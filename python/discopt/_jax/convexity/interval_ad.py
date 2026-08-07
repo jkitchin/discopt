@@ -567,6 +567,39 @@ def _variable_scalar_value(v: Variable, box: dict) -> Interval:
     return Interval(np.float64(lb), np.float64(ub))
 
 
+def _scalar_leaf_interval(expr: Expression) -> Interval:
+    """Degenerate interval for a *scalar-valued* ``Constant``/``Parameter`` leaf.
+
+    Raises ``ValueError`` — the walker's established abstain signal, which
+    :func:`~.certificate.certify_convex` catches — when the leaf holds an
+    array rather than a scalar. The vectorized / indexed-summation modeling
+    API builds exactly such leaves (``m.parameter("cost", value=np.array(...))``
+    multiplied elementwise by an array variable), and ``float(np.asarray(v))``
+    on one raises ``TypeError: only 0-dimensional arrays can be converted to
+    Python scalars``. That ``TypeError`` escaped ``certify_convex``'s
+    ``except ValueError`` and was swallowed by the caller's broad
+    ``except Exception``, turning a *structural* refusal ("this walker is
+    scalar-only; array leaves are out of scope", the same refusal array
+    ``Variable``s already get) into an accidental one that read as
+    convexity-unknown (issue #936, Defect 3). Abstaining deliberately keeps
+    the verdict identical while making the reason visible in the logs.
+
+    The conversion itself is left exactly as it was — ``float(np.asarray(...))``,
+    so every leaf that walked before still walks and none that didn't now does.
+    Only the *exception type* on refusal changes.
+    """
+    arr = np.asarray(expr.value)
+    try:
+        v = float(arr)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Interval Hessian requires scalar {type(expr).__name__} leaves; got "
+            f"shape {arr.shape}. Array-valued leaves come from the vectorized "
+            "modeling API and are out of scope for the scalar interval walker."
+        ) from exc
+    return Interval(np.float64(v), np.float64(v))
+
+
 def _indexed_scalar_value(expr: IndexExpression, box: dict) -> Interval:
     v = expr.base
     lb = np.asarray(v.lb).ravel()
@@ -589,12 +622,10 @@ def _indexed_scalar_value(expr: IndexExpression, box: dict) -> Interval:
 def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _SparseAD:
     # --- Leaves -----------------------------------------------------
     if isinstance(expr, Constant):
-        v = float(np.asarray(expr.value))
-        return _SparseAD(value=Interval(np.float64(v), np.float64(v)), grad={}, hess={}, n=n)
+        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess={}, n=n)
 
     if isinstance(expr, Parameter):
-        v = float(np.asarray(expr.value))
-        return _SparseAD(value=Interval(np.float64(v), np.float64(v)), grad={}, hess={}, n=n)
+        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess={}, n=n)
 
     if isinstance(expr, Variable):
         if expr.size != 1:

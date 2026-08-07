@@ -22,7 +22,11 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 
 from __future__ import annotations
 
-from .certificate import certify_convex, refresh_convex_mask
+from .certificate import (
+    certify_convex,
+    certify_quadratic_objective_convex,
+    refresh_convex_mask,
+)
 from .g_convex_cut import (
     GConvexCut,
     g_concave_overestimator_cut,
@@ -75,6 +79,7 @@ __all__ = [
     "ProductRatioGClass",
     "certify_convex",
     "certify_g_convex",
+    "certify_quadratic_objective_convex",
     "classify_constraint",
     "classify_expr",
     "classify_log_curvature",

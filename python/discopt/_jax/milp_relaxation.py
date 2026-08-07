@@ -1200,6 +1200,20 @@ def _expr_to_polynomial(expr: Expression, model: Model) -> _AffineSquare | None:
             return False
         if isinstance(e, SumExpression):
             return visit(e.operand, scale)
+        if isinstance(e, SumOverExpression):
+            # ``dm.sum(f, over=...)`` / ``dm.sum(term for ...)`` builds an n-ary
+            # ``SumOverExpression`` rather than the binary ``+`` chain Python's
+            # builtin ``sum`` produces. Without this branch the walk returned
+            # ``False`` on a body that is byte-identically polynomial when written
+            # with builtin ``sum`` — so ``extract_quadratic`` abstained on every
+            # indexed-summation model and no such model could be certified convex
+            # (issue #936, Defect 1). A sum is polynomial iff every term is, and
+            # the scale distributes over the terms, so this is the same recursion
+            # the ``+`` branch below performs, just n-ary.
+            for term in e.terms:
+                if not visit(term, scale):
+                    return False
+            return True
         if isinstance(e, BinaryOp):
             if e.op == "+":
                 return visit(e.left, scale) and visit(e.right, scale)
