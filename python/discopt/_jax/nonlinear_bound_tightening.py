@@ -16,6 +16,7 @@ from typing import Callable, NoReturn, Optional, Sequence, TypeVar
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt.modeling.core import (
     BinaryOp,
@@ -82,8 +83,13 @@ class FlatVariableMetadata:
                     isinstance(i, (int, np.integer)) for i in idx
                 ):
                     return None
-                normalized = tuple(int(i) % s for i, s in zip(idx, base.shape))
-                flat_idx = int(np.ravel_multi_index(normalized, base.shape))
+                # #941: `% s` normalizes in-range negatives correctly but also
+                # *wraps* an out-of-range index onto a valid slot (7 % 4 == 3),
+                # and accepts `bool` as an index. Refusing is the sound answer.
+                normalized_flat = flat_index_in_shape(tuple(idx), tuple(base.shape))
+                if normalized_flat is None:
+                    return None
+                flat_idx = normalized_flat
             return base_offset + flat_idx
 
         return None
