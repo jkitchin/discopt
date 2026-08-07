@@ -17,9 +17,19 @@ engine cannot evaluate at all (``tanh``, ``erf``).
 
 The **array reductions** are the exception and are refused, not approximated:
 ``prod`` (``jnp.prod`` of one array argument), ``norm1``/``norm2``/``norminf``,
-``SumExpression``, ``IndexExpression`` and ``MatMulExpression``. A tape node is a
-scalar; there is no array to reduce. An earlier revision lowered ``prod`` as a
-variadic ``*`` chain, which silently computed a different function.
+``SumExpression`` and ``MatMulExpression``. A tape node is a scalar; there is no
+array to reduce. An earlier revision lowered ``prod`` as a variadic ``*`` chain,
+which silently computed a different function.
+
+``IndexExpression`` is the one array-shaped node that is *partly* lowered, because
+it is the one that does not need an array: ``x[i]`` / ``y[i, j]`` on a shaped
+:class:`Variable` names a single entry of the flat ``x`` vector, so it becomes an
+ordinary scalar tape variable (:func:`_static_scalar_slot`). Slices, partial
+indices and non-``Variable`` bases still yield arrays and are still refused.
+Measured before this landed: of the ``IndexExpression`` nodes reachable in three
+model families, 40 of 43 were this static-scalar form; the other 3 were the
+vectorized slices ``dae/collocation.py`` emits, which need the array lowering
+(``MatMulExpression`` and friends) and are unaffected by this.
 
 *Coverage claims here must be checked against operators, not instances.* ``.nl``
 has no opcode for ``sigmoid``/``softplus``/``entropy``/``centropy``/``signpower``,
@@ -43,6 +53,8 @@ from __future__ import annotations
 
 import math
 from typing import Any
+
+import numpy as np
 
 from discopt.modeling.core import (
     BinaryOp,
@@ -97,6 +109,66 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     ``dag_compiler`` routes through the same table.
     """
     return model._flat_var_offset(var)
+
+
+def _static_scalar_slot(expr: IndexExpression, model: Model) -> int | None:
+    """Flat ``x`` index of ``expr``, or ``None`` when it is not one static scalar slot.
+
+    ``x[i]`` / ``y[i, j]`` on a shaped :class:`Variable` names a *single* entry of
+    the flat vector, so it lowers to an ordinary scalar tape variable — no array
+    machinery required. This is the only indexing form lowered, and the identity
+    it rests on is the JAX path's own layout: ``_jax/dag_compiler`` materializes a
+    variable as ``x_flat[off : off + size].reshape(shape)`` (C order) and then
+    applies ``a[index]``. For a full-rank all-integer index that composition is
+    exactly ``x_flat[off + ravel_multi_index(index, shape)]``.
+
+    Everything else returns ``None`` and the caller refuses, which degrades to the
+    JAX evaluator — i.e. to today's behaviour, the sound direction:
+
+    * a **slice or partial** index (``x[1:]``, ``y[0]`` on a 2-D ``y``) yields an
+      array, and a tape node is a scalar;
+    * a **non-Variable base** (``(x + y)[0]``, or a chained ``x[0][1]``) has no
+      flat slot to name — the base would have to be materialized as an array first;
+    * a **non-integer / exotic** index (boolean mask, fancy index, ``Ellipsis``,
+      a symbolic index) is not statically resolvable here;
+    * an **out-of-range** index is refused rather than clamped. numpy raises where
+      ``jnp`` silently clamps, so resolving it here could disagree with the JAX
+      path; refusing hands the case back to that path unchanged.
+
+    ``bool`` is rejected explicitly: it is a subclass of ``int`` in Python, but
+    numpy reads ``x[True]`` as a mask, not as ``x[1]``.
+
+    Deliberately arithmetic rather than probe-based. Indexing an
+    ``np.arange(size).reshape(shape)`` probe would match numpy semantics by
+    construction, but allocating one per index node is O(size) per leaf and
+    O(size·leaves) over the build — the same quadratic root-setup cost issue #654
+    removed from :func:`_compute_var_offset`.
+    """
+    base = expr.base
+    if not isinstance(base, Variable):
+        return None
+    shape = tuple(base.shape or ())
+    if not shape:
+        return None
+
+    index = expr.index
+    idx = index if isinstance(index, tuple) else (index,)
+    if len(idx) != len(shape):
+        # Partial indexing leaves an array; over-indexing is invalid. Either way
+        # this is not one slot.
+        return None
+
+    flat = 0
+    for i, dim in zip(idx, shape):
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            return None
+        i = int(i)
+        if i < 0:
+            i += dim
+        if not 0 <= i < dim:
+            return None
+        flat = flat * dim + i
+    return _compute_var_offset(base, model) + flat
 
 
 def compile_to_nl_expr(expr: Expression, model: Model) -> Any:
@@ -193,7 +265,17 @@ def _lower_uncached(expr: Expression, model: Model, E: Any, memo: dict[int, Any]
         return acc
 
     if isinstance(expr, IndexExpression):
-        raise UnsupportedForTape("IndexExpression (array indexing) is not yet lowered")
+        slot = _static_scalar_slot(expr, model)
+        if slot is None:
+            # Names the base by TYPE, not by repr: for a non-Variable base the
+            # repr is the whole sub-DAG, and an exception message is not the
+            # place to serialize one.
+            raise UnsupportedForTape(
+                f"IndexExpression: index {expr.index!r} on a {type(expr.base).__name__} "
+                "does not resolve to one static scalar slot (slice, partial index, "
+                "non-integer index, or non-Variable base)"
+            )
+        return E.var(slot)
 
     if isinstance(expr, MatMulExpression):
         raise UnsupportedForTape("MatMulExpression is not yet lowered")

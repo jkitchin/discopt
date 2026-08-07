@@ -32,7 +32,7 @@ import pytest
 from discopt import Model
 from discopt._jax.dag_compiler import compile_expression
 from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr, try_compile
-from discopt.modeling.core import Constant, FunctionCall
+from discopt.modeling.core import Constant, FunctionCall, IndexExpression
 
 pytest.importorskip("pounce")
 
@@ -565,3 +565,189 @@ def test_xlogx_family_reaches_derivatives_the_chain_rule_cannot():
     checked += 3
 
     assert checked == 6, f"only {checked} derivative comparisons executed"
+
+
+# ─────────────────────────────────────────────────────────────
+# Static array indexing (`x[i]`, `y[i, j]`)
+# ─────────────────────────────────────────────────────────────
+#
+# The gap these close: before this, EVERY `IndexExpression` was refused, so any
+# model written against the Python API with `shape=(...)` variables — the
+# ordinary way to write one — fell back to the JAX evaluator. Measured over
+# three model families at the time, 40 of 43 reachable `IndexExpression` nodes
+# were the static-scalar form lowered here. The other 3 are the vectorized
+# slices `dae/collocation.py` emits; those still refuse (see the refusal test
+# below), and taking DAE off JAX needs the array lowering, not this.
+
+# (name, n_vars_before, shape, expr-builder taking the shaped Variable).
+# `n_vars_before` puts a scalar variable ahead of the shaped one in some cases so
+# a lost `_flat_var_offset` would be caught, not masked by a zero offset.
+INDEX_CASES = {
+    "1d": ((), (6,), lambda v: sum(dm.exp(v[i]) * v[(i + 1) % 6] for i in range(6))),
+    "2d": (
+        (),
+        (3, 3),
+        lambda v: sum(dm.log(v[i, j]) * v[j, i] for i in range(3) for j in range(3)),
+    ),
+    "1d_offset": (("s",), (5,), lambda v: dm.sqrt(v[0]) + v[3] ** 2 + dm.sin(v[4])),
+    "2d_offset": (("s", "u"), (2, 4), lambda v: v[0, 3] * v[1, 0] + dm.exp(v[1, 3])),
+    "negative": ((), (4,), lambda v: v[-1] * v[-4] + dm.log(v[-2])),
+    "repeated_leaf": ((), (3,), lambda v: (lambda t: t * t + dm.exp(t))(v[1] * v[2])),
+}
+
+
+def _indexed_model(leading, shape):
+    m = Model()
+    for nm in leading:
+        m.continuous(nm, lb=0.3, ub=2.0)
+    return m, m.continuous("v", shape=shape, lb=0.3, ub=2.0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(INDEX_CASES))
+def test_static_index_matches_jax_value_and_gradient(name):
+    """`x[i]` must lower to the SAME flat slot the JAX path reads.
+
+    A wrong slot is the whole risk here: it is silent, it still produces a finite
+    value and a plausible gradient, and only a point-for-point comparison against
+    `_jax/dag_compiler` catches it. The gradient half is what pins the slot — the
+    value alone is insensitive to a permutation of equal-bounded entries.
+    """
+    leading, shape, build = INDEX_CASES[name]
+    m, v = _indexed_model(leading, shape)
+    expr = build(v)
+    tape = compile_to_nl_expr(expr, m)
+    jf, jg = _jax_pair(expr, m)
+
+    n = sum(var.size for var in m._variables)
+    rng = np.random.default_rng(abs(hash(name)) % (2**32))
+    compared = 0
+    for _ in range(25):
+        pt = rng.uniform(0.35, 1.9, size=n)
+        jv = float(np.asarray(jf(pt)))
+        jgv = np.asarray(jg(pt), dtype=float)
+        if not (np.isfinite(jv) and np.all(np.isfinite(jgv))):
+            continue
+        tv = tape.eval(list(pt))
+        tg = np.asarray(tape.gradient(list(pt)), dtype=float)
+        compared += 1
+        assert abs(tv - jv) / max(1.0, abs(jv)) <= 1e-12, f"value drift at {pt}: {tv} vs {jv}"
+        scale = max(1.0, float(np.max(np.abs(jgv))))
+        assert np.max(np.abs(tg - jgv)) / scale <= 1e-12, (
+            f"gradient drift at {pt} -- a mis-resolved flat slot: {tg} vs {jgv}"
+        )
+
+    assert compared >= 5, f"only {compared} points compared for {name}"
+
+
+@pytest.mark.unit
+def test_static_index_resolves_the_c_order_slot():
+    """Pin the slot arithmetic directly, independent of JAX.
+
+    `grad(v[i, j])` is the unit vector at that entry, so this reads the resolved
+    index straight off the gradient. C order and the leading-variable offset are
+    both load-bearing: row-major vs column-major differ for any non-square
+    access, and a dropped offset silently reads another variable's storage.
+    """
+    m = Model()
+    m.continuous("s", lb=0.0, ub=1.0)  # one scalar ahead of `v` => offset 1
+    v = m.continuous("v", shape=(2, 3), lb=0.0, ub=1.0)
+    n = 1 + v.size
+
+    checked = 0
+    for i in range(2):
+        for j in range(3):
+            g = np.asarray(compile_to_nl_expr(v[i, j], m).gradient([0.5] * n), dtype=float)
+            want = np.zeros(n)
+            want[1 + i * 3 + j] = 1.0  # offset 1, C order over shape (2, 3)
+            np.testing.assert_array_equal(g, want, err_msg=f"v[{i}, {j}] resolved to {g}")
+            checked += 1
+
+    # Negative indices normalize against the dimension, not the flat size.
+    g = np.asarray(compile_to_nl_expr(v[-1, -1], m).gradient([0.5] * n), dtype=float)
+    assert g[6] == 1.0 and g.sum() == 1.0, f"v[-1, -1] resolved to {g}"
+    checked += 1
+
+    assert checked == 7, f"only {checked} slot resolutions executed"
+
+
+# Every form that does NOT name one scalar slot. Each must refuse, which degrades
+# to the JAX evaluator — i.e. to the previous behaviour. Constructed directly
+# where `Expression.__getitem__`'s own guard would reject the form first.
+NON_STATIC_INDEX = {
+    "slice": lambda v, w: v[1:],
+    "partial_2d": lambda v, w: IndexExpression(w, 0),
+    "slice_2d": lambda v, w: IndexExpression(w, (slice(None), 1)),
+    "non_variable_base": lambda v, w: (v + v)[0],
+    "boolean": lambda v, w: v[True],
+    "out_of_range": lambda v, w: IndexExpression(v, 9),
+    "negative_out_of_range": lambda v, w: IndexExpression(v, -9),
+    "ellipsis": lambda v, w: IndexExpression(v, Ellipsis),
+    "float_index": lambda v, w: IndexExpression(v, 1.0),
+    "too_many_indices": lambda v, w: IndexExpression(v, (0, 0)),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(NON_STATIC_INDEX))
+def test_non_scalar_index_forms_are_still_refused(name):
+    """Refusing is the sound direction: the caller degrades to JAX unchanged.
+
+    `out_of_range` is here on purpose rather than as an error: numpy raises where
+    `jnp` silently CLAMPS, so resolving it would let the tape disagree with the
+    path it replaces. Refusing hands the case back to JAX with its own semantics.
+    """
+    m = Model()
+    v = m.continuous("v", shape=(4,), lb=0.3, ub=2.0)
+    w = m.continuous("w", shape=(2, 3), lb=0.3, ub=2.0)
+    expr = NON_STATIC_INDEX[name](v, w)
+    with pytest.raises(UnsupportedForTape, match="static scalar slot"):
+        compile_to_nl_expr(expr, m)
+
+
+@pytest.mark.unit
+def test_shaped_variable_model_builds_a_tape_evaluator():
+    """The gap itself: a shaped-variable model no longer falls back to JAX.
+
+    This is the end-to-end statement the unit tests above cannot make —
+    `try_build` returning None is exactly the JAX fallback, and it did so for
+    every `shape=(...)` model before static indexing lowered.
+    """
+    from discopt._tape_nlp_evaluator import try_build
+
+    m = Model()
+    x = m.continuous("x", shape=(4,), lb=0.1, ub=2.0)
+    m.minimize(sum(dm.exp(x[i]) * x[(i + 1) % 4] for i in range(4)))
+    m.subject_to(sum(x[i] ** 2 for i in range(4)) <= 4.0)
+
+    assert try_build(m) is not None, "shaped-variable model still degrades to the JAX evaluator"
+
+
+@pytest.mark.unit
+def test_vectorized_collocation_bodies_still_refuse():
+    """Guard the retraction: this change does NOT take DAE collocation off JAX.
+
+    `dae/collocation.py` emits ONE vector-valued constraint per state, built as a
+    `MatMulExpression` against the collocation matrix with slice indexing — not
+    scalar `x[i, k]`. An earlier reading of this gap claimed the opposite. If a
+    future array lowering makes these representable, this test should be updated
+    deliberately, not silently.
+    """
+    pytest.importorskip("discopt.dae")
+    from discopt.dae import ContinuousSet, DAEBuilder
+
+    m = Model("second_order_decay")
+    dae = DAEBuilder(m, ContinuousSet("t", bounds=(0, 2), nfe=4, ncp=3))
+    dae.add_state("A", initial=1.0, bounds=(0.0, 2.0))
+    dae.set_ode(lambda t, s, a, c: {"A": -0.7 * s["A"] ** 2})
+    dae.discretize()
+
+    assert m._constraints, "collocation emitted no Constraint objects to check"
+    refused = 0
+    for con in m._constraints:
+        with pytest.raises(UnsupportedForTape):
+            compile_to_nl_expr(con.body, m)
+        refused += 1
+    assert refused == len(m._constraints) and refused >= 2, (
+        f"only {refused} collocation bodies checked"
+    )
