@@ -138,6 +138,7 @@ experiment may run.
 | Phase 4 T-CSE/V-segments | **CSE unlocked; V-segments/symmetry de-scoped** (§0.1.2) | — | build order fixed by the re-profile above; CSE first (bound-neutral), Q-extraction second |
 | Phase 4 build 1 — CSE/hash-consing | **done — bound-neutral** | (this PR) | Content-addressed interning in `ExprArena` (`expr.rs`), wired into the `.nl` parser and Python `convert_expr`. DAG node count ↓ **68.9% nvs17, 64.8% clay0303hfsg, 34.2% ex1252, 34.0% casctanks, 0.0% gear4** (panel total −48.4%); gear4 0% confirms the re-profile prediction. Cert-neutrality **NEUTRAL** (42 certifying instances, node_count exactly unchanged, objective to tol). See §8 "Phase 4 CSE — build results" |
 | Phase 4 build 3 — Q-matrix extraction | **done — (A) bound-neutral, (B) flagged bound-changing** | (this PR) | Exact `extract_quadratic(expr,n,model)` in `quadratic_form.py` (exact-or-abstain, validated 1e-12 on 250 pts/inst + 14 non-quadratic rejections). Consumer: PSD-on-Q convexity certificate wired into `certify_convex` behind `DISCOPT_PSD_QFORM` (**default-OFF**); sound tightening, never mis-certifies (30 indefinite-Q seeds), strict refinement of the rigorous path. Flag-off is byte-identical → cert-neutral. See §8 "Phase 4 Q-extraction — build results" |
+| Vectorized-API convexity certification | **done — bound-changing, panel-graduated default-ON** | #936 | No model written with the vectorized / indexed-summation API could be certified convex by ANY route, so positive definite QPs fell through the `solver.py:7062` guard into spatial B&B and did not converge. Fix: take the exact eigenvalue PSD verdict on the Hessian `extract_qp_data` already produces when `classify_problem` proves the model a QP/MIQP (constant Hessian ⇒ box-independent global proof), behind `DISCOPT_QP_EXACT_CONVEXITY` (default-ON, `=0` opt-out); plus the missing `SumOverExpression` branch in `_expr_to_polynomial` and a deliberate `ValueError` abstention for array-valued interval-AD leaves. Panel **cert-clean, 0/284 violations**; 46/46 proven-optimal instances byte-identical in nodes AND objective; route fires on 10 corpus MIQPs and agrees with `eigvalsh` and both established routes 10/10. Issue repro `feasible`/5,101 nodes/60.4 s → **optimal/0 nodes/0.59 s**. See §8 "Vectorized-API convexity certification" |
 | Phase 4 items 2 & 4 (V-segments, symmetry) | **locked / de-scoped** (§0.1.2) | — | V-segments de-prioritized (0 defvars in text `.nl`); symmetry DO-NOT-BUILD (0 orbits) per the re-profile. RLT/edge-concave rewire onto `extract_quadratic` scoped as bound-neutral follow-on |
 | STRUCT-1 verification (task #82) | **done — verified; commutative-normalization KILLED** | — | Independent re-measurement (2026-07-10) on 61 in-repo + 30 snapshot-draw instances: CSE live, median 25.0% node reduction (76/91 ≥10%); 0 defined vars / 0 V segments in all 1,558 text `.nl` (re-confirmed with the correct header field). NEW: commutative-normalized interning would fuse median 0.00% / max 0.5% extra — **do not build**. See §8 "Independent verification" note under CSE build results |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
@@ -1212,6 +1213,90 @@ collect_edge_concave_quadratics`, `rlt_cuts.py`), so rerouting them through
 coefficients, same verdict) and at worst risk a subtle drift; it is not shipped in
 this PR. The value there is a *faster path to the same relaxation*, which must be
 proven exactly bound-neutral (node_count/objective unchanged) — a separate task.
+
+### Vectorized-API convexity certification (#936, 2026-08-07)
+
+The Q-extraction work above certifies convexity from an exact Hessian, but only
+for bodies `quadratic_form.extract_quadratic` can recognise — and that walker,
+like the scalar interval-Hessian certificate beside it, could not parse the
+**vectorized / indexed-summation modeling API** at all. Net effect: *no model
+written in that API could be certified convex by any route*, so a positive
+definite QP fell through the pure-continuous guard (`solver.py:7062`,
+`_pure_continuous_force_spatial = True`) into spatial McCormick B&B, where it
+does not converge. Three stacked defects, all pre-existing:
+
+1. `milp_relaxation._expr_to_polynomial` walked `SumExpression` but not
+   `SumOverExpression` — the node `dm.sum(f, over=...)` builds — so
+   `extract_quadratic` abstained on every indexed-summation body while the
+   byte-identical body written with Python's builtin `sum` extracted fine.
+2. `DISCOPT_PSD_QFORM` default-OFF leaves the interval Hessian + Gershgorin
+   row-sum bound, which cannot certify a dense covariance Hessian.
+3. `convexity/interval_ad` raised `TypeError` on a vector-valued
+   `Constant`/`Parameter` leaf; `certify_convex` catches only `ValueError`, so
+   it escaped and was swallowed by the caller's broad `except Exception` —
+   convexity-unknown *by accident*.
+
+**The fix: consult the proof discopt already computes.**
+`problem_classifier.classify_problem` returns `QP`/`MIQP` only when the Rust
+structure detector reports every constraint linear AND the objective quadratic,
+so on that branch the objective's Hessian is a *constant* matrix and an exact
+symmetric-eigenvalue test on it is a rigorous, box-independent global convexity
+proof — the same argument `_certify_quadratic_psd` makes, fed from
+`extract_qp_data` (which handles the vectorized API) instead of
+`extract_quadratic` (which does not). New
+`certificate.certify_quadratic_objective_convex`, consulted by `classify_model`
+*after* the syntactic walker and the interval certificate have both left the
+objective unproven, so it can only ever upgrade an abstention. Behind
+`DISCOPT_QP_EXACT_CONVEXITY` (**default-ON**, `=0` opt-out) — graduated by the
+panel below under the 2026-07-17 single-passing-gate policy.
+
+*Exactness verified per extractor route*, not assumed (the issue's open
+question): `max |body − (½xᵀHx + cᵀx + d)|` over 40 random box points is
+≤ 1.8e-15 for the algebraic, repr, autodiff **and** dispatched-ladder routes.
+The `SumOverExpression` extraction reconstructs the body to 3.6e-15 (n=6) /
+2.1e-14 (n=20).
+
+*Differential panel (66 in-repo MINLPLib `.nl`, 20 s limit, arms interleaved
+per instance, 284 checks):* **CERT-CLEAN, 0 violations.** On the 46 instances
+proven optimal in both arms the node count and objective are **exactly
+unchanged** (2803 = 2803 nodes) — the bound-neutral regime's own bar, met on
+the certifying core. `gap_certified` 47 → 47, solved-to-optimal 46 → 46.
+The route *does* fire on the corpus (10 MIQPs: alan, gbd, nvs15, st_miqp1–5,
+st_test1, st_testgr3) and agrees with a direct `eigvalsh` on all 10, and with
+both established routes (syntactic walker, interval certificate) on all 10 —
+zero disagreements. The remaining 20 instances hit the time limit in ≥1 arm,
+so their node counts are wall-quantised, not flag effects: `bchoco08` alternates
+3/7 nodes *within the same arm* across repetitions. Two apparent wall outliers
+(`heatexch_gen3` 27.8 → 215.1 s, `bchoco08` 20.6 → 91.0 s) **did not reproduce**;
+interleaved A/B ×3 on an idle box gives heatexch_gen3 29.0 ± 4.9 s (OFF) vs
+33.6 ± 2.0 s (ON) and bchoco08 25.3 ± 4.2 s vs 29.4 ± 2.9 s — both arms overrun
+the 20 s budget on these two instances irrespective of the flag (a pre-existing
+overrun; heatexch_gen3 is the instance §-above already names for a 12 s classify
+under a 15 s budget). The route's own cost is bounded: 7 ms on heatexch_gen3,
+91 µs on the 1210-variable adversarial model (its pre-gate refuses first).
+`tls2`'s apparent objective "drift" (10.30 → 5.30) is the ON arm reaching the
+answer sooner: at a 60 s limit **both** arms certify 5.3 with bound 5.3, and
+both incumbents are independently verified feasible (constraint-feasible, zero
+box violation, zero integrality violation), as is `tspn12`'s 262.647.
+
+*Net-positive:* neutral on the `.nl` corpus by construction (that corpus contains
+**0** `SumOverExpression` nodes across 3,769 objective/constraint bodies in 66
+instances, and the 10 MIQPs the route fires on were already proven convex), and
+decisive on the class it targets. The three `docs/notebooks/` pages the issue
+reports as timing out all solve: the `decision_focused_learning` oracle QP goes
+from `feasible`/5,101 nodes/60.4 s (measured on this tree at `HEAD~1`; the issue
+reports 14,115 nodes) to **optimal/0 nodes/0.59 s**; `qp_solver`'s Markowitz
+n=20 from `feasible` only/557 nodes/120 s limit to optimal/0 nodes/0.13 s;
+`benchmarks_by_class`'s QP sweep runs to n=100 in under 1 s per size.
+
+*Size gate.* `_QP_EXACT_CONVEXITY_MAX_N = 2000` bounds both the dense
+materialisation (2000² float64 = 32 MB) and `eigvalsh` (measured: n=1000 →
+0.052 s, n=2000 → 0.331 s ± 0.008, n=4000 → 2.47 s). The pre-gate counts
+variables **plus constraint rows**, because the extractor appends one slack
+column per inequality row and pads `Q` to the slacked dimension — gating on the
+variable count alone would let a narrow model with a huge row count ask for an
+`(n+m)²` dense array. Abstaining above the cap routes to the sound spatial path,
+so the cap is a performance guard, never a soundness one.
 
 ### Phase D re-profile (2026-07-05) — the POUNCE subsolver is the #1 wall lever
 
