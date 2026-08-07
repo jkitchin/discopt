@@ -1197,6 +1197,24 @@ def _classify_model_inner(
             if cert == need_curv_for_obj:
                 obj_convex = True
 
+        if not obj_convex and use_certificate:
+            # Exact QP/MIQP objective-Hessian route (#936). The syntactic walker
+            # and the scalar interval-Hessian certificate above both work on
+            # *scalar* expression DAGs; neither can parse the vectorized /
+            # indexed-summation modeling API, so a convex QP written with
+            # ``dm.sum(...)`` over array variables was certified convex by no
+            # route at all and fell through to spatial McCormick B&B, where it
+            # does not converge. When the problem classifier proves the model is
+            # a QP/MIQP — an exactly-quadratic objective over a polyhedron — the
+            # objective's Hessian is a constant matrix and an exact eigenvalue
+            # test on it is a rigorous, box-independent global convexity proof.
+            # Consulted last: it only ever upgrades an objective the cheaper
+            # routes left unproven, so it can never loosen a verdict.
+            from .certificate import certify_quadratic_objective_convex
+
+            if certify_quadratic_objective_convex(model, deadline=deadline):
+                obj_convex = True
+
     constraint_mask: list[bool] = []
     all_convex = obj_convex
     for c in model._constraints:
