@@ -1257,10 +1257,15 @@ The `SumOverExpression` extraction reconstructs the body to 3.6e-15 (n=6) /
 2.1e-14 (n=20).
 
 *Differential panel (66 in-repo MINLPLib `.nl`, 20 s limit, arms interleaved
-per instance, 284 checks):* **CERT-CLEAN, 0 violations.** On the 46 instances
+per instance, 284 checks) — re-run on the tree rebased onto #938, because that
+PR changed `solver.py` and the Rust LP simplex and a gate result has to be
+about the tree that ships:* **CERT-CLEAN, 0 violations.** On the 46 instances
 proven optimal in both arms the node count and objective are **exactly
 unchanged** (2803 = 2803 nodes) — the bound-neutral regime's own bar, met on
-the certifying core. `gap_certified` 47 → 47, solved-to-optimal 46 → 46.
+the certifying core. `gap_certified` 47 → 47, solved-to-optimal 46 → 46, total
+wall 524.7 → 516.0 s. Every one of the 5 residual node differences
+(`clay0303hfsg`, `heatexch_gen2`, `syn05hfsg`, `tanksize`, `tspn05`) is on an
+instance that ended `time_limit`/`feasible` in both arms, i.e. wall-quantised.
 The route *does* fire on the corpus (10 MIQPs: alan, gbd, nvs15, st_miqp1–5,
 st_test1, st_testgr3) and agrees with a direct `eigvalsh` on all 10, and with
 both established routes (syntactic walker, interval certificate) on all 10 —
@@ -1288,6 +1293,19 @@ from `feasible`/5,101 nodes/60.4 s (measured on this tree at `HEAD~1`; the issue
 reports 14,115 nodes) to **optimal/0 nodes/0.59 s**; `qp_solver`'s Markowitz
 n=20 from `feasible` only/557 nodes/120 s limit to optimal/0 nodes/0.13 s;
 `benchmarks_by_class`'s QP sweep runs to n=100 in under 1 s per size.
+
+**Defect 2 — `DISCOPT_PSD_QFORM` stays default-OFF (graduation DECLINED).** The
+issue proposed graduating it alongside this fix. Its own panel (same corpus,
+same protocol, `DISCOPT_QP_EXACT_CONVEXITY` ON in both arms) **fails cert-clean
+on `st_e36`**: `gap_certified` True → False and `optimal`/85 nodes →
+`time_limit`/0 nodes. Reproduced interleaved ×3 on an idle box — OFF is
+optimal + certified 3/3 in 9.3–12.3 s; ON is 0/3, never finishing the *root*
+(0 nodes) and overrunning the 20 s budget by 9× at 148–188 s. That is the
+certification regression §5 names as disqualifying, and it is not a timing
+artifact. Graduating it is also unnecessary for #936: the exact-QP route above
+resolves Defect 2's symptom without it (Markowitz n=20 solves at 0 nodes with
+`PSD_QFORM` at its default OFF). This is the `DISCOPT_CUT_INHERIT` rule applied
+— sound ≠ helpful — with the measurement recorded rather than the flag flipped.
 
 *Size gate.* `_QP_EXACT_CONVEXITY_MAX_N = 2000` bounds both the dense
 materialisation (2000² float64 = 32 MB) and `eigvalsh` (measured: n=1000 →
