@@ -15516,7 +15516,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     across ALL rows — which on a large-RHS row inflated the tolerance far past
     discopt's own constraint tolerance: for ``x <= 1e4`` the threshold became
     ``1e-6 * 1e4 = 1e-2``, so an interior-point primal sitting ``1e-4`` on the
-    infeasible side of the row (POUNCE's fixed Ipopt ``constr_viol_tol`` floor)
+    infeasible side of the row (POUNCE's default Ipopt ``constr_viol_tol``)
     was accepted as "optimal" — a super-optimal, constraint-infeasible incumbent
     (issue #850 Obs 3). With the per-row term scale that same point is rejected
     (threshold ``1e-6 + 1e-9*1e4 ≈ 1.1e-5``) and the caller degrades to the exact
@@ -15524,6 +15524,15 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     is kept extremely tight (1e-9) so only cancellation noise proportional to the
     row terms is forgiven; a gross mislabel (the ~7.5 HiGHS case) is still caught.
     A bound row ``lo <= x_i <= hi`` has term scale ``|x_i|`` (unit coefficient).
+
+    #940 correction: that ``1e-4`` was described here as POUNCE's *fixed* floor.
+    Measurement falsifies "fixed" — ``constr_viol_tol`` is settable and honored,
+    and the POUNCE LP/QP backends now request ``1e-9``
+    (:data:`discopt.solvers.lp_pounce._CONSTR_VIOL_TOL`) so their own convergence
+    criterion implies this test. Before that, the guard rejected 50% of POUNCE LP
+    solves — every correct one of them — because the two tolerances were three
+    orders apart. Nothing about THIS check changed: it is the arbiter, and a
+    point that fails it is still rejected however it was produced.
     """
     x = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(x)):

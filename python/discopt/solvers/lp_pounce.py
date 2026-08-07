@@ -15,6 +15,7 @@ below expose exactly that to POUNCE.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, List, Optional, Tuple, Union, cast
 
@@ -22,6 +23,8 @@ import numpy as np
 import scipy.sparse as sp
 
 from discopt.solvers import InfeasibilityCertificate, LPResult, SolveStatus
+
+logger = logging.getLogger(__name__)
 
 try:
     import pounce as _pounce  # noqa: F401
@@ -45,6 +48,99 @@ _FEAS_TOL = 1e-6
 # them. Inversions beyond this tolerance are left intact so they surface as
 # genuine infeasibility rather than being masked.
 _BOUND_SNAP_TOL = 1e-7
+# Requested absolute bound on the max-norm of the UNSCALED constraint violation
+# at termination (Ipopt's ``constr_viol_tol``, which POUNCE is shape-compatible
+# with).
+#
+# discopt checks every returned matrix-form point against its OWN per-row
+# constraint tolerance — ``solver._matrix_solution_feasible``, the #850 Obs 3
+# guard: ``|viol_i| <= 1e-6 + 1e-9 * sum_j |A_ij||x_j|``. POUNCE inherits Ipopt's
+# default ``constr_viol_tol`` of 1e-4, which is 100x LOOSER than that 1e-6 floor,
+# so a legitimately converged IPM point can sit up to 1e-4 on the infeasible side
+# of a row and still be reported OPTIMAL. On any LP whose rows carry term
+# magnitudes above a few hundred the guard then rejects a *correct* solve, logs a
+# WARNING at the ``_solve_lp_matrix`` call site and re-solves with the exact
+# simplex (issue #940). Measured over a 148-solve LP population: 50% of POUNCE LP
+# solves tripped the guard, and 100% of those with row term scale in [1e2, 1e5) —
+# the everyday range of a textbook diet/transport/blending LP, not an exotic
+# corner.
+#
+# Requesting 1e-8 makes POUNCE's own convergence criterion IMPLY discopt's: it
+# bounds exactly the quantity the guard measures, two orders of magnitude under
+# the guard's floor. Measured over 26 LPs spanning n=5..40 and data scale
+# 1e2..1e4: guard trips 24 -> 0, worst absolute violation 1.0e-4 -> 9.8e-9, with
+# the iteration count unchanged within noise (21.1 -> 21.3 mean iterations, so the
+# extra accuracy is not bought with extra work). The same request also pulls a
+# variable binding at a large bound back INSIDE its box (Ipopt's
+# ``bound_relax_factor`` slack stops showing up in the returned point), so no
+# separate bound-side option is needed.
+#
+# The value is a floor set by ATTAINABILITY, not by taste. A request must stay
+# above double-precision noise on the problem's own data, or POUNCE stops short of
+# it and exits with Ipopt code 3/4 — which ``_LP_STATUS_MAP`` reads as UNBOUNDED,
+# i.e. a FALSE certificate on a bounded LP. Sweeping the request against the exact
+# simplex oracle over data scales 1e0..1e8: every request down to 1e-10 is
+# reachable up to scale 1e4; 1e-9 already produces a false UNBOUNDED at scale 1e6
+# (n=40) where 1e-4 does not; 1e-8 reproduces the oracle everywhere the 1e-4
+# default does. Above scale ~1e7 POUNCE is erratic at EVERY request including its
+# own 1e-4 default — pre-existing, not caused by this setting, and now covered by
+# :func:`_reject_impossible_unbounded`, which refuses to dress that failure up as
+# a certificate. Do not tighten this past 1e-8 without re-running that sweep; the
+# margin under the guard is already 100x.
+#
+# This does NOT relax the guard, which remains the arbiter (CLAUDE.md §1): a
+# point that still fails it is still rejected and the exact simplex still
+# answers. A caller's explicit ``options["constr_viol_tol"]`` still wins.
+_CONSTR_VIOL_TOL = 1e-8
+
+
+def _box_is_compact(lb: np.ndarray, ub: np.ndarray) -> bool:
+    """Whether every variable is boxed between two finite bounds *as POUNCE sees
+    them* (i.e. after the ``[1e15, 1e20)`` relaxation to the ``_INF`` sentinel).
+
+    A linear (or convex quadratic) objective over a nonempty subset of a compact
+    box attains its minimum, so on such a box ``UNBOUNDED`` is not merely
+    unlikely — it is impossible. See :func:`solve_lp` for why that matters.
+    """
+    return bool(np.all(lb > -_INF) and np.all(ub < _INF))
+
+
+def _reject_impossible_unbounded(result: LPResult, lb: np.ndarray, ub: np.ndarray) -> LPResult:
+    """Refuse to report ``UNBOUNDED`` for a problem posed on a compact box.
+
+    POUNCE reaches ``UNBOUNDED`` through :data:`_LP_STATUS_MAP` from Ipopt codes
+    3 and 4 (``Search_Direction_Becomes_Too_Small`` / ``Diverging_Iterates``),
+    which are *ambiguous*: they say the interior-point iteration stalled or blew
+    up, not that the problem has a ray. ``solve_lp`` already disambiguates the
+    infeasible reading with an elastic Phase-1; this closes the remaining one.
+    When every declared bound is finite the feasible set lies inside a compact
+    box, so an unbounded ray cannot exist and the verdict is provably false —
+    it is a numerical failure wearing a certificate's clothes.
+
+    Measured (issue #940): on random LPs with data scale ~1e7 and an ordinary
+    ``[0, 1e8]`` box, POUNCE returns ``UNBOUNDED`` on ~4 of 10 instances whose
+    true status is ``optimal``, and because those bounds are far below the
+    ``[1e15, 1e20)`` window that triggers the #850 Obs 1 deferral,
+    ``solver._solve_lp_matrix`` certified it: ``model.solve()`` returned
+    ``status='unbounded'`` for an LP whose exact-simplex optimum is 6.5e7. This
+    predates the #940 tolerance change and occurs at POUNCE's own default
+    tolerance too — the change only shifts which instances land on it.
+
+    Reporting ``ERROR`` instead is the honest outcome: the engine could not
+    decide, the caller degrades to the exact simplex, and no false certificate
+    is ever produced (CLAUDE.md §1). A genuinely unbounded LP is untouched — it
+    has at least one infinite bound, so the box is not compact.
+    """
+    if result.status != SolveStatus.UNBOUNDED or not _box_is_compact(lb, ub):
+        return result
+    logger.debug(
+        "POUNCE reported UNBOUNDED on a compact box (every bound finite), which "
+        "is impossible; reporting ERROR so the caller degrades to the exact "
+        "simplex rather than certifying a false 'unbounded' (#940)."
+    )
+    return LPResult(
+        status=SolveStatus.ERROR, iterations=result.iterations, wall_time=result.wall_time
+    )
 
 
 def _snap_inverted_bounds(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -253,7 +349,9 @@ def solve_lp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts: dict[str, Any] = {"print_level": 0}
+    # constr_viol_tol goes in before the caller's options so an explicit request
+    # still wins; see _CONSTR_VIOL_TOL for why the default is not Ipopt's (#940).
+    opts: dict[str, Any] = {"print_level": 0, "constr_viol_tol": _CONSTR_VIOL_TOL}
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -291,7 +389,11 @@ def solve_lp(
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
-    return result
+    # Phase-1 above settles the "was it really infeasible?" reading of an
+    # ambiguous code-3/4 exit. This settles the other one: on a compact box an
+    # UNBOUNDED verdict is impossible, so it is a numerical failure, not a
+    # certificate (#940).
+    return _reject_impossible_unbounded(result, lb, ub)
 
 
 def solve_lp_kkt(

@@ -35,11 +35,13 @@ import scipy.sparse as sp
 
 from discopt.solvers import QPResult, SolveStatus
 from discopt.solvers.lp_pounce import (
+    _CONSTR_VIOL_TOL,
     _FINITE_BOUND_THRESHOLD,
     _INF,
     _LP_STATUS_MAP,
     POUNCE_AVAILABLE,
     PounceKKTError,
+    _box_is_compact,
     _build_certificate,
     _interior_start,
     _is_infeasible_violation,
@@ -150,7 +152,14 @@ def solve_qp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts: dict[str, Any] = {"print_level": 0}
+    # Same constraint-tolerance mismatch as the LP path, and the same fix: the QP
+    # point is checked by the SAME #850 guard (``_matrix_solution_feasible``, via
+    # ``solver._solve_qp_matrix``), so POUNCE's default 1e-4 constr_viol_tol lets
+    # a converged QP point be rejected on any row with a term scale above a few
+    # hundred. Measured on 18 convex QPs (n=5..20, data scale 1e2..1e4): guard
+    # trips 4 -> 0, worst absolute violation 1.0e-4 -> 9.9e-9 (issue #940).
+    # See lp_pounce._CONSTR_VIOL_TOL. A caller's explicit option still wins.
+    opts: dict[str, Any] = {"print_level": 0, "constr_viol_tol": _CONSTR_VIOL_TOL}
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -180,6 +189,16 @@ def solve_qp(
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
+
+    # Same reasoning as the LP path (see lp_pounce._reject_impossible_unbounded):
+    # a continuous objective over a nonempty subset of a compact box attains its
+    # minimum, so UNBOUNDED on a fully bounded box is a numerical failure wearing
+    # a certificate's clothes, not a certificate. Spelled out here rather than
+    # reusing the LP helper because the result type differs (#940).
+    if result.status == SolveStatus.UNBOUNDED and _box_is_compact(lb, ub):
+        return QPResult(
+            status=SolveStatus.ERROR, iterations=result.iterations, wall_time=result.wall_time
+        )
 
     return result
 
