@@ -18,6 +18,8 @@ import numpy as np
 if TYPE_CHECKING:
     from discopt._jax.learned_relaxations import LearnedRelaxationRegistry
 
+# Import expression types from the modeling API
+from discopt._flat_index import resolve_scalar_slot
 from discopt._jax.mccormick import (
     relax_abs,
     relax_acos,
@@ -54,8 +56,6 @@ from discopt._jax.piecewise_mccormick import (
     piecewise_relax_sin,
     piecewise_relax_sqrt,
 )
-
-# Import expression types from the modeling API
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -101,17 +101,16 @@ def _resolve_scalar_var_offset(expr: Expression, model: Model) -> int | None:
     Returns the flat offset into the x vector if ``expr`` is a scalar
     ``Variable`` or an ``IndexExpression`` over a ``Variable`` that resolves
     to a single scalar component. Returns ``None`` otherwise.
+
+    #941: this used to open-code the index arithmetic as ``base_off + idx``,
+    which takes a negative index literally — ``v[-1]`` resolved to the slot
+    *before* ``v``, belonging to a different variable. The McCormick envelope was
+    then built over the wrong pair, producing an invalid relaxation that cut off
+    the true optimum and still reported ``gap_certified=True``. It also silently
+    dropped every multi-dimensional index and every ``np.integer``. One shared
+    resolver now handles all of it.
     """
-    if isinstance(expr, Variable) and expr.size == 1:
-        return _compute_var_offset(expr, model)
-    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-        base_off = _compute_var_offset(expr.base, model)
-        idx = expr.index
-        if isinstance(idx, int):
-            return base_off + idx
-        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
-            return base_off + idx[0]
-    return None
+    return resolve_scalar_slot(expr, model)
 
 
 def _try_extract_trilinear_chain(expr: Expression, model: Model) -> tuple[int, int, int] | None:
