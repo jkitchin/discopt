@@ -33,10 +33,8 @@ from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.solvers import QPResult, SolveStatus
+from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
-    _BOUND_RELAX_FACTOR,
-    _CONSTR_VIOL_TOL,
     _FINITE_BOUND_THRESHOLD,
     _INF,
     _LP_STATUS_MAP,
@@ -154,15 +152,11 @@ def solve_qp(
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
     # The QP point is checked by the SAME #850 guard (``_matrix_solution_feasible``,
-    # via ``solver._solve_qp_matrix``), so it needs the same two requests as the LP
-    # path and for the same two reasons — see lp_pounce._CONSTR_VIOL_TOL. Measured
-    # on 18 convex QPs (n=5..20, data scale 1e2..1e4): guard trips 4 -> 0 (#940).
+    # via ``solver._solve_qp_matrix``), so it takes the shared POUNCE baseline like
+    # every other entry point — see solvers.pounce_option_defaults. Measured on 18
+    # convex QPs (n=5..20, data scale 1e2..1e4): guard trips 4 -> 0 (#940).
     # A caller's explicit options still win.
-    opts: dict[str, Any] = {
-        "print_level": 0,
-        "constr_viol_tol": _CONSTR_VIOL_TOL,
-        "bound_relax_factor": _BOUND_RELAX_FACTOR,
-    }
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -254,7 +248,7 @@ def solve_qp_kkt(
     cu = b_arr.copy()
     x0 = _interior_start(lb, ub)
 
-    opts: dict[str, Any] = {"print_level": 0}
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
 

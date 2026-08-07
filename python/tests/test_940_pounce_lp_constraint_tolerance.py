@@ -153,6 +153,55 @@ def test_pounce_qp_point_meets_discopt_constraint_tolerance():
     )
 
 
+@pytest.mark.parametrize("flat", [True, False], ids=["lp_path", "nlp_path"])
+def test_returned_point_stays_inside_its_declared_box(flat):
+    """Every POUNCE entry point must return a point inside the declared bounds.
+
+    Pins the *property* directly rather than through an objective comparison.
+    Ipopt's ``bound_relax_factor`` (default 1e-8) relaxes every bound by
+    ``1e-8*(1 + |bound|)``, so a converged point legitimately sits outside the box
+    the caller declared — which is what discopt's feasibility guards were
+    rejecting POUNCE points for.
+
+    Both entry points are exercised because they are genuinely different code
+    paths: ``dm.sum(y.flat)`` classifies linear and routes to ``lp_pounce``,
+    while ``dm.sum(y)`` on the bare indexed container routes to the general NLP
+    path. Seeding the option in the LP/QP backends alone left this second path
+    returning points ~7.5e-9 below ``lb``; the fix lives in
+    ``solvers.pounce_option_defaults`` so every entry point inherits it (#940).
+    """
+    m = dm.Model()
+    s = m.set("S", [10, 20, 30])
+    y = m.continuous("y", lb=1.0, ub=5.0, over=s)
+    m.minimize(dm.sum(y.flat) if flat else dm.sum(y))
+    res = m.solve()
+
+    assert res.status == "optimal"
+    x = np.asarray(res.value(y), dtype=np.float64).ravel()
+    assert x.size == 3
+    below = float(np.max(1.0 - x))
+    assert below <= 1e-12, f"returned point sits {below:.3e} below its declared lb=1"
+    # The optimum is exactly 3.0; a point outside the box buys a super-optimal
+    # objective, so pin that it is not below the true value either.
+    assert res.objective >= 3.0 - 1e-12
+
+
+def test_shared_pounce_defaults_are_the_single_source_of_truth():
+    """The option baseline must not be re-spelled per backend.
+
+    A second copy is how one entry point silently keeps Ipopt's defaults while
+    the rest move — the #940 failure mode exactly.
+    """
+    from discopt.solvers import pounce_option_defaults
+
+    defaults = pounce_option_defaults()
+    assert defaults["bound_relax_factor"] == 0.0
+    assert defaults["constr_viol_tol"] <= DISCOPT_CONSTR_TOL
+    # A fresh dict each call: a caller mutating it must not poison the next solve.
+    defaults["bound_relax_factor"] = 999.0
+    assert pounce_option_defaults()["bound_relax_factor"] == 0.0
+
+
 def test_caller_supplied_constr_viol_tol_still_wins():
     """The tightened value is a default, not an override of the caller."""
     from discopt.solvers.lp_pounce import solve_lp

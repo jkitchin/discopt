@@ -71,8 +71,15 @@ def solve_nlp(
 
     import pounce
 
-    opts = dict(options) if options else {}
-    opts.setdefault("print_level", 0)
+    # discopt's shared POUNCE baseline, seeded BEFORE the caller's options so an
+    # explicit request still wins. Chiefly this pins bound_relax_factor=0 so a
+    # returned NLP point stays inside its declared box — patching only the LP/QP
+    # entry points left this path handing back points ~7.5e-9 below their lower
+    # bounds (issue #940). See solvers.pounce_option_defaults.
+    from discopt.solvers import pounce_option_defaults
+
+    opts = pounce_option_defaults()
+    opts.update(dict(options) if options else {})
 
     n = evaluator.n_variables
     m = evaluator.n_constraints

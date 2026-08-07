@@ -22,7 +22,12 @@ from typing import Any, List, Optional, Tuple, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.solvers import InfeasibilityCertificate, LPResult, SolveStatus
+from discopt.solvers import (
+    InfeasibilityCertificate,
+    LPResult,
+    SolveStatus,
+    pounce_option_defaults,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,68 +53,10 @@ _FEAS_TOL = 1e-6
 # them. Inversions beyond this tolerance are left intact so they surface as
 # genuine infeasibility rather than being masked.
 _BOUND_SNAP_TOL = 1e-7
-# Two option requests, targeting two DIFFERENT mechanisms by which POUNCE returns
-# a point that discopt then rejects. Which one dominates depends on the POUNCE
-# build, so both are set (issue #940).
-#
-# discopt checks every returned matrix-form point against its OWN per-row
-# constraint tolerance — ``solver._matrix_solution_feasible``, the #850 Obs 3
-# guard: ``|viol_i| <= 1e-6 + 1e-9 * sum_j |A_ij||x_j|``. When a returned point
-# misses that, the guard rejects a *correct* solve, logs a WARNING at the
-# ``_solve_lp_matrix`` call site and re-solves with the exact simplex.
-#
-# (1) ``bound_relax_factor = 0`` — THE ROOT CAUSE, and the one that matters on
-#     current POUNCE. Ipopt's default 1e-8 deliberately relaxes bounds — including
-#     the slack bounds standing in for inequality rows — by
-#     ``1e-8*(1 + |bound|)``. The iterate is then genuinely feasible for the
-#     RELAXED problem while sitting outside the declared one, and the violation
-#     grows in proportion to the data: with ``|b| ~ 440`` the relaxation is
-#     ~4.4e-6, with ``|b| ~ 44000`` it is ~4.4e-4. Measured on pounce @ main
-#     exactly that way — worst violation 8.1e-6 / 8.1e-5 / 8.1e-4 at data scale
-#     1e2 / 1e3 / 1e4, i.e. a constant ~8.1e-8 RELATIVE error. No convergence
-#     tolerance can fix this, because the solver has already converged; the box it
-#     converged to is the wrong one.
-#
-# (2) ``constr_viol_tol = 1e-8`` — the absolute cap on the max-norm of the
-#     unscaled constraint violation at termination. POUNCE inherits Ipopt's
-#     default of 1e-4, 100x LOOSER than the guard's 1e-6 floor. On PyPI 0.9.0
-#     this is the dominant term (violations pinned at a flat 1e-4) and this
-#     request alone fixes it; on pounce @ main it is a no-op, because there
-#     mechanism (1) dominates.
-#
-# Measured over a 49-LP battery (n=5..40, data scale 1e0..1e7, plus the tutorial
-# diet LP), on BOTH builds, counting guard trips / non-convergence / status
-# disagreement with the exact-simplex oracle:
-#
-#                                  pounce @ main        PyPI 0.9.0
-#   POUNCE's own defaults          38 trips, 3 nonopt   23 trips, 3 nonopt
-#   constr_viol_tol=1e-8 alone     39 trips, 2 nonopt    0 trips, 3 nonopt
-#   bound_relax_factor=0 alone      0 trips, 2 nonopt    (not measured alone)
-#   BOTH (what ships here)          0 trips, 2 nonopt    0 trips, 2 nonopt
-#
-# Every arm above pins BOTH options explicitly. Naming only one leaves the other
-# at this module's value, which silently turns a "POUNCE defaults" arm into
-# "defaults plus whatever we ship" — a mislabel that cost one round of this fix.
-#
-# The residual 2 non-convergences are the pre-existing scale-1e7 stalls present
-# under POUNCE's own defaults too (see _certify_unbounded_ray), not a cost of
-# these settings. ``constr_viol_tol=1e-12`` was measured and REJECTED: it reaches
-# the tolerance but destroys convergence on main (18 of 49 instances fail to reach
-# OPTIMAL, against 2 at the default).
-#
-# Do not drop either request on the grounds that the other covers it — they bind
-# on different builds, and ``pyproject.toml`` admits ``pounce-solver>=0.9`` while
-# CI tracks ``main``. The regression suite pins the *behaviour* (returned point
-# within discopt's tolerance), not these option names, so a future POUNCE that
-# changes which mechanism dominates fails loudly instead of silently regressing —
-# which is exactly how the ``constr_viol_tol``-only version of this fix was caught.
-#
-# Neither request relaxes the guard, which remains the arbiter (CLAUDE.md §1): a
-# point that still fails it is still rejected and the exact simplex still answers.
-# A caller's explicit options still win.
-_CONSTR_VIOL_TOL = 1e-8
-# Keep iterates inside the declared box; see (1) above.
-_BOUND_RELAX_FACTOR = 0.0
+# The POUNCE option baseline (constr_viol_tol, bound_relax_factor) lives in
+# :func:`discopt.solvers.pounce_option_defaults` — one source of truth shared
+# by every entry point that hands options to POUNCE. See the measurements and
+# the per-build analysis there (issue #940).
 
 
 # A recession direction must lower the objective by at least this much, relative
@@ -457,13 +404,9 @@ def solve_lp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    # Both requests go in before the caller's options so an explicit one still
-    # wins; see _CONSTR_VIOL_TOL for why these are not Ipopt's defaults (#940).
-    opts: dict[str, Any] = {
-        "print_level": 0,
-        "constr_viol_tol": _CONSTR_VIOL_TOL,
-        "bound_relax_factor": _BOUND_RELAX_FACTOR,
-    }
+    # Shared baseline first, so an explicit caller option still wins; see
+    # solvers.pounce_option_defaults for why these are not Ipopt's (#940).
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -550,7 +493,7 @@ def solve_lp_kkt(
     cu = b_arr.copy()
     x0 = _interior_start(lb, ub)
 
-    opts: dict[str, Any] = {"print_level": 0}
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
 
