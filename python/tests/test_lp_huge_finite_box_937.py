@@ -100,24 +100,25 @@ def test_model_solve_on_the_default_continuous_box_is_not_error():
 
 
 @pytest.mark.smoke
-def test_deferred_unbounded_is_returned_rather_than_downgraded_to_error(monkeypatch):
-    """When nothing can certify the declared box, keep the ``unbounded`` verdict.
+def test_deferred_unbounded_failure_is_diagnosed_not_silently_error(monkeypatch):
+    """When nothing can certify the declared box, say *why* — but do not invent a
+    verdict.
 
     The #850 guard declines to certify an IPM ``UNBOUNDED`` on a box with a
-    declared bound in ``[1e15, 1e20)``. It used to signal that by returning a bare
-    ``None`` — indistinguishable from "this engine failed" — so a simplex failure
-    (#937's other half) turned the whole solve into an undiagnosed ``error``.
-    Simulating the simplex failure directly pins the contract independently of
-    whether the simplex happens to succeed today.
+    declared bound in ``[1e15, 1e20)``. It used to signal that with a bare ``None``
+    — indistinguishable from "this engine failed" — so a simplex failure (#937's
+    other half) produced a bare, undiagnosable ``error``.
+
+    The fix is diagnosis, not promotion. Promoting the held verdict was the obvious
+    reading of #937 and it is **unsound**: a ``[1e15, 1e20)`` bound is finite as
+    posed, so on ``min -z0 - z1`` over the default box the truth is ``optimal`` at
+    the corner (the certificate #850 decided is sound) and ``unbounded`` would be a
+    false certificate on a bounded problem. So the status stays ``error`` — not a
+    certificate, an honest "no engine could decide this" — and the warning carries
+    the engine, the cause, and the remedy.
     """
     import discopt.modeling as dm
     import discopt.solver as solver_mod
-
-    pytest.importorskip("pounce")
-    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-
-    if not POUNCE_AVAILABLE:
-        pytest.skip("POUNCE not available; the deferral has no reporting engine")
 
     calls = {"simplex": 0}
 
@@ -125,18 +126,25 @@ def test_deferred_unbounded_is_returned_rather_than_downgraded_to_error(monkeypa
         calls["simplex"] += 1
         return None
 
+    def _deferring_pounce(model, t_start, time_limit=None):
+        return solver_mod._DeferredUnbounded(
+            solver_mod.SolveResult(status="unbounded", wall_time=0.0), "STUB-IPM"
+        )
+
     monkeypatch.setattr(solver_mod, "_solve_lp_simplex", _failing_simplex)
+    monkeypatch.setattr(solver_mod, "_solve_lp_pounce", _deferring_pounce)
 
     m = dm.Model("unbounded_direction")
     z = m.continuous("z", shape=(2,), lb=0)
     m.minimize(-z[0] - z[1])
     m.subject_to(z[0] + z[1] >= 1.0, name="lower")
 
-    res = solver_mod._solve_lp(m, t_start=0.0)
+    with pytest.warns(RuntimeWarning, match=r"relaxed a declared finite bound"):
+        res = solver_mod._solve_lp(m, t_start=0.0)
     assert calls["simplex"] == 1, "the simplex stub must actually have been consulted"
-    assert res.status == "unbounded", (
-        "a deferred UNBOUNDED with nowhere left to defer must be reported, "
-        f"not downgraded; got {res.status}"
+    assert res.status == "error", (
+        "a declined UNBOUNDED on a finite box must not be promoted to a certificate; "
+        f"got {res.status}"
     )
 
 

@@ -14672,18 +14672,35 @@ def _solve_lp(
 
     if deferred is not None:
         # No engine produced a certificate against the declared box, so the
-        # deferral has nowhere left to defer to. Return the held UNBOUNDED rather
-        # than "error" (#937): the verdict came from a real solve and is at worst
-        # an artifact of a relaxed box, whereas "error" is a strictly worse
-        # outcome — it discards a correct answer AND says nothing diagnosable.
-        logger.warning(
-            "%s reported UNBOUNDED on a box with a declared bound in [1e15, 1e20) "
-            "and no engine honoring that box could certify the LP; reporting "
-            "unbounded (#937). The verdict may reflect the relaxed box rather "
-            "than the declared one — tighten the bounds to disambiguate.",
-            deferred.engine,
+        # deferral has nowhere left to defer to.
+        #
+        # The held verdict is NOT promoted to the answer (#937). A bound in
+        # [1e15, 1e20) is finite as posed, so the honest reading of the deferral is
+        # "an engine that could not see this bound called the problem unbounded" —
+        # on `min -x` over the default box the truth is `optimal` at the corner
+        # (the certificate #850 decided is sound), and returning `unbounded` there
+        # would be a FALSE certificate on a bounded problem. CLAUDE.md §1 admits no
+        # trade of a possibly-false certificate for a better-looking status, so the
+        # status stays `error` — not a certificate, an honest "no engine could
+        # decide this".
+        #
+        # What #937 legitimately asks for is that the failure stop being
+        # *undiagnosable*, and that is fixed here: the warning names the engine,
+        # the exact cause, and the remedy, instead of a bare `error` that says
+        # nothing. (In practice the deferral is now almost always resolved by the
+        # simplex, which certifies this band since the audit fix.)
+        msg = (
+            f"{deferred.engine} reported UNBOUNDED, but it relaxed a declared finite "
+            f"bound in [1e15, 1e20) to its own infinity, so that verdict may describe "
+            f"a larger box than the one declared; no engine honoring the declared box "
+            f"could certify the LP. Reporting 'error' rather than an unverified "
+            f"'unbounded' — over a finite box the true answer may well be 'optimal' at "
+            f"the corner. Tighten the bounds below 1e15 to get a decisive certificate."
         )
-        return deferred.result
+        import warnings
+
+        logger.warning(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     # Single robust engine (issue #364): no JAX LP-IPM fallback. Both the simplex
     # and POUNCE (if installed) returned None — a binding that is unavailable or a
@@ -14705,10 +14722,17 @@ class _DeferredUnbounded:
 
     The guard fires when the reporting engine relaxed a declared finite bound in
     ``[1e15, 1e20)`` to its own infinity, so the verdict may describe a larger box
-    than the one declared. It is a *preference*, not a rejection: an engine that
-    honors the declared box should be tried first, but if none can certify, this
-    verdict is still the best available answer and must not be downgraded to
-    ``error`` (#937).
+    than the one declared.
+
+    Carrying the verdict (rather than the bare ``None`` the guard used to return)
+    exists for **diagnosis, not certification**. It lets ``_solve_lp`` tell
+    "an engine declined to certify, and here is exactly why" apart from "an engine
+    failed", so the no-certificate outcome is reported with an actionable message
+    instead of an undiagnosable ``error`` (#937). The verdict itself is never
+    promoted to the answer: over a finite ``[1e15, 1e20)`` box an ``unbounded``
+    claim can be false — ``min -x`` on the default box is ``optimal`` at the corner
+    — and CLAUDE.md §1 forbids trading a possibly-false certificate for a
+    better-looking status.
     """
 
     __slots__ = ("result", "engine")
