@@ -35,6 +35,7 @@ import scipy.sparse as sp
 
 from discopt.solvers import QPResult, SolveStatus
 from discopt.solvers.lp_pounce import (
+    _BOUND_RELAX_FACTOR,
     _CONSTR_VIOL_TOL,
     _FINITE_BOUND_THRESHOLD,
     _INF,
@@ -152,14 +153,16 @@ def solve_qp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    # Same constraint-tolerance mismatch as the LP path, and the same fix: the QP
-    # point is checked by the SAME #850 guard (``_matrix_solution_feasible``, via
-    # ``solver._solve_qp_matrix``), so POUNCE's default 1e-4 constr_viol_tol lets
-    # a converged QP point be rejected on any row with a term scale above a few
-    # hundred. Measured on 18 convex QPs (n=5..20, data scale 1e2..1e4): guard
-    # trips 4 -> 0, worst absolute violation 1.0e-4 -> 9.9e-9 (issue #940).
-    # See lp_pounce._CONSTR_VIOL_TOL. A caller's explicit option still wins.
-    opts: dict[str, Any] = {"print_level": 0, "constr_viol_tol": _CONSTR_VIOL_TOL}
+    # The QP point is checked by the SAME #850 guard (``_matrix_solution_feasible``,
+    # via ``solver._solve_qp_matrix``), so it needs the same two requests as the LP
+    # path and for the same two reasons — see lp_pounce._CONSTR_VIOL_TOL. Measured
+    # on 18 convex QPs (n=5..20, data scale 1e2..1e4): guard trips 4 -> 0 (#940).
+    # A caller's explicit options still win.
+    opts: dict[str, Any] = {
+        "print_level": 0,
+        "constr_viol_tol": _CONSTR_VIOL_TOL,
+        "bound_relax_factor": _BOUND_RELAX_FACTOR,
+    }
     if options:
         opts.update(options)
     if time_limit is not None:

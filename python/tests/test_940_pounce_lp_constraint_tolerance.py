@@ -158,11 +158,21 @@ def test_caller_supplied_constr_viol_tol_still_wins():
     from discopt.solvers.lp_pounce import solve_lp
 
     c, A_ub, b_ub, bounds = _diet_matrices()
-    res = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, options={"constr_viol_tol": 1e-4})
+    # Hand back BOTH of POUNCE's own defaults. Overriding only one is not enough:
+    # the two requests target different mechanisms and either alone keeps the
+    # point tight, which is the whole point of setting both (#940).
+    res = solve_lp(
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        bounds=bounds,
+        options={"constr_viol_tol": 1e-4, "bound_relax_factor": 1e-8},
+    )
     assert res.status == SolveStatus.OPTIMAL
-    # With the loose tolerance restored the point is allowed back out to ~1e-4,
-    # which is the pre-fix behavior — proof the option is honored end to end and
-    # that the tests above are measuring the option, not a coincidence.
+    # With POUNCE's own defaults restored the point is allowed back out past
+    # discopt's tolerance — the pre-fix behavior. This is proof the requests are
+    # honored end to end, so the tests above are measuring them and not a
+    # coincidence of this POUNCE build.
     assert _worst_violation(res.x, A_ub, b_ub, bounds) > DISCOPT_CONSTR_TOL
 
 
