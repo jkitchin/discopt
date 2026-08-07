@@ -100,3 +100,4 @@ scratchpad/*_out*.txt
 scratchpad/*.log
 scratchpad/**/*_out*.txt
 scratchpad/**/*.log
+scratchpad/**/*.out

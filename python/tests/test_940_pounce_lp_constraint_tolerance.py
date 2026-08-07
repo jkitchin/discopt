@@ -210,7 +210,8 @@ def test_unbounded_is_never_certified_on_a_compact_box():
     whose true status is ``optimal``, and since those bounds are far below the
     ``[1e15, 1e20)`` window of the #850 Obs 1 deferral, ``_solve_lp_matrix``
     certified a **false ``unbounded``** end to end. Predates #940 and reproduced
-    at POUNCE's own 1e-4 default; closed by ``_reject_impossible_unbounded``.
+    at POUNCE's own 1e-4 default; closed by ``_certify_unbounded_ray``, which
+    finds no improving recession direction here (the only one is ``d = 0``).
     """
     from discopt.solvers.lp_pounce import solve_lp
     from discopt.solvers.lp_simplex import solve_lp as simplex_solve_lp
@@ -248,11 +249,58 @@ def test_unbounded_is_never_certified_on_a_compact_box():
     assert out.objective == pytest.approx(ref.objective, rel=1e-9)
 
 
+def test_unbounded_is_never_certified_on_a_non_compact_box():
+    """An infinite bound does not make a ray exist — the ray must be exhibited.
+
+    The stronger half of the fix. With ``min c'x`` under ``c >= 0, x >= 0`` no ray
+    can lower the objective *by construction*, yet POUNCE's ambiguous exit
+    certified ``unbounded`` on 42 of 90 such instances at data scale 1e7-1e8, and
+    an infinite upper bound puts them outside any compact-box argument. Only a
+    genuine recession direction may keep the verdict.
+    """
+    from discopt.solvers.lp_pounce import solve_lp
+    from discopt.solvers.lp_simplex import solve_lp as simplex_solve_lp
+
+    rng = np.random.default_rng(0)
+    n, m, scale = 20, 10, 1e7
+    A_ub = -np.abs(rng.uniform(0.5, 5.0, size=(m, n)))
+    b_ub = -scale * np.abs(rng.uniform(0.5, 2.0, size=m)) * n * 0.25
+    c = np.abs(rng.uniform(1.0, 10.0, size=n))  # c >= 0 with x >= 0: no improving ray
+    bounds = [(0.0, np.inf)] + [(0.0, 10.0 * scale)] * (n - 1)
+
+    ref = simplex_solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
+    assert ref.status == SolveStatus.OPTIMAL, "oracle says this LP is bounded"
+
+    res = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
+    assert res.status != SolveStatus.UNBOUNDED, (
+        "POUNCE certified UNBOUNDED for an LP with c >= 0 and x >= 0, where no "
+        "recession direction can lower the objective"
+    )
+
+    mdl = dm.Model("noncompact")
+    x = mdl.continuous("x", shape=(n,), lb=0.0, ub=np.inf)
+    mdl.minimize(dm.sum(lambda j: float(c[j]) * x[j], over=range(n)))
+    for i in range(m):
+        row = A_ub[i]
+        mdl.subject_to(
+            dm.sum(lambda j: float(row[j]) * x[j], over=range(n)) <= float(b_ub[i]), name=f"r{i}"
+        )
+    out = mdl.solve(nlp_solver="pounce")
+    assert out.status == "optimal"
+    assert out.objective == pytest.approx(ref.objective, rel=1e-6)
+
+
 def test_genuinely_unbounded_lp_is_still_reported_unbounded():
-    """The compact-box refusal must not swallow a real unbounded ray."""
+    """The refusal must not swallow a real unbounded ray.
+
+    This is what a bare "codes 3/4 never certify anything" rule would have cost:
+    the Benders dual seam relies on an unbounded dual LP as its feasibility-cut
+    signal, so the verdict has to survive when a ray genuinely exists.
+    """
     from discopt.solvers.lp_pounce import solve_lp
 
-    # min -x0 - x1 with x free above: the box is NOT compact, so UNBOUNDED stands.
+    # min -x0 - x1 with x free above: d = (1, 1) is a recession direction of
+    # strictly negative cost, so UNBOUNDED is earned and must stand.
     res = solve_lp(
         c=np.array([-1.0, -1.0]),
         A_ub=np.array([[-1.0, -1.0]]),
@@ -260,6 +308,44 @@ def test_genuinely_unbounded_lp_is_still_reported_unbounded():
         bounds=[(0.0, np.inf)] * 2,
     )
     assert res.status == SolveStatus.UNBOUNDED
+
+
+def test_genuinely_unbounded_qp_is_still_reported_unbounded():
+    """A convex QP that is flat along its improving ray stays UNBOUNDED.
+
+    ``Q = diag(1, 0)`` and ``c = (0, -1)``: the objective is ``½x0² - x1``, which
+    falls without bound along ``d = (0, 1)`` — and ``Qd = 0`` there, so the
+    quadratic extension of the ray test admits it.
+    """
+    from discopt.solvers.qp_pounce import solve_qp
+
+    res = solve_qp(
+        Q=np.diag([1.0, 0.0]),
+        c=np.array([0.0, -1.0]),
+        A_ub=np.array([[1.0, 0.0]]),
+        b_ub=np.array([10.0]),
+        bounds=[(0.0, np.inf)] * 2,
+    )
+    assert res.status == SolveStatus.UNBOUNDED
+
+
+def test_qp_unbounded_refused_when_the_ray_is_curved():
+    """A ray the quadratic term curves upward is not an unbounded direction.
+
+    ``Q = I``, ``c = (0, -1)``: the objective ``½‖x‖² - x1`` grows along every
+    direction, so ``Qd = 0`` has no nonzero solution and no verdict may be
+    certified even though the box is unbounded above.
+    """
+    from discopt.solvers.qp_pounce import solve_qp
+
+    res = solve_qp(
+        Q=np.eye(2),
+        c=np.array([0.0, -1.0]),
+        A_ub=np.array([[1.0, 0.0]]),
+        b_ub=np.array([10.0]),
+        bounds=[(0.0, np.inf)] * 2,
+    )
+    assert res.status != SolveStatus.UNBOUNDED
 
 
 def test_infeasible_and_unbounded_lps_still_certified():

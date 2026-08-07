@@ -41,8 +41,8 @@ from discopt.solvers.lp_pounce import (
     _LP_STATUS_MAP,
     POUNCE_AVAILABLE,
     PounceKKTError,
-    _box_is_compact,
     _build_certificate,
+    _certify_unbounded_ray,
     _interior_start,
     _is_infeasible_violation,
     _phase1_min_violation,
@@ -190,12 +190,17 @@ def solve_qp(
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
-    # Same reasoning as the LP path (see lp_pounce._reject_impossible_unbounded):
-    # a continuous objective over a nonempty subset of a compact box attains its
-    # minimum, so UNBOUNDED on a fully bounded box is a numerical failure wearing
-    # a certificate's clothes, not a certificate. Spelled out here rather than
-    # reusing the LP helper because the result type differs (#940).
-    if result.status == SolveStatus.UNBOUNDED and _box_is_compact(lb, ub):
+    # Same reasoning as the LP path (see lp_pounce._certify_unbounded_ray): Ipopt
+    # codes 3/4 report a stalled or diverging iteration, not a ray, so UNBOUNDED
+    # survives only when a genuine improving recession direction is exhibited.
+    # Passing ``Q`` adds the ``Qd = 0`` rows that make the test exact for a convex
+    # QP — along ``d`` the objective is ``½t²·d'Qd + t·(c'd + x'Qd)``, so it can
+    # only fall without bound when ``d'Qd = 0``, equivalently ``Qd = 0`` for PSD
+    # ``Q``. Spelled out here rather than reusing the LP wrapper because the result
+    # type differs and the quadratic term has to be threaded through (#940).
+    if result.status == SolveStatus.UNBOUNDED and not _certify_unbounded_ray(
+        c_arr, A, cl, cu, lb, ub, opts, Q=Q_arr
+    ):
         return QPResult(
             status=SolveStatus.ERROR, iterations=result.iterations, wall_time=result.wall_time
         )

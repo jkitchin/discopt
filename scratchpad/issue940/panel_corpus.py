@@ -29,12 +29,12 @@ from discopt.modeling import from_nl  # noqa: E402
 
 # §8: assert we loaded the code under test, by file AND by a marker unique to it.
 assert LPP.__file__.startswith("/home/user/discopt/python/"), LPP.__file__
-assert hasattr(LPP, "_reject_impossible_unbounded"), "post-fix marker absent"
+assert hasattr(LPP, "_settle_ambiguous_unbounded"), "post-fix marker absent"
 assert LPP._CONSTR_VIOL_TOL == 1e-8, LPP._CONSTR_VIOL_TOL
 
 _POST_TOL = LPP._CONSTR_VIOL_TOL
-_POST_REJECT = LPP._reject_impossible_unbounded
-_POST_COMPACT = QPP._box_is_compact
+_POST_REJECT = LPP._settle_ambiguous_unbounded
+_POST_RAY = QPP._certify_unbounded_ray
 _IPOPT_DEFAULT_TOL = 1e-4
 
 ROOT = "python/tests/data/minlplib_nl"
@@ -46,13 +46,13 @@ def set_arm(arm):
     if arm == "pre":
         LPP._CONSTR_VIOL_TOL = _IPOPT_DEFAULT_TOL
         QPP._CONSTR_VIOL_TOL = _IPOPT_DEFAULT_TOL
-        LPP._reject_impossible_unbounded = lambda result, lb, ub: result
-        QPP._box_is_compact = lambda lb, ub: False
+        LPP._settle_ambiguous_unbounded = lambda result, c, A, cl, cu, lb, ub, opts: result
+        QPP._certify_unbounded_ray = lambda *a, **k: True
     else:
         LPP._CONSTR_VIOL_TOL = _POST_TOL
         QPP._CONSTR_VIOL_TOL = _POST_TOL
-        LPP._reject_impossible_unbounded = _POST_REJECT
-        QPP._box_is_compact = _POST_COMPACT
+        LPP._settle_ambiguous_unbounded = _POST_REJECT
+        QPP._certify_unbounded_ray = _POST_RAY
 
 
 def solve_one(path, arm):
