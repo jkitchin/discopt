@@ -265,36 +265,91 @@ fn audit_feasibility(
 ) -> Feasibility {
     const FEAS: f64 = 1e-6;
     for j in 0..n {
-        // Relative bound tolerance: a variable whose bound (and hence value) is
-        // large carries proportionally larger floating-point drift, so an
-        // absolute 1e-6 would spuriously reject a sound optimum on ill-scaled
+        // A bound at or past the ±INF sentinel is NO bound: the whole engine reads
+        // `u[j] >= INF` / `l[j] <= -INF` as "unbounded on that side" (ratio tests,
+        // phase-1 setup, the nonbasic-status assignment), so the LP it actually
+        // solves leaves that side free and a basic variable may legitimately settle
+        // past `1e20`. Comparing against the literal sentinel here audited a
+        // *different* LP than the one solved and rejected sound optima: a slack of
+        // the standard form `[A | I]` carries `u = 1e20`, and on a declared box just
+        // under the sentinel (the default continuous box ±9.999e19) its optimal
+        // value `~2e20` tripped this test — the whole solve came back `Numerical`
+        // (issue #937). Skip the side that is sentinel-infinite; the finite side is
+        // still audited exactly as before.
+        //
+        // Relative bound tolerance on a finite side: a variable whose bound (and
+        // hence value) is large carries proportionally larger floating-point drift,
+        // so an absolute 1e-6 would spuriously reject a sound optimum on ill-scaled
         // lifted LPs (variable magnitudes ~1e9). Scale the slack by the bound
         // magnitude, mirroring the relative test already used on the row residual.
-        let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
-        let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
-        if x[j] < l[j] - lo_tol || x[j] > u[j] + hi_tol {
-            return Feasibility::Bounds;
+        if l[j] > -INF {
+            let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
+            if x[j] < l[j] - lo_tol {
+                return Feasibility::Bounds;
+            }
+        }
+        if u[j] < INF {
+            let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
+            if x[j] > u[j] + hi_tol {
+                return Feasibility::Bounds;
+            }
         }
     }
     // Row activity `A x` accumulated over the sparse columns (O(nnz)), not a dense
     // `m·n` matvec — the lifted relaxations are ~0.3% dense, so this is the
     // difference between milliseconds and seconds on the per-solve audit.
+    //
+    // `term_scale[i] = Σ_j |A_ij x_j|` and `terms[i]` (the number of nonzero
+    // products summed) are accumulated in the same pass — they bound the row
+    // residual's own round-off, see below.
     let mut ax = vec![0.0f64; m];
+    let mut term_scale = vec![0.0f64; m];
+    let mut terms = vec![0u32; m];
     for j in 0..n {
         let xj = x[j];
         if xj != 0.0 {
             let (rows, vals) = cols.col(j);
             for (k, &i) in rows.iter().enumerate() {
-                ax[i] += vals[k] * xj;
+                let t = vals[k] * xj;
+                ax[i] += t;
+                term_scale[i] += t.abs();
+                terms[i] += 1;
             }
         }
     }
     for i in 0..m {
-        if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
+        if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) + row_roundoff(terms[i], term_scale[i])
+        {
             return Feasibility::Rows;
         }
     }
     Feasibility::Ok
+}
+
+/// Floating-point round-off floor for a row residual: the largest `|Ax − b|` a
+/// row of `k` nonzero products totalling `term_scale = Σ|A_ij x_j|` can show
+/// **when `x` is exact**.
+///
+/// `fl(Σ_{1..k} t_j)` differs from the exact sum by at most `k·ε·Σ|t_j|` (the
+/// standard running-sum bound, `(k−1)·ε/(1−(k−1)ε)`, plus one `ε` for the
+/// rounding of each product `A_ij·x_j`); the `8` is headroom over that bound. So
+/// a residual below this is not evidence of anything — it is the arithmetic, and
+/// no `x` representable in `f64` can do better.
+///
+/// This matters once `term_scale` dwarfs `|b_i|`: the vertex of `−z₀ − z₁ + s =
+/// −1` at `z = (u, u)` needs `s = 2u − 1`, which for `2u > 2⁵³` rounds to `2u`
+/// and leaves residual `1` — 5e-17 *relative* to the terms summed, yet ~5e5×
+/// over the `FEAS·(1+|b|)` threshold, so a perfectly sound optimum came back
+/// `Numerical` on every box in `[1e16, 1e20)` (issue #937).
+///
+/// It is a floor, never a widening of the ordinary regime: for a well-scaled row
+/// it is ~1e-14·term_scale, i.e. below the `1e-6` absolute term until the row
+/// activity reaches ~1e8, and it stays ~10 orders of magnitude tighter than the
+/// drift the audit exists to catch (a `Forrest–Tomlin` update error or an
+/// ill-conditioned basis moves `x` by *relative* amounts far above `ε`).
+#[inline]
+fn row_roundoff(terms: u32, term_scale: f64) -> f64 {
+    8.0 * (terms as f64) * f64::EPSILON * term_scale
 }
 
 /// Recover finite, *valid* upper bounds for the **slack** columns of the standard
@@ -2579,5 +2634,79 @@ mod tests {
             &u,
             &r.x
         ));
+    }
+
+    /// #937: a huge-but-finite declared box must still certify. The LP
+    /// `min −z₀ − z₁ s.t. z₀ + z₁ ≥ 1, 0 ≤ z ≤ u` has its optimum at the corner
+    /// `z = (u, u)`, objective `−2u`, for every finite `u`; at the `1e20` sentinel
+    /// the box is infinite and the answer is `Unbounded`. The engine used to break
+    /// on the whole band in between — `[1e15, 1e20)` — via two independent audit
+    /// defects, both scale-blindness in `audit_feasibility`:
+    ///
+    ///   * `[1e16, 1e19]` → `Rows`: the vertex needs `s = 2u − 1` in the standard
+    ///     form's slack, which for `2u > 2⁵³` is not representable and rounds to
+    ///     `2u`, leaving residual `1` — 5e-17 *relative* to the terms summed, but
+    ///     ~5e5× over the `FEAS·(1 + |b|)` threshold, which sees only `|b| = 1`.
+    ///   * `9.999e19` (the DEFAULT `Model.continuous` box) → `Bounds`: the slack's
+    ///     optimal value `1.9998e20` sits past its declared `u = 1e20`, which the
+    ///     rest of the engine reads as the ±INF sentinel — "no upper bound" — while
+    ///     the audit compared against it as a literal number.
+    ///
+    /// The band is pinned end to end, not at a point, because the two defects claim
+    /// different parts of it. FAILS pre-fix (`Numerical` from `1e16` up); passes
+    /// after (`Optimal` at `−2u`, and `Unbounded` only at the sentinel).
+    #[test]
+    fn huge_finite_box_certifies_across_the_whole_band_937() {
+        // Standard form: −z₀ − z₁ + s = −1 (i.e. z₀ + z₁ ≥ 1), s the ≤-slack.
+        let a = [-1.0, -1.0, 1.0];
+        let c = [-1.0, -1.0, 0.0];
+        let l = [0.0; 3];
+        let b = [-1.0];
+        let mut checked = 0usize;
+        for u in [1e3, 1e9, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 5e19, 9.999e19] {
+            let ub = [u, u, INF];
+            let r = solve(&a, 1, 3, &b, &c, &l, &ub);
+            assert_eq!(
+                r.status,
+                LpStatus::Optimal,
+                "u={u:e}: a finite box below the 1e20 sentinel must certify"
+            );
+            // Exact vertex objective −2u (relative, since −2u itself is only
+            // representable to an ulp once u exceeds 2⁵²).
+            assert!(
+                (r.obj - (-2.0 * u)).abs() <= 1e-12 * (2.0 * u),
+                "u={u:e}: obj {} != −2u",
+                r.obj
+            );
+            checked += 1;
+        }
+        // At (and past) the sentinel the box really is infinite.
+        let r = solve(&a, 1, 3, &b, &c, &l, &[INF, INF, INF]);
+        assert_eq!(
+            r.status,
+            LpStatus::Unbounded,
+            "the 1e20 sentinel is infinity: the LP is genuinely unbounded there"
+        );
+        checked += 1;
+        assert_eq!(checked, 11, "band probe must have run every point");
+    }
+
+    /// The `Rows` audit floor is a *floor*, not a widening: it may never let a
+    /// genuinely wrong point certify. A row whose activity is ordinary-scaled keeps
+    /// its `1e-6` absolute threshold, and a residual well above round-off is still
+    /// rejected at any scale.
+    #[test]
+    fn row_roundoff_floor_stays_below_real_drift_937() {
+        // Ordinary scale: the floor is far under the absolute FEAS term, so the
+        // effective threshold is unchanged.
+        assert!(row_roundoff(200, 1.0e6) < 1e-6);
+        // Even at the 1e16 activity of the #937 band, the floor is ~1e-16 relative:
+        // a residual that is 1e-6 RELATIVE to the row (1e10 absolute) still fails.
+        let scale = 4.0e16;
+        assert!(row_roundoff(3, scale) < 1e-6 * scale);
+        assert!(
+            row_roundoff(3, scale) > 1.0,
+            "must forgive the exact-vertex ulp"
+        );
     }
 }
