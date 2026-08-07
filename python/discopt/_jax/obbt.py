@@ -17,6 +17,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
 from discopt.solvers.lp_backend import (
@@ -490,13 +491,11 @@ def _extract_linear_constraints(
             return None
 
         if isinstance(expr, IndexExpression):
-            if isinstance(expr.base, Variable):
-                base_offset = _compute_var_offset(expr.base)
-                idx = expr.index
-                if isinstance(idx, int):
-                    return {base_offset + idx: 1.0}, 0.0
-                if isinstance(idx, tuple) and len(idx) == 1:
-                    return {base_offset + idx[0]: 1.0}, 0.0
+            # #941: `base_offset + idx` took a negative index literally, naming a
+            # slot that belongs to a different variable. Shared resolver.
+            slot = resolve_scalar_slot(expr, model)
+            if slot is not None:
+                return {slot: 1.0}, 0.0
             return None
 
         if isinstance(expr, SumExpression):
@@ -634,12 +633,10 @@ def _extract_linear_objective(
                 return None
             return {k: -v for k, v in inner[0].items()}, -inner[1]
         if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-            base_offset = _compute_var_offset(expr.base)
-            idx = expr.index
-            if isinstance(idx, int):
-                return {base_offset + idx: 1.0}, 0.0
-            if isinstance(idx, tuple) and len(idx) == 1:
-                return {base_offset + idx[0]: 1.0}, 0.0
+            # #941: see the note in the sibling extractor above.
+            slot = resolve_scalar_slot(expr, model)
+            if slot is not None:
+                return {slot: 1.0}, 0.0
             return None
         if isinstance(expr, SumExpression):
             return _extract(expr.operand)
@@ -1402,22 +1399,12 @@ def _scalar_flat_index(expr, model) -> Optional[int]:
     Returns the flat index (matching :func:`_get_var_bounds` ordering) for a
     scalar ``Variable`` or a scalar ``IndexExpression`` over a variable, else
     ``None``.
+
+    #941: this open-coded ``offset + idx``, which resolves ``v[-1]`` to the slot
+    before ``v``. OBBT tightens the bound of whatever slot it is handed, so a
+    wrong slot tightens the wrong variable's box.
     """
-    from discopt.modeling.core import IndexExpression, Variable
-
-    def _offset(var) -> int:
-        # Memoized O(1) prefix-sum lookup; see Model._flat_var_offset (#654, #863).
-        return int(model._flat_var_offset(var))
-
-    if isinstance(expr, Variable) and expr.size == 1:
-        return _offset(expr)
-    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-        idx = expr.index
-        if isinstance(idx, int):
-            return _offset(expr.base) + idx
-        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
-            return _offset(expr.base) + idx[0]
-    return None
+    return resolve_scalar_slot(expr, model)
 
 
 def _flat_indices(expr, model) -> set:

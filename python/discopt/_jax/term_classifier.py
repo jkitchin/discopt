@@ -21,11 +21,10 @@ Theory references:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from operator import index as operator_index
 from typing import Any
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -121,53 +120,19 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return model._flat_var_offset(var)
 
 
-def _as_scalar_index(value: Any) -> int | None:
-    """Return a Python integer index, or None for slices and non-scalars."""
-    try:
-        return operator_index(value)
-    except TypeError:
-        return None
-
-
-def _tuple_to_flat_index(indices: Sequence[int], shape: Sequence[int]) -> int | None:
-    """Flatten a scalar multidimensional index in row-major order."""
-    if len(indices) != len(shape):
-        return None
-
-    flat = 0
-    stride = 1
-    for idx, dim in zip(reversed(indices), reversed(shape)):
-        flat += idx * stride
-        stride *= dim
-    return flat
-
-
 def _get_flat_index(expr: Expression, model: Model) -> int | None:
     """Return the flat variable index for a scalar Variable or IndexExpression.
 
     Returns None if the expression is not a scalar variable reference.
+
+    #941: this used to open-code the index arithmetic and took negatives
+    literally, so ``v[-1]`` resolved to ``base_offset - 1`` — a valid slot
+    belonging to a *different* variable. The bilinear catalog then registered a
+    pair that does not exist in the model, and the relaxation built from it cut
+    off the true optimum under a ``gap_certified=True`` label. It now shares one
+    resolver with every other structure layer.
     """
-    if isinstance(expr, Variable):
-        if expr.size == 1:
-            return _compute_var_offset(expr, model)
-        return None  # multi-element variable without index — can't reduce to scalar
-    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-        base_off = _compute_var_offset(expr.base, model)
-        idx = expr.index
-        scalar_idx = _as_scalar_index(idx)
-        if scalar_idx is not None:
-            return base_off + scalar_idx
-        if isinstance(idx, tuple):
-            scalar_indices = []
-            for item in idx:
-                item_idx = _as_scalar_index(item)
-                if item_idx is None:
-                    return None
-                scalar_indices.append(item_idx)
-            flat = _tuple_to_flat_index(scalar_indices, expr.base.shape)
-            if flat is not None:
-                return base_off + flat
-    return None
+    return resolve_scalar_slot(expr, model)
 
 
 def _contains_expandable_square(model: Model) -> bool:
