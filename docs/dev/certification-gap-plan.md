@@ -1287,25 +1287,52 @@ box violation, zero integrality violation), as is `tspn12`'s 262.647.
 *Net-positive:* neutral on the `.nl` corpus by construction (that corpus contains
 **0** `SumOverExpression` nodes across 3,769 objective/constraint bodies in 66
 instances, and the 10 MIQPs the route fires on were already proven convex), and
-decisive on the class it targets. The three `docs/notebooks/` pages the issue
-reports as timing out all solve: the `decision_focused_learning` oracle QP goes
+decisive on the class it targets: the `decision_focused_learning` oracle QP goes
 from `feasible`/5,101 nodes/60.4 s (measured on this tree at `HEAD~1`; the issue
 reports 14,115 nodes) to **optimal/0 nodes/0.59 s**; `qp_solver`'s Markowitz
 n=20 from `feasible` only/557 nodes/120 s limit to optimal/0 nodes/0.13 s;
 `benchmarks_by_class`'s QP sweep runs to n=100 in under 1 s per size.
 
+*Scope of the notebook evidence (corrected 2026-08-07).* An earlier draft of this
+section said all three `docs/notebooks/` pages the issue reports as timing out
+now solve. Only `decision_focused_learning` supports that end-to-end: it is
+byte-identical on `main` and on this branch, so its before/after is a clean A/B.
+The other two do not establish a pre-fix baseline from `main`. `qp_solver` on
+`main` is the pre-rewrite version of the notebook, and `benchmarks_by_class` on
+`main` aborts before reaching any solve, at `import discopt.solvers.lp_highs` —
+a module removed in #365. The *after* numbers above are measurements of the QP
+bodies themselves and stand as class evidence; what is not established is that
+those two notebooks were previously timing out **because of** #936.
+
 **Defect 2 — `DISCOPT_PSD_QFORM` stays default-OFF (graduation DECLINED).** The
-issue proposed graduating it alongside this fix. Its own panel (same corpus,
-same protocol, `DISCOPT_QP_EXACT_CONVEXITY` ON in both arms) **fails cert-clean
-on `st_e36`**: `gap_certified` True → False and `optimal`/85 nodes →
-`time_limit`/0 nodes. Reproduced interleaved ×3 on an idle box — OFF is
-optimal + certified 3/3 in 9.3–12.3 s; ON is 0/3, never finishing the *root*
-(0 nodes) and overrunning the 20 s budget by 9× at 148–188 s. That is the
-certification regression §5 names as disqualifying, and it is not a timing
-artifact. Graduating it is also unnecessary for #936: the exact-QP route above
-resolves Defect 2's symptom without it (Markowitz n=20 solves at 0 nodes with
-`PSD_QFORM` at its default OFF). This is the `DISCOPT_CUT_INHERIT` rule applied
-— sound ≠ helpful — with the measurement recorded rather than the flag flipped.
+issue proposed graduating it alongside this fix. It is declined on **neutrality**:
+on `st_e36` the flag runs 11 exact eigenvalue certifications that yield 10
+additional CONCAVE verdicts and no convex verdict, so nothing is routed onto a
+convex path — measured cost +1.7 s (3.6 s → 5.3–5.4 s, interleaved ×3), measured
+benefit zero. That is the `DISCOPT_CUT_INHERIT` rule — sound ≠ helpful — with the
+measurement recorded rather than the flag flipped. Graduating it is also
+unnecessary for #936: the exact-QP route above resolves Defect 2's symptom
+without it (Markowitz n=20 solves at 0 nodes with `PSD_QFORM` at its default
+OFF). Graduating it later would need its own §5 panel; none has been run.
+
+*Retraction (§11, 2026-08-07).* An earlier version of this section declined the
+flag on a stronger basis — a **cert-clean failure** on `st_e36`, `gap_certified`
+True → False and `optimal`/85 nodes → `time_limit`/0 nodes, the root never
+finishing at 148–188 s. **That measurement does not reproduce and is withdrawn.**
+An independent reproduction on this branch (`54c606b4`) with a freshly
+`cargo build --release`d extension found `optimal`, 85 nodes,
+`gap_certified=True`, objective `-245.99999999999997`, bound `-246.0000000017`,
+in *every* configuration tried: interleaved ×3 at the 20 s panel limit, the full
+2×2 of `DISCOPT_PSD_QFORM` × `DISCOPT_QP_EXACT_CONVEXITY`, and a 7-instance
+same-process panel with `st_e36` last. The A/B was proven non-vacuous per §6 —
+instrumented calls are `certify_psd` 0× with the flag OFF and 11× with it ON —
+so the two arms genuinely differ; they simply agree on the outcome. The instance
+file is byte-identical in-repo and in the `discopt-minlp-benchmark` corpus.
+Probable cause, unconfirmed: a stale prebuilt `_rust*.so` predating #938, whose
+`primal.rs` rewrite this branch is rebased onto — the §8 trap, which the
+reproducing session hit once itself before adding a positive post-#938 build
+marker. The **decision** (leave the flag default-OFF) is unchanged and remains
+correct on the neutrality evidence above; only its stated basis is retracted.
 
 *Size gate.* `_QP_EXACT_CONVEXITY_MAX_N = 2000` bounds both the dense
 materialisation (2000² float64 = 32 MB) and `eigvalsh` (measured: n=1000 →
