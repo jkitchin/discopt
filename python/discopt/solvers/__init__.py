@@ -140,3 +140,86 @@ class NLPResult:
     bound_multipliers_upper: Optional[np.ndarray] = None
     iterations: int = 0
     wall_time: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Shared POUNCE/Ipopt option defaults (issue #940)
+# ---------------------------------------------------------------------------
+
+# Per-build measurement behind these two values (issue #940). A 49-LP battery
+# (n=5..40, data scale 1e0..1e7, plus the tutorial diet LP), counting rejections
+# by discopt's own feasibility guard / non-convergence, with EVERY arm pinning
+# BOTH options explicitly:
+#
+#                                  pounce @ main        PyPI 0.9.0
+#   POUNCE's own defaults          38 trips, 3 nonopt   23 trips, 3 nonopt
+#   constr_viol_tol=1e-8 alone     39 trips, 2 nonopt    0 trips, 3 nonopt
+#   bound_relax_factor=0 alone      0 trips, 2 nonopt    (not measured alone)
+#   BOTH (what ships)               0 trips, 2 nonopt    0 trips, 2 nonopt
+#
+# Which mechanism dominates depends on the build, so both are set:
+# constr_viol_tol carries the published wheel and is a no-op on main;
+# bound_relax_factor carries main. `pyproject.toml` admits `pounce-solver>=0.9`
+# while CI tracks `main`, so neither may be dropped on the grounds that the
+# other covers it. Naming only one in an experiment arm leaves the other at the
+# shipped value and silently mislabels the arm — that cost one round of this fix.
+#
+# The residual 2 non-convergences are pre-existing stalls at data scale ~1e7,
+# present under POUNCE's own defaults too. `constr_viol_tol=1e-12` was measured
+# and REJECTED: it reaches the tolerance but destroys convergence on main (18 of
+# 49 instances fail to reach OPTIMAL, against 2 at the default).
+#
+# None of this relaxes any discopt guard: the guards remain the arbiter
+# (CLAUDE.md §1), and a point that still fails one is still rejected.
+# Requested absolute cap on the max-norm of the UNSCALED constraint violation at
+# termination. POUNCE inherits Ipopt's default of 1e-4, two orders LOOSER than
+# discopt's own 1e-6 constraint tolerance
+# (``solver._matrix_solution_feasible``, ``_jax.primal_heuristics.
+# _check_constraint_feasibility``), so a converged point can sit 1e-4 on the
+# infeasible side of a row and still be reported OPTIMAL. Dominant on the
+# published pounce-solver wheel; a no-op on current ``main``.
+POUNCE_CONSTR_VIOL_TOL = 1e-8
+
+# Ipopt's ``bound_relax_factor`` (default 1e-8) deliberately relaxes every
+# bound — including the slack bounds standing in for inequality rows — by
+# ``1e-8*(1 + |bound|)``. The solve then converges honestly, but to a RELAXED
+# box, so the returned point sits OUTSIDE the box the caller declared and the
+# error grows with the data. That is what discopt's feasibility guards were
+# rejecting POUNCE points for, and no convergence tolerance can remove it: the
+# solver has already converged; the box it converged to is the wrong one.
+#
+# Pinning it to 0 keeps iterates inside the declared box. This matters well
+# beyond the LP/QP fast path — an NLP iterate stepping below a bound of 0 is
+# exactly how ``log``/``sqrt``/``1/x`` produce the NaN failures discopt warns
+# about — which is why it lives here rather than in one backend (CLAUDE.md §2:
+# fix the class, not the instance).
+POUNCE_BOUND_RELAX_FACTOR = 0.0
+
+
+def pounce_option_defaults() -> dict:
+    """discopt's baseline POUNCE options: quiet, and inside the declared box.
+
+    THE single source of truth for the **matrix-form** backends (``lp_pounce``,
+    ``qp_pounce``). Seed it *before* merging a caller's options so an explicit
+    request still wins::
+
+        opts = pounce_option_defaults()
+        opts.update(caller_options or {})
+
+    Do not re-spell these values at a call site — a second copy is how one entry
+    point silently keeps Ipopt's defaults while the rest move.
+
+    The NLP path (``nlp_pounce.solve_nlp``, and ``solver.py``'s batch path) does
+    NOT use this yet, and so still returns points up to ~7.5e-9 outside their
+    declared bounds. That is not an oversight: pinning ``bound_relax_factor`` to 0
+    there makes incumbents genuinely feasible, which turns ``incumbent - bound``
+    from ``<= 0`` into a small positive number and breaks 12 ``gap == 0 @ 1e-9``
+    assertions across OA / GDPopt / MindtPy parity — those expectations are
+    currently calibrated against a solver that returns slightly-infeasible
+    incumbents. Extending this seed to the NLP path is tracked in #945, together
+    with the gap-closure question it forces.
+    """
+    return {
+        "print_level": 0,
+        "constr_viol_tol": POUNCE_CONSTR_VIOL_TOL,
+    }

@@ -98,3 +98,6 @@ docs/notebooks/*.xlsx
 # scratchpad run logs (keep the harnesses, drop the outputs)
 scratchpad/*_out*.txt
 scratchpad/*.log
+scratchpad/**/*_out*.txt
+scratchpad/**/*.log
+scratchpad/**/*.out

@@ -44,7 +44,7 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
-from discopt.solvers import SolveStatus
+from discopt.solvers import POUNCE_BOUND_RELAX_FACTOR, SolveStatus
 
 # R3a measurement sink (temporary, behavior-neutral). When set to a mutable
 # dict by an experiment harness, the nonconvex B&B path stores the Rust tree's
@@ -14306,6 +14306,8 @@ def _solve_batch_pounce(
 
     # Batch-level options. Whitelist keys POUNCE understands and enforce the
     # per-node wall-time guard (issue #5) used by the serial pounce path.
+    # Deliberately NOT seeded from solvers.pounce_option_defaults: this is the NLP
+    # batch path, and bound_relax_factor=0 there breaks OA/GDPopt gap closure (#945).
     batch_opts: dict = {"print_level": 0}
     for k in ("max_iter", "tol", "acceptable_tol"):
         if options.get(k) is not None:
@@ -15039,7 +15041,16 @@ def _solve_lp_pounce(
         return None
     # Request an infeasibility certificate so an infeasible model-level LP
     # surfaces *why* via SolveResult.infeasibility_certificate (roadmap P0.2).
-    solve_fn = functools.partial(_pounce_solve_lp, certificate=True)
+    # bound_relax_factor=0 is requested HERE, not as a backend default: it is this
+    # call site's point that _matrix_solution_feasible checks, and Ipopt's default
+    # 1e-8 relaxation is what puts that point outside the declared box (#940).
+    # Applied backend-wide it also reaches the Benders dual LP, where it costs
+    # convergence (2 correctness-lane tests, 1.6s -> 79s) — see #945.
+    solve_fn = functools.partial(
+        _pounce_solve_lp,
+        certificate=True,
+        options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
+    )
     # The IPM is the one backend that relaxes a declared [1e15, 1e20) bound to its
     # own infinity, so its UNBOUNDED is the verdict the #850 guard defers on.
     return _solve_lp_matrix(
@@ -15313,7 +15324,12 @@ def _solve_qp_pounce(
         return None
     if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
         return None
-    solve_fn = functools.partial(_pounce_solve_qp, certificate=True)
+    # Same reasoning as _solve_lp_pounce: the guard checks THIS call site's point.
+    solve_fn = functools.partial(
+        _pounce_solve_qp,
+        certificate=True,
+        options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
+    )
     return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
@@ -15516,7 +15532,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     across ALL rows — which on a large-RHS row inflated the tolerance far past
     discopt's own constraint tolerance: for ``x <= 1e4`` the threshold became
     ``1e-6 * 1e4 = 1e-2``, so an interior-point primal sitting ``1e-4`` on the
-    infeasible side of the row (POUNCE's fixed Ipopt ``constr_viol_tol`` floor)
+    infeasible side of the row (POUNCE's default Ipopt ``constr_viol_tol``)
     was accepted as "optimal" — a super-optimal, constraint-infeasible incumbent
     (issue #850 Obs 3). With the per-row term scale that same point is rejected
     (threshold ``1e-6 + 1e-9*1e4 ≈ 1.1e-5``) and the caller degrades to the exact
@@ -15524,6 +15540,27 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     is kept extremely tight (1e-9) so only cancellation noise proportional to the
     row terms is forgiven; a gross mislabel (the ~7.5 HiGHS case) is still caught.
     A bound row ``lo <= x_i <= hi`` has term scale ``|x_i|`` (unit coefficient).
+
+    #940 correction: that ``1e-4`` was described here as POUNCE's *fixed*
+    ``constr_viol_tol`` floor. Measurement falsifies "fixed" — it is settable, and
+    on the published wheel it is honored, so the POUNCE backends request
+    ``1e-8`` (:data:`discopt.solvers.lp_pounce._CONSTR_VIOL_TOL`), two orders
+    under this test's ``1e-6``.
+
+    But that tolerance was never the whole story, and on current POUNCE it is not
+    even the operative half. The setting that actually put returned points on the
+    infeasible side of a row is Ipopt's ``bound_relax_factor`` (default 1e-8),
+    which relaxes bounds — including the slack bounds standing in for inequality
+    rows — by ``1e-8*(1 + |bound|)``. The engine then converges honestly, but to a
+    RELAXED box, so the violation grows with the data (~4.4e-6 at ``|b| ~ 440``,
+    ~4.4e-4 at ``|b| ~ 44000``) and no convergence tolerance can remove it.
+    :data:`discopt.solvers.lp_pounce._BOUND_RELAX_FACTOR` pins it to 0; that is the
+    line that makes this guard stop firing on correct solves. See
+    ``lp_pounce._CONSTR_VIOL_TOL`` for the per-build measurements — which of the
+    two mechanisms dominates depends on the POUNCE build, so both are set.
+
+    Nothing about THIS check changed: it is the arbiter, and a point that fails it
+    is still rejected however it was produced.
     """
     x = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(x)):

@@ -1,0 +1,1193 @@
+{
+ "rows": {
+  "4stufen": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 19713.036064206917,
+    "node_count": 7,
+    "wall": 21.508910659999856
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 19713.036064206917,
+    "node_count": 7,
+    "wall": 20.887375094999697
+   }
+  },
+  "alan": {
+   "post": {
+    "status": "optimal",
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
+    "node_count": 21,
+    "wall": 0.11002031300040471
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
+    "node_count": 21,
+    "wall": 0.11820259100022668
+   }
+  },
+  "bchoco06": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999887833666715,
+    "node_count": 7,
+    "wall": 22.467671041999893
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999887833703148,
+    "node_count": 7,
+    "wall": 21.18098447200009
+   }
+  },
+  "bchoco07": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000000286,
+    "node_count": 7,
+    "wall": 29.30848712399984
+   },
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000000286,
+    "node_count": 7,
+    "wall": 22.659606178000104
+   }
+  },
+  "bchoco08": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000002788,
+    "node_count": 3,
+    "wall": 21.245285416000115
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000002788,
+    "node_count": 3,
+    "wall": 21.40287190500021
+   }
+  },
+  "beuster": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6352.99834504317,
+    "node_count": 7,
+    "wall": 22.180832595000084
+   },
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6352.99834504317,
+    "node_count": 7,
+    "wall": 21.46282591299996
+   }
+  },
+  "casctanks": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -90.17862329759835,
+    "node_count": 1,
+    "wall": 24.244932596000126
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -90.17862329759835,
+    "node_count": 1,
+    "wall": 21.77157353299981
+   }
+  },
+  "chance": {
+   "post": {
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0,
+    "wall": 0.42270455300013055
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0,
+    "wall": 0.19776669599968955
+   }
+  },
+  "clay0303hfsg": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "wall": 24.398320659999627
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 63,
+    "wall": 20.582645404999766
+   }
+  },
+  "contvar": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 180782.8593284799,
+    "node_count": 3,
+    "wall": 26.119079677999707
+   },
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 183430.50053431175,
+    "node_count": 3,
+    "wall": 22.135885255000176
+   }
+  },
+  "cvxnonsep_nsig30": {
+   "pre": {
+    "status": "optimal",
+    "objective": 130.62871116925294,
+    "bound": 130.61841392487688,
+    "node_count": 171,
+    "wall": 8.01772743299989
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 130.62871116925294,
+    "bound": 130.61841392487688,
+    "node_count": 171,
+    "wall": 5.626963754999906
+   }
+  },
+  "cvxnonsep_psig30": {
+   "post": {
+    "status": "optimal",
+    "objective": 78.99885435294289,
+    "bound": 78.99701703820377,
+    "node_count": 89,
+    "wall": 5.301478297000358
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 78.99885435294289,
+    "bound": 78.99701703820377,
+    "node_count": 89,
+    "wall": 2.4127081909996377
+   }
+  },
+  "cvxnonsep_psig40r": {
+   "pre": {
+    "status": "optimal",
+    "objective": 86.54527995164959,
+    "bound": 86.53873600363832,
+    "node_count": 103,
+    "wall": 10.417140275000293
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 86.54527995164959,
+    "bound": 86.53873600363832,
+    "node_count": 103,
+    "wall": 8.604540518000249
+   }
+  },
+  "dispatch": {
+   "post": {
+    "status": "optimal",
+    "objective": 3155.2879266857854,
+    "bound": 3155.2878615366776,
+    "node_count": 23,
+    "wall": 0.7293691979998584
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 3155.2879266857854,
+    "bound": 3155.2878615366776,
+    "node_count": 23,
+    "wall": 0.6962513250000484
+   }
+  },
+  "ex1221": {
+   "pre": {
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5,
+    "wall": 1.249194176000401
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5,
+    "wall": 0.9177672659998279
+   }
+  },
+  "ex1222": {
+   "post": {
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1,
+    "wall": 0.5601772030004213
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1,
+    "wall": 0.35711891700020715
+   }
+  },
+  "ex1224": {
+   "pre": {
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5,
+    "wall": 4.3252883699997255
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5,
+    "wall": 3.636300170999675
+   }
+  },
+  "ex1225": {
+   "post": {
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5,
+    "wall": 3.681566657000076
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5,
+    "wall": 3.4148386019996906
+   }
+  },
+  "ex1226": {
+   "pre": {
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3,
+    "wall": 1.310781259000123
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3,
+    "wall": 1.4155730269999367
+   }
+  },
+  "ex14_1_9": {
+   "post": {
+    "status": "optimal",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3,
+    "wall": 0.4155350740002177
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3,
+    "wall": 0.39447935499993037
+   }
+  },
+  "fac2": {
+   "pre": {
+    "status": "optimal",
+    "objective": 331837497.8394821,
+    "bound": 331837497.54563797,
+    "node_count": 41,
+    "wall": 13.340976797999701
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 331837497.8394821,
+    "bound": 331837497.54563797,
+    "node_count": 41,
+    "wall": 12.449896032999732
+   }
+  },
+  "flay02m": {
+   "post": {
+    "status": "optimal",
+    "objective": 37.94733186383461,
+    "bound": 37.947331804569515,
+    "node_count": 7,
+    "wall": 0.8972219729998869
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 37.94733186383461,
+    "bound": 37.947331804569515,
+    "node_count": 7,
+    "wall": 0.624575878000087
+   }
+  },
+  "flay03m": {
+   "pre": {
+    "status": "optimal",
+    "objective": 48.98979479383567,
+    "bound": 48.98979470823052,
+    "node_count": 111,
+    "wall": 10.442630846999691
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 48.98979479383567,
+    "bound": 48.98979470823052,
+    "node_count": 111,
+    "wall": 9.464744239000083
+   }
+  },
+  "gbd": {
+   "post": {
+    "status": "optimal",
+    "objective": 2.1999999825308127,
+    "bound": 2.1999999825308127,
+    "node_count": 3,
+    "wall": 0.03595365299997866
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
+    "node_count": 3,
+    "wall": 0.03328848499995729
+   }
+  },
+  "gkocis": {
+   "pre": {
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5,
+    "wall": 1.8277999140000247
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5,
+    "wall": 1.6135536520000642
+   }
+  },
+  "hda": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -64473.44240243703,
+    "node_count": 1,
+    "wall": 26.00178211599996
+   },
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -64473.44240243703,
+    "node_count": 1,
+    "wall": 25.005090283999834
+   }
+  },
+  "heatexch_gen1": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.5317460179,
+    "node_count": 3,
+    "wall": 22.89515350000056
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.5317460179,
+    "node_count": 3,
+    "wall": 23.951368686999558
+   }
+  },
+  "heatexch_gen2": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 555767.7902857271,
+    "node_count": 7,
+    "wall": 22.608721485999922
+   },
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 555767.7902857271,
+    "node_count": 7,
+    "wall": 21.981647496000733
+   }
+  },
+  "heatexch_gen3": {
+   "pre": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "wall": 32.95270681200054
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "wall": 248.09698854099952
+   }
+  },
+  "m3": {
+   "post": {
+    "status": "optimal",
+    "objective": 37.79999966997884,
+    "bound": 37.79999951039201,
+    "node_count": 47,
+    "wall": 6.490866232000371
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 37.79999966997884,
+    "bound": 37.79999951039201,
+    "node_count": 47,
+    "wall": 5.6113365699993665
+   }
+  },
+  "nvs01": {
+   "pre": {
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "wall": 2.222138625000298
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "wall": 1.9361843890001182
+   }
+  },
+  "nvs02": {
+   "post": {
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 345,
+    "wall": 0.6423666600003344
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 345,
+    "wall": 0.4747323880001204
+   }
+  },
+  "nvs03": {
+   "pre": {
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5,
+    "wall": 0.41465291300028184
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5,
+    "wall": 0.24724682700070844
+   }
+  },
+  "nvs04": {
+   "post": {
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "wall": 0.677775856000153
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "wall": 0.4733197619998464
+   }
+  },
+  "nvs05": {
+   "pre": {
+    "status": "feasible",
+    "objective": 8.731956986640078,
+    "bound": 3.5139117087764977,
+    "node_count": 25,
+    "wall": 20.348141084000417
+   },
+   "post": {
+    "status": "feasible",
+    "objective": 8.731956986640078,
+    "bound": 3.5139117087764977,
+    "node_count": 33,
+    "wall": 20.13810035699953
+   }
+  },
+  "nvs06": {
+   "post": {
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5,
+    "wall": 2.2296432680004727
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5,
+    "wall": 1.6296473370002786
+   }
+  },
+  "nvs07": {
+   "pre": {
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "wall": 0.1523981129994354
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "wall": 0.09493232699969667
+   }
+  },
+  "nvs08": {
+   "post": {
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3,
+    "wall": 2.048825206999936
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3,
+    "wall": 1.7602878499992585
+   }
+  },
+  "nvs09": {
+   "pre": {
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5,
+    "wall": 8.207970409000154
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5,
+    "wall": 5.702279522000026
+   }
+  },
+  "nvs10": {
+   "post": {
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5,
+    "wall": 0.2771273719999954
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5,
+    "wall": 0.23883065599966358
+   }
+  },
+  "nvs11": {
+   "pre": {
+    "status": "optimal",
+    "objective": -431.0000000000085,
+    "bound": -431.0000000000085,
+    "node_count": 55,
+    "wall": 1.0633460030003334
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -431.0000000000085,
+    "bound": -431.0000000000085,
+    "node_count": 55,
+    "wall": 0.7546429849999186
+   }
+  },
+  "nvs12": {
+   "post": {
+    "status": "optimal",
+    "objective": -481.20000000001,
+    "bound": -481.20000000001,
+    "node_count": 231,
+    "wall": 3.2871221510004034
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -481.20000000001,
+    "bound": -481.20000000001,
+    "node_count": 231,
+    "wall": 3.318201302000489
+   }
+  },
+  "nvs13": {
+   "pre": {
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.2,
+    "node_count": 637,
+    "wall": 2.422947576000297
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.2,
+    "node_count": 637,
+    "wall": 1.7732599160008249
+   }
+  },
+  "nvs14": {
+   "post": {
+    "status": "optimal",
+    "objective": -40358.15476929995,
+    "bound": -40358.154769299996,
+    "node_count": 129,
+    "wall": 1.0206735700003264
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -40358.15476929995,
+    "bound": -40358.154769299996,
+    "node_count": 129,
+    "wall": 0.9539272100000744
+   }
+  },
+  "nvs15": {
+   "pre": {
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7,
+    "wall": 0.1067352000000028
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7,
+    "wall": 0.10220228500020312
+   }
+  },
+  "nvs21": {
+   "post": {
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3,
+    "wall": 8.460657235000326
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3,
+    "wall": 8.806042647999675
+   }
+  },
+  "oaer": {
+   "pre": {
+    "status": "optimal",
+    "objective": -1.923098499884843,
+    "bound": -1.923098601139822,
+    "node_count": 3,
+    "wall": 1.5590041499999643
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -1.923098499884843,
+    "bound": -1.923098601139822,
+    "node_count": 3,
+    "wall": 1.3788624789995083
+   }
+  },
+  "st_e11": {
+   "post": {
+    "status": "optimal",
+    "objective": 189.31162974131917,
+    "bound": 189.31162968661766,
+    "node_count": 27,
+    "wall": 4.603981249999379
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 189.31162974131917,
+    "bound": 189.31162968661766,
+    "node_count": 27,
+    "wall": 4.305659311999989
+   }
+  },
+  "st_e13": {
+   "pre": {
+    "status": "optimal",
+    "objective": 1.9999999825187946,
+    "bound": 1.9999999825187946,
+    "node_count": 1,
+    "wall": 0.31383847699999023
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 1.9999999825187946,
+    "bound": 1.9999999825187946,
+    "node_count": 1,
+    "wall": 0.1715123659996607
+   }
+  },
+  "st_e29": {
+   "post": {
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5,
+    "wall": 3.8910427969995
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5,
+    "wall": 3.6767727909991663
+   }
+  },
+  "st_e36": {
+   "pre": {
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170422,
+    "node_count": 85,
+    "wall": 13.931134089999432
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170422,
+    "node_count": 85,
+    "wall": 12.940589094999268
+   }
+  },
+  "st_e38": {
+   "post": {
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3,
+    "wall": 1.2507111740005712
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3,
+    "wall": 1.0618792739996934
+   }
+  },
+  "st_miqp1": {
+   "pre": {
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15,
+    "wall": 0.03008393999971304
+   },
+   "post": {
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15,
+    "wall": 0.03842139300013514
+   }
+  },
+  "st_miqp2": {
+   "post": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9,
+    "wall": 0.037049591000140936
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9,
+    "wall": 0.03833112299980712
+   }
+  },
+  "st_miqp3": {
+   "pre": {
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1,
+    "wall": 0.016465490999507892
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1,
+    "wall": 0.016128648000631074
+   }
+  },
+  "st_miqp4": {
+   "post": {
+    "status": "optimal",
+    "objective": -4574.0000024840665,
+    "bound": -4574.0000024840665,
+    "node_count": 3,
+    "wall": 0.04548691400032112
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -4574.000004423649,
+    "bound": -4574.000004423649,
+    "node_count": 3,
+    "wall": 0.04147656700024527
+   }
+  },
+  "st_miqp5": {
+   "pre": {
+    "status": "optimal",
+    "objective": -333.8888902720728,
+    "bound": -333.8888902720728,
+    "node_count": 1,
+    "wall": 0.04973499700008688
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -333.88889024868075,
+    "bound": -333.88889024868075,
+    "node_count": 1,
+    "wall": 0.04833077300008881
+   }
+  },
+  "st_test1": {
+   "post": {
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15,
+    "wall": 0.051483186000041314
+   },
+   "pre": {
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15,
+    "wall": 0.050760942999659164
+   }
+  },
+  "st_testgr3": {
+   "pre": {
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549,
+    "wall": 0.42399136400035786
+   },
+   "post": {
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549,
+    "wall": 0.4482717989994853
+   }
+  },
+  "syn05hfsg": {
+   "post": {
+    "status": "feasible",
+    "objective": 837.732412391107,
+    "bound": 851.0639474502206,
+    "node_count": 59,
+    "wall": 20.131564403000084
+   },
+   "pre": {
+    "status": "feasible",
+    "objective": 837.732412391107,
+    "bound": 851.0639474502206,
+    "node_count": 75,
+    "wall": 20.440045795000515
+   }
+  },
+  "tanksize": {
+   "pre": {
+    "status": "time_limit",
+    "objective": 1.268643752557795,
+    "bound": 1.2565601160167452,
+    "node_count": 2313,
+    "wall": 20.12689332500031
+   },
+   "post": {
+    "status": "time_limit",
+    "objective": 1.268643752557795,
+    "bound": 1.2590946299521892,
+    "node_count": 2812,
+    "wall": 20.1271998430002
+   }
+  },
+  "tls2": {
+   "post": {
+    "status": "feasible",
+    "objective": 11.299999856725538,
+    "bound": 2.0999999901667694,
+    "node_count": 333,
+    "wall": 21.186317167999732
+   },
+   "pre": {
+    "status": "feasible",
+    "objective": 10.299999865440752,
+    "bound": 2.4487125876978726,
+    "node_count": 353,
+    "wall": 20.626865416000328
+   }
+  },
+  "tspn05": {
+   "pre": {
+    "status": "feasible",
+    "objective": 191.2552076849412,
+    "bound": 178.11649276434017,
+    "node_count": 35,
+    "wall": 20.53765499600013
+   },
+   "post": {
+    "status": "feasible",
+    "objective": 191.2552076849412,
+    "bound": 178.11649276434017,
+    "node_count": 35,
+    "wall": 20.121083723000083
+   }
+  },
+  "tspn08": {
+   "post": {
+    "status": "feasible",
+    "objective": 290.56685374735093,
+    "bound": null,
+    "node_count": 1,
+    "wall": 24.533595884000533
+   },
+   "pre": {
+    "status": "feasible",
+    "objective": 290.56685374735093,
+    "bound": null,
+    "node_count": 1,
+    "wall": 22.716204569999718
+   }
+  },
+  "tspn10": {
+   "pre": {
+    "status": "feasible",
+    "objective": 225.1260713973286,
+    "bound": null,
+    "node_count": 1,
+    "wall": 19.841280678999283
+   },
+   "post": {
+    "status": "feasible",
+    "objective": 225.1260713973286,
+    "bound": null,
+    "node_count": 1,
+    "wall": 18.795712611000454
+   }
+  },
+  "tspn12": {
+   "post": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "wall": 46.47937336799987
+   },
+   "pre": {
+    "status": "feasible",
+    "objective": 262.64739525060224,
+    "bound": null,
+    "node_count": 1,
+    "wall": 18.630338887000107
+   }
+  }
+ },
+ "diffs": [
+  [
+   "bchoco06",
+   {
+    "bound": [
+     0.9999887833666715,
+     0.9999887833703148
+    ]
+   }
+  ],
+  [
+   "clay0303hfsg",
+   {
+    "node_count": [
+     3,
+     63
+    ]
+   }
+  ],
+  [
+   "contvar",
+   {
+    "bound": [
+     183430.50053431175,
+     180782.8593284799
+    ]
+   }
+  ],
+  [
+   "gbd",
+   {
+    "objective": [
+     2.199999982504936,
+     2.1999999825308127
+    ],
+    "bound": [
+     2.199999982504936,
+     2.1999999825308127
+    ]
+   }
+  ],
+  [
+   "nvs05",
+   {
+    "node_count": [
+     25,
+     33
+    ]
+   }
+  ],
+  [
+   "st_miqp4",
+   {
+    "objective": [
+     -4574.000004423649,
+     -4574.0000024840665
+    ],
+    "bound": [
+     -4574.000004423649,
+     -4574.0000024840665
+    ]
+   }
+  ],
+  [
+   "st_miqp5",
+   {
+    "objective": [
+     -333.8888902720728,
+     -333.88889024868075
+    ],
+    "bound": [
+     -333.8888902720728,
+     -333.88889024868075
+    ]
+   }
+  ],
+  [
+   "syn05hfsg",
+   {
+    "node_count": [
+     75,
+     59
+    ]
+   }
+  ],
+  [
+   "tanksize",
+   {
+    "bound": [
+     1.2565601160167452,
+     1.2590946299521892
+    ],
+    "node_count": [
+     2313,
+     2812
+    ]
+   }
+  ],
+  [
+   "tls2",
+   {
+    "objective": [
+     10.299999865440752,
+     11.299999856725538
+    ],
+    "bound": [
+     2.4487125876978726,
+     2.0999999901667694
+    ],
+    "node_count": [
+     353,
+     333
+    ]
+   }
+  ],
+  [
+   "tspn12",
+   {
+    "status": [
+     "feasible",
+     "time_limit"
+    ],
+    "objective": [
+     262.64739525060224,
+     null
+    ],
+    "node_count": [
+     1,
+     3
+    ]
+   }
+  ]
+ ]
+}
