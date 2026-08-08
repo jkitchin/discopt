@@ -163,12 +163,39 @@ class TestArrayConstantScaling:
         assert checked == 2, checked
 
     def test_non_finite_constant_refuses(self):
-        m, x = self._model()
+        """`inf`/`nan` coefficients refuse for EVERY operand curvature and arity.
+
+        The affine arm is the one that matters. A first cut of this fix screened
+        non-finite inside the sign helper, whose ``None`` then fell straight into
+        the mixed-sign branch and returned AFFINE for `nan * affine` -- emitting a
+        *proof* about a broken model, and (for an array constant) looser than the
+        pre-fix walker, which had no array branch at all and answered UNKNOWN.
+        Both directions are pinned here so neither can drift back.
+
+        `_classify_division` has always refused non-finite divisors; these
+        assertions are what keep the product rule agreeing with it.
+        """
         checked = 0
-        for c in (np.array([1.0, np.inf, 3.0]), np.array([1.0, np.nan, 3.0])):
-            assert classify_expr(c * _sq(x), m, {}) == Curvature.UNKNOWN, c
-            checked += 1
-        assert checked == 2, checked
+        for c in (
+            np.array([1.0, np.inf, 3.0]),
+            np.array([1.0, np.nan, 3.0]),
+            np.inf,
+            -np.inf,
+            np.nan,
+        ):
+            for operand_is_convex in (False, True):
+                m, x = self._model()
+                operand = _sq(x) if operand_is_convex else x
+                assert classify_expr(c * operand, m, {}) == Curvature.UNKNOWN, (
+                    c,
+                    operand_is_convex,
+                )
+                assert classify_expr(operand / c, m, {}) == Curvature.UNKNOWN, (
+                    c,
+                    operand_is_convex,
+                )
+                checked += 2
+        assert checked == 20, checked
 
     def test_scalar_behaviour_is_unchanged(self):
         """The pre-existing 0-d cases must classify exactly as before."""
@@ -235,6 +262,23 @@ class TestNegativeIndexReachesTheRepr:
         with pytest.raises(IndexError):
             model_to_repr(m, getattr(m, "_builder", None))
 
+    def test_boolean_subscript_is_refused(self):
+        """`x[True]` now raises instead of resolving as `x[1]` -- pin it deliberately.
+
+        `bool` is a subclass of `int`, so the old `usize` extraction accepted
+        `True` and named slot 1. numpy reads a bool as a *mask*, not an index, so
+        that silently disagreed with the evaluator the relaxation is built against.
+        Refusing is the intended behaviour, not an oversight -- this test exists so
+        a future reader does not "restore" the old one.
+        """
+        from discopt.modeling.core import IndexExpression
+
+        m = dm.Model("boolidx")
+        x = m.continuous("x", shape=(3,), lb=0, ub=1)
+        m.minimize(IndexExpression(x, True) * 1.0)
+        with pytest.raises(IndexError):
+            model_to_repr(m, getattr(m, "_builder", None))
+
     def test_classification_survives_a_negative_index(self):
         """A negative index must not demote a QP to ``NLP`` (the silent degradation)."""
         from discopt._jax.problem_classifier import ProblemClass, classify_problem
@@ -290,13 +334,19 @@ class TestMinimumEnergyTerminates:
         assert all(mask), f"a linear collocation row classified nonconvex: {mask}"
         assert is_convex
 
-    @pytest.mark.slow
     def test_solves_to_certified_optimality_without_branching(self):
         """0 nodes, certified optimal, and the objective matches the Riccati value.
 
         Before the fix this ran ~9k nodes without certifying and blew an 800 s
         pytest timeout. The ``time_limit`` here is what makes a regression report
         as a failed assertion rather than as a harness timeout (issue item 3).
+
+        Deliberately NOT ``@pytest.mark.slow``. This is the one test that asserts
+        the *routing* rather than the classification, so it is the one that would
+        have caught #944 -- and every CI lane deselects ``slow``, which would have
+        left the fix's actual claim unexercised there. It costs ~2 s now that the
+        model takes the convex path, and the ``time_limit`` bounds the worst case
+        at 120 s, so a regression fails an assertion instead of hanging the lane.
         """
         m, dae = _minimum_energy_model(T=2.0)
         result = m.solve(time_limit=120)

@@ -533,27 +533,17 @@ def _scalar_value(expr: Expression) -> float:
     return float(np.asarray(expr.value))  # type: ignore[attr-defined]
 
 
-def _const_scale_sign(expr: Expression) -> Optional[int]:
-    """Curvature-scaling sign of a constant factor, scalar **or array**.
+def _finite_const_value(expr: Expression) -> Optional[np.ndarray]:
+    """The value of a concrete, everywhere-finite constant leaf, or ``None``.
 
-    Returns ``+1`` / ``-1`` / ``0`` when every entry of the constant is,
-    respectively, nonnegative (with at least one positive), nonpositive (with at
-    least one negative), or exactly zero — the three cases in which the
-    elementwise product ``c ⊙ f`` scales *every* entry of ``f``'s curvature by
-    one uniform sign, so :func:`~.lattice.scale` applies. Returns ``None`` when
-    ``expr`` is not a concrete constant, holds a non-finite entry, or MIXES
-    signs; the caller may still conclude AFFINE in that last case, since an
-    affine operand stays affine under any constant scaling.
-
-    Entries equal to zero alongside strictly-signed ones do not spoil the
-    verdict: ``0 * f`` is affine, hence both convex and concave, so it never
-    contradicts the strict entries' direction.
-
-    Only 0-d constants used to be recognised (``_is_scalar_const``). That
-    dropped the whole *vectorized* modeling surface to UNKNOWN curvature: a
-    collocation row is ``h ⊙ (A @ x)`` with ``h`` an array of element widths, so
-    every ``discopt.dae`` model classified nonconvex and was routed to spatial
-    McCormick B&B, which does not converge on it (#944).
+    ``None`` means *this operand supports no scaling verdict at all* — it is not a
+    ``Constant``/``Parameter``, its value is not coercible to float64, or it holds
+    an ``inf``/``nan``. Kept separate from :func:`_const_scale_sign`'s "no uniform
+    sign" answer because the two demand opposite handling: a mixed-sign constant
+    still leaves an affine operand affine, whereas a non-finite one must refuse
+    outright (a NaN coefficient would otherwise pass through as AFFINE and read as
+    a proof). Conflating them made the product rule disagree with
+    :func:`_classify_division`, which has always refused non-finite divisors.
     """
     if not isinstance(expr, (Constant, Parameter)):
         return None
@@ -563,6 +553,32 @@ def _const_scale_sign(expr: Expression) -> Optional[int]:
         return None
     if not np.all(np.isfinite(arr)):
         return None
+    return arr
+
+
+def _const_scale_sign(arr: np.ndarray) -> Optional[int]:
+    """Curvature-scaling sign of a finite constant factor, scalar **or array**.
+
+    Returns ``+1`` / ``-1`` / ``0`` when every entry is, respectively, nonnegative
+    (with at least one positive), nonpositive (with at least one negative), or
+    exactly zero — the three cases in which the elementwise product ``c ⊙ f``
+    scales *every* entry of ``f``'s curvature by one uniform sign, so
+    :func:`~.lattice.scale` applies. Returns ``None`` when the entries MIX signs:
+    no single scaling is valid then, though an affine operand still stays affine.
+
+    Entries equal to zero alongside strictly-signed ones do not spoil the
+    verdict: ``0 * f`` is affine, hence both convex and concave, so it never
+    contradicts the strict entries' direction.
+
+    Callers pass a value already screened by :func:`_finite_const_value`; this
+    function answers only the sign question.
+
+    Only 0-d constants used to be recognised (``_is_scalar_const``). That
+    dropped the whole *vectorized* modeling surface to UNKNOWN curvature: a
+    collocation row is ``h ⊙ (A @ x)`` with ``h`` an array of element widths, so
+    every ``discopt.dae`` model classified nonconvex and was routed to spatial
+    McCormick B&B, which does not converge on it (#944).
+    """
     if np.all(arr == 0.0):
         return 0
     if np.all(arr >= 0.0):
@@ -641,10 +657,15 @@ def _classify_product(
     # exactly as a scalar would, and an AFFINE operand survives *any* constant
     # array — including one of mixed sign — because each broadcast entry is
     # ``const * affine`` (#944).
+    # A non-finite constant is refused here rather than falling into the
+    # mixed-sign branch below: `nan * affine` is not affine in any useful sense,
+    # and returning AFFINE for it would emit a *proof* about a broken model. This
+    # matches `_classify_division`, which has always refused non-finite divisors.
     for const_side, other in ((expr.left, right), (expr.right, left)):
-        if not isinstance(const_side, (Constant, Parameter)):
+        arr = _finite_const_value(const_side)
+        if arr is None:
             continue
-        s = _const_scale_sign(const_side)
+        s = _const_scale_sign(arr)
         if s is not None:
             return ExprInfo(scale(other.curvature, s), prod_sign)
         if other.curvature == Curvature.AFFINE:
