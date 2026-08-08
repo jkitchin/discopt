@@ -189,6 +189,55 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Outward rounding no longer turns an exact zero into a subnormal** (`fix`, #957).
+  `interval.py`'s `_round_down`/`_round_up` are `np.nextafter(x, ∓inf)`, and
+  `nextafter(0.0, ±inf)` is `±5e-324`. At every other magnitude "one ULP" is a
+  negligible *relative* widening; at zero it crosses into the subnormal range and
+  manufactures a coefficient ~300 orders of magnitude below everything else in
+  the model. Measured on the in-repo corpus, **384 of 730 relaxation LPs carried
+  such a value**, and in 67 of them the coefficient-spread guard at
+  `milp_relaxation.py:548` — `nz.max() / nz.min() > TRIGGER` — *overflowed to
+  `inf`* while making its decision (with a `RuntimeWarning` as the tell), so
+  equilibration fired unconditionally regardless of how benign the matrix was.
+
+  **The obvious fix — leave every exact zero alone — is unsound, and was not
+  taken.** The nudge at zero is load-bearing wherever the producing operation can
+  underflow: `fl(exp(-800))` is `0.0` while the exact value is `3.6e-348`, so a
+  blanket special-case would give `exp` an upper endpoint *below* its own image.
+  What ships instead is an opt-in pair, `_round_down_exact0` / `_round_up_exact0`,
+  applied only where `fl(result) == 0 ⟹ result == 0` is provable: `+`, `-` and
+  `width` (every double is a multiple of `2**-1074`, so a float sum is zero only
+  when the exact sum is — fuzz-checked against `longdouble` over 14 268 cancelling
+  pairs), `abs`, `sqrt`, `log`, the reciprocal, and `*` / `**2` behind an explicit
+  no-underflow guard on the corner factors. The generic monotone wrapper keeps the
+  unconditional helpers, so a future atom inherits the safe behaviour by default.
+
+  Second, independent half: `_coefficient_spread_exceeds()` replaces the open-coded
+  spread test at both conditioning seams. It uses the overflow-free cross-multiplied
+  form (already applied at the false-infeasible seam by #732 Stage 1-B) *and* drops
+  entries below the smallest normal double, so the guard measures the conditioning
+  of the model rather than of an underflow artifact. Both halves were needed: the
+  interval fix clears `A_ub` on 14 of the 15 affected instances, and `st_e11`'s
+  subnormals — which come from a different producer — are neutralised by the floor
+  (19 overflowing LPs → 0).
+
+  Corpus panel (66 instances, 10 s budget, arms interleaved): **0 soundness
+  violations** against the 16 oracle-checked instances, total node count identical
+  (3298 → 3298), subnormal-carrying LPs 384/730 → 28/782, spread-test overflows
+  67 → 0. Every status/bound/node difference the panel reported was on an instance
+  sitting within ~1 s of the deadline; re-measured unloaded with the arms
+  interleaved, the two decisive ones (`cvxnonsep_nsig30`, `st_e36`) are bit-identical
+  between arms.
+
+  Found while fixing the above: `psd_2x2_sufficient` had the same bug pointing the
+  other way. It skipped its upward round when `fl(off**2) == 0.0`, which is *not*
+  an exact zero when `off` is around `1e-200` — the exact `off**2` is ~1e-400, so
+  a matrix with a (barely) negative determinant could pass the PSD test. The zero
+  test now reads the *factors*, not the flushed product. `gershgorin_lambda_min`
+  /`_max` gain the same treatment, so a linear function's all-zero Hessian bounds
+  come back as exactly `0.0` instead of `∓5e-324` and no longer miss a boundary
+  `λ_min ≥ 0` test.
+
 - **Three CI signals that had stopped signalling** (`ci`). An audit of why #927
   (an unsound `ex1252` dual bound, asserted by a test in the tree) could sit open
   found that the lanes meant to catch it were all dark:
