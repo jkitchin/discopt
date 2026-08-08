@@ -75,10 +75,23 @@ def test_bound_relaxation_damage_is_not_bounded_by_the_relaxation_itself():
 
     This is why ``bound_relax_factor`` cannot be dismissed as "1e-8, therefore
     negligible": relaxing ``(x-3)^2 <= 0`` to ``<= 1e-8`` admits every ``x``
-    within ``1e-4`` of 3. On the MindtPy constraint-qualification fixture that
-    produced a certified ``optimal`` at 2.9999000025 against an exact optimum of
-    3.0. The row is reproduced here directly so the mechanism is pinned even if
-    the fixture moves.
+    within ``1e-4`` of 3, because the row squares the excursion. It is the
+    mechanism behind the MindtPy constraint-qualification fixture certifying
+    ``optimal`` at 2.9999000025 against an exact optimum of 3.0, reproduced here
+    directly so it stays pinned even if that fixture moves.
+
+    Measured on this model, both arms interleaved:
+
+        pre-#945   status='optimal'          x = 2.9999000024987788  (1.0e-04 off)
+        post-#945  status='iteration_limit'  x = 2.9999999998864917  (1.1e-10 off)
+
+    The status is part of the finding rather than incidental. ``(x-3)^2 <= 0`` has
+    a single feasible point and therefore empty interior — Slater fails, so this
+    is exactly the degeneracy #849's KKT-residual guard exists to refuse to
+    certify. Pre-#945 that guard could not see it: against the RELAXED box the
+    residuals looked clean, so the solve came back ``optimal``. With the box
+    honest the guard fires and withholds the certificate. So the assertion is that
+    this is NOT certified, not that it is.
     """
     m = dm.Model("brf_squared_row")
     x = m.continuous("x", lb=1.0, ub=10.0)
@@ -86,11 +99,12 @@ def test_bound_relaxation_damage_is_not_bounded_by_the_relaxation_itself():
     m.minimize(x)
     res = m.solve()
 
-    assert res.status in ("optimal", "feasible")
     # x is pinned to exactly 3 by the row; anything meaningfully below it is the
-    # relaxed box, not a better solution.
+    # relaxed box, not a better solution. Fails at 1e-4 on the pre-#945 tree.
     assert float(np.asarray(res.x["x"])) >= 3.0 - 1e-6
     assert res.objective >= 3.0 - 1e-6
+    # A degenerate feasible set must not come back certified (#849).
+    assert res.status != "optimal"
 
 
 # ── (b) gap closure is an honest dual test ───────────────────────────────────
