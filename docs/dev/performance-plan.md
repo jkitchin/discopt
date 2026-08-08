@@ -1612,3 +1612,81 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > through to `solver_stats`. Separately, this panel's scorer gained the
 > `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
 > a finite bound going to `None` was invisible to it too. Both panels now score it.
+
+## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
+
+> **The defect (confirmed).** The McCormick row generators in
+> `bnb/mccormick_patch.rs` did no outward rounding, so an envelope row could cut a
+> point EXACTLY on the graph of the term it relaxes: the rhs is a cancelling
+> combination of box-endpoint quantities (`slope*x0 - f(x0)`) while the auxiliary
+> bound is an independent rounding of the same quantity. Entry experiment, sweeping
+> all four generators over ten orders of magnitude and evaluating `(x, f(x))`:
+>
+> | family | worst residual | vs 1 ulp of the row magnitude |
+> |---|---|---|
+> | cubic monomial | 6.4e+1 | ~0.8 |
+> | affine square | 1.3e-1 | ~1.0 |
+> | affine-form product | 2.0e-3 | ~1.0 |
+> | square monomial | 1.2e-4 | ~0.9 |
+> | bilinear | 9.5e-7 | ~0.4 |
+>
+> Kill criterion was "worst < 1e-9" (ordinary LP tolerance); it missed by nine orders
+> of magnitude. A cubic lift needs a box of only `~5e3` to cut its own graph by
+> `6.1e-5`, and the resulting node LP has no feasible point at all
+> (`corner_pinned_cubic_node_lp_is_solvable` pins this).
+>
+> **FALSIFIED: this is not the mechanism behind #956's headline measurement.** The
+> issue reports `nvs20: n_undecided=2056 over 4192 kernel nodes` (49%) and proposes
+> `n_undecided` as the net-positive metric. It does not move:
+>
+> | arm | undecided / nodes | fraction | bound |
+> |---|---|---|---|
+> | guard ON | 407 / 885 | 46.0 % | 225.342 |
+> | guard OFF (legacy) | 413 / 904 | 45.7 % | 224.858 |
+>
+> Sweeping the guard size settles it: at 1e6 ulp (2.2e-10 relative) the rate is
+> *unchanged* (431/860); only at 1e10 ulp — a **2.2e-6 relative** relaxation, a
+> million times larger than any envelope rounding can explain — does it collapse to
+> 1/1420, and then the bound degrades 225.34 → 209.55. Two further causes were tested
+> and excluded: propagation (43 % undecided with `run_propagation=False`) and OBBT
+> (`run_obbt` defaults false on this path, so it never ran). A conflict-localizing
+> probe — re-solving each undecided node LP with only the rows relaxed, then only the
+> column bounds relaxed — leaves ~2/3 of them `Numerical` even at 1e-6 relative.
+>
+> **Standing conclusion.** `nvs20`'s undecided nodes are a **simplex robustness**
+> problem on a 712x912 node LP, not an envelope-rounding problem. The lever for that
+> counter is in `lp/simplex` (phase-1 Farkas certification and conditioning on the
+> assembled node LP), not in the relaxation. #956's fix stands on its own invariant —
+> a relaxation must contain the graph of what it relaxes — and must not be credited
+> with, or judged by, the `n_undecided` counter.
+>
+> **Panel (CLAUDE.md §5).** Corpus-wide, 119 in-repo instances, ON vs OFF: only **21
+> ever reach the native kernel**, the sole code path the flag exists on. On those 21
+> at a 30 s budget the panel is **cert-clean** — 0 incorrect, 0 bounds above a
+> reference optimum, 0 certification regressions, 0 objective drift, flag firing on
+> 17/21 rows — with 15 of 21 bound deltas at `1e-13`–`1e-15` relative (the guard's
+> designed cost) and the remaining 6 mixed in direction under a wall-clock budget.
+> **Not net-positive**: `n_undecided` 1636 → 1559 (−4.7 %), node count +0.1 %, bounds
+> better on 2 / worse on 4. The 5 s corpus arm flagged 2 certification regressions and
+> 4 objective drifts; an **ON-vs-ON control** (identical configuration, run twice)
+> reproduced the same two regressions and a *larger* nvs20 spread (10.5 vs 7.4
+> absolute), so those flags are wall-clock noise, not flag effects. Three of the six
+> flagged instances never call the kernel in either arm and so cannot be affected at
+> all.
+>
+> **Why it ships default-ON anyway, against §5's net-positive bar.** The guard is not
+> optional bound-changing machinery; it repairs a violated invariant of the existing
+> relaxation, and the in-tree precedent is `spatial_propagate.rs`, whose outward
+> `EPS`-scaled guard is unflagged, default-on, and **1e-9 relative — six orders of
+> magnitude larger** than this one. Shipping default-OFF would require the new
+> regression tests to stop asserting the invariant by default, which CLAUDE.md §1
+> forbids. `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` keeps the legacy path intact and one
+> line flips the default for anyone reading §5 strictly.
+>
+> **Open, same defect class:** the Python twin. `incremental_mccormick.py`'s
+> generators violate the same invariant (measured row residuals `6.0` affine-square,
+> `3.1e-2` bilinear, `2.3e-2` square). Fixing it is coupled work, not a port:
+> `_validate` compares the incremental patch against the cold build through
+> `_rowset`, which rounds each rhs absolutely to 6 decimals, so guarding one engine
+> without the other silently drops the incremental fast path to `ok=False`. Both
+> `uniform_relax.py`'s emitters and `incremental_mccormick.py` must move in lockstep.
