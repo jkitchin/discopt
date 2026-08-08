@@ -31,6 +31,34 @@ from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
 
 logger = logging.getLogger(__name__)
 
+
+def _now() -> float:
+    """The single point where this module reads the wall clock (#950).
+
+    Every deadline in these heuristics — the caller's absolute ``deadline`` and
+    each heuristic's own per-call slice — is stamped and polled through this
+    function, and every :class:`WorkBudget` built here is handed it as its
+    ``clock``. In production it is :func:`time.perf_counter` and nothing else;
+    the indirection is a *seam*, so a test of deadline-edge behaviour can pin
+    the schedule it means to test instead of racing the machine.
+
+    Why it is needed: a heuristic that stamps ``deadline = perf_counter() +
+    slice`` and then polls it decides how much of the search runs from wall
+    time, so a stall *outside* the process — an xdist worker descheduled on a
+    loaded CI runner — changes what the code under test does. That is exactly
+    how ``test_deadline_expiring_mid_round_truncates`` failed as
+    ``assert 0 >= 2``: a 300 ms stall inside local branching's 250 ms slice
+    retired the whole budget before the first sub-NLP, which is *correct*
+    production behaviour (#912: never start a solve past the deadline) and
+    indistinguishable from broken truncation logic. Tests monkeypatch this
+    symbol; production code must never pass a clock of its own. A caller's
+    absolute ``deadline`` argument is measured against this clock, so a test
+    that replaces it must supply any ``deadline`` in the same time base (or,
+    like the test above, none at all).
+    """
+    return time.perf_counter()
+
+
 # Iteration cap for the *sub-NLP* solves inside the primal heuristics (issue #268).
 # These solves only need an approximately feasible point (the heuristic then checks
 # integrality + constraints and lets B&B certify); they do NOT need a tight optimum.
@@ -314,7 +342,7 @@ def feasibility_pump(
         # Always run the first round (a feasible incumbent is the primary goal,
         # worth a small overrun); only the *extra* perturbation rounds are
         # deadline-gated so the pump cannot loop well past a tight ``time_limit``.
-        if deadline is not None and round_idx > 0 and time.perf_counter() >= deadline:
+        if deadline is not None and round_idx > 0 and _now() >= deadline:
             break
         x_try = x_nlp.copy()
 
@@ -629,7 +657,7 @@ def continuous_multistart(
     best_x: Optional[np.ndarray] = None
 
     for i in range(n_starts):
-        remaining = np.inf if deadline is None else deadline - time.perf_counter()
+        remaining = np.inf if deadline is None else deadline - _now()
         if remaining <= 0.05:
             break
         solve_opts = dict(opts)
@@ -746,8 +774,6 @@ def integer_local_search(
     Returns:
         ``(x, obj)`` for the best feasible point found, else ``None``.
     """
-    import time
-
     if evaluator is None:
         evaluator = cached_evaluator(model)
     int_mask = _get_integer_mask(model)
@@ -804,11 +830,15 @@ def integer_local_search(
             solve_budget = _tuning.ils_solve_budget
     if int(eval_budget) > 0 or int(solve_budget) > 0:
         budget = WorkBudget(
-            {EVAL: int(eval_budget), NLP_SOLVE: int(solve_budget)}, deadline=deadline
+            {EVAL: int(eval_budget), NLP_SOLVE: int(solve_budget)},
+            deadline=deadline,
+            clock=_now,
         )
     else:
-        _wall = time.perf_counter() + max(0.0, time_budget)
-        budget = WorkBudget(None, deadline=_wall if deadline is None else min(_wall, deadline))
+        _wall = _now() + max(0.0, time_budget)
+        budget = WorkBudget(
+            None, deadline=_wall if deadline is None else min(_wall, deadline), clock=_now
+        )
 
     def violation(x: np.ndarray) -> float:
         budget.charge(EVAL)
@@ -1074,8 +1104,6 @@ def integer_box_search(
     ``time_limit`` backstop. ``solve_budget=0`` restores the legacy
     ``time_budget`` wall gate.
     """
-    import time
-
     # As in ``one_hot_swap_search``: a non-positive ``time_budget`` is the caller
     # saying there is no budget at all, and #912's deterministic cell budget must
     # not override that.
@@ -1144,10 +1172,12 @@ def integer_box_search(
 
         solve_budget = max(1, round(_BOX_BUDGET_RATIO * _st.current().ils_solve_budget))
     if int(solve_budget) > 0:
-        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=deadline)
+        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=deadline, clock=_now)
     else:
-        _wall = time.perf_counter() + max(0.0, time_budget)
-        budget = WorkBudget(None, deadline=_wall if deadline is None else min(_wall, deadline))
+        _wall = _now() + max(0.0, time_budget)
+        budget = WorkBudget(
+            None, deadline=_wall if deadline is None else min(_wall, deadline), clock=_now
+        )
     best: Optional[tuple[np.ndarray, float]] = None
     for combo in combos:
         if budget.exhausted():
@@ -1408,7 +1438,7 @@ def diving(
             # sub-NLP and stop the dive when it has passed. Skipping the remaining
             # dive steps is always sound: diving is a primal heuristic and never
             # affects the dual bound.
-            if deadline is not None and time.perf_counter() >= deadline:
+            if deadline is not None and _now() >= deadline:
                 return None
             try:
                 res = backend(evaluator, x_cur, options=opts)
@@ -1840,7 +1870,7 @@ def local_branching(
 
     # Absolute wall past which no further sub-NLP may start. The effective budget
     # is the tighter of the caller's per-call slice and the solver's deadline.
-    slice_deadline = time.perf_counter() + max(0.0, float(submip_time_limit))
+    slice_deadline = _now() + max(0.0, float(submip_time_limit))
     if deadline is not None and np.isfinite(deadline):
         effective_deadline = min(slice_deadline, float(deadline))
     else:
@@ -1850,7 +1880,7 @@ def local_branching(
     if len(binary_idx) > max_binaries:
         if evaluator is None:
             evaluator = cached_evaluator(model)
-        remaining = max(0.0, effective_deadline - time.perf_counter())
+        remaining = max(0.0, effective_deadline - _now())
         return _local_branching_submip(
             model,
             x_incumbent,
@@ -1890,9 +1920,9 @@ def local_branching(
 
         solve_budget = max(1, round(_LB_BUDGET_RATIO * _st.current().ils_solve_budget))
     if int(solve_budget) > 0:
-        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=effective_deadline)
+        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=effective_deadline, clock=_now)
     else:
-        budget = WorkBudget(None, deadline=effective_deadline)
+        budget = WorkBudget(None, deadline=effective_deadline, clock=_now)
     # Highest radius whose full enumeration we could afford. If the budget runs
     # out mid-schedule we hand the *unexplored* radii to the bounded sub-MIP so
     # the neighbourhood is still searched, just not by brute force.
@@ -1947,7 +1977,7 @@ def local_branching(
     # the Hamming cut as one linear constraint instead of enumerating C(n, r)
     # flips. This keeps the neighbourhood covered without blowing the deadline.
     if truncated_at is not None and truncated_at <= k:
-        remaining = effective_deadline - time.perf_counter()
+        remaining = effective_deadline - _now()
         if remaining >= _LB_SUBMIP_MIN_BUDGET_S:
             submip = _local_branching_submip(
                 model,
@@ -2112,12 +2142,12 @@ def one_hot_swap_search(
 
         eval_budget = max(1, round(_SWAP_BUDGET_RATIO * _st.current().ils_eval_budget))
     if int(eval_budget) > 0:
-        budget = WorkBudget({EVAL: int(eval_budget)}, deadline=deadline)
+        budget = WorkBudget({EVAL: int(eval_budget)}, deadline=deadline, clock=_now)
     else:
-        t_end = time.perf_counter() + max(0.0, float(time_budget))
+        t_end = _now() + max(0.0, float(time_budget))
         if deadline is not None and np.isfinite(deadline):
             t_end = min(t_end, float(deadline))
-        budget = WorkBudget(None, deadline=t_end)
+        budget = WorkBudget(None, deadline=t_end, clock=_now)
 
     def _obj(assign: np.ndarray) -> float:
         budget.charge(EVAL)
