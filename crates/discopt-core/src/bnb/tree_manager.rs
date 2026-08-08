@@ -95,6 +95,24 @@ struct PendingResult {
     /// midpoint) that must never fathom the node as integer-feasible or become
     /// the incumbent (#598).
     bound_trusted: bool,
+    /// Whether snapping this solution's near-integral coordinates to exact
+    /// integers keeps it inside the declared rows (#952).
+    ///
+    /// `is_integer_feasible` below is a per-coordinate test against a fixed
+    /// absolute `INTEGRALITY_TOL`; it says nothing about what that snap does to
+    /// a *row*. On a big-M row the two are worlds apart: `v <= 1e6 * y` with `y`
+    /// short of 1 by 1e-8 passes the coordinate test, and snapping `y` to 1
+    /// moves the row by 1e-2 — four orders of magnitude outside the declared
+    /// `abs=1e-6`. Such a point is integer-feasible in neither sense that
+    /// matters: unsnapped it is fractional, snapped it is outside the rows.
+    /// Promoting it yields an incumbent that is one or the other.
+    ///
+    /// The orchestrator computes this against the rows it extracted (it holds
+    /// the matrices; this layer does not) and vetoes the fathom/promote arm when
+    /// it is `false`, leaving the node to be branched — which splits the
+    /// offending variable and resolves the ambiguity honestly. `true` is the
+    /// back-compatible default for every caller that does not supply it.
+    snap_consistent: bool,
 }
 
 /// Record of a branching decision at a node, used for retroactive
@@ -380,6 +398,16 @@ impl TreeManager {
     ///
     /// Updates each node's lower bound and buffers solution data for processing.
     pub fn import_results(&mut self, results: &[NodeResult]) {
+        self.import_results_with_snap(results, &[]);
+    }
+
+    /// [`TreeManager::import_results`] plus the per-result snap-consistency veto
+    /// described on [`PendingResult::snap_consistent`] (#952).
+    ///
+    /// `snap_consistent` is positional against `results`. A shorter slice (in
+    /// particular the empty one `import_results` passes) leaves the unlisted
+    /// results at `true`, so every existing caller keeps its behaviour exactly.
+    pub fn import_results_with_snap(&mut self, results: &[NodeResult], snap_consistent: &[bool]) {
         for result in results {
             let node = self.pool.get_mut(result.node_id);
             debug_assert_eq!(
@@ -405,10 +433,11 @@ impl TreeManager {
             node.parent_solution = Some(result.solution.clone());
         }
         self.pending_results
-            .extend(results.iter().map(|r| PendingResult {
+            .extend(results.iter().enumerate().map(|(i, r)| PendingResult {
                 node_id: r.node_id,
                 solution: r.solution.clone(),
                 is_feasible: r.is_feasible,
+                snap_consistent: snap_consistent.get(i).copied().unwrap_or(true),
                 // Recorded from the RAW imported bound, before the floor above:
                 // a non-finite raw bound means the node's own relaxation failed
                 // and the floored `local_lower_bound` is only the inherited
@@ -474,8 +503,16 @@ impl TreeManager {
             // subtree, and promoting it would inject a FALSE incumbent whose
             // "objective" is the parent's lower bound at an unverified point;
             // #598.)
+            // `snap_consistent` (#952) vetoes the same arm as `trusted`, for the
+            // same reason: the attached solution cannot be promoted to an
+            // incumbent. Here it is not that the bound is untrusted but that the
+            // point is not integral in any usable sense — see the field's docs.
+            // Vetoing only fathom/promote and letting the node branch is the
+            // conservative direction: the subtree stays open, so no feasible
+            // point can be lost.
             let trusted = node_lb.is_finite();
             let int_feasible = trusted
+                && result.snap_consistent
                 && (result.is_feasible
                     || is_integer_feasible(&result.solution, &self.integer_vars));
 

@@ -150,12 +150,21 @@ impl PyTreeManager {
     ///     lower_bounds: [N] array of relaxation lower bounds.
     ///     solutions: [N, n_vars] array of relaxation solutions.
     ///     feasible: [N] boolean array (is solution integer-feasible?).
+    ///     snap_consistent: optional [N] boolean array (#952). `False` vetoes
+    ///         promoting that node's solution to the incumbent — snapping its
+    ///         near-integral coordinates to exact integers would move it outside
+    ///         the declared rows, so it is integral in neither usable sense (see
+    ///         `PendingResult::snap_consistent`). The node is branched instead,
+    ///         which is the conservative direction: nothing is pruned. Omitted
+    ///         (or `None`) means "all consistent", the pre-#952 behaviour.
+    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, snap_consistent = None))]
     fn import_results(
         &mut self,
         node_ids: PyReadonlyArray1<i64>,
         lower_bounds: PyReadonlyArray1<f64>,
         solutions: PyReadonlyArray2<f64>,
         feasible: PyReadonlyArray1<bool>,
+        snap_consistent: Option<PyReadonlyArray1<bool>>,
     ) -> PyResult<()> {
         let ids = node_ids.as_array();
         let lbs = lower_bounds.as_array();
@@ -195,7 +204,25 @@ impl PyTreeManager {
             })
             .collect();
 
-        self.inner.import_results(&results);
+        // A supplied veto array must be positionally aligned with the batch, so
+        // a length mismatch is an error rather than a silent truncation: a short
+        // array would leave the tail defaulting to `true` and quietly re-admit
+        // exactly the points the caller meant to veto.
+        match snap_consistent {
+            Some(sc) => {
+                let sc = sc.as_array();
+                if sc.len() != n {
+                    return Err(PyValueError::new_err(format!(
+                        "snap_consistent length {} != {}",
+                        sc.len(),
+                        n
+                    )));
+                }
+                let sc_vec: Vec<bool> = sc.iter().copied().collect();
+                self.inner.import_results_with_snap(&results, &sc_vec);
+            }
+            None => self.inner.import_results(&results),
+        }
         Ok(())
     }
 

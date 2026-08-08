@@ -2190,6 +2190,62 @@ def _extract_variable_info(model: Model):
 # callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
+def _snap_consistent_incumbent_enabled() -> bool:
+    """Whether the #952 snap-consistency veto is active (default on).
+
+    ``DISCOPT_SNAP_CONSISTENT_INCUMBENT=0`` restores the pre-#952 acceptance rule.
+    The opt-out exists for bisection, not as a supported mode: with the veto off
+    the search can still promote a point that is integral in neither usable sense
+    (see ``PendingResult::snap_consistent`` in ``tree_manager.rs``).
+    """
+    return os.environ.get("DISCOPT_SNAP_CONSISTENT_INCUMBENT", "1") != "0"
+
+
+def _snap_point_consistent(x, int_offsets, int_sizes, n_orig, A_ub, b_ub, A_eq, b_eq, bounds):
+    """Whether ONE candidate incumbent survives the #952 snap-consistency test.
+
+    ``True`` when the point either cannot become an incumbent anyway (genuinely
+    fractional — it will be branched), is already exactly integral (snapping
+    moves nothing), or snaps to a point that is still inside the declared rows.
+    ``False`` only for the case this issue is about: integral within the
+    per-coordinate tolerance, yet its snap leaves the rows.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if not int_offsets:
+        return True
+    if not _is_integer_feasible_solution(x, int_offsets, int_sizes):
+        return True
+    snapped, _ = _round_incumbent_integers(x, int_offsets, int_sizes)
+    if np.array_equal(snapped, x):
+        return True
+    return bool(_matrix_solution_feasible(snapped[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds))
+
+
+def _snap_consistency_veto(sols, int_offsets, int_sizes, n_orig, A_ub, b_ub, A_eq, b_eq, bounds):
+    """Per-node snap-consistency flags for a batch of node solutions (#952).
+
+    Returns a bool array, positionally aligned with ``sols``: ``False`` marks a
+    node whose solution passes the per-coordinate integrality test but whose snap
+    to exact integers leaves the declared rows, so it must not be promoted to an
+    incumbent (the tree branches the node instead).
+
+    Only points that could *become* an incumbent are checked — a genuinely
+    fractional node is branched regardless, so testing it would be wasted work —
+    and only when the snap actually moves something. That makes this a no-op on
+    the overwhelmingly common case of an exact vertex, which is what the default
+    simplex node engine returns.
+    """
+    sols = np.asarray(sols, dtype=np.float64)
+    flags = np.ones(sols.shape[0], dtype=bool)
+    if not int_offsets:
+        return flags
+    for i in range(sols.shape[0]):
+        flags[i] = _snap_point_consistent(
+            sols[i], int_offsets, int_sizes, n_orig, A_ub, b_ub, A_eq, b_eq, bounds
+        )
+    return flags
+
+
 def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     """Return True if x satisfies all constraints within tolerance.
 
@@ -15645,22 +15701,37 @@ def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:
     :func:`_matrix_solution_feasible` the way a second thresholded variant could.
     It exists so a refusal raised by that arbiter names a magnitude instead of
     forcing a re-run to find one.
+
+    A block is listed only when its worst residual is **positive**, i.e. when the
+    point is actually outside that block. That sign test is not a tolerance — it
+    is the definition of "outside" — so the no-drift property above still holds.
+    Listing every block unconditionally produced messages like ``A_ub row 1 by
+    9.99e-06; bound on x[0] by 0.000000e+00``, where the second clause names a
+    block the point satisfies exactly and reads as a second violation.
     """
     x = np.asarray(x, dtype=np.float64)
     parts: list[str] = []
     if A_ub is not None and b_ub is not None and len(b_ub):
         v = np.asarray(A_ub, dtype=np.float64) @ x - np.asarray(b_ub, dtype=np.float64)
-        parts.append(f"A_ub row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+        if v.size and float(np.max(v)) > 0.0:
+            parts.append(f"A_ub row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
     if A_eq is not None and b_eq is not None and len(b_eq):
         v = np.abs(np.asarray(A_eq, dtype=np.float64) @ x - np.asarray(b_eq, dtype=np.float64))
-        parts.append(f"A_eq row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+        if v.size and float(np.max(v)) > 0.0:
+            parts.append(f"A_eq row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
     if bounds is not None:
         box = np.asarray(bounds, dtype=np.float64)
         if box.size:
             k = min(x.shape[0], box.shape[0])
             v = np.maximum(box[:k, 0] - x[:k], x[:k] - box[:k, 1])
-            parts.append(f"bound on x[{int(np.argmax(v))}] by {float(np.max(v)):.6e}")
-    return "; ".join(parts) if parts else "no rows or bounds declared"
+            if v.size and float(np.max(v)) > 0.0:
+                parts.append(f"bound on x[{int(np.argmax(v))}] by {float(np.max(v)):.6e}")
+    if parts:
+        return "; ".join(parts)
+    # No block shows a positive residual. Reaching this from a refusal means the
+    # arbiter and this reporter disagree — worth seeing verbatim rather than
+    # papering over with an empty string.
+    return "no block shows a positive residual"
 
 
 def _solve_qp_matrix(
@@ -17787,6 +17858,36 @@ def _solve_milp_bb(
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
+
+    def _inject_snap_checked(xv, objv, source):
+        """``tree.inject_incumbent`` behind the #952 snap-consistency test.
+
+        The node-import veto covers points the *tree* evaluates; incumbents also
+        enter through single-point side channels (warm start, root RCF, the root
+        dive, the primal heuristic), and ``inject_incumbent`` trusts its caller
+        with no re-check. Those channels are how the offending point reached the
+        exit gate in the #946 GBD reproducer even with the import veto active, so
+        they need the same test rather than a second, weaker one.
+        """
+        if _snap_consistent_incumbent_enabled() and not _snap_point_consistent(
+            xv, int_offsets, int_sizes, n_orig, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            logger.debug(
+                "MILP-BB: declined a %s incumbent whose integer snap leaves the rows (%s)",
+                source,
+                _matrix_solution_violations(
+                    _round_incumbent_integers(xv, int_offsets, int_sizes)[0][:n_orig],
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                ),
+            )
+            return False
+        tree.inject_incumbent(xv, objv)
+        return True
+
     # #827 (family C): seed a warm-start incumbent from ``initial_point`` (e.g. the
     # trivial-point primal seed computed in ``solve_model``). The MILP/MIQP path did
     # not previously consult ``initial_point``; without it, models like
@@ -17812,13 +17913,15 @@ def _solve_milp_bb(
                 if _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
                     _ip_obj = float(_ip_ev.evaluate_objective(_ip_x[:n_vars]))
                     if np.isfinite(_ip_obj):
-                        tree.inject_incumbent(_ip_x[:n_vars].copy(), _ip_obj)
+                        _inject_snap_checked(_ip_x[:n_vars].copy(), _ip_obj, "warm-start")
                         logger.info("MILP warm-start incumbent (initial_point): obj=%.6g", _ip_obj)
         except Exception as _ip_exc:
             logger.debug("initial_point seed skipped: %s", _ip_exc)
     if _root_incumbent is not None:
         _z_inc, _x_inc = _root_incumbent
-        tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
+        _inject_snap_checked(
+            np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc), "root-RCF"
+        )
 
     # Opt-in Lagrangian node-bound hook: dualize coupling constraints and combine
     # a valid per-node dual lower bound with the LP relaxation bound (max() never
@@ -17860,7 +17963,9 @@ def _solve_milp_bb(
         )
         if _dive is not None:
             _dz, _dx = _dive
-            tree.inject_incumbent(np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz))
+            _inject_snap_checked(
+                np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz), "root-dive"
+            )
     except Exception as _dive_exc:
         logger.debug("root dive skipped: %s", _dive_exc)
     rust_time += time.perf_counter() - t_rust_start
@@ -17918,8 +18023,10 @@ def _solve_milp_bb(
             time_limit,
         )
         if inc is not None:
-            tree.inject_incumbent(
-                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+            _inject_snap_checked(
+                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(),
+                float(inc[0]),
+                "primal-heuristic",
             )
 
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
@@ -18077,7 +18184,25 @@ def _solve_milp_bb(
             break
 
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        # #952: veto promoting a node point whose integer snap would leave the
+        # declared rows. The node is branched instead of fathomed, so no subtree
+        # is lost -- see ``_snap_consistency_veto``.
+        _snap_ok = (
+            _snap_consistency_veto(
+                result_sols,
+                int_offsets,
+                int_sizes,
+                n_orig,
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                _declared_box,
+            )
+            if _snap_consistent_incumbent_enabled()
+            else None
+        )
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, _snap_ok)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -18720,7 +18845,25 @@ def _solve_miqp_bb(
             break
 
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        # #952: veto promoting a node point whose integer snap would leave the
+        # declared rows. The node is branched instead of fathomed, so no subtree
+        # is lost -- see ``_snap_consistency_veto``.
+        _snap_ok = (
+            _snap_consistency_veto(
+                result_sols,
+                int_offsets,
+                int_sizes,
+                n_orig,
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                _declared_box,
+            )
+            if _snap_consistent_incumbent_enabled()
+            else None
+        )
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, _snap_ok)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
