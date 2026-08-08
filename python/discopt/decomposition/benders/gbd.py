@@ -42,6 +42,35 @@ at the (possibly inexact) NLP primal would leave: ``L(x̂, ŷ) <= f(x̂, ŷ)`` a
 ``m_y <= 0``, so the anchor never exceeds the primal, and both corrections vanish
 at a converged KKT point (``anchor = v(x̂)``, tight). The master
 
+That cut is always *sound*, but it is only *informative* when ``μ`` is finite.
+When the recourse subproblem is **degenerate at its solution** — Slater's
+condition fails, i.e. the feasible set has empty interior — no finite multiplier
+exists, the returned one diverges, and ``∇_x L = ∇_x f + μ^T ∇_x g`` diverges with
+it: the cut stays tight *at* ``x̂`` and goes vacuous one step away, so the master
+bound stalls and GBD exits ``iteration_limit`` instead of ``optimal`` (issue
+#946). Because the multiplier cannot be repaired, the fix is a second cut that
+does not use it. On an **all-0/1 first stage** we also emit the **integer
+L-shaped optimality cut** (Laporte & Louveaux 1993)
+
+    eta >= anchor - (anchor - L) * Δ(x, x̂),
+    Δ(x, x̂) = Σ_{x̂_j=1}(1 - x_j) + Σ_{x̂_j=0} x_j   (Hamming distance to x̂),
+
+where ``L`` is a rigorous global lower bound on the objective over the declared
+box (the closed-form box minimum, ``_box_min_linear``, of the convex objective's
+— or Lagrangian's — subgradient underestimator, so it is a *computed* bound, not
+an assumed one, and it is only ever improved by taking the max over iterations).
+The cut is exact at ``x̂`` (``Δ = 0`` reproduces the multiplier-free anchor) and
+drops to ``L`` at every other 0/1 point (``Δ >= 1``), so it is valid regardless of
+how the multiplier behaves; ``L`` is clamped to ``min(L, anchor)`` so the
+coefficient ``anchor - L`` can never turn negative and tilt the cut upward. Being
+exact at every visited 0/1 point, it also gives the binary-master case finite
+convergence, which the Lagrangian cut alone does not have. A non-binary first
+stage has no comparably cheap exact cut; there the honest outcome is the current
+one, and GBD says so (a logged warning naming the degenerate recourse, and an
+early stop once the master starts re-proposing a point it has already cut).
+
+The master
+
     min_x  eta   s.t.  master-only rows,  GBD cuts,  x integral,  eta >= floor
 
 therefore yields a rigorous lower bound. When the recourse is *infeasible* at a
@@ -77,6 +106,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import NamedTuple
 
 import numpy as np
 
@@ -94,6 +124,69 @@ logger = logging.getLogger(__name__)
 
 _ETA_FLOOR = -1e12
 _BIG = 1e20
+
+# A gradient component below this is treated as stationary and contributes
+# nothing to a closed-form box minimum (matches the pre-#946 ``m_y`` loop).
+_STATIONARY_TOL = 1e-9
+
+# Diagnostic only (issue #946): how far the Lagrangian cut may swing across the
+# master box, relative to the objective scale, before the multiplier behind it
+# is reported as degenerate. Measured on the issue's reproducer, whose two arms
+# differ only in the recourse NLP's ``bound_relax_factor``: a finite multiplier
+# gives a swing of 5.7e4 x the objective scale, the diverging one 7.9e8. This
+# ratio drives a log message and an early stop, never a cut or a bound — the
+# integer L-shaped cut below is added on its own merits, not on this test.
+_DEGENERATE_CUT_RATIO = 1e6
+
+
+class _Recourse(NamedTuple):
+    """Outcome of one recourse classification at a fixed first-stage point.
+
+    ``kind`` is ``'opt'`` / ``'infeas_certified'`` / ``'fail'`` (see
+    :func:`solve_gbd._recourse`); the remaining fields are meaningful only for
+    ``'opt'``.
+    """
+
+    kind: str
+    v: float | None = None
+    x_full: np.ndarray | None = None
+    anchor: float | None = None
+    s: np.ndarray | None = None
+    #: True when ``anchor`` is the rigorous closed-form Lagrangian bound rather
+    #: than the primal fallback used when the recourse box minimum is -inf.
+    rigorous: bool = True
+    #: Rigorous global lower bound on the objective over the declared box, or
+    #: None when a variable is unbounded in the active descent direction.
+    floor: float | None = None
+    #: True when the returned multiplier makes the Lagrangian cut vacuous away
+    #: from x̂ (near-degenerate recourse; diagnostic only).
+    degenerate: bool = False
+
+
+def _box_min_linear(
+    grad: np.ndarray,
+    x_ref: np.ndarray,
+    cols,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[float, bool]:
+    """Closed-form ``min over the box of grad^T (z - x_ref)`` restricted to *cols*.
+
+    Returns ``(value, finite)``. ``finite`` is False when some column with a
+    non-stationary gradient component is unbounded in the descent direction, so
+    the true minimum is ``-inf`` and no finite underestimator exists; ``value``
+    is then meaningless.
+    """
+    total = 0.0
+    for j in cols:
+        gj = float(grad[j])
+        if abs(gj) < _STATIONARY_TOL:  # stationary component: no contribution
+            continue
+        target = lb[j] if gj > 0 else ub[j]
+        if not np.isfinite(target) or abs(target) >= 1e19:
+            return 0.0, False
+        total += gj * (target - x_ref[j])
+    return total, True
 
 
 def _master_columns(model: Model, structure: DecompositionStructure):
@@ -321,10 +414,11 @@ def solve_gbd(
             gap_tolerance=gap_tolerance,
         )
 
-    def _attempt_recourse(x_hat: np.ndarray, perturb: bool):
-        """One recourse-NLP solve at the fixed x̂. Returns an ``('opt', ...)`` tuple
-        (see :func:`_recourse` for the anchor derivation) or ``('nofeas', ...)``
-        when the solve produced no primal-feasible recourse point."""
+    def _attempt_recourse(x_hat: np.ndarray, perturb: bool) -> _Recourse:
+        """One recourse-NLP solve at the fixed x̂. Returns a ``kind='opt'``
+        :class:`_Recourse` (see :func:`_recourse` for the anchor derivation) or
+        ``kind='nofeas'`` when the solve produced no primal-feasible recourse
+        point."""
         sub_lb = lb_all.copy()
         sub_ub = ub_all.copy()
         sub_lb[mcols] = x_hat
@@ -347,13 +441,13 @@ def solve_gbd(
         try:
             res = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 300})  # type: ignore[arg-type]
         except Exception:
-            return ("nofeas", None, None, None, None, True)
+            return _Recourse("nofeas")
 
         feasible = res.x is not None and (
             res.status == SolveStatus.OPTIMAL or _is_primal_feasible(evaluator, res.x)
         )
         if not feasible:
-            return ("nofeas", None, None, None, None, True)
+            return _Recourse("nofeas")
 
         x_full = np.asarray(res.x, dtype=np.float64)
         v = float(evaluator.evaluate_objective(x_full))
@@ -380,33 +474,65 @@ def solve_gbd(
         s = grad_lag[mcols]
 
         # m_y = min over the recourse box of grad_y L^T (y - y*) (closed form).
-        m_y = 0.0
-        finite_anchor = True
-        for j in scols:
-            gj = float(grad_lag[j])
-            if abs(gj) < 1e-9:  # stationary component: no contribution
-                continue
-            target = lb_all[j] if gj > 0 else ub_all[j]
-            if not np.isfinite(target) or abs(target) >= 1e19:
-                finite_anchor = False  # unbounded descent direction: no finite cut
-                break
-            m_y += gj * (target - x_full[j])
-        # Rigorous anchor when the box minimum is finite; otherwise fall back to
-        # the primal value (no worse than the pre-Lagrangian behaviour).
+        m_y, finite_anchor = _box_min_linear(grad_lag, x_full, scols, lb_all, ub_all)
         # Rigorous anchor when the box minimum is finite. When a recourse
         # variable is unbounded in the active descent direction the box minimum
         # is -inf (no finite rigorous cut), so we fall back to the primal value
         # to keep the search progressing and flag ``rigorous=False`` — the
         # reported bound is then withheld (heuristic mode), never an unsound one.
         anchor = (l0 + m_y) if finite_anchor else v
-        return "opt", v, x_full, anchor, s, finite_anchor
 
-    def _recourse(x_hat: np.ndarray):
+        # Rigorous global lower bound on the objective over the *whole declared
+        # box*, i.e. on v_true(x) at every master point x (#946). Same
+        # convexity argument as the anchor, applied over all columns instead of
+        # the recourse ones: for a convex h, h(z) >= h(z*) + grad h^T (z - z*)
+        # everywhere, so the closed-form box minimum of the right-hand side
+        # underestimates h on the box. Two candidates, both valid, best wins:
+        # the objective itself (needs only f convex), and the Lagrangian (valid
+        # on the feasible set because the projected mu makes mu^T g_raw <= 0
+        # there — the same weak-duality step the anchor already relies on).
+        floor: float | None = None
+        m_all, finite_all = _box_min_linear(grad, x_full, range(n_vars), lb_all, ub_all)
+        if finite_all and np.isfinite(v):
+            floor = v + m_all
+        m_all_lag, finite_all_lag = _box_min_linear(grad_lag, x_full, range(n_vars), lb_all, ub_all)
+        if finite_all_lag and np.isfinite(l0):
+            cand = l0 + m_all_lag
+            floor = cand if floor is None else max(floor, cand)
+        if floor is not None and not np.isfinite(floor):
+            floor = None
+
+        # Degeneracy diagnostic: how far this cut swings across the master box
+        # relative to the objective scale. A diverging multiplier shows up here
+        # as a swing many orders above the objective's own magnitude, i.e. a cut
+        # that is tight at x̂ and vacuous one step away.
+        swing = 0.0
+        for k, j in enumerate(mcols):
+            sj = abs(float(s[k]))
+            span = float(ub_all[j] - lb_all[j])
+            if sj < _STATIONARY_TOL or not np.isfinite(span) or span >= 1e19:
+                continue
+            swing = max(swing, sj * span)
+        obj_scale = max(1.0, abs(v), abs(anchor), float(np.max(np.abs(grad))) if grad.size else 0.0)
+        degenerate = swing > _DEGENERATE_CUT_RATIO * obj_scale
+
+        return _Recourse(
+            kind="opt",
+            v=v,
+            x_full=x_full,
+            anchor=anchor,
+            s=s,
+            rigorous=finite_anchor,
+            floor=floor,
+            degenerate=degenerate,
+        )
+
+    def _recourse(x_hat: np.ndarray) -> _Recourse:
         """Fix master vars at x̂ and classify the recourse (C1-safe).
 
-        Returns one of:
+        Returns a :class:`_Recourse` whose ``kind`` is one of:
 
-        - ``('opt', v, x_full, anchor, s, finite_anchor)`` — a primal-feasible
+        - ``'opt'`` — a primal-feasible
           recourse point ``x_full`` with value ``v`` and the rigorous
           Lagrangian-dual cut data ``(anchor, s)``. With sign-projected
           (dual-feasible) multipliers ``mu`` and ``L(x,y) = f + mu^T g`` (jointly
@@ -415,19 +541,22 @@ def solve_gbd(
           ``v_true(x) >= [L(x̂,y*) + m_y] + grad_x L^T (x - x̂)`` where
           ``m_y = min over the recourse box of grad_y L^T (y - y*)`` is the
           closed-form box minimum. So the anchor is a valid lower bound for any
-          approximate recourse solution.
-        - ``('infeas_certified', ...)`` — a **feasibility-phase NLP** certified
+          approximate recourse solution. ``floor`` carries the rigorous global
+          objective lower bound used by the integer L-shaped cut, and
+          ``degenerate`` flags a multiplier that makes the Lagrangian cut
+          vacuous away from x̂ (#946).
+        - ``'infeas_certified'`` — a **feasibility-phase NLP** certified
           that no recourse point exists at x̂ (``t* > feas_tol`` at phase-1
           optimality). Only then may the master exclude x̂.
-        - ``('fail', ...)`` — the recourse solve failed *and* the phase-1 NLP did
+        - ``'fail'`` — the recourse solve failed *and* the phase-1 NLP did
           not certify infeasibility (it reported feasible, or itself failed to
           converge). x̂ must **not** be excluded; the caller downgrades to
           heuristic mode. This is the C1 fix: a transient NLP failure at the
           optimum can no longer be mistaken for infeasibility.
         """
-        kind = _attempt_recourse(x_hat, perturb=False)
-        if kind[0] == "opt":
-            return kind
+        first = _attempt_recourse(x_hat, perturb=False)
+        if first.kind == "opt":
+            return first
         # The recourse solve found no feasible point. Certify *why* before
         # excluding x̂: distinguish genuine infeasibility from a solver failure.
         verdict, _info = certify_recourse_feasibility(
@@ -440,14 +569,14 @@ def solve_gbd(
             feas_tol=1e-6,
         )
         if verdict == "infeasible":
-            return ("infeas_certified", None, None, None, None, True)
+            return _Recourse("infeas_certified")
         # Phase-1 says the recourse is (probably) feasible, or gave no verdict:
         # the first solve failed for another reason. Retry once from a perturbed
         # start before giving up.
-        kind2 = _attempt_recourse(x_hat, perturb=True)
-        if kind2[0] == "opt":
-            return kind2
-        return ("fail", None, None, None, None, False)
+        second = _attempt_recourse(x_hat, perturb=True)
+        if second.kind == "opt":
+            return second
+        return _Recourse("fail", rigorous=False)
 
     def _pinned_bounds(x_hat: np.ndarray) -> np.ndarray:
         b = lb_all.copy()
@@ -464,6 +593,64 @@ def solve_gbd(
         cut_x.append(s.copy())
         cut_eta.append(-1.0)
         cut_rhs.append(float(s @ x_hat) - anchor)
+
+    # Best (largest) rigorous global lower bound on the objective over the box
+    # seen so far. Every candidate is independently valid, so the running max is
+    # valid too; it is the ``L`` of the integer L-shaped cut (#946).
+    obj_floor: float | None = None
+
+    def _register_floor(candidate: float | None) -> None:
+        nonlocal obj_floor
+        if candidate is None:
+            return
+        obj_floor = candidate if obj_floor is None else max(obj_floor, candidate)
+
+    def _add_lshaped_cut(x_hat, anchor: float, s: np.ndarray, rigorous: bool) -> bool:
+        """Integer L-shaped optimality cut at a 0/1 master point (#946).
+
+        ``eta >= anchor_z - (anchor_z - L) * Δ(x, ẑ)`` with ``Δ`` the Hamming
+        distance to the rounded point ẑ and ``L = obj_floor`` a rigorous global
+        lower bound on the objective. Valid because ``Δ = 0`` only at ẑ — where
+        the right-hand side is the rigorous Lagrangian bound ``anchor_z <=
+        v_true(ẑ)`` — while every other 0/1 point has ``Δ >= 1`` and so a
+        right-hand side ``<= L <= v_true(x)``. Unlike the Lagrangian cut it
+        never touches the multiplier, so a degenerate recourse cannot make it
+        vacuous.
+
+        ``anchor_z = anchor + s^T (ẑ - x̂)`` is the Lagrangian cut read off at ẑ:
+        the master returns x̂ within its integrality tolerance of ẑ rather than
+        exactly at it, and the anchor alone bounds ``v_true`` only at x̂. The
+        correction is zero whenever the master returns an exact 0/1 point (the
+        usual case) and rigorous when it does not.
+
+        Requires an all-0/1 first stage (``Δ`` is only a flip count there), a
+        convex model (both the anchor and ``L`` rest on convexity), and the
+        rigorous anchor — the primal fallback ``anchor = f(x̂, ŷ)`` is an *upper*
+        bound on ``v_true(x̂)`` and would cut off the true value there.
+        Returns True when a cut was added.
+        """
+        if not (all_binary_master and is_convex and rigorous):
+            return False
+        if obj_floor is None or obj_floor <= _ETA_FLOOR or not np.isfinite(anchor):
+            # No finite floor, or one weaker than the master's own eta bound:
+            # the cut would carry no information the master does not already have.
+            return False
+        z = np.round(x_hat).astype(float)
+        anchor_z = float(anchor) + float(s @ (z - x_hat))
+        if not np.isfinite(anchor_z) or anchor_z <= _ETA_FLOOR:
+            return False
+        # Clamp: the floor is a lower bound on v_true(x) for every x and the
+        # anchor one at ẑ only, so nothing orders them. A floor above the anchor
+        # would make the coefficient negative and tilt the cut *upward* with the
+        # flip count, which is not valid; using min(L, anchor_z) keeps it >= 0.
+        spread = max(0.0, anchor_z - float(obj_floor))
+        a = np.where(z >= 0.5, 1.0, -1.0)
+        # Δ = n_ones - a^T x, so eta >= anchor_z - spread*Δ becomes
+        # spread * a^T x - eta <= spread * n_ones - anchor_z.
+        cut_x.append(spread * a)
+        cut_eta.append(-1.0)
+        cut_rhs.append(spread * float(z.sum()) - anchor_z)
+        return True
 
     def _add_nogood_cut(x_hat) -> bool:
         # Exclude a 0/1 master point with infeasible recourse:
@@ -498,13 +685,25 @@ def solve_gbd(
     # infeasibility (C1): x̂ is not excluded, and the reported bound is withheld.
     heuristic_fail = False
 
-    kind, v, x_full, anchor, s, rigorous = _recourse(x_hat)
-    if kind == "opt":
-        _add_opt_cut(x_hat, anchor, s)
-        bound_rigorous = bound_rigorous and rigorous
-        best_ub = v
-        incumbent_full = x_full
-    elif kind == "infeas_certified":
+    # #946 diagnostics: whether a degenerate recourse multiplier was ever seen,
+    # and whether the multiplier-free integer L-shaped cut was available to
+    # compensate. Used only to explain a non-certifying exit.
+    degenerate_seen = False
+    lshaped_added = 0
+    visited: list[np.ndarray] = []
+
+    rec = _recourse(x_hat)
+    if rec.kind == "opt":
+        assert rec.anchor is not None and rec.s is not None and rec.v is not None
+        _register_floor(rec.floor)
+        _add_opt_cut(x_hat, rec.anchor, rec.s)
+        lshaped_added += int(_add_lshaped_cut(x_hat, rec.anchor, rec.s, rec.rigorous))
+        degenerate_seen = degenerate_seen or rec.degenerate
+        bound_rigorous = bound_rigorous and rec.rigorous
+        best_ub = rec.v
+        incumbent_full = rec.x_full
+        visited.append(x_hat.copy())
+    elif rec.kind == "infeas_certified":
         if not _add_nogood_cut(x_hat):
             raise NotImplementedError(
                 "GBD recourse is certified infeasible at a non-binary first-stage "
@@ -539,14 +738,21 @@ def solve_gbd(
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = float(lb) if lb is not None else None
 
-        kind, v, x_full, anchor, s, rigorous = _recourse(x_hat)
-        if kind == "opt":
-            if v < best_ub:
-                best_ub = v
-                incumbent_full = x_full
-            _add_opt_cut(x_hat, anchor, s)
-            bound_rigorous = bound_rigorous and rigorous
-        elif kind == "infeas_certified":
+        rec = _recourse(x_hat)
+        repeat = False
+        if rec.kind == "opt":
+            assert rec.anchor is not None and rec.s is not None and rec.v is not None
+            if rec.v < best_ub:
+                best_ub = rec.v
+                incumbent_full = rec.x_full
+            _register_floor(rec.floor)
+            _add_opt_cut(x_hat, rec.anchor, rec.s)
+            lshaped_added += int(_add_lshaped_cut(x_hat, rec.anchor, rec.s, rec.rigorous))
+            degenerate_seen = degenerate_seen or rec.degenerate
+            bound_rigorous = bound_rigorous and rec.rigorous
+            repeat = any(np.allclose(x_hat, seen, rtol=0.0, atol=1e-9) for seen in visited)
+            visited.append(x_hat.copy())
+        elif rec.kind == "infeas_certified":
             if not _add_nogood_cut(x_hat):
                 raise NotImplementedError(
                     "GBD recourse certified infeasible at a non-binary first-stage "
@@ -570,6 +776,30 @@ def solve_gbd(
                 status = "optimal"
                 break
 
+        # Stall (#946): the master re-proposed a point it has already cut, so
+        # the last cut carried no information about eta there and the next
+        # iteration would repeat this one. Spending the remaining budget on it
+        # changes nothing, so stop and say why instead of exhausting it
+        # silently. The status stays ``iteration_limit`` — the honest outcome —
+        # and the bound reported below is the same one the full budget would
+        # have produced.
+        if repeat:
+            logger.warning(
+                "GBD master re-proposed an already-cut first-stage point after %d "
+                "iteration(s); the optimality cut there carries no usable eta "
+                "information%s. Stopping early with a valid but uncertified bound. %s",
+                _it + 1,
+                " (recourse multiplier is degenerate: the recourse subproblem has "
+                "empty interior at this point, so no finite multiplier exists)"
+                if degenerate_seen
+                else "",
+                "The multiplier-free integer L-shaped cut needs an all-0/1 first "
+                "stage and a finite objective floor; it is unavailable here."
+                if lshaped_added == 0
+                else "",
+            )
+            break
+
     # A recourse solve that failed without a feasibility verdict leaves the
     # search unable to progress: report the incumbent heuristically, or error
     # out when there is none. The bound is already withheld (bound_rigorous=False).
@@ -592,6 +822,26 @@ def solve_gbd(
     if status == "iteration_limit" and objective is not None and bound is not None:
         if relative_gap(objective, bound) <= gap_tolerance:
             status = "optimal"
+
+    # Explain a lost certificate rather than leaving it to be rediscovered
+    # (#946): a degenerate recourse gives cuts that are tight at their own
+    # first-stage point and vacuous elsewhere, so the master bound stalls.
+    if status == "iteration_limit" and degenerate_seen:
+        logger.warning(
+            "GBD did not certify optimality (status=%s, bound=%r, incumbent=%r): the "
+            "recourse subproblem is degenerate at one or more first-stage points "
+            "(empty interior, so no finite multiplier exists) and its Lagrangian cut "
+            "is vacuous away from that point. %s The bound reported is valid, only "
+            "weak.",
+            status,
+            bound,
+            objective,
+            f"{lshaped_added} multiplier-free integer L-shaped cut(s) were added alongside it."
+            if lshaped_added
+            else "No multiplier-free cut was available: the integer L-shaped cut needs "
+            "an all-0/1 first stage, a convex model and a finite objective floor over "
+            "the declared box.",
+        )
 
     reported_obj = None if objective is None else objective * sense_flip
     reported_bound = None if bound is None else bound * sense_flip
