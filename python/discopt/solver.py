@@ -17677,6 +17677,10 @@ def _solve_milp_bb(
 
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
+    # #952: declared box for the exit gate, captured before reduced-cost fixing and
+    # FBBT overwrite ``lb``/``ub`` — those are derived, and a wrong inference must
+    # not be able to manufacture a refusal on a genuinely feasible point.
+    _declared_box = np.stack([lb[:n_orig].copy(), ub[:n_orig].copy()], axis=1)
 
     # Resolve the per-node LP engine. ``node_engine="simplex"`` (the pure-MILP
     # default) uses the exact-vertex warm-started simplex; it degrades to the
@@ -18140,6 +18144,30 @@ def _solve_milp_bb(
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
         if _rounded_feas:
             sol_flat = _rounded_inc
+
+        # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
+        # incumbent exit was structurally identical (round, unpack, return) with no
+        # verification of the point whose objective is reported as ``objective`` and,
+        # on ``optimal``, as the dual ``bound`` too. Checked against the ORIGINAL
+        # problem's rows (``lp_data_orig``'s decomposition, not the cover-augmented
+        # ``lp_data``) and the declared box, at the repo's declared ``abs=1e-6``.
+        #
+        # This path is less exposed than the MIQP one was — ``_solve_node_lp_pounce``
+        # already gates its node points on box + rows, and the default simplex engine
+        # returns exact vertices — but the tree also takes incumbents from the root
+        # dive, RENS/feasibility-pump/local-branching injections and POUNCE recovery,
+        # none of which this exit re-checked. Refusal, not repair (CLAUDE.md §3).
+        _x_check = np.asarray(sol_flat[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(
+            _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            raise RuntimeError(
+                "MILP-BB returned an infeasible point labeled feasible/optimal: "
+                + _matrix_solution_violations(
+                    _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+                )
+            )
+
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by

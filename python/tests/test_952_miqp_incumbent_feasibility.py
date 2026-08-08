@@ -36,7 +36,13 @@ What is pinned here
 3. :func:`test_exit_gate_refuses_an_off_row_incumbent` — the gate FIRES: an
    incumbent pushed off a tight row is refused loudly rather than returned as
    ``optimal``. This is the test that fails before the fix.
-4. :func:`test_bounds_check_vectorisation_matches_the_original_loop` — the
+4. :func:`test_milp_exit_gate_refuses_an_off_row_incumbent` (with
+   :func:`test_milp_baseline_solve_is_unaffected` as its control) — the same gate on
+   ``_solve_milp_bb``, whose incumbent exit was structurally identical (round,
+   unpack, return) with nothing verifying the returned point. Fixing only the MIQP
+   path would have been a single-instance fix of a per-path defect (CLAUDE.md §2);
+   the same shape on the *dual* side is tracked in #933.
+5. :func:`test_bounds_check_vectorisation_matches_the_original_loop` — the
    arbiter's bounds check was vectorised for the per-node call site; this pins that
    it did not change semantics.
 """
@@ -170,20 +176,19 @@ def test_old_equality_only_gate_was_a_tautology():
     assert s[0] < -1e-4
 
 
-def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
-    """The gate fires: an incumbent off a declared row is refused, not returned.
+def _patch_offrow_tree(monkeypatch, cont_slice, shift):
+    """Make the tree hand back an incumbent nudged off a tight row.
 
-    ``Σxⱼ ≥ tgt`` is active at the optimum, so pushing the largest ``x`` coordinate
-    down by 1e-3 puts the incumbent 1e-3 outside that row while leaving it inside
-    every variable bound and leaving the binaries integral. Before the fix this
-    came back as ``optimal``; now it raises.
+    Proxies ``PyTreeManager`` and perturbs only the vector returned by
+    ``incumbent()``, so the search itself is untouched and the exit gate is the
+    only thing under test. Returns a dict whose ``applied`` flag lets the caller
+    prove the perturbation actually happened (CLAUDE.md §6) — without it a passing
+    ``pytest.raises`` could be pinning some unrelated error.
     """
     real_tree_cls = S.PyTreeManager
-    shifted = {"applied": False}
+    state = {"applied": False}
 
     class _OffRowTree:
-        """Proxy that perturbs only the incumbent handed back to the caller."""
-
         def __init__(self, *args, **kwargs):
             self._inner = real_tree_cls(*args, **kwargs)
 
@@ -196,23 +201,70 @@ def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
                 return None
             sol, obj = inc
             sol = np.asarray(sol, dtype=np.float64).copy()
-            # Variable order is y (2 binaries) then x (3 continuous).
-            cont = sol[2:5]
-            if np.all(np.isfinite(cont)) and float(np.max(cont)) > 1e-2:
-                j = 2 + int(np.argmax(cont))
-                sol[j] -= 1e-3
-                shifted["applied"] = True
+            block = sol[cont_slice]
+            if np.all(np.isfinite(block)) and float(np.max(block)) > 1e-2:
+                sol[cont_slice.start + int(np.argmax(block))] += shift
+                state["applied"] = True
             return sol, obj
 
     monkeypatch.setattr(S, "PyTreeManager", _OffRowTree)
+    return state
+
+
+def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
+    """The MIQP gate fires: an incumbent off a declared row is refused, not returned.
+
+    ``Σxⱼ ≥ tgt`` is active at the optimum, so pushing the largest ``x`` coordinate
+    down by 1e-3 puts the incumbent 1e-3 outside that row while leaving it inside
+    every variable bound and leaving the binaries integral. Before the fix this came
+    back as ``optimal``; now it raises.
+    """
+    # Variable order is y (2 binaries) then x (3 continuous).
+    state = _patch_offrow_tree(monkeypatch, slice(2, 5), -1e-3)
 
     m = _panel_model(0)
-    with pytest.raises(RuntimeError, match="infeasible point labeled"):
+    with pytest.raises(RuntimeError, match="MIQP-BB returned an infeasible point labeled"):
         m.solve(time_limit=60)
 
-    # §6: the perturbation must actually have been applied, or the raise above
-    # would be proving something else.
-    assert shifted["applied"], "the incumbent was never perturbed; the test proved nothing"
+    assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
+
+
+def test_milp_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
+    """The same gate on the MILP path, whose incumbent exit was structurally
+    identical (round, unpack, return) with nothing verifying the returned point.
+
+    ``x₀ + x₁ ≥ 3`` is active at the optimum, so nudging the larger ``x``
+    coordinate down puts the point off that row while leaving the binary integral.
+    """
+    m = dm.Model("milp952")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    m.minimize(x[0] + 2 * x[1] + 3 * y)
+    m.subject_to(x[0] + x[1] >= 3)
+    m.subject_to(x[0] <= 4 * y)
+
+    # Variable order is y (1 binary) then x (2 continuous).
+    state = _patch_offrow_tree(monkeypatch, slice(1, 3), -1e-3)
+
+    with pytest.raises(RuntimeError, match="MILP-BB returned an infeasible point labeled"):
+        m.solve(time_limit=60)
+
+    assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
+
+
+def test_milp_baseline_solve_is_unaffected():
+    """Control for the test above: without the perturbation the same MILP solves
+    normally, so the raise there is the gate firing and not the model being broken."""
+    m = dm.Model("milp952")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    m.minimize(x[0] + 2 * x[1] + 3 * y)
+    m.subject_to(x[0] + x[1] >= 3)
+    m.subject_to(x[0] <= 4 * y)
+
+    r = m.solve(time_limit=60)
+    assert r.status == "optimal", r.status
+    assert r.objective == pytest.approx(6.0, abs=1e-6)
 
 
 def test_bounds_check_vectorisation_matches_the_original_loop():
