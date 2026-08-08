@@ -189,6 +189,68 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The MILP/MIQP B&B incumbents are verified against every declared row and
+  bound before they are returned** (`fix`, #952). `_solve_miqp_bb`'s only
+  feasibility gate was `_check_lp_solution_feasibility(A_eq_full, b_eq, x_full)`
+  — an equality residual at `tol=1e-4`, 100x the declared `abs=1e-6`, with no
+  inequality-row check, no bound check, and no verification of the point whose
+  objective is returned as `objective` **and**, on `optimal`, as the dual `bound`.
+
+  That gate was a **tautology** on the path that runs.
+  `_pounce_qp_relaxation_nodes` solves only the structural columns and then
+  *reconstructs* the slacks as `z = S⁺(b_eq − A_struct x_s)`, so
+  `A_eq_full [x_s, z] == b_eq` holds to machine precision for **any** `x_s`: a
+  violated inequality row comes back as a negative slack, and the gate never
+  looked at slack bounds. Measured over the issue's 40-seed family: 212 gate
+  invocations, worst equality residual **8.9e-16**, while every returned
+  incumbent sat ~9e-9 outside a declared inequality row. Those excursions are
+  inside `abs=1e-6`, so this was never a live false certificate — the defect is
+  that *nothing bounded them*; their size was set by whatever the QP IPM
+  converged to.
+
+  Node points are now gated on the decomposed `A_ub`/`A_eq` rows plus the node's
+  own box (`_matrix_solution_feasible`, the repo's single arbiter, at
+  `abs=1e-6`), matching what the MILP path's `_solve_node_lp_pounce` already did;
+  a snapped incumbent is verified before `tree.inject_incumbent`; and every
+  incumbent leaving the function is verified against every declared row and the
+  declared box (captured before FBBT), raising rather than silently repairing or
+  downgrading the status — the same loud refusal as the Gurobi QCP path. The gate
+  covers `feasible` as well as `optimal`: `objective` is a primal claim in both.
+  `_check_lp_solution_feasibility` had no callers left and is **deleted**, which
+  closes its unexplained 1e-4 rather than restating it.
+
+  A survey of the five solve exit paths found the same omission on
+  `_solve_milp_bb`, whose incumbent exit was structurally identical (round,
+  unpack, return); it gets the same gate, since fixing only the reported path
+  would be a single-instance fix of a per-path defect. `solve_model` (#779) and
+  `_try_native_spatial_kernel` (#789) already verify. `_solve_nlp_bb` is left
+  open in #954: its rows are nonlinear, so the check needs the evaluator rather
+  than the matrix arbiter, with different tolerance semantics that #952 never
+  measured. This is the primal-side twin of #933, which tracks the same per-path
+  duplication on the dual bound.
+
+  The MILP gate immediately refused
+  `test_nn_equivalence::test_tree_ensemble_fixed_input`, and the producer was not
+  the solve: the incumbent satisfies its equalities to **4.4e-16** and the
+  *snapped* point misses one by **1.55e-6**, from per-coordinate snaps of at most
+  3.9e-7 over a 5-term row. The C-3 call site's comment claimed the snap "cannot
+  move a linear row by more than the integrality tol" — wrong, a row takes one
+  snap per term — and `_round_incumbent_integers`'s `feasible` flag, documented
+  as the caller's guard against exactly this, is vacuous at both B&B call sites
+  because neither passes it an evaluator. Both now use the matrix arbiter as that
+  checker and report the unrounded point when snapping would leave the rows; the
+  unrounded point satisfies *both* declared tolerances, so this is a correction,
+  not a tolerance concession.
+
+  Verified bound-neutral per CLAUDE.md §5 over a 106-instance panel (the 40-seed
+  family plus every in-repo `minlplib_nl` instance), 49 of them through
+  `_solve_miqp_bb`: **0 drifts** in status/objective/bound/node_count/
+  gap_certified across the 88 self-terminating instances, and byte-identical
+  worst violation (9.973171e-09) on both arms. The single apparent drift
+  (`tls2`) was falsified as a wall-clock artifact — it dispatches to
+  `_solve_nlp_bb`, which this change does not touch, and an interleaved A/B on a
+  quiet machine returned bit-identical results (389 nodes, 3/3 rounds per arm).
+
 - **A clock seam for the primal-heuristic deadlines, ending a CI flake**
   (`test`, #950). `TestLocalBranchingBudget::test_deadline_expiring_mid_round_truncates`
   failed intermittently on the parallel lane as `assert 0 >= 2`. The mechanism is
