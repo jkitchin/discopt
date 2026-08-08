@@ -127,6 +127,17 @@ _BIG = 1e20
 
 # A gradient component below this is treated as stationary and contributes
 # nothing to a closed-form box minimum (matches the pre-#946 ``m_y`` loop).
+#
+# It MUST stay below the recourse NLP's own dual tolerance (1e-8). The skip
+# happens *before* the column's bound is examined, so on an unbounded column it
+# reports 0 where the exact box minimum is -inf — an error of up to
+# ``_STATIONARY_TOL * 1e20`` in the *unsafe* direction (an inflated anchor, and
+# an inflated ``floor``, which is what the integer L-shaped cut divides by).
+# Below the NLP tolerance that is sound rather than lucky: an unbounded column
+# is interior at the recourse solution, so KKT stationarity makes its exact
+# gradient component zero and the exact contribution zero too; a component the
+# solver did *not* drive to stationarity lands above the tolerance and correctly
+# returns ``finite=False``. Raising this above 1e-8 breaks that argument.
 _STATIONARY_TOL = 1e-9
 
 # Diagnostic only (issue #946): how far the Lagrangian cut may swing across the
@@ -143,8 +154,10 @@ class _Recourse(NamedTuple):
     """Outcome of one recourse classification at a fixed first-stage point.
 
     ``kind`` is ``'opt'`` / ``'infeas_certified'`` / ``'fail'`` (see
-    :func:`solve_gbd._recourse`); the remaining fields are meaningful only for
-    ``'opt'``.
+    :func:`solve_gbd._recourse`), or the internal ``'nofeas'`` that
+    ``_attempt_recourse`` returns for a single failed solve and that
+    ``_recourse`` always resolves into one of the other three. The remaining
+    fields are meaningful only for ``'opt'``.
     """
 
     kind: str
@@ -175,7 +188,8 @@ def _box_min_linear(
     Returns ``(value, finite)``. ``finite`` is False when some column with a
     non-stationary gradient component is unbounded in the descent direction, so
     the true minimum is ``-inf`` and no finite underestimator exists; ``value``
-    is then meaningless.
+    is then meaningless. "Non-stationary" is ``_STATIONARY_TOL``, whose comment
+    explains why that threshold is what makes this sound on unbounded columns.
     """
     total = 0.0
     for j in cols:

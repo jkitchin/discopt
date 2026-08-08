@@ -206,6 +206,83 @@ def test_nonbinary_first_stage_explains_the_lost_certificate(exact_recourse_boun
     )
 
 
+@pytest.mark.correctness
+@pytest.mark.parametrize("shape", ["unbounded_above", "free"])
+def test_lshaped_floor_is_sound_with_unbounded_recourse_variables(shape):
+    """The floor ``L`` is a closed-form box minimum, so an *unbounded* recourse
+    column is the shape that can break it: ``_box_min_linear`` skips a column
+    whose gradient component is below ``_STATIONARY_TOL`` before it looks at
+    that column's bound, which reports 0 where the exact minimum is -inf. That
+    is sound only because the threshold sits below the NLP's dual tolerance
+    (see the constant's comment) — this pins the consequence rather than the
+    argument: every floor GBD registers must stay at or below the monolithic
+    optimum, and so must the bound built from it.
+
+    ``test_lshaped_cut_soundness_panel`` covers the cut on *bounded* recourse
+    boxes, where the skip cannot fire at all.
+    """
+    from discopt.decomposition.benders import gbd
+
+    def build():
+        m = dm.Model(f"unb_{shape}")
+        y = m.binary("y", shape=(2,))
+        if shape == "unbounded_above":
+            x = m.continuous("x", shape=(3,), lb=0)  # no upper bound
+            m.first_stage(y)
+            m.minimize(sum(x[j] * x[j] for j in range(3)) + 2.0 * y[0] + 3.0 * y[1])
+            m.subject_to(x[0] + x[1] + x[2] >= 3.0)
+            for j in range(3):
+                m.subject_to(x[j] <= 4 * y[j % 2])
+        else:
+            x = m.continuous("x", shape=(2,))  # free in both directions
+            m.first_stage(y)
+            m.minimize((x[0] - 1.0) ** 2 + (x[1] + 2.0) ** 2 + 2.0 * y[0] + 3.0 * y[1])
+            m.subject_to(x[0] + x[1] >= 0.5 + y[0])
+            m.subject_to(x[0] - x[1] <= 3.0 * y[1])
+        return m
+
+    floors: list[float] = []
+    real_cls = gbd._Recourse
+
+    class _Tapped(real_cls):  # type: ignore[misc,valid-type]
+        def __new__(cls, *a, **kw):
+            obj = super().__new__(cls, *a, **kw)
+            if obj.floor is not None and np.isfinite(obj.floor):
+                floors.append(float(obj.floor))
+            return obj
+
+    gbd._Recourse = _Tapped
+    try:
+        r = solve_benders(build(), time_limit=60)
+    finally:
+        gbd._Recourse = real_cls
+
+    mono = build().solve(time_limit=60)
+    assert mono.objective is not None
+    # The tap must have fired, or this asserts nothing (CLAUDE.md §6).
+    assert floors, "no objective floor was registered; the cut was never built"
+    worst = max(floors)
+    assert worst <= mono.objective + 1e-6, (
+        f"objective floor {worst} exceeds the monolithic optimum {mono.objective}: "
+        "it is not a valid global lower bound"
+    )
+    if r.bound is not None:
+        assert r.bound <= mono.objective + 1e-3, (
+            f"unsound GBD bound {r.bound} > monolithic optimum {mono.objective}"
+        )
+
+
+def test_stationary_tolerance_stays_below_the_nlp_dual_tolerance():
+    """``_box_min_linear``'s skip is sound on an unbounded column only because a
+    component that small is roundoff on a direction the NLP drove to
+    stationarity. Raising the threshold above the NLP's own dual tolerance
+    (1e-8) breaks that argument and inflates the anchor and the floor by up to
+    ``tol * 1e20`` in the unsafe direction."""
+    from discopt.decomposition.benders.gbd import _STATIONARY_TOL
+
+    assert _STATIONARY_TOL < 1e-8
+
+
 def test_box_min_linear_closed_form():
     """Unit test for the closed-form box minimum both the recourse anchor and the
     global objective floor are built from."""
