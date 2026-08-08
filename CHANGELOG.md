@@ -189,6 +189,47 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Three CI signals that had stopped signalling** (`ci`). An audit of why #927
+  (an unsound `ex1252` dual bound, asserted by a test in the tree) could sit open
+  found that the lanes meant to catch it were all dark:
+
+  1. **No lane ran `slow` + `correctness` — 153 tests, including every
+     end-to-end certificate assertion.** `python-correctness` runs `not slow`;
+     its comment said the rest was "the nightly `python-coverage` job's
+     responsibility", but that job runs `-m "not slow and not correctness ..."`
+     and `ci.yml` had no `schedule:` trigger at all, so there was no nightly. New
+     `python-correctness-nightly` job (serial, `--timeout=900`, 06:20 UTC) runs
+     exactly that set. `changes` now reports `code=false` on a schedule event so
+     the nightly trigger does not re-run the whole PR matrix.
+  2. **The weekly flag-graduation gate had been exiting 2 before gating
+     anything since 2026-07-13.** The workflow passed a hardcoded
+     `--flags root_fixpoint,node_reduce,...`; `node_reduce` was deprecated out of
+     `GRADUATION_ARMS` in #581, so every scheduled run died on
+     `unknown flag(s): ['node_reduce']` — four consecutive Mondays where the
+     cert-neutrality guard proved nothing. The `--flags` argument is now omitted
+     entirely so the gated set tracks the registry (7 arms, not the copy's 5),
+     and the workflow gained a `pull_request` trigger on its own path so an edit
+     to it is validated by the PR that makes it, not a week later.
+  3. **The AMP integration suite had failed on every push to `main` since
+     2026-07-27** — 40+ consecutive red runs, no tracking issue — on
+     `test_amp_time_limit_with_incumbent_returns_feasible`. The solver contract
+     is intact; the test was the broken part. It drove the timeout by *read
+     ordinal* (`chain([0.0, 0.0], repeat(1.5))`, "the first two reads are before
+     the deadline"), and `monkeypatch.setattr(amp_mod.time, ...)` patches the
+     **global** `time` module, so a burst of ~26 reads inside
+     `nonlinear_bound_tightening`'s budget polling consumed the pre-deadline
+     values. The deadline then blew before any incumbent was stored and
+     `solve_amp` returned through the "no feasible solution found" arm — so the
+     assertion described a path the test no longer executed, and reported it as
+     `assert 'time_limit' == 'feasible'`, which reads as a solver bug. The
+     timeout is now driven by *state* (pre-deadline until an incumbent exists),
+     which no read count can perturb, plus a callback counter so the test cannot
+     pass while measuring nothing (CLAUDE.md §6).
+
+  All three scheduled/main lanes now file-or-refresh a single `ci-signal`-labelled
+  issue on failure. Each of these was red or absent for weeks; none of them
+  reached anyone.
+
 - **A clock seam for the primal-heuristic deadlines, ending a CI flake**
   (`test`, #950). `TestLocalBranchingBudget::test_deadline_expiring_mid_round_truncates`
   failed intermittently on the parallel lane as `assert 0 >= 2`. The mechanism is
