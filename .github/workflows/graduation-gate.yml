@@ -18,12 +18,25 @@ on:
   schedule:
     # Weekly, Mondays 07:42 UTC. Off the PR-fast path (the cert re-solve is minutes).
     - cron: "42 7 * * 1"
+  # A PR that edits the gate or the registry it reads MUST run the gate. Without
+  # this the only way to find out that an edit broke the invocation was to wait
+  # a week for the cron and then read a log nobody opens — which is exactly how
+  # the `node_reduce` drift stayed live from 2026-07-13 to 2026-08-08.
+  pull_request:
+    paths:
+      - ".github/workflows/graduation-gate.yml"
+      - "discopt_benchmarks/scripts/graduation_gate.py"
+      - "discopt_benchmarks/scripts/generality_sweep.py"
 
 jobs:
   graduation-gate-ci-subset:
     name: cert-neutrality regression guard (vendored panel)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 -> 90: dropping the stale hardcoded `--flags` list restored two arms the
+    # copy had lost and added one wired since (`lu_density_route`,
+    # `node_numerical_dual_bound`, `root_build_deadline`), so the gated set is 7
+    # arms, not 5.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,9 +58,15 @@ jobs:
       - name: Run the graduation gate CI subset (cert-neutrality + incorrect_count)
         run: |
           source .venv/bin/activate
-          python discopt_benchmarks/scripts/graduation_gate.py \
-            --flags root_fixpoint,node_reduce,psd_cost_gate,lift_zero_spanning,lift_loose_products \
-            --ci-subset
+          # NO `--flags` here, deliberately. The default is
+          # `",".join(generality_sweep.GRADUATION_ARMS)`, so the gated set tracks
+          # the registry instead of a copy of it that drifts. It previously read
+          # `--flags root_fixpoint,node_reduce,psd_cost_gate,...`; `node_reduce`
+          # was deprecated and removed from GRADUATION_ARMS in #581, after which
+          # this step exited 2 on `unknown flag(s): ['node_reduce']` before
+          # gating anything. That silently disabled the cert-neutrality guard for
+          # every scheduled run from 2026-07-13 onward.
+          python discopt_benchmarks/scripts/graduation_gate.py --ci-subset
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
@@ -59,3 +78,40 @@ jobs:
           name: graduation-gate-ci-subset
           path: reports/graduation_gate_*.json
           if-no-files-found: ignore
+
+  # A scheduled job that fails into an empty room is not a signal. Nobody opens
+  # a weekly run log, so this one reported "unknown flag(s)" for four consecutive
+  # Mondays and the cert-neutrality guard was a no-op the whole time. Surface it
+  # where the work is: one open issue, reused (commented) rather than duplicated.
+  report-failure:
+    name: File/refresh the CI-signal issue
+    needs: graduation-gate-ci-subset
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "CI signal down: flag-graduation gate (scheduled) is failing"
+        run: |
+          set -euo pipefail
+          gh label create ci-signal --force --color B60205 \
+            --description "A CI lane that is supposed to be watching something has stopped watching"
+          printf '%s\n' \
+            "The weekly cert-neutrality regression guard failed." \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "Until this is green the guard is proving nothing: a flag that changes a" \
+            "certified objective on the vendored panel would graduate unnoticed." \
+            > body.md
+          NUM=$(gh issue list --state open --label ci-signal --json number,title \
+                  --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --label ci-signal --body-file body.md
+          fi
