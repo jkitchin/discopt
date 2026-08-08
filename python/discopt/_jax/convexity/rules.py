@@ -533,6 +533,70 @@ def _scalar_value(expr: Expression) -> float:
     return float(np.asarray(expr.value))  # type: ignore[attr-defined]
 
 
+def _const_scale_sign(expr: Expression) -> Optional[int]:
+    """Curvature-scaling sign of a constant factor, scalar **or array**.
+
+    Returns ``+1`` / ``-1`` / ``0`` when every entry of the constant is,
+    respectively, nonnegative (with at least one positive), nonpositive (with at
+    least one negative), or exactly zero — the three cases in which the
+    elementwise product ``c ⊙ f`` scales *every* entry of ``f``'s curvature by
+    one uniform sign, so :func:`~.lattice.scale` applies. Returns ``None`` when
+    ``expr`` is not a concrete constant, holds a non-finite entry, or MIXES
+    signs; the caller may still conclude AFFINE in that last case, since an
+    affine operand stays affine under any constant scaling.
+
+    Entries equal to zero alongside strictly-signed ones do not spoil the
+    verdict: ``0 * f`` is affine, hence both convex and concave, so it never
+    contradicts the strict entries' direction.
+
+    Only 0-d constants used to be recognised (``_is_scalar_const``). That
+    dropped the whole *vectorized* modeling surface to UNKNOWN curvature: a
+    collocation row is ``h ⊙ (A @ x)`` with ``h`` an array of element widths, so
+    every ``discopt.dae`` model classified nonconvex and was routed to spatial
+    McCormick B&B, which does not converge on it (#944).
+    """
+    if not isinstance(expr, (Constant, Parameter)):
+        return None
+    try:
+        arr = np.asarray(expr.value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(arr)):
+        return None
+    if np.all(arr == 0.0):
+        return 0
+    if np.all(arr >= 0.0):
+        return 1
+    if np.all(arr <= 0.0):
+        return -1
+    return None
+
+
+def _const_divisor_info(expr: Expression) -> Optional[int]:
+    """Scaling sign of a constant divisor, scalar **or array**.
+
+    Returns ``+1`` when every entry is strictly positive, ``-1`` when every entry
+    is strictly negative, and ``0`` when the entries are all nonzero but mixed in
+    sign (``1/c`` is then well-defined everywhere but carries no single
+    direction). Returns ``None`` — meaning *refuse* — when ``expr`` is not a
+    concrete constant, holds a non-finite entry, or holds an entry at or within
+    ``1e-30`` of zero, matching the scalar guard this generalises.
+    """
+    if not isinstance(expr, (Constant, Parameter)):
+        return None
+    try:
+        arr = np.asarray(expr.value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(arr)) or np.any(np.abs(arr) <= 1e-30):
+        return None
+    if np.all(arr > 0.0):
+        return 1
+    if np.all(arr < 0.0):
+        return -1
+    return 0
+
+
 def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> ExprInfo:
     left = classify_expr_info(expr.left, model, cache)
     right = classify_expr_info(expr.right, model, cache)
@@ -571,15 +635,20 @@ def _classify_product(
     """Classify ``a * b`` with sign-aware curvature."""
     prod_sign = sign_mul(left.sign, right.sign)
 
-    # Constant scaling on either side → curvature scaled by that sign.
-    if _is_scalar_const(expr.left):
-        val = _scalar_value(expr.left)
-        s = 0 if val == 0 else (1 if val > 0 else -1)
-        return ExprInfo(scale(right.curvature, s), prod_sign)
-    if _is_scalar_const(expr.right):
-        val = _scalar_value(expr.right)
-        s = 0 if val == 0 else (1 if val > 0 else -1)
-        return ExprInfo(scale(left.curvature, s), prod_sign)
+    # Constant scaling on either side → curvature scaled by that sign. The
+    # constant may be an ARRAY (elementwise / broadcast scaling), not only a
+    # 0-d scalar: a uniform entry sign scales the other operand's curvature
+    # exactly as a scalar would, and an AFFINE operand survives *any* constant
+    # array — including one of mixed sign — because each broadcast entry is
+    # ``const * affine`` (#944).
+    for const_side, other in ((expr.left, right), (expr.right, left)):
+        if not isinstance(const_side, (Constant, Parameter)):
+            continue
+        s = _const_scale_sign(const_side)
+        if s is not None:
+            return ExprInfo(scale(other.curvature, s), prod_sign)
+        if other.curvature == Curvature.AFFINE:
+            return ExprInfo(Curvature.AFFINE, prod_sign)
 
     # Square of an affine expression: ``e * e`` with ``e`` affine is convex
     # and nonnegative. Recognising it here (the two operands are the *same*
@@ -618,14 +687,27 @@ def _classify_division(
     cache: dict,
 ) -> ExprInfo:
     """Classify ``a / b``."""
-    # Divide by constant: scale by 1/k.
-    if _is_scalar_const(expr.right):
-        val = _scalar_value(expr.right)
-        if abs(val) <= 1e-30:
+    # Divide by constant: scale by 1/k. As with the product rule, the divisor may
+    # be a constant ARRAY (elementwise / broadcast division by, say, a vector of
+    # finite-element widths); ``1/c`` then has the same uniform sign as ``c``, so
+    # the same scaling applies. Every entry must be bounded away from zero —
+    # a single zero entry makes the quotient undefined there (#944).
+    if isinstance(expr.right, (Constant, Parameter)):
+        s = _const_divisor_info(expr.right)
+        if s is None:
+            # Non-finite, or an entry at/near zero: the quotient is undefined or
+            # numerically meaningless there. Refuse outright rather than fall
+            # through to the reciprocal rule below, whose strict-sign test reads
+            # a zero divisor as strictly signed.
             return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
-        s = 1 if val > 0 else -1
-        inv_sign = Sign.POS if val > 0 else Sign.NEG
-        return ExprInfo(scale(left.curvature, s), sign_mul(left.sign, inv_sign))
+        if s != 0:
+            inv_sign = Sign.POS if s > 0 else Sign.NEG
+            return ExprInfo(scale(left.curvature, s), sign_mul(left.sign, inv_sign))
+        # Mixed-sign (but everywhere-nonzero) divisor: an affine numerator still
+        # divides entrywise to affine; anything else loses its curvature.
+        if left.curvature == Curvature.AFFINE:
+            return ExprInfo(Curvature.AFFINE, Sign.UNKNOWN)
+        return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
     # Reciprocal with constant numerator and strictly-signed denominator.
     # 1/u is convex + nonincreasing on u>0; concave + nonincreasing on
