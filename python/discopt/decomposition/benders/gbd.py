@@ -509,10 +509,10 @@ def solve_gbd(
         swing = 0.0
         for k, j in enumerate(mcols):
             sj = abs(float(s[k]))
-            span = float(ub_all[j] - lb_all[j])
-            if sj < _STATIONARY_TOL or not np.isfinite(span) or span >= 1e19:
+            col_span = float(ub_all[j] - lb_all[j])
+            if sj < _STATIONARY_TOL or not np.isfinite(col_span) or col_span >= 1e19:
                 continue
-            swing = max(swing, sj * span)
+            swing = max(swing, sj * col_span)
         obj_scale = max(1.0, abs(v), abs(anchor), float(np.max(np.abs(grad))) if grad.size else 0.0)
         degenerate = swing > _DEGENERATE_CUT_RATIO * obj_scale
 
