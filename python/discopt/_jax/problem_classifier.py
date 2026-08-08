@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 # annotations``), so importing this module — done on every ``Model.solve`` to
 # route the problem class — does not pull in JAX. That keeps LP/MILP/MIQP solves
 # free of JAX/XLA cold-start.
+from discopt._flat_index import resolve_scalar_slot
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -597,20 +598,11 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
             if node.size != 1:
                 return None
             return _compute_var_offset(node, model)
-        if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-            offset = _compute_var_offset(node.base, model)
-            idx = node.index
-            if isinstance(idx, (int, np.integer)):
-                return offset + int(idx)
-            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
-                return offset + int(idx[0])
-            try:
-                flat_idx = np.ravel_multi_index(
-                    idx if isinstance(idx, tuple) else (idx,), node.base.shape
-                )
-            except (TypeError, ValueError):
-                return None  # sliced/partial subscript: not a scalar reference
-            return offset + int(flat_idx)
+        if isinstance(node, IndexExpression):
+            # #941: the bare-int fast path was `offset + int(idx)`, wrong for a
+            # negative index. (The `ravel_multi_index` fallback below it already
+            # refused negatives, by raising — so only the fast path was unsound.)
+            return resolve_scalar_slot(node, model)
         return None
 
     def _walk(node, scale=1.0, allow_array=False):

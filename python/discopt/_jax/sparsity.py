@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -101,8 +102,14 @@ def _collect_variable_indices(expr: Expression, model: Model) -> set[int]:
             base = expr.base
             offset = _var_offset(base, model)
             idx = expr.index
-            if isinstance(idx, (int, np.integer)):
-                return {offset + int(idx)}
+            # #941: this fast path was `offset + int(idx)`, which for a negative
+            # index names a slot belonging to a different variable — a sparsity
+            # pattern attributing a derivative to the wrong column. The shared
+            # resolver normalizes and range-checks; anything it refuses falls
+            # through to the probe below, which is numpy-exact.
+            slot = resolve_scalar_slot(expr, model)
+            if slot is not None:
+                return {slot}
             # Resolve a multi-dimensional / slice / fancy index (e.g. the 2-D
             # ``a0[i, j]`` of a collocation variable) to the exact flat element
             # set, rather than returning the whole variable. Over-reporting here

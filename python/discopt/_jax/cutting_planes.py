@@ -19,6 +19,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt._jax.nonlinear_bound_tightening import is_effectively_finite
 from discopt.constants import ALPHABB_EPS, ALPHABB_SAFETY
 from discopt.modeling.core import (
@@ -371,18 +372,9 @@ def _var_offset(var: Variable, model: Model) -> int:
 
 def _scalar_var_index(expr: Expression, model: Model) -> Optional[int]:
     """Return the flat index for a scalar variable expression."""
-    if isinstance(expr, Variable):
-        if expr.size == 1:
-            return _var_offset(expr, model)
-        return None
-    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-        base_offset = _var_offset(expr.base, model)
-        idx = expr.index
-        if isinstance(idx, int):
-            return base_offset + idx
-        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
-            return base_offset + idx[0]
-    return None
+    # #941: `base_offset + idx` took a negative index literally, so a cut could be
+    # generated against a different variable than the one the term names.
+    return resolve_scalar_slot(expr, model)
 
 
 def _cleanup_polynomial(poly: QuadraticPolynomial) -> QuadraticPolynomial:
@@ -755,7 +747,6 @@ def detect_bilinear_terms(model) -> list[BilinearTerm]:
     """
     from discopt.modeling.core import (
         BinaryOp,
-        IndexExpression,
         Variable,
     )
     from discopt.modeling.core import Constraint as ConstraintType
@@ -767,14 +758,10 @@ def detect_bilinear_terms(model) -> list[BilinearTerm]:
             if expr.shape == () or expr.shape == (1,):
                 return offset
             return None
-        if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-            var = expr.base
-            offset = model_._flat_var_offset(var)
-            idx = expr.index
-            if isinstance(idx, int):
-                return offset + idx
-            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
-                return offset + idx[0]
+        if isinstance(expr, IndexExpression):
+            # #941: see the note on _scalar_var_index above. A wrong slot here
+            # registers a bilinear pair the model does not contain.
+            return resolve_scalar_slot(expr, model_)
         return None
 
     found: list[BilinearTerm] = []

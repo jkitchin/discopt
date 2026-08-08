@@ -92,6 +92,7 @@ def _ensure_sympy() -> None:
 
 
 def _var_key(node) -> Optional[str]:
+    from discopt._flat_index import flat_index_in_shape
     from discopt.modeling import core
 
     if isinstance(node, core.IndexExpression):
@@ -99,9 +100,26 @@ def _var_key(node) -> Optional[str]:
         # compound expression like (x+y)[0] has no Variable base -> skip.
         if not isinstance(node.base, core.Variable):
             return None
-        idx = node.index
-        i = idx if isinstance(idx, int) else (idx[0] if isinstance(idx, tuple) else idx)
-        return f"{node.base.name}[{i}]"
+        base = node.base
+        shape = tuple(base.shape or ())
+        # #941: this used to key on `idx[0]` — the FIRST AXIS only — so for a
+        # shape-(2, 3) variable both `w[0, 1]` and `w[0, 2]` keyed as "w[0]" and
+        # the recognizer treated two distinct variables as one symbol. It also
+        # keyed `v[-1]` and `v[3]` as different symbols for the same element.
+        #
+        # The canonical key is `name[flat]` — the format `_handle_map` builds, so
+        # a recognized cut can be mapped back to a model handle. `_handle_map`
+        # only builds honorable handles for 1-D variables (it uses `v[i]` with a
+        # bare int, which on an N-D variable selects a whole row, not an
+        # element), so N-D refs are refused here rather than given a key that
+        # cannot be resolved back. `None` is safe: `_to_sympy` substitutes a
+        # fresh Dummy and the recognizer simply matches no pattern involving it.
+        if len(shape) != 1:
+            return None
+        flat = flat_index_in_shape(node.index, shape)
+        if flat is None:
+            return None
+        return f"{base.name}[{flat}]"
     if isinstance(node, core.Variable):
         return node.name
     return None
