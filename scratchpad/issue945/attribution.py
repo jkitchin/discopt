@@ -37,22 +37,40 @@ if not _SEEDED:
     )
     sys.exit(2)
 
-# Arms. "main" is EXACTLY what `nlp_pounce.solve_nlp` did before #945: it set
-# print_level only, leaving BOTH constr_viol_tol (Ipopt default 1e-4) and
-# bound_relax_factor (1e-8) at Ipopt's values. Naming only one of them leaves the
-# other at the shipped value and mislabels the arm (the #940 lesson) — "cvt_only"
-# is kept precisely to show how much of the effect each option carries.
-_ARMS = {
+# Arms. "main" is EXACTLY what the pre-#945 tree did: `nlp_pounce.solve_nlp` set
+# print_level ONLY, leaving BOTH constr_viol_tol (Ipopt default 1e-4) and
+# bound_relax_factor (1e-8) at Ipopt's values, at every call site. Naming only one
+# of them leaves the other at the shipped value and mislabels the arm (the #940
+# lesson) — "cvt" is kept precisely to show how much each option carries.
+#
+# Reconstructing that arm now means neutralizing TWO seams, because #945 does not
+# put bound_relax_factor in the backend default (it breaks the Benders dual LP —
+# see solvers.pounce_incumbent_options): the backend baseline, and the incumbent
+# options requested by the three call sites whose point becomes a solution.
+import discopt.solver as SOLVER  # noqa: E402
+import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
+import discopt.solvers.oa as OA  # noqa: E402
+
+_CONSUMERS = (SOLVER, OA, LOA)
+_REAL_INCUMBENT = SOLVER.pounce_incumbent_options
+_REAL_DEFAULTS = pounce_option_defaults
+
+_BACKEND_ARM = {
     "main": {"print_level": 0},
-    "cvt": {"print_level": 0, "constr_viol_tol": 1e-8, "bound_relax_factor": 1e-8},
+    "cvt": {"print_level": 0, "constr_viol_tol": 1e-8},
     "new": None,  # the shipped pounce_option_defaults()
 }
-_REAL = pounce_option_defaults
+# main/cvt keep Ipopt's bound_relax_factor by contributing nothing here.
+_INCUMBENT_ARM = {"main": {}, "cvt": {"bound_relax_factor": 1e-8}, "new": None}
 
 
 def _install(arm: str) -> None:
-    override = _ARMS[arm]
-    nlp_pounce.pounce_option_defaults = _REAL if override is None else (lambda: dict(override))
+    b, i = _BACKEND_ARM[arm], _INCUMBENT_ARM[arm]
+    nlp_pounce.pounce_option_defaults = _REAL_DEFAULTS if b is None else (lambda: dict(b))
+    for mod in _CONSUMERS:
+        mod.pounce_incumbent_options = _REAL_INCUMBENT if i is None else (lambda: dict(i))
+        if hasattr(mod, "pounce_option_defaults"):
+            mod.pounce_option_defaults = _REAL_DEFAULTS if b is None else (lambda: dict(b))
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -87,10 +105,14 @@ def _gdp_simple_disjunction(name="g"):
 _OA = dict(solver="mip-nlp", mip_nlp_method="oa", time_limit=60, max_nodes=100)
 CASES = [
     ("mindtpy_simple/oa", lambda: _mindtpy_simple_minlp("a"), _OA, 3.5),
-    ("mindtpy_simple/roa-L1", lambda: _mindtpy_simple_minlp("b"), {**_OA, "add_regularization": "level_L1"}, 3.5),
-    ("mindtpy_cq/roa-L1", lambda: _mindtpy_cq("c"), {**_OA, "add_regularization": "level_L1"}, 3.0),
-    ("mindtpy_cq/roa-Linf", lambda: _mindtpy_cq("d"), {**_OA, "add_regularization": "level_L_infinity"}, 3.0),
-    ("mindtpy_cq/roa-gradlag", lambda: _mindtpy_cq("e"), {**_OA, "add_regularization": "grad_lag"}, 3.0),
+    ("mindtpy_simple/roa-L1", lambda: _mindtpy_simple_minlp("b"),
+     {**_OA, "add_regularization": "level_L1"}, 3.5),
+    ("mindtpy_cq/roa-L1", lambda: _mindtpy_cq("c"),
+     {**_OA, "add_regularization": "level_L1"}, 3.0),
+    ("mindtpy_cq/roa-Linf", lambda: _mindtpy_cq("d"),
+     {**_OA, "add_regularization": "level_L_infinity"}, 3.0),
+    ("mindtpy_cq/roa-gradlag", lambda: _mindtpy_cq("e"),
+     {**_OA, "add_regularization": "grad_lag"}, 3.0),
     ("gdp_simple_disjunction", _gdp_simple_disjunction, dict(gdp_method="loa", time_limit=30), 0.0),
 ]
 

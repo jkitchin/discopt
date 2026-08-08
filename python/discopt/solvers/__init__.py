@@ -221,5 +221,37 @@ def pounce_option_defaults() -> dict:
     return {
         "print_level": 0,
         "constr_viol_tol": POUNCE_CONSTR_VIOL_TOL,
-        "bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR,
     }
+
+
+def pounce_incumbent_options() -> dict:
+    """Extra options for a POUNCE call whose returned POINT is the product (#945).
+
+    ``bound_relax_factor = 0`` lives here and deliberately NOT in
+    :func:`pounce_option_defaults`, because the split is not "LP versus NLP" — it
+    is **what the caller consumes**:
+
+    * A call site whose ``x`` becomes a reported solution or incumbent needs the
+      point inside the box the model declared. Ipopt's default relaxes every
+      bound (and every slack bound standing in for an inequality row) by
+      ``1e-8*(1 + |bound|)``, and a squared row takes the square root of that: on
+      the MindtPy constraint-qualification fixture ``(x-3)^2 <= 0`` admitted every
+      ``x`` within 1e-4 of 3, and discopt certified ``optimal`` 1e-4 below an exact
+      optimum of 3.0.
+    * A call site whose **multipliers** are the product must NOT set it. A
+      degenerate feasible set (Slater failing, e.g. ``x0^2 + x1^2 <= 0``) has no
+      finite multiplier; Ipopt's relaxation hands it an artificial interior and
+      keeps the dual finite. Pinning it to 0 makes the multiplier diverge and the
+      cut built from it useless — measured at 9.8e7 with a cut slope of 7.9e8 on
+      GBD, and it is why the same option applied backend-wide cost the Benders
+      dual LP its convergence (#940: two correctness-lane tests, 1.6s -> 79s).
+
+    So: use this at incumbent/solution producers, never at dual consumers
+    (Benders and GBD recourse, OBBT). Seed it after
+    :func:`pounce_option_defaults` and before a caller's own options::
+
+        opts = pounce_option_defaults()
+        opts.update(pounce_incumbent_options())
+        opts.update(caller_options or {})
+    """
+    return {"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR}

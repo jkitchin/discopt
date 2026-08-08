@@ -19,6 +19,7 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
 )
+from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import optimality_gap
 
 logger = logging.getLogger(__name__)
@@ -449,9 +450,13 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
         else:
             from discopt.solvers.nlp_pounce import solve_nlp
 
-        result = solve_nlp(
-            cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
-        )
+        # LOA's incumbent comes from here, so it takes the incumbent options
+        # (#945): pre-#945 this returned a point below its own lb and below its own
+        # dual bound, and LOA reported that as `optimal`.
+        opts = pounce_option_defaults()
+        opts.update(pounce_incumbent_options())
+        opts.update({"max_iter": 200})
+        result = solve_nlp(cast(NLPEvaluator, proxy), x0, options=opts)
 
         from discopt.solvers import SolveStatus
 

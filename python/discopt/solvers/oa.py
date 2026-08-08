@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
+from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import optimality_gap
 from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
@@ -1340,7 +1341,13 @@ def _solve_nlp_attempt(
         else:
             from discopt.solvers.nlp_pounce import solve_nlp
 
-        result = solve_nlp(evaluator, x0, options={"print_level": 0, "max_iter": max_iter})
+        # This point becomes OA's incumbent and its reported objective, so it takes
+        # the incumbent options (#945). Without them the fixed-NLP subproblem returns
+        # a point outside its declared box and OA certifies a super-optimal incumbent.
+        opts = pounce_option_defaults()
+        opts.update(pounce_incumbent_options())
+        opts.update({"max_iter": max_iter})
+        result = solve_nlp(evaluator, x0, options=opts)
 
         from discopt.solvers import SolveStatus
 

@@ -44,7 +44,12 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
-from discopt.solvers import SolveStatus, pounce_option_defaults
+from discopt.solvers import (
+    POUNCE_BOUND_RELAX_FACTOR,
+    SolveStatus,
+    pounce_incumbent_options,
+    pounce_option_defaults,
+)
 
 # R3a measurement sink (temporary, behavior-neutral). When set to a mutable
 # dict by an experiment harness, the nonconvex B&B path stores the Rust tree's
@@ -12611,8 +12616,14 @@ def _solve_continuous(
         _X0_CLIP = 10.0
         x0 = np.clip(x0, np.maximum(lb, -_X0_CLIP), np.minimum(ub, _X0_CLIP))
 
-    opts = dict(ipopt_options) if ipopt_options else {}
-    opts.setdefault("print_level", 0)
+    # The model-level NLP seam: this point IS the user's solution, so it takes the
+    # incumbent options (#945) — the same reasoning as _solve_lp_pounce and
+    # _solve_qp_pounce, and the NLP analogue of them. A caller's explicit option
+    # still wins.
+    opts = pounce_option_defaults()
+    opts.update(pounce_incumbent_options())
+    if ipopt_options:
+        opts.update(ipopt_options)
 
     # Pass remaining time budget to NLP solver so stalled subproblems
     # don't run unbounded (see issue #5).
@@ -15042,7 +15053,16 @@ def _solve_lp_pounce(
         return None
     # Request an infeasibility certificate so an infeasible model-level LP
     # surfaces *why* via SolveResult.infeasibility_certificate (roadmap P0.2).
-    solve_fn = functools.partial(_pounce_solve_lp, certificate=True)
+    # bound_relax_factor=0 is requested HERE, not as a backend default: it is this
+    # call site's point that _matrix_solution_feasible checks, and Ipopt's default
+    # 1e-8 relaxation is what puts that point outside the declared box (#940).
+    # Applied backend-wide it also reaches the Benders dual LP, where it costs
+    # convergence (2 correctness-lane tests, 1.6s -> 79s) — see #945.
+    solve_fn = functools.partial(
+        _pounce_solve_lp,
+        certificate=True,
+        options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
+    )
     # The IPM is the one backend that relaxes a declared [1e15, 1e20) bound to its
     # own infinity, so its UNBOUNDED is the verdict the #850 guard defers on.
     return _solve_lp_matrix(
@@ -15316,7 +15336,12 @@ def _solve_qp_pounce(
         return None
     if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
         return None
-    solve_fn = functools.partial(_pounce_solve_qp, certificate=True)
+    # Same reasoning as _solve_lp_pounce: the guard checks THIS call site's point.
+    solve_fn = functools.partial(
+        _pounce_solve_qp,
+        certificate=True,
+        options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
+    )
     return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 

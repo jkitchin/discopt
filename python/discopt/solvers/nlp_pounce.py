@@ -71,9 +71,15 @@ def solve_nlp(
 
     import pounce
 
-    # Seeded from THE shared baseline so this path returns points inside the box
-    # the caller declared, like every other POUNCE entry point (#940, extended to
-    # the NLP path by #945). A caller's explicit option still wins.
+    # Seeded from THE shared baseline like every other POUNCE entry point, so this
+    # path stops keeping Ipopt's loose `constr_viol_tol` while the rest moved
+    # (#940, extended to the NLP path by #945). A caller's explicit option wins.
+    #
+    # `bound_relax_factor` is deliberately NOT here — it is not a backend-wide
+    # default, because this one backend serves both consumers of a POINT and
+    # consumers of MULTIPLIERS, and the two want opposite things (see
+    # `solvers.pounce_incumbent_options`). Call sites whose x becomes an incumbent
+    # request it; Benders/GBD recourse, whose duals are the product, must not.
     opts = pounce_option_defaults()
     if options:
         opts.update(options)

@@ -1,4 +1,4 @@
-"""Issue #945 differential panel: seeding the NLP path from pounce_option_defaults.
+"""Issue #945 differential panel: the NLP path stops returning out-of-box points.
 
 CLAUDE.md §5 regime 2 (bound-changing): the arms are compared on certification
 soundness first and search behaviour second. For every instance and arm it
@@ -17,10 +17,10 @@ authoritative optima registry (``python/tests/data/known_optima.toml``):
                            pre arm must not lose it in the post arm.
 
 Both arms run INTERLEAVED in one process (§9), alternating which goes first, so
-background load or cache warmth cannot land on one arm only. The pre arm is
-reconstructed exactly as ``nlp_pounce.solve_nlp`` was before #945: ``print_level``
-alone, leaving BOTH ``constr_viol_tol`` (Ipopt default 1e-4) and
-``bound_relax_factor`` (1e-8) at Ipopt's values.
+background load or cache warmth cannot land on one arm only. The pre arm leaves
+BOTH ``constr_viol_tol`` (Ipopt default 1e-4) and ``bound_relax_factor`` (1e-8)
+at Ipopt's values everywhere, which is what the pre-#945 tree did — see the note
+on ``set_arm`` for why that takes two seams rather than one.
 
 §6: this panel counts the ``solve_nlp`` calls each arm actually made. If that
 count is zero the panel exercised nothing of the change under test and exits
@@ -55,7 +55,13 @@ assert "opts = pounce_option_defaults()" in inspect.getsource(NLPP.solve_nlp), (
     "baseline, so there is no change here to panel"
 )
 
-_PRE_ARM = {"print_level": 0}
+# The pre-#945 arm. Reconstructing it takes TWO seams, not one: #945 does NOT put
+# bound_relax_factor in the backend default (that breaks the Benders dual LP — see
+# solvers.pounce_incumbent_options), so the arm has to neutralize both the backend
+# baseline AND the incumbent options requested by the call sites whose returned
+# point becomes a solution. Patching only the backend would leave the incumbent
+# requests live and silently mislabel the arm — the #940 lesson, one level up.
+_PRE_BACKEND = {"print_level": 0}
 _REAL = pounce_option_defaults
 
 ROOT = "python/tests/data/minlplib_nl"
@@ -75,19 +81,23 @@ NLPP.solve_nlp = _counting_solve_nlp
 # The callers import `solve_nlp` lazily inside functions, so patching the module
 # attribute is enough; but solver.py's batch path reads the options directly.
 import discopt.solver as SOLVER  # noqa: E402
+import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
+import discopt.solvers.oa as OA  # noqa: E402
 
-_ORIG_BATCH_DEFAULTS = SOLVER.pounce_option_defaults
+# Every module that requests the incumbent options; the arm must cover all of them.
+_CONSUMERS = (SOLVER, OA, LOA)
+_REAL_INCUMBENT = SOLVER.pounce_incumbent_options
 
 
 def set_arm(arm: str) -> None:
     global _ARM
     _ARM = arm
-    if arm == "pre":
-        NLPP.pounce_option_defaults = lambda: dict(_PRE_ARM)
-        SOLVER.pounce_option_defaults = lambda: dict(_PRE_ARM)
-    else:
-        NLPP.pounce_option_defaults = _REAL
-        SOLVER.pounce_option_defaults = _ORIG_BATCH_DEFAULTS
+    pre = arm == "pre"
+    NLPP.pounce_option_defaults = (lambda: dict(_PRE_BACKEND)) if pre else _REAL
+    for mod in _CONSUMERS:
+        mod.pounce_incumbent_options = (lambda: {}) if pre else _REAL_INCUMBENT
+        if hasattr(mod, "pounce_option_defaults"):
+            mod.pounce_option_defaults = (lambda: dict(_PRE_BACKEND)) if pre else _REAL
 
 
 def solve_one(path: str, arm: str, time_limit: float) -> dict:
