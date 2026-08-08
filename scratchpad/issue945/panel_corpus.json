@@ -2,1194 +2,1335 @@
  "rows": {
   "4stufen": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 20282.050738736412,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 20.867700138999908
+    "wall": 21.32714018599995
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 20282.050738736412,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 20.706769252999948
+    "wall": 20.720571975999974
    }
   },
   "alan": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.9249999999513205,
-    "bound": 2.9249999999513205,
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.10150536599985571
+    "wall": 0.0697737049999887
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.9249999999513205,
-    "bound": 2.9249999999513205,
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.0947628110000096
+    "wall": 0.06162336099987442
    }
   },
   "bchoco06": {
    "pre": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 0.9999887833703148,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 22.010192088000167
+    "wall": 21.838321133999898
    },
    "post": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 0.9999887833703148,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.29733245500006
+    "wall": 21.015788905000136
    }
   },
   "bchoco07": {
    "post": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000000286,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 26.272639786000127
+    "wall": 25.83363056799999
    },
    "pre": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000000286,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.568805414000053
+    "wall": 21.417543166000087
    }
   },
   "bchoco08": {
    "pre": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000002788,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.136641505999933
+    "wall": 21.386567788000093
    },
    "post": {
+    "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000002788,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 20.3981126770002
+    "wall": 20.306743565000033
    }
   },
   "beuster": {
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 6395.108328059316,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.61065829500012
+    "wall": 21.53944314699993
    },
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 6395.108328059316,
+    "bound": 6395.108327034671,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 20.883928779999906
+    "wall": 21.234007547000147
    }
   },
   "casctanks": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": -90.17862329759835,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 20.934898602999965
+    "wall": 21.27176078699995
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": -90.17862329759835,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 27.27564052100024
+    "wall": 25.010035169000048
    }
   },
   "chance": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 29.894378166613386,
     "bound": 29.894378166613386,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.4639579149998099
+    "wall": 0.40208159200005866
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 29.894378154271102,
     "bound": 29.894378154271102,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.1849188989999675
+    "wall": 0.16450228000007883
    }
   },
   "clay0303hfsg": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.36598070800028
+    "wall": 20.643820403999825
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
-    "node_count": 95,
+    "node_count": 127,
     "gap_certified": false,
-    "wall": 20.70678265100014
+    "wall": 20.99889830500001
    }
   },
   "contvar": {
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 180782.8593284799,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.63025449199995
+    "wall": 22.113465987000154
    },
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 183632.02121055726,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 24.087252487000114
+    "wall": 21.53963904400007
    }
   },
   "cvxnonsep_nsig30": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 130.62871116925294,
     "bound": 130.61841392487688,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 10.327229632000126
+    "wall": 5.474517335999963
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 130.62871268683438,
-    "bound": 130.6184154341326,
+    "objective": 130.62871123822686,
+    "bound": 130.61841401236617,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 5.772850220999771
+    "wall": 3.6531784119999884
    }
   },
   "cvxnonsep_psig30": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 78.998854365269,
-    "bound": 78.99701709863874,
+    "objective": 78.99885435294289,
+    "bound": 78.9970170582728,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 3.786479123999925
+    "wall": 3.3853175290000763
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 78.99885435294289,
     "bound": 78.99701703820377,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 1.8690656310000122
+    "wall": 1.8419379100000697
    }
   },
   "cvxnonsep_psig40r": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 86.54527995164959,
     "bound": 86.53873600363832,
     "node_count": 103,
     "gap_certified": true,
-    "wall": 8.518324066000332
+    "wall": 7.935117317000049
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 86.54528288283356,
-    "bound": 86.53873904316234,
+    "objective": 86.54527995164958,
+    "bound": 86.5387360184926,
     "node_count": 95,
     "gap_certified": true,
-    "wall": 6.983134777000032
+    "wall": 6.1406269019998945
    }
   },
   "dispatch": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 3155.2879268631687,
-    "bound": 3155.287861536673,
+    "objective": 3155.2879267317876,
+    "bound": 3155.2878615366767,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.7959989019996101
+    "wall": 0.5210910200000853
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 3155.2879266857854,
     "bound": 3155.2878615366776,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.38547951100008504
+    "wall": 0.38248191299999235
    }
   },
   "ex1221": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 7.667180068813135,
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.0075459250001586
+    "wall": 1.088639171000068
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 7.667180068813135,
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.8329038560000299
+    "wall": 0.6961785749999763
    }
   },
   "ex1222": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 1.0765430833322618,
-    "bound": 1.0765430833322571,
-    "node_count": 3,
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031955,
+    "node_count": 1,
     "gap_certified": true,
-    "wall": 0.4204117680001218
+    "wall": 0.4036420590000489
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.0765430833322625,
     "bound": 1.0765430463031964,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.25425212400023156
+    "wall": 0.2393873399998938
    }
   },
   "ex1224": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -0.9434704942820806,
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 3.870680566000374
+    "wall": 3.1738750510000955
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -0.9434704993121346,
-    "bound": -0.9434705000000165,
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.945993745999658
+    "wall": 2.6461232209999253
    }
   },
   "ex1225": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 31.000000000008843,
-    "bound": 30.999999999999844,
+    "objective": 30.999999948692963,
+    "bound": 30.999999948692963,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.976157606000015
+    "wall": 3.2333033429999887
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 30.999999913557566,
     "bound": 30.999999913557566,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.979208139000093
+    "wall": 2.7822530089999873
    }
   },
   "ex1226": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -17.000000003887443,
     "bound": -17.000000003887443,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.0550850290001108
+    "wall": 1.2791051019999031
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -17.000000000000007,
-    "bound": -17.00000000000013,
-    "node_count": 5,
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3,
     "gap_certified": true,
-    "wall": 1.3592462000001433
+    "wall": 1.432167889000084
    }
   },
   "ex14_1_9": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.8370135742179245e-09,
-    "bound": 0.0,
-    "node_count": 5,
+    "objective": -1.9775220623231286e-16,
+    "bound": -1.9775220623231286e-16,
+    "node_count": 3,
     "gap_certified": true,
-    "wall": 0.2728006060001462
+    "wall": 1.1406090880000193
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -1.9775220540513224e-16,
     "bound": -1.9775220540513224e-16,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.35003560699988157
+    "wall": 0.4209316100000251
    }
   },
   "fac2": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 331837497.8394821,
     "bound": 331837497.54563797,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 10.471384882000166
+    "wall": 10.586713098000018
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 331837498.1769339,
-    "bound": 331837498.1760158,
+    "objective": 331837498.17691857,
+    "bound": 331837497.54565895,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 12.937645874000282
+    "wall": 8.704947227000048
    }
   },
   "flay02m": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 37.94733200383577,
-    "bound": 37.94733193020236,
+    "objective": 37.947331863834606,
+    "bound": 37.94733180456953,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.9391262450003524
+    "wall": 0.6680022479999934
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 37.94733186383461,
     "bound": 37.947331804569515,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.49601408899980015
+    "wall": 0.44236480800009303
    }
   },
   "flay03m": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 48.98979479383567,
     "bound": 48.98979470823052,
     "node_count": 111,
     "gap_certified": true,
-    "wall": 8.738355416000104
+    "wall": 7.461430084000085
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 48.989794973836744,
-    "bound": 48.98979486747301,
+    "objective": 48.98979479383577,
+    "bound": 48.98979470823063,
     "node_count": 113,
     "gap_certified": true,
-    "wall": 9.112262885999826
+    "wall": 7.378897106000068
    }
   },
   "gbd": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.1999999995740955,
-    "bound": 2.1999999995740955,
+    "objective": 2.1999999825308127,
+    "bound": 2.1999999825308127,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.045054060999973444
+    "wall": 0.02703937000001133
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.1999999995740955,
-    "bound": 2.1999999995740955,
+    "objective": 2.1999999825308127,
+    "bound": 2.1999999825308127,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.03419560600013938
+    "wall": 0.022417828000016016
    }
   },
   "gkocis": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -1.9230987798770212,
     "bound": -1.9230988280923489,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.645017875999656
+    "wall": 1.3983889429998726
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -1.9230986924056728,
-    "bound": -1.9230987422706283,
-    "node_count": 7,
+    "objective": -1.9230987747401134,
+    "bound": -1.9230988280923498,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 2.338902108000184
+    "wall": 1.2420297620001293
    }
   },
   "hda": {
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": -64473.44240243703,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 21.1590209269998
+    "wall": 21.7771964760002
    },
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": -64473.44240243703,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 21.094986974999756
+    "wall": 21.071228192000035
    }
   },
   "heatexch_gen1": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.285185699000067
+    "wall": 24.602463700000044
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 26.217303968000124
+    "wall": 25.374974721999934
    }
   },
   "heatexch_gen2": {
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 555767.7902857271,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 22.110858305999955
+    "wall": 22.050892694999902
    },
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": 555767.7902857271,
-    "node_count": 7,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.20073213400019
+    "wall": 21.659613729000057
    }
   },
   "heatexch_gen3": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 26.534706085999915
+    "wall": 24.805495338000128
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 204.4960045869998
+    "wall": 159.09318966699993
    }
   },
   "m3": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 37.800000263754704,
-    "bound": 37.800000072787064,
-    "node_count": 53,
+    "objective": 37.79999970380645,
+    "bound": 37.79999957378442,
+    "node_count": 41,
     "gap_certified": true,
-    "wall": 5.847690927999793
+    "wall": 4.161642962000087
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 37.79999966997884,
     "bound": 37.79999951039201,
     "node_count": 47,
     "gap_certified": true,
-    "wall": 4.307587265000166
+    "wall": 5.255348631000061
    }
   },
   "nvs01": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 12.46966882156821,
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.755747736000103
+    "wall": 1.6439451590001681
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 12.46966882156821,
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.3634539760000735
+    "wall": 1.2853830799999741
    }
   },
   "nvs02": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 5.96418452307,
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.41730416900009004
+    "wall": 0.45007736000002296
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 5.96418452307,
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.37162310200028514
+    "wall": 0.3842895899999803
    }
   },
   "nvs03": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 16.0,
     "bound": 15.99999972676511,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.1952417030001925
+    "wall": 0.2949178530000154
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 16.0,
-    "bound": 16.0,
-    "node_count": 3,
+    "bound": 15.99999996676705,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 0.1750783349998528
+    "wall": 0.1825162210000144
    }
   },
   "nvs04": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 0.720000000000006,
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.49249716800022725
+    "wall": 0.43267889300000206
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 0.720000000000006,
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.34949135599981673
+    "wall": 0.32748328499997115
    }
   },
   "nvs05": {
    "pre": {
+    "maximize": false,
     "status": "feasible",
     "objective": 8.731956986640078,
     "bound": 3.5424692441047068,
-    "node_count": 33,
+    "node_count": 41,
     "gap_certified": false,
-    "wall": 20.248498161000043
+    "wall": 20.182257691999894
    },
    "post": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 8.73195696936806,
-    "bound": 3.5139026016464836,
+    "objective": 12.589492574009626,
+    "bound": 3.513753543700079,
     "node_count": 33,
     "gap_certified": false,
-    "wall": 20.38520216699999
+    "wall": 20.12968590100013
    }
   },
   "nvs06": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.7703125,
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.5734330180002871
+    "wall": 1.5876532459999453
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.7703125,
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.1964277829997627
+    "wall": 1.07712272699996
    }
   },
   "nvs07": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 4.0,
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.14979283399998167
+    "wall": 0.09569734999990942
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 4.0,
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.07110062800029482
+    "wall": 0.06396703199993681
    }
   },
   "nvs08": {
    "post": {
-    "status": "optimal",
-    "objective": 23.449727347978744,
-    "bound": 23.449727347447233,
-    "node_count": 5,
-    "gap_certified": true,
-    "wall": 1.8630246170000646
-   },
-   "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 23.449727347139827,
     "bound": 23.44972734516655,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.455282664999686
+    "wall": 1.4748921469999914
+   },
+   "pre": {
+    "maximize": false,
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 1.2505608799999663
    }
   },
   "nvs09": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -43.134336918035295,
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 7.549358587999905
+    "wall": 6.435507588999826
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -43.13433691803531,
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 5.06351296999992
+    "wall": 4.4610048320000715
    }
   },
   "nvs10": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -310.7999999999999,
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.18107256899975255
+    "wall": 0.16603770200003964
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -310.7999999999999,
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.14433151599996563
+    "wall": 0.13045944899999995
    }
   },
   "nvs11": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -431.0000000000085,
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 0.6414511250000032
+    "wall": 1.1448019409999688
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -431.0000000000085,
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 0.5812574599999607
+    "wall": 0.7152426210000158
    }
   },
   "nvs12": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -481.20000000001,
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.1597501929995815
+    "wall": 2.4171318409999003
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -481.20000000001,
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.078526734999741
+    "wall": 2.097880950999979
    }
   },
   "nvs13": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -585.2,
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.7141908429998693
+    "wall": 1.8591022190000785
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -585.2,
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.6717294449999827
+    "wall": 1.4032217410001522
    }
   },
   "nvs14": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -40358.15476929995,
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.7930625140002121
+    "wall": 0.8666135529999792
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -40358.15476929995,
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.9612146969998321
+    "wall": 0.8534960629999659
    }
   },
   "nvs15": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.0,
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.08759022100002767
+    "wall": 0.07827312700010225
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.0,
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.08692739699972662
+    "wall": 0.07677735400011443
    }
   },
   "nvs21": {
    "post": {
-    "status": "optimal",
-    "objective": -5.684782472248296,
-    "bound": -5.684782500002237,
-    "node_count": 37,
-    "gap_certified": true,
-    "wall": 4.944593620999967
-   },
-   "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -5.684782628025259,
     "bound": -5.684782628025259,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 7.143478100000266
+    "wall": 8.974388968000085
+   },
+   "pre": {
+    "maximize": false,
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 6.292978661999996
    }
   },
   "oaer": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -1.923098499884843,
     "bound": -1.923098601139822,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.4632768280002892
+    "wall": 1.189243807000139
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -1.9230985101297913,
-    "bound": -1.9230985229112765,
-    "node_count": 5,
+    "objective": -1.9230985115702832,
+    "bound": -1.923098601139822,
+    "node_count": 3,
     "gap_certified": true,
-    "wall": 1.6399173979998523
+    "wall": 1.2234205120000752
    }
   },
   "st_e11": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 189.31162970097128,
-    "bound": 189.311629686619,
-    "node_count": 5,
+    "objective": 189.31178228026806,
+    "bound": 189.31162968661764,
+    "node_count": 27,
     "gap_certified": true,
-    "wall": 1.7492268539999714
+    "wall": 3.9886188610000772
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 189.31162974131917,
     "bound": 189.31162968661766,
     "node_count": 27,
     "gap_certified": true,
-    "wall": 3.9942719690002377
+    "wall": 3.3204398390000733
    }
   },
   "st_e13": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 1.9999999825187946,
     "bound": 1.9999999825187946,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.27426670399972863
+    "wall": 0.23803890599992883
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": 2.0000000025188225,
-    "bound": 2.0,
+    "objective": 1.9999999825187946,
+    "bound": 1.9999999825187946,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.1379266369999641
+    "wall": 0.1254774509998242
    }
   },
   "st_e29": {
    "post": {
-    "status": "optimal",
-    "objective": -0.9434704993121346,
-    "bound": -0.9434705000000165,
-    "node_count": 5,
-    "gap_certified": true,
-    "wall": 2.964155441999992
-   },
-   "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -0.9434704942820806,
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.8933606120003788
+    "wall": 2.5590663169998606
+   },
+   "pre": {
+    "maximize": false,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.665116517000115
    }
   },
   "st_e36": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -245.99999999999997,
     "bound": -246.00000000170422,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 11.671530211000118
+    "wall": 10.071021720999852
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -246.0,
+    "objective": -245.99999999999997,
     "bound": -246.00000000170422,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 10.362108264000199
+    "wall": 9.108315689999927
    }
   },
   "st_e38": {
    "post": {
-    "status": "optimal",
-    "objective": 7197.727148526157,
-    "bound": 7197.727148526157,
-    "node_count": 3,
-    "gap_certified": true,
-    "wall": 1.0355117770000106
-   },
-   "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 7197.727116826533,
     "bound": 7197.727116826533,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.770093886000268
+    "wall": 0.9304301829999986
+   },
+   "pre": {
+    "maximize": false,
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.7120587800000067
    }
   },
   "st_miqp1": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 280.9999999906497,
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.21868393500017191
+    "wall": 0.02052733999994416
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 280.9999999906497,
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.03125743100008549
+    "wall": 0.018686946999878273
    }
   },
   "st_miqp2": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": 2.0,
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.07676102499999615
+    "wall": 0.02447017899999082
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": 2.0,
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.06837029500002245
+    "wall": 0.023696365999967384
    }
   },
   "st_miqp3": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -6.0,
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.02205712000022686
+    "wall": 0.00906364599995868
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -6.0,
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.01834424799972112
+    "wall": 0.008847068000022773
    }
   },
   "st_miqp4": {
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -4574.000000000435,
-    "bound": -4574.000000000435,
+    "objective": -4574.0000024840665,
+    "bound": -4574.0000024840665,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.09114826299992274
+    "wall": 0.026047281999808547
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -4574.000000000435,
-    "bound": -4574.000000000435,
+    "objective": -4574.0000024840665,
+    "bound": -4574.0000024840665,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.13341707600011432
+    "wall": 0.026393293999944945
    }
   },
   "st_miqp5": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -333.88888889644716,
-    "bound": -333.88888889644716,
+    "objective": -333.88889024868075,
+    "bound": -333.88889024868075,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.10419316000024992
+    "wall": 0.0324710889999551
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
-    "objective": -333.88888889644716,
-    "bound": -333.88888889644716,
+    "objective": -333.88889024868075,
+    "bound": -333.88889024868075,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.062342824999632285
+    "wall": 0.031452121000029365
    }
   },
   "st_test1": {
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -1.6495994490692313e-08,
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.08140621399979864
+    "wall": 0.03626103800002056
    },
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -1.6495994490692313e-08,
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.051205858000230364
+    "wall": 0.035310013999833245
    }
   },
   "st_testgr3": {
    "pre": {
+    "maximize": false,
     "status": "optimal",
     "objective": -20.59,
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.45436429100027453
+    "wall": 0.28182646599998407
    },
    "post": {
+    "maximize": false,
     "status": "optimal",
     "objective": -20.59,
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.5031579499996042
+    "wall": 0.2782758789999207
    }
   },
   "syn05hfsg": {
    "post": {
+    "maximize": true,
     "status": "feasible",
-    "objective": 837.7323012718434,
-    "bound": 840.4893941019076,
-    "node_count": 215,
+    "objective": 837.7324083563395,
+    "bound": 838.3878622240098,
+    "node_count": 171,
     "gap_certified": false,
-    "wall": 20.24814080499982
+    "wall": 20.28268366600014
    },
    "pre": {
+    "maximize": true,
     "status": "feasible",
     "objective": 837.732412391107,
-    "bound": 840.4893941019081,
-    "node_count": 125,
+    "bound": 838.3878622240098,
+    "node_count": 181,
     "gap_certified": false,
-    "wall": 20.11201671300023
+    "wall": 20.11427130700008
    }
   },
   "tanksize": {
    "pre": {
+    "maximize": false,
     "status": "time_limit",
     "objective": 1.268643752557795,
-    "bound": 1.2609361431125585,
-    "node_count": 3330,
+    "bound": 1.2616432205298513,
+    "node_count": 3596,
     "gap_certified": true,
-    "wall": 20.3181326670001
+    "wall": 20.114331551000078
    },
    "post": {
+    "maximize": false,
     "status": "time_limit",
-    "objective": 1.268643759853009,
-    "bound": 1.2598035867232422,
-    "node_count": 3076,
+    "objective": 1.2686437708530283,
+    "bound": 1.262799393410885,
+    "node_count": 3964,
     "gap_certified": true,
-    "wall": 20.118190193999908
+    "wall": 20.109238961000074
    }
   },
   "tls2": {
    "post": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 10.299999999983916,
-    "bound": 2.448712647787379,
+    "objective": 10.299999996297192,
+    "bound": 2.4487125876978713,
     "node_count": 353,
     "gap_certified": false,
-    "wall": 20.627966677999666
+    "wall": 20.732897183999967
    },
    "pre": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 6.299999911869455,
-    "bound": 2.4487125876978726,
-    "node_count": 339,
+    "objective": 5.299999922109238,
+    "bound": 3.1706801036010077,
+    "node_count": 349,
     "gap_certified": false,
-    "wall": 21.14731124700029
+    "wall": 20.800227508000035
    }
   },
   "tspn05": {
    "pre": {
+    "maximize": false,
     "status": "feasible",
     "objective": 191.2552076848774,
-    "bound": 178.27199442798212,
-    "node_count": 33,
+    "bound": 179.44337578420988,
+    "node_count": 49,
     "gap_certified": false,
-    "wall": 20.15668522499982
+    "wall": 20.155364598999768
    },
    "post": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 191.25520784460605,
-    "bound": 179.0941485386719,
-    "node_count": 53,
+    "objective": 191.2552076848786,
+    "bound": 179.44337578420988,
+    "node_count": 49,
     "gap_certified": false,
-    "wall": 20.138568632999977
+    "wall": 20.18219688099998
    }
   },
   "tspn08": {
    "post": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 290.5668539675022,
+    "objective": 290.5668537474047,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 13.85614847700026
+    "wall": 19.96056919099965
    },
    "pre": {
+    "maximize": false,
     "status": "feasible",
     "objective": 290.56685374735093,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 17.982297136999932
+    "wall": 16.166508093000175
    }
   },
   "tspn10": {
    "pre": {
+    "maximize": false,
     "status": "feasible",
     "objective": 225.1260713973286,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 16.99774281100008
+    "wall": 15.319980657000087
    },
    "post": {
+    "maximize": false,
     "status": "feasible",
-    "objective": 225.12607170016992,
+    "objective": 225.12607139732896,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 20.852727699999832
+    "wall": 19.474078835
    }
   },
   "tspn12": {
    "post": {
+    "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 46.11591934199987
+    "wall": 35.189106618000096
    },
    "pre": {
+    "maximize": false,
     "status": "feasible",
     "objective": 262.64739525060224,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 15.90270813699999
+    "wall": 14.85704738000004
    }
   }
  },
  "diffs": [
+  [
+   "beuster",
+   {
+    "bound": [
+     6395.108327034671,
+     6395.108328059316
+    ]
+   }
+  ],
   [
    "casctanks",
    {
@@ -1217,7 +1358,7 @@
    {
     "node_count": [
      3,
-     95
+     127
     ]
    }
   ],
@@ -1235,24 +1376,20 @@
    {
     "objective": [
      130.62871116925294,
-     130.62871268683438
+     130.62871123822686
     ],
     "bound": [
      130.61841392487688,
-     130.6184154341326
+     130.61841401236617
     ]
    }
   ],
   [
    "cvxnonsep_psig30",
    {
-    "objective": [
-     78.99885435294289,
-     78.998854365269
-    ],
     "bound": [
      78.99701703820377,
-     78.99701709863874
+     78.9970170582728
     ]
    }
   ],
@@ -1261,11 +1398,11 @@
    {
     "objective": [
      86.54527995164959,
-     86.54528288283356
+     86.54527995164958
     ],
     "bound": [
      86.53873600363832,
-     86.53873904316234
+     86.5387360184926
     ],
     "node_count": [
      103,
@@ -1278,41 +1415,20 @@
    {
     "objective": [
      3155.2879266857854,
-     3155.2879268631687
+     3155.2879267317876
     ],
     "bound": [
      3155.2878615366776,
-     3155.287861536673
+     3155.2878615366767
     ]
    }
   ],
   [
    "ex1222",
    {
-    "objective": [
-     1.0765430833322625,
-     1.0765430833322618
-    ],
     "bound": [
      1.0765430463031964,
-     1.0765430833322571
-    ],
-    "node_count": [
-     1,
-     3
-    ]
-   }
-  ],
-  [
-   "ex1224",
-   {
-    "objective": [
-     -0.9434704942820806,
-     -0.9434704993121346
-    ],
-    "bound": [
-     -0.9434705000000166,
-     -0.9434705000000165
+     1.0765430463031955
     ]
    }
   ],
@@ -1321,28 +1437,11 @@
    {
     "objective": [
      30.999999913557566,
-     31.000000000008843
+     30.999999948692963
     ],
     "bound": [
      30.999999913557566,
-     30.999999999999844
-    ]
-   }
-  ],
-  [
-   "ex1226",
-   {
-    "objective": [
-     -17.000000003887443,
-     -17.000000000000007
-    ],
-    "bound": [
-     -17.000000003887443,
-     -17.00000000000013
-    ],
-    "node_count": [
-     3,
-     5
+     30.999999948692963
     ]
    }
   ],
@@ -1351,15 +1450,11 @@
    {
     "objective": [
      -1.9775220540513224e-16,
-     2.8370135742179245e-09
+     -1.9775220623231286e-16
     ],
     "bound": [
      -1.9775220540513224e-16,
-     0.0
-    ],
-    "node_count": [
-     3,
-     5
+     -1.9775220623231286e-16
     ]
    }
   ],
@@ -1368,11 +1463,11 @@
    {
     "objective": [
      331837497.8394821,
-     331837498.1769339
+     331837498.17691857
     ],
     "bound": [
      331837497.54563797,
-     331837498.1760158
+     331837497.54565895
     ]
    }
   ],
@@ -1381,11 +1476,11 @@
    {
     "objective": [
      37.94733186383461,
-     37.94733200383577
+     37.947331863834606
     ],
     "bound": [
      37.947331804569515,
-     37.94733193020236
+     37.94733180456953
     ]
    }
   ],
@@ -1394,11 +1489,11 @@
    {
     "objective": [
      48.98979479383567,
-     48.989794973836744
+     48.98979479383577
     ],
     "bound": [
      48.98979470823052,
-     48.98979486747301
+     48.98979470823063
     ],
     "node_count": [
      111,
@@ -1411,14 +1506,19 @@
    {
     "objective": [
      -1.9230987798770212,
-     -1.9230986924056728
+     -1.9230987747401134
     ],
     "bound": [
      -1.9230988280923489,
-     -1.9230987422706283
-    ],
+     -1.9230988280923498
+    ]
+   }
+  ],
+  [
+   "heatexch_gen2",
+   {
     "node_count": [
-     5,
+     3,
      7
     ]
    }
@@ -1428,15 +1528,15 @@
    {
     "objective": [
      37.79999966997884,
-     37.800000263754704
+     37.79999970380645
     ],
     "bound": [
      37.79999951039201,
-     37.800000072787064
+     37.79999957378442
     ],
     "node_count": [
      47,
-     53
+     41
     ]
    }
   ],
@@ -1445,11 +1545,7 @@
    {
     "bound": [
      15.99999972676511,
-     16.0
-    ],
-    "node_count": [
-     5,
-     3
+     15.99999996676705
     ]
    }
   ],
@@ -1458,28 +1554,15 @@
    {
     "objective": [
      8.731956986640078,
-     8.73195696936806
+     12.589492574009626
     ],
     "bound": [
      3.5424692441047068,
-     3.5139026016464836
-    ]
-   }
-  ],
-  [
-   "nvs08",
-   {
-    "objective": [
-     23.449727347139827,
-     23.449727347978744
-    ],
-    "bound": [
-     23.44972734516655,
-     23.449727347447233
+     3.513753543700079
     ],
     "node_count": [
-     3,
-     5
+     41,
+     33
     ]
    }
   ],
@@ -1493,36 +1576,11 @@
    }
   ],
   [
-   "nvs21",
-   {
-    "objective": [
-     -5.684782628025259,
-     -5.684782472248296
-    ],
-    "bound": [
-     -5.684782628025259,
-     -5.684782500002237
-    ],
-    "node_count": [
-     3,
-     37
-    ]
-   }
-  ],
-  [
    "oaer",
    {
     "objective": [
      -1.923098499884843,
-     -1.9230985101297913
-    ],
-    "bound": [
-     -1.923098601139822,
-     -1.9230985229112765
-    ],
-    "node_count": [
-     3,
-     5
+     -1.9230985115702832
     ]
    }
   ],
@@ -1531,63 +1589,11 @@
    {
     "objective": [
      189.31162974131917,
-     189.31162970097128
+     189.31178228026806
     ],
     "bound": [
      189.31162968661766,
-     189.311629686619
-    ],
-    "node_count": [
-     27,
-     5
-    ]
-   }
-  ],
-  [
-   "st_e13",
-   {
-    "objective": [
-     1.9999999825187946,
-     2.0000000025188225
-    ],
-    "bound": [
-     1.9999999825187946,
-     2.0
-    ]
-   }
-  ],
-  [
-   "st_e29",
-   {
-    "objective": [
-     -0.9434704942820806,
-     -0.9434704993121346
-    ],
-    "bound": [
-     -0.9434705000000166,
-     -0.9434705000000165
-    ]
-   }
-  ],
-  [
-   "st_e36",
-   {
-    "objective": [
-     -245.99999999999997,
-     -246.0
-    ]
-   }
-  ],
-  [
-   "st_e38",
-   {
-    "objective": [
-     7197.727116826533,
-     7197.727148526157
-    ],
-    "bound": [
-     7197.727116826533,
-     7197.727148526157
+     189.31162968661764
     ]
    }
   ],
@@ -1596,15 +1602,11 @@
    {
     "objective": [
      837.732412391107,
-     837.7323012718434
-    ],
-    "bound": [
-     840.4893941019081,
-     840.4893941019076
+     837.7324083563395
     ],
     "node_count": [
-     125,
-     215
+     181,
+     171
     ]
    }
   ],
@@ -1613,15 +1615,15 @@
    {
     "objective": [
      1.268643752557795,
-     1.268643759853009
+     1.2686437708530283
     ],
     "bound": [
-     1.2609361431125585,
-     1.2598035867232422
+     1.2616432205298513,
+     1.262799393410885
     ],
     "node_count": [
-     3330,
-     3076
+     3596,
+     3964
     ]
    }
   ],
@@ -1629,15 +1631,15 @@
    "tls2",
    {
     "objective": [
-     6.299999911869455,
-     10.299999999983916
+     5.299999922109238,
+     10.299999996297192
     ],
     "bound": [
-     2.4487125876978726,
-     2.448712647787379
+     3.1706801036010077,
+     2.4487125876978713
     ],
     "node_count": [
-     339,
+     349,
      353
     ]
    }
@@ -1647,15 +1649,7 @@
    {
     "objective": [
      191.2552076848774,
-     191.25520784460605
-    ],
-    "bound": [
-     178.27199442798212,
-     179.0941485386719
-    ],
-    "node_count": [
-     33,
-     53
+     191.2552076848786
     ]
    }
   ],
@@ -1664,7 +1658,7 @@
    {
     "objective": [
      290.56685374735093,
-     290.5668539675022
+     290.5668537474047
     ]
    }
   ],
@@ -1673,7 +1667,7 @@
    {
     "objective": [
      225.1260713973286,
-     225.12607170016992
+     225.12607139732896
     ]
    }
   ],
@@ -1698,8 +1692,8 @@
  "findings": [],
  "cert_regressions": [],
  "solve_nlp_calls": {
-  "pre": 2996,
-  "post": 3044
+  "pre": 3047,
+  "post": 2865
  },
  "time_limit": 20.0
 }

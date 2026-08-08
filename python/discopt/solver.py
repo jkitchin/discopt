@@ -14317,10 +14317,10 @@ def _solve_batch_pounce(
 
     # Batch-level options. Whitelist keys POUNCE understands and enforce the
     # per-node wall-time guard (issue #5) used by the serial pounce path.
-    # Seeded from the shared baseline (#945) so a batched node returns the same
-    # in-the-box point the serial ``nlp_pounce.solve_nlp`` path does — otherwise
-    # batching alone would change which side of a bound an incumbent lands on.
-    batch_opts: dict = pounce_option_defaults()
+    # Left at POUNCE's own baseline, like the serial ``nlp_pounce.solve_nlp`` path
+    # it must agree with: these are B&B node relaxations, not the reported solution,
+    # and neither shared request belongs here (#945 — see the note in nlp_pounce).
+    batch_opts: dict = {"print_level": 0}
     for k in ("max_iter", "tol", "acceptable_tol"):
         if options.get(k) is not None:
             batch_opts[k] = options[k]

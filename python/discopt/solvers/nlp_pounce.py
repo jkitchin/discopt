@@ -18,7 +18,7 @@ import numpy as np
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
-from discopt.solvers import NLPResult, SolveStatus, pounce_option_defaults
+from discopt.solvers import NLPResult, SolveStatus
 from discopt.solvers.nlp_ipopt import (
     _IPOPT_STATUS_MAP,
     _infer_constraint_bounds,
@@ -71,18 +71,36 @@ def solve_nlp(
 
     import pounce
 
-    # Seeded from THE shared baseline like every other POUNCE entry point, so this
-    # path stops keeping Ipopt's loose `constr_viol_tol` while the rest moved
-    # (#940, extended to the NLP path by #945). A caller's explicit option wins.
+    opts = dict(options) if options else {}
+    opts.setdefault("print_level", 0)
+    # NEITHER of the two shared POUNCE requests is seeded here, and both omissions
+    # are measured rather than assumed (#945):
     #
-    # `bound_relax_factor` is deliberately NOT here — it is not a backend-wide
-    # default, because this one backend serves both consumers of a POINT and
-    # consumers of MULTIPLIERS, and the two want opposite things (see
-    # `solvers.pounce_incumbent_options`). Call sites whose x becomes an incumbent
-    # request it; Benders/GBD recourse, whose duals are the product, must not.
-    opts = pounce_option_defaults()
-    if options:
-        opts.update(options)
+    # `bound_relax_factor = 0` is requested by the call sites whose returned POINT
+    # is the product (`solver._solve_continuous`, `oa._solve_nlp_attempt`,
+    # `gdpopt_loa._solve_nlp_subproblem`) — see `solvers.pounce_incumbent_options`.
+    # Backend-wide it also reaches Benders and GBD recourse, whose product is the
+    # MULTIPLIERS, and a degenerate feasible set has no finite multiplier without
+    # Ipopt's relaxation (#940: two correctness-lane tests, 1.6s -> 79s; #946).
+    #
+    # `constr_viol_tol = 1e-8` is a backend-wide default for the matrix-form
+    # backends but is deliberately NOT routed here. Measured on nvs05 at a 20 s
+    # budget, 4 arms interleaved, 3 reps, ZERO within-arm spread
+    # (scratchpad/issue945/nvs05_attribution.py):
+    #
+    #     print_level only           objective  8.731956987   bound 3.542469244
+    #     + constr_viol_tol=1e-8     objective 12.589492574   bound 3.513753544
+    #     + incumbent options only    objective  8.731956987   bound 3.542469244
+    #
+    # so it costs a 31%-worse incumbent AND a looser bound, entirely on its own.
+    # The incumbent it displaces is genuinely feasible — worst row violation
+    # 1.8e-12, box 0, integrality 0 (nvs05_feasibility.py) — so this is a real
+    # solution lost, not a false one rejected, which is what I had assumed and had
+    # to retract. Against that: it fixes nothing here. The out-of-box defect #945 is
+    # about is `bound_relax_factor`'s, and the arm above shows constr_viol_tol alone
+    # does not touch it (mindtpy_cq stays at 2.9999000025 either way). Sound but not
+    # helpful stays out (CLAUDE.md §5). Route it here only with a measurement
+    # showing a benefit that outweighs nvs05.
 
     n = evaluator.n_variables
     m = evaluator.n_constraints

@@ -28,7 +28,17 @@ import json
 import sys
 
 REL_FLOOR = 1e-6
-MAXIMIZE = {"syn05hfsg"}
+# Fallback only. The sense decides which direction "tighter" is, so it is read from
+# the run itself when recorded; a hardcoded set is the same hole that made the
+# corpus panel misread syn05hfsg, and it silently rots as TARGETS changes.
+_FALLBACK_MAXIMIZE = {"syn05hfsg"}
+
+
+def _is_max(name, runs):
+    for r in runs:
+        if "maximize" in r:
+            return bool(r["maximize"]), "recorded"
+    return name in _FALLBACK_MAXIMIZE, "FALLBACK (sense not recorded in this run)"
 
 
 def _vals(runs, key):
@@ -47,11 +57,11 @@ def main(path: str) -> int:
 
     print(f"reps={d['reps']}  time_limit={d['time_limit']}s\n")
     for name, arms in res.items():
-        mx = name in MAXIMIZE
         pre, post = arms["pre"], arms["post"]
+        mx, src = _is_max(name, pre + post)
         st_pre = sorted({str(r.get("status")) for r in pre})
         st_post = sorted({str(r.get("status")) for r in post})
-        print(f"{name}  ({'max' if mx else 'min'})")
+        print(f"{name}  ({'max' if mx else 'min'}, sense {src})")
         print(f"   status   pre={','.join(st_pre):22s} post={','.join(st_post)}")
 
         for key in ("objective", "bound"):

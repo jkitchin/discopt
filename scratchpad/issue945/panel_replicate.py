@@ -30,7 +30,9 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.solver as SOLVER  # noqa: E402
+import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
 import discopt.solvers.nlp_pounce as NLPP  # noqa: E402
+import discopt.solvers.oa as OA  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 from discopt.solvers import pounce_option_defaults  # noqa: E402
 
@@ -38,33 +40,43 @@ assert "opts = pounce_option_defaults()" in inspect.getsource(NLPP.solve_nlp), (
     "post-#945 marker absent — nothing to replicate"
 )
 
-_PRE_ARM = {"print_level": 0}
+# Same two-seam arm reconstruction as panel_corpus.set_arm: bound_relax_factor is
+# not a backend default post-#945, so neutralizing only the backend would leave the
+# incumbent requests live and mislabel the arm.
+_PRE_BACKEND = {"print_level": 0}
 _REAL = pounce_option_defaults
-_ORIG_BATCH = SOLVER.pounce_option_defaults
+_REAL_INCUMBENT = SOLVER.pounce_incumbent_options
+_CONSUMERS = (SOLVER, OA, LOA)
 
 ROOT = "python/tests/data/minlplib_nl"
 
-# Every instance the corpus panel reported as differing on status, objective or
-# bound in a way that is not pure last-digit drift, plus tspn05 (where the post
-# arm's bound was BETTER) as a control — if replication says everything is noise,
-# a control that moved the other way is what shows the harness can see anything.
-TARGETS = ["tls2", "tspn12", "nvs05", "tspn05", "syn05hfsg", "tanksize"]
+# Every instance the corpus panel reported as differing on STATUS or on a bound
+# by more than last-digit drift. The set includes movers in BOTH directions
+# (nvs03/ex1225 tighter, nvs05/tanksize looser) — a replication harness that only
+# ever chases regressions cannot show it is capable of seeing anything.
+TARGETS = ["contvar", "ex1225", "m3", "nvs03", "nvs05", "tanksize", "tls2", "tspn12"]
 
 
 def set_arm(arm: str) -> None:
-    fn = (lambda: dict(_PRE_ARM)) if arm == "pre" else None
-    NLPP.pounce_option_defaults = fn or _REAL
-    SOLVER.pounce_option_defaults = fn or _ORIG_BATCH
+    pre = arm == "pre"
+    NLPP.pounce_option_defaults = (lambda: dict(_PRE_BACKEND)) if pre else _REAL
+    for mod in _CONSUMERS:
+        mod.pounce_incumbent_options = (lambda: {}) if pre else _REAL_INCUMBENT
+        if hasattr(mod, "pounce_option_defaults"):
+            mod.pounce_option_defaults = (lambda: dict(_PRE_BACKEND)) if pre else _REAL
 
 
 def run(path: str, arm: str, tl: float) -> dict:
     set_arm(arm)
     t0 = time.perf_counter()
     try:
-        r = from_nl(path).solve(time_limit=tl)
+        model = from_nl(path)
+        maximize = model._objective is not None and str(model._objective.sense).endswith("MAXIMIZE")
+        r = model.solve(time_limit=tl)
     except Exception as exc:  # recorded, never swallowed (§7)
         return {"error": f"{type(exc).__name__}: {exc}", "wall": time.perf_counter() - t0}
     return {
+        "maximize": maximize,
         "status": r.status,
         "objective": r.objective,
         "bound": r.bound,

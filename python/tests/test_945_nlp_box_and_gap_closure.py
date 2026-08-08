@@ -32,19 +32,41 @@ from discopt.solvers._gap import GAP_ABS_TOL, optimality_gap
 
 
 @pytest.mark.smoke
-def test_nlp_backend_seeds_the_shared_pounce_baseline():
-    """``solve_nlp`` must inherit the shared baseline, not re-spell it.
+def test_incumbent_options_are_requested_by_point_consumers_only():
+    """Pin WHERE ``bound_relax_factor`` is requested, because the two sides differ.
 
-    A second copy of these values is how one entry point silently keeps Ipopt's
-    defaults while the rest move — which is exactly the state #945 fixed.
+    The split is not "LP versus NLP", it is what the caller consumes. A call site
+    whose returned POINT becomes a solution needs it inside the declared box; a
+    call site whose MULTIPLIERS are the product must not pin it, because a
+    degenerate feasible set has no finite multiplier without Ipopt's relaxation.
+    Applied backend-wide it costs the Benders dual LP its convergence (#940) and
+    GBD its certification (#946).
+
+    Asserted in both directions, so a future edit cannot quietly move it either
+    way — the companion to
+    ``test_940...::test_option_requests_are_wired_where_the_guard_checks``.
     """
     import inspect
 
-    from discopt.solvers import nlp_pounce
+    from discopt import solver as S
+    from discopt.solvers import gdpopt_loa, nlp_pounce, oa, pounce_incumbent_options
 
-    src = inspect.getsource(nlp_pounce.solve_nlp)
-    assert "pounce_option_defaults()" in src, (
-        "nlp_pounce.solve_nlp no longer seeds from solvers.pounce_option_defaults"
+    assert pounce_incumbent_options()["bound_relax_factor"] == 0.0
+    # A fresh dict each call: a caller mutating it must not poison the next solve.
+    pounce_incumbent_options()["bound_relax_factor"] = 999.0
+    assert pounce_incumbent_options()["bound_relax_factor"] == 0.0
+
+    for fn in (S._solve_continuous, oa._solve_nlp_attempt, gdpopt_loa._solve_nlp_subproblem):
+        assert "pounce_incumbent_options()" in inspect.getsource(fn), (
+            f"{fn.__name__} returns a point that becomes a solution, so it must "
+            "request the incumbent options"
+        )
+
+    # The backend itself must stay neutral: it serves dual consumers too.
+    backend_src = inspect.getsource(nlp_pounce.solve_nlp)
+    assert "pounce_incumbent_options()" not in backend_src, (
+        "bound_relax_factor must NOT be a backend-wide default on the NLP path — "
+        "it reaches Benders/GBD recourse, whose product is the multipliers (#946)"
     )
 
 
