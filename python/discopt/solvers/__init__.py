@@ -199,9 +199,10 @@ POUNCE_BOUND_RELAX_FACTOR = 0.0
 def pounce_option_defaults() -> dict:
     """discopt's baseline POUNCE options: quiet, and inside the declared box.
 
-    THE single source of truth for the **matrix-form** backends (``lp_pounce``,
-    ``qp_pounce``). Seed it *before* merging a caller's options so an explicit
-    request still wins::
+    THE single source of truth for EVERY POUNCE entry point: the matrix-form
+    backends (``lp_pounce``, ``qp_pounce``, #940) and the NLP path
+    (``nlp_pounce.solve_nlp`` and ``solver.py``'s batch path, #945). Seed it
+    *before* merging a caller's options so an explicit request still wins::
 
         opts = pounce_option_defaults()
         opts.update(caller_options or {})
@@ -209,15 +210,13 @@ def pounce_option_defaults() -> dict:
     Do not re-spell these values at a call site — a second copy is how one entry
     point silently keeps Ipopt's defaults while the rest move.
 
-    The NLP path (``nlp_pounce.solve_nlp``, and ``solver.py``'s batch path) does
-    NOT use this yet, and so still returns points up to ~7.5e-9 outside their
-    declared bounds. That is not an oversight: pinning ``bound_relax_factor`` to 0
-    there makes incumbents genuinely feasible, which turns ``incumbent - bound``
-    from ``<= 0`` into a small positive number and breaks 12 ``gap == 0 @ 1e-9``
-    assertions across OA / GDPopt / MindtPy parity — those expectations are
-    currently calibrated against a solver that returns slightly-infeasible
-    incumbents. Extending this seed to the NLP path is tracked in #945, together
-    with the gap-closure question it forces.
+    Extending the seed to the NLP path was held back until #945 because it is a
+    certification-semantics change, not just an option: with incumbents genuinely
+    inside their boxes, ``incumbent - bound`` stops being ``<= 0``, and 12
+    ``gap == 0 @ 1e-9`` assertions across OA / GDPopt / MindtPy turned out to be
+    satisfiable only by a solver returning slightly-infeasible incumbents. #945
+    settled that by giving gap closure an absolute criterion at discopt's own
+    ``1e-6`` — see :mod:`discopt.solvers._gap`.
     """
     return {
         "print_level": 0,

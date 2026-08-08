@@ -1805,6 +1805,13 @@ def local_branching(
         and np.isfinite(node_bound)
         and np.isfinite(incumbent_obj)
     ):
+        # Deliberately NOT the shared certification tolerance from
+        # ``solvers._gap`` (1e-6), despite looking like the same test. This gate
+        # decides whether to SKIP a heuristic, so its safe direction is the
+        # opposite one: a floor tighter than the certificate tolerance runs the
+        # search more often, which costs time and can only ever find a better
+        # incumbent. Widening it here to 1e-6 for consistency would skip more and
+        # is a search-behaviour change owing its own net-positive panel (#945).
         abs_gap = incumbent_obj - float(node_bound)
         denom = max(abs(incumbent_obj), abs(float(node_bound)), 1e-10)
         if abs_gap <= 1e-9 or abs_gap / denom <= gap_tolerance:

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
+from discopt.solvers._gap import optimality_gap
 from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
@@ -3635,13 +3636,12 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
 
 
 def _compute_gap(lb: float, ub: float) -> float:
-    if ub >= 1e19 or lb <= -1e19:
-        return 1.0
-    abs_gap = max(0.0, ub - lb)
-    if abs_gap <= 1e-9:
-        return 0.0
-    denom = max(abs(ub), abs(lb), 1.0)
-    return abs_gap / denom
+    """OA's optimality gap — see :mod:`discopt.solvers._gap` for the semantics.
+
+    ``denom_floor=1.0``: below unit objective scale OA reports the absolute gap
+    rather than dividing by a vanishing denominator.
+    """
+    return optimality_gap(lb, ub, denom_floor=1.0)
 
 
 def solve_feasibility_pump(

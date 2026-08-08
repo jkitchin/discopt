@@ -44,7 +44,7 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
-from discopt.solvers import SolveStatus
+from discopt.solvers import SolveStatus, pounce_option_defaults
 
 # R3a measurement sink (temporary, behavior-neutral). When set to a mutable
 # dict by an experiment harness, the nonconvex B&B path stores the Rust tree's
@@ -14306,9 +14306,10 @@ def _solve_batch_pounce(
 
     # Batch-level options. Whitelist keys POUNCE understands and enforce the
     # per-node wall-time guard (issue #5) used by the serial pounce path.
-    # Deliberately NOT seeded from solvers.pounce_option_defaults: this is the NLP
-    # batch path, and bound_relax_factor=0 there breaks OA/GDPopt gap closure (#945).
-    batch_opts: dict = {"print_level": 0}
+    # Seeded from the shared baseline (#945) so a batched node returns the same
+    # in-the-box point the serial ``nlp_pounce.solve_nlp`` path does — otherwise
+    # batching alone would change which side of a bound an incumbent lands on.
+    batch_opts: dict = pounce_option_defaults()
     for k in ("max_iter", "tol", "acceptable_tol"):
         if options.get(k) is not None:
             batch_opts[k] = options[k]

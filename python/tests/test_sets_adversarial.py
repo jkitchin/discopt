@@ -26,27 +26,19 @@ class TestSumProdOverIndexedContainer:
         # vars at lb=1 -> 3.0, NOT 60.0 (= the keys 10+20+30)
         assert r.objective == pytest.approx(3.0, abs=1e-5)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#945: the two arms take different engine paths and only the LP one is "
-        "seeded from pounce_option_defaults, so they no longer agree to 1e-9. Kept "
-        "STRICT at 1e-9 rather than loosened — it flips to a pass when #945 seeds the "
-        "NLP path, and loosening would re-hide the defect (#940 review).",
-    )
     def test_sum_indexed_var_equals_sum_flat(self):
         # The two arms take DIFFERENT engine paths — `dm.sum(y.flat)` classifies
         # linear and goes to lp_pounce, `dm.sum(y)` on the bare container goes to
         # the general NLP path — so this is a real cross-path invariant and the
         # tight 1e-9 bound is worth keeping.
         #
-        # It previously passed for the WRONG reason: both paths returned points
-        # ~7.5e-9 BELOW lb=1 (Ipopt's bound_relax_factor), so both objectives were
-        # 2.25e-8 super-optimal and agreed to 1.4e-11 — two matched errors
-        # cancelling. #940 fixed the LP arm only, so the arms now disagree by
-        # ~3.0e-8 and this fails honestly instead of passing dishonestly. The
-        # ground-truth assertions below are what make the difference visible: a
-        # cross-model comparison alone passes just as happily when both models are
-        # wrong in the same way.
+        # It once passed for the WRONG reason: both paths returned points ~7.5e-9
+        # BELOW lb=1 (Ipopt's bound_relax_factor), so both objectives were 2.25e-8
+        # super-optimal and agreed to 1.4e-11 — two matched errors cancelling.
+        # #940 fixed the LP arm and #945 the NLP arm, so both are now inside their
+        # box and agree for the right reason. The ground-truth assertions below are
+        # what make the difference visible: a cross-model comparison alone passes
+        # just as happily when both models are wrong in the same way.
         m = dm.Model()
         s = m.set("S", [10, 20, 30])
         y = m.continuous("y", lb=1, ub=5, over=s)

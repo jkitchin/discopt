@@ -18,7 +18,7 @@ import numpy as np
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
-from discopt.solvers import NLPResult, SolveStatus
+from discopt.solvers import NLPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.nlp_ipopt import (
     _IPOPT_STATUS_MAP,
     _infer_constraint_bounds,
@@ -71,17 +71,12 @@ def solve_nlp(
 
     import pounce
 
-    opts = dict(options) if options else {}
-    opts.setdefault("print_level", 0)
-    # NOT seeded from solvers.pounce_option_defaults yet. This path returns points
-    # up to ~7.5e-9 OUTSIDE their declared bounds (Ipopt's bound_relax_factor),
-    # measured in #940 — but pinning that to 0 here makes incumbents genuinely
-    # feasible, which turns `incumbent - bound` from <=0 into a small positive
-    # number and breaks 12 `gap == 0 @ 1e-9` assertions across OA / GDPopt /
-    # MindtPy parity. Those expectations are currently calibrated against a solver
-    # that returns slightly-infeasible incumbents; correcting that is a
-    # certification-semantics change needing its own differential panel. Tracked
-    # in #945 with the full attribution.
+    # Seeded from THE shared baseline so this path returns points inside the box
+    # the caller declared, like every other POUNCE entry point (#940, extended to
+    # the NLP path by #945). A caller's explicit option still wins.
+    opts = pounce_option_defaults()
+    if options:
+        opts.update(options)
 
     n = evaluator.n_variables
     m = evaluator.n_constraints
