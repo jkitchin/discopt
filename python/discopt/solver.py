@@ -11776,6 +11776,14 @@ def solve_model(
                     _fix_lb[_off + _k] = _val
                     _fix_ub[_off + _k] = _val
             _polish_opts = dict(opts)
+            # The polished point IS the reported solution when it is adopted below,
+            # so this is an incumbent producer and takes the incumbent options
+            # (#945). Without them the polish can walk the continuous variables
+            # outside the declared box by ``1e-8*(1+|bound|)`` per bound — the very
+            # digits it exists to tighten — and the adopted objective is then
+            # super-optimal. The sibling ``recover_opts`` re-solve at :13848
+            # deliberately does NOT take them: its product is the MULTIPLIERS.
+            _polish_opts.update(pounce_incumbent_options())
             _polish_opts["max_wall_time"] = max(
                 0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
             )
@@ -13834,9 +13842,32 @@ def _solve_nlp_bb(
             sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
 
-        # Recover relaxation duals at the incumbent by re-solving the NLP with
-        # integer variables fixed. Best-effort — failures leave duals as None
-        # and the examiner falls back to its LSQ recovery.
+        # Refine the incumbent's continuous variables, then recover relaxation
+        # duals at the refined point, by re-solving the NLP with integer variables
+        # fixed. Best-effort — failures leave duals as None and the examiner falls
+        # back to its LSQ recovery.
+        #
+        # This site consumes BOTH products of an NLP solve, and the two want
+        # opposite options (#945), so it takes two solves rather than one:
+        #
+        #   * the refine solve's product is the reported POINT, so it requests
+        #     ``pounce_incumbent_options()``. Ipopt's default ``bound_relax_factor``
+        #     relaxes every bound — including the slack bounds standing in for
+        #     inequality rows — by ``1e-8*(1 + |bound|)``, and on an ill-conditioned
+        #     row that is not a 1e-8 error in the answer: ``(x-3)^2 <= 0`` violated
+        #     by 1e-8 is ``x`` wrong by 1e-4. On the MindtPy constraint-qualification
+        #     fixture (exact optimum 3.0) this single re-solve took a feasible
+        #     incumbent at x = 3 and overwrote it with x = 2.9999, which the search
+        #     then certified ``optimal`` at ``gap = 0``. No feasibility screen can
+        #     catch that — the bad point's worst row violation is 1e-8, well inside
+        #     any sane tolerance — so the fix has to be not to *produce* it.
+        #   * the recover solve's product is the MULTIPLIERS, so it must NOT set it:
+        #     a degenerate feasible set (Slater failing) has no finite multiplier
+        #     without Ipopt's relaxation (#946).
+        #
+        # Order matters: refine first, then recover at the adopted point, so the
+        # duals stay consistent with the primal that is actually reported — which
+        # is what the adoption below exists for.
         try:
             fix_lb = lb.copy()
             fix_ub = ub.copy()
@@ -13850,6 +13881,27 @@ def _solve_nlp_bb(
                 0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
             )
             recover_opts.setdefault("print_level", 0)
+            refine_opts = dict(recover_opts)
+            refine_opts.update(pounce_incumbent_options())
+            nlp_refined = _solve_node_nlp_kkt(
+                evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, refine_opts
+            )
+            if (
+                nlp_refined.status == SolveStatus.OPTIMAL
+                and nlp_refined.x is not None
+                and np.all(np.isfinite(nlp_refined.x))
+                and nlp_refined.objective is not None
+                and abs(float(nlp_refined.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
+            ):
+                refined = np.asarray(nlp_refined.x, dtype=float).copy()
+                # Keep integer columns pinned at their (rounded) incumbent
+                # values; only the continuous variables are refined.
+                for off, sz in zip(int_offsets, int_sizes):
+                    for k in range(int(sz)):
+                        refined[off + k] = round(float(sol_flat[off + k]))
+                sol_flat = refined
+                x_dict = _unpack_solution(model, sol_flat)
+                obj_val = float(nlp_refined.objective)
             nlp_recovered = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
             )
@@ -13876,30 +13928,14 @@ def _solve_nlp_bb(
                             if bound_duals_upper is not None and v.name in bound_duals_upper:
                                 bound_duals_upper[v.name] = np.zeros_like(bound_duals_upper[v.name])
 
-                # Adopt the refined primal from the KKT re-solve. It solves the
-                # same integer-fixed subproblem to tighter precision than the
-                # batched JAX IPM, so the continuous variables (and thus
-                # active-constraint residuals) stay consistent with the
-                # recovered duals — without this, complementarity (mu * residual)
-                # can exceed validation tolerances. Guarded: only adopt an
-                # OPTIMAL re-solve whose objective matches the incumbent, so a
-                # divergent recover can never corrupt the reported solution.
-                if (
-                    nlp_recovered.status == SolveStatus.OPTIMAL
-                    and nlp_recovered.x is not None
-                    and np.all(np.isfinite(nlp_recovered.x))
-                    and nlp_recovered.objective is not None
-                    and abs(float(nlp_recovered.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
-                ):
-                    refined = np.asarray(nlp_recovered.x, dtype=float).copy()
-                    # Keep integer columns pinned at their (rounded) incumbent
-                    # values; only the continuous variables are refined.
-                    for off, sz in zip(int_offsets, int_sizes):
-                        for k in range(int(sz)):
-                            refined[off + k] = round(float(sol_flat[off + k]))
-                    sol_flat = refined
-                    x_dict = _unpack_solution(model, sol_flat)
-                    obj_val = float(nlp_recovered.objective)
+                # The refined primal was already adopted above, from the
+                # incumbent-options solve, and this recover ran *at* that point —
+                # so the continuous variables (and thus active-constraint
+                # residuals) stay consistent with the recovered duals, which is
+                # what the adoption exists for: without it, complementarity
+                # (mu * residual) can exceed validation tolerances. The recover
+                # solve's own ``x`` is deliberately NOT adopted; it is the output
+                # of a deliberately relaxed box (see the two-solve note above).
         except Exception as _exc:
             logger.debug("NLP-BB dual recovery failed: %s", _exc)
 

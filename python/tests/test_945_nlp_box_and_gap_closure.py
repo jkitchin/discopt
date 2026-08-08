@@ -129,6 +129,108 @@ def test_bound_relaxation_damage_is_not_bounded_by_the_relaxation_itself():
     assert res.status != "optimal"
 
 
+@pytest.mark.smoke
+def test_default_solve_path_does_not_certify_a_super_optimal_incumbent():
+    """The same fixture through the DEFAULT ``m.solve()`` path, not ``mip-nlp``.
+
+    Seeding OA and GDPopt-LOA left the entry point users actually hit still doing
+    it: on the MINLP variant (exact optimum 3.0) ``m.solve()`` returned
+    ``objective = 2.9999000090835057`` with ``status='optimal'`` and ``gap = 0.0``
+    — 1.0e-04 below an optimum that a single point pins exactly.
+
+    Attributed to two producers, both fixed:
+
+    * ``primal_heuristics.feasibility_pump`` projected onto the RELAXED box and
+      handed back ``x = 2.9999`` as a candidate incumbent, and
+    * ``_solve_nlp_bb``'s terminal re-solve then adopted its own primal, which
+      came from the relaxed box too — so even with the pump honest (``x = 3``
+      exactly) the answer was overwritten back to 2.9999.
+
+    No feasibility screen catches this: the bad point's worst row violation is
+    1e-8, inside every tolerance discopt has. Only not producing it works.
+
+        pre    obj = 2.9999000090835057   super-optimal by 9.999e-05
+        post   obj = 2.9999999983777133   super-optimal by 1.622e-09
+
+    Both assertions below fail on the pre tree; the second is the one that
+    matters, since a certificate on a point that cannot exist is the CLAUDE.md §1
+    failure.
+    """
+    m = dm.Model("mindtpy_cq_default_path")
+    x = m.continuous("x", lb=1.0, ub=10.0)
+    y = m.binary("y")
+    m.subject_to((x - 3.0) ** 2 <= 50.0 * (1 - y))
+    m.subject_to(x * dm.log(x) + 5.0 <= 50.0 * y)
+    m.minimize(x)
+    res = m.solve(time_limit=60)
+
+    assert res.objective is not None
+    assert res.objective >= 3.0 - 1e-6, (
+        f"objective {res.objective!r} is below the exact optimum 3.0; y=0 leaves "
+        "x*log(x)+5 <= 0 with no root on [1,10], so y=1 and (x-3)^2 <= 0 pins x=3"
+    )
+    if res.status == "optimal":
+        assert res.bound is not None
+        assert res.bound <= res.objective + 1e-5
+
+
+@pytest.mark.smoke
+def test_every_primal_heuristic_requests_the_incumbent_options():
+    """The whole module is a point producer, so the seed is a module-wide rule.
+
+    Six NLP option sites in ``_jax/primal_heuristics.py`` each built their own
+    ``dict(nlp_options)``; one of them (``feasibility_pump``) supplied the
+    super-optimal incumbent above. They are routed through one helper so a
+    seventh heuristic cannot silently keep Ipopt's default — asserted here rather
+    than left to review, because that is the failure mode #940 already had once.
+
+    ``pounce_option_defaults()`` must NOT arrive with it: its ``constr_viol_tol``
+    is separable and costs a 31%-worse incumbent on nvs05 on its own.
+    """
+    import inspect
+
+    from discopt._jax import primal_heuristics as PH
+
+    src = inspect.getsource(PH)
+    assert "pounce_incumbent_options()" in inspect.getsource(PH._heuristic_nlp_options)
+    assert "pounce_option_defaults()" not in src, (
+        "constr_viol_tol is measurably harmful on this path and is not wanted here"
+    )
+    assert PH._heuristic_nlp_options()["bound_relax_factor"] == 0.0
+    # An explicit caller request still wins over the seed.
+    assert PH._heuristic_nlp_options({"bound_relax_factor": 1e-9})["bound_relax_factor"] == 1e-9
+
+    # Every option site routes through the helper; none rebuilds its own dict.
+    n_sites = src.count("_heuristic_nlp_options(")
+    assert n_sites >= 7, f"expected the helper plus 6 call sites, found {n_sites}"
+    assert 'setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)' not in src.split("def ", 2)[2], (
+        "a heuristic still builds its NLP options inline instead of via the helper"
+    )
+
+
+@pytest.mark.smoke
+def test_nlp_bb_terminal_resolve_separates_its_point_from_its_multipliers():
+    """One call site, two products, two option sets (#945/#946).
+
+    ``_solve_nlp_bb``'s terminal re-solve both refines the reported primal and
+    recovers the duals at it. Those want opposite options, so it takes two solves:
+    the refine one requests the incumbent options, the recover one must not (a
+    degenerate feasible set has no finite multiplier without Ipopt's relaxation).
+    Pinned in both directions so a future edit cannot collapse them back into one.
+    """
+    import inspect
+
+    from discopt import solver as S
+
+    src = inspect.getsource(S._solve_nlp_bb)
+    assert "refine_opts.update(pounce_incumbent_options())" in src
+    # The recover solve stays relaxed, and its own point is not adopted.
+    assert "recover_opts.update(pounce_incumbent_options())" not in src
+    assert "recover_opts.update(" not in src
+    assert "sol_flat = np.asarray(nlp_recovered.x" not in src
+    assert "obj_val = float(nlp_recovered.objective)" not in src
+
+
 # ── (b) gap closure is an honest dual test ───────────────────────────────────
 
 

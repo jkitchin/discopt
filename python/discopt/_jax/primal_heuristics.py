@@ -27,7 +27,7 @@ from discopt.modeling.core import Model, VarType
 # Re-exported here because callers/docs reference ``primal_heuristics.is_qubo`` /
 # ``qubo_local_search``; ``solve_model`` imports the JAX-free module directly.
 from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
-from discopt.solvers import NLPResult, SolveStatus
+from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,39 @@ logger = logging.getLogger(__name__)
 # capped, unconverged point simply fails the feasibility check and yields no
 # incumbent — it can never inject a wrong one (inject_incumbent re-verifies).
 _HEURISTIC_NLP_MAX_ITER = 300
+
+
+def _heuristic_nlp_options(caller_options: Optional[dict] = None) -> dict:
+    """Base NLP options for a sub-solve in this module (#945).
+
+    Every NLP solve here exists to produce a candidate **incumbent**, so every one
+    of them takes :func:`discopt.solvers.pounce_incumbent_options`: the returned
+    point has to lie inside the box the model declared, or the incumbent it becomes
+    is not a solution of the model the user wrote. Ipopt's default
+    ``bound_relax_factor`` relaxes every bound — including the slack bounds standing
+    in for inequality rows — by ``1e-8*(1 + |bound|)``, and a squared row takes the
+    square root of that: ``(x-3)^2 <= 0`` admits every ``x`` within 1e-4 of 3.
+    Measured on the MindtPy constraint-qualification fixture, whose exact optimum is
+    3.0, ``feasibility_pump`` returned ``x = 2.9999`` and the default ``m.solve()``
+    path certified it ``optimal`` with ``gap = 0.0``; with this seed the same run
+    returns 2.999999998 (``scratchpad/issue945/heuristic_incumbent_box.py``).
+
+    :func:`discopt.solvers.pounce_option_defaults` is deliberately **not** seeded
+    here. The two halves are separable and only this one is wanted: its
+    ``constr_viol_tol = 1e-8`` costs a 31%-worse incumbent and a looser bound on
+    nvs05, entirely on its own (see the measurement in ``nlp_pounce.solve_nlp``).
+
+    Routed through one helper rather than spelled at each call site so a seventh
+    heuristic cannot silently keep Ipopt's default — the #940 lesson, one level up.
+    Caller options are merged *after* the seed, so an explicit request still wins.
+    """
+    opts = pounce_incumbent_options()
+    if caller_options:
+        opts.update(caller_options)
+    opts.setdefault("print_level", 0)
+    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+    return opts
+
 
 # VOLUME-1 (docs/dev/nlp-solve-volume-2026-07-06.md) + ILS-DEFAULT
 # (docs/dev/ils-default-validation-2026-07-06.md): the objective-improvement
@@ -184,9 +217,7 @@ class MultiStartNLP:
         rng = np.random.default_rng(self._seed)
         starts = _generate_starts(lb, ub, self._n_starts, rng)
 
-        opts = dict(ipopt_options) if ipopt_options else {}
-        opts.setdefault("print_level", 0)
-        opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+        opts = _heuristic_nlp_options(ipopt_options)
         if backend is None:
             from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -271,9 +302,7 @@ def feasibility_pump(
     if evaluator is None:
         evaluator = cached_evaluator(model)
 
-    opts = dict(ipopt_options) if ipopt_options else {}
-    opts.setdefault("print_level", 0)
-    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+    opts = _heuristic_nlp_options(ipopt_options)
     if backend is None:
         from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -472,9 +501,7 @@ def subnlp(
                     v.ub = fixed.copy()
                 offset += sz
 
-        opts = dict(nlp_options) if nlp_options else {}
-        opts.setdefault("print_level", 0)
-        opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+        opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
 
@@ -596,9 +623,7 @@ def continuous_multistart(
     rng = np.random.default_rng(seed)
     starts = _generate_starts(lb, ub, n_starts, rng)
 
-    opts = dict(nlp_options) if nlp_options else {}
-    opts.setdefault("print_level", 0)
-    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+    opts = _heuristic_nlp_options(nlp_options)
 
     best_obj = float("inf") if incumbent_obj is None else float(incumbent_obj)
     best_x: Optional[np.ndarray] = None
@@ -880,9 +905,7 @@ def integer_local_search(
         # discards this second (relaxation) restart base. Clip first so every
         # coordinate is a finite, usable start.
         mid = np.clip(0.5 * (np.clip(lb, -1e3, 1e3) + np.clip(ub, -1e3, 1e3)), -1e3, 1e3)
-        relax_opts = dict(nlp_options) if nlp_options else {}
-        relax_opts.setdefault("print_level", 0)
-        relax_opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+        relax_opts = _heuristic_nlp_options(nlp_options)
         budget.charge(NLP_SOLVE)
         relax_res = backend(evaluator, mid, options=relax_opts)
         if relax_res is not None and relax_res.x is not None:
@@ -1367,9 +1390,7 @@ def diving(
     lb0, ub0 = _get_variable_bounds(model)
     slot_map = _flat_slot_map(model)
 
-    opts = dict(nlp_options) if nlp_options else {}
-    opts.setdefault("print_level", 0)
-    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+    opts = _heuristic_nlp_options(nlp_options)
 
     fixed = np.zeros(int_mask.shape[0], dtype=bool)
     x_cur = np.clip(np.asarray(x_relax, dtype=np.float64), lb0, ub0)

@@ -199,9 +199,13 @@ POUNCE_BOUND_RELAX_FACTOR = 0.0
 def pounce_option_defaults() -> dict:
     """discopt's baseline POUNCE options: quiet, and inside the declared box.
 
-    THE single source of truth for EVERY POUNCE entry point: the matrix-form
-    backends (``lp_pounce``, ``qp_pounce``, #940) and the NLP path
-    (``nlp_pounce.solve_nlp`` and ``solver.py``'s batch path, #945). Seed it
+    THE single source of truth for the matrix-form backends (``lp_pounce``,
+    ``qp_pounce``, #940), and available to any caller that wants discopt's
+    baseline rather than Ipopt's. It is deliberately NOT applied backend-wide on
+    the NLP path: ``constr_viol_tol = 1e-8`` costs a 31%-worse incumbent and a
+    looser bound on nvs05 entirely on its own (measured in
+    ``nlp_pounce.solve_nlp``), so ``nlp_pounce.solve_nlp`` stays at POUNCE's own
+    baseline and the NLP call sites that want this seed it themselves. Seed it
     *before* merging a caller's options so an explicit request still wins::
 
         opts = pounce_option_defaults()

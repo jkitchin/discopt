@@ -210,9 +210,12 @@ def test_returned_point_stays_inside_its_declared_box(flat):
     paths: ``dm.sum(y.flat)`` classifies linear and routes to ``lp_pounce``,
     while ``dm.sum(y)`` on the bare indexed container routes to the general NLP
     path. Seeding the option in the LP/QP backends alone left this second path
-    returning points ~7.5e-9 below ``lb``; the fix lives in
-    ``solvers.pounce_option_defaults`` so every entry point inherits it — the
-    LP/QP backends in #940, the NLP path in #945.
+    returning points ~7.5e-9 below ``lb``. The fix is NOT one backend-wide default:
+    the LP/QP backends take it from ``solvers.pounce_option_defaults`` (#940), and
+    on the NLP path it is requested by the call sites whose returned POINT is the
+    product (``solvers.pounce_incumbent_options``, #945) — never by
+    ``nlp_pounce.solve_nlp`` itself, which also serves callers whose product is the
+    MULTIPLIERS and who need Ipopt's relaxation to keep them finite.
     """
     m = dm.Model()
     s = m.set("S", [10, 20, 30])

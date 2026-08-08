@@ -12,30 +12,44 @@ import sys
 import discopt.modeling as dm
 import discopt.solvers.nlp_pounce as nlp_pounce
 import numpy as np
-from discopt import Model
+from discopt import Model, solver
 
 # §8: prove which code is loaded, and which arm it is.
-SEEDED = "opts = pounce_option_defaults()" in inspect.getsource(nlp_pounce.solve_nlp)
+# The seed lives at the CALL SITES, not in the backend — #945 settled that the
+# split is what the caller consumes, and `solve_nlp` also serves dual consumers.
+# An earlier version of this marker tested `solve_nlp`'s own source and so was
+# permanently False on the post tree, mislabelling every post run as UNSEEDED.
+SEEDED = "pounce_incumbent_options()" in inspect.getsource(solver._solve_continuous)
 print(f"# discopt      : {dm.__file__}")
 print(f"# nlp_pounce   : {nlp_pounce.__file__}")
-print(f"# NLP arm      : {'SEEDED (bound_relax_factor=0)' if SEEDED else 'UNSEEDED (Ipopt defaults)'}")
+print(
+    f"# NLP arm      : {'SEEDED (bound_relax_factor=0)' if SEEDED else 'UNSEEDED (Ipopt defaults)'}"
+)
 
 checks = 0
 violations = 0
 
 
-def build(flat: bool) -> Model:
+def build(flat: bool):
+    """Same construction as ``test_940...::test_returned_point_stays_inside_its_declared_box``.
+
+    Two API mistakes made this harness unrunnable as vendored — ``Model.add_variable``
+    does not exist and ``solve()`` rejects ``verbose`` (it refuses unknown options
+    rather than swallowing them). Mirroring the test is what keeps the probe and the
+    thing it claims to measure from drifting apart again.
+    """
     m = Model()
-    y = m.add_variable("y", shape=(3,), lb=1.0, ub=5.0)
+    s = m.set("S", [10, 20, 30])
+    y = m.continuous("y", lb=1.0, ub=5.0, over=s)
     m.minimize(dm.sum(y.flat) if flat else dm.sum(y))
-    return m
+    return m, y
 
 
 for flat in (True, False):
     label = "dm.sum(y.flat)" if flat else "dm.sum(y)"
-    m = build(flat)
-    res = m.solve(verbose=False)
-    x = np.asarray(res.x["y"], dtype=float).ravel()
+    m, y = build(flat)
+    res = m.solve()
+    x = np.asarray(res.value(y), dtype=float).ravel()
     below = float(np.max(1.0 - x))  # >0 means below lb=1
     above = float(np.max(x - 5.0))
     checks += 2

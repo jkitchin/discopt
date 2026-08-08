@@ -53,7 +53,11 @@ from discopt.solvers import pounce_option_defaults  # noqa: E402
 # options at the point-consuming call sites and deliberately leaves the backend
 # neutral. An earlier version of this assert named the superseded contract and
 # refused to run once the branch rescoped — which is the guard working.
-assert NLPP.__file__.startswith("/home/user/discopt/python/"), NLPP.__file__
+_REPO_PYTHON = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "python"))
+assert NLPP.__file__.startswith(_REPO_PYTHON + os.sep), (
+    f"loaded discopt from {NLPP.__file__}, not the tree under test at {_REPO_PYTHON} — "
+    "a panel run against an installed copy measures the wrong code (§8)"
+)
 
 # The pre-#945 arm. Reconstructing it takes TWO seams, not one: #945 does NOT put
 # bound_relax_factor in the backend default (that breaks the Benders dual LP — see
@@ -80,22 +84,39 @@ def _counting_solve_nlp(*args, **kwargs):
 NLPP.solve_nlp = _counting_solve_nlp
 # The callers import `solve_nlp` lazily inside functions, so patching the module
 # attribute is enough; but solver.py's batch path reads the options directly.
+import discopt._jax.primal_heuristics as PH  # noqa: E402
 import discopt.solver as SOLVER  # noqa: E402
 import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
 import discopt.solvers.oa as OA  # noqa: E402
 
 # Every module that requests the incumbent options; the arm must cover all of them.
-_CONSUMERS = (SOLVER, OA, LOA)
+# ``PH`` joined the list when the class was closed at the two producers the first
+# pass missed: ``feasibility_pump`` (and its five siblings, all routed through
+# ``PH._heuristic_nlp_options``) and ``_solve_nlp_bb``'s terminal refine solve.
+# Both read the module-global name, so patching the module attribute covers them.
+_CONSUMERS = (SOLVER, OA, LOA, PH)
 _REAL_INCUMBENT = SOLVER.pounce_incumbent_options
 
 # Post-#945 markers, checked here rather than at import of NLPP because the change
 # now lives at the CALL SITES. Absent => there is nothing to panel, and a green
 # "0 differences" would be measuring the same tree twice.
-for _fn in (SOLVER._solve_continuous, OA._solve_nlp_attempt, LOA._solve_nlp_subproblem):
+for _fn in (
+    SOLVER._solve_continuous,
+    OA._solve_nlp_attempt,
+    LOA._solve_nlp_subproblem,
+    PH._heuristic_nlp_options,
+):
     assert "pounce_incumbent_options()" in inspect.getsource(_fn), (
         f"post-#945 marker absent in {_fn.__name__}: the incumbent options are not "
         "requested there, so this panel would compare the pre arm against itself"
     )
+assert "refine_opts.update(pounce_incumbent_options())" in inspect.getsource(
+    SOLVER._solve_nlp_bb
+), (
+    "post marker absent in _solve_nlp_bb: its terminal refine solve is not "
+    "requesting the incumbent options, so this panel would compare the pre arm "
+    "against itself on the default MINLP path"
+)
 assert "pounce_incumbent_options()" not in inspect.getsource(NLPP.solve_nlp), (
     "bound_relax_factor leaked back into the NLP backend default; the pre arm "
     "reconstruction below assumes it is requested only at the call sites"
@@ -225,8 +246,14 @@ def main(out_path: str, time_limit: float) -> int:
         same = all(got["pre"].get(k) == got["post"].get(k) for k in keys)
         if not same:
             diffs.append(
-                (name, {k: (got["pre"].get(k), got["post"].get(k)) for k in keys
-                        if got["pre"].get(k) != got["post"].get(k)})
+                (
+                    name,
+                    {
+                        k: (got["pre"].get(k), got["post"].get(k))
+                        for k in keys
+                        if got["pre"].get(k) != got["post"].get(k)
+                    },
+                )
             )
         print(
             f"[{i:3d}/{len(files)}] {name:28s} {'SAME' if same else 'DIFF'} "
