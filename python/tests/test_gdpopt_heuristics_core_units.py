@@ -963,16 +963,33 @@ class TestLocalBranchingBudget:
         out = ph.local_branching(m, np.array([1.0, 1.0]), submip_time_limit=0.0)
         assert out is None
 
-    def test_deadline_expiring_mid_round_truncates(self):
+    def test_deadline_expiring_mid_round_truncates(self, monkeypatch):
+        """The deadline poll cuts the enumeration off *mid-round*.
+
+        Driven by an injected clock (#950), not by ``time.sleep``. The subject is
+        the truncation *schedule* — radius 0 runs whole, radius 1 starts and is
+        cut after its first sub-NLP — which is a wall-clock-independent intent.
+        Reading the real clock made it a wall-clock-dependent assertion: the
+        slice is stamped before the first budget poll, so any stall longer than
+        the slice (an xdist worker descheduled on a loaded runner) retires the
+        budget before sub-NLP #1 and the test failed as ``assert 0 >= 2`` while
+        the code was behaving exactly as #912 specifies.
+
+        Here the clock only moves when the backend moves it, so the machine
+        cannot change the answer.
+        """
         m = dm.Model("lb3")
         b = m.binary("b", shape=(3,))
         m.minimize(dm.sum(b))
         calls = {"n": 0}
+        fake_t = {"now": 0.0}
+        monkeypatch.setattr(ph, "_now", lambda: fake_t["now"])
 
         def slow_backend(evaluator, x0, options=None):
             calls["n"] += 1
             if calls["n"] >= 2:
-                time.sleep(0.3)
+                # Sub-NLP #2 (the first of radius 1) overruns the 0.25 s slice.
+                fake_t["now"] += 0.3
             raise RuntimeError("no point")
 
         out = ph.local_branching(
@@ -983,8 +1000,11 @@ class TestLocalBranchingBudget:
             submip_time_limit=0.25,
         )
         assert out is None
-        # radius 0 ran, radius 1 started and was cut off by the deadline poll.
-        assert calls["n"] >= 2
+        # radius 0 ran (1 sub-NLP), radius 1 started (sub-NLP 2) and the next
+        # poll saw the deadline. Exact, not ">=": with the clock injected the
+        # count is a function of the schedule alone, so a drift is a real change
+        # in the truncation logic rather than a slow machine.
+        assert calls["n"] == 2
 
     def test_truncation_dispatches_bounded_submip(self, monkeypatch):
         """When a radius round cannot fit the remaining sub-NLP budget, the

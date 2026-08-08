@@ -189,6 +189,34 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A clock seam for the primal-heuristic deadlines, ending a CI flake**
+  (`test`, #950). `TestLocalBranchingBudget::test_deadline_expiring_mid_round_truncates`
+  failed intermittently on the parallel lane as `assert 0 >= 2`. The mechanism is
+  scheduling, not solver behaviour: `local_branching` stamps
+  `slice_deadline = perf_counter() + submip_time_limit` *before* its first budget
+  poll, and since #912 no sub-NLP may start past that deadline — so any stall
+  longer than the test's 250 ms slice (an xdist worker descheduled on a loaded
+  runner) correctly retires the budget before sub-NLP #1, and the test's
+  wall-clock-dependent assertion could not tell that apart from broken truncation
+  logic. Reproduced deterministically by injecting a 0.30 s stall and changing
+  nothing else: `calls` 2 → 0.
+
+  `primal_heuristics._now()` is now the module's single clock read — every
+  heuristic's deadline stamp and poll goes through it, and every `WorkBudget`
+  built there is handed it via the new `WorkBudget(clock=...)` parameter (default
+  `time.perf_counter`; production passes nothing else). The test drives the
+  deadline from a clock the backend advances, so it pins the truncation
+  *schedule* — radius 0 whole, radius 1 cut after its first sub-NLP — as an exact
+  count rather than racing the machine. Verified by re-running the old and new
+  test bodies under a 0.5 s injected stall: old `calls=0` (the reported failure),
+  new `calls=2` with and without the stall; with the injected clock frozen the
+  enumeration runs all `C(3,1)=3` flips (`calls=4`), which is what proves the
+  seam — and not something else — is what fires the gate. `submip_time_limit`
+  was **not** widened: that would have made the race rarer without removing it,
+  and the budget edge is the test's subject. Production behaviour is unchanged;
+  the #912 wall-budget inventory scanner was taught to see through the seam so a
+  new gate cannot leave the ratchet by routing through `_now()`.
+
 - **A non-zero `Constraint.rhs` was a silent wrong answer through the public API**
   (`fix(correctness)`, #909). `Constraint` is exported in
   `discopt.modeling.__all__`, and `m.subject_to(Constraint(w, ">=", 5.0))` solved

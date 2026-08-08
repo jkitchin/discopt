@@ -203,7 +203,16 @@ def test_every_primal_heuristic_requests_the_incumbent_options():
     # Every option site routes through the helper; none rebuilds its own dict.
     n_sites = src.count("_heuristic_nlp_options(")
     assert n_sites >= 7, f"expected the helper plus 6 call sites, found {n_sites}"
-    assert 'setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)' not in src.split("def ", 2)[2], (
+    # Everything except the helper itself, which is the one place allowed to set
+    # the cap. Anchored on the helper's own source rather than on "the source
+    # after the second ``def``": that positional slice silently assumed the
+    # helper was the module's first function, so adding any function above it
+    # (#950's ``_now`` clock seam) moved the cut into the helper's body and the
+    # assertion failed on the helper's *own* line. Removing the helper's source
+    # says what the rule means and also covers functions defined above it.
+    helper_src = inspect.getsource(PH._heuristic_nlp_options)
+    assert 'setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)' in helper_src
+    assert 'setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)' not in src.replace(helper_src, ""), (
         "a heuristic still builds its NLP options inline instead of via the helper"
     )
 
