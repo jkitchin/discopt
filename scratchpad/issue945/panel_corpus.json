@@ -5,39 +5,39 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 20282.050738736412,
+    "bound": 20712.174649175664,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 20.86161571499906
+    "wall": 20.15884420904331
    },
    "post": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 20282.050738736412,
-    "node_count": 7,
+    "bound": 21475.147700500194,
+    "node_count": 15,
     "gap_certified": false,
-    "wall": 20.753485027998977
+    "wall": 20.18610162503319
    }
   },
   "alan": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 2.9249999983013426,
-    "bound": 2.9249999983013426,
+    "objective": 2.924999998301341,
+    "bound": 2.924999998301341,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.06835342300109915
+    "wall": 0.023668167006690055
    },
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": 2.9249999983013426,
-    "bound": 2.9249999983013426,
+    "objective": 2.924999998301341,
+    "bound": 2.924999998301341,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.058100629001273774
+    "wall": 0.019837208034005016
    }
   },
   "bchoco06": {
@@ -45,19 +45,19 @@
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 0.9999887833703148,
-    "node_count": 7,
+    "bound": 1.000000000000125,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.156143522001003
+    "wall": 20.433878916024696
    },
    "post": {
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 0.9999887833703148,
-    "node_count": 7,
+    "bound": 1.000000000000125,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.04775808500017
+    "wall": 24.98003937501926
    }
   },
   "bchoco07": {
@@ -65,19 +65,19 @@
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 1.000000000000286,
-    "node_count": 7,
+    "bound": 0.9999909483405423,
+    "node_count": 15,
     "gap_certified": false,
-    "wall": 21.59716466200007
+    "wall": 20.30800508300308
    },
    "pre": {
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 1.000000000000286,
-    "node_count": 7,
+    "bound": 0.9999909483405423,
+    "node_count": 15,
     "gap_certified": false,
-    "wall": 21.59804242899918
+    "wall": 20.306305708014406
    }
   },
   "bchoco08": {
@@ -85,19 +85,19 @@
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 1.000000000002788,
+    "bound": 1.0000000000038425,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 32.4324953689993
+    "wall": 20.872869958984666
    },
    "post": {
     "maximize": true,
     "status": "time_limit",
     "objective": null,
-    "bound": 1.000000000002788,
+    "bound": 1.0000000000038425,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 27.874022898000476
+    "wall": 20.276276832970325
    }
   },
   "beuster": {
@@ -105,19 +105,19 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 6395.108328059316,
-    "node_count": 7,
+    "bound": 17801.54887879556,
+    "node_count": 31,
     "gap_certified": false,
-    "wall": 21.35085587499998
+    "wall": 20.599164749961346
    },
    "pre": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 6395.108327034645,
-    "node_count": 7,
+    "bound": 17801.54887879556,
+    "node_count": 31,
     "gap_certified": false,
-    "wall": 21.02280981700096
+    "wall": 20.46201924997149
    }
   },
   "casctanks": {
@@ -125,19 +125,19 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": -90.17862329759835,
-    "node_count": 3,
+    "bound": 2.9097722176628698,
+    "node_count": 31,
     "gap_certified": false,
-    "wall": 21.07955941900036
+    "wall": 20.459041249996517
    },
    "post": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": -90.17862329759835,
-    "node_count": 3,
+    "bound": 2.9097722176628698,
+    "node_count": 15,
     "gap_certified": false,
-    "wall": 21.022934431000976
+    "wall": 20.356712125008926
    }
   },
   "chance": {
@@ -148,7 +148,7 @@
     "bound": 29.894378166613386,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.1880844879997312
+    "wall": 0.10948704101610929
    },
    "pre": {
     "maximize": false,
@@ -157,7 +157,7 @@
     "bound": 29.894378154271102,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.1705907940013276
+    "wall": 0.09824083303101361
    }
   },
   "clay0303hfsg": {
@@ -166,18 +166,18 @@
     "status": "time_limit",
     "objective": null,
     "bound": null,
-    "node_count": 95,
+    "node_count": 319,
     "gap_certified": false,
-    "wall": 20.64232235199961
+    "wall": 20.398560917004943
    },
    "post": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
     "bound": null,
-    "node_count": 95,
+    "node_count": 287,
     "gap_certified": false,
-    "wall": 21.364085389999673
+    "wall": 20.352453332976438
    }
   },
   "contvar": {
@@ -185,19 +185,19 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 183632.02121055726,
-    "node_count": 3,
+    "bound": 183632.7659824633,
+    "node_count": 7,
     "gap_certified": false,
-    "wall": 21.968097285000113
+    "wall": 27.284093625028618
    },
    "pre": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 183632.02121055726,
-    "node_count": 3,
+    "bound": 183632.7659824633,
+    "node_count": 7,
     "gap_certified": false,
-    "wall": 21.651497513999857
+    "wall": 24.344116166990716
    }
   },
   "cvxnonsep_nsig30": {
@@ -208,27 +208,27 @@
     "bound": 130.61841392487688,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 4.114179767000678
+    "wall": 1.320952041016426
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 130.62871116925294,
+    "objective": 130.62871268683435,
     "bound": 130.61841392487688,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 4.689829281000129
+    "wall": 1.27652783296071
    }
   },
   "cvxnonsep_psig30": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 78.99885435294289,
+    "objective": 78.99885436526898,
     "bound": 78.99701703820377,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 1.752459473998897
+    "wall": 0.9006080830004066
    },
    "pre": {
     "maximize": false,
@@ -237,38 +237,38 @@
     "bound": 78.99701703820377,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 1.6242167050004355
+    "wall": 0.5196317910449579
    }
   },
   "cvxnonsep_psig40r": {
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": 86.54527995164959,
+    "objective": 86.54527995164958,
     "bound": 86.53873600363832,
-    "node_count": 103,
+    "node_count": 95,
     "gap_certified": true,
-    "wall": 6.555701078999846
+    "wall": 2.0506843749899417
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 86.54527995164959,
-    "bound": 86.53873600363832,
-    "node_count": 103,
+    "objective": 86.54528288283353,
+    "bound": 86.5387360036383,
+    "node_count": 95,
     "gap_certified": true,
-    "wall": 6.816428178999558
+    "wall": 2.091534541978035
    }
   },
   "dispatch": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 3155.2879266857854,
-    "bound": 3155.2878615366776,
+    "objective": 3155.2879268631687,
+    "bound": 3155.287861536673,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.4005815389991767
+    "wall": 0.46529037499567494
    },
    "pre": {
     "maximize": false,
@@ -277,7 +277,7 @@
     "bound": 3155.2878615366776,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.3739400349986681
+    "wall": 0.15692524996120483
    }
   },
   "ex1221": {
@@ -288,7 +288,7 @@
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.8064225850012008
+    "wall": 0.38447033398551866
    },
    "post": {
     "maximize": false,
@@ -297,18 +297,18 @@
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.7007486250004149
+    "wall": 0.2866894580074586
    }
   },
   "ex1222": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 1.0765430833322625,
-    "bound": 1.0765430463031964,
-    "node_count": 1,
+    "objective": 1.0765430833322618,
+    "bound": 1.0765430833322571,
+    "node_count": 3,
     "gap_certified": true,
-    "wall": 0.5019422189998295
+    "wall": 0.13064320798730478
    },
    "pre": {
     "maximize": false,
@@ -317,7 +317,7 @@
     "bound": 1.0765430463031964,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.26799431200015533
+    "wall": 0.10628412500955164
    }
   },
   "ex1224": {
@@ -325,30 +325,30 @@
     "maximize": false,
     "status": "optimal",
     "objective": -0.9434704942820806,
-    "bound": -0.9434705000000166,
+    "bound": -0.9434705000000164,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.771524681000301
+    "wall": 0.9285265419748612
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -0.9434704942820806,
-    "bound": -0.9434705000000166,
+    "objective": -0.9434704993121346,
+    "bound": -0.9434705000000165,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.5357477289999224
+    "wall": 0.8769470000406727
    }
   },
   "ex1225": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 30.999999913557566,
-    "bound": 30.999999913557566,
+    "objective": 31.000000000008843,
+    "bound": 30.999999999999844,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.4943522610010405
+    "wall": 0.7443189580226317
    },
    "pre": {
     "maximize": false,
@@ -357,7 +357,7 @@
     "bound": 30.999999913557566,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 3.0981000720003067
+    "wall": 0.7705545829958282
    }
   },
   "ex1226": {
@@ -368,27 +368,27 @@
     "bound": -17.000000003887443,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.9011488069991174
+    "wall": 0.24128625000594184
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -17.000000003887443,
-    "bound": -17.000000003887443,
-    "node_count": 3,
+    "objective": -17.000000000000007,
+    "bound": -17.00000000000013,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 0.8077394409992849
+    "wall": 0.3864867090014741
    }
   },
   "ex14_1_9": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.9775220540513224e-16,
-    "bound": -1.9775220540513224e-16,
-    "node_count": 3,
+    "objective": 3.7948647471750336e-09,
+    "bound": 0.0,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 0.34157072699963464
+    "wall": 0.08824958396144211
    },
    "pre": {
     "maximize": false,
@@ -397,7 +397,7 @@
     "bound": -1.9775220540513224e-16,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.32864354199955415
+    "wall": 0.10098937503062189
    }
   },
   "fac2": {
@@ -405,30 +405,30 @@
     "maximize": false,
     "status": "optimal",
     "objective": 331837497.8394821,
-    "bound": 331837497.54563797,
+    "bound": 331837497.5456339,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 9.197090076999302
+    "wall": 2.2586874589906074
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 331837497.8394821,
-    "bound": 331837497.54563797,
+    "objective": 331837498.17693394,
+    "bound": 331837497.5456339,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 8.771808849000081
+    "wall": 1.8731694589951076
    }
   },
   "flay02m": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 37.94733186383461,
-    "bound": 37.947331804569515,
+    "objective": 37.94733200383462,
+    "bound": 37.94733186379298,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.4826830580004753
+    "wall": 0.22171779198106378
    },
    "pre": {
     "maximize": false,
@@ -437,7 +437,7 @@
     "bound": 37.947331804569515,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.4870537700007844
+    "wall": 0.13512691599316895
    }
   },
   "flay03m": {
@@ -448,36 +448,36 @@
     "bound": 48.98979470823052,
     "node_count": 111,
     "gap_certified": true,
-    "wall": 7.334201186999053
+    "wall": 1.8101904999930412
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 48.98979479383567,
-    "bound": 48.98979470823052,
+    "objective": 48.9897949738358,
+    "bound": 48.98979479323287,
     "node_count": 111,
     "gap_certified": true,
-    "wall": 7.1553186740002275
+    "wall": 1.6741547919809818
    }
   },
   "gbd": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 2.1999999825308127,
-    "bound": 2.1999999825308127,
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.023471718001019326
+    "wall": 0.007882375037297606
    },
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": 2.1999999825308127,
-    "bound": 2.1999999825308127,
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.021934147000138182
+    "wall": 0.007483166002202779
    }
   },
   "gkocis": {
@@ -488,16 +488,16 @@
     "bound": -1.9230988280923489,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.3678106690003915
+    "wall": 0.36128087498946115
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.9230987798770212,
-    "bound": -1.9230988280923489,
-    "node_count": 5,
+    "objective": -1.9230986924056728,
+    "bound": -1.9230987422706283,
+    "node_count": 7,
     "gap_certified": true,
-    "wall": 1.2579532119998476
+    "wall": 0.4564329590066336
    }
   },
   "hda": {
@@ -505,19 +505,19 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": -64473.44240243703,
-    "node_count": 1,
+    "bound": -64473.44240160173,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.057206409999708
+    "wall": 20.51703358296072
    },
    "pre": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": -64473.44240243703,
-    "node_count": 1,
+    "bound": -64473.44240160173,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.028191478000736
+    "wall": 20.478384374990128
    }
   },
   "heatexch_gen1": {
@@ -528,7 +528,7 @@
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 21.632646988000488
+    "wall": 22.378892250009812
    },
    "post": {
     "maximize": false,
@@ -537,18 +537,18 @@
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.771728911000537
+    "wall": 20.587661208002828
    }
   },
   "heatexch_gen2": {
    "post": {
     "maximize": false,
-    "status": "time_limit",
-    "objective": null,
+    "status": "feasible",
+    "objective": 824551.3269251497,
     "bound": 555767.7902857271,
-    "node_count": 7,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 20.513917931000833
+    "wall": 20.400821332994383
    },
    "pre": {
     "maximize": false,
@@ -557,7 +557,7 @@
     "bound": 555767.7902857271,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.88522019299853
+    "wall": 20.559940458042547
    }
   },
   "heatexch_gen3": {
@@ -568,7 +568,7 @@
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 31.722223757000393
+    "wall": 28.76060416601831
    },
    "post": {
     "maximize": false,
@@ -577,18 +577,18 @@
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 30.268358085000727
+    "wall": 29.0618288340047
    }
   },
   "m3": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 37.79999966997884,
-    "bound": 37.79999951039201,
-    "node_count": 47,
+    "objective": 37.800000263754725,
+    "bound": 37.7999996700244,
+    "node_count": 53,
     "gap_certified": true,
-    "wall": 5.38149255099961
+    "wall": 1.4006437500356697
    },
    "pre": {
     "maximize": false,
@@ -597,7 +597,7 @@
     "bound": 37.79999951039201,
     "node_count": 47,
     "gap_certified": true,
-    "wall": 4.395422977000635
+    "wall": 1.0566823749686591
    }
   },
   "nvs01": {
@@ -608,7 +608,7 @@
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.5421696320008778
+    "wall": 0.45666104200063273
    },
    "post": {
     "maximize": false,
@@ -617,7 +617,7 @@
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.5508252489998995
+    "wall": 0.40370274998713285
    }
   },
   "nvs02": {
@@ -628,7 +628,7 @@
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.43936890399891126
+    "wall": 0.21183724998263642
    },
    "pre": {
     "maximize": false,
@@ -637,7 +637,7 @@
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.40878159500061884
+    "wall": 0.13563837500987574
    }
   },
   "nvs03": {
@@ -648,16 +648,16 @@
     "bound": 15.99999972676511,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.1984112530008133
+    "wall": 0.0671741669648327
    },
    "post": {
     "maximize": false,
     "status": "optimal",
     "objective": 16.0,
-    "bound": 15.99999972676511,
-    "node_count": 5,
+    "bound": 16.0,
+    "node_count": 3,
     "gap_certified": true,
-    "wall": 0.19523057600054017
+    "wall": 0.0588020840077661
    }
   },
   "nvs04": {
@@ -668,7 +668,7 @@
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.36598496599981445
+    "wall": 0.10041808302048594
    },
    "pre": {
     "maximize": false,
@@ -677,7 +677,7 @@
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.30987134499991953
+    "wall": 0.08595849998528138
    }
   },
   "nvs05": {
@@ -685,19 +685,19 @@
     "maximize": false,
     "status": "feasible",
     "objective": 8.731956986640078,
-    "bound": 3.5424692441047068,
-    "node_count": 41,
+    "bound": 3.8053367777828426,
+    "node_count": 131,
     "gap_certified": false,
-    "wall": 20.182268660999398
+    "wall": 20.04697958298493
    },
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 8.731956986640078,
-    "bound": 3.5424692441047068,
-    "node_count": 41,
+    "objective": 8.731956986640789,
+    "bound": 4.099237735891656,
+    "node_count": 155,
     "gap_certified": false,
-    "wall": 20.12048007500016
+    "wall": 20.04612954199547
    }
   },
   "nvs06": {
@@ -708,7 +708,7 @@
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.2201087190005637
+    "wall": 0.34974024997791275
    },
    "pre": {
     "maximize": false,
@@ -717,7 +717,7 @@
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.502843292999387
+    "wall": 0.314218332991004
    }
   },
   "nvs07": {
@@ -728,7 +728,7 @@
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.06894203599949833
+    "wall": 0.02610087499488145
    },
    "post": {
     "maximize": false,
@@ -737,18 +737,18 @@
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.0659772859999066
+    "wall": 0.026362750038970262
    }
   },
   "nvs08": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 23.449727347139827,
-    "bound": 23.44972734516655,
-    "node_count": 3,
+    "objective": 23.449727347978744,
+    "bound": 23.449727347447233,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 1.4144361870003195
+    "wall": 0.3815501659992151
    },
    "pre": {
     "maximize": false,
@@ -757,7 +757,7 @@
     "bound": 23.44972734516655,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.3376553260004584
+    "wall": 0.3503852079738863
    }
   },
   "nvs09": {
@@ -768,16 +768,16 @@
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 4.672621407999031
+    "wall": 1.3995527499937452
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -43.134336918035295,
+    "objective": -43.13433691803531,
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 4.754440293998414
+    "wall": 1.2800637090113014
    }
   },
   "nvs10": {
@@ -788,7 +788,7 @@
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.1850798819996271
+    "wall": 0.05135404196335003
    },
    "pre": {
     "maximize": false,
@@ -797,7 +797,7 @@
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.13099405899993144
+    "wall": 0.05075645900797099
    }
   },
   "nvs11": {
@@ -808,7 +808,7 @@
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 0.753779074000704
+    "wall": 0.2248889590264298
    },
    "post": {
     "maximize": false,
@@ -817,7 +817,7 @@
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 0.8486461190004775
+    "wall": 0.21808949997648597
    }
   },
   "nvs12": {
@@ -828,7 +828,7 @@
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.704115794000245
+    "wall": 0.8515402500052005
    },
    "pre": {
     "maximize": false,
@@ -837,7 +837,7 @@
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.33796169299967
+    "wall": 0.6787049589911476
    }
   },
   "nvs13": {
@@ -848,7 +848,7 @@
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.4629285850005544
+    "wall": 0.5278392499894835
    },
    "post": {
     "maximize": false,
@@ -857,7 +857,7 @@
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.4282700680014386
+    "wall": 0.6015272089862265
    }
   },
   "nvs14": {
@@ -868,7 +868,7 @@
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.865303655000389
+    "wall": 0.3201721250079572
    },
    "pre": {
     "maximize": false,
@@ -877,7 +877,7 @@
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.8515085239996552
+    "wall": 0.31205354194389656
    }
   },
   "nvs15": {
@@ -888,7 +888,7 @@
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.08334700300110853
+    "wall": 0.031345500028692186
    },
    "post": {
     "maximize": false,
@@ -897,18 +897,18 @@
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.08156909700119286
+    "wall": 0.030564250017050654
    }
   },
   "nvs21": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -5.684782628025259,
-    "bound": -5.684782628025259,
-    "node_count": 3,
+    "objective": -5.684782416744887,
+    "bound": -5.684782500000104,
+    "node_count": 9,
     "gap_certified": true,
-    "wall": 7.086681823000617
+    "wall": 0.6373233330086805
    },
    "pre": {
     "maximize": false,
@@ -917,38 +917,38 @@
     "bound": -5.684782628025259,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 6.684371395000198
+    "wall": 0.5104961250326596
    }
   },
   "oaer": {
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.923098499884843,
+    "objective": -1.9230984998848466,
     "bound": -1.923098601139822,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.0001207739987876
+    "wall": 0.306818499986548
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.923098499884843,
-    "bound": -1.923098601139822,
-    "node_count": 3,
+    "objective": -1.923098510129794,
+    "bound": -1.9230985229112711,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 0.9625405360002333
+    "wall": 0.38240770797710866
    }
   },
   "st_e11": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 189.31162974131917,
-    "bound": 189.31162968661766,
-    "node_count": 27,
+    "objective": 189.31162970097128,
+    "bound": 189.311629686619,
+    "node_count": 5,
     "gap_certified": true,
-    "wall": 3.257049719999486
+    "wall": 0.7252116670133546
    },
    "pre": {
     "maximize": false,
@@ -957,7 +957,7 @@
     "bound": 189.31162968661766,
     "node_count": 27,
     "gap_certified": true,
-    "wall": 3.5043417340002634
+    "wall": 0.8819153750082478
    }
   },
   "st_e13": {
@@ -968,36 +968,36 @@
     "bound": 1.9999999825187946,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.13843990199893597
+    "wall": 0.0463331249775365
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 1.9999999825187946,
-    "bound": 1.9999999825187946,
+    "objective": 2.000000002518795,
+    "bound": 2.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.1294228610004211
+    "wall": 0.04156287497607991
    }
   },
   "st_e29": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -0.9434704942820806,
-    "bound": -0.9434705000000166,
+    "objective": -0.9434704993121346,
+    "bound": -0.9434705000000165,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.970016630999453
+    "wall": 0.7877465829951689
    },
    "pre": {
     "maximize": false,
     "status": "optimal",
     "objective": -0.9434704942820806,
-    "bound": -0.9434705000000166,
+    "bound": -0.9434705000000164,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.7799038590001146
+    "wall": 0.7452050420106389
    }
   },
   "st_e36": {
@@ -1005,30 +1005,30 @@
     "maximize": false,
     "status": "optimal",
     "objective": -245.99999999999997,
-    "bound": -246.00000000170422,
+    "bound": -246.00000000170442,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 9.839661432999492
+    "wall": 3.3920822920044884
    },
    "post": {
     "maximize": false,
     "status": "optimal",
     "objective": -245.99999999999997,
-    "bound": -246.00000000170422,
+    "bound": -246.00000000170442,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 9.748952232999727
+    "wall": 3.2264332919730805
    }
   },
   "st_e38": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 7197.727116826533,
-    "bound": 7197.727116826533,
+    "objective": 7197.727148526159,
+    "bound": 7197.727148526159,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.7476165880016197
+    "wall": 0.24708916700910777
    },
    "pre": {
     "maximize": false,
@@ -1037,7 +1037,7 @@
     "bound": 7197.727116826533,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.7652405289991293
+    "wall": 0.22449654201045632
    }
   },
   "st_miqp1": {
@@ -1048,7 +1048,7 @@
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.021535358999244636
+    "wall": 0.007288207998499274
    },
    "post": {
     "maximize": false,
@@ -1057,7 +1057,7 @@
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.02053010700001323
+    "wall": 0.007253458024933934
    }
   },
   "st_miqp2": {
@@ -1068,7 +1068,7 @@
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.02448736099904636
+    "wall": 0.009034875023644418
    },
    "pre": {
     "maximize": false,
@@ -1077,7 +1077,7 @@
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.025398279000000912
+    "wall": 0.009177583968266845
    }
   },
   "st_miqp3": {
@@ -1088,7 +1088,7 @@
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.008985454000139725
+    "wall": 0.003653916995972395
    },
    "post": {
     "maximize": false,
@@ -1097,47 +1097,47 @@
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.010443168999699992
+    "wall": 0.0037784589803777635
    }
   },
   "st_miqp4": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -4574.0000024840665,
-    "bound": -4574.0000024840665,
+    "objective": -4574.000002484067,
+    "bound": -4574.000002484067,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.032428487998913624
+    "wall": 0.009518625040072948
    },
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": -4574.0000024840665,
-    "bound": -4574.0000024840665,
+    "objective": -4574.000002484067,
+    "bound": -4574.000002484067,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.030268503998740925
+    "wall": 0.009589541994500905
    }
   },
   "st_miqp5": {
    "pre": {
     "maximize": false,
     "status": "optimal",
-    "objective": -333.88889024868075,
-    "bound": -333.88889024868075,
+    "objective": -333.8888902491578,
+    "bound": -333.8888902491578,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.03785257100025774
+    "wall": 0.011504416994284838
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -333.88889024868075,
-    "bound": -333.88889024868075,
+    "objective": -333.8888902491578,
+    "bound": -333.8888902491578,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.03559647300062352
+    "wall": 0.011059750046115369
    }
   },
   "st_test1": {
@@ -1148,7 +1148,7 @@
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.04169112199997471
+    "wall": 0.012947167037054896
    },
    "pre": {
     "maximize": false,
@@ -1157,7 +1157,7 @@
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.03655282199906651
+    "wall": 0.01251724996836856
    }
   },
   "st_testgr3": {
@@ -1168,7 +1168,7 @@
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.3153328190001048
+    "wall": 0.07895283302059397
    },
    "post": {
     "maximize": false,
@@ -1177,138 +1177,138 @@
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.3286758020003617
+    "wall": 0.07581474998733029
    }
   },
   "syn05hfsg": {
    "post": {
     "maximize": true,
-    "status": "feasible",
-    "objective": 837.732412391107,
-    "bound": 840.4893941019075,
-    "node_count": 167,
-    "gap_certified": false,
-    "wall": 20.28740770799959
+    "status": "optimal",
+    "objective": 837.7323012718434,
+    "bound": 837.7324008980034,
+    "node_count": 285,
+    "gap_certified": true,
+    "wall": 5.584002582996618
    },
    "pre": {
     "maximize": true,
-    "status": "feasible",
+    "status": "optimal",
     "objective": 837.732412391107,
-    "bound": 838.3878622240098,
-    "node_count": 179,
-    "gap_certified": false,
-    "wall": 20.10448203299893
+    "bound": 837.732412391107,
+    "node_count": 185,
+    "gap_certified": true,
+    "wall": 5.3335105840233155
    }
   },
   "tanksize": {
    "pre": {
     "maximize": false,
-    "status": "time_limit",
-    "objective": 1.268643752557795,
-    "bound": 1.2632541695785504,
-    "node_count": 4306,
+    "status": "optimal",
+    "objective": 1.2686437525577947,
+    "bound": 1.2685440897016123,
+    "node_count": 11451,
     "gap_certified": true,
-    "wall": 20.107069439000043
+    "wall": 17.197832499979995
    },
    "post": {
     "maximize": false,
-    "status": "time_limit",
-    "objective": 1.268643752557795,
-    "bound": 1.2621867811714296,
-    "node_count": 3784,
+    "status": "optimal",
+    "objective": 1.2686437598530085,
+    "bound": 1.2685440895965434,
+    "node_count": 10861,
     "gap_certified": true,
-    "wall": 20.101737228000275
+    "wall": 15.87849150004331
    }
   },
   "tls2": {
    "post": {
     "maximize": false,
-    "status": "feasible",
-    "objective": 5.299999922109238,
-    "bound": 3.1706801036010077,
-    "node_count": 349,
-    "gap_certified": false,
-    "wall": 20.496603259998665
+    "status": "optimal",
+    "objective": 5.2999999999875085,
+    "bound": 5.3,
+    "node_count": 353,
+    "gap_certified": true,
+    "wall": 13.18257750000339
    },
    "pre": {
     "maximize": false,
-    "status": "feasible",
+    "status": "optimal",
     "objective": 5.299999922109238,
-    "bound": 3.2532681850660596,
+    "bound": 5.3,
     "node_count": 353,
-    "gap_certified": false,
-    "wall": 20.344976995000252
+    "gap_certified": true,
+    "wall": 13.021860250039026
    }
   },
   "tspn05": {
    "pre": {
     "maximize": false,
-    "status": "feasible",
-    "objective": 191.2552076848774,
-    "bound": 179.44337578420988,
-    "node_count": 49,
-    "gap_certified": false,
-    "wall": 20.147514609998325
+    "status": "optimal",
+    "objective": 191.25520768494238,
+    "bound": 191.25510622528546,
+    "node_count": 51,
+    "gap_certified": true,
+    "wall": 9.492925582977477
    },
    "post": {
     "maximize": false,
-    "status": "feasible",
-    "objective": 191.2552076848774,
-    "bound": 179.44337578420988,
-    "node_count": 49,
-    "gap_certified": false,
-    "wall": 20.118836876001296
+    "status": "optimal",
+    "objective": 191.25520784466957,
+    "bound": 191.25510622528546,
+    "node_count": 51,
+    "gap_certified": true,
+    "wall": 9.32075629197061
    }
   },
   "tspn08": {
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 290.56685374735093,
+    "objective": 290.5668539675055,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 15.3715363350002
+    "wall": 5.83552508399589
    },
    "pre": {
     "maximize": false,
     "status": "feasible",
-    "objective": 290.56685374735093,
+    "objective": 290.56685374735457,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 18.034337167000558
+    "wall": 6.066250791947823
    }
   },
   "tspn10": {
    "pre": {
     "maximize": false,
     "status": "feasible",
-    "objective": 225.12607139732842,
+    "objective": 225.1260713973292,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 15.533888261999891
+    "wall": 8.225008875015192
    },
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 225.12607139732683,
+    "objective": 225.1260717001685,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 21.301305689999936
+    "wall": 7.226137874997221
    }
   },
   "tspn12": {
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 262.64739525060224,
+    "objective": 262.6473957963284,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 15.072269878999577
+    "wall": 4.389950249984395
    },
    "pre": {
     "maximize": false,
@@ -1317,17 +1317,30 @@
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 14.654824365001332
+    "wall": 4.432227334007621
    }
   }
  },
  "diffs": [
   [
-   "beuster",
+   "4stufen",
    {
     "bound": [
-     6395.108327034645,
-     6395.108328059316
+     20712.174649175664,
+     21475.147700500194
+    ],
+    "node_count": [
+     7,
+     15
+    ]
+   }
+  ],
+  [
+   "casctanks",
+   {
+    "node_count": [
+     31,
+     15
     ]
    }
   ],
@@ -1345,50 +1358,421 @@
    }
   ],
   [
-   "heatexch_gen2",
+   "clay0303hfsg",
    {
     "node_count": [
+     319,
+     287
+    ]
+   }
+  ],
+  [
+   "cvxnonsep_nsig30",
+   {
+    "objective": [
+     130.62871116925294,
+     130.62871268683435
+    ]
+   }
+  ],
+  [
+   "cvxnonsep_psig30",
+   {
+    "objective": [
+     78.99885435294289,
+     78.99885436526898
+    ]
+   }
+  ],
+  [
+   "cvxnonsep_psig40r",
+   {
+    "objective": [
+     86.54527995164958,
+     86.54528288283353
+    ],
+    "bound": [
+     86.53873600363832,
+     86.5387360036383
+    ]
+   }
+  ],
+  [
+   "dispatch",
+   {
+    "objective": [
+     3155.2879266857854,
+     3155.2879268631687
+    ],
+    "bound": [
+     3155.2878615366776,
+     3155.287861536673
+    ]
+   }
+  ],
+  [
+   "ex1222",
+   {
+    "objective": [
+     1.0765430833322625,
+     1.0765430833322618
+    ],
+    "bound": [
+     1.0765430463031964,
+     1.0765430833322571
+    ],
+    "node_count": [
+     1,
+     3
+    ]
+   }
+  ],
+  [
+   "ex1224",
+   {
+    "objective": [
+     -0.9434704942820806,
+     -0.9434704993121346
+    ],
+    "bound": [
+     -0.9434705000000164,
+     -0.9434705000000165
+    ]
+   }
+  ],
+  [
+   "ex1225",
+   {
+    "objective": [
+     30.999999913557566,
+     31.000000000008843
+    ],
+    "bound": [
+     30.999999913557566,
+     30.999999999999844
+    ]
+   }
+  ],
+  [
+   "ex1226",
+   {
+    "objective": [
+     -17.000000003887443,
+     -17.000000000000007
+    ],
+    "bound": [
+     -17.000000003887443,
+     -17.00000000000013
+    ],
+    "node_count": [
      3,
+     5
+    ]
+   }
+  ],
+  [
+   "ex14_1_9",
+   {
+    "objective": [
+     -1.9775220540513224e-16,
+     3.7948647471750336e-09
+    ],
+    "bound": [
+     -1.9775220540513224e-16,
+     0.0
+    ],
+    "node_count": [
+     3,
+     5
+    ]
+   }
+  ],
+  [
+   "fac2",
+   {
+    "objective": [
+     331837497.8394821,
+     331837498.17693394
+    ]
+   }
+  ],
+  [
+   "flay02m",
+   {
+    "objective": [
+     37.94733186383461,
+     37.94733200383462
+    ],
+    "bound": [
+     37.947331804569515,
+     37.94733186379298
+    ]
+   }
+  ],
+  [
+   "flay03m",
+   {
+    "objective": [
+     48.98979479383567,
+     48.9897949738358
+    ],
+    "bound": [
+     48.98979470823052,
+     48.98979479323287
+    ]
+   }
+  ],
+  [
+   "gkocis",
+   {
+    "objective": [
+     -1.9230987798770212,
+     -1.9230986924056728
+    ],
+    "bound": [
+     -1.9230988280923489,
+     -1.9230987422706283
+    ],
+    "node_count": [
+     5,
      7
+    ]
+   }
+  ],
+  [
+   "heatexch_gen2",
+   {
+    "status": [
+     "time_limit",
+     "feasible"
+    ],
+    "objective": [
+     null,
+     824551.3269251497
+    ]
+   }
+  ],
+  [
+   "m3",
+   {
+    "objective": [
+     37.79999966997884,
+     37.800000263754725
+    ],
+    "bound": [
+     37.79999951039201,
+     37.7999996700244
+    ],
+    "node_count": [
+     47,
+     53
+    ]
+   }
+  ],
+  [
+   "nvs03",
+   {
+    "bound": [
+     15.99999972676511,
+     16.0
+    ],
+    "node_count": [
+     5,
+     3
+    ]
+   }
+  ],
+  [
+   "nvs05",
+   {
+    "objective": [
+     8.731956986640078,
+     8.731956986640789
+    ],
+    "bound": [
+     3.8053367777828426,
+     4.099237735891656
+    ],
+    "node_count": [
+     131,
+     155
+    ]
+   }
+  ],
+  [
+   "nvs08",
+   {
+    "objective": [
+     23.449727347139827,
+     23.449727347978744
+    ],
+    "bound": [
+     23.44972734516655,
+     23.449727347447233
+    ],
+    "node_count": [
+     3,
+     5
+    ]
+   }
+  ],
+  [
+   "nvs09",
+   {
+    "objective": [
+     -43.134336918035295,
+     -43.13433691803531
+    ]
+   }
+  ],
+  [
+   "nvs21",
+   {
+    "objective": [
+     -5.684782628025259,
+     -5.684782416744887
+    ],
+    "bound": [
+     -5.684782628025259,
+     -5.684782500000104
+    ],
+    "node_count": [
+     3,
+     9
+    ]
+   }
+  ],
+  [
+   "oaer",
+   {
+    "objective": [
+     -1.9230984998848466,
+     -1.923098510129794
+    ],
+    "bound": [
+     -1.923098601139822,
+     -1.9230985229112711
+    ],
+    "node_count": [
+     3,
+     5
+    ]
+   }
+  ],
+  [
+   "st_e11",
+   {
+    "objective": [
+     189.31162974131917,
+     189.31162970097128
+    ],
+    "bound": [
+     189.31162968661766,
+     189.311629686619
+    ],
+    "node_count": [
+     27,
+     5
+    ]
+   }
+  ],
+  [
+   "st_e13",
+   {
+    "objective": [
+     1.9999999825187946,
+     2.000000002518795
+    ],
+    "bound": [
+     1.9999999825187946,
+     2.0
+    ]
+   }
+  ],
+  [
+   "st_e29",
+   {
+    "objective": [
+     -0.9434704942820806,
+     -0.9434704993121346
+    ],
+    "bound": [
+     -0.9434705000000164,
+     -0.9434705000000165
+    ]
+   }
+  ],
+  [
+   "st_e38",
+   {
+    "objective": [
+     7197.727116826533,
+     7197.727148526159
+    ],
+    "bound": [
+     7197.727116826533,
+     7197.727148526159
     ]
    }
   ],
   [
    "syn05hfsg",
    {
+    "objective": [
+     837.732412391107,
+     837.7323012718434
+    ],
     "bound": [
-     838.3878622240098,
-     840.4893941019075
+     837.732412391107,
+     837.7324008980034
     ],
     "node_count": [
-     179,
-     167
+     185,
+     285
     ]
    }
   ],
   [
    "tanksize",
    {
+    "objective": [
+     1.2686437525577947,
+     1.2686437598530085
+    ],
     "bound": [
-     1.2632541695785504,
-     1.2621867811714296
+     1.2685440897016123,
+     1.2685440895965434
     ],
     "node_count": [
-     4306,
-     3784
+     11451,
+     10861
     ]
    }
   ],
   [
    "tls2",
    {
-    "bound": [
-     3.2532681850660596,
-     3.1706801036010077
-    ],
-    "node_count": [
-     353,
-     349
+    "objective": [
+     5.299999922109238,
+     5.2999999999875085
+    ]
+   }
+  ],
+  [
+   "tspn05",
+   {
+    "objective": [
+     191.25520768494238,
+     191.25520784466957
+    ]
+   }
+  ],
+  [
+   "tspn08",
+   {
+    "objective": [
+     290.56685374735457,
+     290.5668539675055
     ]
    }
   ],
@@ -1396,8 +1780,17 @@
    "tspn10",
    {
     "objective": [
-     225.12607139732842,
-     225.12607139732683
+     225.1260713973292,
+     225.1260717001685
+    ]
+   }
+  ],
+  [
+   "tspn12",
+   {
+    "objective": [
+     262.64739525060224,
+     262.6473957963284
     ]
    }
   ]
@@ -1405,8 +1798,8 @@
  "findings": [],
  "cert_regressions": [],
  "solve_nlp_calls": {
-  "pre": 3136,
-  "post": 3163
+  "pre": 4037,
+  "post": 4052
  },
  "time_limit": 20.0
 }
