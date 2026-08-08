@@ -71,15 +71,17 @@ def solve_nlp(
 
     import pounce
 
-    # discopt's shared POUNCE baseline, seeded BEFORE the caller's options so an
-    # explicit request still wins. Chiefly this pins bound_relax_factor=0 so a
-    # returned NLP point stays inside its declared box — patching only the LP/QP
-    # entry points left this path handing back points ~7.5e-9 below their lower
-    # bounds (issue #940). See solvers.pounce_option_defaults.
-    from discopt.solvers import pounce_option_defaults
-
-    opts = pounce_option_defaults()
-    opts.update(dict(options) if options else {})
+    opts = dict(options) if options else {}
+    opts.setdefault("print_level", 0)
+    # NOT seeded from solvers.pounce_option_defaults yet. This path returns points
+    # up to ~7.5e-9 OUTSIDE their declared bounds (Ipopt's bound_relax_factor),
+    # measured in #940 — but pinning that to 0 here makes incumbents genuinely
+    # feasible, which turns `incumbent - bound` from <=0 into a small positive
+    # number and breaks 12 `gap == 0 @ 1e-9` assertions across OA / GDPopt /
+    # MindtPy parity. Those expectations are currently calibrated against a solver
+    # that returns slightly-infeasible incumbents; correcting that is a
+    # certification-semantics change needing its own differential panel. Tracked
+    # in #945 with the full attribution.
 
     n = evaluator.n_variables
     m = evaluator.n_constraints

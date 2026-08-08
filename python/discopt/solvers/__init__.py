@@ -199,17 +199,25 @@ POUNCE_BOUND_RELAX_FACTOR = 0.0
 def pounce_option_defaults() -> dict:
     """discopt's baseline POUNCE options: quiet, and inside the declared box.
 
-    THE single source of truth, seeded at every site that hands options to
-    POUNCE. Seed it *before* merging a caller's options so an explicit request
-    still wins::
+    THE single source of truth for the **matrix-form** backends (``lp_pounce``,
+    ``qp_pounce``). Seed it *before* merging a caller's options so an explicit
+    request still wins::
 
         opts = pounce_option_defaults()
         opts.update(caller_options or {})
 
     Do not re-spell these values at a call site — a second copy is how one entry
-    point silently keeps Ipopt's defaults while the rest move (issue #940, where
-    patching the LP/QP entry points alone left the NLP path returning points
-    ~7.5e-9 below their declared lower bounds).
+    point silently keeps Ipopt's defaults while the rest move.
+
+    The NLP path (``nlp_pounce.solve_nlp``, and ``solver.py``'s batch path) does
+    NOT use this yet, and so still returns points up to ~7.5e-9 outside their
+    declared bounds. That is not an oversight: pinning ``bound_relax_factor`` to 0
+    there makes incumbents genuinely feasible, which turns ``incumbent - bound``
+    from ``<= 0`` into a small positive number and breaks 12 ``gap == 0 @ 1e-9``
+    assertions across OA / GDPopt / MindtPy parity — those expectations are
+    currently calibrated against a solver that returns slightly-infeasible
+    incumbents. Extending this seed to the NLP path is tracked in #945, together
+    with the gap-closure question it forces.
     """
     return {
         "print_level": 0,

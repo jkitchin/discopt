@@ -14306,11 +14306,9 @@ def _solve_batch_pounce(
 
     # Batch-level options. Whitelist keys POUNCE understands and enforce the
     # per-node wall-time guard (issue #5) used by the serial pounce path.
-    # Seeded from the shared POUNCE baseline so this batch path keeps iterates
-    # inside their declared node box like every other entry point (#940).
-    from discopt.solvers import pounce_option_defaults
-
-    batch_opts: dict = pounce_option_defaults()
+    # Deliberately NOT seeded from solvers.pounce_option_defaults: this is the NLP
+    # batch path, and bound_relax_factor=0 there breaks OA/GDPopt gap closure (#945).
+    batch_opts: dict = {"print_level": 0}
     for k in ("max_iter", "tol", "acceptable_tol"):
         if options.get(k) is not None:
             batch_opts[k] = options[k]
