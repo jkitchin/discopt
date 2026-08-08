@@ -36,8 +36,16 @@ import discopt.solvers.oa as OA  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 from discopt.solvers import pounce_option_defaults  # noqa: E402
 
-assert "opts = pounce_option_defaults()" in inspect.getsource(NLPP.solve_nlp), (
-    "post-#945 marker absent — nothing to replicate"
+# §8 markers, tracking the CONTRACT rather than a line of code: #945 requests the
+# incumbent options at the point-consuming call sites and leaves the NLP backend
+# neutral. An earlier version named the superseded contract and refused to run once
+# the branch rescoped — the guard working, not a bug.
+for _fn in (SOLVER._solve_continuous, OA._solve_nlp_attempt, LOA._solve_nlp_subproblem):
+    assert "pounce_incumbent_options()" in inspect.getsource(_fn), (
+        f"post-#945 marker absent in {_fn.__name__} — nothing to replicate"
+    )
+assert "pounce_incumbent_options()" not in inspect.getsource(NLPP.solve_nlp), (
+    "bound_relax_factor leaked back into the NLP backend default"
 )
 
 # Same two-seam arm reconstruction as panel_corpus.set_arm: bound_relax_factor is
@@ -50,11 +58,11 @@ _CONSUMERS = (SOLVER, OA, LOA)
 
 ROOT = "python/tests/data/minlplib_nl"
 
-# Every instance the corpus panel reported as differing on STATUS or on a bound
-# by more than last-digit drift. The set includes movers in BOTH directions
-# (nvs03/ex1225 tighter, nvs05/tanksize looser) — a replication harness that only
-# ever chases regressions cannot show it is capable of seeing anything.
-TARGETS = ["contvar", "ex1225", "m3", "nvs03", "nvs05", "tanksize", "tls2", "tspn12"]
+# Every instance the final corpus panel reported as differing. The set deliberately
+# includes movers in BOTH directions — tls2 (panel: certification LOST) and
+# syn05hfsg (panel: certification GAINED) — because a replication harness that only
+# ever chases regressions cannot demonstrate it is capable of seeing anything.
+TARGETS = ["chance", "nvs05", "syn05hfsg", "tanksize", "tls2"]
 
 
 def set_arm(arm: str) -> None:

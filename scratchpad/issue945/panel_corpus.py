@@ -49,11 +49,11 @@ from discopt.modeling import from_nl  # noqa: E402
 from discopt.solvers import pounce_option_defaults  # noqa: E402
 
 # §8: assert we loaded the code under test, by file AND by a marker unique to it.
+# The marker tracks the CONTRACT, not a line of code: #945 requests the incumbent
+# options at the point-consuming call sites and deliberately leaves the backend
+# neutral. An earlier version of this assert named the superseded contract and
+# refused to run once the branch rescoped — which is the guard working.
 assert NLPP.__file__.startswith("/home/user/discopt/python/"), NLPP.__file__
-assert "opts = pounce_option_defaults()" in inspect.getsource(NLPP.solve_nlp), (
-    "post-#945 marker absent: nlp_pounce.solve_nlp is not seeded from the shared "
-    "baseline, so there is no change here to panel"
-)
 
 # The pre-#945 arm. Reconstructing it takes TWO seams, not one: #945 does NOT put
 # bound_relax_factor in the backend default (that breaks the Benders dual LP — see
@@ -87,6 +87,19 @@ import discopt.solvers.oa as OA  # noqa: E402
 # Every module that requests the incumbent options; the arm must cover all of them.
 _CONSUMERS = (SOLVER, OA, LOA)
 _REAL_INCUMBENT = SOLVER.pounce_incumbent_options
+
+# Post-#945 markers, checked here rather than at import of NLPP because the change
+# now lives at the CALL SITES. Absent => there is nothing to panel, and a green
+# "0 differences" would be measuring the same tree twice.
+for _fn in (SOLVER._solve_continuous, OA._solve_nlp_attempt, LOA._solve_nlp_subproblem):
+    assert "pounce_incumbent_options()" in inspect.getsource(_fn), (
+        f"post-#945 marker absent in {_fn.__name__}: the incumbent options are not "
+        "requested there, so this panel would compare the pre arm against itself"
+    )
+assert "pounce_incumbent_options()" not in inspect.getsource(NLPP.solve_nlp), (
+    "bound_relax_factor leaked back into the NLP backend default; the pre arm "
+    "reconstruction below assumes it is requested only at the call sites"
+)
 
 
 def set_arm(arm: str) -> None:

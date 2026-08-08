@@ -8,7 +8,7 @@
     "bound": 20282.050738736412,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.32714018599995
+    "wall": 21.340063814000132
    },
    "post": {
     "maximize": false,
@@ -17,7 +17,7 @@
     "bound": 20282.050738736412,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 20.720571975999974
+    "wall": 20.703717978999975
    }
   },
   "alan": {
@@ -28,7 +28,7 @@
     "bound": 2.9249999983013426,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.0697737049999887
+    "wall": 0.07706615500001135
    },
    "pre": {
     "maximize": false,
@@ -37,7 +37,7 @@
     "bound": 2.9249999983013426,
     "node_count": 21,
     "gap_certified": true,
-    "wall": 0.06162336099987442
+    "wall": 0.06102747500017358
    }
   },
   "bchoco06": {
@@ -48,7 +48,7 @@
     "bound": 0.9999887833703148,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.838321133999898
+    "wall": 21.067289785999947
    },
    "post": {
     "maximize": true,
@@ -57,7 +57,7 @@
     "bound": 0.9999887833703148,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.015788905000136
+    "wall": 21.901819542999874
    }
   },
   "bchoco07": {
@@ -68,7 +68,7 @@
     "bound": 1.000000000000286,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 25.83363056799999
+    "wall": 21.473129479999898
    },
    "pre": {
     "maximize": true,
@@ -77,7 +77,7 @@
     "bound": 1.000000000000286,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.417543166000087
+    "wall": 21.438231690000066
    }
   },
   "bchoco08": {
@@ -86,18 +86,18 @@
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000002788,
-    "node_count": 3,
+    "node_count": 7,
     "gap_certified": false,
-    "wall": 21.386567788000093
+    "wall": 67.47129444099983
    },
    "post": {
     "maximize": true,
     "status": "time_limit",
     "objective": null,
     "bound": 1.000000000002788,
-    "node_count": 3,
+    "node_count": 7,
     "gap_certified": false,
-    "wall": 20.306743565000033
+    "wall": 31.66573628900005
    }
   },
   "beuster": {
@@ -108,16 +108,16 @@
     "bound": 6395.108328059316,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.53944314699993
+    "wall": 20.86968129199977
    },
    "pre": {
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 6395.108327034671,
+    "bound": 6395.108328059316,
     "node_count": 7,
     "gap_certified": false,
-    "wall": 21.234007547000147
+    "wall": 21.137492664000092
    }
   },
   "casctanks": {
@@ -126,9 +126,9 @@
     "status": "time_limit",
     "objective": null,
     "bound": -90.17862329759835,
-    "node_count": 1,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 21.27176078699995
+    "wall": 21.675969455000086
    },
    "post": {
     "maximize": false,
@@ -137,7 +137,7 @@
     "bound": -90.17862329759835,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 25.010035169000048
+    "wall": 21.52435942500051
    }
   },
   "chance": {
@@ -148,7 +148,7 @@
     "bound": 29.894378166613386,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.40208159200005866
+    "wall": 0.18263813399971696
    },
    "pre": {
     "maximize": false,
@@ -157,7 +157,7 @@
     "bound": 29.894378154271102,
     "node_count": 0,
     "gap_certified": true,
-    "wall": 0.16450228000007883
+    "wall": 0.16545271100039827
    }
   },
   "clay0303hfsg": {
@@ -166,9 +166,9 @@
     "status": "time_limit",
     "objective": null,
     "bound": null,
-    "node_count": 3,
+    "node_count": 127,
     "gap_certified": false,
-    "wall": 20.643820403999825
+    "wall": 21.00434961800056
    },
    "post": {
     "maximize": false,
@@ -177,7 +177,7 @@
     "bound": null,
     "node_count": 127,
     "gap_certified": false,
-    "wall": 20.99889830500001
+    "wall": 20.736461437999424
    }
   },
   "contvar": {
@@ -185,10 +185,10 @@
     "maximize": false,
     "status": "time_limit",
     "objective": null,
-    "bound": 180782.8593284799,
+    "bound": 183632.02121055726,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 22.113465987000154
+    "wall": 22.349915685999804
    },
    "pre": {
     "maximize": false,
@@ -197,7 +197,7 @@
     "bound": 183632.02121055726,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 21.53963904400007
+    "wall": 21.744284481999784
    }
   },
   "cvxnonsep_nsig30": {
@@ -208,16 +208,16 @@
     "bound": 130.61841392487688,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 5.474517335999963
+    "wall": 4.089018747999944
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 130.62871123822686,
-    "bound": 130.61841401236617,
+    "objective": 130.62871116925294,
+    "bound": 130.61841392487688,
     "node_count": 171,
     "gap_certified": true,
-    "wall": 3.6531784119999884
+    "wall": 3.966168029000073
    }
   },
   "cvxnonsep_psig30": {
@@ -225,10 +225,10 @@
     "maximize": false,
     "status": "optimal",
     "objective": 78.99885435294289,
-    "bound": 78.9970170582728,
+    "bound": 78.99701703820377,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 3.3853175290000763
+    "wall": 1.6343554780005434
    },
    "pre": {
     "maximize": false,
@@ -237,7 +237,7 @@
     "bound": 78.99701703820377,
     "node_count": 89,
     "gap_certified": true,
-    "wall": 1.8419379100000697
+    "wall": 2.0338044550007908
    }
   },
   "cvxnonsep_psig40r": {
@@ -248,27 +248,27 @@
     "bound": 86.53873600363832,
     "node_count": 103,
     "gap_certified": true,
-    "wall": 7.935117317000049
+    "wall": 6.401610296000399
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 86.54527995164958,
-    "bound": 86.5387360184926,
-    "node_count": 95,
+    "objective": 86.54527995164959,
+    "bound": 86.53873600363832,
+    "node_count": 103,
     "gap_certified": true,
-    "wall": 6.1406269019998945
+    "wall": 6.646877549999772
    }
   },
   "dispatch": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 3155.2879267317876,
-    "bound": 3155.2878615366767,
+    "objective": 3155.2879266857854,
+    "bound": 3155.2878615366776,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.5210910200000853
+    "wall": 0.5983337699999538
    },
    "pre": {
     "maximize": false,
@@ -277,7 +277,7 @@
     "bound": 3155.2878615366776,
     "node_count": 23,
     "gap_certified": true,
-    "wall": 0.38248191299999235
+    "wall": 0.4223917499994059
    }
   },
   "ex1221": {
@@ -288,7 +288,7 @@
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.088639171000068
+    "wall": 0.847690366000279
    },
    "post": {
     "maximize": false,
@@ -297,7 +297,7 @@
     "bound": 7.667180068813077,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.6961785749999763
+    "wall": 0.8767105770002672
    }
   },
   "ex1222": {
@@ -305,10 +305,10 @@
     "maximize": false,
     "status": "optimal",
     "objective": 1.0765430833322625,
-    "bound": 1.0765430463031955,
+    "bound": 1.0765430463031964,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.4036420590000489
+    "wall": 0.306689307999477
    },
    "pre": {
     "maximize": false,
@@ -317,7 +317,7 @@
     "bound": 1.0765430463031964,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.2393873399998938
+    "wall": 0.23709257100017567
    }
   },
   "ex1224": {
@@ -328,7 +328,7 @@
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 3.1738750510000955
+    "wall": 2.7015993259992683
    },
    "post": {
     "maximize": false,
@@ -337,18 +337,18 @@
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.6461232209999253
+    "wall": 2.5378109640005277
    }
   },
   "ex1225": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 30.999999948692963,
-    "bound": 30.999999948692963,
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 3.2333033429999887
+    "wall": 2.4734765289995266
    },
    "pre": {
     "maximize": false,
@@ -357,7 +357,7 @@
     "bound": 30.999999913557566,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.7822530089999873
+    "wall": 2.680774093999389
    }
   },
   "ex1226": {
@@ -368,7 +368,7 @@
     "bound": -17.000000003887443,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.2791051019999031
+    "wall": 0.7485413469994455
    },
    "post": {
     "maximize": false,
@@ -377,18 +377,18 @@
     "bound": -17.000000003887443,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.432167889000084
+    "wall": 0.7260731919996033
    }
   },
   "ex14_1_9": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.9775220623231286e-16,
-    "bound": -1.9775220623231286e-16,
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.1406090880000193
+    "wall": 0.29846733000067616
    },
    "pre": {
     "maximize": false,
@@ -397,7 +397,7 @@
     "bound": -1.9775220540513224e-16,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.4209316100000251
+    "wall": 0.28341770699989866
    }
   },
   "fac2": {
@@ -408,27 +408,27 @@
     "bound": 331837497.54563797,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 10.586713098000018
+    "wall": 8.841676842000197
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 331837498.17691857,
-    "bound": 331837497.54565895,
+    "objective": 331837497.8394821,
+    "bound": 331837497.54563797,
     "node_count": 41,
     "gap_certified": true,
-    "wall": 8.704947227000048
+    "wall": 8.715976561999923
    }
   },
   "flay02m": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 37.947331863834606,
-    "bound": 37.94733180456953,
+    "objective": 37.94733186383461,
+    "bound": 37.947331804569515,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.6680022479999934
+    "wall": 0.5235917359996165
    },
    "pre": {
     "maximize": false,
@@ -437,7 +437,7 @@
     "bound": 37.947331804569515,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.44236480800009303
+    "wall": 0.502729496000029
    }
   },
   "flay03m": {
@@ -448,16 +448,16 @@
     "bound": 48.98979470823052,
     "node_count": 111,
     "gap_certified": true,
-    "wall": 7.461430084000085
+    "wall": 9.543892702999983
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 48.98979479383577,
-    "bound": 48.98979470823063,
-    "node_count": 113,
+    "objective": 48.98979479383567,
+    "bound": 48.98979470823052,
+    "node_count": 111,
     "gap_certified": true,
-    "wall": 7.378897106000068
+    "wall": 7.040910736000114
    }
   },
   "gbd": {
@@ -468,7 +468,7 @@
     "bound": 2.1999999825308127,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.02703937000001133
+    "wall": 0.02498746299988852
    },
    "pre": {
     "maximize": false,
@@ -477,7 +477,7 @@
     "bound": 2.1999999825308127,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.022417828000016016
+    "wall": 0.021001138999963587
    }
   },
   "gkocis": {
@@ -488,16 +488,16 @@
     "bound": -1.9230988280923489,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.3983889429998726
+    "wall": 1.4591283479994672
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.9230987747401134,
-    "bound": -1.9230988280923498,
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.2420297620001293
+    "wall": 1.17010479199962
    }
   },
   "hda": {
@@ -508,7 +508,7 @@
     "bound": -64473.44240243703,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 21.7771964760002
+    "wall": 21.402470478000396
    },
    "pre": {
     "maximize": false,
@@ -517,7 +517,7 @@
     "bound": -64473.44240243703,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 21.071228192000035
+    "wall": 21.099769899999956
    }
   },
   "heatexch_gen1": {
@@ -528,7 +528,7 @@
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 24.602463700000044
+    "wall": 21.656159112999376
    },
    "post": {
     "maximize": false,
@@ -537,7 +537,7 @@
     "bound": 38183.5317460179,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 25.374974721999934
+    "wall": 21.572925202999613
    }
   },
   "heatexch_gen2": {
@@ -546,9 +546,9 @@
     "status": "time_limit",
     "objective": null,
     "bound": 555767.7902857271,
-    "node_count": 7,
+    "node_count": 3,
     "gap_certified": false,
-    "wall": 22.050892694999902
+    "wall": 21.984058686000026
    },
    "pre": {
     "maximize": false,
@@ -557,7 +557,7 @@
     "bound": 555767.7902857271,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 21.659613729000057
+    "wall": 21.933579728999575
    }
   },
   "heatexch_gen3": {
@@ -568,7 +568,7 @@
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 24.805495338000128
+    "wall": 29.739361054000256
    },
    "post": {
     "maximize": false,
@@ -577,18 +577,18 @@
     "bound": null,
     "node_count": 3,
     "gap_certified": false,
-    "wall": 159.09318966699993
+    "wall": 29.96267835800063
    }
   },
   "m3": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 37.79999970380645,
-    "bound": 37.79999957378442,
-    "node_count": 41,
+    "objective": 37.79999966997884,
+    "bound": 37.79999951039201,
+    "node_count": 47,
     "gap_certified": true,
-    "wall": 4.161642962000087
+    "wall": 4.658604321999519
    },
    "pre": {
     "maximize": false,
@@ -597,7 +597,7 @@
     "bound": 37.79999951039201,
     "node_count": 47,
     "gap_certified": true,
-    "wall": 5.255348631000061
+    "wall": 4.756032500999936
    }
   },
   "nvs01": {
@@ -608,7 +608,7 @@
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.6439451590001681
+    "wall": 1.988911017000646
    },
    "post": {
     "maximize": false,
@@ -617,7 +617,7 @@
     "bound": 12.46966882156821,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.2853830799999741
+    "wall": 1.5507398740001008
    }
   },
   "nvs02": {
@@ -628,7 +628,7 @@
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.45007736000002296
+    "wall": 0.5207517459994051
    },
    "pre": {
     "maximize": false,
@@ -637,7 +637,7 @@
     "bound": 5.96418452307,
     "node_count": 345,
     "gap_certified": true,
-    "wall": 0.3842895899999803
+    "wall": 0.42628081099974224
    }
   },
   "nvs03": {
@@ -648,16 +648,16 @@
     "bound": 15.99999972676511,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.2949178530000154
+    "wall": 0.22198429299987765
    },
    "post": {
     "maximize": false,
     "status": "optimal",
     "objective": 16.0,
-    "bound": 15.99999996676705,
+    "bound": 15.99999972676511,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.1825162210000144
+    "wall": 0.18828977399971336
    }
   },
   "nvs04": {
@@ -668,7 +668,7 @@
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.43267889300000206
+    "wall": 0.4147367790001226
    },
    "pre": {
     "maximize": false,
@@ -677,7 +677,7 @@
     "bound": 0.7199999999999773,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.32748328499997115
+    "wall": 0.35070941199955996
    }
   },
   "nvs05": {
@@ -686,18 +686,18 @@
     "status": "feasible",
     "objective": 8.731956986640078,
     "bound": 3.5424692441047068,
-    "node_count": 41,
+    "node_count": 33,
     "gap_certified": false,
-    "wall": 20.182257691999894
+    "wall": 20.14191485399988
    },
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 12.589492574009626,
-    "bound": 3.513753543700079,
-    "node_count": 33,
+    "objective": 8.731956986640078,
+    "bound": 3.5424692441047068,
+    "node_count": 41,
     "gap_certified": false,
-    "wall": 20.12968590100013
+    "wall": 20.161285596999733
    }
   },
   "nvs06": {
@@ -708,7 +708,7 @@
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.5876532459999453
+    "wall": 1.187288453000292
    },
    "pre": {
     "maximize": false,
@@ -717,7 +717,7 @@
     "bound": 1.7703124999999627,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 1.07712272699996
+    "wall": 1.1228943139994954
    }
   },
   "nvs07": {
@@ -728,7 +728,7 @@
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.09569734999990942
+    "wall": 0.07190670799991494
    },
    "post": {
     "maximize": false,
@@ -737,7 +737,7 @@
     "bound": 4.0,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.06396703199993681
+    "wall": 0.06876586599992152
    }
   },
   "nvs08": {
@@ -748,7 +748,7 @@
     "bound": 23.44972734516655,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.4748921469999914
+    "wall": 1.2100922780000474
    },
    "pre": {
     "maximize": false,
@@ -757,7 +757,7 @@
     "bound": 23.44972734516655,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.2505608799999663
+    "wall": 1.1709591640001236
    }
   },
   "nvs09": {
@@ -768,16 +768,16 @@
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 6.435507588999826
+    "wall": 4.718927093000275
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -43.13433691803531,
+    "objective": -43.134336918035295,
     "bound": -43.13433691803662,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 4.4610048320000715
+    "wall": 4.314823305999198
    }
   },
   "nvs10": {
@@ -788,7 +788,7 @@
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.16603770200003964
+    "wall": 0.18428214799951093
    },
    "pre": {
     "maximize": false,
@@ -797,7 +797,7 @@
     "bound": -310.7999999999999,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 0.13045944899999995
+    "wall": 0.15585522099991067
    }
   },
   "nvs11": {
@@ -808,7 +808,7 @@
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 1.1448019409999688
+    "wall": 0.7984933790003197
    },
    "post": {
     "maximize": false,
@@ -817,7 +817,7 @@
     "bound": -431.0000000000085,
     "node_count": 55,
     "gap_certified": true,
-    "wall": 0.7152426210000158
+    "wall": 0.6477721329993074
    }
   },
   "nvs12": {
@@ -828,7 +828,7 @@
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.4171318409999003
+    "wall": 2.5677869540004394
    },
    "pre": {
     "maximize": false,
@@ -837,7 +837,7 @@
     "bound": -481.20000000001,
     "node_count": 231,
     "gap_certified": true,
-    "wall": 2.097880950999979
+    "wall": 2.0910330770002474
    }
   },
   "nvs13": {
@@ -848,7 +848,7 @@
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.8591022190000785
+    "wall": 1.6628040579998924
    },
    "post": {
     "maximize": false,
@@ -857,7 +857,7 @@
     "bound": -585.2,
     "node_count": 637,
     "gap_certified": true,
-    "wall": 1.4032217410001522
+    "wall": 1.4816955699998289
    }
   },
   "nvs14": {
@@ -868,7 +868,7 @@
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.8666135529999792
+    "wall": 0.8479760170002919
    },
    "pre": {
     "maximize": false,
@@ -877,7 +877,7 @@
     "bound": -40358.154769299996,
     "node_count": 129,
     "gap_certified": true,
-    "wall": 0.8534960629999659
+    "wall": 0.84033171900046
    }
   },
   "nvs15": {
@@ -888,7 +888,7 @@
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.07827312700010225
+    "wall": 0.08723134499996377
    },
    "post": {
     "maximize": false,
@@ -897,7 +897,7 @@
     "bound": 1.0,
     "node_count": 7,
     "gap_certified": true,
-    "wall": 0.07677735400011443
+    "wall": 0.08384172800015222
    }
   },
   "nvs21": {
@@ -908,7 +908,7 @@
     "bound": -5.684782628025259,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 8.974388968000085
+    "wall": 7.365921497999807
    },
    "pre": {
     "maximize": false,
@@ -917,7 +917,7 @@
     "bound": -5.684782628025259,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 6.292978661999996
+    "wall": 6.512636297000427
    }
   },
   "oaer": {
@@ -928,27 +928,27 @@
     "bound": -1.923098601139822,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.189243807000139
+    "wall": 1.1342668400002367
    },
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": -1.9230985115702832,
+    "objective": -1.923098499884843,
     "bound": -1.923098601139822,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 1.2234205120000752
+    "wall": 0.9787721730008343
    }
   },
   "st_e11": {
    "post": {
     "maximize": false,
     "status": "optimal",
-    "objective": 189.31178228026806,
-    "bound": 189.31162968661764,
+    "objective": 189.31162974131917,
+    "bound": 189.31162968661766,
     "node_count": 27,
     "gap_certified": true,
-    "wall": 3.9886188610000772
+    "wall": 3.3105536600005507
    },
    "pre": {
     "maximize": false,
@@ -957,7 +957,7 @@
     "bound": 189.31162968661766,
     "node_count": 27,
     "gap_certified": true,
-    "wall": 3.3204398390000733
+    "wall": 3.151153957999668
    }
   },
   "st_e13": {
@@ -968,7 +968,7 @@
     "bound": 1.9999999825187946,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.23803890599992883
+    "wall": 0.1342486370003826
    },
    "post": {
     "maximize": false,
@@ -977,7 +977,7 @@
     "bound": 1.9999999825187946,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.1254774509998242
+    "wall": 0.12964829100019415
    }
   },
   "st_e29": {
@@ -988,7 +988,7 @@
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.5590663169998606
+    "wall": 2.973738345000129
    },
    "pre": {
     "maximize": false,
@@ -997,7 +997,7 @@
     "bound": -0.9434705000000166,
     "node_count": 5,
     "gap_certified": true,
-    "wall": 2.665116517000115
+    "wall": 2.723435843000516
    }
   },
   "st_e36": {
@@ -1008,7 +1008,7 @@
     "bound": -246.00000000170422,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 10.071021720999852
+    "wall": 9.497817057000248
    },
    "post": {
     "maximize": false,
@@ -1017,7 +1017,7 @@
     "bound": -246.00000000170422,
     "node_count": 85,
     "gap_certified": true,
-    "wall": 9.108315689999927
+    "wall": 8.930255438999666
    }
   },
   "st_e38": {
@@ -1028,7 +1028,7 @@
     "bound": 7197.727116826533,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.9304301829999986
+    "wall": 0.8050893419995191
    },
    "pre": {
     "maximize": false,
@@ -1037,7 +1037,7 @@
     "bound": 7197.727116826533,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.7120587800000067
+    "wall": 0.7653070249998564
    }
   },
   "st_miqp1": {
@@ -1048,7 +1048,7 @@
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.02052733999994416
+    "wall": 0.02535302399974171
    },
    "post": {
     "maximize": false,
@@ -1057,7 +1057,7 @@
     "bound": 280.9999999906497,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.018686946999878273
+    "wall": 0.020920111000123143
    }
   },
   "st_miqp2": {
@@ -1068,7 +1068,7 @@
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.02447017899999082
+    "wall": 0.027963353999439278
    },
    "pre": {
     "maximize": false,
@@ -1077,7 +1077,7 @@
     "bound": 2.0,
     "node_count": 9,
     "gap_certified": true,
-    "wall": 0.023696365999967384
+    "wall": 0.0295779260004565
    }
   },
   "st_miqp3": {
@@ -1088,7 +1088,7 @@
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.00906364599995868
+    "wall": 0.010991941000611405
    },
    "post": {
     "maximize": false,
@@ -1097,7 +1097,7 @@
     "bound": -6.0,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.008847068000022773
+    "wall": 0.010478748000423366
    }
   },
   "st_miqp4": {
@@ -1108,7 +1108,7 @@
     "bound": -4574.0000024840665,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.026047281999808547
+    "wall": 0.031087235999621043
    },
    "pre": {
     "maximize": false,
@@ -1117,7 +1117,7 @@
     "bound": -4574.0000024840665,
     "node_count": 3,
     "gap_certified": true,
-    "wall": 0.026393293999944945
+    "wall": 0.028957886999705806
    }
   },
   "st_miqp5": {
@@ -1128,7 +1128,7 @@
     "bound": -333.88889024868075,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.0324710889999551
+    "wall": 0.0340186020002875
    },
    "post": {
     "maximize": false,
@@ -1137,7 +1137,7 @@
     "bound": -333.88889024868075,
     "node_count": 1,
     "gap_certified": true,
-    "wall": 0.031452121000029365
+    "wall": 0.03273793999960617
    }
   },
   "st_test1": {
@@ -1148,7 +1148,7 @@
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.03626103800002056
+    "wall": 0.03634161800073343
    },
    "pre": {
     "maximize": false,
@@ -1157,7 +1157,7 @@
     "bound": -1.6495994490692313e-08,
     "node_count": 15,
     "gap_certified": true,
-    "wall": 0.035310013999833245
+    "wall": 0.038223362999815436
    }
   },
   "st_testgr3": {
@@ -1168,7 +1168,7 @@
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.28182646599998407
+    "wall": 0.28243116900011955
    },
    "post": {
     "maximize": false,
@@ -1177,27 +1177,27 @@
     "bound": -20.59070709795548,
     "node_count": 549,
     "gap_certified": true,
-    "wall": 0.2782758789999207
+    "wall": 0.2876941529993928
    }
   },
   "syn05hfsg": {
    "post": {
     "maximize": true,
-    "status": "feasible",
-    "objective": 837.7324083563395,
-    "bound": 838.3878622240098,
-    "node_count": 171,
-    "gap_certified": false,
-    "wall": 20.28268366600014
+    "status": "optimal",
+    "objective": 837.732412391107,
+    "bound": 837.732412391107,
+    "node_count": 185,
+    "gap_certified": true,
+    "wall": 20.022627572999227
    },
    "pre": {
     "maximize": true,
     "status": "feasible",
     "objective": 837.732412391107,
     "bound": 838.3878622240098,
-    "node_count": 181,
+    "node_count": 167,
     "gap_certified": false,
-    "wall": 20.11427130700008
+    "wall": 20.09403269500035
    }
   },
   "tanksize": {
@@ -1205,39 +1205,39 @@
     "maximize": false,
     "status": "time_limit",
     "objective": 1.268643752557795,
-    "bound": 1.2616432205298513,
-    "node_count": 3596,
+    "bound": 1.2630486909987855,
+    "node_count": 4186,
     "gap_certified": true,
-    "wall": 20.114331551000078
+    "wall": 20.11908975499955
    },
    "post": {
     "maximize": false,
     "status": "time_limit",
-    "objective": 1.2686437708530283,
-    "bound": 1.262799393410885,
-    "node_count": 3964,
+    "objective": 1.268643752557795,
+    "bound": 1.263118021659774,
+    "node_count": 4216,
     "gap_certified": true,
-    "wall": 20.109238961000074
+    "wall": 20.102947426000355
    }
   },
   "tls2": {
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 10.299999996297192,
-    "bound": 2.4487125876978713,
+    "objective": 5.299999922109238,
+    "bound": 3.2532681850660596,
     "node_count": 353,
     "gap_certified": false,
-    "wall": 20.732897183999967
+    "wall": 20.111197416999858
    },
    "pre": {
     "maximize": false,
-    "status": "feasible",
+    "status": "optimal",
     "objective": 5.299999922109238,
-    "bound": 3.1706801036010077,
-    "node_count": 349,
-    "gap_certified": false,
-    "wall": 20.800227508000035
+    "bound": 5.3,
+    "node_count": 353,
+    "gap_certified": true,
+    "wall": 20.396457507999912
    }
   },
   "tspn05": {
@@ -1248,27 +1248,27 @@
     "bound": 179.44337578420988,
     "node_count": 49,
     "gap_certified": false,
-    "wall": 20.155364598999768
+    "wall": 20.206236415000603
    },
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 191.2552076848786,
+    "objective": 191.2552076848774,
     "bound": 179.44337578420988,
     "node_count": 49,
     "gap_certified": false,
-    "wall": 20.18219688099998
+    "wall": 20.103172094
    }
   },
   "tspn08": {
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 290.5668537474047,
+    "objective": 290.56685374735093,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 19.96056919099965
+    "wall": 15.677741274000255
    },
    "pre": {
     "maximize": false,
@@ -1277,38 +1277,38 @@
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 16.166508093000175
+    "wall": 15.301717747999646
    }
   },
   "tspn10": {
    "pre": {
     "maximize": false,
     "status": "feasible",
-    "objective": 225.1260713973286,
+    "objective": 225.12607139732683,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 15.319980657000087
+    "wall": 20.90029842900003
    },
    "post": {
     "maximize": false,
     "status": "feasible",
-    "objective": 225.12607139732896,
+    "objective": 225.12607139732683,
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 19.474078835
+    "wall": 14.456912680999267
    }
   },
   "tspn12": {
    "post": {
     "maximize": false,
-    "status": "time_limit",
-    "objective": null,
+    "status": "feasible",
+    "objective": 262.64739525060224,
     "bound": null,
-    "node_count": 3,
+    "node_count": 1,
     "gap_certified": false,
-    "wall": 35.189106618000096
+    "wall": 14.722521587999836
    },
    "pre": {
     "maximize": false,
@@ -1317,29 +1317,11 @@
     "bound": null,
     "node_count": 1,
     "gap_certified": false,
-    "wall": 14.85704738000004
+    "wall": 14.460105023000324
    }
   }
  },
  "diffs": [
-  [
-   "beuster",
-   {
-    "bound": [
-     6395.108327034671,
-     6395.108328059316
-    ]
-   }
-  ],
-  [
-   "casctanks",
-   {
-    "node_count": [
-     1,
-     3
-    ]
-   }
-  ],
   [
    "chance",
    {
@@ -1354,346 +1336,65 @@
    }
   ],
   [
-   "clay0303hfsg",
-   {
-    "node_count": [
-     3,
-     127
-    ]
-   }
-  ],
-  [
-   "contvar",
-   {
-    "bound": [
-     183632.02121055726,
-     180782.8593284799
-    ]
-   }
-  ],
-  [
-   "cvxnonsep_nsig30",
-   {
-    "objective": [
-     130.62871116925294,
-     130.62871123822686
-    ],
-    "bound": [
-     130.61841392487688,
-     130.61841401236617
-    ]
-   }
-  ],
-  [
-   "cvxnonsep_psig30",
-   {
-    "bound": [
-     78.99701703820377,
-     78.9970170582728
-    ]
-   }
-  ],
-  [
-   "cvxnonsep_psig40r",
-   {
-    "objective": [
-     86.54527995164959,
-     86.54527995164958
-    ],
-    "bound": [
-     86.53873600363832,
-     86.5387360184926
-    ],
-    "node_count": [
-     103,
-     95
-    ]
-   }
-  ],
-  [
-   "dispatch",
-   {
-    "objective": [
-     3155.2879266857854,
-     3155.2879267317876
-    ],
-    "bound": [
-     3155.2878615366776,
-     3155.2878615366767
-    ]
-   }
-  ],
-  [
-   "ex1222",
-   {
-    "bound": [
-     1.0765430463031964,
-     1.0765430463031955
-    ]
-   }
-  ],
-  [
-   "ex1225",
-   {
-    "objective": [
-     30.999999913557566,
-     30.999999948692963
-    ],
-    "bound": [
-     30.999999913557566,
-     30.999999948692963
-    ]
-   }
-  ],
-  [
-   "ex14_1_9",
-   {
-    "objective": [
-     -1.9775220540513224e-16,
-     -1.9775220623231286e-16
-    ],
-    "bound": [
-     -1.9775220540513224e-16,
-     -1.9775220623231286e-16
-    ]
-   }
-  ],
-  [
-   "fac2",
-   {
-    "objective": [
-     331837497.8394821,
-     331837498.17691857
-    ],
-    "bound": [
-     331837497.54563797,
-     331837497.54565895
-    ]
-   }
-  ],
-  [
-   "flay02m",
-   {
-    "objective": [
-     37.94733186383461,
-     37.947331863834606
-    ],
-    "bound": [
-     37.947331804569515,
-     37.94733180456953
-    ]
-   }
-  ],
-  [
-   "flay03m",
-   {
-    "objective": [
-     48.98979479383567,
-     48.98979479383577
-    ],
-    "bound": [
-     48.98979470823052,
-     48.98979470823063
-    ],
-    "node_count": [
-     111,
-     113
-    ]
-   }
-  ],
-  [
-   "gkocis",
-   {
-    "objective": [
-     -1.9230987798770212,
-     -1.9230987747401134
-    ],
-    "bound": [
-     -1.9230988280923489,
-     -1.9230988280923498
-    ]
-   }
-  ],
-  [
-   "heatexch_gen2",
-   {
-    "node_count": [
-     3,
-     7
-    ]
-   }
-  ],
-  [
-   "m3",
-   {
-    "objective": [
-     37.79999966997884,
-     37.79999970380645
-    ],
-    "bound": [
-     37.79999951039201,
-     37.79999957378442
-    ],
-    "node_count": [
-     47,
-     41
-    ]
-   }
-  ],
-  [
-   "nvs03",
-   {
-    "bound": [
-     15.99999972676511,
-     15.99999996676705
-    ]
-   }
-  ],
-  [
    "nvs05",
    {
-    "objective": [
-     8.731956986640078,
-     12.589492574009626
-    ],
-    "bound": [
-     3.5424692441047068,
-     3.513753543700079
-    ],
     "node_count": [
-     41,
-     33
-    ]
-   }
-  ],
-  [
-   "nvs09",
-   {
-    "objective": [
-     -43.134336918035295,
-     -43.13433691803531
-    ]
-   }
-  ],
-  [
-   "oaer",
-   {
-    "objective": [
-     -1.923098499884843,
-     -1.9230985115702832
-    ]
-   }
-  ],
-  [
-   "st_e11",
-   {
-    "objective": [
-     189.31162974131917,
-     189.31178228026806
-    ],
-    "bound": [
-     189.31162968661766,
-     189.31162968661764
+     33,
+     41
     ]
    }
   ],
   [
    "syn05hfsg",
    {
-    "objective": [
-     837.732412391107,
-     837.7324083563395
+    "status": [
+     "feasible",
+     "optimal"
+    ],
+    "bound": [
+     838.3878622240098,
+     837.732412391107
     ],
     "node_count": [
-     181,
-     171
+     167,
+     185
     ]
    }
   ],
   [
    "tanksize",
    {
-    "objective": [
-     1.268643752557795,
-     1.2686437708530283
-    ],
     "bound": [
-     1.2616432205298513,
-     1.262799393410885
+     1.2630486909987855,
+     1.263118021659774
     ],
     "node_count": [
-     3596,
-     3964
+     4186,
+     4216
     ]
    }
   ],
   [
    "tls2",
    {
-    "objective": [
-     5.299999922109238,
-     10.299999996297192
+    "status": [
+     "optimal",
+     "feasible"
     ],
     "bound": [
-     3.1706801036010077,
-     2.4487125876978713
-    ],
-    "node_count": [
-     349,
-     353
-    ]
-   }
-  ],
-  [
-   "tspn05",
-   {
-    "objective": [
-     191.2552076848774,
-     191.2552076848786
-    ]
-   }
-  ],
-  [
-   "tspn08",
-   {
-    "objective": [
-     290.56685374735093,
-     290.5668537474047
-    ]
-   }
-  ],
-  [
-   "tspn10",
-   {
-    "objective": [
-     225.1260713973286,
-     225.12607139732896
-    ]
-   }
-  ],
-  [
-   "tspn12",
-   {
-    "status": [
-     "feasible",
-     "time_limit"
-    ],
-    "objective": [
-     262.64739525060224,
-     null
-    ],
-    "node_count": [
-     1,
-     3
+     5.3,
+     3.2532681850660596
     ]
    }
   ]
  ],
  "findings": [],
- "cert_regressions": [],
+ "cert_regressions": [
+  "tls2"
+ ],
  "solve_nlp_calls": {
-  "pre": 3047,
-  "post": 2865
+  "pre": 3229,
+  "post": 3140
  },
  "time_limit": 20.0
 }
