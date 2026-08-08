@@ -22,10 +22,9 @@ import inspect
 import pathlib
 import sys
 
-import numpy as np
-
 import discopt.modeling as dm
 import discopt.solvers.nlp_pounce as nlp_pounce
+import numpy as np
 from discopt.solvers import pounce_option_defaults
 
 # §8: assert which code is under test before measuring anything.

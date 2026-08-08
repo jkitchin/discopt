@@ -9,10 +9,9 @@ from __future__ import annotations
 import inspect
 import sys
 
-import numpy as np
-
 import discopt.modeling as dm
 import discopt.solvers.nlp_pounce as nlp_pounce
+import numpy as np
 from discopt import Model
 
 # §8: prove which code is loaded, and which arm it is.

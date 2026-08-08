@@ -5,11 +5,14 @@ soundness first and search behaviour second. For every instance and arm it
 records status / objective / bound / node_count, and checks against the
 authoritative optima registry (``python/tests/data/known_optima.toml``):
 
-  * ``bound_above_opt``  — a dual bound above the reference optimum (min sense)
-                           has cut the optimum out of the search. Fatal.
-  * ``super_optimal``    — an incumbent below the reference optimum is not a
+  * ``cert_inverted``    — the bound crossed the incumbent (the certificate
+                           invariant). Needs no oracle, so it runs on EVERY solved
+                           instance, and is sense-aware: for a maximization the
+                           bound is the UPPER side. Fatal.
+  * ``bound_past_opt``   — a dual bound beyond the reference optimum has cut the
+                           optimum out of the search. Fatal.
+  * ``super_optimal``    — an incumbent better than the reference optimum is not a
                            feasible point. Fatal.
-  * ``cert_inverted``    — bound > incumbent, the certificate invariant. Fatal.
   * certification regression — an instance that reported a *certified* gap in the
                            pre arm must not lose it in the post arm.
 
@@ -91,10 +94,13 @@ def solve_one(path: str, arm: str, time_limit: float) -> dict:
     set_arm(arm)
     t0 = time.perf_counter()
     try:
-        res = from_nl(path).solve(time_limit=time_limit)
+        model = from_nl(path)
+        maximize = model._objective is not None and str(model._objective.sense).endswith("MAXIMIZE")
+        res = model.solve(time_limit=time_limit)
     except Exception as exc:  # recorded, never swallowed (§7)
         return {"error": f"{type(exc).__name__}: {exc}", "wall": time.perf_counter() - t0}
     return {
+        "maximize": maximize,
         "status": res.status,
         "objective": res.objective,
         "bound": res.bound,
@@ -104,15 +110,16 @@ def solve_one(path: str, arm: str, time_limit: float) -> dict:
     }
 
 
-# Reference optima are stored in the instance's own sense; the .nl files in this
-# corpus are all minimizations, which the registry documents.
+# Reference optima are stored in the instance's own sense, and so are `bound` and
+# `objective`; `maximize` per row is what keeps the comparisons oriented.
 _BOUND_SLACK = 1e-6
 _REL_SLACK = 1e-6
 
 # `known_optimum` raises on an unrecorded instance by design; the registry covers
-# a subset of the 68-file corpus, so look up rather than ask. Instances with no
-# recorded optimum still contribute their pre/post diff, just not an oracle check
-# — which is why the oracle count is printed separately from the comparison count.
+# 16 of this corpus's 66 instances, so look up rather than ask. Instances with no
+# recorded optimum still get the certificate-ordering check and their pre/post
+# diff — which is why the three counts are printed separately rather than as one
+# reassuring total.
 _REGISTRY = optima_registry()
 
 
@@ -121,22 +128,37 @@ def known_optimum(name: str):
     return None if entry is None else entry["optimum"]
 
 
-def _oracle_findings(name: str, r: dict) -> list[str]:
-    """Soundness checks against the reference optimum. Empty list == clean."""
+def _oracle_findings(name: str, r: dict, maximize: bool) -> list[str]:
+    """Soundness checks. Empty list == clean.
+
+    The certificate-ordering check needs no oracle and so is NOT gated on one —
+    the first draft of this panel gated it, which silently skipped it on the 50 of
+    66 instances with no recorded optimum. It is also sense-aware: for a
+    maximization ``bound`` is an UPPER bound, so ``bound >= incumbent`` is the
+    correct ordering there (``syn05hfsg`` is such an instance, and reads as a 2.76
+    "inversion" if the sense is ignored).
+    """
     if "error" in r:
         return []
+    out = []
+    b, o = r.get("bound"), r.get("objective")
+
+    if b is not None and o is not None:
+        scale = _BOUND_SLACK + _REL_SLACK * max(abs(b), abs(o))
+        # In the model's own sense the bound is always the OPTIMISTIC side.
+        crossed = (o - b) if maximize else (b - o)
+        if crossed > scale:
+            sense = "max" if maximize else "min"
+            out.append(f"cert_inverted(bound {b:.12g} vs incumbent {o:.12g}, sense={sense})")
+
     opt = known_optimum(name)
     if opt is None:
-        return []
-    out = []
+        return out
     tol = _BOUND_SLACK + _REL_SLACK * abs(opt)
-    b, o = r.get("bound"), r.get("objective")
-    if b is not None and b > opt + tol:
-        out.append(f"bound_above_opt({b:.12g} > {opt:.12g})")
-    if o is not None and o < opt - tol:
-        out.append(f"super_optimal({o:.12g} < {opt:.12g})")
-    if b is not None and o is not None and b > o + tol:
-        out.append(f"cert_inverted(bound {b:.12g} > incumbent {o:.12g})")
+    if b is not None and (opt - b if maximize else b - opt) > tol:
+        out.append(f"bound_past_opt({b:.12g} vs optimum {opt:.12g})")
+    if o is not None and (o - opt if maximize else opt - o) > tol:
+        out.append(f"super_optimal({o:.12g} vs optimum {opt:.12g})")
     return out
 
 
@@ -145,6 +167,7 @@ def main(out_path: str, time_limit: float) -> int:
     rows: dict[str, dict] = {}
     comparisons = 0
     oracle_checks = 0
+    cert_checks = 0
     diffs: list = []
     findings: list = []
     cert_regressions: list = []
@@ -159,9 +182,15 @@ def main(out_path: str, time_limit: float) -> int:
         comparisons += 1
 
         for arm in ("pre", "post"):
-            fs = _oracle_findings(name, got[arm])
-            if known_optimum(name) is not None and "error" not in got[arm]:
-                oracle_checks += 1
+            r = got[arm]
+            fs = _oracle_findings(name, r, bool(r.get("maximize")))
+            if "error" not in r:
+                # Certificate-ordering check fires on every solved instance; the
+                # oracle comparisons additionally need a recorded optimum.
+                if r.get("bound") is not None and r.get("objective") is not None:
+                    cert_checks += 1
+                if known_optimum(name) is not None:
+                    oracle_checks += 1
             for msg in fs:
                 findings.append((name, arm, msg))
 
@@ -202,6 +231,7 @@ def main(out_path: str, time_limit: float) -> int:
         f"\nCOMPARISONS_EXECUTED={comparisons}  identical={comparisons - len(diffs)}  "
         f"differing={len(diffs)}"
     )
+    print(f"CERT_ORDER_CHECKS_EXECUTED={cert_checks}")
     print(f"ORACLE_CHECKS_EXECUTED={oracle_checks}  soundness_findings={len(findings)}")
     print(f"SOLVE_NLP_CALLS pre={_CALLS['pre']} post={_CALLS['post']}")
     print(f"CERT_REGRESSIONS={len(cert_regressions)} {cert_regressions}")

@@ -18,10 +18,9 @@ from __future__ import annotations
 import inspect
 import sys
 
-import numpy as np
-
 import discopt.modeling as dm
 import discopt.solvers.nlp_pounce as NLPP
+import numpy as np
 from discopt.decomposition.benders import solve_benders
 from discopt.solvers import pounce_option_defaults
 
