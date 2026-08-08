@@ -41,7 +41,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python", "tests"))
 
 import discopt.solvers.nlp_pounce as NLPP  # noqa: E402
-from _optima import known_optimum  # noqa: E402
+from _optima import optima_registry  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 from discopt.solvers import pounce_option_defaults  # noqa: E402
 
@@ -108,6 +108,17 @@ def solve_one(path: str, arm: str, time_limit: float) -> dict:
 # corpus are all minimizations, which the registry documents.
 _BOUND_SLACK = 1e-6
 _REL_SLACK = 1e-6
+
+# `known_optimum` raises on an unrecorded instance by design; the registry covers
+# a subset of the 68-file corpus, so look up rather than ask. Instances with no
+# recorded optimum still contribute their pre/post diff, just not an oracle check
+# — which is why the oracle count is printed separately from the comparison count.
+_REGISTRY = optima_registry()
+
+
+def known_optimum(name: str):
+    entry = _REGISTRY.get(name)
+    return None if entry is None else entry["optimum"]
 
 
 def _oracle_findings(name: str, r: dict) -> list[str]:
