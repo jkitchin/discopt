@@ -313,6 +313,7 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("node_count", res.node_count)?;
     out.set_item("n_lp_solves", res.n_lp_solves)?;
     out.set_item("n_uncertified", res.n_uncertified)?;
+    out.set_item("n_undecided", res.n_undecided)?;
     // #917: seconds of the caller's withheld reserve the tree actually reclaimed.
     out.set_item("incumbent_extension_s", res.incumbent_extension_s)?;
     Ok(out)
