@@ -339,13 +339,24 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     lfull.extend(std::iter::repeat(0.0).take(m));
     for (r, (rc, rcoef, rhs)) in rows.iter().enumerate() {
         let mut min_act = 0.0f64;
+        let mut act_mag = 0.0f64;
         for (c, v) in rc.iter().zip(rcoef.iter()) {
-            min_act += if *v > 0.0 {
+            let term = if *v > 0.0 {
                 v * lfull[*c]
             } else {
                 v * ufull[*c]
             };
+            min_act += term;
+            act_mag += mc::bounded_mag(term);
         }
+        // #956: `cap` turns `min_act` into a LOWER limit on the row activity
+        // (`s_r <= cap` is `a·x >= rhs − cap = min_act`), and `min_act` is itself a
+        // rounded sum over box endpoints. Rounded the wrong way it cuts the very
+        // point that attains the minimum — so round it OUTWARD (down) by the same
+        // ulp-scaled guard the envelope rows use. Guarding the row rhs alone would
+        // make this worse, not better: raising `rhs` without raising `cap` raises
+        // the row's lower limit too.
+        let min_act = min_act - mc::outward_slack(act_mag);
         let cap = if min_act.is_finite() {
             (rhs - min_act).max(0.0)
         } else {
@@ -548,6 +559,66 @@ mod tests {
             res.bound
         );
         assert!((res.bound - 1.0).abs() < 1e-6, "bound {} != 1", res.bound);
+    }
+
+    /// #956: a node LP whose box corner is the only feasible point must be SOLVABLE.
+    ///
+    /// The cubic lift of a variable near `5e3` — an unremarkable engineering
+    /// magnitude — gives a tangent-at-`ui` row with an rhs near `2.4e11` formed by a
+    /// cancelling subtraction, while the auxiliary column's own upper bound `ui^3` is
+    /// an independent rounding of the same quantity. Unguarded the two disagree by
+    /// `6.1e-5`: at `x = ui` the row demands `s >= ui^3 + 6.1e-5` and the column caps
+    /// `s <= ui^3`, so the LP has no feasible point at all. The simplex returns
+    /// `Numerical` (its honest "cannot decide"), which since #927 costs a branch on
+    /// every such node. With the outward rounding the LP solves and its safe bound is
+    /// `<=` the true optimum `ui^3`.
+    ///
+    /// Run with `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` this test fails — that is the
+    /// before/after demonstration.
+    #[test]
+    fn corner_pinned_cubic_node_lp_is_solvable() {
+        let li = 4477.244559568261f64;
+        let ui = 4989.3506965406295f64;
+        let spec = SpatialKernelSpec {
+            n_cols: 2,
+            n_orig: 1,
+            c: vec![0.0, 1.0], // minimize s = x^3
+            integrality: vec![false, false],
+            global_lo: vec![li, -1e20],
+            global_hi: vec![ui, 1e20],
+            // `-x <= -ui`: pin the box to its upper corner, where the envelope row
+            // and the aux bound are two roundings of the same number.
+            fixed_rows: vec![FixedRow {
+                cols: vec![0],
+                coeffs: vec![-1.0],
+                rhs: -ui,
+            }],
+            terms: vec![EnvTerm::Monomial { i: 0, s: 1, p: 3 }],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let lo = vec![li, -1e20];
+        let hi = vec![ui, 1e20];
+        let res = solve_spatial_node(&spec, &lo, &hi, false, &SimplexOptions::default());
+        assert_eq!(
+            res.status,
+            LpStatus::Optimal,
+            "corner-pinned cubic node LP unsolvable ({:?}) — the envelope cut its own graph",
+            res.status
+        );
+        let truth = ui.powi(3);
+        // Soundness: the safe bound never exceeds the true optimum of the region.
+        assert!(
+            res.bound <= truth,
+            "safe bound {} above the true optimum {truth}",
+            res.bound
+        );
+        // Quality: the outward guard costs ulp scale, not a real bound.
+        assert!(
+            res.bound >= truth - 1e-9 * truth,
+            "safe bound {} far below the true optimum {truth}",
+            res.bound
+        );
     }
 
     #[test]
