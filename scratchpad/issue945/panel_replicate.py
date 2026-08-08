@@ -7,8 +7,11 @@ INTERLEAVED (pre, post, pre, post, ...), and reports the spread. §9: a claim ab
 a difference needs a spread, not two numbers.
 
 Reports, per instance and arm: the set of statuses seen, the incumbent range, the
-bound range, and the node-count range. A difference is an arm effect only when the
-arms' ranges do not overlap.
+bound range, and the node-count range.
+
+This script COLLECTS; it does not judge. Its first version also printed a
+verdict column, and that column was wrong — see the RETRACTION at the top of
+``panel_replicate_analyze.py``. Run that on the JSON this writes.
 
 §6: prints an executed-run count and exits non-zero if it is zero.
 
@@ -109,7 +112,6 @@ def main(out: str, reps: int, tl: float) -> int:
 
     print(f"\n{'instance':11s} {'arm':5s} {'statuses':24s} {'objective':>26s} {'bound':>26s} {'nodes':>14s}")
     print("-" * 112)
-    verdicts = []
     for name in TARGETS:
         rngs = {}
         for arm in ("pre", "post"):
@@ -120,26 +122,13 @@ def main(out: str, reps: int, tl: float) -> int:
             n = _rng([r.get("node_count") for r in rs])
             rngs[arm] = (st, o, b, n)
             print(f"{name:11s} {arm:5s} {','.join(st):24s} {_fmt(o):>26s} {_fmt(b):>26s} {_fmt(n,6):>14s}")
-        # Overlapping ranges => the panel's single-run difference was within
-        # this instance's own run-to-run spread, i.e. not an arm effect.
-        def overlap(x, y):
-            if x is None or y is None:
-                return x is None and y is None
-            return not (x[1] < y[0] or y[1] < x[0])
-
-        same_status = set(rngs["pre"][0]) == set(rngs["post"][0])
-        verdict = (
-            "arm effect"
-            if not (same_status and overlap(rngs["pre"][1], rngs["post"][1])
-                    and overlap(rngs["pre"][2], rngs["post"][2]))
-            else "within noise"
-        )
-        verdicts.append((name, verdict))
-        print(f"{'':11s} {'':5s} -> {verdict}")
+        # No verdict here. A bare interval-overlap test with no tolerance called
+        # every instance an "arm effect", including one whose arms differ by 2e-9
+        # relative — a criterion that fires on everything separates nothing.
+        # `panel_replicate_analyze.py` does the judging, against the saved JSON.
 
     print(f"\nEXECUTED_RUNS={runs}  reps={reps}  time_limit={tl}")
-    for n, v in verdicts:
-        print(f"  VERDICT {n}: {v}")
+    print(f"Now run: python -u scratchpad/issue945/panel_replicate_analyze.py {out}")
     if runs == 0:
         print("REPLICATION RAN NOTHING", file=sys.stderr)
         return 1
