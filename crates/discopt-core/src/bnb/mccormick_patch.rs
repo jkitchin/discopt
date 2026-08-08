@@ -124,19 +124,30 @@ fn outward_rounding_enabled() -> bool {
     })
 }
 
-/// Magnitude contribution of a box-derived quantity to a guard.
+/// Magnitude of a quantity for guard sizing; non-finite contributes **zero**.
 ///
-/// Non-finite values and anything at/past the [`INF_SENTINEL`] contribute **zero**:
-/// on an unbounded box a *relative* guard has no meaning, and scaling by `1e20`
-/// would swamp the relaxation. Under-guarding there is exactly the pre-#956
-/// behaviour, so this is never a regression.
+/// Note this does NOT clamp at [`INF_SENTINEL`]. A *derived* value may legitimately
+/// exceed it — `x^3` over a box reaching `9e6` encloses `7.3e20`, whose ulp is
+/// `1.3e5` — and zeroing it left exactly that value unguarded, which is the defect
+/// #956 is about. The sentinel means "this BOX is unbounded", so it is tested on the
+/// box endpoints only, by [`box_finite`]. Matches `outward_rounding.bounded_mag`.
 #[inline]
 pub fn bounded_mag(v: f64) -> f64 {
-    if v.is_finite() && v.abs() < INF_SENTINEL {
+    if v.is_finite() {
         v.abs()
     } else {
         0.0
     }
+}
+
+/// Whether a BOX endpoint is a real bound rather than the infinity sentinel.
+///
+/// On an unbounded box a *relative* guard has no meaning and scaling by `1e20` (or
+/// by an `f` image of it) would swamp the relaxation, so the guard there degrades
+/// to its absolute floor — exactly the pre-#956 behaviour, never a regression.
+#[inline]
+fn box_finite(v: f64) -> bool {
+    v.is_finite() && v.abs() < INF_SENTINEL
 }
 
 /// The outward slack for a row rhs / bound whose terms have total magnitude
@@ -153,13 +164,93 @@ pub fn outward_slack(mag_sum: f64) -> f64 {
     ULP_GUARD * mag_sum.max(1.0)
 }
 
-/// Widen `[lo, hi]` outward by the guard for magnitude `mag_sum` (issue #956), so
+/// Widen `[lo, hi]` outward (issue #956), each end sized by ITS OWN magnitude, so
 /// a value the box maps to can never fall outside its own auxiliary bounds by a
 /// rounding.
+///
+/// Sizing both ends by the interval's larger end makes the guard on the small end
+/// wildly coarse: the aux enclosure of `x^5` over `[-18.3, -0.64]` is
+/// `[-2.06e6, -0.106]`, where a guard scaled by `2.06e6` moves the upper end by
+/// `7.3e-9` — a `7e-8` RELATIVE widening of a quantity only wrong by an ulp of its
+/// own size. Per-end sizing is both tighter and the correct model of where the
+/// rounding happened. Matches `outward_rounding.widen` in Python.
 #[inline]
-fn widen(lo: f64, hi: f64, mag_sum: f64) -> (f64, f64) {
-    let g = outward_slack(mag_sum);
-    (lo - g, hi + g)
+fn widen(lo: f64, hi: f64) -> (f64, f64) {
+    (
+        lo - outward_slack(bounded_mag(lo)),
+        hi + outward_slack(bounded_mag(hi)),
+    )
+}
+
+/// Outward slack for a 1-D envelope row of `w = f(t)`, `t = form + cst` (#956).
+///
+/// `dfdt` is the row's slope in `t` (a tangent's `f'(t0)`, or the secant slope);
+/// `[t_lo, t_hi]` is the box in `t`-space and `f_lo`/`f_hi` are `f` at its
+/// endpoints. Every atom relaxed this way is monotone or convex over the box, so
+/// `max(|f_lo|, |f_hi|)` bounds `|w|` — the midpoint tangent included.
+///
+/// MUST stay term-for-term identical to `outward_rounding.envelope_1d_slack` in
+/// Python: the cold build, the incremental patch and this kernel have to emit the
+/// same guarded row, and `IncrementalMcCormickLP._validate` compares rhs values
+/// rounded to 6 decimals ABSOLUTELY, which a divergent guard would break on any
+/// large-magnitude row. Computed in `t`-space (not the base variable's) because
+/// that is where the cancellation happens and where all three share intermediates.
+#[inline]
+fn envelope_1d_slack(
+    dfdt: f64,
+    t_lo: f64,
+    t_hi: f64,
+    f_lo: f64,
+    f_hi: f64,
+    cst: f64,
+    rhs: f64,
+) -> f64 {
+    if !(box_finite(t_lo) && box_finite(t_hi)) {
+        return outward_slack(0.0); // unbounded box: absolute floor only
+    }
+    let d = bounded_mag(dfdt);
+    let tmag = bounded_mag(t_lo).max(bounded_mag(t_hi));
+    let fmag = bounded_mag(f_lo).max(bounded_mag(f_hi));
+    outward_slack(d * tmag + d * bounded_mag(cst) + fmag + bounded_mag(rhs))
+}
+
+/// Outward slack for a McCormick row of `w = A*B` over the two forms' enclosures
+/// (#956). `coef_a`/`coef_b` are the row's multipliers on `A`/`B`; the forms'
+/// constants are folded into `rhs` by the emitters, so they are added back here.
+///
+/// MUST stay identical to `outward_rounding.envelope_product_slack` in Python —
+/// see [`envelope_1d_slack`] for why.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn envelope_product_slack(
+    coef_a: f64,
+    coef_b: f64,
+    a_lo: f64,
+    a_hi: f64,
+    b_lo: f64,
+    b_hi: f64,
+    a_const: f64,
+    b_const: f64,
+    rhs: f64,
+) -> f64 {
+    if !(box_finite(a_lo) && box_finite(a_hi) && box_finite(b_lo) && box_finite(b_hi)) {
+        return outward_slack(0.0); // unbounded form enclosure: absolute floor only
+    }
+    let (ca, cb) = (bounded_mag(coef_a), bounded_mag(coef_b));
+    let amag = bounded_mag(a_lo).max(bounded_mag(a_hi));
+    let bmag = bounded_mag(b_lo).max(bounded_mag(b_hi));
+    let wmag = bounded_mag(a_lo * b_lo)
+        .max(bounded_mag(a_lo * b_hi))
+        .max(bounded_mag(a_hi * b_lo))
+        .max(bounded_mag(a_hi * b_hi));
+    outward_slack(
+        ca * amag
+            + ca * bounded_mag(a_const)
+            + cb * bmag
+            + cb * bounded_mag(b_const)
+            + wmag
+            + bounded_mag(rhs),
+    )
 }
 
 /// The 4 McCormick inequalities for `w = x_i * x_j` over `[li,ui] x [lj,uj]`.
@@ -182,28 +273,20 @@ pub fn bilinear_rows(
     lj: f64,
     uj: f64,
 ) -> [EnvRow; 4] {
-    // #956: the point (x_i, x_j, x_i*x_j) must satisfy every row it is on. Guard by
-    // the row's own term magnitudes over the box (|w| <= imax*jmax at a corner).
-    let imax = bounded_mag(li).max(bounded_mag(ui));
-    let jmax = bounded_mag(lj).max(bounded_mag(uj));
-    let wmax = imax * jmax;
-    let row = |ci: f64, cj: f64, cw: f64, rhs: f64| EnvRow {
+    // #956: the point (x_i, x_j, x_i*x_j) must satisfy every row it is on. `coef_a`
+    // / `coef_b` are the row's multipliers on the two factors, which is what sizes
+    // the guard — the same shape `_emit_mccormick` and `_bilinear_rows` use.
+    let row = |ci: f64, cj: f64, cw: f64, rhs: f64, ca: f64, cb: f64| EnvRow {
         cols: [i, j, w],
         coeffs: [ci, cj, cw],
         nnz: 3,
-        rhs: rhs
-            + outward_slack(
-                bounded_mag(ci) * imax
-                    + bounded_mag(cj) * jmax
-                    + bounded_mag(cw) * wmax
-                    + bounded_mag(rhs),
-            ),
+        rhs: rhs + envelope_product_slack(ca, cb, li, ui, lj, uj, 0.0, 0.0, rhs),
     };
     [
-        row(lj, li, -1.0, li * lj),
-        row(uj, ui, -1.0, ui * uj),
-        row(-uj, -li, 1.0, -li * uj),
-        row(-lj, -ui, 1.0, -ui * lj),
+        row(lj, li, -1.0, li * lj, lj, li),
+        row(uj, ui, -1.0, ui * uj, uj, ui),
+        row(-uj, -li, 1.0, -li * uj, uj, li),
+        row(-lj, -ui, 1.0, -ui * lj, lj, ui),
     ]
 }
 
@@ -237,28 +320,26 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
     // #956: the tangent-at-`ui` rhs is `f'(ui)*ui - f(ui)`, a cancelling subtraction
     // of two same-signed quantities; at `x = ui` it disagrees with `ui^p` by ~1 ulp
     // of `f'(ui)*ui`. Guard by the magnitudes that form the row.
-    let xmax = bounded_mag(li).max(bounded_mag(ui));
-    let fmax = bounded_mag(fl).max(bounded_mag(fm)).max(bounded_mag(fu));
-    let row = |cx: f64, cs: f64, rhs: f64| EnvRow {
+    // The base is the bare variable, so `t == x` and `cst == 0`.
+    let row = |cx: f64, cs: f64, rhs: f64, d: f64| EnvRow {
         cols: [i, s, 0],
         coeffs: [cx, cs, 0.0],
         nnz: 2,
-        rhs: rhs
-            + outward_slack(bounded_mag(cx) * xmax + bounded_mag(cs) * fmax + bounded_mag(rhs)),
+        rhs: rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs),
     };
     if convex {
         [
-            row(dfl, -1.0, dfl * li - fl), // tangent at li:  s >= f'(li)(x-li)+f(li)
-            row(dfm, -1.0, dfm * mid - fm), // tangent at midpoint
-            row(dfu, -1.0, dfu * ui - fu), // tangent at ui
-            row(-slope, 1.0, fl - slope * li), // secant (overestimator): s <= ...
+            row(dfl, -1.0, dfl * li - fl, dfl), // tangent at li: s >= f'(li)(x-li)+f(li)
+            row(dfm, -1.0, dfm * mid - fm, dfm), // tangent at midpoint
+            row(dfu, -1.0, dfu * ui - fu, dfu), // tangent at ui
+            row(-slope, 1.0, fl - slope * li, slope), // secant (overestimator): s <= ...
         ]
     } else {
         [
-            row(-dfl, 1.0, fl - dfl * li), // tangent at li (overestimator): s <= ...
-            row(-dfm, 1.0, fm - dfm * mid), // tangent at midpoint
-            row(-dfu, 1.0, fu - dfu * ui), // tangent at ui
-            row(slope, -1.0, slope * li - fl), // secant (underestimator): s >= ...
+            row(-dfl, 1.0, fl - dfl * li, dfl), // tangent at li (overestimator): s <= ...
+            row(-dfm, 1.0, fm - dfm * mid, dfm), // tangent at midpoint
+            row(-dfu, 1.0, fu - dfu * ui, dfu), // tangent at ui
+            row(slope, -1.0, slope * li - fl, slope), // secant (underestimator): s >= ...
         ]
     }
 }
@@ -284,22 +365,36 @@ pub fn affine_square_rows(
     // already equals 2*t_lo == f'(t_lo), so no divide-by-zero guard is needed.
     let slope = t_hi + t_lo;
     let a = t_lo * t_lo - slope * t_lo;
-    // #956: `t` is itself a rounded affine image of `x`, so the squares that form
-    // these rhs values carry the base box's magnitude twice over. Guard by them.
-    let xmax = bounded_mag(li).max(bounded_mag(ui));
-    let wmax = bounded_mag(t_lo * t_lo).max(bounded_mag(t_hi * t_hi));
-    let row = |cx: f64, cw: f64, rhs: f64| EnvRow {
+    // #956: outward guard in `t`-space, matching `_emit_1d` / `_affine_square_rows`
+    // term for term (`t` is itself a rounded affine image of `x`, so the squares
+    // forming these rhs values carry the base box's magnitude twice over).
+    let (f_lo, f_hi) = (t_lo * t_lo, t_hi * t_hi);
+    let row = |cx: f64, cw: f64, rhs: f64, d: f64| EnvRow {
         cols: [j, w, 0],
         coeffs: [cx, cw, 0.0],
         nnz: 2,
-        rhs: rhs
-            + outward_slack(bounded_mag(cx) * xmax + bounded_mag(cw) * wmax + bounded_mag(rhs)),
+        rhs: rhs + envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, cst, rhs),
     };
     [
-        row(-slope * coeff, 1.0, a + slope * cst), // secant (overestimator)
-        row(2.0 * t_lo * coeff, -1.0, t_lo * t_lo - 2.0 * t_lo * cst), // tangent at t_lo
-        row(2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * cst), // tangent at midpoint
-        row(2.0 * t_hi * coeff, -1.0, t_hi * t_hi - 2.0 * t_hi * cst), // tangent at t_hi
+        row(-slope * coeff, 1.0, a + slope * cst, slope), // secant (overestimator)
+        row(
+            2.0 * t_lo * coeff,
+            -1.0,
+            f_lo - 2.0 * t_lo * cst,
+            2.0 * t_lo,
+        ), // tangent @ t_lo
+        row(
+            2.0 * mid * coeff,
+            -1.0,
+            mid * mid - 2.0 * mid * cst,
+            2.0 * mid,
+        ), // tangent @ mid
+        row(
+            2.0 * t_hi * coeff,
+            -1.0,
+            f_hi - 2.0 * t_hi * cst,
+            2.0 * t_hi,
+        ), // tangent @ t_hi
     ]
 }
 
@@ -387,26 +482,23 @@ pub fn univariate_rows(
         Curv::Convex => 1.0,
         Curv::Concave => -1.0,
     };
-    // #956: same outward guard as the other generators — `f` is monotone on the box
-    // (all covered atoms are), so `|w| <= max(|f(t_lo)|, |f(t_hi)|)`.
-    let xmax = bounded_mag(x_lo).max(bounded_mag(x_hi));
-    let wmax = bounded_mag(flo).max(bounded_mag(fhi));
-    let row = |cx: f64, cw: f64, rhs: f64| EnvRow {
+    // #956: same outward guard as the other generators, in `t`-space — `f` is
+    // monotone on the box (all covered atoms are), so `|w| <= max(|flo|, |fhi|)`.
+    let row = |cx: f64, cw: f64, rhs: f64, d: f64| EnvRow {
         cols: [x, w, 0],
         coeffs: [cx, cw, 0.0],
         nnz: 2,
-        rhs: rhs
-            + outward_slack(bounded_mag(cx) * xmax + bounded_mag(cw) * wmax + bounded_mag(rhs)),
+        rhs: rhs + envelope_1d_slack(d, t_lo, t_hi, flo, fhi, cst, rhs),
     };
     // secant: sign*w <= sign*(flo + slope*(t - t_lo)); intercept a = flo - slope*t_lo.
     let a = flo - slope * t_lo;
-    let secant = row(-s * slope * coeff, s, s * (a + slope * cst));
+    let secant = row(-s * slope * coeff, s, s * (a + slope * cst), slope);
     // tangent at t0: sign*w >= sign*(f(t0) + f'(t0)*(t - t0)).
     let tangent = |t0: f64| {
         let g = atom.f(t0);
         let gp = atom.fp(t0);
         let intercept = g - gp * t0;
-        row(s * gp * coeff, -s, -s * intercept - s * gp * cst)
+        row(s * gp * coeff, -s, -s * intercept - s * gp * cst, gp)
     };
     Some([secant, tangent(t_lo), tangent(mid), tangent(t_hi)])
 }
@@ -423,7 +515,7 @@ pub fn sqrt_aux_bounds(coeff: f64, cst: f64, x_lo: f64, x_hi: f64) -> Option<(f6
         return None;
     }
     let (lo, hi) = (t_lo.sqrt(), t_hi.sqrt());
-    Some(widen(lo, hi, bounded_mag(lo).max(bounded_mag(hi))))
+    Some(widen(lo, hi))
 }
 
 /// Auxiliary-variable bounds for `w = x_i * x_j` — the min/max over the box corners.
@@ -440,7 +532,7 @@ pub fn bilinear_aux_bounds(li: f64, ui: f64, lj: f64, uj: f64) -> (f64, f64) {
     // #956: widened outward so the corner product can never fall outside the
     // auxiliary column's own bounds by a rounding — the disagreement between a row
     // and this bound is precisely what made the node LP unsolvable.
-    widen(lo, hi, bounded_mag(lo).max(bounded_mag(hi)))
+    widen(lo, hi)
 }
 
 /// Auxiliary-variable bounds for `s = x_i^p` over a sign-definite `[li,ui]` (monotone
@@ -451,7 +543,7 @@ pub fn monomial_aux_bounds(li: f64, ui: f64, p: i32) -> (f64, f64) {
     let b = ui.powi(p);
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     // #956: widened outward (see `bilinear_aux_bounds`).
-    widen(lo, hi, bounded_mag(lo).max(bounded_mag(hi)))
+    widen(lo, hi)
 }
 
 /// Auxiliary-variable bounds for the squared base `t^2` over `t in [t_lo,t_hi]`
@@ -467,7 +559,7 @@ pub fn square_aux_bounds(t_lo: f64, t_hi: f64) -> (f64, f64) {
     };
     // #956: widened outward (see `bilinear_aux_bounds`). `t` reaching an endpoint is
     // itself a rounded affine image of `x`, so even the monotone side can miss.
-    widen(lo, hi, bounded_mag(lo).max(bounded_mag(hi)))
+    widen(lo, hi)
 }
 
 /// Auxiliary-variable bounds for `w = (coeff*x + const)^2` over `x in [li,ui]`.
@@ -535,11 +627,6 @@ pub fn bilinear_linform_rows(
 ) {
     let (a_lo, a_hi) = linform_interval(a_cols, a_coeffs, a_const, box_lo, box_hi);
     let (b_lo, b_hi) = linform_interval(b_cols, b_coeffs, b_const, box_lo, box_hi);
-    // #956: magnitude of the `w` column over this box — the interval product's
-    // widest corner. The a/b columns are guarded by their own box bounds below.
-    let wmax = [a_lo * b_lo, a_lo * b_hi, a_hi * b_lo, a_hi * b_hi]
-        .iter()
-        .fold(0.0f64, |m, &v| m.max(bounded_mag(v)));
     // (coef_a, coef_b, cc, sign) — identical order/values to `_emit_mccormick`.
     let specs = [
         (b_lo, a_lo, -a_lo * b_lo, 1.0f64),
@@ -575,19 +662,13 @@ pub fn bilinear_linform_rows(
             coeffs[p] += sign * coef_b * bc;
         }
         let rhs = -sign * (cc + coef_a * a_const + coef_b * b_const);
-        // #956: guard by this row's own term magnitudes over the box. `A`/`B` are
-        // sums, so their evaluation can cancel; scaling by each column's own bound
-        // (rather than by the form's interval) covers that.
-        let mut mag_sum = bounded_mag(rhs);
-        for (k, &c) in coeffs.iter().enumerate() {
-            let col_mag = if cols[k] == w {
-                wmax
-            } else {
-                bounded_mag(box_lo[cols[k]]).max(bounded_mag(box_hi[cols[k]]))
-            };
-            mag_sum += bounded_mag(c) * col_mag;
-        }
-        out.push((cols, coeffs, rhs + outward_slack(mag_sum)));
+        // #956: outward guard sized from the two forms' enclosures — the exact
+        // shape `_emit_mccormick` uses, so the cold build and this kernel emit the
+        // same guarded row.
+        let slack = envelope_product_slack(
+            coef_a, coef_b, a_lo, a_hi, b_lo, b_hi, a_const, b_const, rhs,
+        );
+        out.push((cols, coeffs, rhs + slack));
     }
 }
 
@@ -620,7 +701,7 @@ pub fn bilinear_linform_aux_bounds(
         (f64::NEG_INFINITY, f64::INFINITY)
     } else {
         // #956: widened outward (see `bilinear_aux_bounds`).
-        widen(lo, hi, bounded_mag(lo).max(bounded_mag(hi)))
+        widen(lo, hi)
     }
 }
 

@@ -42,6 +42,12 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._jax.outward_rounding import (
+    envelope_1d_slack,
+    envelope_product_slack,
+    widen,
+)
+
 logger = logging.getLogger(__name__)
 
 _TOL = 1e-7
@@ -71,36 +77,57 @@ class _IncrementalStructureTooLarge(Exception):
 
 def _bilinear_rows(i, j, a, li, ui, lj, uj):
     """The 4 McCormick inequalities for w=x_i*x_j over [li,ui]x[lj,uj], each as
-    ``(coeff_on_i, coeff_on_j, coeff_on_w, rhs)`` of an ``... <= rhs`` row."""
+    ``(coeff_on_i, coeff_on_j, coeff_on_w, rhs)`` of an ``... <= rhs`` row.
+
+    Each rhs carries the #956 outward guard, computed by the shared helper from
+    the same enclosures ``_emit_mccormick`` uses, so the cold build and this patch
+    stay bit-identical (see :mod:`discopt._jax.outward_rounding`).
+    """
+    # (coeff_on_i, coeff_on_j, coeff_on_w, rhs, coef_a, coef_b) — `coef_a`/`coef_b`
+    # are the row's multipliers on the two factors, which is what sizes the guard.
+    spec = [
+        (lj, li, -1.0, li * lj, lj, li),  # w >= lj*xi + li*xj - li*lj
+        (uj, ui, -1.0, ui * uj, uj, ui),  # w >= uj*xi + ui*xj - ui*uj
+        (-uj, -li, 1.0, -li * uj, uj, li),  # w <= uj*xi + li*xj - li*uj
+        (-lj, -ui, 1.0, -ui * lj, lj, ui),  # w <= lj*xi + ui*xj - ui*lj
+    ]
     return [
-        (lj, li, -1.0, li * lj),  # w >= lj*xi + li*xj - li*lj
-        (uj, ui, -1.0, ui * uj),  # w >= uj*xi + ui*xj - ui*uj
-        (-uj, -li, 1.0, -li * uj),  # w <= uj*xi + li*xj - li*uj
-        (-lj, -ui, 1.0, -ui * lj),  # w <= lj*xi + ui*xj - ui*lj
+        (ci, cj, cw, rhs + envelope_product_slack(ca, cb, li, ui, lj, uj, 0.0, 0.0, rhs))
+        for ci, cj, cw, rhs, ca, cb in spec
     ]
 
 
 def _square_rows(i, a, li, ui):
     """The 3 rows for s=x_i**2 over [li,ui]: 2 endpoint tangents + 1 secant, each
     ``(coeff_on_i, coeff_on_s, rhs)`` of an ``... <= rhs`` row."""
+    fl, fu = li * li, ui * ui
+    spec = [
+        (2.0 * li, -1.0, fl, 2.0 * li),  # s >= 2*li*xi - li^2  (tangent at li)
+        (2.0 * ui, -1.0, fu, 2.0 * ui),  # s >= 2*ui*xi - ui^2  (tangent at ui)
+        (-(li + ui), 1.0, -li * ui, li + ui),  # s <= (li+ui)*xi - li*ui (secant)
+    ]
     return [
-        (2.0 * li, -1.0, li * li),  # s >= 2*li*xi - li^2  (tangent at li)
-        (2.0 * ui, -1.0, ui * ui),  # s >= 2*ui*xi - ui^2  (tangent at ui)
-        (-(li + ui), 1.0, -li * ui),  # s <= (li+ui)*xi - li*ui (secant)
+        (cx, cs, rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)) for cx, cs, rhs, d in spec
     ]
 
 
 def _bilinear_aux_bounds(li, ui, lj, uj):
     corners = (li * lj, li * uj, ui * lj, ui * uj)
-    return min(corners), max(corners)
+    lo, hi = min(corners), max(corners)
+    # #956: widened outward so a corner product can never fall outside the aux
+    # column's own bounds by a rounding.
+    return widen(lo, hi)
 
 
 def _square_aux_bounds(li, ui):
     if li >= 0:
-        return li * li, ui * ui
-    if ui <= 0:
-        return ui * ui, li * li
-    return 0.0, max(li * li, ui * ui)
+        lo, hi = li * li, ui * ui
+    elif ui <= 0:
+        lo, hi = ui * ui, li * li
+    else:
+        lo, hi = 0.0, max(li * li, ui * ui)
+    # #956: widened outward (see `_bilinear_aux_bounds`).
+    return widen(lo, hi)
 
 
 def _monomial_rows(li, ui, p):
@@ -157,17 +184,26 @@ def _monomial_rows(li, ui, p):
     slope = dfl if ui <= li else (fu - fl) / (ui - li)
     convex = (p % 2 == 0) or (li >= 0.0)
     if convex:
-        return [
-            (dfl, -1.0, dfl * li - fl),  # tangent at li:  s >= f'(li)*(x-li)+f(li)
-            (dfm, -1.0, dfm * mid - fm),  # tangent at midpoint
-            (dfu, -1.0, dfu * ui - fu),  # tangent at ui
-            (-slope, 1.0, fl - slope * li),  # secant (overestimator): s <= ...
+        spec = [
+            (dfl, -1.0, dfl * li - fl, dfl),  # tangent at li: s >= f'(li)*(x-li)+f(li)
+            (dfm, -1.0, dfm * mid - fm, dfm),  # tangent at midpoint
+            (dfu, -1.0, dfu * ui - fu, dfu),  # tangent at ui
+            (-slope, 1.0, fl - slope * li, slope),  # secant (overestimator): s <= ...
         ]
+    else:
+        spec = [
+            (-dfl, 1.0, fl - dfl * li, dfl),  # tangent at li (overestimator): s <= ...
+            (-dfm, 1.0, fm - dfm * mid, dfm),  # tangent at midpoint
+            (-dfu, 1.0, fu - dfu * ui, dfu),  # tangent at ui
+            (slope, -1.0, slope * li - fl, slope),  # secant (underestimator): s >= ...
+        ]
+    # #956: each rhs is a cancelling combination of box-endpoint quantities
+    # (`f'(x0)*x0 - f(x0)`), so it is relaxed outward by the shared ulp-scaled
+    # guard — computed from the same `t`-space quantities `_emit_1d` has, which is
+    # what keeps the cold build and this patch bit-identical under `_validate`.
+    # `t == x` here (the base is the bare variable), so `cst` is 0.
     return [
-        (-dfl, 1.0, fl - dfl * li),  # tangent at li (overestimator): s <= ...
-        (-dfm, 1.0, fm - dfm * mid),  # tangent at midpoint
-        (-dfu, 1.0, fu - dfu * ui),  # tangent at ui
-        (slope, -1.0, slope * li - fl),  # secant (underestimator): s >= ...
+        (cx, cs, rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)) for cx, cs, rhs, d in spec
     ]
 
 
@@ -226,12 +262,16 @@ def _monomial_aux_bounds(li, ui, p):
         enc = Interval.from_bounds(np.float64(li), np.float64(ui)) ** int(p)
         return float(enc.lo), float(enc.hi)
     if p == 2:
-        return _square_aux_bounds(li, ui)
+        return _square_aux_bounds(li, ui)  # already widened there
     lo, hi = li, ui
     for _ in range(p - 1):
         corners = (lo * li, lo * ui, hi * li, hi * ui)
         lo, hi = min(corners), max(corners)
-    return lo, hi
+    # #956: widened outward. This stays within the `rel=1e-9` parity the cold
+    # build's `Interval.__pow__` is pinned to (the guard is ~3.6e-15 relative),
+    # and `Interval` already outward-rounds every step of its own product — this
+    # is the same treatment applied to the closed form that reproduces it.
+    return widen(lo, hi)
 
 
 def _affine_square_rows(coeff, const, li, ui):
@@ -250,11 +290,17 @@ def _affine_square_rows(coeff, const, li, ui):
     # guard is needed here (unlike the general power secant).
     slope = t_hi + t_lo
     a = t_lo * t_lo - slope * t_lo
+    f_lo, f_hi = t_lo * t_lo, t_hi * t_hi
+    spec = [
+        (-slope * coeff, 1.0, a + slope * const, slope),  # secant (overestimator)
+        (2.0 * t_lo * coeff, -1.0, f_lo - 2.0 * t_lo * const, 2.0 * t_lo),  # tangent @ t_lo
+        (2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * const, 2.0 * mid),  # tangent @ mid
+        (2.0 * t_hi * coeff, -1.0, f_hi - 2.0 * t_hi * const, 2.0 * t_hi),  # tangent @ t_hi
+    ]
+    # #956: outward guard in `t`-space, matching `_emit_1d` term for term.
     return [
-        (-slope * coeff, 1.0, a + slope * const),  # secant (overestimator): w <= ...
-        (2.0 * t_lo * coeff, -1.0, t_lo * t_lo - 2.0 * t_lo * const),  # tangent at t_lo
-        (2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * const),  # tangent at midpoint
-        (2.0 * t_hi * coeff, -1.0, t_hi * t_hi - 2.0 * t_hi * const),  # tangent at t_hi
+        (cx, cw, rhs + envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, const, rhs))
+        for cx, cw, rhs, d in spec
     ]
 
 

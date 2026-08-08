@@ -578,13 +578,26 @@ def _milp_model():
 
 
 def _infeasible_bilinear():
-    """Infeasible only after branching (FBBT alone cannot prove it): needs
-    x*y >= 0.5 with x + y <= 1 on [0,1]^2 (max of x*y is 0.25)."""
+    """A bilinear model whose infeasibility the solver actually CERTIFIES:
+    ``x*y <= 1`` with ``x, y in [2,3]`` (the product is at least 4).
+
+    The previous fixture was ``x*y >= 0.5`` with ``x + y <= 1`` on ``[0,1]^2``,
+    documented as "infeasible only after branching". It was not: the solver never
+    branched it, and it never proved it either. Its root relaxation is feasible at
+    EXACTLY one vertex — ``(x, y, w) = (0.5, 0.5, 0.5)`` satisfies every McCormick
+    facet with equality — so the verdict came from whichever way that razor-thin LP
+    happened to round. Measured (#956): the rhs ``0.5`` case was the ONLY one that
+    ever terminated, and only before the envelopes were outward-rounded; every
+    other margin — 0.3, 0.45, 0.49, 0.55, 0.6, 0.75, 1.0, 1.5, 2.0 — runs ~12 000
+    nodes to the time limit in BOTH arms, so no amount of margin recovers it.
+    The solver's inability to close that family is a real, separate gap; this test
+    is about the DEBUGGER, so it now uses a fixture whose verdict is deterministic
+    (0 nodes, ~0.4 s, identical with the guard on and off) rather than one that
+    passed on a rounding coincidence."""
     m = do.Model("adv2_infeas")
-    x = m.continuous("x", lb=0.0, ub=1.0)
-    y = m.continuous("y", lb=0.0, ub=1.0)
-    m.subject_to(x * y >= 0.5)
-    m.subject_to(x + y <= 1.0)
+    x = m.continuous("x", lb=2.0, ub=3.0)
+    y = m.continuous("y", lb=2.0, ub=3.0)
+    m.subject_to(x * y <= 1.0)
     m.minimize(x + y)
     return m
 

@@ -70,6 +70,7 @@ from discopt._jax.milp_relaxation import (
     _linearize_affine_expr_sparse,
 )
 from discopt._jax.model_utils import flat_variable_bounds
+from discopt._jax.outward_rounding import envelope_1d_slack, envelope_product_slack
 from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
 
 __all__ = [
@@ -1258,7 +1259,11 @@ def _emit_1d(
         coeffs = {w: sign}
         for j, c in lt.scaled(-sign * slope).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
-        ctx.add_row(coeffs, sign * (a + slope * lt.const))
+        rhs = sign * (a + slope * lt.const)
+        # #956: relax outward. The guard is computed by the shared helper from the
+        # same t-space quantities the incremental patch has, so the two engines'
+        # rows stay bit-identical under `IncrementalMcCormickLP._validate`.
+        ctx.add_row(coeffs, rhs + envelope_1d_slack(slope, lo, hi, flo, fhi, lt.const, rhs))
 
     def _tangent_row(t0: float, sign: float) -> None:
         # sign*(w - (f(t0) + f'(t0)(t - t0))) >= 0  ->  -sign*w + sign*f'(t0)*t <= ...
@@ -1274,7 +1279,9 @@ def _emit_1d(
         coeffs = {w: -sign}
         for j, c in lt.scaled(sign * gp).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
-        ctx.add_row(coeffs, -sign * intercept - sign * gp * lt.const)
+        rhs = -sign * intercept - sign * gp * lt.const
+        # #956: relax outward (see `_secant_row`).
+        ctx.add_row(coeffs, rhs + envelope_1d_slack(gp, lo, hi, flo, fhi, lt.const, rhs))
 
     mid = 0.5 * (lo + hi)
     if curv == "convex":
@@ -1852,7 +1859,13 @@ def _emit_mccormick(ctx: _Builder, w: int, la: LinForm, ba, lb_: LinForm, bb) ->
         for j, c in lb_.scaled(sign * coef_b).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
         rhs = -sign * (cc + coef_a * la.const + coef_b * lb_.const)
-        ctx.add_row(coeffs, rhs)
+        # #956: relax outward, sized from the two forms' enclosures — the same
+        # quantities `_bilinear_rows` and the Rust kernel use, so all three
+        # engines emit the same guarded row.
+        ctx.add_row(
+            coeffs,
+            rhs + envelope_product_slack(coef_a, coef_b, aL, aH, bL, bH, la.const, lb_.const, rhs),
+        )
 
 
 def _factor_value(
