@@ -222,5 +222,4 @@ def pounce_option_defaults() -> dict:
     return {
         "print_level": 0,
         "constr_viol_tol": POUNCE_CONSTR_VIOL_TOL,
-        "bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR,
     }

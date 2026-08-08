@@ -41,7 +41,7 @@ import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from discopt.solver import _matrix_solution_feasible  # noqa: E402
-from discopt.solvers import SolveStatus  # noqa: E402
+from discopt.solvers import POUNCE_BOUND_RELAX_FACTOR, SolveStatus  # noqa: E402
 from discopt.solvers.lp_pounce import POUNCE_AVAILABLE  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not POUNCE_AVAILABLE, reason="pounce not installed")
@@ -69,6 +69,32 @@ def _diet_matrices():
     return c, -A, -req, [(0.0, 10.0)] * 5
 
 
+def _model_from_matrices(c, A_ub, b_ub, bounds, name="m940"):
+    """Build a `dm.Model` equivalent to ``min cᵀx s.t. A_ub x ≤ b_ub, bounds``.
+
+    The tests below go through ``model.solve()`` deliberately. ``bound_relax_factor``
+    is requested by the model-level POUNCE call sites (``solver._solve_lp_pounce`` /
+    ``_solve_qp_pounce``) rather than as a backend-wide default, because those are
+    the call sites whose points ``_matrix_solution_feasible`` checks — and applying
+    it backend-wide reaches the Benders dual LP, where it costs convergence (#945).
+    So calling the backend directly would test a different contract than the one
+    #940 is about.
+    """
+    n = len(c)
+    m = dm.Model(name)
+    lo = float(bounds[0][0])
+    hi = float(bounds[0][1])
+    x = m.continuous("x", shape=(n,), lb=lo, ub=hi)
+    m.minimize(dm.sum(lambda j: float(c[j]) * x[j], over=range(n)))
+    for i in range(A_ub.shape[0]):
+        row = A_ub[i]
+        m.subject_to(
+            dm.sum(lambda j: float(row[j]) * x[j], over=range(n)) <= float(b_ub[i]),
+            name=f"r{i}",
+        )
+    return m, x
+
+
 def _worst_violation(x, A_ub, b_ub, bounds):
     """Max absolute amount by which ``x`` breaks a row or a bound."""
     x = np.asarray(x, dtype=np.float64)
@@ -79,17 +105,17 @@ def _worst_violation(x, A_ub, b_ub, bounds):
 
 
 def test_pounce_lp_point_meets_discopt_constraint_tolerance():
-    """POUNCE's own LP convergence must imply discopt's constraint tolerance."""
-    from discopt.solvers.lp_pounce import solve_lp
-
+    """The model-level LP fast path must return a point discopt's guard accepts."""
     c, A_ub, b_ub, bounds = _diet_matrices()
-    res = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
+    model, x = _model_from_matrices(c, A_ub, b_ub, bounds, name="diet940")
+    res = model.solve(nlp_solver="pounce")
 
-    assert res.status == SolveStatus.OPTIMAL
-    worst = _worst_violation(res.x, A_ub, b_ub, bounds)
+    assert res.status == "optimal"
+    sol = np.asarray(res.value(x), dtype=np.float64).ravel()
+    worst = _worst_violation(sol, A_ub, b_ub, bounds)
     # Pre-fix this is ~5.8e-6 (and up to Ipopt's 1e-4 default on other data).
     assert worst <= DISCOPT_CONSTR_TOL, f"worst violation {worst:.3e} exceeds 1e-6"
-    assert _matrix_solution_feasible(res.x, A_ub, b_ub, None, None, bounds)
+    assert _matrix_solution_feasible(sol, A_ub, b_ub, None, None, bounds)
 
 
 @pytest.mark.parametrize("scale", [1e2, 1e3, 1e4])
@@ -99,8 +125,6 @@ def test_pounce_lp_guard_holds_across_data_scales(scale):
     Pre-fix, 100% of solves with row term scale in ``[1e2, 1e5)`` tripped it;
     this is the general statement, not the tutorial instance.
     """
-    from discopt.solvers.lp_pounce import solve_lp
-
     rng = np.random.default_rng(940)
     n, m = 20, 10
     A_ub = -np.abs(rng.uniform(0.5, 5.0, size=(m, n)))
@@ -108,11 +132,13 @@ def test_pounce_lp_guard_holds_across_data_scales(scale):
     c = np.abs(rng.uniform(1.0, 10.0, size=n))
     bounds = [(0.0, 10.0 * scale)] * n
 
-    res = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
-    assert res.status == SolveStatus.OPTIMAL
-    assert _matrix_solution_feasible(res.x, A_ub, b_ub, None, None, bounds), (
-        f"guard rejected a converged POUNCE LP point at data scale {scale:g}; "
-        f"worst violation {_worst_violation(res.x, A_ub, b_ub, bounds):.3e}"
+    model, x = _model_from_matrices(c, A_ub, b_ub, bounds, name=f"sw{scale:g}")
+    res = model.solve(nlp_solver="pounce")
+    assert res.status == "optimal"
+    sol = np.asarray(res.value(x), dtype=np.float64).ravel()
+    assert _matrix_solution_feasible(sol, A_ub, b_ub, None, None, bounds), (
+        f"guard rejected the model-level POUNCE LP point at data scale {scale:g}; "
+        f"worst violation {_worst_violation(sol, A_ub, b_ub, bounds):.3e}"
     )
 
 
@@ -153,7 +179,16 @@ def test_pounce_qp_point_meets_discopt_constraint_tolerance():
     b_ub = -scale * np.abs(rng.uniform(0.5, 2.0, size=m)) * n * 0.25
     bounds = [(0.0, 10.0 * scale)] * n
 
-    res = solve_qp(Q=Q, c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
+    # Mirrors exactly what solver._solve_qp_pounce requests at the guard-checked
+    # call site; the wiring itself is pinned by the test below.
+    res = solve_qp(
+        Q=Q,
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        bounds=bounds,
+        options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
+    )
     assert res.status == SolveStatus.OPTIMAL
     assert _matrix_solution_feasible(res.x, A_ub, b_ub, None, None, bounds), (
         "guard rejected a converged POUNCE QP point; worst violation "
@@ -210,20 +245,41 @@ def test_returned_point_stays_inside_its_declared_box(flat):
     assert res.objective >= 3.0 - 1e-12
 
 
-def test_shared_pounce_defaults_are_the_single_source_of_truth():
-    """The option baseline must not be re-spelled per backend.
+def test_option_requests_are_wired_where_the_guard_checks():
+    """Pin WHERE each request lives, because the two have different blast radii.
 
-    A second copy is how one entry point silently keeps Ipopt's defaults while
-    the rest move — the #940 failure mode exactly.
+    ``constr_viol_tol`` is a backend-wide default: it is harmless everywhere and
+    carries the fix on the published pounce wheel.
+
+    ``bound_relax_factor = 0`` is NOT backend-wide. It is requested by the
+    model-level POUNCE call sites, whose points ``_matrix_solution_feasible``
+    checks. Applied backend-wide it also reaches the Benders dual LP, where it
+    costs convergence — two correctness-lane tests go 1.6s -> 79s and end at
+    iteration/time limit (#945). Keeping the request at the consumer that needs
+    the guarantee is the difference between fixing #940 and breaking Benders.
     """
-    from discopt.solvers import pounce_option_defaults
+    import inspect
+
+    from discopt import solver as S
+    from discopt.solvers import POUNCE_BOUND_RELAX_FACTOR, pounce_option_defaults
 
     defaults = pounce_option_defaults()
-    assert defaults["bound_relax_factor"] == 0.0
     assert defaults["constr_viol_tol"] <= DISCOPT_CONSTR_TOL
+    assert "bound_relax_factor" not in defaults, (
+        "bound_relax_factor must NOT be a backend-wide default — it breaks the "
+        "Benders dual LP (#945)"
+    )
     # A fresh dict each call: a caller mutating it must not poison the next solve.
-    defaults["bound_relax_factor"] = 999.0
-    assert pounce_option_defaults()["bound_relax_factor"] == 0.0
+    defaults["constr_viol_tol"] = 999.0
+    assert pounce_option_defaults()["constr_viol_tol"] <= DISCOPT_CONSTR_TOL
+
+    assert POUNCE_BOUND_RELAX_FACTOR == 0.0
+    for fn in (S._solve_lp_pounce, S._solve_qp_pounce):
+        src = inspect.getsource(fn)
+        assert "bound_relax_factor" in src, (
+            f"{fn.__name__} must request bound_relax_factor — it is the call site "
+            "whose point the #850 guard checks"
+        )
 
 
 def test_caller_supplied_constr_viol_tol_still_wins():
