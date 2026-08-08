@@ -2181,17 +2181,13 @@ def _extract_variable_info(model: Model):
     return n_vars, lb, ub, int_var_offsets, int_var_sizes
 
 
-def _check_lp_solution_feasibility(A_eq, b_eq, x_full, tol=1e-4):
-    """Check that an LP/QP solution satisfies A_eq @ x = b_eq within tolerance.
-
-    Returns True if the maximum absolute constraint residual is within *tol*.
-    Used by MILP/MIQP B&B to reject LP/QP relaxation solutions where the IPM
-    converged to a constraint-violating point.
-    """
-    if A_eq.shape[0] == 0:
-        return True
-    residual = np.asarray(A_eq) @ np.asarray(x_full) - np.asarray(b_eq)
-    return float(np.max(np.abs(residual))) <= tol
+# NOTE (#952): ``_check_lp_solution_feasibility`` used to live here — an
+# equality-residual-only gate at ``tol=1e-4``, 100x the repo's declared
+# ``abs=1e-6``. Its last two callers were the MIQP B&B node gates, where it was a
+# tautology (the batched node path reconstructs slacks so the equality holds by
+# construction; see ``_solve_miqp_bb._node_point_feasible``). Both now call
+# ``_matrix_solution_feasible``, the repo's single arbiter, so the helper had no
+# callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
 def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
@@ -15627,11 +15623,44 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         if np.any(viol > tol + rtol * row_scale):
             return False
     if bounds is not None:
-        for xi, (lo, hi) in zip(x, bounds):
-            row_tol = tol + rtol * abs(xi)
-            if xi < lo - row_tol or xi > hi + row_tol:
+        # Vectorised form of the original per-element loop (#952): identical
+        # semantics — same per-element ``tol + rtol*|x_i|`` threshold, same
+        # ``zip``-style truncation to the shorter of ``x``/``bounds`` — but O(n)
+        # numpy instead of O(n) Python, because the MIQP B&B node gate now calls
+        # this once per node rather than once per solve.
+        box = np.asarray(bounds, dtype=np.float64)
+        if box.size:
+            k = min(x.shape[0], box.shape[0])
+            row_tol = tol + rtol * absx[:k]
+            if np.any(x[:k] < box[:k, 0] - row_tol) or np.any(x[:k] > box[:k, 1] + row_tol):
                 return False
     return True
+
+
+def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:
+    """Human-readable worst raw residual per block — **diagnostic only**.
+
+    This is never the arbiter: it applies no tolerance and makes no accept/reject
+    decision, so it cannot drift out of agreement with
+    :func:`_matrix_solution_feasible` the way a second thresholded variant could.
+    It exists so a refusal raised by that arbiter names a magnitude instead of
+    forcing a re-run to find one.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    parts: list[str] = []
+    if A_ub is not None and b_ub is not None and len(b_ub):
+        v = np.asarray(A_ub, dtype=np.float64) @ x - np.asarray(b_ub, dtype=np.float64)
+        parts.append(f"A_ub row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+    if A_eq is not None and b_eq is not None and len(b_eq):
+        v = np.abs(np.asarray(A_eq, dtype=np.float64) @ x - np.asarray(b_eq, dtype=np.float64))
+        parts.append(f"A_eq row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+    if bounds is not None:
+        box = np.asarray(bounds, dtype=np.float64)
+        if box.size:
+            k = min(x.shape[0], box.shape[0])
+            v = np.maximum(box[:k, 0] - x[:k], x[:k] - box[:k, 1])
+            parts.append(f"bound on x[{int(np.argmax(v))}] by {float(np.max(v)):.6e}")
+    return "; ".join(parts) if parts else "no rows or bounds declared"
 
 
 def _solve_qp_matrix(
@@ -16291,9 +16320,10 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         return None
     if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
         x_sol = np.asarray(res.x, dtype=np.float64)
-        # Soundness gate (mirrors the JAX-IPM path's _check_lp_solution_feasibility):
-        # reject a node point that violates its own rows so a slightly-infeasible
-        # relaxation solution cannot seed a spurious incumbent or node bound.
+        # Soundness gate: reject a node point that violates its own rows so a
+        # slightly-infeasible relaxation solution cannot seed a spurious incumbent
+        # or node bound. (#952 gave the MIQP node path the equivalent check, via
+        # ``_matrix_solution_feasible``; this MILP one already checked box + rows.)
         tol = 1e-5
         feasible = True
         # An LP optimum must respect the node's variable box; an off-bound point
@@ -18296,6 +18326,11 @@ def _solve_miqp_bb(
 
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
+    # #952: the exit gate below verifies the returned incumbent against the box the
+    # *model* declares, captured here before FBBT overwrites ``lb``/``ub``. FBBT
+    # bounds are derived, so checking against them would let a wrong inference
+    # manufacture a refusal on a point genuinely feasible for the model as written.
+    _declared_box = np.stack([lb[:n_orig].copy(), ub[:n_orig].copy()], axis=1)
 
     # --- Root presolve: FBBT before tree creation ---
     # The node QP IPM diverges to NaN on variables with infinite bounds (e.g.
@@ -18345,6 +18380,46 @@ def _solve_miqp_bb(
     _c_m = np.asarray(qp_data.c[:n_orig])
     _Q_m = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
 
+    def _node_point_feasible(x_full, node_lb_i, node_ub_i) -> bool:
+        """Does a node point satisfy the model's rows and the node's own box?
+
+        This replaces the equality-only ``A_eq_full x == b_eq`` gate this path
+        used to run (issue #952), which was a **tautology** on the batched
+        structured-QP node path and therefore measured nothing. The reason is in
+        :func:`_pounce_qp_relaxation_nodes`: that path solves only the structural
+        columns and then *reconstructs* the slacks as ``z = S⁺(b_eq - A_struct
+        x_s)``, which makes ``A_eq_full [x_s, z] == b_eq`` hold to machine
+        precision for **any** ``x_s`` — a violated inequality row simply comes
+        back as a negative slack, and the old gate never looked at slack bounds.
+        Measured on the 40-seed family in the issue: 212 gate invocations, worst
+        equality residual 8.9e-16, while the returned points sat ~9e-9 outside a
+        declared inequality row.
+
+        The honest check is against the *decomposed* rows over the structural
+        columns (``A_ub``/``A_eq``) plus the node box — which is exactly what the
+        MILP path's :func:`_solve_node_lp_pounce` already does, and what
+        :func:`_matrix_solution_feasible` (this repo's arbiter, at the declared
+        ``abs=1e-6``) implements. Checking the *node* box rather than the declared
+        one is deliberate: an off-box point can be integral (a binary at -1) and
+        still pass every row, seeding a spurious incumbent.
+        """
+        if x_full is None:
+            return False
+        return _matrix_solution_feasible(
+            np.asarray(x_full, dtype=np.float64)[:n_orig],
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            np.stack(
+                [
+                    np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+                    np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+                ],
+                axis=1,
+            ),
+        )
+
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
@@ -18365,9 +18440,21 @@ def _solve_miqp_bb(
             Q=_Q_m,
         )
         if inc is not None:
-            tree.inject_incumbent(
-                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
-            )
+            x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
+            # #952: an injected incumbent goes straight into the tree as a
+            # candidate answer, so it is verified here rather than only at the
+            # exit gate. The snap re-solve fixes the integers and asks POUNCE for
+            # the continuous completion; an "optimal" verdict there is still a
+            # POUNCE iterate, not a proof that the point sits inside the rows.
+            if _node_point_feasible(x_inc, node_lb_i, node_ub_i):
+                tree.inject_incumbent(x_inc, float(inc[0]))
+            else:
+                logger.debug(
+                    "MIQP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                    _matrix_solution_violations(
+                        x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
+                    ),
+                )
 
     def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
         # A node whose QP relaxation did not cleanly converge (non-KKT, solver
@@ -18388,7 +18475,7 @@ def _solve_miqp_bb(
         finite_feas = (
             x_full is not None
             and bool(np.all(np.isfinite(x_full)))
-            and _check_lp_solution_feasibility(_A_eq_dense, qp_data.b_eq, x_full)
+            and _node_point_feasible(x_full, node_lb_i, node_ub_i)
         )
         if finite_feas:
             # Try first to recover a trusted (KKT) lower bound; if POUNCE
@@ -18532,7 +18619,7 @@ def _solve_miqp_bb(
             if infeasible[i]:
                 # POUNCE Phase-1-certified empty box: a sound infeasibility prune.
                 result_sols[i] = 0.5 * (lb_c + ub_c)
-            elif clean[i] and _check_lp_solution_feasibility(_A_eq_dense, qp_data.b_eq, x_vals[i]):
+            elif clean[i] and _node_point_feasible(x_vals[i], node_lb, node_ub):
                 # KKT-valid relaxation optimum -> a valid node lower bound.
                 result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
                 result_sols[i] = x_vals[i, :n_vars]
@@ -18633,6 +18720,47 @@ def _solve_miqp_bb(
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
         if _rounded_feas:
             sol_flat = _rounded_inc
+
+        # #952: exit gate. Every incumbent this function returns is verified here,
+        # against EVERY declared row (inequalities included) and every declared
+        # bound, at the repo's declared ``abs=1e-6`` — the same arbiter and the same
+        # loud refusal as the Gurobi QCP path (see ``_matrix_solution_feasible``).
+        # Before this, the only gate on the way out was an equality residual that
+        # the batched node path had made vacuous (see ``_node_point_feasible``), so
+        # nothing bounded how far outside a row the returned point could sit: its
+        # size was set by whatever the QP IPM happened to converge to.
+        #
+        # This covers "feasible" as well as "optimal". The certificate argument is
+        # sharpest on "optimal" — that status returns the incumbent's objective as
+        # the *dual bound* too, and an objective evaluated outside the feasible set
+        # is below the true optimum, so the bound is optimistic by exactly the
+        # excursion. But ``objective`` on a "feasible" exit is equally a claim that
+        # some feasible point attains it, and downstream callers (GBD, OA) consume
+        # it as a valid upper bound. Both are primal claims; both are checked.
+        #
+        # Per CLAUDE.md §3 the failure is a refusal, not a repair: nudging the point
+        # or quietly downgrading the status would turn a solver defect into a silent
+        # approximation, which is the failure mode this gate exists to catch.
+        #
+        # Scope, stated honestly: the rows checked are the ones ``extract_qp_data``
+        # produced (decomposed back out of slack form), the same matrices the node
+        # solves consume. So this catches an engine returning a point outside the
+        # extracted problem — the failure mode #952 is about — but not a bug in the
+        # extraction itself, which would move gate and solver together. That second
+        # class is covered from outside, against the model as declared, by
+        # ``python/tests/test_952_miqp_incumbent_feasibility.py``'s NLPEvaluator
+        # measurement; doing it here would mean a JAX compile on every solve.
+        _x_check = np.asarray(sol_flat[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(
+            _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            raise RuntimeError(
+                "MIQP-BB returned an infeasible point labeled feasible/optimal: "
+                + _matrix_solution_violations(
+                    _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+                )
+            )
+
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
