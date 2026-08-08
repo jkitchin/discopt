@@ -267,6 +267,67 @@ def test_milp_baseline_solve_is_unaffected():
     assert r.objective == pytest.approx(6.0, abs=1e-6)
 
 
+def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
+    """The C-3 integer snap is adopted only if it keeps the point inside the rows.
+
+    The exit gate found this: on `test_nn_equivalence::test_tree_ensemble_fixed_input`
+    the incumbent satisfies its equalities to 4.4e-16 and the *snapped* point misses
+    one by 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
+    The MILP call site's comment claimed the snap "cannot move a linear row by more
+    than the integrality tol"; a row takes one snap per term, so it can.
+
+    ``_round_incumbent_integers`` is documented to report ``feasible=False`` when
+    rounding breaks feasibility, but only when handed a checker — and this call site
+    passes none, so the flag was unconditionally True. Reproduced here in the small:
+    five integers each 3e-7 under an integer, on a row with coefficient 2, moves the
+    equality by 3e-6. The unrounded point satisfies *both* declared tolerances (rows
+    exactly, integrality 3e-7 against 1e-5), so it is the one reported.
+    """
+    eps = 3e-7
+    m = dm.Model("snap952")
+    z = m.integer("z", shape=(5,), lb=0, ub=3)
+    x = m.continuous("x", lb=-100, ub=100)
+    m.minimize(x + sum(z[j] for j in range(5)))
+    m.subject_to(2 * sum(z[j] for j in range(5)) + x == 10)
+
+    z_near = np.full(5, 1.0 + eps)
+    x_val = 10.0 - 2.0 * float(np.sum(z_near))  # equality holds exactly at z_near
+
+    # Sanity, before relying on it: snapping really does break the row here, by more
+    # than the declared abs tolerance. Without this the test could pass vacuously.
+    assert abs(2 * np.sum(np.round(z_near)) + x_val - 10.0) > DECLARED_ABS_TOL
+
+    real_tree_cls = S.PyTreeManager
+    state = {"applied": False}
+
+    class _NearIntegralTree:
+        def __init__(self, *args, **kwargs):
+            self._inner = real_tree_cls(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def incumbent(self):
+            inc = self._inner.incumbent()
+            if inc is None:
+                return None
+            _sol, obj = inc
+            state["applied"] = True
+            # Variable order is z (5 integers) then x.
+            return np.concatenate([z_near, [x_val]]), obj
+
+    monkeypatch.setattr(S, "PyTreeManager", _NearIntegralTree)
+
+    r = m.solve(time_limit=60)  # must NOT raise: the unrounded point is feasible
+    assert state["applied"], "the incumbent was never replaced; the test proved nothing"
+    assert r.x is not None
+
+    got = np.asarray(r.x["z"], dtype=np.float64).flatten()
+    assert np.allclose(got, z_near, atol=0, rtol=0), (
+        f"expected the unrounded incumbent {z_near} to be reported, got {got}"
+    )
+
+
 def test_bounds_check_vectorisation_matches_the_original_loop():
     """``_matrix_solution_feasible``'s bounds check was vectorised so the MIQP node
     gate can call it once per node. Semantics must be unchanged, including the

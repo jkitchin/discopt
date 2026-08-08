@@ -18137,13 +18137,50 @@ def _solve_milp_bb(
         sol_flat = np.array(sol_array)
         # C-3: snap near-integral discrete coordinates to exact integers. In the
         # MILP path each integer was branch-fixed to [k, k] before the node LP
-        # solved, so a stored k±ε is a numeric artifact and rounding to k
-        # restores exactly the point the LP was solving — it cannot move a
-        # linear row by more than the integrality tol. The dual-recovery
-        # re-solve does not round the reported primal, so round here.
+        # solved, so a stored k±ε is a numeric artifact and rounding to k restores
+        # exactly the point the LP was solving. The dual-recovery re-solve does not
+        # round the reported primal, so round here.
+        #
+        # #952 correction: this comment used to claim the snap "cannot move a linear
+        # row by more than the integrality tol". That is wrong, and measurably so —
+        # a row accumulates one snap per term, weighted by its coefficients. On
+        # ``test_nn_equivalence::test_tree_ensemble_fixed_input`` the incumbent
+        # satisfies its equalities to 4.4e-16 and the snapped point violates one by
+        # 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
+        #
+        # ``_round_incumbent_integers`` is documented to return ``feasible=False``
+        # when rounding breaks feasibility, and "the caller must not certify a
+        # rounded point that reports False" — but it can only do that when handed a
+        # checker, and this call site passes none, so the flag was unconditionally
+        # True and validated nothing. The matrix arbiter is the checker here: adopt
+        # the snap only when it keeps the point inside the declared rows, otherwise
+        # report the unrounded point. That is not a tolerance concession — the
+        # unrounded point satisfies BOTH declared tolerances (rows at 4.4e-16,
+        # integrality at 3.9e-7 against integrality_tol=1e-5), while the snapped one
+        # satisfies integrality exactly but misses abs=1e-6 on a row.
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if _rounded_feas:
+        if _rounded_feas and _matrix_solution_feasible(
+            np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            _declared_box,
+        ):
             sol_flat = _rounded_inc
+        else:
+            logger.debug(
+                "MILP-BB: integer snap would leave the declared rows (%s); "
+                "reporting the unrounded incumbent",
+                _matrix_solution_violations(
+                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                ),
+            )
 
         # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
         # incumbent exit was structurally identical (round, unpack, return) with no
@@ -18745,9 +18782,36 @@ def _solve_miqp_bb(
         # MILP-BB path). Integers are branch-fixed before each node QP solve, so
         # rounding a stored k±ε restores the fixed point; the dual-recovery
         # re-solve does not round the reported primal.
+        #
+        # #952: adopt the snap only when it keeps the point inside the declared rows.
+        # Same reasoning, and the same vacuous ``_rounded_feas``, as the MILP-BB call
+        # site documents at length — this path passes no checker either, so the flag
+        # was unconditionally True. No instance in the in-repo corpus panel exercised
+        # the fallback here (the MILP path's did), but the call sites are the same
+        # shape and are kept symmetric rather than left to diverge.
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if _rounded_feas:
+        if _rounded_feas and _matrix_solution_feasible(
+            np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            _declared_box,
+        ):
             sol_flat = _rounded_inc
+        else:
+            logger.debug(
+                "MIQP-BB: integer snap would leave the declared rows (%s); "
+                "reporting the unrounded incumbent",
+                _matrix_solution_violations(
+                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                ),
+            )
 
         # #952: exit gate. Every incumbent this function returns is verified here,
         # against EVERY declared row (inequalities included) and every declared
