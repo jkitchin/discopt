@@ -303,10 +303,15 @@ jobs:
     # `--timeout=900` because these tests pass real `time_limit=` budgets to the
     # solver (ex1252 uses 200 s) and a per-test timeout below the budget would
     # fail the harness instead of the assertion.
+    #
+    # Measured 313 s serially on an M-series laptop (153 selected: 146 passed,
+    # 7 skipped, 1 failed — the failure being #927). `python-correctness` is
+    # ~5 min locally and 23 min on a runner, so budget ~25 min here and leave
+    # headroom for a slower runner rather than a hung solve.
     name: Python correctness (slow, nightly, 3.12, ubuntu)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
