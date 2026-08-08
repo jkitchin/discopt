@@ -1,0 +1,390 @@
+{
+ "results": {
+  "contvar": {
+   "pre": [
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183632.02121055726,
+     "node_count": 3,
+     "wall": 21.966746790000343
+    },
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183632.18040315996,
+     "node_count": 3,
+     "wall": 22.600557973000377
+    },
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183632.02121055726,
+     "node_count": 3,
+     "wall": 22.357893702999718
+    }
+   ],
+   "post": [
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183632.18040315996,
+     "node_count": 3,
+     "wall": 23.059128349000275
+    },
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 22.08727708499964
+    },
+    {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183632.02121055726,
+     "node_count": 3,
+     "wall": 21.394620528999894
+    }
+   ]
+  },
+  "ex1225": {
+   "pre": [
+    {
+     "status": "optimal",
+     "objective": 30.999999913557566,
+     "bound": 30.999999913557566,
+     "node_count": 5,
+     "wall": 2.4458057770002597
+    },
+    {
+     "status": "optimal",
+     "objective": 30.999999913557566,
+     "bound": 30.999999913557566,
+     "node_count": 5,
+     "wall": 2.3281306719995882
+    },
+    {
+     "status": "optimal",
+     "objective": 30.999999913557566,
+     "bound": 30.999999913557566,
+     "node_count": 5,
+     "wall": 2.533555673999672
+    }
+   ],
+   "post": [
+    {
+     "status": "optimal",
+     "objective": 30.999999948692963,
+     "bound": 30.999999948692963,
+     "node_count": 5,
+     "wall": 2.42900134599995
+    },
+    {
+     "status": "optimal",
+     "objective": 30.999999948692963,
+     "bound": 30.999999948692963,
+     "node_count": 5,
+     "wall": 2.48255794600027
+    },
+    {
+     "status": "optimal",
+     "objective": 30.999999948692963,
+     "bound": 30.999999948692963,
+     "node_count": 5,
+     "wall": 2.4410160180000275
+    }
+   ]
+  },
+  "m3": {
+   "pre": [
+    {
+     "status": "optimal",
+     "objective": 37.799999669978845,
+     "bound": 37.79999951039202,
+     "node_count": 47,
+     "wall": 7.701020250000056
+    },
+    {
+     "status": "optimal",
+     "objective": 37.799999669978845,
+     "bound": 37.79999951039202,
+     "node_count": 47,
+     "wall": 7.6758502749999025
+    },
+    {
+     "status": "optimal",
+     "objective": 37.799999669978845,
+     "bound": 37.79999951039202,
+     "node_count": 47,
+     "wall": 7.737198276000072
+    }
+   ],
+   "post": [
+    {
+     "status": "optimal",
+     "objective": 37.79999970380644,
+     "bound": 37.79999957378442,
+     "node_count": 41,
+     "wall": 5.870836144999885
+    },
+    {
+     "status": "optimal",
+     "objective": 37.79999970380644,
+     "bound": 37.79999957378442,
+     "node_count": 41,
+     "wall": 6.139060973999676
+    },
+    {
+     "status": "optimal",
+     "objective": 37.79999970380644,
+     "bound": 37.79999957378442,
+     "node_count": 41,
+     "wall": 5.832039001999874
+    }
+   ]
+  },
+  "nvs03": {
+   "pre": [
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999972676511,
+     "node_count": 5,
+     "wall": 0.2002397370001745
+    },
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999972676511,
+     "node_count": 5,
+     "wall": 0.1801057339998806
+    },
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999972676511,
+     "node_count": 5,
+     "wall": 0.19352301100025215
+    }
+   ],
+   "post": [
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999996676705,
+     "node_count": 5,
+     "wall": 0.18343414199989638
+    },
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999996676705,
+     "node_count": 5,
+     "wall": 0.1760415409999041
+    },
+    {
+     "status": "optimal",
+     "objective": 16.0,
+     "bound": 15.99999996676705,
+     "node_count": 5,
+     "wall": 0.20400574700033758
+    }
+   ]
+  },
+  "nvs05": {
+   "pre": [
+    {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5424692441047068,
+     "node_count": 41,
+     "wall": 20.173445263999838
+    },
+    {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5424692441047068,
+     "node_count": 41,
+     "wall": 20.162235710000004
+    },
+    {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5424692441047068,
+     "node_count": 41,
+     "wall": 20.148775003000083
+    }
+   ],
+   "post": [
+    {
+     "status": "feasible",
+     "objective": 12.589492574009626,
+     "bound": 3.513753543700079,
+     "node_count": 33,
+     "wall": 20.117771083000207
+    },
+    {
+     "status": "feasible",
+     "objective": 12.589492574009626,
+     "bound": 3.513753543700079,
+     "node_count": 33,
+     "wall": 20.17553781000015
+    },
+    {
+     "status": "feasible",
+     "objective": 12.589492574009626,
+     "bound": 3.494691518002833,
+     "node_count": 33,
+     "wall": 20.092665443999977
+    }
+   ]
+  },
+  "tanksize": {
+   "pre": [
+    {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2633042223672657,
+     "node_count": 4324,
+     "wall": 20.23523669999986
+    },
+    {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2635583144030644,
+     "node_count": 4485,
+     "wall": 20.231536124000286
+    },
+    {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2635288830441058,
+     "node_count": 4463,
+     "wall": 20.220829058000163
+    }
+   ],
+   "post": [
+    {
+     "status": "time_limit",
+     "objective": 1.2686437708530283,
+     "bound": 1.2635580253373981,
+     "node_count": 4386,
+     "wall": 20.097855522999907
+    },
+    {
+     "status": "time_limit",
+     "objective": 1.2686437708530283,
+     "bound": 1.263571886620212,
+     "node_count": 4394,
+     "wall": 20.10033474299962
+    },
+    {
+     "status": "time_limit",
+     "objective": 1.2686437708530283,
+     "bound": 1.2629381792946415,
+     "node_count": 4037,
+     "wall": 20.09630309100021
+    }
+   ]
+  },
+  "tls2": {
+   "pre": [
+    {
+     "status": "feasible",
+     "objective": 5.299999922109238,
+     "bound": 3.2532681850660596,
+     "node_count": 353,
+     "wall": 20.163227672000176
+    },
+    {
+     "status": "feasible",
+     "objective": 5.299999922109238,
+     "bound": 3.1706801036010077,
+     "node_count": 349,
+     "wall": 20.2978921429999
+    },
+    {
+     "status": "feasible",
+     "objective": 5.299999922109238,
+     "bound": 3.2532681850660596,
+     "node_count": 353,
+     "wall": 20.726493942999696
+    }
+   ],
+   "post": [
+    {
+     "status": "optimal",
+     "objective": 5.299999996520617,
+     "bound": 5.3,
+     "node_count": 353,
+     "wall": 20.49768623600039
+    },
+    {
+     "status": "optimal",
+     "objective": 5.299999996520617,
+     "bound": 5.3,
+     "node_count": 353,
+     "wall": 20.646659052999894
+    },
+    {
+     "status": "feasible",
+     "objective": 5.299999996520617,
+     "bound": 3.170680103601007,
+     "node_count": 349,
+     "wall": 20.639154293000047
+    }
+   ]
+  },
+  "tspn12": {
+   "pre": [
+    {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 15.182319851000102
+    },
+    {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 14.198232381999787
+    },
+    {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 13.702092998000353
+    }
+   ],
+   "post": [
+    {
+     "status": "feasible",
+     "objective": 262.64739525060213,
+     "bound": null,
+     "node_count": 1,
+     "wall": 15.082553841999925
+    },
+    {
+     "status": "feasible",
+     "objective": 262.64739525060213,
+     "bound": null,
+     "node_count": 1,
+     "wall": 14.59224022599983
+    },
+    {
+     "status": "feasible",
+     "objective": 262.64739525060213,
+     "bound": null,
+     "node_count": 1,
+     "wall": 14.571465107000222
+    }
+   ]
+  }
+ },
+ "reps": 3,
+ "time_limit": 20.0
+}

@@ -5009,7 +5009,21 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
     assert result.objective == pytest.approx(3.0, abs=1e-3)
     if result.status == "optimal":
         assert result.bound == pytest.approx(3.0, abs=1e-3)
-        assert result.gap == pytest.approx(0.0, abs=1e-9)
+        # Re-baselined by #945. This asserted `gap == 0 @ 1e-9`, which was only
+        # ever satisfiable here because the NLP path returned an incumbent of
+        # 2.9999000025 — 1e-4 BELOW this fixture's exact optimum of 3.0, and 5e-5
+        # below its own reported dual bound of 2.99995 — whereupon
+        # `max(0.0, ub - lb)` clamped the resulting NEGATIVE gap to zero. With the
+        # incumbent honest the gap is a real 1.6e-5, inside the solver's declared
+        # 1e-4 relative tolerance, so that is what is pinned.
+        assert result.gap == pytest.approx(0.0, abs=1e-4)
+        # The certificate invariant the old numbers violated: for a minimization
+        # the dual bound never sits above the incumbent.
+        assert result.bound <= result.objective + 1e-9
+    # y=0 leaves `x*log(x) + 5 <= 0`, which has no root on [1, 10], so y=1 and
+    # `(x-3)^2 <= 0` pins x to exactly 3. Nothing feasible scores below 3.0, so a
+    # smaller objective is a false incumbent, not a better one.
+    assert result.objective >= 3.0 - 1e-6
     assert result.x["x"] == pytest.approx(3.0, abs=1e-3)
     assert result.x["y"] == pytest.approx(1.0, abs=1e-5)
 

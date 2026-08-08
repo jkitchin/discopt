@@ -199,9 +199,14 @@ POUNCE_BOUND_RELAX_FACTOR = 0.0
 def pounce_option_defaults() -> dict:
     """discopt's baseline POUNCE options: quiet, and inside the declared box.
 
-    THE single source of truth for the **matrix-form** backends (``lp_pounce``,
-    ``qp_pounce``). Seed it *before* merging a caller's options so an explicit
-    request still wins::
+    THE single source of truth for the matrix-form backends (``lp_pounce``,
+    ``qp_pounce``, #940), and available to any caller that wants discopt's
+    baseline rather than Ipopt's. It is deliberately NOT applied backend-wide on
+    the NLP path: ``constr_viol_tol = 1e-8`` costs a 31%-worse incumbent and a
+    looser bound on nvs05 entirely on its own (measured in
+    ``nlp_pounce.solve_nlp``), so ``nlp_pounce.solve_nlp`` stays at POUNCE's own
+    baseline and the NLP call sites that want this seed it themselves. Seed it
+    *before* merging a caller's options so an explicit request still wins::
 
         opts = pounce_option_defaults()
         opts.update(caller_options or {})
@@ -209,17 +214,48 @@ def pounce_option_defaults() -> dict:
     Do not re-spell these values at a call site — a second copy is how one entry
     point silently keeps Ipopt's defaults while the rest move.
 
-    The NLP path (``nlp_pounce.solve_nlp``, and ``solver.py``'s batch path) does
-    NOT use this yet, and so still returns points up to ~7.5e-9 outside their
-    declared bounds. That is not an oversight: pinning ``bound_relax_factor`` to 0
-    there makes incumbents genuinely feasible, which turns ``incumbent - bound``
-    from ``<= 0`` into a small positive number and breaks 12 ``gap == 0 @ 1e-9``
-    assertions across OA / GDPopt / MindtPy parity — those expectations are
-    currently calibrated against a solver that returns slightly-infeasible
-    incumbents. Extending this seed to the NLP path is tracked in #945, together
-    with the gap-closure question it forces.
+    Extending the seed to the NLP path was held back until #945 because it is a
+    certification-semantics change, not just an option: with incumbents genuinely
+    inside their boxes, ``incumbent - bound`` stops being ``<= 0``, and 12
+    ``gap == 0 @ 1e-9`` assertions across OA / GDPopt / MindtPy turned out to be
+    satisfiable only by a solver returning slightly-infeasible incumbents. #945
+    settled that by giving gap closure an absolute criterion at discopt's own
+    ``1e-6`` — see :mod:`discopt.solvers._gap`.
     """
     return {
         "print_level": 0,
         "constr_viol_tol": POUNCE_CONSTR_VIOL_TOL,
     }
+
+
+def pounce_incumbent_options() -> dict:
+    """Extra options for a POUNCE call whose returned POINT is the product (#945).
+
+    ``bound_relax_factor = 0`` lives here and deliberately NOT in
+    :func:`pounce_option_defaults`, because the split is not "LP versus NLP" — it
+    is **what the caller consumes**:
+
+    * A call site whose ``x`` becomes a reported solution or incumbent needs the
+      point inside the box the model declared. Ipopt's default relaxes every
+      bound (and every slack bound standing in for an inequality row) by
+      ``1e-8*(1 + |bound|)``, and a squared row takes the square root of that: on
+      the MindtPy constraint-qualification fixture ``(x-3)^2 <= 0`` admitted every
+      ``x`` within 1e-4 of 3, and discopt certified ``optimal`` 1e-4 below an exact
+      optimum of 3.0.
+    * A call site whose **multipliers** are the product must NOT set it. A
+      degenerate feasible set (Slater failing, e.g. ``x0^2 + x1^2 <= 0``) has no
+      finite multiplier; Ipopt's relaxation hands it an artificial interior and
+      keeps the dual finite. Pinning it to 0 makes the multiplier diverge and the
+      cut built from it useless — measured at 9.8e7 with a cut slope of 7.9e8 on
+      GBD, and it is why the same option applied backend-wide cost the Benders
+      dual LP its convergence (#940: two correctness-lane tests, 1.6s -> 79s).
+
+    So: use this at incumbent/solution producers, never at dual consumers
+    (Benders and GBD recourse, OBBT). Seed it after
+    :func:`pounce_option_defaults` and before a caller's own options::
+
+        opts = pounce_option_defaults()
+        opts.update(pounce_incumbent_options())
+        opts.update(caller_options or {})
+    """
+    return {"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR}

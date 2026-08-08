@@ -24,8 +24,8 @@ the arbiter. These tests pin BEHAVIOUR (the returned point), never the option
 names, which is why they caught a ``constr_viol_tol``-only version of this fix
 being a complete no-op on the build CI actually installs.
 
-8 of these cases fail on the pre-fix tree. The ``nlp_path`` xfail is a live
-marker for #945, not a skip.
+8 of these cases fail on the pre-#940 tree. ``nlp_path`` was a live strict xfail
+until #945 seeded the NLP path from the same baseline; it is now a plain pass.
 """
 
 from __future__ import annotations
@@ -196,23 +196,7 @@ def test_pounce_qp_point_meets_discopt_constraint_tolerance():
     )
 
 
-@pytest.mark.parametrize(
-    "flat",
-    [
-        True,
-        pytest.param(
-            False,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#945: the NLP path is not seeded from pounce_option_defaults yet — "
-                "bound_relax_factor=0 there makes incumbents feasible, which breaks 12 "
-                "gap==0@1e-9 assertions across OA/GDPopt/MindtPy. Kept as a live xfail so "
-                "the defect stays visible and flips to a pass the moment #945 lands.",
-            ),
-        ),
-    ],
-    ids=["lp_path", "nlp_path"],
-)
+@pytest.mark.parametrize("flat", [True, False], ids=["lp_path", "nlp_path"])
 def test_returned_point_stays_inside_its_declared_box(flat):
     """Every POUNCE entry point must return a point inside the declared bounds.
 
@@ -226,8 +210,12 @@ def test_returned_point_stays_inside_its_declared_box(flat):
     paths: ``dm.sum(y.flat)`` classifies linear and routes to ``lp_pounce``,
     while ``dm.sum(y)`` on the bare indexed container routes to the general NLP
     path. Seeding the option in the LP/QP backends alone left this second path
-    returning points ~7.5e-9 below ``lb``; the fix lives in
-    ``solvers.pounce_option_defaults`` so every entry point inherits it (#940).
+    returning points ~7.5e-9 below ``lb``. The fix is NOT one backend-wide default:
+    the LP/QP backends take it from ``solvers.pounce_option_defaults`` (#940), and
+    on the NLP path it is requested by the call sites whose returned POINT is the
+    product (``solvers.pounce_incumbent_options``, #945) — never by
+    ``nlp_pounce.solve_nlp`` itself, which also serves callers whose product is the
+    MULTIPLIERS and who need Ipopt's relaxation to keep them finite.
     """
     m = dm.Model()
     s = m.set("S", [10, 20, 30])

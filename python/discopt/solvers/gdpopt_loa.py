@@ -19,6 +19,8 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
 )
+from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
+from discopt.solvers._gap import optimality_gap
 
 logger = logging.getLogger(__name__)
 
@@ -391,13 +393,14 @@ def solve_gdpopt_loa(
 
 
 def _compute_gap(lb: float, ub: float) -> float:
-    if ub >= 1e19 or lb <= -1e19:
-        return 1.0
-    abs_gap = max(0.0, ub - lb)
-    if abs_gap <= 1e-9:
-        return 0.0
-    denom = max(abs(ub), abs(lb), 1e-10)
-    return abs_gap / denom
+    """LOA's optimality gap — see :mod:`discopt.solvers._gap` for the semantics.
+
+    ``denom_floor=1e-10`` keeps LOA's stricter reporting scale for an
+    *unconverged* run (the gap relative to the objective however small it is).
+    It no longer degenerates on a converged near-zero optimum, because the shared
+    absolute criterion closes the gap before the denominator is reached.
+    """
+    return optimality_gap(lb, ub, denom_floor=1e-10)
 
 
 def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | None:
@@ -447,9 +450,13 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
         else:
             from discopt.solvers.nlp_pounce import solve_nlp
 
-        result = solve_nlp(
-            cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
-        )
+        # LOA's incumbent comes from here, so it takes the incumbent options
+        # (#945): pre-#945 this returned a point below its own lb and below its own
+        # dual bound, and LOA reported that as `optimal`.
+        opts = pounce_option_defaults()
+        opts.update(pounce_incumbent_options())
+        opts.update({"max_iter": 200})
+        result = solve_nlp(cast(NLPEvaluator, proxy), x0, options=opts)
 
         from discopt.solvers import SolveStatus
 
