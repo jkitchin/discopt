@@ -220,6 +220,74 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Two CI signals that reported without measuring** (`ci`). Both were found while
+  driving #960 to green, and both share a shape: a check that answers confidently
+  from something other than the thing it claims to be testing.
+
+  1. **The `changes` gate answered from a guessed diff on all three event
+     arms.** It resolves a base commit and diffs against it; every arm had a
+     path where the base is unavailable and the code substituted
+     `HEAD~1..HEAD` — the tip commit's file list — instead of recognising that
+     it did not know. When that guess lands on a docs-only commit the gate says
+     `code=false` and every solver job below it reports `skipped`, which renders
+     as *not red*. That is the #953 failure mode: a wrong `false` here is not a
+     missing test, it is a green-looking wall of nothing.
+
+     * `workflow_dispatch`: `github.event.before` exists only on `push`, so it
+       expands to the empty string, the first `git diff` fails, and the fallback
+       fires. Dispatching CI on #960, whose tip touched `CHANGELOG.md` and
+       `docs/dev/data/claim-baseline.jsonl`, produced `code=false` and left
+       Rust, `Python fast`, `Python claim-boundary`, `Python correctness` and
+       AMP all `skipped` — nine checks that executed nothing. Now `code=true`
+       unconditionally: pressing the button means "run everything", and there is
+       no base to diff against anyway.
+     * `pull_request` — the trigger that fires on nearly every change here —
+       used `${base:-HEAD~1}`, reachable two ways: the `git fetch` above it is
+       `|| true`, so a fetch failure is silent, and the `--depth=200` fetch
+       installed a shallow boundary that hides the merge base of a branch forked
+       further back than that. Either way a PR that changes the solver behind a
+       docs-only tip commit skipped every solver job. The depth cap is gone (the
+       checkout is already `fetch-depth: 0`) and an unresolvable base is now
+       treated as uncertain.
+     * `push`: an all-zero `before` (a branch's first push), a non-existent
+       object (force-push, shallow clone), or an empty one is likewise the
+       *uncertainty* case the job's own comment already promised to resolve as
+       `true`.
+
+     New `python/tests/test_ci_changes_gate.py` extracts the gate's real shell
+     script out of `ci.yml` — not a copy, so it cannot drift — renders the
+     `${{ github.* }}` expressions, and runs it against throwaway git repos, one
+     case per event type. 12 tests; 6 fail on the pre-change workflow (one per
+     defective arm plus the four `push` base shapes) and the 6 pinning behaviour
+     that must not change (docs-only PRs and pushes still skip, a code file
+     runs, `schedule` still skips the PR matrix, a resolvable merge base is still
+     used in preference to the tip) pass both ways. `pyyaml` moves into the `dev`
+     extra so that file is a skip rather than a collection error where it is
+     absent.
+
+  2. **Two `ex1252` quality bars measured the runner, not the relaxation.**
+     `compute_disjunctive_config_bound` stops on whichever of `max_leaf_solves`
+     and `deadline` comes first, and reported no indication of which. The leaf
+     budget is reproducible; the clock is not. The nightly lane read 33498
+     (42/120 leaves) and 31567 (32/48) on a runner ~3x slower than the reference
+     machine and failed both bars as if the bound had regressed. It had not: at
+     the full budget the bound is **bit-identical** across the #957 boundary —
+     37945.427865923564 at 48 leaves and 63080.286987442756 at 120, matching the
+     values the tests' own docstrings record, with the same leaf and prune counts
+     in both arms.
+
+     `DisjunctiveConfigResult` gains `stopped_on` (`"budget"` / `"deadline"` /
+     `"exhausted"`), mirroring `WorkBudget.stopped_on` from #912 — the same
+     distinction between a search decided by work and one decided by the clock.
+     The two bars now assert `stopped_on != "deadline"` *before* the bound
+     comparison, so a slow machine and a bound regression produce different
+     failures with different instructions, and the clock-bound message says
+     explicitly not to lower the bar. Deadlines are re-sized as backstops at ~2x
+     the measured runner rate (0.175 leaf solves/s → 600 s for 48 leaves, 1500 s
+     for 120), and the nightly lane's `--timeout` goes 900 s → 1800 s so the
+     harness timeout is never what decides a quality bar. The 120-minute job
+     timeout remains the backstop against a hang.
+
 - **Outward rounding no longer turns an exact zero into a subnormal** (`fix`, #957).
   `interval.py`'s `_round_down`/`_round_up` are `np.nextafter(x, ∓inf)`, and
   `nextafter(0.0, ±inf)` is `±5e-324`. At every other magnitude "one ULP" is a
