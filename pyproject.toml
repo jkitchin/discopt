@@ -70,6 +70,16 @@ dev = [
     "pytest",
     "pytest-timeout",
     "pytest-cov",
+    # test_gams_link.py opens with "None of this requires a GAMS installation"
+    # and three of its tests `import yaml` unguarded, so PyYAML is a hard test
+    # dependency and not a `[gams]`-only one. Declared here rather than relied
+    # on transitively: without it those tests are collection ERRORS, not skips —
+    # red for the wrong reason, and only in a `pip install -e ".[dev]"` tree,
+    # since four CI jobs pip-install pyyaml separately and would stay green.
+    # test_dev_extra_declares_test_deps.py pins this; it named
+    # test_ci_changes_gate.py until 2026-08-09, a file that no longer exists.
+    # (Also in the `gams` extra, for gamsconfig.yaml merging.)
+    "pyyaml>=6",
     "pytest-xdist",
     # Pin the lint/typecheck toolchain to the exact versions in
     # .pre-commit-config.yaml (the single source of truth CI also runs), so a

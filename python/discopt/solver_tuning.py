@@ -1044,6 +1044,88 @@ class SolverTuning:
     becomes timing-dependent (an anytime algorithm), so it is not bit-reproducible
     run-to-run; the ``=0`` opt-out path stays deterministic."""
 
+    node_round_budget: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=False)
+    )
+    """Make a per-node separated-relaxation ROUND honor its grant end-to-end
+    (``DISCOPT_NODE_ROUND_BUDGET``, default **off**; §5 bound-changing; issue #966).
+
+    #928 made the warm pure-LP path honor its per-solve ``time_limit``, and the
+    residual budget overrun measurably moved OUT of the LP layer: a round's grant
+    clamps only the LP solves, while the round's non-LP cost — the cold
+    ``build_uniform_relaxation`` (~1.1–3.3 s on contvar) plus separation — is spent
+    AFTER the admission check, unclamped. Measured (contvar @ 20 s, both arms,
+    ``scratchpad/issue966_phase_probe.py``): a node round granted 2.0 s runs
+    5.3–5.8 s, ~3.3 s of it the build; the budget-honoring LPs return sooner, the
+    loop fits MORE such rounds, and the ON arm's wall goes UP (issue #966's
+    20 s-budget sign flip: ON−OFF +325.4/+68.5/+12.7 s over 3 reps).
+
+    When on, the spatial B&B node loops:
+
+    * pass the round's grant to ``solve_at_node`` as an absolute
+      ``round_deadline``, which (a) truncates the cold build's constraint-row
+      loop at the grant (the #694/#832 anytime-build mechanism — a prefix of
+      rows is a valid weaker outer relaxation) and (b) anchors the node's
+      internal solve/separation deadline at the grant instead of restarting the
+      clock after the build; and
+    * decline to START a round whose grant cannot cover the relaxer's measured
+      cold-build cost (an EMA over this solve's builds) — the round admission
+      check accounting for the round's expected non-LP cost. A declined node
+      keeps its inherited (valid) parent bound and stays open, exactly like the
+      existing past-deadline skip.
+
+    Sound by construction: build truncation only drops rows (weaker, never
+    falsified — the ``_objective_bound_valid`` gate catches an un-bounded cost
+    column), deadline-cut LP solves already bank the Neumaier-Shcherbina floor,
+    and a declined round only leaves a node on its parent's valid bound. Default
+    off pending the §5 corpus-wide differential panel (cert-clean AND
+    net-positive); graduation is coupled to the #928
+    ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""
+
+    hessian_compile_gate: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HESS_COMPILE_GATE", default=False)
+    )
+    """Refuse to START a nonconvex node NLP whose first-time sparse-Hessian XLA
+    compile cannot fit the solve's remaining budget
+    (``DISCOPT_HESS_COMPILE_GATE``, default **off**; §5 bound-changing; issue #966).
+
+    #966's rare severe overruns (200–500 s past a 20 s budget, BOTH
+    ``DISCOPT_LP_WARM_DEADLINE`` arms) were caught in flight with
+    ``faulthandler.dump_traceback_later``: the phase is the **uninterruptible
+    first-time XLA compile of the colored-HVP Lagrangian-Hessian kernel**
+    (``jit_batch_hvp``, ``sparse_hessian.py``), fired from a node NLP —
+    heatexch_gen3 @ 20 s: entered near the deadline, XLA's own alarm reported the
+    compile at 124 s, run wall 162.5 s. The F4 root-heuristic budget gate
+    (``_root_heur_nlp_entry_ok``) exists for exactly this risk but the per-node
+    NLP entries (root multistart on the no-relaxer class, strided node NLP,
+    batch POUNCE) bypass it. An eager (``jax.disable_jit``) fallback was
+    falsified as the fix (§4 entry experiment,
+    ``scratchpad/issue966_eager_hessian_entry.py``): eager evaluation costs
+    8–10 s PER CALL steady-state on this class — worse than useless inside a
+    20 s budget. A compile cannot be interrupted, so entry refusal is the whole
+    mechanism (the F4 philosophy).
+
+    When on, the spatial node loops' per-node NLP entries (the root multistart
+    on the no-relaxer class — the caught severe mode — and the strided node
+    NLP; ``_hess_compile_refuses`` in ``solver.py``) plus the JAX-callback
+    batch-POUNCE path decline to start a solve when the model is NONCONVEX and
+    the evaluator's (conservative) first-compile estimate exceeds the remaining
+    budget. Convex solves are never gated — on the convex path the node NLP is
+    the bound producer (rule 1: never skip the sole bound source) — which is
+    why the check lives at the loop sites, where ``_model_is_convex`` is
+    authoritative (the multistart chain does not thread convexity down). The
+    native-AD POUNCE path never compiles XLA and is never gated. Bound-changing
+    because a refused nonconvex node also skips the
+    alphaBB/interval bounds nested behind the NLP on the serial path: the node
+    stays OPEN at its inherited parent bound (weaker, never false) and the
+    incumbent that NLP might have found is forgone. Residual exposure, recorded
+    honestly: the compile cost is measured-unpredictable (1–186 s, R² ≈ 0 vs
+    size — see ``estimate_hessian_compile_s``), so an entry admitted with
+    remaining budget above the risk floor can still overrun; this flag kills the
+    observed late-entry severe modes, not the early-entry gamble the F4 floor
+    deliberately accepts. Default off pending the §5 differential panel
+    (graduation coupled to the #928/#966 panel)."""
+
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
     # tightened box to the children) was DEPRECATED and removed. It was a

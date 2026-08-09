@@ -1,0 +1,596 @@
+{
+ "bchoco06": {
+  "verdict": "QUARANTINE",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833703148,
+     "node_count": 7,
+     "wall": 22.278725989000122
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833703148,
+     "node_count": 7,
+     "wall": 21.265131154999835
+    }
+   },
+   {
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833666715,
+     "node_count": 7,
+     "wall": 21.284136137000132
+    },
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833703148,
+     "node_count": 7,
+     "wall": 21.114453488000436
+    }
+   },
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833703148,
+     "node_count": 7,
+     "wall": 21.07059298799959
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 0.9999887833703148,
+     "node_count": 7,
+     "wall": 21.070964898000057
+    }
+   }
+  ]
+ },
+ "clay0303hfsg": {
+  "verdict": "CLEAN",
+  "optimum": 26669.10955143,
+  "reps": [
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 95,
+     "wall": 21.814024835000055
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 95,
+     "wall": 21.251528796000457
+    }
+   },
+   {
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 159,
+     "wall": 21.501222324999617
+    },
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 159,
+     "wall": 21.563027747999513
+    }
+   },
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 159,
+     "wall": 21.554702398999325
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": null,
+     "node_count": 159,
+     "wall": 21.567474464000043
+    }
+   }
+  ]
+ },
+ "contvar": {
+  "verdict": "CLEAN",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 21.965850954000416
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 21.53163203800068
+    }
+   },
+   {
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 21.918906437999794
+    },
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 22.94343765099984
+    }
+   },
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 21.86314364500049
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": null,
+     "bound": 183430.50053431175,
+     "node_count": 3,
+     "wall": 21.723385276000045
+    }
+   }
+  ]
+ },
+ "gbd": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": 2.199999982504936,
+     "bound": 2.199999982504936,
+     "node_count": 3,
+     "wall": 0.04534839399912016
+    },
+    "post": {
+     "status": "optimal",
+     "objective": 2.1999999825308127,
+     "bound": 2.1999999825308127,
+     "node_count": 3,
+     "wall": 0.031762124999659136
+    }
+   },
+   {
+    "post": {
+     "status": "optimal",
+     "objective": 2.1999999825308127,
+     "bound": 2.1999999825308127,
+     "node_count": 3,
+     "wall": 0.02984358699995937
+    },
+    "pre": {
+     "status": "optimal",
+     "objective": 2.199999982504936,
+     "bound": 2.199999982504936,
+     "node_count": 3,
+     "wall": 0.032564516000093136
+    }
+   },
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": 2.199999982504936,
+     "bound": 2.199999982504936,
+     "node_count": 3,
+     "wall": 0.03346098399924813
+    },
+    "post": {
+     "status": "optimal",
+     "objective": 2.1999999825308127,
+     "bound": 2.1999999825308127,
+     "node_count": 3,
+     "wall": 0.038923388000512205
+    }
+   }
+  ]
+ },
+ "nvs05": {
+  "verdict": "QUARANTINE",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 25,
+     "wall": 20.152572226000302
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 33,
+     "wall": 20.4193791280004
+    }
+   },
+   {
+    "post": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 25,
+     "wall": 20.096821790999456
+    },
+    "pre": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 33,
+     "wall": 20.479329019000033
+    }
+   },
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 33,
+     "wall": 20.304705008999917
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 8.731956986640078,
+     "bound": 3.5139117087764977,
+     "node_count": 33,
+     "wall": 20.19338899000013
+    }
+   }
+  ]
+ },
+ "st_miqp4": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": -4574.000004423649,
+     "bound": -4574.000004423649,
+     "node_count": 3,
+     "wall": 0.043551748000027146
+    },
+    "post": {
+     "status": "optimal",
+     "objective": -4574.0000024840665,
+     "bound": -4574.0000024840665,
+     "node_count": 3,
+     "wall": 0.04341972200018063
+    }
+   },
+   {
+    "post": {
+     "status": "optimal",
+     "objective": -4574.0000024840665,
+     "bound": -4574.0000024840665,
+     "node_count": 3,
+     "wall": 0.038607106000199565
+    },
+    "pre": {
+     "status": "optimal",
+     "objective": -4574.000004423649,
+     "bound": -4574.000004423649,
+     "node_count": 3,
+     "wall": 0.03836849700019229
+    }
+   },
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": -4574.000004423649,
+     "bound": -4574.000004423649,
+     "node_count": 3,
+     "wall": 0.04992351599958056
+    },
+    "post": {
+     "status": "optimal",
+     "objective": -4574.0000024840665,
+     "bound": -4574.0000024840665,
+     "node_count": 3,
+     "wall": 0.03857986999992136
+    }
+   }
+  ]
+ },
+ "st_miqp5": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": -333.8888902720728,
+     "bound": -333.8888902720728,
+     "node_count": 1,
+     "wall": 0.0454219560006095
+    },
+    "post": {
+     "status": "optimal",
+     "objective": -333.88889024868075,
+     "bound": -333.88889024868075,
+     "node_count": 1,
+     "wall": 0.04639924300045095
+    }
+   },
+   {
+    "post": {
+     "status": "optimal",
+     "objective": -333.88889024868075,
+     "bound": -333.88889024868075,
+     "node_count": 1,
+     "wall": 0.04899067499991361
+    },
+    "pre": {
+     "status": "optimal",
+     "objective": -333.8888902720728,
+     "bound": -333.8888902720728,
+     "node_count": 1,
+     "wall": 0.046760614999584504
+    }
+   },
+   {
+    "pre": {
+     "status": "optimal",
+     "objective": -333.8888902720728,
+     "bound": -333.8888902720728,
+     "node_count": 1,
+     "wall": 0.04518116200051736
+    },
+    "post": {
+     "status": "optimal",
+     "objective": -333.88889024868075,
+     "bound": -333.88889024868075,
+     "node_count": 1,
+     "wall": 0.04521750300045824
+    }
+   }
+  ]
+ },
+ "syn05hfsg": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.063947450158,
+     "node_count": 93,
+     "wall": 20.143515407999985
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.0639474502206,
+     "node_count": 75,
+     "wall": 20.147809948999566
+    }
+   },
+   {
+    "post": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.0639474502206,
+     "node_count": 67,
+     "wall": 20.17672949200005
+    },
+    "pre": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.0639474502201,
+     "node_count": 85,
+     "wall": 20.17180781299976
+    }
+   },
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.0639474502201,
+     "node_count": 79,
+     "wall": 20.117712160999872
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 837.732412391107,
+     "bound": 851.0639474502201,
+     "node_count": 83,
+     "wall": 20.12314328299999
+    }
+   }
+  ]
+ },
+ "tanksize": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2578554884376834,
+     "node_count": 2545,
+     "wall": 20.12710885100023
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2594468851681229,
+     "node_count": 2901,
+     "wall": 20.1252385709995
+    }
+   },
+   {
+    "post": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2592441702798831,
+     "node_count": 2843,
+     "wall": 20.14317377900079
+    },
+    "pre": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2587709659359911,
+     "node_count": 2718,
+     "wall": 20.117999476000477
+    }
+   },
+   {
+    "pre": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2591137205545024,
+     "node_count": 2813,
+     "wall": 20.12767620700015
+    },
+    "post": {
+     "status": "time_limit",
+     "objective": 1.268643752557795,
+     "bound": 1.2594400278873694,
+     "node_count": 2891,
+     "wall": 20.362965065000026
+    }
+   }
+  ]
+ },
+ "tls2": {
+  "verdict": "STABLE-DIFF",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 10.299999865440752,
+     "bound": 2.4487125876978726,
+     "node_count": 353,
+     "wall": 20.73295799100015
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 11.299999856725538,
+     "bound": 2.0999999901667694,
+     "node_count": 333,
+     "wall": 20.593051967000065
+    }
+   },
+   {
+    "post": {
+     "status": "feasible",
+     "objective": 10.299999865440752,
+     "bound": 2.4487125876978726,
+     "node_count": 353,
+     "wall": 20.660693099000127
+    },
+    "pre": {
+     "status": "feasible",
+     "objective": 6.299999911869455,
+     "bound": 2.4487125876978726,
+     "node_count": 339,
+     "wall": 20.585876978999295
+    }
+   },
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 10.299999865440752,
+     "bound": 2.4487125876978726,
+     "node_count": 353,
+     "wall": 20.951647835000585
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 6.299999911869455,
+     "bound": 2.4487125876978726,
+     "node_count": 339,
+     "wall": 21.08624554800008
+    }
+   }
+  ]
+ },
+ "tspn12": {
+  "verdict": "CLEAN",
+  "optimum": null,
+  "reps": [
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 18.39600091000011
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 17.618511687000137
+    }
+   },
+   {
+    "post": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 18.157298946000083
+    },
+    "pre": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 18.108954534000077
+    }
+   },
+   {
+    "pre": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 17.98511323999992
+    },
+    "post": {
+     "status": "feasible",
+     "objective": 262.64739525060224,
+     "bound": null,
+     "node_count": 1,
+     "wall": 18.16853779700068
+    }
+   }
+  ]
+ }
+}

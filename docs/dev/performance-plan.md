@@ -1533,7 +1533,65 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
 > an `optimal` result), which is why the default path does not move.
 
-### 13a. Retraction: #917's reserve-extension graduation is void after #919 (2026-08-01)
+### 14b. #928: the deadline exit is bound-preserving; graduation still fails, and the residual moved seams (2026-08-09)
+
+> §14a left two things open: the banked floor's *quality* (a deadline exit that
+> banks -141697 when -64473 is seconds away) and the net-positive bar. The first
+> is now fixed; the second still fails, and the measurement says the remaining
+> overrun is no longer this seam's.
+>
+> **Root cause of the weak floor, measured** (`scratchpad/issue928_{capture_lps,
+> replay}.py`, replaying the real hda separated-relaxation node LP): on a deadline
+> the warm dual loop returned `None`, discarding its dual-feasible basis; the cold
+> primal fallback then ran on a spent budget and its `IterLimit` dual export is
+> **identically zero through phase 1**, so the recovered NS floor was exactly
+> `g(y=0)` — the trivial box bound, -141697.4335, at 15/40/75% deadline fractions
+> alike, gap to the -64473.4 LP optimum never shrinking with budget.
+>
+> **The fix** (`SimplexOptions::bank_deadline_duals`, set ONLY by
+> `solve_lp_warm_csc_py` when a `time_limit` is passed — the MILP driver's own
+> deadline route keeps `false`, so the default B&B pivot path is untouched;
+> verified BOUND_NEUTRAL flag-OFF on 13 certifying instances vs the merge-base,
+> `scratchpad/issue928_neutrality.py`, marker-gated per §8): the dual loop's
+> deadline exit returns `IterLimit` carrying its current `y = B⁻ᵀc_B` (NS value =
+> the monotone best-so-far dual objective); near-zero-pivot breakdowns retry in
+> place (refactorize + exact recompute, the loop's existing soundness anchor,
+> capped at 5) instead of abandoning the loop; the last exact refresh's duals
+> survive a breakdown → cold-fallback → deadline-cut sequence; and a COLD solve
+> carrying a finite deadline starts the dual simplex from the sign-matched slack
+> basis when dual-feasible (`_dual_start_slack_basis`; `PreparedDual::prepare`
+> re-verifies the precondition), because the primal proves no usable floor
+> mid-run. Measured on the hda LP: floor -141697 -> -118439/-118783 at every
+> binding deadline (~30% of the gap closed, monotone in budget); whole-solve hda
+> @10 s ON: bound -141697 -> -123462 in 3/3 reps, wall 11.2-11.8 s.
+>
+> **Seven §5 panel runs, ALL cert-clean** — 0 cert_regressions / lost_incumbents
+> / lost_bound / unsound in every run; §14a's bound-losing trade is gone (contvar
+> is now often TIGHTER than OFF; tspn12 and tls2 gained incumbents). Net-positive
+> is where it dies (`discopt_benchmarks/results/issue928_*.json`):
+>
+> | panel | budget | ON−OFF overrun |
+> |---|---|---|
+> | full corpus (66), 1 run | 15 s | 73.8 -> 31.6 s (**-57%**) |
+> | binding subset (19), 3 reps | 15 s | -2.5 / 0.0 / -8.2 s |
+> | binding subset (19), 3 reps | 20 s | **+325.4 / +68.5 / +12.7 s** |
+>
+> The sign flips with budget — not "measurably helpful broadly" (the
+> `DISCOPT_CUT_INHERIT` rule) — so **the flag stays OFF**.
+>
+> **Where the ON overrun actually lives** (`scratchpad/issue928_{contvar_probe,
+> blowup_hunt}.py`): not in this seam. Zero per-LP deadline violations across all
+> probes. contvar ON spends **2.8 s in 30 relaxation solves** against a 27-33 s
+> wall; OFF spends 6.3 s in 20 solves for a ~22 s wall. The budget-honoring LPs
+> return sooner, the enclosing separation loop fits ~10 more rounds, and each
+> round's non-LP cost (~1.1 s `build_uniform_relaxation` etc.) is not clamped by
+> the round's grant. On top of that, downstream phases with coarse global-deadline
+> compliance produce rare severe modes in BOTH arms: ON contvar 500.6 s and
+> bchoco08 80.9 s; OFF heatexch_gen3 200.5 s in the same rep set (the same
+> pre-existing class §14 recorded as 78-176 s OFF-arm noise). The next actionable
+> seam is therefore **caller-side round-budget accounting** (clamp a separation
+> round's build cost against the phase grant, and the downstream phases' deadline
+> compliance), not further work in the LP engine.
 
 > §13 graduated `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION` default-ON on a 133-cell panel
 > whose net-positive case was three cells: nvs18@45 s (uncertified 0/3 → **certified
@@ -1612,3 +1670,429 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > through to `solver_stats`. Separately, this panel's scorer gained the
 > `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
 > a finite bound going to `None` was invisible to it too. Both panels now score it.
+
+### 14c. #966: the caller-side seams measured, the severe mode caught in flight, and an eager-Hessian fallback falsified (2026-08-09)
+
+> #928's residual (recorded in §14b, on `claude/issue-928-as1vvj` until that
+> branch merges) named two caller-side deficiencies. Both are now measured on
+> this tree and fixed behind flags (`scratchpad/issue966_phase_probe.py`; all
+> probes print executed-comparison counts per §6).
+>
+> **Seam 1 — a round's grant clamps only its LPs.** A `solve_at_node` round
+> granted 2.0 s runs 5.2–5.8 s in BOTH `DISCOPT_LP_WARM_DEADLINE` arms on
+> contvar @ 20 s — ~3.2 s of it the cold `build_uniform_relaxation`, spent
+> after the admission check, unclamped (6/6 reps). The internal node deadline
+> is anchored AFTER the build, so the build also restarts the round's clock.
+> Fix (`DISCOPT_NODE_ROUND_BUDGET`, default OFF, §5): the spatial node loops
+> pass the global deadline into `solve_at_node` as an absolute
+> `round_deadline` (clamps the build via the #694 anytime mechanism AND caps
+> the internal anchor), and the round admission check declines a round whose
+> remaining grant cannot cover the relaxer's measured cold-build EMA
+> (`expected_build_cost()`). The serial loop previously had NO past-deadline
+> skip at all — it gets one under the flag.
+>
+> **Seam 2 — the 200–500 s severe modes are one uninterruptible XLA compile.**
+> Caught in flight with `faulthandler.dump_traceback_later` (§10):
+> heatexch_gen3 @ 20 s ran 162.5 s with the stack inside
+> `_solve_root_node_multistart → solve_nlp(pounce) → evaluate_hessian_values →
+> sparse_hess_values → jit_batch_hvp` and XLA's own slow-compile alarm
+> reporting the compile at **124 s**. The F4 gate exists for exactly this risk
+> but the per-node NLP entries (root multistart on the no-relaxer class,
+> strided node NLP, JAX-callback batch POUNCE) bypass it.
+>
+> **Falsified (§4, kill criterion hit): the eager fallback.** Hypothesis: an
+> uncompiled `jax.disable_jit()` Hessian evaluation bounds the phase at usable
+> per-call cost. Measured (`scratchpad/issue966_eager_hessian_entry.py`):
+> heatexch_gen3 eager walls 62.7 / 11.7 / 10.4 s, contvar 29.7 / 7.7 / 8.3 s —
+> the steady state alone dwarfs a per-iteration budget, so the eager route is
+> dead. A compile can neither be truncated nor cheaply avoided; **entry
+> refusal is the whole treatment** (the F4 rationale). Fix
+> (`DISCOPT_HESS_COMPILE_GATE`, default OFF, §5): `_hess_compile_refuses`
+> declines a NONCONVEX per-node NLP entry when the conservative first-compile
+> estimate exceeds the remaining budget, checked at the loop sites where
+> `_model_is_convex` is authoritative (the multistart chain does not thread
+> convexity down; on the convex path the NLP is the bound producer and is
+> never refused — rule 1).
+>
+> **A/B with both flags ON** (3 reps × {contvar, heatexch_gen3, bchoco08} ×
+> both #928 arms @ 20 s): every wall in **[20.1, 22.1] s** — the baseline's
+> worst same-container mode was 162.5 s and §14b records 500.6 s. No bound
+> lost (heatexch_gen3 `None` in both regimes; bchoco08 identical; contvar OFF
+> 183430.5 vs 183632.0 baseline — weaker by declined rounds, as the mechanism
+> predicts, and never above). The gate's refusal was confirmed non-vacuous
+> (2 firings logged on a heatexch_gen3 run, §6).
+>
+> **Honest residuals.** (1) The one-time ROOT probe build (grant 2.0 s, wall
+> ~5.5 s on contvar) is deliberately NOT clamped: it feeds the
+> `_probe_useful` decision and the incremental structure every later round
+> reuses; truncating it can drop the relaxer entirely. The overrun is one
+> bounded in-flight op (#654 policy). (2) The compile estimate is
+> measured-unpredictable (1–186 s, R² ≈ 0, see `estimate_hessian_compile_s`),
+> so an entry admitted with remaining budget above the risk floor can still
+> overrun — the flag kills the observed late-entry severe modes, not the
+> early-entry gamble the F4 floor deliberately accepts. (3) On THIS tree the
+> loop fits few rounds (contvar: 1 probe round per run); the "more rounds fit"
+> amplification §14b measured needs the #928 branch's banked dual floor, so
+> the corpus-wide differential panel for these two flags is coupled to the
+> #928 graduation panel re-run (issue #966 item 3).
+
+### 14b. #928 + #966 coupled graduation panel: FAILED, and the loss is an *interaction* (2026-08-09)
+
+> §14a left `DISCOPT_LP_WARM_DEADLINE` cert-clean but not net-positive, with a named
+> next step: "a load-gated, multi-rep panel over the instances where the deadline
+> actually binds." That panel has now run, and it grew a second question first.
+>
+> **Why the three flags were scored as one change.** #928's net-positive failure had a
+> *measured* cause, not a mysterious one: the LP layer honours its grant, but the
+> enclosing separated-relaxation round did not, so budget-honouring LPs merely let the
+> loop fit more unclamped rounds and the ON arm's wall went **up** (ON−OFF +325.4 /
+> +68.5 / +12.7 s at a 20 s budget). #966 closed that seam behind
+> `DISCOPT_NODE_ROUND_BUDGET` (a `round_deadline` threaded into `solve_at_node`, min-
+> combined with the build deadline) and `DISCOPT_HESS_COMPILE_GATE` (refuse to *start*
+> a per-node NLP whose first-time sparse-Hessian XLA compile — measured 124 s on
+> heatexch_gen3 against a 20 s budget — cannot fit; a compile is uninterruptible, so
+> entry refusal is the whole treatment). Graduating #928 without #966 re-creates the
+> known regression, so the panel has three arms rather than two:
+> `base` (all OFF) / `seam` (#966 only) / `cand` (all three), interleaved per instance,
+> every flag named explicitly in every arm so no cell can inherit a default.
+>
+> **Panel**: 19 binding instances, 20 s budget, 3 reps, `wtpanel` built from
+> `origin/main` and gated by four §8 markers per cell (`discopt.__file__`,
+> `_extend_budget_for_incumbent`, `_dual_start_slack_basis`, `round_deadline` in
+> `solve_at_node.__code__.co_varnames`). `COMPARISONS_EXECUTED=19` each rep;
+> `loadavg` recorded into every artifact.
+> Raw: `discopt_benchmarks/results/issue966_coupled_binding20_rep{1,2,3}.json`.
+>
+> **The wall regression is gone.** The entry question passes cleanly and reproducibly:
+>
+> | pair | rep1 | rep2 | rep3 | mean ± sd |
+> |---|---|---|---|---|
+> | cand − base overrun | −2.6 s | −2.7 s | −2.7 s | **−2.7 ± 0.0 s** |
+> | seam − base overrun | −6.0 s | −3.6 s | −5.2 s | **−4.9 ± 1.0 s** |
+>
+> The sign flip is attributable to #966; #928 gives back ~2.3 s of #966's gain.
+>
+> **`CERT_CLEAN=False` in 3/3 reps, on exactly one item**: contvar's bound goes
+> `183632.766 → None` in the `cand` arm — not looser, *absent*. Nothing is unsound
+> (`unsound=[]`, `incumbent_verification_failed=[]`, no cert regressions, no lost
+> incumbents in any rep), so this is a claim-quality failure, not a soundness one.
+> **Neither flag set graduates.**
+>
+> **The 3-arm panel could not attribute it, so a 4th arm was run.** `cand` loses the
+> bound and `seam` keeps it, which attributes the loss to #928 *given the seam* — not
+> to #928 by itself. The panel has no `warm`-only arm, so one was added
+> (`discopt_benchmarks/scripts/issue928_contvar_attribution_probe.py`, 2 reps,
+> `CELLS_EXECUTED=16`, bit-identical across reps):
+>
+> | contvar @20 s | nodes | status | bound | incumbent |
+> |---|---|---|---|---|
+> | base | 7 | time_limit | 183632.766 | none |
+> | warm (#928 alone) | 3 | **feasible** | 98924.530 (looser, sound) | **813745.125** |
+> | seam (#966 alone) | 7 | time_limit | 183632.766 | none |
+> | cand (all three) | **287** | time_limit | **none** | none |
+>
+> **#928 alone does not destroy the bound — it trades bound quality for an incumbent**
+> (the 98924.53 figure is exactly the one §14a reported). The destruction is an
+> **interaction**: with the round budget also clamping, the node count explodes 7 → 287
+> and no node ever certifies anything, so the tree spends the whole budget on cheap
+> uncertified nodes. The suspect is the pair "LP yields on its deadline" ×  "round
+> yields on *its* deadline" compounding into a node result that carries no adoptable
+> bound at all; that is the thing to fix before either flag is re-panelled.
+>
+> **A second cost, from #966 alone, not surfaced in PR #968**: casctanks
+> `2.9098 → −56.5001` in the `seam` arm, identical in all three reps and in both probe
+> reps (and −57.2/−60.1/−60.7 with all three on). Sound (looser) and therefore
+> invisible to `cert_clean`, but a dual bound crossing from +2.9 to −56.5 is a
+> collapse, not a drift — the round budget is declining the rounds that were producing
+> casctanks' bound. #928 alone costs it only 2.9098 → 2.4598.
+>
+> **Verdict.** `seam` (#966 alone) *is* cert-clean in 3/3 reps and is the only arm that
+> buys wall time (−4.9 ± 1.0 s), but it fails the net-positive bar on the other half of
+> the metric set: its bound ledger over three reps is 4 looser (casctanks every rep,
+> tls2 ×2, nvs05, tspn10) against 3 tiny non-reproducible tighter entries, and node
+> counts rise (1329 → 1811). This is the `DISCOPT_CUT_INHERIT` shape again — sound, and
+> genuinely better on the metric it was built for, while paying for it in the metric
+> the solver's product actually is. **All three flags stay default-OFF.**
+
+### 14b-qual. Retraction of §14b's soundness evidence — the oracle was 1/19 (2026-08-09)
+
+> CLAUDE.md §11: a measurement that contradicts a claim I already published gets
+> retracted in writing before anything else proceeds. This qualifies §14b above.
+>
+> §14b asserts "**Nothing is unsound** (`unsound=[]`, `incumbent_verification_failed=[]`,
+> …)". The `unsound=[]` half of that was **not** a measurement over 19 instances. The
+> panel's `reference_optimum()` read `python/tests/_optima.py` behind a bare
+> `except Exception: return None` — §7's exact failure mode — and that module records
+> 27 curated instances. A counted control over the panel's own 19 names
+> (`old_oracle_covered`) returns **one**: `clay0303hfsg`. Every other instance's oracle
+> arm was skipped, and the panel printed `unsound: []` regardless. The other soundness
+> checks in the same function *did* fire on all 19 (bound-crosses-incumbent,
+> incumbent verification), so §14b's soundness conclusion was never empty — but its
+> bound-vs-oracle component rested on one instance's three arms per rep (9 comparisons
+> over the three reps, counted) and was reported as though it covered all 19.
+>
+> **The claim survives re-measurement, and is now stated at its real strength.** The
+> three saved artifacts were re-scored against `minlplib.solu` — the library-wide
+> oracle — without re-running anything, since the cells already carry every arm's
+> bound (`--rescore`, and the standalone
+> `discopt_benchmarks/scripts/issue966_rescore_against_solu.py`):
+>
+> | | merged §14b | re-scored |
+> |---|---|---|
+> | instances with an oracle | 1 / 19 | **16 / 19** |
+> | bound-vs-oracle comparisons | 3 per rep, 9 total | **44 per rep, 132 over 3 reps** |
+> | violations | 0 | **0** |
+>
+> Tightest margin over all 132: `syn05hfsg`, −1.99e-09 — inside the 1e-4 relative
+> tolerance and attributable to LP arithmetic, not a crossed bound. `bchoco06`,
+> `bchoco07` and `bchoco08` are named in neither oracle and remain **uncovered**; they
+> are reported, never counted as clean. §14b's verdict (all three flags default-OFF)
+> is unchanged — that verdict turned on `cert_clean` and the bound ledger, not on this
+> line.
+>
+> **Instrument fixed, not just the sentence.** `reference_optimum()` now consults
+> `minlplib.solu` first and falls back to `_optima`; only `KeyError` (the one genuine
+> "no oracle" outcome) is swallowed, so a missing `.solu` or a bad import crashes.
+> `soundness()` returns `oracle_comparisons_executed` and `instances_without_oracle`,
+> both printed, and the panel **exits non-zero** when it made zero oracle comparisons
+> (§6) — the state that produced this retraction can no longer report success.
+
+## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
+
+> **The defect (confirmed).** The McCormick row generators in
+> `bnb/mccormick_patch.rs` did no outward rounding, so an envelope row could cut a
+> point EXACTLY on the graph of the term it relaxes: the rhs is a cancelling
+> combination of box-endpoint quantities (`slope*x0 - f(x0)`) while the auxiliary
+> bound is an independent rounding of the same quantity. Entry experiment, sweeping
+> all four generators over ten orders of magnitude and evaluating `(x, f(x))`:
+>
+> | family | worst residual | vs 1 ulp of the row magnitude |
+> |---|---|---|
+> | cubic monomial | 6.4e+1 | ~0.8 |
+> | affine square | 1.3e-1 | ~1.0 |
+> | affine-form product | 2.0e-3 | ~1.0 |
+> | square monomial | 1.2e-4 | ~0.9 |
+> | bilinear | 9.5e-7 | ~0.4 |
+>
+> Kill criterion was "worst < 1e-9" (ordinary LP tolerance); it missed by nine orders
+> of magnitude. A cubic lift needs a box of only `~5e3` to cut its own graph by
+> `6.1e-5`, and the resulting node LP has no feasible point at all
+> (`corner_pinned_cubic_node_lp_is_solvable` pins this).
+>
+> **FALSIFIED: this is not the mechanism behind #956's headline measurement.** The
+> issue reports `nvs20: n_undecided=2056 over 4192 kernel nodes` (49%) and proposes
+> `n_undecided` as the net-positive metric. It does not move:
+>
+> | arm | undecided / nodes | fraction | bound |
+> |---|---|---|---|
+> | guard ON | 407 / 885 | 46.0 % | 225.342 |
+> | guard OFF (legacy) | 413 / 904 | 45.7 % | 224.858 |
+>
+> Sweeping the guard size settles it: at 1e6 ulp (2.2e-10 relative) the rate is
+> *unchanged* (431/860); only at 1e10 ulp — a **2.2e-6 relative** relaxation, a
+> million times larger than any envelope rounding can explain — does it collapse to
+> 1/1420, and then the bound degrades 225.34 → 209.55. Two further causes were tested
+> and excluded: propagation (43 % undecided with `run_propagation=False`) and OBBT
+> (`run_obbt` defaults false on this path, so it never ran). A conflict-localizing
+> probe — re-solving each undecided node LP with only the rows relaxed, then only the
+> column bounds relaxed — leaves ~2/3 of them `Numerical` even at 1e-6 relative.
+>
+> **Standing conclusion.** `nvs20`'s undecided nodes are a **simplex robustness**
+> problem on a 712x912 node LP, not an envelope-rounding problem. The lever for that
+> counter is in `lp/simplex` (phase-1 Farkas certification and conditioning on the
+> assembled node LP), not in the relaxation. #956's fix stands on its own invariant —
+> a relaxation must contain the graph of what it relaxes — and must not be credited
+> with, or judged by, the `n_undecided` counter.
+>
+> **Panel (CLAUDE.md §5).** Corpus-wide, 119 in-repo instances, ON vs OFF: only **21
+> ever reach the native kernel**, the sole code path the flag exists on. On those 21
+> at a 30 s budget the panel is **cert-clean** — 0 incorrect, 0 bounds above a
+> reference optimum, 0 certification regressions, 0 objective drift, flag firing on
+> 17/21 rows — with 15 of 21 bound deltas at `1e-13`–`1e-15` relative (the guard's
+> designed cost) and the remaining 6 mixed in direction under a wall-clock budget.
+> **Not net-positive**: `n_undecided` 1636 → 1559 (−4.7 %), node count +0.1 %, bounds
+> better on 2 / worse on 4. The 5 s corpus arm flagged 2 certification regressions and
+> 4 objective drifts; an **ON-vs-ON control** (identical configuration, run twice)
+> reproduced the same two regressions and a *larger* nvs20 spread (10.5 vs 7.4
+> absolute), so those flags are wall-clock noise, not flag effects. Three of the six
+> flagged instances never call the kernel in either arm and so cannot be affected at
+> all.
+>
+> **RETRACTION (2026-08-09): the flag ships default-OFF, and the claim that it is
+> merely "neutral" was wrong.** An earlier revision of this section argued for
+> default-ON on the grounds that the guard repairs an invariant and was only
+> bound-neutral. A better measurement — the interleaved-replicate method this repo
+> already validated for exactly this situation (`solver.py`, #902: `max_nodes` is
+> unusable because `node_limit` routes the kernel back to the Python path, so the
+> arms would compare OFF against OFF) — shows the guard is **harmful**, not neutral:
+>
+> | instance | ON bound (3 reps) | OFF bound (3 reps) | verdict |
+> |---|---|---|---|
+> | nvs17 | -1333.79 ± 4.8 | -1308.60 ± 1.2 | REGRESSION 3/3 |
+> | nvs19 | -5841.67 ± 130 | -5679.50 ± 30 | REGRESSION 3/3 |
+> | nvs20 | 225.342 ± 0 | 225.428 ± 0 | REGRESSION 3/3 |
+> | nvs23 | -25667.3 ± 25 | -25570.6 ± 9.3 | REGRESSION 3/3 |
+> | nvs24 | -171599 ± 600 | -170776 ± 100 | REGRESSION 3/3 |
+> | tanksize | 1.25788 ± 9.4e-5 | 1.25823 ± 2.1e-4 | REGRESSION 3/3 |
+>
+> 6/6 decisive instances regress in 3/3 replicates, outside the replicate spread;
+> `nvs20` has **zero** spread in both arms, so it is deterministic, not noise. And on
+> `ex1252` under the #707 reform flags — *the configuration #956 was filed about* —
+> the guard makes the counter the issue proposed measurably WORSE:
+>
+> | arm | undecided | fraction | nodes | bound |
+> |---|---|---|---|---|
+> | ON | 5222 / 6388 | **81.7 %** | 6388 | 12658 |
+> | OFF | 8554 / 15456 | 55.3 % | 15456 | 20520 |
+>
+> **Mechanism, and it is not what the issue assumed.** It is not build cost — the
+> guarded relaxation build is if anything faster (median 6.09/6.15 ms ON vs
+> 6.18/7.00 ms OFF on nvs20, interleaved). It is not root-relaxation weakening on
+> most instances either: root bounds move only ~6e-14 relative on nvs17/19/23/24
+> (nvs20 is the exception at 1.8e-6, because the guard is sized relative to the ROW
+> and nvs20's rows are ~1e10 against an objective of ~87). What happens is that a
+> uniformly *looser* relaxation prunes slightly less at every node, the trees
+> diverge, and under a fixed wall-clock budget the bound lands lower — which is why
+> the direction is systematic rather than 50/50. On ex1252 the loosening also makes
+> node LPs *more* degenerate, so a larger share come back undecided. That inverts
+> the issue's premise: those LPs are not unsolvable because rows cut their own
+> graph, they are unsolvable because they are ill-conditioned, and loosening them
+> makes conditioning worse.
+>
+> So this is the `DISCOPT_CUT_INHERIT` case exactly as §5 describes it — sound but
+> harmful — and the flag stays **OFF**, with the measurement recorded.
+> `DISCOPT_ENVELOPE_OUTWARD_ROUND=1` opts in. With it off, `outward_slack` is
+> identically `0.0` and `widen` is the identity, so all three engines are bit-for-bit
+> the pre-#956 arithmetic; the invariant tests opt in explicitly rather than
+> asserting a configuration that does not ship.
+>
+> **What would graduate it.** Not a bigger guard — a *cheaper* invariant. The guard
+> is currently sized by the row's whole term magnitude; sizing it by the actual
+> cancellation in each rhs (which is what genuinely needs repair) would be far
+> smaller on well-scaled rows and might cost no bound at all. Alternatively, repair
+> only the rows that demonstrably cut their own graph rather than all of them.
+>
+> **The Python twin is now closed too (2026-08-09).** `uniform_relax._emit_1d` /
+> `_emit_mccormick` and `incremental_mccormick`'s generators carry the identical
+> guard, behind the same flag. The constraint that shaped it: `_validate` compares
+> the two engines through `_rowset`, which rounds each rhs absolutely to 6 decimals,
+> so a guard applied to one and not the other — or computed from different
+> intermediates — silently drops the incremental fast path to `ok=False`. The guard
+> is therefore a pure function of quantities all three engines hold, computed once in
+> `_jax/outward_rounding.py` and mirrored term-for-term in Rust. Verified: monomial
+> and bilinear rows are BIT-IDENTICAL across the two Python engines, and the
+> pre-existing affine-square divergence is unchanged (1265 mismatches, worst |delta|
+> 1.133e-01, identical with the guard on and off). The invariant now holds on the
+> Python generators: 1 950 000 comparisons, worst residual -3.3e-15, previously
+> +1.3e+5.
+>
+> **Two defects in the Rust-only first pass, both found by doing the Python side.**
+> `widen` sized both ends of an aux interval by the larger end's magnitude (the
+> enclosure of `x**5` over [-18.3,-0.64] is [-2.06e6,-0.106], so the small end moved
+> 7.3e-9 — a 7e-8 relative widening); and `bounded_mag` zeroed anything past the
+> `1e20` sentinel, which also zeroed legitimately large DERIVED values — `x**3` over
+> a box reaching 9e6 encloses 7.3e20, whose ulp is 1.3e5, left entirely unguarded.
+> The sentinel means "this BOX is unbounded" and is now tested on box endpoints only.
+>
+> **A pre-existing gap this work exposed, worth its own issue.** The spatial path
+> cannot certify infeasibility of `x*y >= c, x + y <= 1` over `[0,1]^2` for ANY `c`
+> tested — 0.3, 0.45, 0.49, 0.55, 0.6, 0.75, 1.0, 1.5, 2.0 all run ~12 000 nodes to
+> the time limit in BOTH arms. `test_debug_adversarial`'s infeasible fixture passed
+> only because `c = 0.5` puts the root relaxation's feasible set at exactly one
+> vertex — `(0.5,0.5,0.5)` satisfies every McCormick facet with equality — so the
+> verdict came from whichever way that razor-thin LP rounded, and the solver closed
+> it in 1 node without ever branching, contradicting the fixture's own docstring.
+> The fixture now uses a model whose verdict is deterministic in both arms.
+
+### 15a. Retraction and graduation: the "harmful" verdict on #956 was noise, and the guard ships ON (2026-08-09)
+
+Everything in §15 above marked as evidence that
+`DISCOPT_ENVELOPE_OUTWARD_ROUND` is *harmful* is **retracted**. Both measurements
+were re-run on the current tree after the #956 T3′ fix (a proven-empty region can
+now be fathomed without an incumbent) and neither survives.
+
+**The 6/6-regressions table was noise, and the missing piece was a control.** That
+table has no arm in which the two builds are known to be identical, so it had no
+way to distinguish a real effect from run-to-run variation. The T6 panel supplied
+one: comparing this branch against `origin/main` on six instances where the only
+differing code path *provably never executes* (`TreeCertInfeasPrunes = 0` on all
+six), the same harness still reported "WIN 3/3" for one instance and "REGRESSION
+4/7" for two others, with bound spreads of 0.1–0.7 % at `time_limit=20`. That is
+the noise floor. Re-run against it, the guard's own A/B is a wash: 3 identical, 1
+win (tanksize, every replicate), 2 unresolved, 2 "regressions" at 2/3 — every one
+of them inside the floor. `nvs20`'s "deterministic, not noise" reading also fails:
+it is now *identical* in both arms.
+
+**The ex1252 undecided-fraction table can no longer be measured at all.** That
+configuration does not route through the native spatial kernel any more — the
+panel's wrapper counts 0 kernel calls for it, while counting 21 elsewhere in the
+same run, so the probe is live and the answer is real. Across the 21 corpus
+instances that do reach the kernel, `n_undecided` is **0 in both arms** over
+12 636 (ON) / 12 255 (OFF) kernel nodes. There is no undecided fraction left for
+the guard to worsen. The mechanism story §15 built on that table — "loosening
+makes conditioning worse, so more LPs come back undecided" — has no surviving
+measurement behind it and should not be cited.
+
+**Cert-clean panel, ON vs OFF, one build, 119 instances:** 149 executed
+assertions, **0 false bounds, 0 false objectives, 0 false infeasibles, 0 new
+errors**. The single flagged certification difference (`nvs12`) does not reproduce
+— 6/6 interleaved replicates return `optimal`, 231 nodes, bound −481.2 in both
+arms.
+
+**Graduated default-ON.** §5's net-positive bar exists to keep sound-but-useless
+*performance* machinery off the default path. The outward-rounding guard is not
+that — it is the repair for the reported defect (unguarded generators cut
+`(x, f(x))` out of their own envelope, a route to a false bound; six Rust
+regression tests fail with `=0`), and its cost is not measurable above the noise
+floor. §1 governs: correctness before performance. `=0` remains the opt-out and
+the legacy arithmetic behind it is untouched. §15's "what would graduate it"
+paragraph — a cheaper, cancellation-sized guard — is still the right *next*
+refinement, but it is no longer a precondition for shipping.
+
+**Also closed here:** §15's last paragraph called the `x*y >= c, x + y <= 1`
+non-certification "a pre-existing gap worth its own issue". It was fixed instead,
+in this branch: the tree pruned only on `lower_bound >= incumbent`, and with no
+incumbent that test is never true, so every certified-empty node was branched
+rather than fathomed. It now returns `infeasible` in **1 node** for every `c` from
+0.3 to 2.0, against ~12 000 nodes to the time limit before.
+
+### 15b. #956 T2′: the bound excursions are authored by a drifted `x_B` — and repairing that does not reduce them (2026-08-09)
+
+Recorded here because it is a **negative result about the LP engine**, and §15's
+cost model is where those belong.
+
+The primal loop maintains `x_B` incrementally and re-derives it exactly only on
+the ≤48-update refactorizations. The Harris ratio test reads that estimate to pick
+the leaving variable and the step, so a drifted estimate authorises a step that is
+infeasible in the values the basis actually holds — and no later refresh repairs
+it, because a refresh corrects `x_B`, not the basis. Sweeping an exact-refresh
+cadence `K` on `nvs20` moves the phase-1 handoff violation rate monotonically over
+a 30× range: **50.3 % (K=0) → 28.1 % (16) → 21.8 % (8) → 14.9 % (4) → 10.1 % (2) →
+1.7 % (K=1)**. EXPAND is excluded independently: suppressing it on every solve
+moves the rate 49.7 % → 48.2 %, and 97 % of the violations exceed its per-pivot
+ceiling by over 100× with **none** at or below it.
+
+**The falsification.** Driving that rate to 1.7 % barely touches the failures it
+was supposed to explain: `LpAuditBoundsFail` 788 → 764, `LpVerdictNumerical`
+864 → 856. So a box-infeasible phase-1 handoff is real but is **not** what makes
+node LPs come back `Numerical`. Any future work that proposes to cut the
+`Numerical` population by fixing primal feasibility should treat this as settled
+and look elsewhere (discopt#364's class).
+
+**Not shipped, and why.** The cadence is sound (it only replaces an estimate with
+the value the basis already holds — pinned by
+`xb_refresh_cadence_cannot_move_the_optimum`) but not net-positive under a
+wall-clock budget: the extra ftran costs throughput, and fewer nodes in the same
+20 s means a lower bound. K=1 is 2 wins / 4 regressions (nvs19, nvs23, nvs24 at
+4σ–9σ outside the replicate spread); K=16 is 2 wins / 2 regressions / 2 unresolved.
+`DISCOPT_PRIMAL_XB_REFRESH` therefore defaults to `0` and
+`DISCOPT_SIMPLEX_NO_EXPAND` to off — kept as the control arms, since eliminating
+drift or suppressing EXPAND is the only way to judge a future ratio-test
+hypothesis, and each is pinned by a test rather than left as dead configuration.
+
+One measurement worth keeping for CC-style costing: on `nvs20` at K=1 the engine
+performs 92 116 extra ftrans over a 20 s solve and still completes 973 nodes
+against 902 at K=0 — the exact-`x_B` refresh is far cheaper per pivot than the
+node-level work around it, so the throughput cost that decides against it is small
+and instance-dependent, not structural.
+

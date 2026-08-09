@@ -1498,7 +1498,12 @@ fn convert_expr(
             let base = obj.getattr("base")?;
             let base_id = convert_expr(_py, &base, arena, var_ids, param_ids)?;
             let py_index = obj.getattr("index")?;
-            let index_spec = convert_index_spec(&py_index)?;
+            // The base's shape is needed to normalize Python's negative indices
+            // (`x[-1]`), which `IndexSpec` cannot represent -- its scalar arms are
+            // `usize`. Without it every negative index overflowed the extraction and
+            // aborted the whole conversion (#944).
+            let base_shape = python_shape(&base);
+            let index_spec = convert_index_spec(&py_index, base_shape.as_deref())?;
             Ok(arena.intern(ExprNode::Index {
                 base: base_id,
                 index: index_spec,
@@ -1699,9 +1704,64 @@ fn parse_objective_sense(s: &str) -> PyResult<ObjectiveSense> {
     }
 }
 
+/// Read a Python expression's `.shape` as a list of axis lengths.
+///
+/// Returns `None` when the attribute is missing or is not a tuple of
+/// non-negative ints -- callers then simply lose negative-index normalization
+/// and report the original out-of-range error, which is the pre-existing
+/// behaviour.
+fn python_shape(obj: &Bound<'_, PyAny>) -> Option<Vec<usize>> {
+    let shape = obj.getattr("shape").ok()?;
+    let dims: Vec<isize> = shape.extract().ok()?;
+    if dims.iter().any(|&d| d < 0) {
+        return None;
+    }
+    Some(dims.into_iter().map(|d| d as usize).collect())
+}
+
+/// Normalize one scalar subscript against the length of the axis it indexes.
+///
+/// Python/numpy semantics: a negative `i` means `i + len`, and the result must
+/// land in `[0, len)`. Out-of-range is an `IndexError` -- refused, never clamped
+/// or wrapped, because a wrong-but-in-range slot names a different variable and
+/// is silently accepted by everything downstream (the #941 failure mode).
+///
+/// `axis_len` is `None` when the base's shape could not be read; a non-negative
+/// index passes through unchanged and a negative one is refused with a message
+/// naming the real cause instead of an integer-conversion overflow.
+fn normalize_scalar_index(item: &Bound<'_, PyAny>, axis_len: Option<usize>) -> PyResult<usize> {
+    // bool is a subclass of int in Python, but numpy reads `x[True]` as a mask,
+    // not as `x[1]`; refuse rather than silently disagree with the evaluator.
+    if item.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "boolean index is not supported in an expression subscript",
+        ));
+    }
+    let raw: isize = item.extract()?;
+    if raw >= 0 {
+        return Ok(raw as usize);
+    }
+    let len = axis_len.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+            "negative index {raw} cannot be resolved: the indexed expression has no shape"
+        ))
+    })?;
+    let shifted = raw + len as isize;
+    if shifted < 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+            "index {raw} is out of bounds for axis of length {len}"
+        )));
+    }
+    Ok(shifted as usize)
+}
+
 /// Convert a Python index (int, slice, or tuple of ints/slices) to an
 /// IndexSpec.
-fn convert_index_spec(obj: &Bound<'_, PyAny>) -> PyResult<IndexSpec> {
+///
+/// `base_shape` is the shape of the expression being subscripted, used to turn
+/// Python's negative indices into the non-negative ones `IndexSpec` stores.
+fn convert_index_spec(obj: &Bound<'_, PyAny>, base_shape: Option<&[usize]>) -> PyResult<IndexSpec> {
+    let axis_len = |axis: usize| base_shape.and_then(|s| s.get(axis).copied());
     if obj.is_instance_of::<PyTuple>() {
         let tuple: &Bound<'_, PyTuple> = obj.downcast()?;
         // If every element is a plain int, keep the simple Tuple form.
@@ -1716,25 +1776,27 @@ fn convert_index_spec(obj: &Bound<'_, PyAny>) -> PyResult<IndexSpec> {
         if all_scalar {
             let indices: Vec<usize> = tuple
                 .iter()
-                .map(|item| item.extract::<usize>())
+                .enumerate()
+                .map(|(axis, item)| normalize_scalar_index(&item, axis_len(axis)))
                 .collect::<PyResult<Vec<_>>>()?;
             return Ok(IndexSpec::Tuple(indices));
         }
         let mut elems: Vec<IndexElem> = Vec::with_capacity(tuple.len());
-        for item in tuple.iter() {
+        for (axis, item) in tuple.iter().enumerate() {
             if item.is_instance_of::<PySlice>() {
                 elems.push(slice_to_index_elem(&item)?);
             } else {
-                let i: usize = item.extract()?;
-                elems.push(IndexElem::Scalar(i));
+                elems.push(IndexElem::Scalar(normalize_scalar_index(
+                    &item,
+                    axis_len(axis),
+                )?));
             }
         }
         Ok(IndexSpec::Multi(elems))
     } else if obj.is_instance_of::<PySlice>() {
         Ok(IndexSpec::Multi(vec![slice_to_index_elem(obj)?]))
     } else {
-        let idx: usize = obj.extract()?;
-        Ok(IndexSpec::Scalar(idx))
+        Ok(IndexSpec::Scalar(normalize_scalar_index(obj, axis_len(0))?))
     }
 }
 

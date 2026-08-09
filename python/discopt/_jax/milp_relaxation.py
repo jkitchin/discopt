@@ -138,6 +138,45 @@ _RELAX_EQUILIBRATE_TRIGGER = 1e6
 # (HiGHS-tuned) 1e6 trigger above because the simplex fails at lower spreads.
 _RELAX_FALSE_INFEAS_TRIGGER = 1e3
 
+# Smallest positive *normal* double (2.2250738585072014e-308). Coefficients below
+# it are subnormal: they carry fewer significand bits than a normal double, so
+# they are underflow artifacts rather than modelled quantities. The one that
+# motivated this floor is ``±5e-324``, produced by outward-rounding an exact zero
+# in the interval-arithmetic layer (#957) — see ``_coefficient_spread_exceeds``.
+_SUBNORMAL_FLOOR = float(np.finfo(np.float64).tiny)
+
+
+def _coefficient_spread_exceeds(data: np.ndarray, trigger: float) -> bool:
+    """Is the nonzero-coefficient dynamic range of ``data`` above ``trigger``?
+
+    Shared by the two conditioning guards below, both of which ask "is this LP
+    badly enough scaled to be worth an exact equilibration". Two properties the
+    naive ``nz.max() / nz.min() > trigger`` does not have (#957):
+
+    * **It cannot overflow.** The cross-multiplied form is the identical boolean
+      once the zeros are filtered (``min > 0``), but on the very spreads this
+      guard exists for — ~1e26 over ~1e-300 — the division itself overflows to
+      ``inf``, so the test answers ``True`` unconditionally while emitting a
+      ``RuntimeWarning`` at the moment it makes its decision (#732 Stage 1-B
+      already applied this form at the false-infeasible seam).
+    * **A single subnormal cannot dominate it.** ``inf`` aside, one ``5e-324``
+      entry drags ``nz.min()`` 300 orders of magnitude below every modelled
+      coefficient and the answer becomes ``True`` regardless of how benign the
+      matrix actually is. Filtering below :data:`_SUBNORMAL_FLOOR` measures the
+      conditioning of the *model*, not of an underflow artifact.
+
+    Both directions are sound whichever way this answers — equilibration is an
+    exact, feasible-set-preserving rescale — so this only decides whether the
+    work is worth doing, never what the LP means.
+    """
+    if data is None or data.size == 0:
+        return False
+    nz = np.abs(data[data != 0.0])
+    nz = nz[nz >= _SUBNORMAL_FLOOR]
+    if nz.size == 0 or not np.isfinite(nz).all():
+        return False
+    return bool(nz.max() > trigger * nz.min())
+
 
 def equilibrate_relaxation_lp(
     c: np.ndarray,
@@ -366,6 +405,46 @@ def _lp_warm_deadline_enabled() -> bool:
     3. *And the panel could not see (2).* It compared bound quality only where BOTH
        arms were finite, so ``1.0 -> None`` scored as clean and it reported
        CERT_CLEAN=True twice. ``lost_bound``/``gained_bound`` exist because of that.
+
+    **Update 2026-08-09: the deadline exit is now bound-PRESERVING, and the flag
+    STILL does not graduate — but for a new, measured reason.** The #928 fix
+    (``SimplexOptions::bank_deadline_duals``; set only by ``solve_lp_warm_csc_py``
+    when a ``time_limit`` is passed, i.e. exactly this flag's path) makes a
+    deadline exit return the dual loop's current dual-feasible ``y = B⁻ᵀc_B`` — the
+    monotone best-so-far dual objective — instead of a cold-fallback initial-basis
+    dual that evaluated to the trivial ``g(y=0)`` box floor. Measured on the hda
+    separated-relaxation node LP: banked floor -141697 (= exactly ``g(0)``) at
+    15/40/75% deadline fractions alike before; -118439/-118783 after (gap to the
+    -64473 optimum cut ~30%). Whole-solve hda at ``time_limit=10``: the ON arm's
+    bound went -141697 -> -123462 in 3/3 reps at 11.2-11.8 s wall. Flag-OFF
+    bound-neutrality: 13 certifying instances byte-identical vs the merge-base
+    (``scratchpad/issue928_neutrality.py``, marker-gated both directions).
+
+    Seven §5 panel runs on that build, ALL cert-clean (0 cert_regressions /
+    lost_incumbents / lost_bound / unsound in every run — the bound-losing trade
+    recorded above is gone; contvar is now often TIGHTER than OFF, tspn12/tls2
+    gained incumbents):
+
+    * full corpus, 15 s, 1 run: total overrun 73.8 -> 31.6 s (-57%).
+    * binding subset (19 non-closing instances), 15 s, 3 reps: ON-OFF deltas
+      -2.5 / 0.0 / -8.2 s.
+    * binding subset, 20 s, 3 reps: deltas **+325.4 / +68.5 / +12.7 s** — the ON
+      arm is WORSE at this budget in 3/3 reps, including sporadic severe modes
+      (contvar 500.6 s, bchoco08 80.9 s; the OFF arm has its own pre-existing
+      class, heatexch_gen3 200.5 s in the same rep set).
+
+    Net-positive therefore FAILS: the sign flips with budget, which is not
+    "measurably helpful broadly" (the ``DISCOPT_CUT_INHERIT`` rule). The residual
+    is measurably NOT this seam any more: per-LP deadline violations are zero
+    across every probe, and on contvar the ON arm spends 2.8 s in 30 relaxation
+    solves against a 27-33 s wall (OFF: 6.3 s in 20 solves, ~22 s wall) — the
+    budget-honoring LPs let the enclosing separation loop fit ~10 more rounds
+    whose non-LP cost (~1.1 s relaxation build each) is not clamped by the
+    round's grant, and downstream phases with coarse global-deadline compliance
+    do the rest (``scratchpad/issue928_{contvar_probe,blowup_hunt}.py``,
+    ``discopt_benchmarks/results/issue928_*.json``). Fixing THAT is caller-side
+    budget accounting — a different seam with its own issue; this flag stays OFF
+    until it lands and a re-run panel passes both bars.
     """
     import os as _os
 
@@ -545,13 +624,7 @@ class MilpRelaxationModel:
         col_scale = None
         if backend != "simplex" and self._A_ub is not None:
             data = sp.csr_matrix(self._A_ub).data
-            nz = np.abs(data[data != 0.0])
-            ill = bool(
-                nz.size
-                and np.isfinite(nz).all()
-                and nz.max() / nz.min() > _RELAX_EQUILIBRATE_TRIGGER
-            )
-            if ill:
+            if _coefficient_spread_exceeds(data, _RELAX_EQUILIBRATE_TRIGGER):
                 c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
                     self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
                 )
@@ -580,19 +653,11 @@ class MilpRelaxationModel:
         # genuinely infeasible LP stays infeasible; only a numerical false-negative
         # flips to optimal.
         if result.status == SolveStatus.INFEASIBLE and col_scale is None and self._A_ub is not None:
-            _nz = np.abs(sp.csr_matrix(self._A_ub).data)
-            _nz = _nz[_nz != 0.0]
-            if (
-                _nz.size
-                and np.isfinite(_nz).all()
-                # Cross-multiplied form of ``max/min > TRIGGER``: identical boolean
-                # (``min > 0`` after the zero-filter), but on the ill-conditioned
-                # narrow/RLT boxes this guard exists for — coefficient spreads of
-                # ~1e26 over ~1e-300 denormals — the division overflows to ``inf``
-                # (a spurious RuntimeWarning), whereas ``TRIGGER * min`` cannot
-                # overflow (#732 Stage 1-B).
-                and _nz.max() > _RELAX_FALSE_INFEAS_TRIGGER * _nz.min()
-            ):
+            # ``_coefficient_spread_exceeds`` carries the overflow-free
+            # cross-multiplied form this seam has used since #732 Stage 1-B, plus
+            # the subnormal floor from #957.
+            _data = sp.csr_matrix(self._A_ub).data
+            if _coefficient_spread_exceeds(_data, _RELAX_FALSE_INFEAS_TRIGGER):
                 c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
                     self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
                 )

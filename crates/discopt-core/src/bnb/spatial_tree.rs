@@ -55,6 +55,36 @@ impl Ord for QNode {
     }
 }
 
+/// What a node LP's terminal status licenses the tree to conclude about the region
+/// the node covers.
+///
+/// #927: this mapping is the soundness hinge of the whole search. Only a
+/// Farkas-certified [`LpStatus::Infeasible`] proves a region is empty; every other
+/// non-optimal status is the LP declining to decide, and pruning on it fabricates
+/// an emptiness proof the solver never had. The `match` is exhaustive on purpose —
+/// a new `LpStatus` variant must make an explicit choice here rather than silently
+/// inheriting "prune it".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeVerdict {
+    /// The LP solved: its safe bound is a valid lower bound for the region.
+    Bound,
+    /// The region is PROVEN empty (certified infeasible) — it contributes nothing.
+    EmptyRegion,
+    /// The LP decided nothing. The region may well contain the optimum, so it must
+    /// be branched (or closed with its inherited bound), never pruned.
+    Undecided,
+}
+
+fn verdict_for(status: LpStatus) -> NodeVerdict {
+    match status {
+        LpStatus::Optimal => NodeVerdict::Bound,
+        // `Infeasible` is returned only after the simplex verifies a Farkas dual
+        // ray (see `lp::simplex`), so it is a proof.
+        LpStatus::Infeasible => NodeVerdict::EmptyRegion,
+        LpStatus::Unbounded | LpStatus::IterLimit | LpStatus::Numerical => NodeVerdict::Undecided,
+    }
+}
+
 /// Termination status of the tree solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeStatus {
@@ -130,6 +160,22 @@ pub struct SpatialTreeConfig {
     /// (closing onto its own incumbent), nvs19 -4017.37 -> -2303.40, nvs23
     /// -23735.23 -> -18951.65.
     pub incumbent_time_extension: Option<Duration>,
+    /// Extra wall-clock time this search may take when [`Self::deadline`] expires —
+    /// but ONLY if its global dual bound is already finite (#933).
+    ///
+    /// This is the kernel-side mirror of `Model.solve`'s #844 policy ("withhold the
+    /// root-fallback reserve precisely while the search is bound-less"): the caller
+    /// shortens the kernel's deadline by the reserve it wants to keep for the
+    /// root-relaxation fallback and passes that reserve here. A kernel whose
+    /// frontier is finite at the shortened deadline reclaims the slice (the
+    /// fallback has nothing to contribute — the kernel's own bound is at least as
+    /// tight as any root bound); a kernel still bound-less exits immediately,
+    /// leaving the reserve unspent so the caller can compute a root-relaxation
+    /// bound INSIDE the original budget instead of reporting no bound at all.
+    ///
+    /// Taken at most once. `None` (the default) reproduces the prior deadline
+    /// exactly.
+    pub bound_time_extension: Option<Duration>,
 }
 
 impl Default for SpatialTreeConfig {
@@ -146,6 +192,7 @@ impl Default for SpatialTreeConfig {
             propagation_rounds: 15,
             initial_incumbent: None,
             incumbent_time_extension: None,
+            bound_time_extension: None,
         }
     }
 }
@@ -171,11 +218,23 @@ pub struct SpatialTreeResult {
     /// subtree of them freezes the frontier — the diagnostic for a bound plateau
     /// caused by certification failure rather than relaxation looseness.
     pub n_uncertified: usize,
+    /// #927: nodes whose LP came back with a status that DECIDES NOTHING
+    /// (`Numerical` / `IterLimit` / `Unbounded`). These are branched rather than
+    /// fathomed — a nonzero count means the search hit ill-conditioned node LPs and
+    /// paid for them in extra nodes, which is exactly the trade that keeps the
+    /// certificate honest. Reported so "the fallback fired" is observable.
+    pub n_undecided: usize,
     /// #917: seconds of the caller's withheld reserve this search actually reclaimed
     /// (0.0 when it never did). Reported so "the extension fired" is directly
     /// observable instead of inferred from a wall-clock reading — a panel that can
     /// only guess whether the mechanism ran cannot score it (CLAUDE.md §6).
     pub incumbent_extension_s: f64,
+    /// #933: seconds of the caller's withheld bound-fallback reserve this search
+    /// reclaimed because its dual bound was already finite at the shortened
+    /// deadline (0.0 when it never did — including the bound-less exit that
+    /// leaves the reserve to the caller's root-relaxation fallback). Reported
+    /// for the same §6 observability reason as `incumbent_extension_s`.
+    pub bound_extension_s: f64,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -261,9 +320,12 @@ pub fn solve_spatial_tree(
     let mut deadline = config.deadline;
     let mut extension_taken = false;
     let mut extension_s = 0.0f64;
+    let mut bound_extension_taken = false;
+    let mut bound_extension_s = 0.0f64;
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
     let mut n_uncertified = 0usize;
+    let mut n_undecided = 0usize;
 
     // Global lower bound = min, over every region that leaves the tree WITHOUT being
     // subdivided (pruned / infeasible / feasible-leaf / width-exhausted), of a valid
@@ -299,6 +361,28 @@ pub fn solve_spatial_tree(
                 extension_s = ext.as_secs_f64();
             }
         }
+        if deadline.is_some_and(|d| Instant::now() >= d)
+            && !bound_extension_taken
+            && config.bound_time_extension.is_some()
+        {
+            // #933: the caller shortened this kernel's deadline by the reserve it
+            // withholds for its root-relaxation fallback. If the global bound is
+            // already finite, that fallback has nothing to contribute (the
+            // kernel's frontier bound is at least as tight as any root bound), so
+            // reclaim the slice — once — and keep searching. If the bound is
+            // still -inf, fall through to the exit below with the reserve
+            // unspent, so the caller can still prove a root bound inside the
+            // original budget instead of reporting none at all.
+            let frontier = heap.iter().map(|n| n.pb).fold(f64::INFINITY, f64::min);
+            let gb = global_lb_closed.min(frontier).min(parent_bound);
+            if gb.is_finite() {
+                if let (Some(d), Some(ext)) = (deadline, config.bound_time_extension) {
+                    deadline = Some(d + ext);
+                    bound_extension_taken = true;
+                    bound_extension_s = ext.as_secs_f64();
+                }
+            }
+        }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             // Global bound = min(closed regions, open frontier, this unprocessed
             // node). Every term is rigorous for its region, so the partial result
@@ -313,7 +397,9 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -338,7 +424,9 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             };
         }
         node_count += 1;
@@ -371,8 +459,47 @@ pub fn solve_spatial_tree(
             n_uncertified += 1;
         }
 
-        // Infeasible node: empty region, contributes +inf (nothing).
-        if node.status != LpStatus::Optimal {
+        let verdict = verdict_for(node.status);
+        if verdict != NodeVerdict::Bound {
+            // Certified-infeasible node: empty region, contributes +inf (nothing).
+            if verdict == NodeVerdict::EmptyRegion {
+                continue;
+            }
+            // #927: every OTHER non-Optimal status (`Numerical`, `IterLimit`,
+            // `Unbounded`) is the LP *failing to decide*, NOT a proof that the
+            // region is empty — and the simplex contract is explicit that an
+            // unproven verdict may "force a fallback, never an unsound fathom".
+            // Treating them as empty is a false emptiness proof: on ex1252 under
+            // `DISCOPT_INTEGER_MULTILINEAR_REFORM` + `DISCOPT_MULTILINEAR_COUPLING_RLT`
+            // the reformulation lifts x^3 of a variable near 2950, so the envelope
+            // rows carry magnitudes near 1e11 and the node LP on a tight box came
+            // back `Numerical`. The region it covered held the true optimum
+            // (128893.74); fathoming it produced a certified `optimal` at
+            // 216826.52 — a false certificate.
+            //
+            // An undecided LP is a reason to BRANCH, not to prune: the children
+            // are better conditioned (narrower boxes → smaller envelope
+            // coefficients) and each carries `parent_bound`, which is a valid lower
+            // bound for this region because the parent's region contains it. When
+            // no branchable column is left, the region closes with that same honest
+            // bound rather than with `+inf`.
+            n_undecided += 1;
+            let split = widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width);
+            match split {
+                Some(j) => {
+                    let at = clamp_interior(0.5 * (lo[j] + hi[j]), lo[j], hi[j]);
+                    push_children(
+                        &mut heap,
+                        &lo,
+                        &hi,
+                        j,
+                        at,
+                        parent_bound,
+                        spec.integrality[j],
+                    );
+                }
+                None => global_lb_closed = global_lb_closed.min(parent_bound),
+            }
             continue;
         }
         // Rigorous safe lower bound for this region, inheriting the parent's bound as
@@ -479,17 +606,8 @@ pub fn solve_spatial_tree(
         // closed with its honest rigorous `bound` (surfaced as `Exhausted` if that
         // leaves the gap open — never silently upgraded to `Optimal`).
         let fallback = || -> Option<(usize, f64)> {
-            let mut best: Option<(f64, usize)> = None;
-            for j in 0..spec.n_orig {
-                let wj = hi[j] - lo[j];
-                if wj > config.min_box_width.max(1e-9) {
-                    let rw = wj / root_w[j];
-                    if best.map(|(bw, _)| rw > bw).unwrap_or(true) {
-                        best = Some((rw, j));
-                    }
-                }
-            }
-            best.map(|(_, j)| (j, clamp_interior(x[j], lo[j], hi[j])))
+            widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width)
+                .map(|j| (j, clamp_interior(x[j], lo[j], hi[j])))
         };
         let pick = if let Some(j) = frac_int {
             Some((j, x[j].floor() + 0.5)) // integer branch: <= floor, >= ceil
@@ -506,45 +624,15 @@ pub fn solve_spatial_tree(
         };
 
         // Two covering children.
-        if spec.integrality[split_col] {
-            // integer: child1 x<=floor, child2 x>=ceil
-            let f = (split_at - 0.5).floor();
-            let lo1 = lo.clone();
-            let mut hi1 = hi.clone();
-            hi1[split_col] = f;
-            let mut lo2 = lo.clone();
-            let hi2 = hi.clone();
-            lo2[split_col] = f + 1.0;
-            if hi1[split_col] >= lo1[split_col] - 1e-12 {
-                heap.push(QNode {
-                    pb: bound,
-                    lo: lo1,
-                    hi: hi1,
-                });
-            }
-            if hi2[split_col] >= lo2[split_col] - 1e-12 {
-                heap.push(QNode {
-                    pb: bound,
-                    lo: lo2,
-                    hi: hi2,
-                });
-            }
-        } else {
-            let mut hi1 = hi.clone();
-            hi1[split_col] = split_at;
-            let mut lo2 = lo.clone();
-            lo2[split_col] = split_at;
-            heap.push(QNode {
-                pb: bound,
-                lo: lo.clone(),
-                hi: hi1,
-            });
-            heap.push(QNode {
-                pb: bound,
-                lo: lo2,
-                hi: hi.clone(),
-            });
-        }
+        push_children(
+            &mut heap,
+            &lo,
+            &hi,
+            split_col,
+            split_at,
+            bound,
+            spec.integrality[split_col],
+        );
     }
 
     // Worklist empty: every region was explored or fathomed. The reported bound is
@@ -570,7 +658,9 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             }
         }
         None => SpatialTreeResult {
@@ -581,8 +671,86 @@ pub fn solve_spatial_tree(
             node_count,
             n_lp_solves,
             n_uncertified,
+            n_undecided,
             incumbent_extension_s: extension_s,
+            bound_extension_s,
         },
+    }
+}
+
+/// Widest ORIGINAL column relative to its root width, or `None` when every one is
+/// already at or below `min_box_width` (nothing left to branch on).
+fn widest_original_col(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    root_w: &[f64],
+    min_box_width: f64,
+) -> Option<usize> {
+    let mut best: Option<(f64, usize)> = None;
+    for j in 0..spec.n_orig {
+        let wj = hi[j] - lo[j];
+        if wj > min_box_width.max(1e-9) {
+            let rw = wj / root_w[j];
+            if best.map(|(bw, _)| rw > bw).unwrap_or(true) {
+                best = Some((rw, j));
+            }
+        }
+    }
+    best.map(|(_, j)| j)
+}
+
+/// Push the two covering children of `[lo, hi]` split on `split_col` at `split_at`,
+/// each inheriting `pb` as its (valid) region lower bound. The two children cover
+/// the parent box exactly, so no feasible point is lost.
+#[allow(clippy::too_many_arguments)]
+fn push_children(
+    heap: &mut BinaryHeap<QNode>,
+    lo: &[f64],
+    hi: &[f64],
+    split_col: usize,
+    split_at: f64,
+    pb: f64,
+    is_int: bool,
+) {
+    if is_int {
+        // integer: child1 x<=floor, child2 x>=ceil
+        let f = (split_at - 0.5).floor();
+        let lo1 = lo.to_vec();
+        let mut hi1 = hi.to_vec();
+        hi1[split_col] = f;
+        let mut lo2 = lo.to_vec();
+        let hi2 = hi.to_vec();
+        lo2[split_col] = f + 1.0;
+        if hi1[split_col] >= lo1[split_col] - 1e-12 {
+            heap.push(QNode {
+                pb,
+                lo: lo1,
+                hi: hi1,
+            });
+        }
+        if hi2[split_col] >= lo2[split_col] - 1e-12 {
+            heap.push(QNode {
+                pb,
+                lo: lo2,
+                hi: hi2,
+            });
+        }
+    } else {
+        let mut hi1 = hi.to_vec();
+        hi1[split_col] = split_at;
+        let mut lo2 = lo.to_vec();
+        lo2[split_col] = split_at;
+        heap.push(QNode {
+            pb,
+            lo: lo.to_vec(),
+            hi: hi1,
+        });
+        heap.push(QNode {
+            pb,
+            lo: lo2,
+            hi: hi.to_vec(),
+        });
     }
 }
 
@@ -813,5 +981,39 @@ mod tests {
         assert_eq!(res.status, TreeStatus::TimeLimit);
         assert_eq!(res.node_count, 0);
         assert_eq!(res.bound, f64::NEG_INFINITY);
+    }
+
+    /// #927 regression: ONLY a certified `Infeasible` licenses the tree to treat a
+    /// region as empty.
+    ///
+    /// The false certificate on ex1252 (a certified `optimal` 216826.52 against a
+    /// true optimum of 128893.74, under `DISCOPT_INTEGER_MULTILINEAR_REFORM` +
+    /// `DISCOPT_MULTILINEAR_COUPLING_RLT`) came from exactly one line: the tree
+    /// fathomed on `status != Optimal`, and the node LP had returned `Numerical`.
+    /// That reformulation lifts `x^3` for an `x` near 2950, so the cubic's tangent
+    /// envelope rows carry coefficients near `3*2950^2 = 2.6e7` and right-hand sides
+    /// near `7.7e10` formed by a cancelling subtraction; at the box corner `x = ui`
+    /// the row and the auxiliary column's own upper bound `ui^3` are two different
+    /// roundings of the same number, leaving an absolute residual near 1e-5 that no
+    /// LP feasibility tolerance can absorb. The simplex said so honestly
+    /// (`Numerical`, not `Infeasible`) and was overruled.
+    ///
+    /// Pinning the mapping is what keeps that from coming back: a region is empty
+    /// only when something PROVED it empty.
+    #[test]
+    fn only_certified_infeasible_proves_a_region_empty() {
+        assert_eq!(verdict_for(LpStatus::Optimal), NodeVerdict::Bound);
+        assert_eq!(verdict_for(LpStatus::Infeasible), NodeVerdict::EmptyRegion);
+        for undecided in [
+            LpStatus::Numerical,
+            LpStatus::IterLimit,
+            LpStatus::Unbounded,
+        ] {
+            assert_eq!(
+                verdict_for(undecided),
+                NodeVerdict::Undecided,
+                "{undecided:?} is not a proof of emptiness and must not fathom"
+            );
+        }
     }
 }

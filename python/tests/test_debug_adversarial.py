@@ -578,8 +578,26 @@ def _milp_model():
 
 
 def _infeasible_bilinear():
-    """Infeasible only after branching (FBBT alone cannot prove it): needs
-    x*y >= 0.5 with x + y <= 1 on [0,1]^2 (max of x*y is 0.25)."""
+    """Certifiably infeasible bilinear model: ``x*y >= 0.5`` with ``x + y <= 1``
+    on ``[0,1]^2`` (the product cannot exceed 0.25 under the linear cap).
+
+    Restored in the #956 follow-through. It had been swapped out because the
+    solver could not certify it: every margin from 0.3 to 2.0 ran ~12 000 nodes to
+    the time limit, and the ``0.5`` case only ever "passed" because its root
+    relaxation is feasible at exactly one vertex, so the verdict came from
+    whichever way that razor-thin LP rounded. The cause was that a node proven
+    empty was pruned only via ``lower_bound >= incumbent``, which cannot fire
+    before an incumbent exists — i.e. never, on an infeasible model. With the
+    emptiness certificate now carried to the tree, this closes at the root in 1
+    node on a rigorous Farkas-verified proof, deterministically and in both
+    outward-rounding arms.
+
+    Note the fixture's original docstring claimed "infeasible only after
+    branching". That was never true and is not true now — but the reason has
+    changed from a rounding accident to a genuine root-level proof: the McCormick
+    relaxation over the root box is itself empty (``w <= x``, ``w <= y``,
+    ``w >= 0.5`` forces ``x + y >= 1``, which the cap meets only at the single
+    point ``(0.5, 0.5)``)."""
     m = do.Model("adv2_infeas")
     x = m.continuous("x", lb=0.0, ub=1.0)
     y = m.continuous("y", lb=0.0, ub=1.0)

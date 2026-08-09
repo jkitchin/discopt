@@ -26,7 +26,6 @@ Sections:
 
 from __future__ import annotations
 
-import itertools
 import logging
 import os
 import warnings
@@ -3501,12 +3500,38 @@ class TestCurrentCodeWeaknesses:
         from discopt._jax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
-        # First two reads land before the deadline; every later read is past it,
-        # so the timeout path triggers regardless of how many clock samples
-        # solve_amp takes.
-        fake_clock = itertools.chain([0.0, 0.0], itertools.repeat(1.5))
+        # The timeout is driven by *state*, not by read ordinal: the clock is
+        # pre-deadline until an incumbent exists and past the deadline after.
+        # That is what "timed out after finding an incumbent" means, and it is
+        # immune to how many times anything reads the clock.
+        #
+        # The previous wiring here was ``chain([0.0, 0.0], repeat(1.5))`` --
+        # "the first two reads are before the deadline" -- which silently stopped
+        # reaching this path. ``monkeypatch.setattr(amp_mod.time, ...)`` replaces
+        # ``perf_counter`` on the *global* ``time`` module, so every clock read
+        # under the call draws from the sequence, not just ``amp``'s own; a burst
+        # of ~26 reads inside ``nonlinear_bound_tightening``'s budget polling
+        # consumed the pre-deadline values, the main loop saw a blown deadline
+        # before any incumbent was stored, and ``solve_amp`` returned through the
+        # "no feasible solution found" arm. The assertion below then described a
+        # path the test no longer executed -- so it failed for a reason that had
+        # nothing to do with the contract it names. Hence ``calls``: if the
+        # incumbent callback never fires, this test measured nothing and must not
+        # be able to pass (CLAUDE.md §6).
+        calls = {"n": 0}
+        state = {"incumbent_found": False}
 
-        monkeypatch.setattr(amp_mod.time, "perf_counter", lambda: next(fake_clock))
+        def fake_now():
+            # ``time_limit`` is 1.0 s and ``t_start`` is read before any incumbent
+            # exists, so the origin is 0.0 and the deadline is 1.0.
+            return 1.5 if state["incumbent_found"] else 0.0
+
+        def fake_best_nlp(*args, **kwargs):
+            calls["n"] += 1
+            state["incumbent_found"] = True
+            return np.array([2.0, 2.0], dtype=np.float64), 10.0
+
+        monkeypatch.setattr(amp_mod.time, "perf_counter", fake_now)
         monkeypatch.setattr(
             amp_mod,
             "_solve_milp_with_oa_recovery",
@@ -3521,11 +3546,7 @@ class TestCurrentCodeWeaknesses:
                 1,
             ),
         )
-        monkeypatch.setattr(
-            amp_mod,
-            "_solve_best_nlp_candidate",
-            lambda *args, **kwargs: (np.array([2.0, 2.0], dtype=np.float64), 10.0),
-        )
+        monkeypatch.setattr(amp_mod, "_solve_best_nlp_candidate", fake_best_nlp)
 
         result = amp_mod.solve_amp(
             _make_nlp1(),
@@ -3535,8 +3556,13 @@ class TestCurrentCodeWeaknesses:
             time_limit=1.0,
         )
 
+        assert calls["n"] == 1, (
+            "the incumbent callback never fired, so the timeout did not land "
+            "*after* an incumbent and this test measured nothing"
+        )
         assert result.status == "feasible"
         assert result.objective is not None
+        assert result.x is not None
         assert result.gap_certified is False
 
     @pytest.mark.xfail(

@@ -51,6 +51,12 @@ macro_rules! counters {
         const NC: usize = { let mut c = 0; $( let _ = stringify!($name); c += 1; )* c };
         static CNAMES: &[&str] = &[$(stringify!($name)),*];
         static CVALS: [AtomicU64; NC] = [$( { let _ = stringify!($name); AtomicU64::new(0) }),*];
+        /// Monotonic totals. [`dump`] zeroes `CVALS` (it is a "print since last
+        /// dump" view) and is called from per-solve binding sites, so a caller
+        /// measuring a whole run cannot read `CVALS` — on the Python spatial path
+        /// every node LP wipes them. These accumulate in parallel and are cleared
+        /// only by an explicit [`reset`].
+        static CTOTALS: [AtomicU64; NC] = [$( { let _ = stringify!($name); AtomicU64::new(0) }),*];
     };
 }
 
@@ -164,12 +170,118 @@ counters!(
     // existing fallback chain exactly as before the retry existed.
     LpDenseRetries,
     LpDenseRetryRescues,
+    // #956 follow-through: the TERMINAL verdict histogram of the cold primal
+    // simplex, counted once per solve at its single exit point (`assemble`, after
+    // the feasibility audit has had its say). This is the instrument that decides
+    // whether an undecided node LP is an uncertified infeasibility, a drifted
+    // optimum, or a factorization breakdown — the three have completely different
+    // fixes and were previously indistinguishable from outside.
+    LpVerdictOptimal,
+    LpVerdictInfeasible,
+    LpVerdictNumerical,
+    LpVerdictIterLimit,
+    LpVerdictUnbounded,
+    // The load-bearing bucket: phase 1 left a real residual (so the LP looks
+    // infeasible) but the Farkas ray did NOT certify, so the honest — and
+    // useless — `Numerical` is returned instead of a proof. Since #927 the spatial
+    // tree branches on that verdict, and `lp_spatial_bb` folds it into
+    // `unresolved_lb`, which is why such a tree can never conclude `infeasible`.
+    LpInfeasUncertified,
+    // Why `assemble`'s audit downgraded an `Optimal`: a column outside its bounds
+    // (refinement cannot help) vs a row residual (refinement can, and Rescues
+    // above counts when it did).
+    LpAuditBoundsFail,
+    LpAuditRowsFail,
+    // Why `farkas_ray_certifies_cols` rejected a ray: it needed a finite bound on a
+    // column the ray selected and had none (`Open` — it recovers such bounds for
+    // SLACK columns only, so a ray touching an unbounded structural/auxiliary
+    // column is rejected outright), or the Neumaier-Shcherbina margin was not met
+    // (`Margin`). Splitting these is what separates "the certificate is incomplete"
+    // from "the LP is not actually infeasible".
+    FarkasRejectOpen,
+    FarkasRejectMargin,
+    // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
+    // Python spatial engine's per-node LPs come through, and it can return without
+    // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above
+    // do not see it (measured: witness W1 runs 2495 nodes and registers ONE cold
+    // verdict). Counted separately so the two engines can be told apart.
+    WarmVerdictOptimal,
+    WarmVerdictInfeasible,
+    WarmVerdictNumerical,
+    WarmVerdictIterLimit,
+    WarmVerdictUnbounded,
+    // How FAR outside its box the audit found the offending column, as a multiple
+    // of the audit's own relative tolerance `1e-6·(1+|bound|)`. A near-miss (a few
+    // ×) is a drift the basis could be cleaned up from; a gross one means the basis
+    // is simply wrong and no tolerance change is admissible. Decides whether the
+    // dominant `LpAuditBoundsFail` bucket is repairable at all.
+    AuditExcursionLt10x,
+    AuditExcursionLt1e3x,
+    AuditExcursionLt1e6x,
+    AuditExcursionGe1e6x,
+    // #956 T2': is the column the audit rejected BASIC (so `x_B` is wrong — either
+    // drift or a genuinely primal-infeasible basis) or nonbasic (which should be
+    // impossible, since a nonbasic sits exactly at a bound by construction)? And
+    // does recomputing `x_B` from a refinement-polished factorization pull it back
+    // inside? `assemble` currently asserts it cannot ("a Harris ratio-test artefact,
+    // not a solve-accuracy problem", measured for #364 on a different corpus) — these
+    // counters re-test that claim on the spatial McCormick LPs.
+    AuditBoundsOnBasic,
+    AuditBoundsOnNonbasic,
+    AuditBoundsRefineFixes,
+    AuditBoundsRefinePersists,
+    // Does the LP handed to the simplex have a CROSSED box (`l[j] > u[j]`)? Such an
+    // LP is empty by inspection — no basis can satisfy it, phase 1 cannot repair it,
+    // and no amount of refinement will pull the basic variable back inside a box
+    // that has no inside. `assemble_node_lp` can produce one: it intersects each
+    // auxiliary column's incoming bounds with the box-derived envelope range
+    // (`l[a].max(alo)` / `u[a].min(ahi)`) with nothing checking that the result is
+    // non-empty. Counted per solve, split by whether the solve then failed.
+    LpCrossedBox,
+    LpCrossedBoxAndFailed,
+    // Is the basis primal-feasible when phase 1 hands off to phase 2? `assemble`'s
+    // sibling comment asserts it is ("the LP is FEASIBLE and, because the cleanup
+    // used only phase-1-feasible ratio-test pivots, the basis is primal-feasible"),
+    // but phase 1 measures feasibility as `sum|artificials| <= 1e-6` — an ABSOLUTE
+    // test on artificials, which says nothing about whether the structural basics
+    // are inside their boxes. These counters test the claim.
+    Phase1EndBoxOk,
+    Phase1EndBoxViolated,
+    // ... and how big the violation is, measured against EXPAND's own per-pivot
+    // ceiling (1e-7). At-or-below that scale it is one pivot's sanctioned Harris
+    // excursion; far above it, an accumulation across pivots or update drift.
+    // #956 T3': nodes fathomed on a rigorous emptiness certificate rather than by
+    // bound. Zero on an instance means the T3' arm never fired there, which is the
+    // difference between "the change is neutral" and "the experiment measured
+    // nothing" (CLAUDE.md §6).
+    TreeCertInfeasPrunes,
+    Phase1ViolLe1Expand,
+    Phase1ViolLe100Expand,
+    Phase1ViolGt100Expand,
+    // ... and, for a violating solve, whether the ratio test's OWN (incrementally
+    // maintained) x_B was already outside the box, or was clean and had merely
+    // drifted away from what the basis actually holds. Different repairs.
+    // #956 T2': mid-window exact re-derivations of x_B (DISCOPT_PRIMAL_XB_REFRESH).
+    XbMidRefresh,
+    Phase1IncrAlsoViolates,
+    Phase1DriftDominates,
+    Phase1ViolUnexplained,
+    Phase1NoIncrXb,
+    // #956 T2': the EXPAND-free re-solve of a cold primal that failed to decide,
+    // and how many of those reached a terminal certificate instead of failing again.
+    EntryDense,
+    EntryCols,
+    EntryColsWarm,
+    ExpandResetArmed,
+    ExpandResetRetries,
+    ExpandResetRescues,
 );
 
 #[inline(always)]
 pub fn incr(c: Ctr) {
     if enabled() {
         CVALS[c as usize].fetch_add(1, Ordering::Relaxed);
+        CTOTALS[c as usize].fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -210,9 +322,25 @@ impl Drop for Timer {
     }
 }
 
-/// Reset all accumulators (e.g. between solves).
+/// Reset the per-`dump` accumulators (e.g. between solves).
+///
+/// Deliberately leaves `CTOTALS` alone. `milp_driver` calls this at the start of
+/// every MILP sub-solve, so clearing the run totals here silently zeroed them
+/// mid-run: a counter incremented before the last sub-solve read back as 0, and
+/// "0" reads as "this path never executed". That cost a wrong conclusion twice
+/// (#956 T1 and again in the T6 fired-check), which is why the totals now survive
+/// both [`dump`] and this. Use [`reset_totals`] to clear them on purpose.
 pub fn reset() {
     for a in PCOUNT.iter().chain(PNANOS.iter()).chain(CVALS.iter()) {
+        a.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Clear the run totals as well — the deliberate "start a new measurement" reset,
+/// called only by an instrument that owns the whole process.
+pub fn reset_totals() {
+    reset();
+    for a in CTOTALS.iter() {
         a.store(0, Ordering::Relaxed);
     }
 }
@@ -224,6 +352,17 @@ pub fn reset() {
 #[inline]
 pub fn counter(c: Ctr) -> u64 {
     CVALS[c as usize].load(Ordering::Relaxed)
+}
+
+/// Every counter as `(name, value)`, without printing or resetting.
+///
+/// [`dump`] writes to stderr and zeroes the accumulators, which makes it unusable
+/// as a measurement instrument for a caller that wants the numbers back (the #956
+/// follow-through needs the verdict histogram in Python). This returns them.
+pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
+    (0..NC)
+        .map(|i| (CNAMES[i], CTOTALS[i].load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// Force the profiling flag on/off. Test-only: production toggles it exactly once

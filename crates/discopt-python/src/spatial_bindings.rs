@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
     max_nodes=100_000, gap_tol=1e-6, int_tol=1e-5, mccormick_tol=1e-6,
     min_box_width=1e-9, run_obbt=false, run_propagation=true,
     propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
-    incumbent_time_extension_s=None,
+    incumbent_time_extension_s=None, bound_time_extension_s=None,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -83,6 +83,7 @@ pub fn solve_spatial_tree_py<'py>(
     initial_incumbent: Option<f64>,
     time_limit_s: Option<f64>,
     incumbent_time_extension_s: Option<f64>,
+    bound_time_extension_s: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -280,6 +281,23 @@ pub fn solve_spatial_tree_py<'py>(
                 .map_err(|_| PyValueError::new_err("incumbent_time_extension_s is too large"))?,
         ),
     };
+    // #933: the caller's withheld bound-fallback reserve, which the tree may
+    // reclaim once — and only while its dual bound is already finite. Same
+    // validation rule as `incumbent_time_extension_s`.
+    let bound_time_extension = match bound_time_extension_s {
+        None => None,
+        Some(seconds) if seconds == f64::INFINITY => None,
+        Some(seconds) if seconds.is_nan() || seconds < 0.0 => {
+            return Err(PyValueError::new_err(
+                "bound_time_extension_s must be non-negative and not NaN \
+                 (use None for no extension)",
+            ));
+        }
+        Some(seconds) => Some(
+            Duration::try_from_secs_f64(seconds)
+                .map_err(|_| PyValueError::new_err("bound_time_extension_s is too large"))?,
+        ),
+    };
     let cfg = SpatialTreeConfig {
         max_nodes,
         deadline,
@@ -292,6 +310,7 @@ pub fn solve_spatial_tree_py<'py>(
         propagation_rounds,
         initial_incumbent,
         incumbent_time_extension,
+        bound_time_extension,
     };
     let opts = SimplexOptions::default();
 
@@ -313,7 +332,10 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("node_count", res.node_count)?;
     out.set_item("n_lp_solves", res.n_lp_solves)?;
     out.set_item("n_uncertified", res.n_uncertified)?;
+    out.set_item("n_undecided", res.n_undecided)?;
     // #917: seconds of the caller's withheld reserve the tree actually reclaimed.
     out.set_item("incumbent_extension_s", res.incumbent_extension_s)?;
+    // #933: seconds of the bound-fallback reserve reclaimed (bound already finite).
+    out.set_item("bound_extension_s", res.bound_extension_s)?;
     Ok(out)
 }

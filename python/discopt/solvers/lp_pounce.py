@@ -15,6 +15,7 @@ below expose exactly that to POUNCE.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, List, Optional, Tuple, Union, cast
 
@@ -22,7 +23,14 @@ import numpy as np
 import scipy.sparse as sp
 
 from discopt import _timing
-from discopt.solvers import InfeasibilityCertificate, LPResult, SolveStatus
+from discopt.solvers import (
+    InfeasibilityCertificate,
+    LPResult,
+    SolveStatus,
+    pounce_option_defaults,
+)
+
+logger = logging.getLogger(__name__)
 
 try:
     import pounce as _pounce  # noqa: F401
@@ -46,6 +54,149 @@ _FEAS_TOL = 1e-6
 # them. Inversions beyond this tolerance are left intact so they surface as
 # genuine infeasibility rather than being masked.
 _BOUND_SNAP_TOL = 1e-7
+# The POUNCE option baseline (constr_viol_tol, bound_relax_factor) lives in
+# :func:`discopt.solvers.pounce_option_defaults` — one source of truth shared
+# by every entry point that hands options to POUNCE. See the measurements and
+# the per-build analysis there (issue #940).
+
+
+# A recession direction must lower the objective by at least this much, relative
+# to the cost vector's magnitude, before ``UNBOUNDED`` is certified. The ray LP's
+# directions are normalized to the unit box, so a genuine ray registers as an
+# O(|c|) drop while interior-point noise registers near zero. Erring toward NOT
+# certifying is the safe direction: the caller then degrades to the exact simplex.
+_RAY_COST_TOL = 1e-7
+
+
+def _certify_unbounded_ray(
+    c: np.ndarray,
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    opts: dict,
+    Q: Optional[np.ndarray] = None,
+) -> bool:
+    """Whether a genuine improving recession direction exists — an *earned*
+    ``UNBOUNDED``, rather than one inferred from a numerical-failure code.
+
+    POUNCE reaches ``UNBOUNDED`` through :data:`_LP_STATUS_MAP` from Ipopt codes
+    3 and 4 (``Search_Direction_Becomes_Too_Small`` / ``Diverging_Iterates``).
+    Those codes are *ambiguous*: they report that the interior-point iteration
+    stalled or blew up, not that the problem has a ray. POUNCE never claims
+    unboundedness — that inference was discopt's, and it is unsound. Measured
+    (issue #940): on random LPs of data magnitude ~1e7 over an ordinary
+    ``[0, 1e8]`` box, ~4 in 10 instances whose true status is ``optimal`` exit
+    this way, and 42 of 90 do so on a box carrying one infinite bound, where the
+    objective is ``min c'x`` with ``c >= 0, x >= 0`` and therefore cannot decrease
+    along any ray by construction. Those bounds sit far below the
+    ``[1e15, 1e20)`` window of the #850 Obs 1 deferral, so
+    ``solver._solve_lp_matrix`` certified the verdict: ``model.solve()`` returned
+    ``status='unbounded'`` for an LP whose exact optimum is 5.1e7.
+
+    Rather than drop the verdict (which would cost the Benders dual seam its
+    feasibility-cut signal, where an unbounded dual is the normal case), settle it
+    with the recession cone: a **feasible** LP is unbounded **iff** its recession
+    cone contains a direction of strictly negative cost. That cone is described by
+    the same data:
+
+        min  c'd   s.t.   (A d)_i <= 0 where cu_i is finite,
+                          (A d)_i >= 0 where cl_i is finite,
+                          d_j >= 0 where lb_j is finite,
+                          d_j <= 0 where ub_j is finite,
+                          -1 <= d <= 1                        (normalization)
+
+    which is itself always feasible (``d = 0``) and bounded, so it is a far easier
+    solve than the one that just failed. A strictly negative optimum exhibits the
+    ray and ``x + t·d`` stays feasible for every ``t >= 0``, certifying
+    unboundedness; anything else means the exit was numerical and the caller
+    should degrade to the exact simplex.
+
+    On the feasibility hypothesis of that "iff": ``solve_lp``'s elastic Phase-1
+    establishes it on the paths where Phase-1 actually runs — ``m > 0`` and the
+    Phase-1 solve itself returning slacks. It is *not* established when there are
+    no constraint rows at all, or when that solve fails and returns ``None``
+    (``qp_pounce.solve_qp`` has the identical structure). That gap costs nothing,
+    because this test is one-directional: it can only ever WITHDRAW an ``UNBOUNDED``
+    verdict, never add one. An infeasible LP that happens to own a recession ray
+    keeps whatever verdict it already had, so an unestablished premise costs a
+    certificate, never soundness.
+
+    ``Q`` extends this to a convex QP: along ``d`` the objective is
+    ``½t²·d'Qd + t·(c'd + x'Qd)``, so it can only fall without bound when
+    ``d'Qd = 0``, which for positive-semidefinite ``Q`` is equivalent to
+    ``Qd = 0`` — added here as equality rows.
+
+    Returns ``False`` whenever the ray LP does not itself reach a clean optimum,
+    so an undecidable case never becomes a certificate (CLAUDE.md §1).
+    """
+    n = len(c)
+    finite_lo = lb > -_INF
+    finite_hi = ub < _INF
+    # Directions live in the unit box, tightened to a half-line (or to {0}) by
+    # whichever variable bounds are finite.
+    d_lo = np.where(finite_lo, 0.0, -1.0)
+    d_hi = np.where(finite_hi, 0.0, 1.0)
+    if not np.any(d_lo < 0.0) and not np.any(d_hi > 0.0):
+        return False  # compact box: the only recession direction is d = 0
+
+    rows = [A]
+    row_lo = [np.where(cl > -_INF, 0.0, -_INF)]
+    row_hi = [np.where(cu < _INF, 0.0, _INF)]
+    if Q is not None:
+        rows.append(np.asarray(Q, dtype=np.float64).reshape(n, n))
+        row_lo.append(np.zeros(n))
+        row_hi.append(np.zeros(n))
+    A_ray = np.vstack(rows) if rows[0].shape[0] or len(rows) > 1 else np.empty((0, n))
+    cl_ray = np.concatenate(row_lo)
+    cu_ray = np.concatenate(row_hi)
+
+    res = _solve_core(
+        np.asarray(c, dtype=np.float64),
+        A_ray,
+        cl_ray,
+        cu_ray,
+        d_lo,
+        d_hi,
+        np.zeros(n),
+        opts,
+    )
+    if res.status != SolveStatus.OPTIMAL or res.objective is None:
+        return False
+    threshold = -_RAY_COST_TOL * max(1.0, float(np.max(np.abs(c))) if n else 1.0)
+    return bool(res.objective < threshold)
+
+
+def _settle_ambiguous_unbounded(
+    result: LPResult,
+    c: np.ndarray,
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    opts: dict,
+) -> LPResult:
+    """Keep ``UNBOUNDED`` only when :func:`_certify_unbounded_ray` exhibits a ray.
+
+    Reporting ``ERROR`` otherwise is the honest outcome: the engine could not
+    decide, the caller degrades to the exact simplex, and no false certificate is
+    produced (#940).
+    """
+    if result.status != SolveStatus.UNBOUNDED:
+        return result
+    if _certify_unbounded_ray(c, A, cl, cu, lb, ub, opts):
+        return result
+    logger.debug(
+        "POUNCE exited with an ambiguous Ipopt code 3/4 and no improving recession "
+        "direction exists, so the problem is not unbounded; reporting ERROR so the "
+        "caller degrades to the exact simplex rather than certifying a false "
+        "'unbounded' (#940)."
+    )
+    return LPResult(
+        status=SolveStatus.ERROR, iterations=result.iterations, wall_time=result.wall_time
+    )
 
 
 def _snap_inverted_bounds(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -254,7 +405,9 @@ def solve_lp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts: dict[str, Any] = {"print_level": 0}
+    # Shared baseline first, so an explicit caller option still wins; see
+    # solvers.pounce_option_defaults for why these are not Ipopt's (#940).
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -292,7 +445,11 @@ def solve_lp(
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
-    return result
+    # Phase-1 above settles the "was it really infeasible?" reading of an ambiguous
+    # code-3/4 exit. This settles the other one: UNBOUNDED survives only if a ray
+    # is actually exhibited, so the certificate is earned rather than inferred from
+    # a numerical-failure code (#940).
+    return _settle_ambiguous_unbounded(result, c_arr, A, cl, cu, lb, ub, opts)
 
 
 def solve_lp_kkt(
@@ -337,7 +494,7 @@ def solve_lp_kkt(
     cu = b_arr.copy()
     x0 = _interior_start(lb, ub)
 
-    opts: dict[str, Any] = {"print_level": 0}
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
 

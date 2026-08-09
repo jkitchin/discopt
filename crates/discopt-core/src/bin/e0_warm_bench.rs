@@ -159,6 +159,7 @@ fn main() -> ExitCode {
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: true,
+        bank_deadline_duals: false,
     };
 
     let mut l = lp_data.l.clone();

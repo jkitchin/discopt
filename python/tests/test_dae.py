@@ -610,7 +610,11 @@ class TestOptimalControl:
         x_var = dae.get_state("x")
         obj = dae.integral(lambda t, s, a, c: c["u"] ** 2)
         m.minimize(obj + 10.0 * x_var[-1, -1] ** 2)
-        result = m.solve()
+        # An explicit time_limit is what makes a regression report as a failed
+        # assertion instead of as a pytest timeout: with no limit this solve ran
+        # past 800 s on the spatial path and the test could report nothing at all
+        # (#944). This is a 100-variable convex QP; it takes a few seconds.
+        result = m.solve(time_limit=120)
         assert result.status == "optimal"
 
         # x should be driven toward 0

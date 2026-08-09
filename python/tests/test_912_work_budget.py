@@ -119,6 +119,27 @@ def test_stopped_on_is_latched_at_the_first_stop():
 
 
 @pytest.mark.unit
+def test_deadline_is_measured_against_the_injected_clock():
+    """#950: the backstop reads ``clock``, so a test can pin deadline-edge
+    behaviour instead of racing the machine.
+
+    The default is :func:`time.perf_counter` (the two tests above rely on it);
+    this one drives the same gate from a clock it owns. A real deadline one hour
+    out cannot fire on wall time within this test, so the ``exhausted()`` below
+    is caused by the injected clock and nothing else.
+    """
+    now = {"t": 0.0}
+    b = WorkBudget({EVAL: 10**9}, deadline=3600.0, clock=lambda: now["t"])
+    b.charge(EVAL)
+    assert not b.exhausted()
+    assert b.stopped_on is None
+    now["t"] = 3600.0
+    assert b.exhausted()
+    assert b.stopped_on == "deadline"
+    assert not b.deterministic
+
+
+@pytest.mark.unit
 def test_unknown_kind_is_counted_but_never_gates():
     b = WorkBudget({EVAL: 5})
     b.charge("lp_iteration", 10**6)

@@ -10,7 +10,81 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The POUNCE-native NLP path now requires — and verifies — a cross-thread-safe
+  `NlProblem`** (`fix`, #932). #932 reported the pyo3 panic
+  `_pounce::nl_problem::PyNlProblem is unsendable, but sent to another thread`
+  and asked for one of two outcomes: pin the object to one thread, or establish
+  that it is safe to send and drop the marker. **POUNCE took the second route** —
+  pounce#477 ("Let one NlProblem serve a whole worker pool") removed the
+  `unsendable` marker after establishing that `NlTnlp` is `Send` and that every
+  `&self` method evaluates under the GIL, citing the same reasoning #932 did:
+  `PanicException` derives from `BaseException`, so a cross-thread access slips
+  past every `except Exception` in a host and surfaces as a wrong answer rather
+  than an error, and the *drop* path tripped even for code that never used an
+  instance cross-thread. There is therefore no discopt-side thread-affinity bug,
+  and the model-level base cache — one `NlProblem` shared by every thread that
+  solves a node — is correct as written.
+
+  What changed here is the requirement being made explicit instead of assumed.
+  POUNCE's version string cannot express it (pounce#477 landed inside an
+  unreleased `0.9.0`, so a pre- and post-fix build are both "0.9.0"), so
+  `nlp_native` now *measures* the guarantee once per process on the first base
+  built — a real second thread touching the problem, catching `BaseException`
+  because a pyo3 panic is one — and disables the native path with a warning
+  naming pounce#477 when it does not hold, falling back to the JAX callback
+  bridge rather than letting an uncatchable panic abort a solve. The stale
+  "enable explicitly once PyNlProblem is made Send-safe" note in `solver.py` is
+  corrected; `DISCOPT_NLP_NATIVE` stays default-OFF on its remaining grounds
+  (neutral-to-modest speedup, MIQP-batch certification perturbation), which is a
+  §5 graduation-panel decision rather than a bug fix.
+  Tests: `test_932_native_base_thread_sharing.py`.
+
 ### Added
+
+- **Anytime dual bound: root seeding + one unified report** (`fix`, #933).
+  27% of a 200-instance MINLPLib sweep reported **no dual bound at all** at
+  `time_limit=8`, for two architectural reasons #933 measured: (a) the root
+  relaxation bound proved during setup was never installed into the tree, so
+  `global_lower_bound` stayed `-inf` until the first fully-processed batch; and
+  (b) the reported bound was re-derived independently in five solve exit paths,
+  four of which had no recovery when the tree bound was unusable — including
+  silently discarding a perfectly *valid* finite tree bound on every
+  no-incumbent limit exit by conflating "the exit is not certified" with "the
+  tree bound is invalid".
+
+  Part (a): `TreeManager::seed_root_bound` (new PyO3 entry point) floors node
+  0's `local_lower_bound` — and permanently the reported global bound — at a
+  root-box bound proved by the *same trusted engine* that bounds the path's
+  nodes (the spatial path's McCormick root probe behind the #930 box-equality
+  gate; the MILP path's structured-node root LP; the #781 HiGHS root-cut bound
+  is deliberately not seeded). Children inherit the floor, so the dual bound is
+  anytime and monotone by construction. The native spatial kernel gets the
+  kernel-side mirror of the #844 policy: its deadline is shortened by the
+  root-fallback reserve, reclaimed once (`bound_time_extension`) the moment its
+  own bound is finite, so only a bound-less kernel forfeits the slice — which
+  the caller then spends on the rigorous root-relaxation fallback. Seeding and
+  the kernel reserve are **bound-changing** and gated by
+  `DISCOPT_ROOT_BOUND_SEED` — graduated **default ON** through the Regime-2
+  panel (`discopt_benchmarks/scripts/issue933_seed_graduation_panel.py`,
+  66 in-repo instances at TL=8, paired OFF/ON: 31 oracle checks with 0
+  crossings, 0 certification regressions, 0 objective drift; bound coverage
+  61→62, ON tighter on 6 / looser on 0 paired bounds, one
+  feasible→certified-optimal upgrade, wall mean −0.55 s; raw log in
+  `discopt_benchmarks/results/issue933/`). `=0` opts out and restores the
+  legacy unseeded tree.
+
+  Part (b) (unconditional, reporting-only): `_finalize_reported_bound` is the
+  one chokepoint for an uncertified exit's reported bound — taint rule applied
+  once (valid+finite+sub-sentinel at the 1e19 threshold, closing the #930
+  `np.isfinite(1e20)` hole for every path), independent-root-bound fallback
+  applied once (root LP / untainted root-batch snapshot; tightest wins), the
+  `bound <= incumbent` certificate invariant enforced, sense mapped once. The
+  NLP-BB/MILP-BB/MIQP-BB paths now capture the taint flag *before* the
+  exit-status logic overwrites it, so a valid tree bound survives no-incumbent
+  time/node-limit exits, and the MILP path reports its live frontier bound
+  instead of the stale root LP value on budget-limited exits.
 
 - **Deterministic work budgets for the root primal heuristics** (`fix`, #912).
   The search tree was a function of *machine speed*: the root
@@ -188,6 +262,379 @@ The release procedure that produces these entries is documented in
   because a bound with no incumbent is still a valid bound.
 
 ### Fixed
+
+- **Two CI signals that reported without measuring** (`ci`). Both were found while
+  driving #960 to green, and both share a shape: a check that answers confidently
+  from something other than the thing it claims to be testing.
+
+  1. **The `changes` gate answered from a guessed diff on all three event
+     arms.** It resolves a base commit and diffs against it; every arm had a
+     path where the base is unavailable and the code substituted
+     `HEAD~1..HEAD` — the tip commit's file list — instead of recognising that
+     it did not know. When that guess lands on a docs-only commit the gate says
+     `code=false` and every solver job below it reports `skipped`, which renders
+     as *not red*. That is the #953 failure mode: a wrong `false` here is not a
+     missing test, it is a green-looking wall of nothing.
+
+     * `workflow_dispatch`: `github.event.before` exists only on `push`, so it
+       expands to the empty string, the first `git diff` fails, and the fallback
+       fires. Dispatching CI on #960, whose tip touched `CHANGELOG.md` and
+       `docs/dev/data/claim-baseline.jsonl`, produced `code=false` and left
+       Rust, `Python fast`, `Python claim-boundary`, `Python correctness` and
+       AMP all `skipped` — nine checks that executed nothing. Now `code=true`
+       unconditionally: pressing the button means "run everything", and there is
+       no base to diff against anyway.
+     * `pull_request` — the trigger that fires on nearly every change here —
+       used `${base:-HEAD~1}`, reachable two ways: the `git fetch` above it is
+       `|| true`, so a fetch failure is silent, and the `--depth=200` fetch
+       installed a shallow boundary that hides the merge base of a branch forked
+       further back than that. Either way a PR that changes the solver behind a
+       docs-only tip commit skipped every solver job. The depth cap is gone (the
+       checkout is already `fetch-depth: 0`) and an unresolvable base is now
+       treated as uncertain.
+     * `push`: an all-zero `before` (a branch's first push), a non-existent
+       object (force-push, shallow clone), or an empty one is likewise the
+       *uncertainty* case the job's own comment already promised to resolve as
+       `true`.
+
+     New `python/tests/test_ci_changes_gate.py` extracts the gate's real shell
+     script out of `ci.yml` — not a copy, so it cannot drift — renders the
+     `${{ github.* }}` expressions, and runs it against throwaway git repos, one
+     case per event type. 12 tests; 6 fail on the pre-change workflow (one per
+     defective arm plus the four `push` base shapes) and the 6 pinning behaviour
+     that must not change (docs-only PRs and pushes still skip, a code file
+     runs, `schedule` still skips the PR matrix, a resolvable merge base is still
+     used in preference to the tip) pass both ways. `pyyaml` moves into the `dev`
+     extra so that file is a skip rather than a collection error where it is
+     absent.
+
+  2. **Two `ex1252` quality bars measured the runner, not the relaxation.**
+     `compute_disjunctive_config_bound` stops on whichever of `max_leaf_solves`
+     and `deadline` comes first, and reported no indication of which. The leaf
+     budget is reproducible; the clock is not. The nightly lane read 33498
+     (42/120 leaves) and 31567 (32/48) on a runner ~3x slower than the reference
+     machine and failed both bars as if the bound had regressed. It had not: at
+     the full budget the bound is **bit-identical** across the #957 boundary —
+     37945.427865923564 at 48 leaves and 63080.286987442756 at 120, matching the
+     values the tests' own docstrings record, with the same leaf and prune counts
+     in both arms.
+
+     `DisjunctiveConfigResult` gains `stopped_on` (`"budget"` / `"deadline"` /
+     `"exhausted"`), mirroring `WorkBudget.stopped_on` from #912 — the same
+     distinction between a search decided by work and one decided by the clock.
+     The two bars now assert `stopped_on != "deadline"` *before* the bound
+     comparison, so a slow machine and a bound regression produce different
+     failures with different instructions, and the clock-bound message says
+     explicitly not to lower the bar. Deadlines are re-sized as backstops at ~2x
+     the measured runner rate (0.175 leaf solves/s → 600 s for 48 leaves, 1500 s
+     for 120), and the nightly lane's `--timeout` goes 900 s → 1800 s so the
+     harness timeout is never what decides a quality bar. The 120-minute job
+     timeout remains the backstop against a hang.
+
+- **Outward rounding no longer turns an exact zero into a subnormal** (`fix`, #957).
+  `interval.py`'s `_round_down`/`_round_up` are `np.nextafter(x, ∓inf)`, and
+  `nextafter(0.0, ±inf)` is `±5e-324`. At every other magnitude "one ULP" is a
+  negligible *relative* widening; at zero it crosses into the subnormal range and
+  manufactures a coefficient ~300 orders of magnitude below everything else in
+  the model. Measured on the in-repo corpus, **384 of 730 relaxation LPs carried
+  such a value**, and in 67 of them the coefficient-spread guard at
+  `milp_relaxation.py:548` — `nz.max() / nz.min() > TRIGGER` — *overflowed to
+  `inf`* while making its decision (with a `RuntimeWarning` as the tell), so
+  equilibration fired unconditionally regardless of how benign the matrix was.
+
+  **The obvious fix — leave every exact zero alone — is unsound, and was not
+  taken.** The nudge at zero is load-bearing wherever the producing operation can
+  underflow: `fl(exp(-800))` is `0.0` while the exact value is `3.6e-348`, so a
+  blanket special-case would give `exp` an upper endpoint *below* its own image.
+  What ships instead is an opt-in pair, `_round_down_exact0` / `_round_up_exact0`,
+  applied only where `fl(result) == 0 ⟹ result == 0` is provable: `+`, `-` and
+  `width` (every double is a multiple of `2**-1074`, so a float sum is zero only
+  when the exact sum is — fuzz-checked against `longdouble` over 14 268 cancelling
+  pairs), `abs`, `sqrt`, `log`, the reciprocal, and `*` / `**2` behind an explicit
+  no-underflow guard on the corner factors. The generic monotone wrapper keeps the
+  unconditional helpers, so a future atom inherits the safe behaviour by default.
+
+  Second, independent half: `_coefficient_spread_exceeds()` replaces the open-coded
+  spread test at both conditioning seams. It uses the overflow-free cross-multiplied
+  form (already applied at the false-infeasible seam by #732 Stage 1-B) *and* drops
+  entries below the smallest normal double, so the guard measures the conditioning
+  of the model rather than of an underflow artifact. Both halves were needed: the
+  interval fix clears `A_ub` on 14 of the 15 affected instances, and `st_e11`'s
+  subnormals — which come from a different producer — are neutralised by the floor
+  (19 overflowing LPs → 0).
+
+  Corpus panel (66 instances, 10 s budget, arms interleaved): **0 soundness
+  violations** against the 16 oracle-checked instances, total node count identical
+  (3298 → 3298), subnormal-carrying LPs 384/730 → 28/782, spread-test overflows
+  67 → 0. Every status/bound/node difference the panel reported was on an instance
+  sitting within ~1 s of the deadline; re-measured unloaded with the arms
+  interleaved, the two decisive ones (`cvxnonsep_nsig30`, `st_e36`) are bit-identical
+  between arms.
+
+  Found while fixing the above: `psd_2x2_sufficient` had the same bug pointing the
+  other way. It skipped its upward round when `fl(off**2) == 0.0`, which is *not*
+  an exact zero when `off` is around `1e-200` — the exact `off**2` is ~1e-400, so
+  a matrix with a (barely) negative determinant could pass the PSD test. The zero
+  test now reads the *factors*, not the flushed product. `gershgorin_lambda_min`
+  /`_max` gain the same treatment, so a linear function's all-zero Hessian bounds
+  come back as exactly `0.0` instead of `∓5e-324` and no longer miss a boundary
+  `λ_min ≥ 0` test.
+
+  **Claim-boundary baseline regenerated, attributed against a `main` control.**
+  This is a bound-changing change, so `docs/dev/data/claim-baseline.jsonl` moves —
+  but `claim_differential`'s contract is that every changed instance be
+  independently attributed, not merely re-recorded. A naive regeneration is
+  *not* attributable here: the committed baseline was stamped at `605d29b` and
+  its `root_lp_bound` column had gone stale, so regenerating on this branch
+  showed 56 bound moves and looked like this PR had done all of them.
+
+  Three-way measurement, with the control arm asserted to lack the marker
+  (`_round_down_exact0` absent in the `main` tree, checked before generating):
+
+  - **committed `605d29b` → `main` `d5f6eff6`** (62 instances): `SHAPE_MOVED=0`,
+    `ROOT_LP_MOVED=52`. All 52 predate this branch, including every one that
+    looked alarming — `nvs13` −4843.01 → −751.12, and `beuster`/`casctanks`/
+    `st_miqp2`/`st_miqp3`/`st_miqp4` dropping to no recorded root bound. The
+    *shape* column was never stale, which is why the gate — shape-only — has been
+    passing on `main` throughout.
+  - **`main` → this branch** (66 instances): `SHAPE_MOVED=7`, `ROOT_LP_MOVED=18`.
+    That is this PR's actual footprint.
+
+  The 7 shape movers are rows-only — column and integer-column counts unchanged
+  everywhere, the signature of extra cuts rather than a different formulation —
+  and they are the claim-boundary job's list instance for instance: `bchoco06`
+  832→848, `bchoco07` 1081→1163, `bchoco08` 1604→1898, `fac2` 54→66, `tspn08`
+  604→609, `tspn10` 935→940, `tspn12` 1340→1345. An independent two-arm probe in
+  a single tree (OFF = the opt-in helpers rebound to the unconditional
+  `_round_down`/`_round_up` in both modules plus the pre-#960 `psd_2x2_sufficient`
+  at both its import sites) reproduces exactly that set, and its OFF arm
+  reproduces the committed baseline shape for all 62 rows
+  (`CONTROL_MATCHED_BASELINE=62 MISMATCHED=[]`).
+
+  Of the 18 bound moves, 12 are last-digit (≤1e-10 relative: `bchoco06/07/08`,
+  `hda`, `heatexch_gen1/2`, `nvs12`, `nvs13`, `nvs21`, `st_e36`, `st_miqp1`,
+  `tspn05`). The 6 substantive ones are all tightenings that stay below their
+  reference optimum — every one of these instances minimizes (`O0 0`), so a valid
+  dual bound may rise but never past the optimum:
+
+  | instance | `main` | this branch | reference optimum |
+  | --- | --- | --- | --- |
+  | `fac2` | none | 303 398.521 | 331 837 498.2 |
+  | `tspn08` | none | 231.983 | 290.567 |
+  | `tspn10` | none | 161.161 | 225.126 |
+  | `tspn12` | none | 183.326 | 262.647 |
+  | `chance` | 26.350 | 28.943 | 29.894 |
+  | `nvs04` | −5e-322 | 0.0 | 0.72 |
+
+  `nvs04` is the bug itself in the baseline: the recorded root bound *was* the
+  subnormal artifact, and it is now an exact zero. Solving the relaxation MILP
+  rather than the root LP tells the same story — `fac2` no usable bound →
+  2 132 258.914, and `tspn08/10/12` go from **unbounded** to a finite valid bound
+  (246.211 / 183.117 / 203.126), all below their optima, `UNSOUND=0`.
+
+  The 52 pre-existing `root_lp_bound` drifts are carried in by this regeneration
+  because the file is generated wholesale; they are recorded here as measured on
+  `main`, not claimed as this PR's doing.
+- **The MILP/MIQP B&B incumbents are verified against every declared row and
+  bound before they are returned** (`fix`, #952). `_solve_miqp_bb`'s only
+  feasibility gate was `_check_lp_solution_feasibility(A_eq_full, b_eq, x_full)`
+  — an equality residual at `tol=1e-4`, 100x the declared `abs=1e-6`, with no
+  inequality-row check, no bound check, and no verification of the point whose
+  objective is returned as `objective` **and**, on `optimal`, as the dual `bound`.
+
+  That gate was a **tautology** on the path that runs.
+  `_pounce_qp_relaxation_nodes` solves only the structural columns and then
+  *reconstructs* the slacks as `z = S⁺(b_eq − A_struct x_s)`, so
+  `A_eq_full [x_s, z] == b_eq` holds to machine precision for **any** `x_s`: a
+  violated inequality row comes back as a negative slack, and the gate never
+  looked at slack bounds. Measured over the issue's 40-seed family: 212 gate
+  invocations, worst equality residual **8.9e-16**, while every returned
+  incumbent sat ~9e-9 outside a declared inequality row. Those excursions are
+  inside `abs=1e-6`, so this was never a live false certificate — the defect is
+  that *nothing bounded them*; their size was set by whatever the QP IPM
+  converged to.
+
+  Node points are now gated on the decomposed `A_ub`/`A_eq` rows plus the node's
+  own box (`_matrix_solution_feasible`, the repo's single arbiter, at
+  `abs=1e-6`), matching what the MILP path's `_solve_node_lp_pounce` already did;
+  a snapped incumbent is verified before `tree.inject_incumbent`; and every
+  incumbent leaving the function is verified against every declared row and the
+  declared box (captured before FBBT), raising rather than silently repairing or
+  downgrading the status — the same loud refusal as the Gurobi QCP path. The gate
+  covers `feasible` as well as `optimal`: `objective` is a primal claim in both.
+  `_check_lp_solution_feasibility` had no callers left and is **deleted**, which
+  closes its unexplained 1e-4 rather than restating it.
+
+  A survey of the five solve exit paths found the same omission on
+  `_solve_milp_bb`, whose incumbent exit was structurally identical (round,
+  unpack, return); it gets the same gate, since fixing only the reported path
+  would be a single-instance fix of a per-path defect. `solve_model` (#779) and
+  `_try_native_spatial_kernel` (#789) already verify. `_solve_nlp_bb` is left
+  open in #954: its rows are nonlinear, so the check needs the evaluator rather
+  than the matrix arbiter, with different tolerance semantics that #952 never
+  measured. This is the primal-side twin of #933, which tracks the same per-path
+  duplication on the dual bound.
+
+  The MILP gate immediately refused
+  `test_nn_equivalence::test_tree_ensemble_fixed_input`, and the producer was not
+  the solve: the incumbent satisfies its equalities to **4.4e-16** and the
+  *snapped* point misses one by **1.55e-6**, from per-coordinate snaps of at most
+  3.9e-7 over a 5-term row. The C-3 call site's comment claimed the snap "cannot
+  move a linear row by more than the integrality tol" — wrong, a row takes one
+  snap per term — and `_round_incumbent_integers`'s `feasible` flag, documented
+  as the caller's guard against exactly this, is vacuous at both B&B call sites
+  because neither passes it an evaluator. Both now use the matrix arbiter as that
+  checker and report the unrounded point when snapping would leave the rows; the
+  unrounded point satisfies *both* declared tolerances, so this is a correction,
+  not a tolerance concession.
+
+  The MILP gate then refused the `vub=1e3`/`vub=1e6` arms of
+  `test_benders_soundness`, and again the producer was upstream of the exit.
+  `_pounce_snap_incumbent` fixes the integers and takes the POUNCE IPM's
+  continuous completion, which honours the slack bounds standing in for
+  inequality rows only to ~1e-8 *relative*; on `v <= 1e6*y` that is a **1e-2**
+  absolute excursion. The point comes back exactly integral, so nothing
+  downstream re-examines it — the tree took it as the incumbent and reported it
+  `optimal`. Traced with a spy on the injection funnel: all 4 node-relaxation
+  points were inside the rows, and the offending `[y=1.0, eta=-1.00000001e+06]`
+  arrived through this funnel, not a node LP. `_solve_milp_bb`'s
+  `_maybe_inject_snapped` now verifies the candidate against the same rows and
+  node box the node solves are held to, which is the check the MIQP twin of that
+  funnel already ran (`_node_point_feasible`). Declining costs nothing:
+  injection is a heuristic accelerator, the subtree stays open, and a genuinely
+  feasible point is re-found from a node relaxation.
+
+  A side effect worth naming, and attributed by measurement rather than by
+  assumption: `test_946_gbd_degenerate_multiplier`'s non-binary arm used to exit
+  `iteration_limit` with bound -2.0, because the master promoted an incumbent
+  whose integer snap had left its own rows and the optimality cut added there
+  carried no usable `eta` information. It is the C-3 correction above — report
+  the unrounded point when snapping leaves the rows — and not the funnel check,
+  that changes this: on `origin/main`'s `solver.py` the arm still stalls, and on
+  this branch with the funnel check reverted it already certifies. It now
+  reaches `optimal` at bound -1.0000000149881925 against an optimum of -1, in 4
+  recourse solves. That test pins both arms: the explanation on the uncertified
+  exit (reached deterministically with `max_iterations=1`) and the newly
+  certified full-budget outcome.
+
+  Verified bound-neutral per CLAUDE.md §5 over a 106-instance panel (the 40-seed
+  family plus every in-repo `minlplib_nl` instance), 49 of them through
+  `_solve_miqp_bb`: **0 drifts** in status/objective/bound/node_count/
+  gap_certified across the 88 self-terminating instances, and byte-identical
+  worst violation (9.973171e-09) on both arms. The single apparent drift
+  (`tls2`) was falsified as a wall-clock artifact — it dispatches to
+  `_solve_nlp_bb`, which this change does not touch, and an interleaved A/B on a
+  quiet machine returned bit-identical results (389 nodes, 3/3 rounds per arm).
+
+- **The NLP-BB incumbent is verified against every declared row and bound before
+  it is returned** (`fix`, #954). `_solve_nlp_bb` was the last of the five solve
+  exit paths with nothing checking the point it returns (#779/#789 closed
+  `solve_model` and `_try_native_spatial_kernel`; #952 closed `_solve_milp_bb` and
+  `_solve_miqp_bb`). Its exit was the same three steps those two had — snap the
+  integers, unpack, return — with no verification of the point whose objective is
+  reported as `objective` and, on `optimal`, as the dual `bound` too.
+
+  Two things kept this from being "apply the #952 gate here". Its rows are
+  nonlinear, so the arbiter cannot be `_matrix_solution_feasible`; the new
+  `_nonlinear_point_excess` applies the repo's nonlinear convention instead
+  (`viol <= tol + rtol*term_scale` at `abs=1e-6`, `rtol=1e-9` — the same test
+  `_jax.primal_heuristics._check_constraint_feasibility` applies whenever a primal
+  heuristic accepts an incumbent), and returns the excess it measured so the
+  refusal names a magnitude and the reported number cannot drift from the decision.
+  And the terminal refine re-solve can *replace* the reported point after every
+  gate the search ran, so the check is the last thing before the return. The rows
+  judged are the ones the model declares — root cuts (#781) are appended to the
+  model before the evaluator is compiled and are excluded — and the box is the
+  declared one, captured before FBBT overwrites it.
+
+  The rounding guard at this call site (#954 item 3) ran at
+  `_round_incumbent_integers`'s default `feas_tol=1e-4`, 100x the declared
+  `abs=1e-6`. It now takes the exit's own arbiter, so a snap can no longer be
+  admitted at 1e-4 and then refused by the exit at 1e-6; a rejected snap keeps the
+  unrounded incumbent, which is C-3's documented fallback.
+
+  Entry experiment before the gate was written (CLAUDE.md §4), over a 106-item
+  panel — a 40-seed convex-MINLP family plus every in-repo `minlplib_nl` instance
+  driven through this path with `nlp_bb=True`: 100 entered `_solve_nlp_bb`, 69
+  returned a point, 2638 comparisons; worst raw violation 9.36e-11 (`tls2`), worst
+  tolerance that would be needed to admit any returned point 3.93e-14, and **0**
+  instances a 1e-6 gate would newly refuse. As with #952 this was never a live
+  false certificate — the defect is that nothing bounded the excursion, whose size
+  was set by whatever the NLP backend converged to, and the exit would equally
+  have returned 1e-2. Bound-neutral per CLAUDE.md §5: the gated arm reproduces the
+  baseline's `node_count`, `objective`, status and `gap_certified` on every
+  self-terminating instance; the 7 apparent drifts in the contended panel run were
+  all on wall-truncated (`gap_certified=False`) searches and vanished on
+  uncontended reruns of both arms.
+
+- **Three CI signals that had stopped signalling** (`ci`). An audit of why #927
+  (an unsound `ex1252` dual bound, asserted by a test in the tree) could sit open
+  found that the lanes meant to catch it were all dark:
+
+  1. **No lane ran `slow` + `correctness` — 153 tests, including every
+     end-to-end certificate assertion.** `python-correctness` runs `not slow`;
+     its comment said the rest was "the nightly `python-coverage` job's
+     responsibility", but that job runs `-m "not slow and not correctness ..."`
+     and `ci.yml` had no `schedule:` trigger at all, so there was no nightly. New
+     `python-correctness-nightly` job (serial, `--timeout=900`, 06:20 UTC) runs
+     exactly that set. `changes` now reports `code=false` on a schedule event so
+     the nightly trigger does not re-run the whole PR matrix.
+  2. **The weekly flag-graduation gate had been exiting 2 before gating
+     anything since 2026-07-13.** The workflow passed a hardcoded
+     `--flags root_fixpoint,node_reduce,...`; `node_reduce` was deprecated out of
+     `GRADUATION_ARMS` in #581, so every scheduled run died on
+     `unknown flag(s): ['node_reduce']` — four consecutive Mondays where the
+     cert-neutrality guard proved nothing. The `--flags` argument is now omitted
+     entirely so the gated set tracks the registry (7 arms, not the copy's 5),
+     and the workflow gained a `pull_request` trigger on its own path so an edit
+     to it is validated by the PR that makes it, not a week later.
+  3. **The AMP integration suite had failed on every push to `main` since
+     2026-07-27** — 40+ consecutive red runs, no tracking issue — on
+     `test_amp_time_limit_with_incumbent_returns_feasible`. The solver contract
+     is intact; the test was the broken part. It drove the timeout by *read
+     ordinal* (`chain([0.0, 0.0], repeat(1.5))`, "the first two reads are before
+     the deadline"), and `monkeypatch.setattr(amp_mod.time, ...)` patches the
+     **global** `time` module, so a burst of ~26 reads inside
+     `nonlinear_bound_tightening`'s budget polling consumed the pre-deadline
+     values. The deadline then blew before any incumbent was stored and
+     `solve_amp` returned through the "no feasible solution found" arm — so the
+     assertion described a path the test no longer executed, and reported it as
+     `assert 'time_limit' == 'feasible'`, which reads as a solver bug. The
+     timeout is now driven by *state* (pre-deadline until an incumbent exists),
+     which no read count can perturb, plus a callback counter so the test cannot
+     pass while measuring nothing (CLAUDE.md §6).
+
+  All three scheduled/main lanes now file-or-refresh a single `ci-signal`-labelled
+  issue on failure. Each of these was red or absent for weeks; none of them
+  reached anyone.
+
+- **A clock seam for the primal-heuristic deadlines, ending a CI flake**
+  (`test`, #950). `TestLocalBranchingBudget::test_deadline_expiring_mid_round_truncates`
+  failed intermittently on the parallel lane as `assert 0 >= 2`. The mechanism is
+  scheduling, not solver behaviour: `local_branching` stamps
+  `slice_deadline = perf_counter() + submip_time_limit` *before* its first budget
+  poll, and since #912 no sub-NLP may start past that deadline — so any stall
+  longer than the test's 250 ms slice (an xdist worker descheduled on a loaded
+  runner) correctly retires the budget before sub-NLP #1, and the test's
+  wall-clock-dependent assertion could not tell that apart from broken truncation
+  logic. Reproduced deterministically by injecting a 0.30 s stall and changing
+  nothing else: `calls` 2 → 0.
+
+  `primal_heuristics._now()` is now the module's single clock read — every
+  heuristic's deadline stamp and poll goes through it, and every `WorkBudget`
+  built there is handed it via the new `WorkBudget(clock=...)` parameter (default
+  `time.perf_counter`; production passes nothing else). The test drives the
+  deadline from a clock the backend advances, so it pins the truncation
+  *schedule* — radius 0 whole, radius 1 cut after its first sub-NLP — as an exact
+  count rather than racing the machine. Verified by re-running the old and new
+  test bodies under a 0.5 s injected stall: old `calls=0` (the reported failure),
+  new `calls=2` with and without the stall; with the injected clock frozen the
+  enumeration runs all `C(3,1)=3` flips (`calls=4`), which is what proves the
+  seam — and not something else — is what fires the gate. `submip_time_limit`
+  was **not** widened: that would have made the race rarer without removing it,
+  and the budget edge is the test's subject. Production behaviour is unchanged;
+  the #912 wall-budget inventory scanner was taught to see through the seam so a
+  new gate cannot leave the ratchet by routing through `_now()`.
 
 - **A non-zero `Constraint.rhs` was a silent wrong answer through the public API**
   (`fix(correctness)`, #909). `Constraint` is exported in

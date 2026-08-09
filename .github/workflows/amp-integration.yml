@@ -96,3 +96,39 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "0"
+
+  # This suite failed on EVERY push to main from 2026-07-27 to 2026-08-08 — 40+
+  # consecutive red runs — on a single test, with no issue tracking it. A red X
+  # on a merge commit is not a signal if nothing routes it anywhere. One open
+  # issue, reused rather than duplicated, is.
+  report-failure:
+    name: File/refresh the CI-signal issue
+    needs: amp-integration
+    if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "CI signal down: AMP integration suite is failing on main"
+        run: |
+          set -euo pipefail
+          gh label create ci-signal --force --color B60205 \
+            --description "A CI lane that is supposed to be watching something has stopped watching"
+          printf '%s\n' \
+            "The AMP integration suite failed on \`${GITHUB_REF_NAME}\` (${GITHUB_SHA})." \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "While this is red the AMP paths are unguarded on main." \
+            > body.md
+          NUM=$(gh issue list --state open --label ci-signal --json number,title \
+                  --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --label ci-signal --body-file body.md
+          fi

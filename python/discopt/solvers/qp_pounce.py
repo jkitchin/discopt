@@ -34,7 +34,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from discopt import _timing
-from discopt.solvers import QPResult, SolveStatus
+from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
     _FINITE_BOUND_THRESHOLD,
     _INF,
@@ -42,6 +42,7 @@ from discopt.solvers.lp_pounce import (
     POUNCE_AVAILABLE,
     PounceKKTError,
     _build_certificate,
+    _certify_unbounded_ray,
     _interior_start,
     _is_infeasible_violation,
     _phase1_min_violation,
@@ -151,7 +152,12 @@ def solve_qp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts: dict[str, Any] = {"print_level": 0}
+    # The QP point is checked by the SAME #850 guard (``_matrix_solution_feasible``,
+    # via ``solver._solve_qp_matrix``), so it takes the shared POUNCE baseline like
+    # every other entry point — see solvers.pounce_option_defaults. Measured on 18
+    # convex QPs (n=5..20, data scale 1e2..1e4): guard trips 4 -> 0 (#940).
+    # A caller's explicit options still win.
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
     if time_limit is not None:
@@ -181,6 +187,21 @@ def solve_qp(
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
+
+    # Same reasoning as the LP path (see lp_pounce._certify_unbounded_ray): Ipopt
+    # codes 3/4 report a stalled or diverging iteration, not a ray, so UNBOUNDED
+    # survives only when a genuine improving recession direction is exhibited.
+    # Passing ``Q`` adds the ``Qd = 0`` rows that make the test exact for a convex
+    # QP — along ``d`` the objective is ``½t²·d'Qd + t·(c'd + x'Qd)``, so it can
+    # only fall without bound when ``d'Qd = 0``, equivalently ``Qd = 0`` for PSD
+    # ``Q``. Spelled out here rather than reusing the LP wrapper because the result
+    # type differs and the quadratic term has to be threaded through (#940).
+    if result.status == SolveStatus.UNBOUNDED and not _certify_unbounded_ray(
+        c_arr, A, cl, cu, lb, ub, opts, Q=Q_arr
+    ):
+        return QPResult(
+            status=SolveStatus.ERROR, iterations=result.iterations, wall_time=result.wall_time
+        )
 
     return result
 
@@ -228,7 +249,7 @@ def solve_qp_kkt(
     cu = b_arr.copy()
     x0 = _interior_start(lb, ub)
 
-    opts: dict[str, Any] = {"print_level": 0}
+    opts: dict[str, Any] = pounce_option_defaults()
     if options:
         opts.update(options)
 

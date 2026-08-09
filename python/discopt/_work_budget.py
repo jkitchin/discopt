@@ -71,7 +71,7 @@ Usage::
 from __future__ import annotations
 
 import time
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 __all__ = [
     "EVAL",
@@ -96,19 +96,29 @@ class WorkBudget:
             non-positive value, is unlimited — but still counted, so an
             instrumented run can report what an unbounded loop actually did.
             ``None`` means every kind is unlimited.
-        deadline: Optional absolute ``time.perf_counter()`` timestamp. This is
-            the *user's* limit (role 1 above), not a work gate: it is checked in
+        deadline: Optional absolute ``clock()`` timestamp. This is the *user's*
+            limit (role 1 above), not a work gate: it is checked in
             :meth:`exhausted` so a heuristic cannot overrun ``time_limit``, and
             when it is what stopped the loop :attr:`stopped_on` says so.
+        clock: The monotonic clock ``deadline`` is measured against. Defaults to
+            :func:`time.perf_counter`; production code never passes anything
+            else. The seam exists so a *test* of deadline-edge behaviour can
+            drive the deadline from a clock it controls instead of racing the
+            machine: with the real clock, the truncation a test means to pin is
+            a consequence of wall time, so an unrelated scheduling stall (a
+            descheduled xdist worker on a loaded runner) silently changes what
+            the code under test does and the test flakes (#950). ``deadline``
+            and ``clock`` must be expressed in the same time base.
     """
 
-    __slots__ = ("limits", "deadline", "used", "_stopped_on")
+    __slots__ = ("limits", "deadline", "used", "_stopped_on", "_clock")
 
     def __init__(
         self,
         limits: Optional[Mapping[str, int]] = None,
         *,
         deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.perf_counter,
     ):
         self.limits: dict[str, int] = {
             k: int(v) for k, v in (limits or {}).items() if v is not None and int(v) > 0
@@ -116,6 +126,7 @@ class WorkBudget:
         self.deadline: Optional[float] = deadline
         self.used: dict[str, int] = {}
         self._stopped_on: Optional[str] = None
+        self._clock: Callable[[], float] = clock
 
     def charge(self, kind: str, count: int = 1) -> None:
         """Record ``count`` operations of ``kind`` as spent."""
@@ -132,7 +143,7 @@ class WorkBudget:
                 if self._stopped_on is None:
                     self._stopped_on = f"work:{kind}"
                 return True
-        if self.deadline is not None and time.perf_counter() >= self.deadline:
+        if self.deadline is not None and self._clock() >= self.deadline:
             if self._stopped_on is None:
                 self._stopped_on = "deadline"
             return True

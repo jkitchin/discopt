@@ -71,6 +71,11 @@ from discopt._jax.milp_relaxation import (
     _linearize_affine_expr_sparse,
 )
 from discopt._jax.model_utils import flat_variable_bounds
+from discopt._jax.outward_rounding import (
+    envelope_1d_slack,
+    envelope_product_slack,
+    relaxed_rhs,
+)
 from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
 
 logger = logging.getLogger(__name__)
@@ -1393,7 +1398,13 @@ def _emit_1d(
         coeffs = {w: sign}
         for j, c in lt.scaled(-sign * slope).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
-        ctx.add_row(coeffs, sign * (a + slope * lt.const))
+        rhs = sign * (a + slope * lt.const)
+        # #956: relax outward. The guard is computed by the shared helper from the
+        # same t-space quantities the incremental patch has, so the two engines'
+        # rows stay bit-identical under `IncrementalMcCormickLP._validate`.
+        ctx.add_row(
+            coeffs, relaxed_rhs(rhs, envelope_1d_slack(slope, lo, hi, flo, fhi, lt.const, rhs))
+        )
 
     def _tangent_row(t0: float, sign: float) -> None:
         # sign*(w - (f(t0) + f'(t0)(t - t0))) >= 0  ->  -sign*w + sign*f'(t0)*t <= ...
@@ -1409,7 +1420,11 @@ def _emit_1d(
         coeffs = {w: -sign}
         for j, c in lt.scaled(sign * gp).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
-        ctx.add_row(coeffs, -sign * intercept - sign * gp * lt.const)
+        rhs = -sign * intercept - sign * gp * lt.const
+        # #956: relax outward (see `_secant_row`).
+        ctx.add_row(
+            coeffs, relaxed_rhs(rhs, envelope_1d_slack(gp, lo, hi, flo, fhi, lt.const, rhs))
+        )
 
     mid = 0.5 * (lo + hi)
     if curv == "convex":
@@ -1775,6 +1790,15 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
 
     Each line touches the graph and lies on the correct side everywhere on the box
     (the convex/concave-envelope construction), so no feasible ``(t, w=t^p)`` is cut.
+
+    In exact arithmetic. In f64 the rhs ``ft0 - m*t0`` is the same cancelling
+    endpoint combination #956 is about, and it cuts by an ulp of its own magnitude:
+    measured on ``x**3`` over ``[-3.18e5, 1.27e6]`` at ``t = lo``, the overestimator
+    facet excluded the exactly-feasible point by **128** absolute. So the rhs is
+    relaxed outward by the same guard the other envelope emitters use. Unlike those,
+    this one has no incremental or native counterpart to stay bit-identical with —
+    ``incremental_mccormick`` declines odd powers on a straddling root box outright —
+    so the guard here is unconstrained by the tri-engine rowset comparison.
     """
     if p < 3 or p % 2 == 0 or not (lo < 0.0 < hi) or not _finite(lo, hi):
         return False
@@ -1787,7 +1811,7 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
             coeffs[j] = coeffs.get(j, 0.0) + c
         # sign*w - sign*m*(cols) <= sign*(m*t0 - ft0 + m*lt.const)*(-1)^...:
         rhs = sign * (ft0 - m * t0 + m * lt.const)
-        ctx.add_row(coeffs, rhs)
+        ctx.add_row(coeffs, relaxed_rhs(rhs, envelope_1d_slack(m, lo, hi, flo, fhi, lt.const, rhs)))
 
     flo, fhi = lo**p, hi**p
     # Underestimator from lo.
@@ -1987,7 +2011,16 @@ def _emit_mccormick(ctx: _Builder, w: int, la: LinForm, ba, lb_: LinForm, bb) ->
         for j, c in lb_.scaled(sign * coef_b).coeffs.items():
             coeffs[j] = coeffs.get(j, 0.0) + c
         rhs = -sign * (cc + coef_a * la.const + coef_b * lb_.const)
-        ctx.add_row(coeffs, rhs)
+        # #956: relax outward, sized from the two forms' enclosures — the same
+        # quantities `_bilinear_rows` and the Rust kernel use, so all three
+        # engines emit the same guarded row.
+        ctx.add_row(
+            coeffs,
+            relaxed_rhs(
+                rhs,
+                envelope_product_slack(coef_a, coef_b, aL, aH, bL, bH, la.const, lb_.const, rhs),
+            ),
+        )
 
 
 def _factor_value(

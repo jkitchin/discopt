@@ -150,12 +150,17 @@ impl PyTreeManager {
     ///     lower_bounds: [N] array of relaxation lower bounds.
     ///     solutions: [N, n_vars] array of relaxation solutions.
     ///     feasible: [N] boolean array (is solution integer-feasible?).
+    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None))]
     fn import_results(
         &mut self,
         node_ids: PyReadonlyArray1<i64>,
         lower_bounds: PyReadonlyArray1<f64>,
         solutions: PyReadonlyArray2<f64>,
         feasible: PyReadonlyArray1<bool>,
+        // #956 T3': per-node RIGOROUS emptiness certificate (Farkas-verified
+        // infeasible relaxation / empty box). Optional so existing callers are
+        // unchanged; omitted means "no certificate", the pre-fix behaviour.
+        certified_infeasible: Option<PyReadonlyArray1<bool>>,
     ) -> PyResult<()> {
         let ids = node_ids.as_array();
         let lbs = lower_bounds.as_array();
@@ -183,6 +188,14 @@ impl PyTreeManager {
             )));
         }
 
+        let cinf = certified_infeasible.as_ref().map(|a| a.as_array());
+        if let Some(ci) = cinf.as_ref() {
+            if ci.len() != n {
+                return Err(PyValueError::new_err(
+                    "certified_infeasible must have the same length as node_ids",
+                ));
+            }
+        }
         let results: Vec<NodeResult> = (0..n)
             .map(|i| {
                 let nid = discopt_core::bnb::NodeId(ids[i] as usize);
@@ -191,6 +204,7 @@ impl PyTreeManager {
                     lower_bound: lbs[i],
                     solution: sols.row(i).to_vec(),
                     is_feasible: feas[i],
+                    certified_infeasible: cinf.as_ref().map(|c| c[i]).unwrap_or(false),
                 }
             })
             .collect();
@@ -272,6 +286,19 @@ impl PyTreeManager {
         let ub_v: Vec<f64> = ub.as_array().to_vec();
         self.inner.set_node_bounds(nid, lb_v, ub_v);
         Ok(())
+    }
+
+    /// Install an externally-proved rigorous lower bound for the root box
+    /// (#933 part (a)): the caller asserts `bound` is a valid lower bound of
+    /// the internally-minimized objective over the box the tree was created
+    /// with (e.g. the root LP/McCormick relaxation bound proved during setup).
+    /// The seed floors every open node's `local_lower_bound` (children inherit
+    /// it) and permanently floors the reported `global_lower_bound`, so the
+    /// tree reports a finite anytime dual bound from the first proved root
+    /// relaxation onward instead of `-inf` until the first processed batch.
+    /// Non-finite values are ignored.
+    fn seed_root_bound(&mut self, bound: f64) {
+        self.inner.seed_root_bound(bound);
     }
 
     /// Process all evaluated nodes: prune, check integrality, branch.

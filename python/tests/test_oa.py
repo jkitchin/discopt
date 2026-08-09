@@ -85,9 +85,37 @@ def _mindtpy_duran_grossmann_minlp():
 
 
 def test_compute_gap_uses_absolute_scale_near_zero():
+    """A near-zero objective must not inflate a small gap into a large relative one.
+
+    Re-baselined by #945: the magnitude was 1.99e-8, which now sits *below* the
+    shared absolute criterion (1e-6, discopt's absolute tolerance) and so reads as
+    closed. The property under test is the denominator floor, not that particular
+    magnitude, so it is re-pinned above the absolute floor where the floor is what
+    decides the answer.
+    """
     from discopt.solvers.oa import _compute_gap
 
-    assert _compute_gap(-1.99e-8, 9e-18) == pytest.approx(1.99e-8)
+    # denom = max(9e-18, 1.99e-3, 1.0) = 1.0 -> the ABSOLUTE gap is reported,
+    # rather than 1.99e-3/9e-18 ~ 2e14.
+    assert _compute_gap(-1.99e-3, 9e-18) == pytest.approx(1.99e-3)
+    # Below the absolute criterion the gap is closed outright.
+    assert _compute_gap(-1.99e-8, 9e-18) == 0.0
+
+
+def test_compute_gap_refuses_to_certify_an_inverted_bound():
+    """A dual bound materially ABOVE the incumbent is not a closed gap (#945).
+
+    ``max(0.0, ub - lb)`` used to turn an inverted certificate into ``gap = 0.0``
+    and hence ``status='optimal'``. That is how the MindtPy constraint-qualification
+    fixture certified an incumbent 1e-4 *below* its true optimum of 3.0 while
+    reporting a dual bound 5e-5 above that same incumbent.
+    """
+    from discopt.solvers.oa import _compute_gap
+
+    # The exact pre-#945 inversion: bound 2.99995 above incumbent 2.99990.
+    assert _compute_gap(2.99995000083, 2.9999000025) == 1.0
+    # Rounding-scale inversions are still absorbed, as they always were.
+    assert _compute_gap(4.0, 3.9999999999) == 0.0
 
 
 # ── Convex MINLP ─────────────────────────────────────────────

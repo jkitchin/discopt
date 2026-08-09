@@ -78,8 +78,13 @@ import pytest
 
 _PKG = Path(__file__).resolve().parents[1] / "discopt"
 
-_MAKE = re.compile(r"(time|_time)\.(perf_counter|monotonic)\(\)\s*\+")
-_ELAPSED = re.compile(r"(time|_time)\.(perf_counter|monotonic)\(\)\s*-\s*\w+[^<>]*[<>]=?")
+# A clock read. ``_now()`` is ``primal_heuristics``' module-level seam over
+# ``time.perf_counter`` (#950) — it is still a wall-clock read, so the scanner
+# must see through it, or routing a new gate through the seam would be a way to
+# leave this inventory silently.
+_CLOCK = r"(?:(?:time|_time)\.(?:perf_counter|monotonic)\(\)|(?<![\w.])_now\(\))"
+_MAKE = re.compile(_CLOCK + r"\s*\+")
+_ELAPSED = re.compile(_CLOCK + r"\s*-\s*\w+[^<>]*[<>]=?")
 
 # (module-relative path, source line, category). See the module docstring.
 KNOWN: tuple[tuple[str, str, str], ...] = (
@@ -276,19 +281,23 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "if total_time_limit is not None else None",
         "contract",
     ),
+    # These three read the clock through ``primal_heuristics._now()`` since #950
+    # (one seam, monkeypatchable, so a deadline-edge test pins the schedule it
+    # means to test instead of racing the machine). Same three gates, same
+    # categories — only the spelling of the clock read changed.
     (
         "_jax/primal_heuristics.py",
-        "_wall = time.perf_counter() + max(0.0, time_budget)",
+        "_wall = _now() + max(0.0, time_budget)",
         "legacy",
     ),
     (
         "_jax/primal_heuristics.py",
-        "slice_deadline = time.perf_counter() + max(0.0, float(submip_time_limit))",
+        "slice_deadline = _now() + max(0.0, float(submip_time_limit))",
         "contract",
     ),
     (
         "_jax/primal_heuristics.py",
-        "t_end = time.perf_counter() + max(0.0, float(time_budget))",
+        "t_end = _now() + max(0.0, float(time_budget))",
         "legacy",
     ),
     (
