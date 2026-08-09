@@ -11,6 +11,16 @@ differential gate (plan §3.2) compares every canonical-cutover PR against; sinc
 tolerance), so a bound drift requires deliberately regenerating this file in the
 PR that causes it.
 
+Since #971 the gate reads the recorded root LP in two ways, because the two are
+not equally reproducible: the recorded pair must *reproduce* on the bulk of the
+corpus (a handful of instances legitimately differ across arithmetic paths at an
+identical fingerprint — the certified bound is a Neumaier-Shcherbina bound read
+off a degenerate LP's non-unique dual), while the *properties* of the current
+result — the #961 status/bound contract, and a bound at or below the published
+optimum — are asserted hard on every host. So a row recorded here is a
+reproducibility reference, not a correctness oracle; the oracle is
+``docs/dev/data/cert-optima.json`` plus ``python/tests/data/known_optima.toml``.
+
 Usage (from the repo root, with the built extension importable)::
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
