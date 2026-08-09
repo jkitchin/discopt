@@ -1814,6 +1814,49 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > genuinely better on the metric it was built for, while paying for it in the metric
 > the solver's product actually is. **All three flags stay default-OFF.**
 
+### 14b-qual. Retraction of §14b's soundness evidence — the oracle was 1/19 (2026-08-09)
+
+> CLAUDE.md §11: a measurement that contradicts a claim I already published gets
+> retracted in writing before anything else proceeds. This qualifies §14b above.
+>
+> §14b asserts "**Nothing is unsound** (`unsound=[]`, `incumbent_verification_failed=[]`,
+> …)". The `unsound=[]` half of that was **not** a measurement over 19 instances. The
+> panel's `reference_optimum()` read `python/tests/_optima.py` behind a bare
+> `except Exception: return None` — §7's exact failure mode — and that module records
+> 27 curated instances. A counted control over the panel's own 19 names
+> (`old_oracle_covered`) returns **one**: `clay0303hfsg`. Every other instance's oracle
+> arm was skipped, and the panel printed `unsound: []` regardless. The other soundness
+> checks in the same function *did* fire on all 19 (bound-crosses-incumbent,
+> incumbent verification), so §14b's soundness conclusion was never empty — but its
+> bound-vs-oracle component rested on one instance's three arms per rep (9 comparisons
+> over the three reps, counted) and was reported as though it covered all 19.
+>
+> **The claim survives re-measurement, and is now stated at its real strength.** The
+> three saved artifacts were re-scored against `minlplib.solu` — the library-wide
+> oracle — without re-running anything, since the cells already carry every arm's
+> bound (`--rescore`, and the standalone
+> `discopt_benchmarks/scripts/issue966_rescore_against_solu.py`):
+>
+> | | merged §14b | re-scored |
+> |---|---|---|
+> | instances with an oracle | 1 / 19 | **16 / 19** |
+> | bound-vs-oracle comparisons | 3 per rep, 9 total | **44 per rep, 132 over 3 reps** |
+> | violations | 0 | **0** |
+>
+> Tightest margin over all 132: `syn05hfsg`, −1.99e-09 — inside the 1e-4 relative
+> tolerance and attributable to LP arithmetic, not a crossed bound. `bchoco06`,
+> `bchoco07` and `bchoco08` are named in neither oracle and remain **uncovered**; they
+> are reported, never counted as clean. §14b's verdict (all three flags default-OFF)
+> is unchanged — that verdict turned on `cert_clean` and the bound ledger, not on this
+> line.
+>
+> **Instrument fixed, not just the sentence.** `reference_optimum()` now consults
+> `minlplib.solu` first and falls back to `_optima`; only `KeyError` (the one genuine
+> "no oracle" outcome) is swallowed, so a missing `.solu` or a bad import crashes.
+> `soundness()` returns `oracle_comparisons_executed` and `instances_without_oracle`,
+> both printed, and the panel **exits non-zero** when it made zero oracle comparisons
+> (§6) — the state that produced this retraction can no longer report success.
+
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
 > **The defect (confirmed).** The McCormick row generators in
