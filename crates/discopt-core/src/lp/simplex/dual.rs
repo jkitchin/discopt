@@ -29,6 +29,13 @@ use crate::lp::crossover::LpView;
 
 const INF: f64 = 1e20;
 
+/// Max in-place recoveries from a near-zero pivot per deadline-carrying dual
+/// re-solve (#928). Each recovery is a refactorize + exact recompute — the same
+/// drift repair the loop already runs on a cadence — so the cap bounds the extra
+/// cost while a genuinely singular pivot selection (which recurs on the exact
+/// values) still reaches the robust cold fallback within a handful of attempts.
+const UNSTABLE_RECOVERY_MAX: usize = 5;
+
 /// Re-optimize `min cᵀx s.t. A x = b, l ≤ x ≤ u` from a warm `start` basis via
 /// the dual simplex, falling back to a cold solve on any difficulty.
 ///
@@ -402,20 +409,54 @@ impl<'a> PreparedDual<'a> {
     /// the same LP, so the result is always correct.
     pub fn reoptimize(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> LpSolve {
         crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
-        match self.run_dual(l, u, b, opts) {
+        // #928: the dual loop's most recent exact-refresh duals, banked so a
+        // breakdown → cold-fallback → deadline-cut sequence does not forfeit the
+        // floor the (dual-feasible, monotone) loop had already proved. Filled only
+        // when `opts.bank_deadline_duals` is set; empty otherwise.
+        let mut banked_y: Vec<f64> = Vec::new();
+        match self.run_dual(l, u, b, opts, &mut banked_y) {
             Some(sol) => sol,
             // Cold fallback from the prepared CSC matrix (clone is O(nnz), paid only
             // on the rare numerical-breakdown path) — no dense matrix is kept.
             None => {
                 crate::profile::incr(crate::profile::Ctr::DualColdFallbacks);
-                solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts)
+                let mut sol = solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts);
+                // #928: the rescue was itself cut short (`IterLimit` can only be the
+                // deadline or the pivot cap). Its exported dual is a mid-primal
+                // candidate that proves close to nothing — measured on the hda node
+                // LP, a phase-1 exit's `y` is identically zero, i.e. the trivial
+                // `g(0)` box floor — while `banked_y` is from a dual-FEASIBLE basis,
+                // so its Neumaier–Shcherbina value is the dual objective the loop
+                // had monotonically pushed up before breaking down. Both are
+                // candidates the caller independently verifies (NS is sound for ANY
+                // multiplier vector), so preferring the banked one can only tighten
+                // the recovered floor, never make it unsound. `banked_y` is
+                // non-empty only when a deadline was set, so plain pivot-cap exits
+                // keep the historical dual untouched.
+                if sol.status == LpStatus::IterLimit && !banked_y.is_empty() {
+                    sol.dual = banked_y;
+                }
+                sol
             }
         }
     }
 
     /// The dual pivots, on a fresh clone of the prepared factorization/basis.
     /// `None` requests the cold fallback (numerical breakdown or iteration cap).
-    fn run_dual(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
+    ///
+    /// When `opts.bank_deadline_duals` is set, `banked_out` is kept up to date
+    /// with the row duals `y = B⁻ᵀc_B` of the most recent exact refresh (#928) —
+    /// the floor the caller falls back on if this loop breaks down and the cold
+    /// rescue is then itself cut by the deadline. Otherwise it is never written
+    /// (no extra work on the default path).
+    fn run_dual(
+        &self,
+        l: &[f64],
+        u: &[f64],
+        b: &[f64],
+        opts: &SimplexOptions,
+        banked_out: &mut Vec<f64>,
+    ) -> Option<LpSolve> {
         let (m, n, c, sp) = (self.m, self.n, self.c, &self.sp);
         let tol = opts.tol;
         // Clone the pristine prepared state; the loop mutates these in place.
@@ -423,6 +464,20 @@ impl<'a> PreparedDual<'a> {
         let mut basis = self.basis.clone();
         let mut slot_of = self.slot_of.clone();
         let mut stat = self.stat.clone();
+
+        // Exact reduced-cost refresh that additionally banks the refresh's row
+        // duals into `banked_out` when `opts.bank_deadline_duals` is set (#928) —
+        // one assignment, no extra linear algebra (the `y` falls out of the
+        // recompute for free).
+        macro_rules! refresh_rc {
+            () => {{
+                let (d_new, y_new) = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                if opts.bank_deadline_duals {
+                    *banked_out = y_new;
+                }
+                d_new
+            }};
+        }
 
         let nb_value = |stat: &[i8], j: usize| -> f64 {
             if stat[j] == AT_UPPER {
@@ -441,7 +496,7 @@ impl<'a> PreparedDual<'a> {
         {
             let _t_rc = crate::profile::Timer::new(crate::profile::Phase::DualRecompute);
             xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-            dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+            dvec = refresh_rc!();
         }
         // Iterations since the last exact refresh; bound roundoff in the rank-1
         // updates by refreshing at least this often (still far cheaper than the
@@ -464,6 +519,11 @@ impl<'a> PreparedDual<'a> {
         // was the iteration cap → cold fallback; Bland resolves it in place.
         let mut stall = 0usize;
         let bland_threshold = 2 * (n + 1);
+        // #928: in-place recoveries from a near-zero pivot, attempted only on a
+        // deadline-carrying solve (see the unstable-pivot arm below). Capped per
+        // solve so a persistently singular selection still reaches the cold
+        // fallback promptly.
+        let mut unstable_recoveries = 0usize;
         // Warm-restart **stall guard** (discopt F2). Bland's rule above makes the
         // dual loop cycle-free in exact arithmetic, but a warm re-solve after a
         // row-append can still spin near the *feasibility tolerance* in floating
@@ -490,22 +550,42 @@ impl<'a> PreparedDual<'a> {
         for pivots in 0..stall_cap {
             let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
-            // timeout we abandon the warm dual re-solve and request the cold
-            // fallback by returning None; the cold primal solve re-checks the
-            // same deadline on its first iteration and returns IterLimit, which
-            // the B&B treats soundly. Polled every 256 pivots to keep the now()
-            // cost negligible against a full ftran iteration.
+            // timeout, bank the progress instead of discarding it (#928): the
+            // dual simplex maintains DUAL FEASIBILITY throughout, so the current
+            // basis's row duals `y = B⁻ᵀc_B` evaluate (via the caller's
+            // Neumaier–Shcherbina check) to the monotone best-so-far dual
+            // objective — the tightest floor this solve has proved. Returning
+            // `None` here (the pre-#928 behaviour) fell back to a cold primal
+            // whose budget was already spent, so it bailed `IterLimit` from its
+            // INITIAL basis and the recovered floor was near-useless: on the hda
+            // node LP the banked floor was -141697 at ANY deadline fraction
+            // while the LP optimum -64473 was fractions of a second away. The
+            // status is still `IterLimit` — no consumer may trust `x`/`obj`
+            // (the point is primal-infeasible mid-loop); only the dual candidate
+            // is exported, and the caller independently verifies any bound built
+            // from it (NS is sound for ANY multiplier vector). Non-deadline
+            // difficulties (stall cap, unstable pivot, factorization loss) still
+            // return `None` → cold fallback, which then shares the same
+            // remaining deadline; and without `opts.bank_deadline_duals` (the
+            // default — e.g. the MILP driver's own deadline route) the exit is
+            // the legacy `None`, keeping that pivot path untouched. Polled every
+            // 256 pivots to keep the now() cost negligible.
             if (pivots & 255) == 0
                 && opts
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d)
             {
+                if opts.bank_deadline_duals {
+                    return Some(banked_deadline_solve(
+                        &mut lu, &basis, &slot_of, &stat, &xb, c, l, u, n, m, pivots,
+                    ));
+                }
                 return None;
             }
             // Periodic exact refresh to bound increment roundoff.
             if since_refresh >= REFRESH {
                 xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                dvec = refresh_rc!();
                 since_refresh = 0;
             }
 
@@ -522,7 +602,7 @@ impl<'a> PreparedDual<'a> {
                         match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
                             Some(sel) => sel,
                             None => {
-                                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                                dvec = refresh_rc!();
                                 if dual_feasible(n, &stat, l, u, &dvec, tol) {
                                     // In-engine refined recovery (discopt#364): if the
                                     // working factor's growth signal flags possible digit
@@ -617,7 +697,7 @@ impl<'a> PreparedDual<'a> {
             // empty the set. Flips only change which bound a nonbasic sits at.
             let mut cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
             if cand.is_empty() {
-                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                dvec = refresh_rc!();
                 cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
                     xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
@@ -708,6 +788,39 @@ impl<'a> PreparedDual<'a> {
             }
             let piv = alpha[r];
             if piv.abs() <= tol {
+                // Unstable (near-zero) pivot. On a solve with NO deadline this
+                // hands off to the robust cold fallback, exactly as before. On a
+                // deadline-carrying solve (#928) that hand-off forfeits the dual
+                // loop's anytime floor: the cold primal proves no usable bound
+                // mid-run, so if IT is then cut by the deadline the recovered
+                // floor collapses to the trivial `g(y=0)` box bound (measured on
+                // the hda node LP: floor -141697 vs optimum -64473 at every
+                // deadline fraction, after this very bail at pivot 563). The tiny
+                // pivot is usually Forrest–Tomlin update drift, and the existing
+                // recovery for drift is refactorize + exact recompute — so do
+                // that in place and re-select, keeping the (monotone-bound) dual
+                // loop alive. Bounded: a few attempts per solve, then the old
+                // cold bail; a genuinely singular selection re-trips immediately
+                // and exits through it. Sound: refactorize + exact recompute is
+                // the loop's soundness anchor already, and no pivot is taken on
+                // the near-zero element.
+                if opts.bank_deadline_duals && unstable_recoveries < UNSTABLE_RECOVERY_MAX {
+                    unstable_recoveries += 1;
+                    let cols: Vec<Vec<(usize, f64)>> = basis
+                        .iter()
+                        .map(|&j| {
+                            let (rows, vals) = sp.col(j);
+                            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                        })
+                        .collect();
+                    if lu.factorize_sparse(m, &cols).is_ok() {
+                        xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                        dvec = refresh_rc!();
+                        updates = 0;
+                        since_refresh = 0;
+                        continue;
+                    }
+                }
                 return None; // unstable (near-zero) pivot → robust cold fallback
             }
             {
@@ -802,7 +915,7 @@ impl<'a> PreparedDual<'a> {
                 updates = 0;
                 // Fresh factorization → reseed exact values, reset the drift clock.
                 xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                dvec = refresh_rc!();
                 since_refresh = 0;
             } else {
                 since_refresh += 1;
@@ -924,7 +1037,9 @@ fn refined_basic_values(
     Some(xb)
 }
 
-/// Exact reduced costs `d_j = c_j − yᵀA_j` (with `y = B⁻ᵀ c_B`) for every column.
+/// Exact reduced costs `d_j = c_j − yᵀA_j` (with `y = B⁻ᵀ c_B`) for every column,
+/// returned together with the row duals `y` they were derived from (`y` falls out
+/// of the computation for free; #928 banks it as the deadline floor candidate).
 /// Basic columns get ≈0. Used to seed and periodically refresh the maintained
 /// `dvec`, and to verify dual feasibility before `Optimal` is returned.
 fn recompute_reduced_costs(
@@ -933,7 +1048,7 @@ fn recompute_reduced_costs(
     c: &[f64],
     n: usize,
     basis: &[usize],
-) -> Option<Vec<f64>> {
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
     if lu.btran(&mut y).is_err() {
         return None;
@@ -942,7 +1057,7 @@ fn recompute_reduced_costs(
     for (j, dj) in d.iter_mut().enumerate() {
         *dj = c[j] - sp.dot(j, &y);
     }
-    Some(d)
+    Some((d, y))
 }
 
 /// Most primal-infeasible basic variable by dual-Devex score `violation²/γ`, or
@@ -1061,6 +1176,54 @@ fn dual_feasible(n: usize, stat: &[i8], l: &[f64], u: &[f64], dvec: &[f64], tol:
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The solution a deadline-cut dual re-solve hands back instead of `None` (#928):
+/// status [`LpStatus::IterLimit`] with the *current* basis's row-dual candidate
+/// `y = B⁻ᵀc_B`. The dual simplex maintains dual feasibility, so a caller-side
+/// Neumaier–Shcherbina evaluation of this `y` recovers the monotone best-so-far
+/// dual objective — the tightest floor the cut-short solve has proved. `x`/`obj`
+/// are the mid-loop (primal-infeasible) state and MUST NOT be trusted by any
+/// consumer — the `IterLimit` status already enforces that contract everywhere.
+/// The dual is a *candidate*: NS is sound for ANY multiplier vector, so a drifted
+/// `y` only loosens the recovered floor, never lifts it above the optimum. On a
+/// btran failure the dual is left empty (the caller then banks nothing, exactly
+/// the pre-#928 outcome).
+#[allow(clippy::too_many_arguments)]
+fn banked_deadline_solve(
+    lu: &mut FeralLU,
+    basis: &[usize],
+    slot_of: &[i64],
+    stat: &[i8],
+    xb: &[f64],
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    n: usize,
+    m: usize,
+    pivots: usize,
+) -> LpSolve {
+    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+    let dual = if lu.btran(&mut y).is_ok() {
+        y
+    } else {
+        Vec::new()
+    };
+    assemble(
+        n,
+        m,
+        basis,
+        slot_of,
+        stat,
+        xb,
+        c,
+        l,
+        u,
+        LpStatus::IterLimit,
+        pivots,
+        dual,
+        Vec::new(),
+    )
+}
+
 fn assemble(
     n: usize,
     _m: usize,
@@ -1138,6 +1301,80 @@ mod tests {
         let feasible = [1.0, 1.0];
         assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false).is_none());
         assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true).is_none());
+    }
+
+    // #928: a deadline that is already spent when the warm re-solve starts must
+    // return `IterLimit` WITH the start basis's row-dual candidate, not `None`
+    // into a cold fallback that discards it. The start basis here is the parent's
+    // OPTIMAL basis, so the banked `y = B⁻ᵀc_B` is the parent's exact duals — the
+    // caller's Neumaier–Shcherbina evaluation recovers the parent bound instead
+    // of the trivial `g(0)` box floor the cold fallback's initial basis yields.
+    #[test]
+    fn expired_deadline_banks_the_start_basis_duals() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        // Tighten x1 ≤ 0.5 so the warm re-solve has real dual work to do, then
+        // hand it a deadline that has already passed.
+        let u2 = [5.0, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u2,
+        };
+        let expired = SimplexOptions {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            bank_deadline_duals: true,
+            ..opts()
+        };
+        let cut = solve_lp_warm(&lp2, &b, &cold.basis, &expired);
+        assert_eq!(cut.status, LpStatus::IterLimit, "a spent budget must yield");
+        assert_eq!(cut.iters, 0, "no pivot may run past an expired deadline");
+        assert_eq!(
+            cut.dual.len(),
+            m,
+            "the deadline exit must bank the current basis's dual candidate"
+        );
+        // The banked duals are the start (= parent-optimal) basis's y, so they
+        // must satisfy the same safe-bound identity the optimal export does,
+        // evaluated on the PARENT's LP (the basis is optimal there):
+        // bᵀy + Σ_j min_box (c − Aᵀy)_j z_j ≈ parent objective.
+        let y = &cut.dual;
+        let mut g = b[0] * y[0] + b[1] * y[1];
+        for j in 0..n {
+            let aj = [a[j], a[4 + j]];
+            let rc = c[j] - (aj[0] * y[0] + aj[1] * y[1]);
+            g += if rc > 0.0 {
+                rc * l[j]
+            } else if rc < 0.0 {
+                rc * u[j]
+            } else {
+                0.0
+            };
+        }
+        assert!(
+            (g - cold.obj).abs() < 1e-7,
+            "banked duals must recover the parent bound: g={} parent obj={}",
+            g,
+            cold.obj
+        );
     }
 
     // Solve cold, then perturb one bound and re-solve warm from the cold basis;

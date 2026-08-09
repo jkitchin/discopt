@@ -449,6 +449,47 @@ def _refined_safe_bound_regularized(
     return best
 
 
+def _dual_start_slack_basis(
+    c_arr: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    m: int,
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Sign-matched slack start basis for a deadline-carrying COLD pure-LP solve
+    (#928), or ``None`` when it is not dual-feasible.
+
+    Slacks basic (``B = I``, so ``y = B⁻ᵀc_B = 0`` and every reduced cost is
+    ``c_j``), each structural column nonbasic at the bound its objective sign
+    selects (``c_j > 0`` → lower, ``c_j < 0`` → upper, ``c_j = 0`` → lower). That
+    basis is dual-feasible exactly when every selected side is finite, which this
+    checks; the Rust ``PreparedDual::prepare`` re-verifies the same precondition
+    exactly, so an accepted basis here can never make the engine converge wrong.
+
+    Why: the primal simplex proves NO usable lower bound mid-run — on the hda
+    separated-relaxation LP the floor recovered from a deadline-cut cold primal
+    was -141697 at *any* deadline fraction (15/40/75% of the full solve) against
+    an optimum of -64473. The dual simplex maintains dual feasibility, so its
+    dual objective is a monotone anytime lower bound and a deadline exit banks
+    the best bound proved so far. Only engaged when the caller set a finite
+    ``time_limit`` (i.e. it wants an interruptible solve with a bankable floor);
+    a solve without a deadline keeps the historical cold-primal path
+    bit-identical.
+    """
+    if m <= 0:
+        return None
+    need_lb = c_arr > 0.0
+    need_ub = c_arr < 0.0
+    if ((need_lb & (lb <= -_INF)) | (need_ub & (ub >= _INF))).any():
+        return None  # a selected side is open → dual-infeasible → keep the primal
+    n = c_arr.shape[0]
+    # Rust basis encoding: AT_LOWER=0, BASIC=1, AT_UPPER=2 (crate::lp::basis).
+    col_status = np.concatenate(
+        [np.where(need_ub, 2, 0).astype(np.int8), np.ones(m, dtype=np.int8)]
+    )
+    basic_vars = np.arange(n, n + m, dtype=np.int64)
+    return col_status, basic_vars
+
+
 def _farkas_certified_std(
     ray: np.ndarray,
     a_std: np.ndarray,
@@ -722,6 +763,15 @@ def solve_lp_warm_std(
     lb_std = np.concatenate([lb, np.zeros(m)])
     ub_std = np.concatenate([ub, np.full(m, 1e20)])
     c_std = np.concatenate([c_arr, np.zeros(m)])
+
+    # #928: a COLD solve carrying a finite deadline starts the DUAL simplex from
+    # the sign-matched slack basis when that basis is dual-feasible, because only
+    # the dual loop has an anytime (monotone, bankable) lower bound to return when
+    # the deadline fires — the cold primal proves nothing usable mid-run. An
+    # ineligible LP (an open bound on a selected side) keeps the primal path, and
+    # a solve with no deadline is bit-identical to before.
+    if in_basis is None and time_limit is not None and np.isfinite(time_limit):
+        in_basis = _dual_start_slack_basis(c_arr, lb, ub, m)
 
     cs0 = None if in_basis is None else np.ascontiguousarray(in_basis[0], dtype=np.int8)
     bv0 = None if in_basis is None else np.ascontiguousarray(in_basis[1], dtype=np.int64)
