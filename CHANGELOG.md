@@ -43,6 +43,49 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Anytime dual bound: root seeding + one unified report** (`fix`, #933).
+  27% of a 200-instance MINLPLib sweep reported **no dual bound at all** at
+  `time_limit=8`, for two architectural reasons #933 measured: (a) the root
+  relaxation bound proved during setup was never installed into the tree, so
+  `global_lower_bound` stayed `-inf` until the first fully-processed batch; and
+  (b) the reported bound was re-derived independently in five solve exit paths,
+  four of which had no recovery when the tree bound was unusable — including
+  silently discarding a perfectly *valid* finite tree bound on every
+  no-incumbent limit exit by conflating "the exit is not certified" with "the
+  tree bound is invalid".
+
+  Part (a): `TreeManager::seed_root_bound` (new PyO3 entry point) floors node
+  0's `local_lower_bound` — and permanently the reported global bound — at a
+  root-box bound proved by the *same trusted engine* that bounds the path's
+  nodes (the spatial path's McCormick root probe behind the #930 box-equality
+  gate; the MILP path's structured-node root LP; the #781 HiGHS root-cut bound
+  is deliberately not seeded). Children inherit the floor, so the dual bound is
+  anytime and monotone by construction. The native spatial kernel gets the
+  kernel-side mirror of the #844 policy: its deadline is shortened by the
+  root-fallback reserve, reclaimed once (`bound_time_extension`) the moment its
+  own bound is finite, so only a bound-less kernel forfeits the slice — which
+  the caller then spends on the rigorous root-relaxation fallback. Seeding and
+  the kernel reserve are **bound-changing** and gated by
+  `DISCOPT_ROOT_BOUND_SEED` — graduated **default ON** through the Regime-2
+  panel (`discopt_benchmarks/scripts/issue933_seed_graduation_panel.py`,
+  66 in-repo instances at TL=8, paired OFF/ON: 31 oracle checks with 0
+  crossings, 0 certification regressions, 0 objective drift; bound coverage
+  61→62, ON tighter on 6 / looser on 0 paired bounds, one
+  feasible→certified-optimal upgrade, wall mean −0.55 s; raw log in
+  `discopt_benchmarks/results/issue933/`). `=0` opts out and restores the
+  legacy unseeded tree.
+
+  Part (b) (unconditional, reporting-only): `_finalize_reported_bound` is the
+  one chokepoint for an uncertified exit's reported bound — taint rule applied
+  once (valid+finite+sub-sentinel at the 1e19 threshold, closing the #930
+  `np.isfinite(1e20)` hole for every path), independent-root-bound fallback
+  applied once (root LP / untainted root-batch snapshot; tightest wins), the
+  `bound <= incumbent` certificate invariant enforced, sense mapped once. The
+  NLP-BB/MILP-BB/MIQP-BB paths now capture the taint flag *before* the
+  exit-status logic overwrites it, so a valid tree bound survives no-incumbent
+  time/node-limit exits, and the MILP path reports its live frontier bound
+  instead of the stale root LP value on budget-limited exits.
+
 - **Deterministic work budgets for the root primal heuristics** (`fix`, #912).
   The search tree was a function of *machine speed*: the root
   `integer_local_search` bounded its own extent with a wall clock
