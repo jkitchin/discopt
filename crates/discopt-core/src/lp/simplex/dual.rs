@@ -1175,7 +1175,6 @@ fn dual_feasible(n: usize, stat: &[i8], l: &[f64], u: &[f64], dvec: &[f64], tol:
     true
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The solution a deadline-cut dual re-solve hands back instead of `None` (#928):
 /// status [`LpStatus::IterLimit`] with the *current* basis's row-dual candidate
 /// `y = B⁻ᵀc_B`. The dual simplex maintains dual feasibility, so a caller-side
@@ -1224,6 +1223,7 @@ fn banked_deadline_solve(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assemble(
     n: usize,
     _m: usize,
