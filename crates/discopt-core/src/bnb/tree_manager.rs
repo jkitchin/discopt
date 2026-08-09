@@ -515,6 +515,9 @@ impl TreeManager {
             //    limit. Sound: the flag is set only from a rigorous emptiness
             //    certificate, never from a failure sentinel.
             if result.certified_infeasible {
+                // Counted so a panel can tell "this arm changed nothing" from
+                // "this arm never fired" (CLAUDE.md §6) — profiling-gated.
+                crate::profile::incr(crate::profile::Ctr::TreeCertInfeasPrunes);
                 self.pool.prune(result.node_id);
                 stats.pruned += 1;
                 continue;
@@ -1973,6 +1976,7 @@ mod tests {
             lower_bound: f64::NEG_INFINITY,
             solution: vec![0.5, 0.7],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         let ts = tm.stats();

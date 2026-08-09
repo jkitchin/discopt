@@ -247,6 +247,17 @@ counters!(
     // are inside their boxes. These counters test the claim.
     Phase1EndBoxOk,
     Phase1EndBoxViolated,
+    // ... and how big the violation is, measured against EXPAND's own per-pivot
+    // ceiling (1e-7). At-or-below that scale it is one pivot's sanctioned Harris
+    // excursion; far above it, an accumulation across pivots or update drift.
+    // #956 T3': nodes fathomed on a rigorous emptiness certificate rather than by
+    // bound. Zero on an instance means the T3' arm never fired there, which is the
+    // difference between "the change is neutral" and "the experiment measured
+    // nothing" (CLAUDE.md §6).
+    TreeCertInfeasPrunes,
+    Phase1ViolLe1Expand,
+    Phase1ViolLe100Expand,
+    Phase1ViolGt100Expand,
     // #956 T2': the EXPAND-free re-solve of a cold primal that failed to decide,
     // and how many of those reached a terminal certificate instead of failing again.
     EntryDense,
@@ -302,14 +313,25 @@ impl Drop for Timer {
     }
 }
 
-/// Reset all accumulators (e.g. between solves).
+/// Reset the per-`dump` accumulators (e.g. between solves).
+///
+/// Deliberately leaves `CTOTALS` alone. `milp_driver` calls this at the start of
+/// every MILP sub-solve, so clearing the run totals here silently zeroed them
+/// mid-run: a counter incremented before the last sub-solve read back as 0, and
+/// "0" reads as "this path never executed". That cost a wrong conclusion twice
+/// (#956 T1 and again in the T6 fired-check), which is why the totals now survive
+/// both [`dump`] and this. Use [`reset_totals`] to clear them on purpose.
 pub fn reset() {
-    for a in PCOUNT
-        .iter()
-        .chain(PNANOS.iter())
-        .chain(CVALS.iter())
-        .chain(CTOTALS.iter())
-    {
+    for a in PCOUNT.iter().chain(PNANOS.iter()).chain(CVALS.iter()) {
+        a.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Clear the run totals as well — the deliberate "start a new measurement" reset,
+/// called only by an instrument that owns the whole process.
+pub fn reset_totals() {
+    reset();
+    for a in CTOTALS.iter() {
         a.store(0, Ordering::Relaxed);
     }
 }

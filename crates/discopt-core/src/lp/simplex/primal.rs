@@ -131,7 +131,9 @@ pub fn solve_lp_cols(
     // is not paid on the default path).
     crate::profile::incr(crate::profile::Ctr::EntryCols);
     let expand_retry_cols = expand_reset_retry_available().then(|| cols.clone());
-    let mut sol = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run();
+    let mut sx0 = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
+    sx0.no_expand = expand_suppressed_globally();
+    let mut sol = sx0.run();
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
             sol = dense_retry(sol, || {
@@ -163,6 +165,26 @@ fn expand_reset_retry_available() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("DISCOPT_PRIMAL_EXPAND_RESET")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
+            .unwrap_or(false)
+    })
+}
+
+/// Whether EXPAND is suppressed on the **primary** solve, not just the retry
+/// (`DISCOPT_SIMPLEX_NO_EXPAND=1`, default OFF, read once).
+///
+/// This is the seam the #956 T2′ entry experiment needs. The retry above measures
+/// "how many already-failed solves does an EXPAND-free re-solve rescue" (4 %),
+/// which cannot settle whether EXPAND *causes* the bound excursions — a failed
+/// solve is already deep in trouble for other reasons. The question that decides
+/// the mechanism is what `Phase1EndBoxViolated` does when no pivot anywhere is
+/// ever allowed to cross a bound. Default OFF; it graduates only on the §5 panel.
+fn expand_suppressed_globally() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_SIMPLEX_NO_EXPAND")
             .ok()
             .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
             .unwrap_or(false)
@@ -859,18 +881,50 @@ impl<'a> Simplex<'a> {
         if !crate::profile::enabled() {
             return;
         }
-        let ok = match self.basic_values(art_sign) {
+        let worst = match self.basic_values(art_sign) {
             Ok(xb) => {
                 let x = self.assemble_x(&xb);
-                self.first_bound_violator(&x).is_none()
+                self.worst_bound_violation(&x)
             }
-            Err(()) => false,
+            Err(()) => f64::INFINITY,
         };
-        crate::profile::incr(if ok {
+        crate::profile::incr(if worst <= 0.0 {
             crate::profile::Ctr::Phase1EndBoxOk
         } else {
             crate::profile::Ctr::Phase1EndBoxViolated
         });
+        // Size the violation against EXPAND's own per-pivot ceiling (1e-7). A
+        // violation at that scale is one pivot's sanctioned Harris excursion; one
+        // 100x larger can only be an accumulation across pivots (or drift), and the
+        // two call for different repairs (#956 T2').
+        if worst > 0.0 && worst.is_finite() {
+            crate::profile::incr(if worst <= 1e-7 {
+                crate::profile::Ctr::Phase1ViolLe1Expand
+            } else if worst <= 1e-5 {
+                crate::profile::Ctr::Phase1ViolLe100Expand
+            } else {
+                crate::profile::Ctr::Phase1ViolGt100Expand
+            });
+        }
+    }
+
+    /// Largest absolute bound violation over the structural columns, measured
+    /// against the same relative tolerance [`Self::first_bound_violator`] uses;
+    /// `0.0` when every column is inside its box. Diagnostic only (#956 T2').
+    fn worst_bound_violation(&self, x: &[f64]) -> f64 {
+        const FEAS: f64 = 1e-6;
+        let mut worst = 0.0f64;
+        for j in 0..self.n {
+            if self.lb[j] > -INF {
+                let slack = self.lb[j] - FEAS * (1.0 + self.lb[j].abs().min(INF)) - x[j];
+                worst = worst.max(slack);
+            }
+            if self.ub[j] < INF {
+                let slack = x[j] - self.ub[j] - FEAS * (1.0 + self.ub[j].abs().min(INF));
+                worst = worst.max(slack);
+            }
+        }
+        worst
     }
 
     /// Index of the first column outside its box by more than the audit's own

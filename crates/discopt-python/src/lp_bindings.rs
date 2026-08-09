@@ -641,7 +641,7 @@ pub fn profile_counters_py(py: Python<'_>) -> PyResult<PyObject> {
 #[pyfunction]
 pub fn profile_reset_py() {
     discopt_core::profile::init_from_env();
-    discopt_core::profile::reset();
+    discopt_core::profile::reset_totals();
 }
 
 /// strings (`optimal`/`infeasible`/`unbounded`/`iter_limit`/`numerical`), `x` is

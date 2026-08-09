@@ -159,12 +159,20 @@ carries the fix through to the tree anyway.
   tree as a `#[cfg(debug_assertions)]` / test-only audit so a future regression
   trips it.
 
-- [ ] **T6 — Panel: did it help?** Re-run the CLAUDE.md §5 panel with the guard
-  OFF (i.e. measuring T2+T3 alone, against `origin/main`): corpus-wide cert-clean
-  check plus interleaved 3-replicate A/B on the decisive instances
-  (nvs17/19/20/23/24, tanksize) and W3.
-  **Done when:** cert-clean holds and the verdict (win / neutral / regression) is
-  recorded here and in `performance-plan.md`. A regression here means T2/T3 revert.
+- [x] **T6 — DONE 2026-08-09. Cert-clean PASS; the A/B on the chosen instances was
+  a null experiment, which is itself the finding.** Branch vs `origin/main` as two
+  builds, guard OFF in both. 119 instances × 2 arms, 147 executed assertions, zero
+  false bounds / objectives / infeasibles / new errors; the two flagged status
+  differences are TL=5 deadline-boundary flicker that the **baseline shows too**.
+  The T3′ prune arm fires 0 times on all six decisive instances (they are simply
+  not in the class), so the arms execute identical code there and the replicate
+  verdicts are noise — now recorded as this harness's measured noise floor. It
+  *does* fire on **30 of 119** corpus instances; the A/B re-run on ten of those is
+  **1 WIN (tls2: 265 vs 317 nodes, bound 3.667 vs 2.100, `optimal` vs `feasible`)
+  and 9 identical, 0 regressions**. W1 itself: `origin/main` `time_limit` at 4927
+  nodes → branch `infeasible` in 1 node. Cert-clean **and** net-positive; no
+  revert. Full entry in §4, including the retraction of the first
+  (instrument-broken) fired-check.
 
 - [ ] **T7 — Re-decide the #956 guard default.** With undecided nodes now decidable,
   re-run the guard's own interleaved-replicate A/B (the table in
@@ -187,6 +195,87 @@ carries the fix through to the tree anyway.
   obstructs a measurement, note it and work around it rather than fixing it here.
 
 ## §4 Log
+
+### T6 — the panel, and a second instrument that measured nothing (2026-08-09)
+
+**Setup.** Two *builds*, not two flag settings: this branch (merged up to
+`origin/main` f13bd93) against `origin/main` itself, both with
+`DISCOPT_ENVELOPE_OUTWARD_ROUND=0` so the panel measures T2+T3 alone. Each arm is
+its own process importing `discopt` from its own tree, and each asserts the tree
+path *and* a version marker — `PyTreeManager.import_results.__text_signature__`
+must contain `certified_infeasible` on the branch arm and must **not** on the
+baseline arm (CLAUDE.md §8).
+
+**Corpus cert-clean: PASS.** 119 instances per arm at `time_limit=5`, 147
+executed assertions: **0 false bounds, 0 false objectives, 0 false infeasibles, 0
+new errors.** Two status differences were flagged and both are deadline-boundary
+artifacts, not regressions:
+
+| instance | base | branch | resolution |
+|---|---|---|---|
+| `ex1265` | `optimal` (1555 nodes) | `time_limit` (1 node) | bimodal at TL=5 — **the baseline flips too** (1 of 8 replicates returned `feasible`/1559 nodes). At TL=30 both arms are `optimal`, 1555 nodes, 3.3 s, 3/3. |
+| `nvs05` | `feasible` | `time_limit` | identical bound (0.6149450688180482); both arms `time_limit`, 3 nodes, 5/5 on replication. |
+
+**The A/B on the decisive instances is a NULL EXPERIMENT, and that is the
+finding.** nvs17/19/20/23/24 and tanksize were chosen because they are where the
+undecided-node problem shows. They are not where T3′ acts: instrumented with
+`TreeCertInfeasPrunes`, the certified-empty prune arm fires **0 times on all six**
+and **1 time on W1**. Two arms that execute identical code cannot differ, so every
+verdict the replicate harness printed for them is scheduler jitter:
+
+| instance | 3 reps | 7 reps | T3′ prunes |
+|---|---|---|---|
+| nvs17 | WIN 3/3 | — | 0 |
+| nvs19 | w2/l1 | "REGRESSION" 4/7 | 0 |
+| nvs20 | identical | — | 0 |
+| nvs23 | w2/l1 | "REGRESSION" 4/7 | 0 |
+| nvs24 | "REGRESSION" 2/3 | "REGRESSION" 5/7 | 0 |
+| tanksize | w2/l0/t1 | w5/l1/t1 | 0 |
+
+That table is worth keeping for a different reason: it is a **measured noise
+floor** for this harness. At TL=20 with identical code, bound spreads of 0.1–0.7 %
+and per-instance win/loss splits up to 5/7 occur *by chance*. A future panel that
+reads a 4/7 split as a regression would be reading noise.
+
+**Where it does fire: 30 of the 119 corpus instances (25 %)**, from 1 prune up to
+28 (`trig` 28, `tls2` 16, `st_e05` 12, `m3` 10, `st_e03` 9, `prob10` 6, `nvs21` 3,
+`gkocis`/`nvs01`/`ex1223a`/`st_e38` 2). So the arm is far from inert corpus-wide —
+the six instances §1 nominated simply are not in that set. Re-running the same
+3-replicate A/B on ten firing instances is the panel that actually tests the
+change:
+
+| instance | branch | base | verdict |
+|---|---|---|---|
+| **tls2** | **265 nodes, bound 3.667, `optimal` in 1/3 reps** | 317 nodes, bound 2.100, `feasible` in 3/3 | **WIN, every replicate** |
+| trig, st_e05, m3, st_e03, prob10, nvs21, ex1233, st_e36, heatexch_gen1 | — | — | **identical** (same node count, same bound, every replicate) |
+
+Nine of ten are bit-identical: the certified-empty prune *replaces* a branch that
+would have closed the same region anyway, so the certificate is unchanged and only
+the path to it is shorter. The tenth is a genuine gain — `tls2` prunes 52 fewer
+nodes and lifts its dual bound from 2.100 to 3.667, enough to certify optimality
+in a replicate where `origin/main` finishes merely `feasible`.
+
+Where it acts most, it is not marginal at all: W1 (`x·y ≥ 0.6, x + y ≤ 1` on
+`[0,1]²`) is `time_limit` at **4927 nodes** on `origin/main` and `infeasible` in
+**1 node, 1.4 s** on the branch.
+
+**Retraction (CLAUDE.md §11).** The first run of this fired-check reported the arm
+firing **zero times everywhere, including W1** — while W1 demonstrably returned
+`infeasible` in 1 node. The counter was right and the readout was wrong:
+`profile::reset()` cleared `CTOTALS` along with the per-`dump` accumulators, and
+`milp_driver` calls `reset()` at the start of **every MILP sub-solve**, so any
+counter incremented before the last sub-solve read back as 0. This is the same
+failure as the `dump()` retraction recorded under T3 — the totals were made to
+survive `dump()` but not `reset()`. Split into `reset()` (per-dump accumulators)
+and `reset_totals()` (the deliberate whole-process reset, the only thing
+`profile_reset_py` now calls). Any zero counter read in this plan before this fix
+is unreliable and was re-measured.
+
+**Verdict: cert-clean AND net-positive — T2+T3 stays.** Cert-clean by the corpus
+panel (147 assertions, zero violations); net-positive by the firing-instance panel
+(1 win, 9 identical, 0 regressions) plus W1's `time_limit` → `infeasible`. On the
+89 non-firing instances it cannot regress anything, because there it executes
+nothing at all. No revert.
 
 ### T3' / T4 / T5 - the tree could not fathom a proven-empty region (2026-08-09)
 
