@@ -84,6 +84,20 @@ logger = logging.getLogger(__name__)
 #: graduated tape default, not once per node (`_compiled` runs per B&B node).
 _analytic_sepgrad_preempt_warned = False
 
+#: Nodes whose expression the tape could not lower, so separation fell through to
+#: JAX. The fall-through is *deliberate* -- soundness first, an unlowerable node
+#: must lose its tape and not its separation -- but it was also silent, which is
+#: the problem: it is the one remaining route by which a default #75 solve can
+#: still import JAX, and nothing said so. Counted and warned (once) rather than
+#: removed: `DISCOPT_SEPGRAD=jax` is the graduated flag's documented opt-out, so
+#: CLAUDE.md §5 requires the JAX arm stay intact.
+#:
+#: Not observed to fire on any instance measured so far: 66 in-repo plus 139
+#: off-corpus MINLPLib instances, and 734 lift-node compiles at the real call
+#: site with 100% tape coverage. A nonzero count here is therefore news.
+_tape_unlowerable_nodes = 0
+_tape_fallthrough_warned = False
+
 __all__ = [
     "LinForm",
     "Envelope",
@@ -855,7 +869,20 @@ class _Builder:
                 cache[nid] = v
                 return v
             # fall through to JAX: an unlowerable node must lose its tape, never
-            # its separation.
+            # its separation. Count it and say so once -- this is the last route
+            # by which a default solve can still import JAX (#75), and a silent
+            # fall-through means nobody learns which operator is missing a
+            # lowering. See `_tape_unlowerable_nodes`.
+            global _tape_unlowerable_nodes, _tape_fallthrough_warned
+            _tape_unlowerable_nodes += 1
+            if not _tape_fallthrough_warned:
+                _tape_fallthrough_warned = True
+                logger.warning(
+                    "separation gradients fell back to JAX: the tape could not lower "
+                    "this node's expression [tape-sepgrad-fallthrough]. The bound stays "
+                    "sound, but this solve imports JAX. Please report the model -- the "
+                    "operator needs an NlExpr lowering."
+                )
 
         import jax
         import jax.numpy as jnp

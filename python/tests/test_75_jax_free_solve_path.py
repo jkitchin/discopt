@@ -573,3 +573,59 @@ def test_tangent_slope_matches_the_jax_reference():
     v, g = under.tangent_cut(37.0)
     assert v == pytest.approx(1.1938449576366978, rel=1e-12)
     assert g == pytest.approx(0.1022698440660875, rel=1e-12)
+
+
+# --------------------------------------------------------------------------
+# The last JAX route on a default solve (#75): when the tape cannot lower a
+# node's expression, separation falls through to JAX. That fall-through is
+# deliberate and stays -- an unlowerable node must lose its tape, not its
+# separation, and `DISCOPT_SEPGRAD=jax` is the graduated flag's documented
+# opt-out, which CLAUDE.md §5 requires stay intact. What was wrong is that it
+# was *silent*: the one path that can still import 211 jax modules on a default
+# solve said nothing about having done so.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.correctness
+def test_tape_fallthrough_to_jax_is_counted_and_warned(monkeypatch, caplog):
+    """A node the tape cannot lower is counted, warned once, and still separated.
+
+    Forces the fall-through by making `try_compile` refuse every node, which is
+    the only way to reach it: the tape lowered 100% of nodes on every instance
+    measured (66 in-repo + 139 off-corpus MINLPLib, 734 lift-node compiles), so
+    there is no natural trigger to test against.
+    """
+    import logging
+
+    import discopt._nl_expr_compiler as nlc
+    import discopt.modeling as dm
+    from discopt._jax import uniform_relax as ur
+
+    refusals = {"n": 0}
+
+    def _refuse(*a, **k):
+        refusals["n"] += 1
+        return None
+
+    monkeypatch.setattr(nlc, "try_compile", _refuse)
+    monkeypatch.setattr(ur, "_tape_unlowerable_nodes", 0)
+    monkeypatch.setattr(ur, "_tape_fallthrough_warned", False)
+
+    # `beuster` reaches the separation path (8 tape compiles); most instances
+    # never call it at all, which would make this test vacuous.
+    m = dm.from_nl("python/tests/data/minlplib_nl/beuster.nl")
+    with caplog.at_level(logging.WARNING, logger="discopt._jax.uniform_relax"):
+        m.solve(time_limit=5)
+
+    # Vacuity control: if the separation path was never reached, everything
+    # below is trivially satisfiable and proves nothing.
+    assert refusals["n"] > 0, "the tape compile path was never reached -- test is vacuous"
+    assert ur._tape_unlowerable_nodes == refusals["n"], (
+        f"counted {ur._tape_unlowerable_nodes} fall-throughs but forced {refusals['n']}"
+    )
+    assert "tape-sepgrad-fallthrough" in caplog.text, (
+        "the fall-through to JAX was silent -- a default solve can import 211 jax "
+        "modules with nothing said about it"
+    )
+    # Warned once per process, not once per node: 8 nodes, 1 record.
+    assert sum("tape-sepgrad-fallthrough" in r.message for r in caplog.records) == 1
