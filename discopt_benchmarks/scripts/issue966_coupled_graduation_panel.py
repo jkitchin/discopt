@@ -1,0 +1,276 @@
+"""Coupled §5 graduation panel for the three budget flags (#928 + #966 item 3).
+
+``DISCOPT_LP_WARM_DEADLINE`` (#917/#928) failed the net-positive bar for one
+*measured* reason: the LP layer honours its grant, but the enclosing
+separated-relaxation round does not, so the budget-honouring LPs simply let the
+loop fit more (unclamped) rounds and the ON arm's wall went UP at a 20 s budget
+(ON-OFF +325.4 / +68.5 / +12.7 s over three reps). #966 fixed that seam behind
+``DISCOPT_NODE_ROUND_BUDGET`` and ``DISCOPT_HESS_COMPILE_GATE``. The three are
+therefore ONE change for graduation purposes, and this panel scores them as one.
+
+Three arms, run back-to-back per instance (interleaved, CLAUDE.md §9) in isolated
+subprocesses, every flag set explicitly on every arm:
+
+    A  base       all three OFF  -- today's default, the control
+    B  seam       #966 ON, #928 OFF -- isolates the round/compile budget fix
+    C  candidate  all three ON   -- what graduation would make the default
+
+C vs A is the graduation question. C vs B isolates #928's marginal effect now
+that the seam is closed, and B vs A isolates #966's own effect, so a failure can
+be attributed instead of guessed at.
+
+Ends with an executed-comparison count; exits non-zero if it compared nothing
+(§6). Every arm's raw record is written to ``--out`` for re-analysis.
+
+    python -u discopt_benchmarks/scripts/issue966_coupled_graduation_panel.py \
+        --budget 20 --instances 4stufen,bchoco06,... \
+        --out discopt_benchmarks/results/issue966_coupled_binding20_rep1.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+CORPUS = ROOT / "python/tests/data/minlplib_nl"
+WORKER = Path(__file__).with_name("issue966_coupled_worker.py")
+TOL = 1e-6
+
+WARM = "DISCOPT_LP_WARM_DEADLINE"
+ROUND = "DISCOPT_NODE_ROUND_BUDGET"
+HESS = "DISCOPT_HESS_COMPILE_GATE"
+
+# (key, label, env). Every flag is named in every arm: an arm must never inherit.
+ARMS = (
+    ("base", "all OFF (today's default)", {WARM: "0", ROUND: "0", HESS: "0"}),
+    ("seam", "#966 ON, #928 OFF", {WARM: "0", ROUND: "1", HESS: "1"}),
+    ("cand", "all three ON", {WARM: "1", ROUND: "1", HESS: "1"}),
+)
+
+
+def loadavg() -> list[float]:
+    """1/5/15-minute load, recorded into the artifact at panel start and end.
+
+    CLAUDE.md §9 makes a load gate part of any timing claim; recording it beside
+    the numbers keeps the gate auditable instead of a sentence in a PR body. The
+    arms are interleaved per instance precisely so a load excursion hits all
+    three within seconds of each other rather than biasing one.
+    """
+    return list(os.getloadavg())
+
+
+def reference_optimum(name: str):
+    sys.path.insert(0, str(ROOT / "python/tests"))
+    try:
+        from _optima import known_optimum  # type: ignore
+
+        return known_optimum(name)
+    except Exception:
+        return None
+
+
+def run_one(nl: Path, budget: float, env: dict) -> dict:
+    proc = subprocess.run(
+        [sys.executable, "-u", str(WORKER), str(nl), str(budget)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+        timeout=40 * budget + 900,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout[-3000:] + "\n" + proc.stderr[-6000:] + "\n")
+        raise SystemExit(f"worker failed on {nl.stem} env={env}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def soundness(cells: list[dict]) -> dict:
+    """Per-arm soundness scoring: a bound past the oracle or across the incumbent,
+    or an incumbent that failed verification, is disqualifying on its own."""
+    unsound, verification_failed = [], []
+    for c in cells:
+        ref = c["reference_optimum"]
+        for key, _label, _env in ARMS:
+            rec = c[key]
+            sense = rec["sense"]
+            if rec["incumbent_verification_failed"]:
+                verification_failed.append(f"{c['instance']}:{key}")
+            if rec["bound"] is not None and rec["objective"] is not None:
+                bad = (
+                    rec["bound"] < rec["objective"] - 1e-4
+                    if sense == "max"
+                    else rec["bound"] > rec["objective"] + 1e-4
+                )
+                if bad:
+                    unsound.append(f"{c['instance']}:{key}:bound-crosses-incumbent")
+            if rec["bound"] is not None and ref is not None:
+                bad = (
+                    rec["bound"] < float(ref) - 1e-4
+                    if sense == "max"
+                    else rec["bound"] > float(ref) + 1e-4
+                )
+                if bad:
+                    unsound.append(f"{c['instance']}:{key}:bound-past-oracle")
+    return {"unsound": unsound, "incumbent_verification_failed": verification_failed}
+
+
+def compare(cells: list[dict], a_key: str, b_key: str) -> dict:
+    """Score arm ``b`` against arm ``a`` with the #917 panel's metric set."""
+    cert_gains, cert_regressions = [], []
+    lost_incumbents, gained_incumbents = [], []
+    worse_obj, better_obj = [], []
+    looser_bound, tighter_bound = [], []
+    lost_bound, gained_bound = [], []
+    over_a = over_b = 0
+    overrun_a = overrun_b = 0.0
+    nodes_a = nodes_b = 0
+
+    for c in cells:
+        a, b, name, budget = c[a_key], c[b_key], c["instance"], c["budget"]
+        sense = a["sense"]
+        for rec, is_a in ((a, True), (b, False)):
+            if rec["wall"] > budget * 1.05:
+                if is_a:
+                    over_a += 1
+                else:
+                    over_b += 1
+            ov = max(0.0, rec["wall"] - budget)
+            if is_a:
+                overrun_a += ov
+                nodes_a += rec["node_count"]
+            else:
+                overrun_b += ov
+                nodes_b += rec["node_count"]
+
+        if bool(b["gap_certified"]) and not bool(a["gap_certified"]):
+            cert_gains.append(name)
+        if bool(a["gap_certified"]) and not bool(b["gap_certified"]):
+            cert_regressions.append(name)
+        if a["objective"] is not None and b["objective"] is None:
+            lost_incumbents.append(name)
+        if a["objective"] is None and b["objective"] is not None:
+            gained_incumbents.append(name)
+
+        ab, bb = a["bound"], b["bound"]
+        # A finite bound going to None is the most severe bound outcome there is --
+        # the solve stops claiming anything at all -- and comparing only cells where
+        # BOTH arms are finite silently skips it (the #917 panel's original bug).
+        if ab is not None and bb is None:
+            lost_bound.append(f"{name} ({ab} -> None)")
+        if ab is None and bb is not None:
+            gained_bound.append(f"{name} (None -> {bb})")
+        if ab is not None and bb is not None and abs(bb - ab) / max(1.0, abs(ab)) > 1e-9:
+            if (bb < ab) if sense == "min" else (bb > ab):
+                looser_bound.append(f"{name} ({ab} -> {bb})")
+            else:
+                tighter_bound.append(f"{name} ({ab} -> {bb})")
+
+        ao, bo = a["objective"], b["objective"]
+        if ao is not None and bo is not None and abs(bo - ao) > TOL * max(1.0, abs(ao)):
+            if (bo > ao) if sense == "min" else (bo < ao):
+                worse_obj.append(f"{name} ({ao} -> {bo})")
+            else:
+                better_obj.append(f"{name} ({ao} -> {bo})")
+
+    return {
+        "pair": f"{b_key} vs {a_key}",
+        "cells_over_budget": {a_key: over_a, b_key: over_b},
+        "total_overrun_s": {a_key: round(overrun_a, 1), b_key: round(overrun_b, 1)},
+        "overrun_delta_s": round(overrun_b - overrun_a, 1),
+        "node_count_total": {a_key: nodes_a, b_key: nodes_b},
+        "cert_gains": cert_gains,
+        "cert_regressions": cert_regressions,
+        "gained_incumbents": gained_incumbents,
+        "lost_incumbents": lost_incumbents,
+        "better_objective": better_obj,
+        "worse_objective": worse_obj,
+        "tighter_bound": tighter_bound,
+        "looser_bound": looser_bound,
+        "gained_bound": gained_bound,
+        "lost_bound": lost_bound,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--budget", type=float, default=20.0)
+    ap.add_argument("--instances", default=None)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+
+    names = (
+        [s for s in args.instances.split(",") if s]
+        if args.instances
+        else sorted(p.stem for p in CORPUS.glob("*.nl"))
+    )
+    budget = args.budget
+
+    cells, compared = [], 0
+    t_panel = time.perf_counter()
+    load_start = loadavg()
+    for idx, name in enumerate(names, 1):
+        nl = CORPUS / f"{name}.nl"
+        cell = {"instance": name, "budget": budget, "reference_optimum": reference_optimum(name)}
+        for key, _label, env in ARMS:
+            cell[key] = run_one(nl, budget, env)
+        cells.append(cell)
+        compared += 1
+        parts = " | ".join(
+            f"{key} wall={cell[key]['wall']:6.1f} ({cell[key]['wall'] / budget:4.2f}x) "
+            f"cert={int(bool(cell[key]['gap_certified']))} bound={cell[key]['bound']}"
+            for key, _l, _e in ARMS
+        )
+        print(f"[{idx}/{len(names)}] {name:22s} {parts}", flush=True)
+
+    snd = soundness(cells)
+    pairs = [
+        compare(cells, "base", "cand"),
+        compare(cells, "seam", "cand"),
+        compare(cells, "base", "seam"),
+    ]
+    grad = pairs[0]
+    cert_clean = not (
+        snd["unsound"]
+        or snd["incumbent_verification_failed"]
+        or grad["cert_regressions"]
+        or grad["lost_incumbents"]
+        or grad["lost_bound"]
+    )
+    summary = {
+        "instances": len(cells),
+        "budget": budget,
+        "arms": {k: lbl for k, lbl, _e in ARMS},
+        **snd,
+        "pairs": pairs,
+        "panel_wall_s": round(time.perf_counter() - t_panel, 1),
+        "loadavg_start": [round(x, 2) for x in load_start],
+        "loadavg_end": [round(x, 2) for x in loadavg()],
+    }
+
+    print()
+    print(json.dumps(summary, indent=2))
+    print(f"\nCERT_CLEAN={cert_clean}  (graduation pair: cand vs base)")
+    print(f"OVERRUN_DELTA_S_CAND_VS_BASE={grad['overrun_delta_s']}")
+    print(f"COMPARISONS_EXECUTED={compared}")
+
+    if args.out:
+        out = Path(args.out)
+        if not out.is_absolute():
+            out = ROOT / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"summary": summary, "cells": cells}, indent=2))
+        print(f"wrote {out}")
+
+    if compared == 0:
+        print("PANEL FIRED NOTHING", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

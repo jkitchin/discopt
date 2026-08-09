@@ -1533,7 +1533,65 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
 > an `optimal` result), which is why the default path does not move.
 
-### 13a. Retraction: #917's reserve-extension graduation is void after #919 (2026-08-01)
+### 14b. #928: the deadline exit is bound-preserving; graduation still fails, and the residual moved seams (2026-08-09)
+
+> §14a left two things open: the banked floor's *quality* (a deadline exit that
+> banks -141697 when -64473 is seconds away) and the net-positive bar. The first
+> is now fixed; the second still fails, and the measurement says the remaining
+> overrun is no longer this seam's.
+>
+> **Root cause of the weak floor, measured** (`scratchpad/issue928_{capture_lps,
+> replay}.py`, replaying the real hda separated-relaxation node LP): on a deadline
+> the warm dual loop returned `None`, discarding its dual-feasible basis; the cold
+> primal fallback then ran on a spent budget and its `IterLimit` dual export is
+> **identically zero through phase 1**, so the recovered NS floor was exactly
+> `g(y=0)` — the trivial box bound, -141697.4335, at 15/40/75% deadline fractions
+> alike, gap to the -64473.4 LP optimum never shrinking with budget.
+>
+> **The fix** (`SimplexOptions::bank_deadline_duals`, set ONLY by
+> `solve_lp_warm_csc_py` when a `time_limit` is passed — the MILP driver's own
+> deadline route keeps `false`, so the default B&B pivot path is untouched;
+> verified BOUND_NEUTRAL flag-OFF on 13 certifying instances vs the merge-base,
+> `scratchpad/issue928_neutrality.py`, marker-gated per §8): the dual loop's
+> deadline exit returns `IterLimit` carrying its current `y = B⁻ᵀc_B` (NS value =
+> the monotone best-so-far dual objective); near-zero-pivot breakdowns retry in
+> place (refactorize + exact recompute, the loop's existing soundness anchor,
+> capped at 5) instead of abandoning the loop; the last exact refresh's duals
+> survive a breakdown → cold-fallback → deadline-cut sequence; and a COLD solve
+> carrying a finite deadline starts the dual simplex from the sign-matched slack
+> basis when dual-feasible (`_dual_start_slack_basis`; `PreparedDual::prepare`
+> re-verifies the precondition), because the primal proves no usable floor
+> mid-run. Measured on the hda LP: floor -141697 -> -118439/-118783 at every
+> binding deadline (~30% of the gap closed, monotone in budget); whole-solve hda
+> @10 s ON: bound -141697 -> -123462 in 3/3 reps, wall 11.2-11.8 s.
+>
+> **Seven §5 panel runs, ALL cert-clean** — 0 cert_regressions / lost_incumbents
+> / lost_bound / unsound in every run; §14a's bound-losing trade is gone (contvar
+> is now often TIGHTER than OFF; tspn12 and tls2 gained incumbents). Net-positive
+> is where it dies (`discopt_benchmarks/results/issue928_*.json`):
+>
+> | panel | budget | ON−OFF overrun |
+> |---|---|---|
+> | full corpus (66), 1 run | 15 s | 73.8 -> 31.6 s (**-57%**) |
+> | binding subset (19), 3 reps | 15 s | -2.5 / 0.0 / -8.2 s |
+> | binding subset (19), 3 reps | 20 s | **+325.4 / +68.5 / +12.7 s** |
+>
+> The sign flips with budget — not "measurably helpful broadly" (the
+> `DISCOPT_CUT_INHERIT` rule) — so **the flag stays OFF**.
+>
+> **Where the ON overrun actually lives** (`scratchpad/issue928_{contvar_probe,
+> blowup_hunt}.py`): not in this seam. Zero per-LP deadline violations across all
+> probes. contvar ON spends **2.8 s in 30 relaxation solves** against a 27-33 s
+> wall; OFF spends 6.3 s in 20 solves for a ~22 s wall. The budget-honoring LPs
+> return sooner, the enclosing separation loop fits ~10 more rounds, and each
+> round's non-LP cost (~1.1 s `build_uniform_relaxation` etc.) is not clamped by
+> the round's grant. On top of that, downstream phases with coarse global-deadline
+> compliance produce rare severe modes in BOTH arms: ON contvar 500.6 s and
+> bchoco08 80.9 s; OFF heatexch_gen3 200.5 s in the same rep set (the same
+> pre-existing class §14 recorded as 78-176 s OFF-arm noise). The next actionable
+> seam is therefore **caller-side round-budget accounting** (clamp a separation
+> round's build cost against the phase grant, and the downstream phases' deadline
+> compliance), not further work in the LP engine.
 
 > §13 graduated `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION` default-ON on a 133-cell panel
 > whose net-positive case was three cells: nvs18@45 s (uncertified 0/3 → **certified
@@ -1612,6 +1670,149 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > through to `solver_stats`. Separately, this panel's scorer gained the
 > `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
 > a finite bound going to `None` was invisible to it too. Both panels now score it.
+
+### 14c. #966: the caller-side seams measured, the severe mode caught in flight, and an eager-Hessian fallback falsified (2026-08-09)
+
+> #928's residual (recorded in §14b, on `claude/issue-928-as1vvj` until that
+> branch merges) named two caller-side deficiencies. Both are now measured on
+> this tree and fixed behind flags (`scratchpad/issue966_phase_probe.py`; all
+> probes print executed-comparison counts per §6).
+>
+> **Seam 1 — a round's grant clamps only its LPs.** A `solve_at_node` round
+> granted 2.0 s runs 5.2–5.8 s in BOTH `DISCOPT_LP_WARM_DEADLINE` arms on
+> contvar @ 20 s — ~3.2 s of it the cold `build_uniform_relaxation`, spent
+> after the admission check, unclamped (6/6 reps). The internal node deadline
+> is anchored AFTER the build, so the build also restarts the round's clock.
+> Fix (`DISCOPT_NODE_ROUND_BUDGET`, default OFF, §5): the spatial node loops
+> pass the global deadline into `solve_at_node` as an absolute
+> `round_deadline` (clamps the build via the #694 anytime mechanism AND caps
+> the internal anchor), and the round admission check declines a round whose
+> remaining grant cannot cover the relaxer's measured cold-build EMA
+> (`expected_build_cost()`). The serial loop previously had NO past-deadline
+> skip at all — it gets one under the flag.
+>
+> **Seam 2 — the 200–500 s severe modes are one uninterruptible XLA compile.**
+> Caught in flight with `faulthandler.dump_traceback_later` (§10):
+> heatexch_gen3 @ 20 s ran 162.5 s with the stack inside
+> `_solve_root_node_multistart → solve_nlp(pounce) → evaluate_hessian_values →
+> sparse_hess_values → jit_batch_hvp` and XLA's own slow-compile alarm
+> reporting the compile at **124 s**. The F4 gate exists for exactly this risk
+> but the per-node NLP entries (root multistart on the no-relaxer class,
+> strided node NLP, JAX-callback batch POUNCE) bypass it.
+>
+> **Falsified (§4, kill criterion hit): the eager fallback.** Hypothesis: an
+> uncompiled `jax.disable_jit()` Hessian evaluation bounds the phase at usable
+> per-call cost. Measured (`scratchpad/issue966_eager_hessian_entry.py`):
+> heatexch_gen3 eager walls 62.7 / 11.7 / 10.4 s, contvar 29.7 / 7.7 / 8.3 s —
+> the steady state alone dwarfs a per-iteration budget, so the eager route is
+> dead. A compile can neither be truncated nor cheaply avoided; **entry
+> refusal is the whole treatment** (the F4 rationale). Fix
+> (`DISCOPT_HESS_COMPILE_GATE`, default OFF, §5): `_hess_compile_refuses`
+> declines a NONCONVEX per-node NLP entry when the conservative first-compile
+> estimate exceeds the remaining budget, checked at the loop sites where
+> `_model_is_convex` is authoritative (the multistart chain does not thread
+> convexity down; on the convex path the NLP is the bound producer and is
+> never refused — rule 1).
+>
+> **A/B with both flags ON** (3 reps × {contvar, heatexch_gen3, bchoco08} ×
+> both #928 arms @ 20 s): every wall in **[20.1, 22.1] s** — the baseline's
+> worst same-container mode was 162.5 s and §14b records 500.6 s. No bound
+> lost (heatexch_gen3 `None` in both regimes; bchoco08 identical; contvar OFF
+> 183430.5 vs 183632.0 baseline — weaker by declined rounds, as the mechanism
+> predicts, and never above). The gate's refusal was confirmed non-vacuous
+> (2 firings logged on a heatexch_gen3 run, §6).
+>
+> **Honest residuals.** (1) The one-time ROOT probe build (grant 2.0 s, wall
+> ~5.5 s on contvar) is deliberately NOT clamped: it feeds the
+> `_probe_useful` decision and the incremental structure every later round
+> reuses; truncating it can drop the relaxer entirely. The overrun is one
+> bounded in-flight op (#654 policy). (2) The compile estimate is
+> measured-unpredictable (1–186 s, R² ≈ 0, see `estimate_hessian_compile_s`),
+> so an entry admitted with remaining budget above the risk floor can still
+> overrun — the flag kills the observed late-entry severe modes, not the
+> early-entry gamble the F4 floor deliberately accepts. (3) On THIS tree the
+> loop fits few rounds (contvar: 1 probe round per run); the "more rounds fit"
+> amplification §14b measured needs the #928 branch's banked dual floor, so
+> the corpus-wide differential panel for these two flags is coupled to the
+> #928 graduation panel re-run (issue #966 item 3).
+
+### 14b. #928 + #966 coupled graduation panel: FAILED, and the loss is an *interaction* (2026-08-09)
+
+> §14a left `DISCOPT_LP_WARM_DEADLINE` cert-clean but not net-positive, with a named
+> next step: "a load-gated, multi-rep panel over the instances where the deadline
+> actually binds." That panel has now run, and it grew a second question first.
+>
+> **Why the three flags were scored as one change.** #928's net-positive failure had a
+> *measured* cause, not a mysterious one: the LP layer honours its grant, but the
+> enclosing separated-relaxation round did not, so budget-honouring LPs merely let the
+> loop fit more unclamped rounds and the ON arm's wall went **up** (ON−OFF +325.4 /
+> +68.5 / +12.7 s at a 20 s budget). #966 closed that seam behind
+> `DISCOPT_NODE_ROUND_BUDGET` (a `round_deadline` threaded into `solve_at_node`, min-
+> combined with the build deadline) and `DISCOPT_HESS_COMPILE_GATE` (refuse to *start*
+> a per-node NLP whose first-time sparse-Hessian XLA compile — measured 124 s on
+> heatexch_gen3 against a 20 s budget — cannot fit; a compile is uninterruptible, so
+> entry refusal is the whole treatment). Graduating #928 without #966 re-creates the
+> known regression, so the panel has three arms rather than two:
+> `base` (all OFF) / `seam` (#966 only) / `cand` (all three), interleaved per instance,
+> every flag named explicitly in every arm so no cell can inherit a default.
+>
+> **Panel**: 19 binding instances, 20 s budget, 3 reps, `wtpanel` built from
+> `origin/main` and gated by four §8 markers per cell (`discopt.__file__`,
+> `_extend_budget_for_incumbent`, `_dual_start_slack_basis`, `round_deadline` in
+> `solve_at_node.__code__.co_varnames`). `COMPARISONS_EXECUTED=19` each rep;
+> `loadavg` recorded into every artifact.
+> Raw: `discopt_benchmarks/results/issue966_coupled_binding20_rep{1,2,3}.json`.
+>
+> **The wall regression is gone.** The entry question passes cleanly and reproducibly:
+>
+> | pair | rep1 | rep2 | rep3 | mean ± sd |
+> |---|---|---|---|---|
+> | cand − base overrun | −2.6 s | −2.7 s | −2.7 s | **−2.7 ± 0.0 s** |
+> | seam − base overrun | −6.0 s | −3.6 s | −5.2 s | **−4.9 ± 1.0 s** |
+>
+> The sign flip is attributable to #966; #928 gives back ~2.3 s of #966's gain.
+>
+> **`CERT_CLEAN=False` in 3/3 reps, on exactly one item**: contvar's bound goes
+> `183632.766 → None` in the `cand` arm — not looser, *absent*. Nothing is unsound
+> (`unsound=[]`, `incumbent_verification_failed=[]`, no cert regressions, no lost
+> incumbents in any rep), so this is a claim-quality failure, not a soundness one.
+> **Neither flag set graduates.**
+>
+> **The 3-arm panel could not attribute it, so a 4th arm was run.** `cand` loses the
+> bound and `seam` keeps it, which attributes the loss to #928 *given the seam* — not
+> to #928 by itself. The panel has no `warm`-only arm, so one was added
+> (`discopt_benchmarks/scripts/issue928_contvar_attribution_probe.py`, 2 reps,
+> `CELLS_EXECUTED=16`, bit-identical across reps):
+>
+> | contvar @20 s | nodes | status | bound | incumbent |
+> |---|---|---|---|---|
+> | base | 7 | time_limit | 183632.766 | none |
+> | warm (#928 alone) | 3 | **feasible** | 98924.530 (looser, sound) | **813745.125** |
+> | seam (#966 alone) | 7 | time_limit | 183632.766 | none |
+> | cand (all three) | **287** | time_limit | **none** | none |
+>
+> **#928 alone does not destroy the bound — it trades bound quality for an incumbent**
+> (the 98924.53 figure is exactly the one §14a reported). The destruction is an
+> **interaction**: with the round budget also clamping, the node count explodes 7 → 287
+> and no node ever certifies anything, so the tree spends the whole budget on cheap
+> uncertified nodes. The suspect is the pair "LP yields on its deadline" ×  "round
+> yields on *its* deadline" compounding into a node result that carries no adoptable
+> bound at all; that is the thing to fix before either flag is re-panelled.
+>
+> **A second cost, from #966 alone, not surfaced in PR #968**: casctanks
+> `2.9098 → −56.5001` in the `seam` arm, identical in all three reps and in both probe
+> reps (and −57.2/−60.1/−60.7 with all three on). Sound (looser) and therefore
+> invisible to `cert_clean`, but a dual bound crossing from +2.9 to −56.5 is a
+> collapse, not a drift — the round budget is declining the rounds that were producing
+> casctanks' bound. #928 alone costs it only 2.9098 → 2.4598.
+>
+> **Verdict.** `seam` (#966 alone) *is* cert-clean in 3/3 reps and is the only arm that
+> buys wall time (−4.9 ± 1.0 s), but it fails the net-positive bar on the other half of
+> the metric set: its bound ledger over three reps is 4 looser (casctanks every rep,
+> tls2 ×2, nvs05, tspn10) against 3 tiny non-reproducible tighter entries, and node
+> counts rise (1329 → 1811). This is the `DISCOPT_CUT_INHERIT` shape again — sound, and
+> genuinely better on the metric it was built for, while paying for it in the metric
+> the solver's product actually is. **All three flags stay default-OFF.**
 
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
@@ -1851,3 +2052,4 @@ performs 92 116 extra ftrans over a 20 s solve and still completes 973 nodes
 against 902 at K=0 — the exact-`x_B` refresh is far cheaper per pivot than the
 node-level work around it, so the throughput cost that decides against it is small
 and instance-dependent, not structural.
+

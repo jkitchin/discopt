@@ -171,6 +171,7 @@ fn main() {
             warm_stall_guard: true,
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
+            bank_deadline_duals: false,
         };
         let sol = solve_lp(&lp, &b, &opts);
         let basis = &sol.basis.basic_vars;

@@ -452,6 +452,14 @@ class MccormickLPRelaxer:
         # Skip-eligible node-solve counter for the lazy-trigger stride net
         # (see the module-level ``_LAZY_RESEP_STRIDE`` rationale).
         self._lazy_skip_ctr: int = 0
+        # Measured cold-build cost EMA (#966, ``DISCOPT_NODE_ROUND_BUDGET``): the
+        # wall of this relaxer's ``build_milp_relaxation`` calls, exponentially
+        # averaged (alpha 0.5) so the node loop's round-admission check can
+        # decline a round whose grant cannot cover the round's expected non-LP
+        # cost. ``None`` until the first cold build; the incremental fast path
+        # does not update it (its per-node cost is negligible by construction).
+        # Pure measurement — read via :meth:`expected_build_cost`.
+        self._build_wall_ema: Optional[float] = None
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -935,6 +943,15 @@ class MccormickLPRelaxer:
             return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
         return None
 
+    def expected_build_cost(self) -> Optional[float]:
+        """EMA of this relaxer's cold-build wall (#966), ``None`` before any build.
+
+        The node loop's round-admission check reads this (under
+        ``DISCOPT_NODE_ROUND_BUDGET``) to decline a round whose remaining grant
+        cannot cover the round's expected non-LP cost.
+        """
+        return self._build_wall_ema
+
     def solve_at_node(
         self,
         node_lb: np.ndarray,
@@ -948,6 +965,7 @@ class MccormickLPRelaxer:
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
+        round_deadline: Optional[float] = None,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -1012,6 +1030,7 @@ class MccormickLPRelaxer:
             want_marginals=want_marginals,
             skip_pool_separators=skip_pool_separators,
             build_deadline=build_deadline,
+            round_deadline=round_deadline,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
         # regular node solve (not a root pool-capture call, which passes no pool),
@@ -1155,8 +1174,16 @@ class MccormickLPRelaxer:
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
+        round_deadline: Optional[float] = None,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
+
+        ``round_deadline`` (#966, absolute ``perf_counter`` time, default None)
+        bounds the WHOLE round: it clamps the cold build (like
+        ``build_deadline``) AND anchors the internal solve/separation deadline,
+        so the round's non-LP cost cannot restart the clock. Passed only by the
+        spatial node loops under ``DISCOPT_NODE_ROUND_BUDGET``; every other
+        caller's behavior is byte-identical.
 
         Returns a :class:`MccormickLPResult`. ``lower_bound`` is a valid lower
         bound on the original problem within this box (for minimization).
@@ -1236,6 +1263,16 @@ class MccormickLPRelaxer:
             # once spent, yielding a valid weaker relaxation. The incremental fast
             # path above is already cheap, so it ignores the deadline; only this
             # cold, row-generating build (the ~16.8s sonet23v4 cost, #694) honors it.
+            # #966: a ``round_deadline`` clamps the build too (the round's grant
+            # covers the build), min-combined with any caller ``build_deadline``.
+            _eff_build_deadline = build_deadline
+            if round_deadline is not None:
+                _eff_build_deadline = (
+                    round_deadline
+                    if _eff_build_deadline is None
+                    else min(_eff_build_deadline, round_deadline)
+                )
+            _t_build = time.perf_counter()
             milp, varmap = build_milp_relaxation(
                 self._model,
                 self._terms,
@@ -1246,8 +1283,18 @@ class MccormickLPRelaxer:
                 ),
                 superposition=self._superposition,
                 rlt_level1=self._rlt_applicable,
-                build_deadline=build_deadline,
+                build_deadline=_eff_build_deadline,
             )
+            # #966 round-admission measurement: EMA of the cold-build wall. A
+            # deadline-truncated build stopped early, so its wall underestimates
+            # what a full build costs — only whole builds update the estimate.
+            if not getattr(milp, "_build_truncated", False):
+                _build_wall = time.perf_counter() - _t_build
+                self._build_wall_ema = (
+                    _build_wall
+                    if self._build_wall_ema is None
+                    else 0.5 * self._build_wall_ema + 0.5 * _build_wall
+                )
         except Exception:
             # Build failures here are otherwise invisible: the result silently
             # becomes status="error", which propagates up to a top-level
@@ -1355,7 +1402,13 @@ class MccormickLPRelaxer:
         # spatial B&B (one such node per step) blew a 25s limit out to ~75s.
         # Convert the duration to a single deadline and hand each internal solve
         # only the time that remains, so the node's TOTAL respects the budget.
+        # #966: this anchor is taken AFTER the cold build, so with only a
+        # duration ``time_limit`` the build restarts the round's clock. A caller
+        # ``round_deadline`` caps the anchor at the round's absolute grant end,
+        # so build + solves + separation together respect the round budget.
         _deadline = None if time_limit is None else time.perf_counter() + time_limit
+        if round_deadline is not None:
+            _deadline = round_deadline if _deadline is None else min(_deadline, round_deadline)
 
         def _remaining() -> Optional[float]:
             if _deadline is None:

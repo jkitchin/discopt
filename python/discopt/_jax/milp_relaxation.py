@@ -405,6 +405,46 @@ def _lp_warm_deadline_enabled() -> bool:
     3. *And the panel could not see (2).* It compared bound quality only where BOTH
        arms were finite, so ``1.0 -> None`` scored as clean and it reported
        CERT_CLEAN=True twice. ``lost_bound``/``gained_bound`` exist because of that.
+
+    **Update 2026-08-09: the deadline exit is now bound-PRESERVING, and the flag
+    STILL does not graduate — but for a new, measured reason.** The #928 fix
+    (``SimplexOptions::bank_deadline_duals``; set only by ``solve_lp_warm_csc_py``
+    when a ``time_limit`` is passed, i.e. exactly this flag's path) makes a
+    deadline exit return the dual loop's current dual-feasible ``y = B⁻ᵀc_B`` — the
+    monotone best-so-far dual objective — instead of a cold-fallback initial-basis
+    dual that evaluated to the trivial ``g(y=0)`` box floor. Measured on the hda
+    separated-relaxation node LP: banked floor -141697 (= exactly ``g(0)``) at
+    15/40/75% deadline fractions alike before; -118439/-118783 after (gap to the
+    -64473 optimum cut ~30%). Whole-solve hda at ``time_limit=10``: the ON arm's
+    bound went -141697 -> -123462 in 3/3 reps at 11.2-11.8 s wall. Flag-OFF
+    bound-neutrality: 13 certifying instances byte-identical vs the merge-base
+    (``scratchpad/issue928_neutrality.py``, marker-gated both directions).
+
+    Seven §5 panel runs on that build, ALL cert-clean (0 cert_regressions /
+    lost_incumbents / lost_bound / unsound in every run — the bound-losing trade
+    recorded above is gone; contvar is now often TIGHTER than OFF, tspn12/tls2
+    gained incumbents):
+
+    * full corpus, 15 s, 1 run: total overrun 73.8 -> 31.6 s (-57%).
+    * binding subset (19 non-closing instances), 15 s, 3 reps: ON-OFF deltas
+      -2.5 / 0.0 / -8.2 s.
+    * binding subset, 20 s, 3 reps: deltas **+325.4 / +68.5 / +12.7 s** — the ON
+      arm is WORSE at this budget in 3/3 reps, including sporadic severe modes
+      (contvar 500.6 s, bchoco08 80.9 s; the OFF arm has its own pre-existing
+      class, heatexch_gen3 200.5 s in the same rep set).
+
+    Net-positive therefore FAILS: the sign flips with budget, which is not
+    "measurably helpful broadly" (the ``DISCOPT_CUT_INHERIT`` rule). The residual
+    is measurably NOT this seam any more: per-LP deadline violations are zero
+    across every probe, and on contvar the ON arm spends 2.8 s in 30 relaxation
+    solves against a 27-33 s wall (OFF: 6.3 s in 20 solves, ~22 s wall) — the
+    budget-honoring LPs let the enclosing separation loop fit ~10 more rounds
+    whose non-LP cost (~1.1 s relaxation build each) is not clamped by the
+    round's grant, and downstream phases with coarse global-deadline compliance
+    do the rest (``scratchpad/issue928_{contvar_probe,blowup_hunt}.py``,
+    ``discopt_benchmarks/results/issue928_*.json``). Fixing THAT is caller-side
+    budget accounting — a different seam with its own issue; this flag stays OFF
+    until it lands and a re-run panel passes both bars.
     """
     import os as _os
 

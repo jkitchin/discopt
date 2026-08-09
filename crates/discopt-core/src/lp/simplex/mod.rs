@@ -116,6 +116,24 @@ pub struct SimplexOptions {
     /// OFF and is opted into only by the branch-and-cut kernel path (which needs
     /// warm-start to succeed), pending the CLAUDE.md §5 graduation panel.
     pub expel_zero_artificials: bool,
+    /// Bank the warm dual loop's progress when [`deadline`](Self::deadline) cuts
+    /// it short (#928). When `true`, a deadline exit from the dual pivot loop
+    /// returns [`LpStatus::IterLimit`] carrying the current (dual-feasible)
+    /// basis's row-dual candidate `y = B⁻ᵀc_B` — whose Neumaier–Shcherbina
+    /// evaluation is the monotone best-so-far dual objective — instead of falling
+    /// back to a cold primal whose spent budget yields a near-useless initial
+    /// basis dual. It also enables two loop-preserving recoveries that exist only
+    /// to keep that anytime floor alive: an in-place refactorize+recompute retry
+    /// on a near-zero pivot, and handing the last exact-refresh duals to the cold
+    /// fallback when the loop breaks down and the fallback is then itself cut.
+    ///
+    /// Default `false`: the MILP B&B driver also sets `deadline` on the default
+    /// route, and these recoveries change the pivot path (same audited optimum,
+    /// possibly a different degenerate vertex), which is *bound-changing* under
+    /// the §5 regime. Only the pure-LP warm binding (`solve_lp_warm_csc_py`)
+    /// sets it, and only when its caller passed a `time_limit` — i.e. exactly the
+    /// `DISCOPT_LP_WARM_DEADLINE` path whose graduation panel judges it.
+    pub bank_deadline_duals: bool,
 }
 
 impl SimplexOptions {
@@ -155,6 +173,7 @@ impl Default for SimplexOptions {
             warm_stall_guard: true,
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
+            bank_deadline_duals: false,
         }
     }
 }
