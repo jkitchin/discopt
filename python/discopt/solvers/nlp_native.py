@@ -42,7 +42,6 @@ import logging
 import os
 import tempfile
 import threading
-import weakref
 from dataclasses import dataclass
 from typing import Optional
 
@@ -244,52 +243,80 @@ def build_native_base(evaluator, *, validate: bool = True) -> Optional[NativeNlp
     )
 
 
-# Native-base cache, PER THREAD (issue #932). POUNCE's ``PyNlProblem`` is a
-# pyo3 ``unsendable`` pyclass: it must be created, used, AND dropped on a single
-# thread — pyo3 panics on any cross-thread access ("unsendable, but sent to
-# another thread") and on a cross-thread dealloc ("unsendable, but is being
-# dropped on another thread"). The previous cache lived on the Model
-# (``model._native_nlp_base_cache``), which broke that contract two ways:
+# Cross-thread capability of POUNCE's ``NlProblem`` (issue #932).
 #
-# 1. *Access*: any thread calling :func:`get_native_base` on a model whose base
-#    another thread had built received the same ``PyNlProblem``; the first
-#    ``variant()``/``objective()`` call then panicked.
-# 2. *Drop*: a discarded Model is cyclic garbage (its expression DAG holds
-#    reference cycles), so the cached problem's dealloc ran inside whichever
-#    thread happened to trigger the next cyclic-GC collection — under
-#    pytest-xdist, a JAX/execnet service thread, or a POUNCE callback worker
-#    holding the GIL — and panicked there.
+# The base is cached on the *model* and handed to whichever thread solves a node,
+# so discopt relies on one ``NlProblem`` being usable — and droppable — from more
+# than one thread. POUNCE guarantees that as of pounce#477 ("Let one NlProblem
+# serve a whole worker pool"), which removed the pyo3 ``unsendable`` marker after
+# establishing that ``NlTnlp`` is ``Send`` and that every ``&self`` method
+# evaluates under the GIL.
 #
-# A ``threading.local`` cache makes both same-thread by construction: each
-# thread builds, uses, and (via same-thread eviction below, or its own
-# thread-state teardown) drops only its own bases, and the unsendable object is
-# never woven into the model's reference cycles at all. The cost is a rebuild
-# when a second thread solves the same model — correct, and cheap next to a
-# node NLP solve.
-_TLS = threading.local()
-# Per-thread entry cap. Eviction is insertion-ordered and runs on the owning
-# thread (the only place a drop is legal), so the cap just bounds memory for a
-# long-lived thread that solves many distinct models.
-_TLS_MAX_ENTRIES = 4
+# Against an *older* POUNCE the marker is still present and the guarantee does not
+# hold. That failure is not survivable in place: pyo3 raises ``PanicException``,
+# which derives from ``BaseException`` and so slips past every ``except Exception``
+# in the solver — a cross-thread access would abort the run rather than surface as
+# an error, and the *drop* path trips even for code that never used an instance
+# cross-thread (whichever thread runs the cyclic GC inherits the object). Both are
+# the failures #932 reported.
+#
+# POUNCE's version string cannot express the requirement (pounce#477 landed inside
+# an unreleased ``0.9.0``), so the capability is *measured* once per process, on
+# the first base built, and the native path is disabled if it does not hold. The
+# probe deliberately performs the access pyo3 would reject, on a real second
+# thread, and catches ``BaseException`` there — the panic is the observation, and
+# it is reported, never swallowed.
+_CROSS_THREAD_OK: Optional[bool] = None
+_CROSS_THREAD_LOCK = threading.Lock()
 
 
-def _tls_entries() -> dict:
-    entries = getattr(_TLS, "entries", None)
-    if entries is None:
-        entries = {}
-        _TLS.entries = entries
-    return entries
+def _probe_cross_thread_use(nb: NativeNlpBase) -> bool:
+    """Touch ``nb``'s ``NlProblem`` from a second thread; True if POUNCE allows it."""
+    outcome: dict = {}
+
+    def worker():
+        outcome["tid"] = threading.get_ident()
+        try:
+            outcome["value"] = nb.base.n
+        except BaseException as exc:  # noqa: BLE001 - a pyo3 PanicException is the signal
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    t = threading.Thread(target=worker, name="discopt-native-base-probe")
+    t.start()
+    t.join()
+
+    if outcome.get("tid") == threading.get_ident():  # pragma: no cover - defensive
+        raise RuntimeError("cross-thread probe ran on the calling thread; it proves nothing")
+    return "error" not in outcome
+
+
+def _cross_thread_use_supported(nb: NativeNlpBase) -> bool:
+    """Establish the cross-thread guarantee once per process (see the note above)."""
+    global _CROSS_THREAD_OK
+    with _CROSS_THREAD_LOCK:
+        if _CROSS_THREAD_OK is None:
+            _CROSS_THREAD_OK = _probe_cross_thread_use(nb)
+            if not _CROSS_THREAD_OK:
+                logger.warning(
+                    "POUNCE's NlProblem cannot be used off its creating thread, so the "
+                    "native NLP path is disabled for this process (falling back to the "
+                    "JAX callback bridge). This POUNCE predates pounce#477; upgrade to a "
+                    "build that drops the pyo3 `unsendable` marker. See discopt#932."
+                )
+    return _CROSS_THREAD_OK
 
 
 def get_native_base(evaluator) -> Optional[NativeNlpBase]:
-    """Return this thread's cached native base for ``evaluator``'s model.
+    """Return a cached native base for ``evaluator``'s model, building once.
 
-    Cached per ``(thread, model)`` — never on the model itself, because the
-    underlying ``PyNlProblem`` is pyo3-``unsendable`` (see the ``_TLS`` note
-    above) — and invalidated by the same structural fingerprint the evaluator
-    cache uses, so a reformulated/edited model rebuilds its base. ``False`` is
-    cached for a model that cannot use the native path, so a thread does not
+    Cached on the model and invalidated by the same structural fingerprint the
+    evaluator cache uses, so a reformulated/edited model rebuilds its base.
+    ``False`` is cached for a model that cannot use the native path, so we do not
     repeatedly re-attempt (and re-emit) a failing model.
+
+    The cache is shared across threads, which POUNCE supports as of pounce#477;
+    the first base built in a process verifies that (see ``_CROSS_THREAD_OK``) and
+    the native path is disabled outright against a POUNCE that does not.
     """
     model = getattr(evaluator, "_model", None)
     if model is None:
@@ -297,24 +324,16 @@ def get_native_base(evaluator) -> Optional[NativeNlpBase]:
     from discopt.solver import _evaluator_fingerprint
 
     fp = _evaluator_fingerprint(model)
-    entries = _tls_entries()
-    key = id(model)
-    entry = entries.get(key)
-    if entry is not None:
-        model_ref, cached_fp, base = entry
-        # ``model_ref() is model`` guards id() reuse after a model is freed.
-        if model_ref() is model and cached_fp == fp:
+    cached = getattr(model, "_native_nlp_base_cache", None)
+    if cached is not None:
+        base, cached_fp = cached
+        if cached_fp == fp:
             return base or None  # may be False (sentinel for "unavailable")
-        del entries[key]  # stale: dead/reused id or refingerprinted model
 
     nb = build_native_base(evaluator)
-    # Housekeeping on the owning thread, where dropping a base is legal:
-    # prune entries whose model died, then enforce the cap oldest-first.
-    for k in [k for k, (ref, _f, _b) in entries.items() if ref() is None]:
-        del entries[k]
-    while len(entries) >= _TLS_MAX_ENTRIES:
-        del entries[next(iter(entries))]
-    entries[key] = (weakref.ref(model), fp, nb if nb is not None else False)
+    if nb is not None and not _cross_thread_use_supported(nb):
+        nb = None
+    model._native_nlp_base_cache = (nb if nb is not None else False, fp)
     return nb
 
 

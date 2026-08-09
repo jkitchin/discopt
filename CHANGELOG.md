@@ -12,23 +12,34 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
-- **The POUNCE-native NLP base no longer crosses threads** (`fix`, #932).
-  POUNCE's `PyNlProblem` is a pyo3 `unsendable` pyclass — it must be created,
-  used, and dropped on one thread; pyo3 panics on any violation
-  (`_pounce::nl_problem::PyNlProblem is unsendable, but sent to another
-  thread`). `get_native_base` cached it on the *Model*, which broke the
-  contract both ways: any thread asking for the base received another thread's
-  `PyNlProblem` (access panic — and `PanicException` subclasses
-  `BaseException`, so no `except Exception` in the solver would have contained
-  it: landing in a node solve would have aborted the run), and a discarded
-  Model is cyclic garbage, so the cached problem's dealloc ran on whichever
-  thread triggered the next cyclic-GC collection (drop panic, the one #932
-  observed printing mid-run). The cache now lives in `threading.local` storage
-  keyed per `(thread, model)` with same-thread eviction, so construction,
-  every access, and the drop are single-threaded by construction — the panic
-  is removed, not suppressed. Regression:
-  `test_932_native_base_thread_affinity.py` (pre-fix, both crossings reproduce
-  the exact pyo3 panics).
+- **The POUNCE-native NLP path now requires — and verifies — a cross-thread-safe
+  `NlProblem`** (`fix`, #932). #932 reported the pyo3 panic
+  `_pounce::nl_problem::PyNlProblem is unsendable, but sent to another thread`
+  and asked for one of two outcomes: pin the object to one thread, or establish
+  that it is safe to send and drop the marker. **POUNCE took the second route** —
+  pounce#477 ("Let one NlProblem serve a whole worker pool") removed the
+  `unsendable` marker after establishing that `NlTnlp` is `Send` and that every
+  `&self` method evaluates under the GIL, citing the same reasoning #932 did:
+  `PanicException` derives from `BaseException`, so a cross-thread access slips
+  past every `except Exception` in a host and surfaces as a wrong answer rather
+  than an error, and the *drop* path tripped even for code that never used an
+  instance cross-thread. There is therefore no discopt-side thread-affinity bug,
+  and the model-level base cache — one `NlProblem` shared by every thread that
+  solves a node — is correct as written.
+
+  What changed here is the requirement being made explicit instead of assumed.
+  POUNCE's version string cannot express it (pounce#477 landed inside an
+  unreleased `0.9.0`, so a pre- and post-fix build are both "0.9.0"), so
+  `nlp_native` now *measures* the guarantee once per process on the first base
+  built — a real second thread touching the problem, catching `BaseException`
+  because a pyo3 panic is one — and disables the native path with a warning
+  naming pounce#477 when it does not hold, falling back to the JAX callback
+  bridge rather than letting an uncatchable panic abort a solve. The stale
+  "enable explicitly once PyNlProblem is made Send-safe" note in `solver.py` is
+  corrected; `DISCOPT_NLP_NATIVE` stays default-OFF on its remaining grounds
+  (neutral-to-modest speedup, MIQP-batch certification perturbation), which is a
+  §5 graduation-panel decision rather than a bug fix.
+  Tests: `test_932_native_base_thread_sharing.py`.
 
 ### Added
 
