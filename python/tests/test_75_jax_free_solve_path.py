@@ -243,6 +243,29 @@ def test_opt_outs_still_reach_the_legacy_jax_path(env, label):
     assert int(res["JAXMODS"]) > 0, f"{label}: opt-out did not reach the JAX path"
 
 
+@pytest.mark.slow
+def test_eager_imports_stay_jax_free():
+    """``DISCOPT_EAGER_IMPORTS=1`` must not reintroduce JAX.
+
+    Found by review, not by the tests above: every other test here runs with the
+    eager path OFF (its default), so none of them touches this list. It named
+    ``jax.numpy`` as its first entry -- a documented, supported configuration in
+    which the #75 result was simply false. Measured on the merged tree before the
+    fix: **210** JAX modules on the same solve that imports 0 by default.
+
+    The list is *by name*, so no amount of removing ``import jax`` statements from
+    the solve path can fix it and no import-site grep would find it. That makes it
+    exactly the class of leak this file exists to catch, and it is pinned here
+    rather than in the ``__init__`` unit tests so it lives beside the assertion it
+    protects.
+    """
+    res = _run(MODELS["nlp_exp_log"], {"DISCOPT_EAGER_IMPORTS": "1"})
+    assert res["JAXMODS"] == "0", (
+        f"DISCOPT_EAGER_IMPORTS=1 imported {res['JAXMODS']} jax modules "
+        f"({res.get('LEAKED', '?')}) -- the eager list has reacquired a jax entry"
+    )
+
+
 @pytest.mark.unit
 def test_cut_augmented_wrapper_over_a_tape_stays_jax_free():
     """`_AugmentedEvaluator` must not import JAX when it wraps a tape evaluator.
