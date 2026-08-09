@@ -268,6 +268,92 @@ def test_timed_out_solve_without_a_floor_reports_no_bound(warm_dl, monkeypatch):
     assert res.bound is None
 
 
+def test_deadline_exit_banks_the_warm_basis_floor():
+    """#928: a deadline exit must return the best bound the solve already had.
+
+    Warm-start the LP from its own OPTIMAL basis and cut it with an already-spent
+    budget. The dual loop's deadline exit banks the current (here: optimal) basis's
+    row duals, so the recovered Neumaier-Shcherbina floor must sit at the LP
+    optimum (within its rigor margin) — not at the trivial ``g(y=0)`` box bound.
+
+    Before the fix the dual loop discarded its basis on a deadline (``return
+    None`` → cold fallback → ``IterLimit`` from the cold INITIAL basis), so the
+    banked floor collapsed to ``g(0)``: measured on the hda separated-relaxation
+    node LP, floor -141697 at 15%%, 40%% and 75%% deadlines alike, with the
+    optimum -64473 fractions of a second away.
+
+    Deterministic: the deadline is in the past before the first pivot, so the
+    banked basis is exactly the one passed in.
+    """
+    c, A, b, bounds = _small_lp()
+    res_full, out_basis, _cert = solve_lp_warm_std(c, A, b, bounds, return_cert=True)
+    assert res_full is not None and res_full.objective == pytest.approx(-1.0, abs=1e-6)
+    assert out_basis is not None
+
+    res_cut, _, cert = solve_lp_warm_std(
+        c, A, b, bounds, tuple(out_basis), return_cert=True, time_limit=0.0
+    )
+    assert res_cut is None, "a spent budget must still yield, never solve on"
+    assert cert.safe_bound is not None, "the deadline exit must bank a floor"
+    assert cert.safe_bound <= -1.0 + 1e-9, "UNSOUND: floor above the true optimum"
+    assert cert.safe_bound == pytest.approx(-1.0, abs=1e-6), (
+        "the optimal-basis floor was discarded: a deadline exit must bank the "
+        f"bound it already had (got {cert.safe_bound}, optimum -1.0)"
+    )
+
+
+def test_cold_deadline_solve_starts_the_dual_simplex():
+    """#928: a COLD solve carrying a finite deadline threads the sign-matched
+    slack basis to the engine, so the (anytime, monotone-bound) dual simplex runs
+    instead of the primal — the primal proves no usable floor mid-run. Without a
+    deadline the historical no-basis call is preserved bit-for-bit."""
+    import discopt._rust as _rust
+
+    calls = []
+    orig = _rust.solve_lp_warm_csc_py
+
+    def spy(*a, **kw):
+        calls.append(a[9] is not None)  # start_col_status positional slot
+        return orig(*a, **kw)
+
+    _rust.solve_lp_warm_csc_py = spy
+    try:
+        c, A, b, bounds = _small_lp()
+        solve_lp_warm_std(c, A, b, bounds, time_limit=None)
+        solve_lp_warm_std(c, A, b, bounds, time_limit=30.0)
+        solve_lp_warm_std(c, A, b, bounds, time_limit=float("inf"))
+    finally:
+        _rust.solve_lp_warm_csc_py = orig
+    assert calls == [False, True, False], (
+        "slack-dual start must engage exactly on finite-deadline cold solves; "
+        f"got {calls} for [no limit, 30s, inf]"
+    )
+
+
+def test_dual_start_slack_basis_eligibility():
+    """The sign-matched slack basis is proposed only when it is dual-feasible:
+    every objective-selected bound side must be finite. ``PreparedDual::prepare``
+    re-verifies the same precondition exactly, so this gate is about not wasting a
+    prepare, never about soundness."""
+    import numpy as np
+    from discopt.solvers.milp_simplex import _dual_start_slack_basis
+
+    lb = np.array([0.0, -1e20])
+    ub = np.array([1.0, 1e20])
+    # c[1] > 0 selects the lower bound of a free-below column: dual-infeasible.
+    assert _dual_start_slack_basis(np.array([1.0, 1.0]), lb, ub, m=2) is None
+    # c[1] < 0 selects the (open) upper bound: dual-infeasible.
+    assert _dual_start_slack_basis(np.array([1.0, -1.0]), lb, ub, m=2) is None
+    # c[1] = 0 constrains nothing: eligible; slacks basic, structurals at bounds.
+    out = _dual_start_slack_basis(np.array([-1.0, 0.0]), lb, ub, m=2)
+    assert out is not None
+    col_status, basic_vars = out
+    assert col_status.tolist() == [2, 0, 1, 1]  # AT_UPPER, AT_LOWER, BASIC, BASIC
+    assert basic_vars.tolist() == [2, 3]
+    # No rows -> no slack basis to build.
+    assert _dual_start_slack_basis(np.array([-1.0, 0.0]), lb, ub, m=0) is None
+
+
 def test_iter_limit_exports_a_dual_candidate():
     """The Rust blocker: a deadline exit must still hand back a dual candidate.
 
