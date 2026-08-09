@@ -6523,11 +6523,17 @@ def solve_model(
                                     model._disjunctive_config_floor = float(_dcb.bound)
                                     logger.info(
                                         "disjunctive config bound: floor %.6g "
-                                        "(%d leaf solves, %d infeasible, %.1fs)",
+                                        "(%d leaf solves, %d infeasible, %.1fs, "
+                                        "stopped on %s)",
                                         _dcb.bound,
                                         _dcb.n_processed,
                                         _dcb.n_pruned_infeasible,
                                         _dcb.wall,
+                                        # Expected to be "deadline" here: in-solve
+                                        # the wall budget governs by design (the
+                                        # leaf cap above is a runaway backstop), so
+                                        # this floor is anytime, not reproducible.
+                                        _dcb.stopped_on,
                                     )
                             except Exception as _dcb_exc:  # pragma: no cover
                                 logger.debug("disjunctive config bound skipped: %s", _dcb_exc)

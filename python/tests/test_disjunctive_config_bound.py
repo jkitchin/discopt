@@ -84,6 +84,71 @@ def test_anytime_validity_tiny_budget(monkeypatch):
         assert res.bound <= EX1252_OPT + 1e-2, "bound above the optimum is unsound"
 
 
+def test_stopped_on_reports_the_clock_when_the_deadline_fires(monkeypatch):
+    """An already-expired deadline must be reported as such, not as a bound.
+
+    Without this field the result of a clock-truncated pass is indistinguishable
+    from a fully-budgeted one, so a slow runner and a bound regression produce
+    the same evidence.
+    """
+    r = _reformed(monkeypatch)
+    lb, ub = flat_variable_bounds(r)
+    res = compute_disjunctive_config_bound(
+        r,
+        np.asarray(lb),
+        np.asarray(ub),
+        max_leaf_solves=120,
+        deadline=time.perf_counter() - 1.0,  # already gone
+    )
+    assert res.stopped_on == "deadline", f"expected 'deadline', got {res.stopped_on!r}"
+    assert res.n_processed == 0
+
+
+def test_stopped_on_reports_the_budget_when_the_leaf_cap_fires(monkeypatch):
+    """The reproducible stopping rule reports itself distinctly from the clock."""
+    r = _reformed(monkeypatch)
+    lb, ub = flat_variable_bounds(r)
+    res = compute_disjunctive_config_bound(
+        r,
+        np.asarray(lb),
+        np.asarray(ub),
+        max_leaf_solves=2,
+        deadline=time.perf_counter() + 600.0,  # generous: must not be what stops it
+    )
+    assert res.stopped_on == "budget", f"expected 'budget', got {res.stopped_on!r}"
+    assert res.n_processed == 2
+
+
+def _assert_budget_not_clock(res, budget: int, deadline_s: float) -> None:
+    """The quality bars below are only readable if the LEAF BUDGET ended the pass.
+
+    The pass stops on whichever of ``max_leaf_solves`` and ``deadline`` comes
+    first. The leaf budget is reproducible: at a fixed budget the bound is a
+    function of the relaxation alone (measured bit-identical across two arms and
+    two budgets — 37945.427865923564 at 48 leaves, 63080.286987442756 at 120).
+    The clock is not: whatever the pass has managed by then depends on the
+    machine.
+
+    So a bound below the bar means one of two completely different things, and
+    the difference is not visible in the bound. This turns the ambiguity into two
+    distinct failures. Do NOT "fix" a clock-bound failure by lowering the bar —
+    raise the deadline, or get a faster runner.
+
+    History: the nightly lane read 33498 (42/120 leaves) and 31567 (32/48) on a
+    runner ~3x slower than the reference machine and reported both as bound
+    regressions. Both were the deadline; the bounds at full budget were unchanged
+    to the last digit.
+    """
+    assert res.stopped_on != "deadline", (
+        f"CLOCK-BOUND, not a bound regression: the pass hit its {deadline_s:.0f}s "
+        f"deadline after only {res.n_processed}/{budget} leaf solves, so the bound "
+        f"it reports ({res.bound}) measures this runner's speed, not the "
+        f"relaxation. Raise the deadline (the job's own timeout is the backstop); "
+        f"do NOT lower the quality bar."
+    )
+    assert res.n_processed > 0, "the pass processed no leaf at all — it did not fire"
+
+
 @pytest.mark.slow
 def test_ex1252_spatial_recursion_clears_721_bar(monkeypatch):
     """#732 Stage 4: with continuous bisection at count-complete leaves, the pass
@@ -94,20 +159,23 @@ def test_ex1252_spatial_recursion_clears_721_bar(monkeypatch):
     Stage 2: counts are still splittable there, so the spatial extension only
     engages deeper).
     """
+    budget, deadline_s = 120, 1500.0
     r = _reformed(monkeypatch)
     lb, ub = flat_variable_bounds(r)
     res = compute_disjunctive_config_bound(
         r,
         np.asarray(lb),
         np.asarray(ub),
-        max_leaf_solves=120,
-        deadline=time.perf_counter() + 240.0,
+        max_leaf_solves=budget,
+        deadline=time.perf_counter() + deadline_s,
     )
     assert res.bound is not None
     assert res.bound <= EX1252_OPT + 1e-2, f"UNSOUND: {res.bound} > optimum {EX1252_OPT}"
+    _assert_budget_not_clock(res, budget, deadline_s)
     assert res.bound >= 48000.0, (
-        f"spatial recursion bound {res.bound} fell below the #721 bar (48k) — "
-        "re-run the plan-doc Stage-4 measurement before shipping a change here"
+        f"spatial recursion bound {res.bound} fell below the #721 bar (48k) at the "
+        f"full {budget}-leaf budget — re-run the plan-doc Stage-4 measurement "
+        "before shipping a change here"
     )
 
 
@@ -119,20 +187,23 @@ def test_ex1252_pass_clears_stage2_gate(monkeypatch):
     >= 33k gate (12658); the disjunctive pass clears it with no incumbent and no
     tree (measured ~37.9k at this budget).
     """
+    budget, deadline_s = 48, 600.0
     r = _reformed(monkeypatch)
     lb, ub = flat_variable_bounds(r)
     res = compute_disjunctive_config_bound(
         r,
         np.asarray(lb),
         np.asarray(ub),
-        max_leaf_solves=48,
-        deadline=time.perf_counter() + 180.0,
+        max_leaf_solves=budget,
+        deadline=time.perf_counter() + deadline_s,
     )
     assert res.bound is not None, "the pass must certify a bound on the config class"
     assert res.bound <= EX1252_OPT + 1e-2, f"UNSOUND: {res.bound} > optimum {EX1252_OPT}"
+    _assert_budget_not_clock(res, budget, deadline_s)
     assert res.bound >= STAGE2_GATE, (
-        f"pass bound {res.bound} fell below the Stage-2 gate {STAGE2_GATE} — "
-        "re-run the plan-doc entry experiments before shipping a change here"
+        f"pass bound {res.bound} fell below the Stage-2 gate {STAGE2_GATE} at the "
+        f"full {budget}-leaf budget — re-run the plan-doc entry experiments before "
+        "shipping a change here"
     )
 
 
