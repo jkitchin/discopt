@@ -1533,7 +1533,65 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
 > an `optimal` result), which is why the default path does not move.
 
-### 13a. Retraction: #917's reserve-extension graduation is void after #919 (2026-08-01)
+### 14b. #928: the deadline exit is bound-preserving; graduation still fails, and the residual moved seams (2026-08-09)
+
+> §14a left two things open: the banked floor's *quality* (a deadline exit that
+> banks -141697 when -64473 is seconds away) and the net-positive bar. The first
+> is now fixed; the second still fails, and the measurement says the remaining
+> overrun is no longer this seam's.
+>
+> **Root cause of the weak floor, measured** (`scratchpad/issue928_{capture_lps,
+> replay}.py`, replaying the real hda separated-relaxation node LP): on a deadline
+> the warm dual loop returned `None`, discarding its dual-feasible basis; the cold
+> primal fallback then ran on a spent budget and its `IterLimit` dual export is
+> **identically zero through phase 1**, so the recovered NS floor was exactly
+> `g(y=0)` — the trivial box bound, -141697.4335, at 15/40/75% deadline fractions
+> alike, gap to the -64473.4 LP optimum never shrinking with budget.
+>
+> **The fix** (`SimplexOptions::bank_deadline_duals`, set ONLY by
+> `solve_lp_warm_csc_py` when a `time_limit` is passed — the MILP driver's own
+> deadline route keeps `false`, so the default B&B pivot path is untouched;
+> verified BOUND_NEUTRAL flag-OFF on 13 certifying instances vs the merge-base,
+> `scratchpad/issue928_neutrality.py`, marker-gated per §8): the dual loop's
+> deadline exit returns `IterLimit` carrying its current `y = B⁻ᵀc_B` (NS value =
+> the monotone best-so-far dual objective); near-zero-pivot breakdowns retry in
+> place (refactorize + exact recompute, the loop's existing soundness anchor,
+> capped at 5) instead of abandoning the loop; the last exact refresh's duals
+> survive a breakdown → cold-fallback → deadline-cut sequence; and a COLD solve
+> carrying a finite deadline starts the dual simplex from the sign-matched slack
+> basis when dual-feasible (`_dual_start_slack_basis`; `PreparedDual::prepare`
+> re-verifies the precondition), because the primal proves no usable floor
+> mid-run. Measured on the hda LP: floor -141697 -> -118439/-118783 at every
+> binding deadline (~30% of the gap closed, monotone in budget); whole-solve hda
+> @10 s ON: bound -141697 -> -123462 in 3/3 reps, wall 11.2-11.8 s.
+>
+> **Seven §5 panel runs, ALL cert-clean** — 0 cert_regressions / lost_incumbents
+> / lost_bound / unsound in every run; §14a's bound-losing trade is gone (contvar
+> is now often TIGHTER than OFF; tspn12 and tls2 gained incumbents). Net-positive
+> is where it dies (`discopt_benchmarks/results/issue928_*.json`):
+>
+> | panel | budget | ON−OFF overrun |
+> |---|---|---|
+> | full corpus (66), 1 run | 15 s | 73.8 -> 31.6 s (**-57%**) |
+> | binding subset (19), 3 reps | 15 s | -2.5 / 0.0 / -8.2 s |
+> | binding subset (19), 3 reps | 20 s | **+325.4 / +68.5 / +12.7 s** |
+>
+> The sign flips with budget — not "measurably helpful broadly" (the
+> `DISCOPT_CUT_INHERIT` rule) — so **the flag stays OFF**.
+>
+> **Where the ON overrun actually lives** (`scratchpad/issue928_{contvar_probe,
+> blowup_hunt}.py`): not in this seam. Zero per-LP deadline violations across all
+> probes. contvar ON spends **2.8 s in 30 relaxation solves** against a 27-33 s
+> wall; OFF spends 6.3 s in 20 solves for a ~22 s wall. The budget-honoring LPs
+> return sooner, the enclosing separation loop fits ~10 more rounds, and each
+> round's non-LP cost (~1.1 s `build_uniform_relaxation` etc.) is not clamped by
+> the round's grant. On top of that, downstream phases with coarse global-deadline
+> compliance produce rare severe modes in BOTH arms: ON contvar 500.6 s and
+> bchoco08 80.9 s; OFF heatexch_gen3 200.5 s in the same rep set (the same
+> pre-existing class §14 recorded as 78-176 s OFF-arm noise). The next actionable
+> seam is therefore **caller-side round-budget accounting** (clamp a separation
+> round's build cost against the phase grant, and the downstream phases' deadline
+> compliance), not further work in the LP engine.
 
 > §13 graduated `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION` default-ON on a 133-cell panel
 > whose net-positive case was three cells: nvs18@45 s (uncertified 0/3 → **certified
