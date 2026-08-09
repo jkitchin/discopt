@@ -68,6 +68,13 @@ Work top to bottom. Each task states its done-condition; do not start a task who
 predecessor's done-condition is unmet. Tick the box and record the measurement
 inline when a task completes.
 
+**Order changed 2026-08-09 (owner's call): T3 and T4 run BEFORE T2′.** T2′ has
+become an open-ended simplex investigation whose size is not yet bounded — six
+hypotheses eliminated, no fix — while T3/T4 are independent of it and deliver the
+bilinear-infeasibility gap outright. Banking them first also de-risks T2′: if it
+turns out phase 1 emits a false *feasible*, T3's certificate plumbing is what
+carries the fix through to the tree anyway.
+
 - [x] **T1 — Entry experiment: classify the undecided verdicts (NO implementation
   until this reports).** DONE 2026-08-09 — **kill criterion NOT met; T2's hypothesis
   is falsified.** See §4 log entry T1 for the full histogram. Headlines:
@@ -113,17 +120,24 @@ inline when a task completes.
   **Done when:** `LpAuditBoundsFail` is materially reduced on W2 and the terminal
   histogram shifts from `Numerical` to `Optimal`/`Infeasible`, with T5 green.
 
-- [ ] **T3 — Give the Python cold path a verdict at all (now W1's whole story).**
-  T1 raised this task's priority: W1 runs 10 847 nodes and registers **zero**
-  verdicts on either Rust simplex path, so its node LPs never even attempt a
-  certificate. `_node_bound`'s
-  `cut_enabled=False` branch calls `_relax_bound`, which "collapses every failure
-  mode into `None` and cannot prove infeasibility", so every node on that path is
-  `"unresolved"` by construction. Plumb the same `(status, farkas)` pair the
-  incremental path returns through the cold path so a certified-infeasible node can
-  fathom there too.
-  **Done when:** on W1 the cold path reports certified-infeasible nodes (counted,
-  not inferred), and the fraction of `"unresolved"` nodes drops.
+- [ ] **T3′ — Re-scoped 2026-08-09: the certificate plumbing ALREADY EXISTS and
+  works. The defect is downstream of it.** T3 as written rested on two claims that
+  both turned out false; see the §4 log entry T3 for the full trace.
+  * `solve_lp_spatial_bb` is called **zero** times for W1, so `_relax_bound` and its
+    `cut_enabled=False` branch — the entire subject of the original T3 — are not on
+    this witness's path at all.
+  * W1's node LPs are certified infeasible **3600/3600** (`('infeasible', farkas=True)`
+    out of `IncrementalMcCormickLP.solve_assembled_full`), `mccormick_lp` converts
+    that into `MccormickLPResult(status="infeasible")` on a verified ray, and
+    `solver.py` fathoms it (`node_infeasible_mask`, `_INFEASIBILITY_SENTINEL`).
+    Every link in the chain works.
+
+  **The open question is now narrower and stranger:** every node LP is certified
+  infeasible and every node is fathomed, yet the tree runs 4000+ nodes and returns
+  `time_limit` instead of `infeasible`. A fathomed node produces no children, so the
+  tree should empty almost immediately. Something is regenerating or re-solving
+  nodes, or the termination test is not reading the fathom marks.
+  **Done when:** the node-generation path is identified and W1's tree terminates.
 
 - [ ] **T4 — W1 terminates.** `x*y >= c, x + y <= 1` on `[0,1]²` returns
   `infeasible` for `c` in {0.5, 0.6, 1.0, 2.0}, in both guard arms.
@@ -262,6 +276,43 @@ producing a false *feasible* and the fix belongs in infeasibility detection — 
 is exactly what W1 and W2 both need, and would convert `Numerical` into certified
 `Infeasible`. If HiGHS solves it, the fix belongs in phase-1 feasibility
 maintenance (more frequent exact recompute / a composite phase-1 objective).
+
+### T3 — retraction of a T1 finding, and the certificate chain traced end to end (2026-08-09)
+
+**RETRACTION (CLAUDE.md §11).** T1 reported that W1 and W3 "register zero counters
+on both instrumented paths", and concluded their node LPs never reach the Rust
+simplex. **That was an instrument defect, not a measurement.** `profile::dump()`
+`swap(0)`s every counter, and it is called at the end of `solve_lp_warm_csc_py` —
+i.e. after *every node LP* on the Python path — so the snapshot was being wiped
+before the probe could read it. Fixed by adding monotonic `CTOTALS` that `dump()`
+does not clear (`counter_snapshot` now reads those; an explicit `reset()` clears
+both). Every T1 conclusion that rested on W2 stands — W2's counters were large and
+nonzero — but the W1/W3 zeros are withdrawn.
+
+**What W1 actually does,** with the repaired instrument:
+
+| measurement | value |
+|---|---|
+| `LpVerdictInfeasible` | **6586** |
+| `LpInfeasUncertified` | 0 |
+| `LpVerdictNumerical` | 0 |
+| `solve_assembled_full` verdicts | `('infeasible', farkas=True)` × 3600 |
+| `solve_lp_spatial_bb` calls | **0** |
+
+So the Rust simplex certifies every one of these node LPs infeasible; the Python
+re-verification agrees (`solve_lp_warm_std` → `farkas_certified=True`, checked
+directly); `mccormick_lp` returns `MccormickLPResult(status="infeasible")` on the
+verified ray; and `solver.py` fathoms it with `node_infeasible_mask` +
+`_INFEASIBILITY_SENTINEL`. **The whole certificate chain works.** T3's proposed fix
+— plumb `(status, farkas)` through the cold path — would have been a no-op on this
+witness, and `lp_spatial_bb` is not even on its path.
+
+One real defect was found on the way and is worth its own note: `relax.solve()`
+reports `status='infeasible'` with `farkas_certified=False`, because the generic
+MILP path's result builder omits the field entirely (the warm path sets it). That
+is a genuine hole in `MilpRelaxationModel`, currently unreachable from W1 but
+reachable from any caller that lands on the generic path — recorded here rather
+than fixed, since fixing it now would be speculative.
 
 **Also learned:** `DISCOPT_PROFILE` costs throughput badly (147k–475k stderr lines
 per run, W3 fell from ~6 400 nodes to 31), so node counts measured under it must

@@ -51,6 +51,12 @@ macro_rules! counters {
         const NC: usize = { let mut c = 0; $( let _ = stringify!($name); c += 1; )* c };
         static CNAMES: &[&str] = &[$(stringify!($name)),*];
         static CVALS: [AtomicU64; NC] = [$( { let _ = stringify!($name); AtomicU64::new(0) }),*];
+        /// Monotonic totals. [`dump`] zeroes `CVALS` (it is a "print since last
+        /// dump" view) and is called from per-solve binding sites, so a caller
+        /// measuring a whole run cannot read `CVALS` — on the Python spatial path
+        /// every node LP wipes them. These accumulate in parallel and are cleared
+        /// only by an explicit [`reset`].
+        static CTOTALS: [AtomicU64; NC] = [$( { let _ = stringify!($name); AtomicU64::new(0) }),*];
     };
 }
 
@@ -255,6 +261,7 @@ counters!(
 pub fn incr(c: Ctr) {
     if enabled() {
         CVALS[c as usize].fetch_add(1, Ordering::Relaxed);
+        CTOTALS[c as usize].fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -297,7 +304,12 @@ impl Drop for Timer {
 
 /// Reset all accumulators (e.g. between solves).
 pub fn reset() {
-    for a in PCOUNT.iter().chain(PNANOS.iter()).chain(CVALS.iter()) {
+    for a in PCOUNT
+        .iter()
+        .chain(PNANOS.iter())
+        .chain(CVALS.iter())
+        .chain(CTOTALS.iter())
+    {
         a.store(0, Ordering::Relaxed);
     }
 }
@@ -318,7 +330,7 @@ pub fn counter(c: Ctr) -> u64 {
 /// follow-through needs the verdict histogram in Python). This returns them.
 pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
     (0..NC)
-        .map(|i| (CNAMES[i], CVALS[i].load(Ordering::Relaxed)))
+        .map(|i| (CNAMES[i], CTOTALS[i].load(Ordering::Relaxed)))
         .collect()
 }
 
