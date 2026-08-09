@@ -90,40 +90,36 @@ def test_root_lp_gate_bites_when_the_matrix_bytes_are_identical():
     produces, an altered status or bound is still ``changed``. Without this test,
     widening the bucket to a blanket skip would look like a pass.
 
-    The "recorded" side is synthesized from THIS build rather than read out of the
-    committed baseline. What is under test is the gate's *conditional*, which needs
-    only a row whose bytes and bound the build reproduces — and the committed
-    baseline is a linux/x86-64 artifact of one solver commit, so sourcing them from
-    it made this assertion fail for two reasons that have nothing to do with the
-    gate: a relaxation change (any correct one moves the fingerprints) and a
-    platform change (10 of the 66 committed rows do not reproduce on arm64).
-
-    Worse, the old selection predicate was ``diff_root_lp(...).status ==
-    "unchanged"``, which does NOT imply byte-identity — ``diff_root_lp`` computes
-    the fingerprint only once it already sees a status/bound difference — so the
-    ``row["fingerprint"] == current_row(...)["fingerprint"]`` assertion below it
-    was load-bearing but unimplied, and whether this test proved anything came down
-    to which instance happened to sort first. See #971.
+    The instance is selected on the fingerprint itself, not on
+    ``diff_root_lp(...) == "unchanged"``. Those are not the same condition:
+    ``diff_root_lp`` computes the fingerprint only when it already sees a
+    status/bound difference, so an instance whose root LP is unchanged can still
+    have drifted bytes — and the committed baseline is host-sensitive (measured
+    2026-08-09: 42 of 66 rows differ from a local build with #956's envelope guard
+    OFF, 61 of 66 with it ON, while the root-LP status/bound gate stays green).
+    Selecting on ``unchanged`` therefore picked a byte-drifted instance whenever
+    the host's luck ran out, and the assertion below failed for a reason that had
+    nothing to do with the gate under test.
     """
-    from support.claim_differential import (
-        current_root_lp,
-        current_row,
-        diff_root_lp,
-        load_baseline,
-    )
+    from support.claim_differential import current_row, diff_root_lp, load_baseline
 
     baseline = load_baseline()
-    name = sorted(baseline)[0]
-    assert name, "empty baseline -- test is dead"
-    status, bound = current_root_lp(name)
-    row = {
-        "instance": name,
-        "fingerprint": current_row(name)["fingerprint"],
-        "root_lp_status": status,
-        "root_lp_bound": bound,
-    }
-    assert row["fingerprint"], f"{name}: this build produced no relaxation fingerprint"
-    assert status, f"{name}: this build produced no root-LP status"
+    # Pick an instance this build reproduces EXACTLY -- byte-identical relaxation
+    # AND an unchanged root LP -- so the only thing under test is the doctored
+    # field (proves the probe fired -- CLAUDE.md §6).
+    name = next(
+        (
+            n
+            for n in sorted(baseline)
+            if baseline[n].get("fingerprint") is not None
+            and current_row(n).get("fingerprint") == baseline[n]["fingerprint"]
+            and diff_root_lp(n, baseline).status == "unchanged"
+        ),
+        None,
+    )
+    assert name is not None, "no exactly-reproduced instance to test the gate with"
+    row = dict(baseline[name])
+    assert row["fingerprint"] == current_row(name)["fingerprint"]
 
     same_bytes = dict(row, root_lp_status="a-status-this-build-does-not-produce")
     d = diff_root_lp(name, {name: same_bytes})
