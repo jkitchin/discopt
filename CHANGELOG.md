@@ -242,6 +242,35 @@ The release procedure that produces these entries is documented in
   unrounded point satisfies *both* declared tolerances, so this is a correction,
   not a tolerance concession.
 
+  The MILP gate then refused the `vub=1e3`/`vub=1e6` arms of
+  `test_benders_soundness`, and again the producer was upstream of the exit.
+  `_pounce_snap_incumbent` fixes the integers and takes the POUNCE IPM's
+  continuous completion, which honours the slack bounds standing in for
+  inequality rows only to ~1e-8 *relative*; on `v <= 1e6*y` that is a **1e-2**
+  absolute excursion. The point comes back exactly integral, so nothing
+  downstream re-examines it — the tree took it as the incumbent and reported it
+  `optimal`. Traced with a spy on the injection funnel: all 4 node-relaxation
+  points were inside the rows, and the offending `[y=1.0, eta=-1.00000001e+06]`
+  arrived through this funnel, not a node LP. `_solve_milp_bb`'s
+  `_maybe_inject_snapped` now verifies the candidate against the same rows and
+  node box the node solves are held to, which is the check the MIQP twin of that
+  funnel already ran (`_node_point_feasible`). Declining costs nothing:
+  injection is a heuristic accelerator, the subtree stays open, and a genuinely
+  feasible point is re-found from a node relaxation.
+
+  A side effect worth naming, and attributed by measurement rather than by
+  assumption: `test_946_gbd_degenerate_multiplier`'s non-binary arm used to exit
+  `iteration_limit` with bound -2.0, because the master promoted an incumbent
+  whose integer snap had left its own rows and the optimality cut added there
+  carried no usable `eta` information. It is the C-3 correction above — report
+  the unrounded point when snapping leaves the rows — and not the funnel check,
+  that changes this: on `origin/main`'s `solver.py` the arm still stalls, and on
+  this branch with the funnel check reverted it already certifies. It now
+  reaches `optimal` at bound -1.0000000149881925 against an optimum of -1, in 4
+  recourse solves. That test pins both arms: the explanation on the uncertified
+  exit (reached deterministically with `max_iterations=1`) and the newly
+  certified full-budget outcome.
+
   Verified bound-neutral per CLAUDE.md §5 over a 106-instance panel (the 40-seed
   family plus every in-repo `minlplib_nl` instance), 49 of them through
   `_solve_miqp_bb`: **0 drifts** in status/objective/bound/node_count/

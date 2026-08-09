@@ -18149,10 +18149,46 @@ def _solve_milp_bb(
             t_start,
             time_limit,
         )
-        if inc is not None:
-            tree.inject_incumbent(
-                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+        if inc is None:
+            return
+        x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
+        # #952: this is the channel the exit gate caught, and the MIQP twin of
+        # this funnel already guards it (``_node_point_feasible`` below). The
+        # snap re-solve fixes the integers and asks POUNCE for the continuous
+        # completion; POUNCE honours the slack bounds standing in for inequality
+        # rows only to its own ~1e-8 *relative* tolerance, which on a big-M row
+        # like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes
+        # back exactly integral, so nothing downstream re-examines it: the tree
+        # took it as the incumbent and reported it ``optimal``.
+        #
+        # Measured on ``test_bound_active_recourse_is_sound``: all 4 node
+        # relaxation points were inside the rows, and the offending
+        # ``[y=1.0, eta=-1.00000001e+06]`` arrived here — this funnel, not a node
+        # LP. So verify the candidate against the same rows and box the node
+        # solves are held to, at the repo's declared ``abs=1e-6``.
+        #
+        # Declining is free: injection is a heuristic accelerator, the subtree
+        # stays open, and the tree re-finds the point from a node relaxation if
+        # it is genuinely feasible. A candidate that fails here is one the exit
+        # gate would otherwise refuse the whole solve over.
+        _box_inc = np.stack(
+            [
+                np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+                np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+            ],
+            axis=1,
+        )
+        if not _matrix_solution_feasible(
+            x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
+        ):
+            logger.debug(
+                "MILP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                _matrix_solution_violations(
+                    x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
+                ),
             )
+            return
+        tree.inject_incumbent(x_inc, float(inc[0]))
 
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
     # directly (no JAX recompile on cut-augmented shapes): the exact-vertex

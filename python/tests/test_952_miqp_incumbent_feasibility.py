@@ -45,7 +45,16 @@ What is pinned here
 5. :func:`test_bounds_check_vectorisation_matches_the_original_loop` — the
    arbiter's bounds check was vectorised for the per-node call site; this pins that
    it did not change semantics.
+6. :func:`test_injection_funnel_declines_an_off_row_heuristic_incumbent` — the
+   funnel, not just the exit. ``_pounce_snap_incumbent`` fixes the integers and
+   takes the POUNCE IPM's continuous completion, which honours the slack bounds
+   standing in for inequality rows only to ~1e-8 *relative*; on a big-M row that is
+   a 1e-2 absolute excursion, delivered as an exactly-integral point that the MILP
+   funnel used to wave through and the exit gate then refused the whole solve over.
+   The MIQP funnel already checked this; the MILP one now does too.
 """
+
+import logging
 
 import discopt.modeling as dm
 import numpy as np
@@ -355,3 +364,49 @@ def test_bounds_check_vectorisation_matches_the_original_loop():
         checked += 1
 
     assert checked == 200, f"only {checked} comparisons executed"
+
+
+@pytest.mark.parametrize("vub", [1e3, 1e6])
+def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
+    """An exactly-integral candidate outside a declared row must be declined where
+    it is injected, not discovered at the exit gate.
+
+    The Benders master for ``min y - v`` s.t. ``v <= vub*y`` is the reproducer:
+    the master's LP relaxation lands ``y`` a hair under 1,
+    ``_pounce_snap_incumbent`` fixes ``y = 1`` and re-solves for ``v``, and the IPM
+    returns ``v`` about ``1e-8*vub`` past the big-M row — 1e-2 at ``vub = 1e6``,
+    four orders of magnitude outside the declared ``abs=1e-6``. Nothing downstream
+    re-examines it (it is already integral), so it reached the exit gate as the
+    answer and the whole solve died with ``MILP-BB returned an infeasible point
+    labeled feasible/optimal``.
+
+    Declining at the funnel is free — injection is a heuristic accelerator, the
+    subtree stays open — so the solve completes and its answer is exact.
+    """
+    from discopt.decomposition.benders import solve_benders
+
+    m = dm.Model("bigM")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0, ub=vub)
+    m.first_stage(y)
+    m.minimize(y - v)
+    m.subject_to(v <= vub * y)
+
+    with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
+        r = solve_benders(m, time_limit=60)
+
+    declined = [
+        rec.getMessage()
+        for rec in caplog.records
+        if "MILP-BB: rejected a snapped incumbent" in rec.getMessage()
+    ]
+    assert declined, (
+        "the funnel never declined anything; this test would pass for the wrong "
+        "reason (the off-row candidate is what it is meant to exercise)"
+    )
+
+    # And the solve still lands on the exact optimum (y=1, v=vub -> 1 - vub).
+    assert r.status in ("optimal", "iteration_limit")
+    assert r.objective == pytest.approx(1.0 - vub, rel=1e-9)
+    if r.bound is not None:
+        assert r.bound <= (1.0 - vub) + 1e-3 * (1.0 + abs(1.0 - vub))
