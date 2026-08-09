@@ -66,6 +66,21 @@ class DisjunctiveConfigResult:
     ``None`` when the pass declined / could not certify anything above ``-inf``.
     ``infeasible`` is True only when EVERY configuration pattern was pruned
     infeasible — a rigorous proof the input box contains no feasible point.
+
+    ``stopped_on`` records *what ended the pass*, following the same convention as
+    ``WorkBudget.stopped_on`` (#912):
+
+    * ``"budget"``    — the ``max_leaf_solves`` leaf budget was spent. The bound is
+      a reproducible function of the input and the budget.
+    * ``"deadline"``  — the wall-clock ``deadline`` fired first. The bound is then
+      a function of **how fast the machine is**, and comparing it against a fixed
+      quality bar measures the runner, not the relaxation.
+    * ``"exhausted"`` — the search ran out of work (no splittable leaf left)
+      before either limit. Also reproducible.
+
+    Without this field the two reproducible outcomes and the irreproducible one
+    are indistinguishable in the result, which is exactly how a slow runner came
+    to look like a bound regression on ``ex1252`` (#960 post-merge).
     """
 
     bound: Optional[float] = None
@@ -75,6 +90,7 @@ class DisjunctiveConfigResult:
     n_pruned_cutoff: int = 0
     n_leaves: int = 0
     wall: float = 0.0
+    stopped_on: str = "exhausted"
 
 
 @dataclass
@@ -224,9 +240,17 @@ def compute_disjunctive_config_bound(
     terminal_bounds: list[float] = []
 
     def _out_of_budget() -> bool:
+        # Record WHICH limit fired, not just that one did: the leaf budget is a
+        # reproducible stopping rule, the clock is not, and a caller comparing the
+        # bound against a fixed bar can only interpret it if it knows which one
+        # ended the pass. Same distinction as ``WorkBudget.stopped_on`` (#912).
         if res.n_processed >= max_leaf_solves:
+            res.stopped_on = "budget"
             return True
-        return deadline is not None and time.perf_counter() >= deadline
+        if deadline is not None and time.perf_counter() >= deadline:
+            res.stopped_on = "deadline"
+            return True
+        return False
 
     def _process(leaf: _Leaf) -> Optional[_Leaf]:
         """FBBT -> OBBT(cutoff) -> LP on the leaf. Returns the surviving leaf

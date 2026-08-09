@@ -1056,6 +1056,8 @@ def _try_native_spatial_kernel(
     rust_time,
     jax_time,
     incumbent_time_extension: float = 0.0,
+    rr_reserve_s: float = 0.0,
+    psd_cuts: bool = False,
 ):
     """Issue #764: if the native Rust spatial kernel is enabled and the model is in
     its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
@@ -1137,11 +1139,24 @@ def _try_native_spatial_kernel(
         remaining = (
             None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
         )
+        # #933: withhold the caller's root-fallback reserve from the kernel's
+        # deadline, exactly as the Python node loop withholds it while bound-less
+        # (#844). The kernel reclaims the slice the moment its own dual bound is
+        # finite (`bound_time_extension_s` — the fallback then has nothing to
+        # contribute), so only a still-bound-less kernel forfeits it; the exit
+        # handling below spends the unspent reserve on the rigorous
+        # root-relaxation fallback instead of reporting no bound at all.
+        _bound_reserve = 0.0
+        if rr_reserve_s > 0.0 and remaining is not None and remaining > 0.0:
+            _bound_reserve = min(float(rr_reserve_s), 0.5 * remaining)
+            remaining = remaining - _bound_reserve
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=float(gap_tolerance),
             time_limit_s=remaining,
         )
+        if _bound_reserve > 0.0:
+            solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
         # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
         # the slice at its own deadline — but only while it already holds an incumbent,
         # the one state in which that fallback has nothing to contribute. The kernel is
@@ -1237,6 +1252,51 @@ def _try_native_spatial_kernel(
             )
             return None
 
+    # #933: a bound-less time-limited kernel exit spends the withheld reserve on
+    # the rigorous root-relaxation fallback instead of reporting no dual bound
+    # after consuming the whole budget — the same recovery `solve_model` runs,
+    # composed through the same chokepoint. The kernel only leaves this reserve
+    # unspent when its own bound is still non-finite at its shortened deadline
+    # (see `bound_time_extension_s` above), so this arm costs nothing on solves
+    # that prove their own bound.
+    if native_status == "time_limit" and not math.isfinite(bound_val):
+        from discopt.modeling.core import ObjectiveSense as _ObjSenseNK
+
+        _nk_maximize = (
+            model._objective is not None and model._objective.sense == _ObjSenseNK.MAXIMIZE
+        )
+        _fb_remaining = (
+            0.0 if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
+        )
+        _rr_internal = None
+        if _fb_remaining > 0.0:
+            try:
+                _t_phase = time.perf_counter()
+                _rr_internal = _root_relaxation_lower_bound(
+                    model,
+                    np.asarray(lb, dtype=np.float64)[:n_vars],
+                    np.asarray(ub, dtype=np.float64)[:n_vars],
+                    _fb_remaining,
+                    psd_cuts=psd_cuts,
+                )
+                _native_jax_s += time.perf_counter() - _t_phase
+            except Exception as _rr_exc:  # pragma: no cover - defensive
+                logger.debug("native-kernel root-relaxation fallback failed: %s", _rr_exc)
+        _fb_bound, _ = _finalize_reported_bound(
+            tree_bound_internal=None,
+            tree_bound_valid=False,
+            is_maximize=_nk_maximize,
+            obj_val=obj_val,
+            independent_bounds_internal=(_rr_internal,),
+        )
+        if _fb_bound is not None:
+            logger.info(
+                "native spatial kernel bound-less at time_limit — reporting the "
+                "root-relaxation fallback bound %.6g (#933)",
+                _fb_bound,
+            )
+            bound_val = _fb_bound
+
     x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start
     gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10) if obj_val is not None else None
@@ -1263,6 +1323,11 @@ def _try_native_spatial_kernel(
     # its own mechanism fire cannot score it (CLAUDE.md §6).
     _ext_s = float(res.get("incumbent_extension_s") or 0.0)
     _native_stats = {"budget/incumbent_extension_s": _ext_s} if _ext_s > 0.0 else None
+    # #933: same §6 observability for the bound-conditional reserve reclaim.
+    _bext_s = float(res.get("bound_extension_s") or 0.0)
+    if _bext_s > 0.0:
+        _native_stats = dict(_native_stats or {})
+        _native_stats["budget/bound_extension_s"] = _bext_s
     return SolveResult(
         status=native_status,
         objective=obj_val,
@@ -1509,11 +1574,13 @@ _POUNCE_BATCH_MULTISTART = False
 # POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Opt-in
 # (DISCOPT_NLP_NATIVE / options["nlp_native"]); falls back to the JAX path
 # automatically whenever a native base cannot be built/validated for the model
-# (see solvers.nlp_native). Default OFF: POUNCE's PyNlProblem is unsendable
-# (pyo3), so caching it on the model and using it across the batch/parallel paths
-# trips "unsendable ... dropped on another thread" under pytest-xdist and can
-# perturb MIQP-batch certification; and the speedup is neutral-to-modest. Enable
-# explicitly once PyNlProblem is made Send-safe.
+# (see solvers.nlp_native). The "PyNlProblem is unsendable (pyo3)" hazard this
+# comment used to carry is gone: pounce#477 dropped the marker after establishing
+# NlProblem is Send, so one base can serve every thread, and nlp_native measures
+# that guarantee once per process and disables the native path against an older
+# POUNCE (discopt#932). Default stays OFF on the remaining grounds — the speedup
+# is neutral-to-modest and the path can perturb MIQP-batch certification; flipping
+# the default is a §5 graduation-panel decision, not a bug fix.
 _NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
     "0",
     "false",
@@ -2181,17 +2248,13 @@ def _extract_variable_info(model: Model):
     return n_vars, lb, ub, int_var_offsets, int_var_sizes
 
 
-def _check_lp_solution_feasibility(A_eq, b_eq, x_full, tol=1e-4):
-    """Check that an LP/QP solution satisfies A_eq @ x = b_eq within tolerance.
-
-    Returns True if the maximum absolute constraint residual is within *tol*.
-    Used by MILP/MIQP B&B to reject LP/QP relaxation solutions where the IPM
-    converged to a constraint-violating point.
-    """
-    if A_eq.shape[0] == 0:
-        return True
-    residual = np.asarray(A_eq) @ np.asarray(x_full) - np.asarray(b_eq)
-    return float(np.max(np.abs(residual))) <= tol
+# NOTE (#952): ``_check_lp_solution_feasibility`` used to live here — an
+# equality-residual-only gate at ``tol=1e-4``, 100x the repo's declared
+# ``abs=1e-6``. Its last two callers were the MIQP B&B node gates, where it was a
+# tautology (the batched node path reconstructs slacks so the equality holds by
+# construction; see ``_solve_miqp_bb._node_point_feasible``). Both now call
+# ``_matrix_solution_feasible``, the repo's single arbiter, so the helper had no
+# callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
 def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
@@ -2229,6 +2292,132 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
         float(np.max(cons[:n_check] - cu[:n_check])), float(np.max(cl[:n_check] - cons[:n_check]))
     )
     return max_viol <= tol
+
+
+# The absolute tolerance the NLP-BB exit gate (#954) holds a returned incumbent
+# to: the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), the same
+# figure ``_matrix_solution_feasible`` enforces on the matrix paths (#952) and
+# ``_jax.primal_heuristics._check_constraint_feasibility`` enforces when a primal
+# heuristic accepts an incumbent. Deliberately NOT the 1e-4 that this module's
+# local ``_check_constraint_feasibility`` defaults to; see the gate's call site.
+_NLPBB_EXIT_ABS_TOL = 1e-6
+# Term-magnitude forgiveness, identical to the two arbiters above: a row built
+# from terms of size ~1e5 carries ~1e-6 of pure cancellation noise, so an
+# absolute-only test at 1e-6 rejects genuinely optimal points (the prob07 lesson
+# recorded in ``primal_heuristics._check_constraint_feasibility``). Kept extremely
+# tight so only noise proportional to the row's own terms is forgiven.
+_NLPBB_EXIT_RTOL = 1e-9
+
+
+def _nonlinear_point_excess(
+    evaluator,
+    x,
+    cl_list,
+    cu_list,
+    n_rows=None,
+    box=None,
+    tol=_NLPBB_EXIT_ABS_TOL,
+    rtol=_NLPBB_EXIT_RTOL,
+):
+    """How far ``x`` sits outside nonlinear rows + a box, net of term-scaled noise.
+
+    The nonlinear counterpart of :func:`_matrix_solution_feasible` /
+    :func:`_matrix_solution_violations`, and deliberately ONE function rather than
+    an arbiter plus a separate reporter: the decision and the reported magnitude
+    come from the same number, so they cannot drift out of agreement (#952 kept
+    them apart by giving the reporter no tolerance at all; here the reporter *is*
+    the arbiter's own quantity).
+
+    Returns ``(excess, where, n_compared)``:
+
+    * ``excess`` — ``max(viol_i - rtol*scale_i)`` over the checked rows and box
+      entries, where ``scale_i = sum_j |J_ij| |x_j|`` is the row's additive-term
+      magnitude (from the Jacobian, never from the possibly-``1e20`` bound
+      sentinels) and ``|x_i|`` for a box entry. The point is feasible at absolute
+      tolerance ``tol`` exactly when ``excess <= tol``. When the raw violation
+      already clears ``tol`` the Jacobian is not evaluated and the raw maximum is
+      returned instead — an upper bound on the excess, and exact whenever the
+      returned value exceeds ``tol``, which is the only regime a caller acts on.
+    * ``where`` — which row or variable carried the maximum, for the message.
+    * ``n_compared`` — executed comparisons (CLAUDE.md §6), so a caller can prove
+      the check looked at something rather than short-circuiting on empty inputs.
+
+    ``n_rows`` limits the check to the FIRST ``n_rows`` evaluator rows. The NLP-BB
+    path appends root cuts (#781) to the model before compiling the evaluator;
+    those rows are valid for integer-feasible points but deliberately tight, and
+    they are not rows the user declared, so a gate must not judge a returned point
+    by them.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    excess = -np.inf
+    where = "nothing checked"
+    n_compared = 0
+
+    if not np.all(np.isfinite(x)):
+        bad = int(np.argmax(~np.isfinite(x)))
+        return np.inf, f"x[{bad}] is not finite", int(x.size)
+
+    n = 0
+    viol = np.zeros(0, dtype=np.float64)
+    if cl_list is not None and len(cl_list) and getattr(evaluator, "n_constraints", 0):
+        cl = np.asarray(cl_list, dtype=np.float64)
+        cu = np.asarray(cu_list, dtype=np.float64)
+        g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+        n = min(len(g), len(cl))
+        if n_rows is not None:
+            n = min(n, int(n_rows))
+        if n > 0:
+            viol = np.maximum(np.maximum(cl[:n] - g[:n], g[:n] - cu[:n]), 0.0)
+            n_compared += 2 * n
+            excess = max(excess, float(viol.max()))
+            where = f"constraint row {int(viol.argmax())}"
+
+    box_viol = np.zeros(0, dtype=np.float64)
+    if box is not None:
+        box_arr = np.asarray(box, dtype=np.float64)
+        if box_arr.size:
+            k = min(x.shape[0], box_arr.shape[0])
+            box_viol = np.maximum(np.maximum(box_arr[:k, 0] - x[:k], x[:k] - box_arr[:k, 1]), 0.0)
+            n_compared += 2 * k
+            if k and float(box_viol.max()) > excess:
+                excess = float(box_viol.max())
+                where = f"bound on x[{int(box_viol.argmax())}]"
+
+    if excess == -np.inf:
+        return 0.0, "nothing checked", n_compared
+    if excess <= tol:
+        # Cheap path: the raw violation already clears the tolerance, so the
+        # term-scaled forgiveness cannot change the verdict. Skips the Jacobian.
+        return float(excess), where, n_compared
+
+    # Some block exceeds the absolute tolerance: net out the term-scaled noise
+    # before deciding, exactly as the two sibling arbiters do.
+    excess = -np.inf
+    where = "nothing checked"
+    if n > 0:
+        try:
+            jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
+            # ``np.asarray`` on a sparse matrix silently yields a 0-d object array
+            # (CLAUDE.md "Key Constraints"), which would feed garbage into the
+            # scale. ``evaluate_jacobian`` documents a dense (m, n) return; verify
+            # it rather than trust it, and fall back to the strict path if not.
+            if jac.ndim != 2 or jac.shape[0] < n:
+                raise TypeError(f"expected a dense (m, n) Jacobian, got shape {jac.shape}")
+            scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
+        except Exception as exc:
+            # An unevaluable Jacobian is not a licence to forgive: fall back to
+            # the raw (stricter) violation rather than silently passing a point.
+            logger.debug("#954 gate: Jacobian unavailable, using raw residuals: %s", exc)
+            scale = np.zeros(n, dtype=np.float64)
+        net = viol - rtol * scale
+        excess = float(net.max())
+        where = f"constraint row {int(net.argmax())}"
+    if box_viol.size:
+        net_box = box_viol - rtol * np.abs(x[: box_viol.size])
+        if float(net_box.max()) > excess:
+            excess = float(net_box.max())
+            where = f"bound on x[{int(net_box.argmax())}]"
+    return float(excess), where, n_compared
 
 
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
@@ -2965,6 +3154,110 @@ def _certified_callback_bound(
     if abs(global_lower_bound) >= _SENTINEL_THRESHOLD:
         return None
     return -global_lower_bound if is_maximize else global_lower_bound
+
+
+def _root_bound_seed_enabled() -> bool:
+    """Whether the #933 root dual-bound seeding is engaged (**default ON** since the
+    2026-08-09 Regime-2 graduation panel; ``DISCOPT_ROOT_BOUND_SEED=0`` opts out and
+    restores the legacy unseeded tree byte-for-byte).
+
+    Bound-changing: a proved root relaxation bound is installed into node 0's
+    ``local_lower_bound`` (``PyTreeManager.seed_root_bound``), so every descendant
+    inherits a finite floor and the tree's ``global_lower_bound`` is finite —
+    anytime and monotone — from the first root LP onward instead of from the first
+    fully-processed batch. The floor can change which nodes prune first, hence the
+    flag. Only bounds proved by the SAME trusted engine that produces the path's
+    node bounds are ever seeded (the spatial path's McCormick root probe behind the
+    #930 box-equality gate; the MILP path's structured-node root LP); the #781
+    HiGHS root-cut bound is deliberately NOT seeded — it stays a report-only value
+    outside the pruning machinery, exactly as #781 designed.
+
+    Graduation record (in-repo corpus, 66 instances, TL=8, paired OFF/ON —
+    ``discopt_benchmarks/scripts/issue933_seed_graduation_panel.py``, raw log in
+    ``discopt_benchmarks/results/issue933/``): cert-clean — 31 oracle checks,
+    0 bounds past the reference optimum, 0 certification regressions, 0 objective
+    drift; net-positive — bound coverage 61 -> 62, ON tighter on 6 / equal on 52 /
+    looser on 0 paired bounds, one feasible -> certified-optimal upgrade
+    (cvxnonsep_nsig30), wall mean -0.55 s (sd 3.66, median -0.05 s; bounded
+    overruns like heatexch_gen2 8.7 -> 14.5 s offset by tspn12 31.9 -> 7.8 s).
+    """
+    return os.environ.get("DISCOPT_ROOT_BOUND_SEED", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _finalize_reported_bound(
+    *,
+    tree_bound_internal: Optional[float],
+    tree_bound_valid: bool,
+    is_maximize: bool,
+    obj_val: Optional[float],
+    independent_bounds_internal: "tuple[Optional[float], ...]" = (),
+) -> "tuple[Optional[float], Optional[float]]":
+    """#933 part (b): the ONE composition of an *uncertified* exit's reported dual
+    bound, shared by every solve path instead of five hand-rolled variants.
+
+    Taint rule, applied once: the tree's ``global_lower_bound`` is adopted only
+    when ``tree_bound_valid`` — no node's bound entered the tree without a
+    soundness proof — and it is finite and below the ``1e20`` effective-infinity
+    sentinel (the #930 hole: ``np.isfinite(1e20)`` is True; the refusal threshold
+    is the same ``1e19`` the #930 gate and the LP layer's ``_INF`` use, NOT the
+    ``1e29`` infeasibility-marker threshold, which would wave 1e20 through). A
+    tainted tree bound is *discarded wholesale*, exactly as each path did
+    individually.
+
+    Fallback rule, applied once: every entry of ``independent_bounds_internal`` is
+    a rigorous global lower bound of the INTERNALLY MINIMIZED objective proved
+    independently of the tree's taint (a root LP/relaxation bound, or a tree-stats
+    snapshot taken while the tree was still untainted). The tightest (largest,
+    min-sense) admissible value wins; ``None``/non-finite/sentinel entries are
+    skipped, so a path with nothing to offer passes ``()`` and gets today's
+    ``None`` back.
+
+    The certificate invariant ``bound <= incumbent`` (min sense) is enforced here:
+    a composed bound is capped at the incumbent objective, mirroring the cap the
+    Rust tree applies to its own frontier minimum.
+
+    Returns ``(bound, gap)`` in the REPORTED objective sense (negated for a
+    MAXIMIZE, where a lower bound on the internal ``-obj`` is an upper bound on
+    ``obj``); the gap is ``|obj - bound| / max(1, |obj|)`` or ``None`` without a
+    finite incumbent. Never raises; never certifies — callers own
+    ``gap_certified`` and any re-certification logic.
+    """
+    # Effective-infinity refusal threshold (see docstring): 1e19, one order
+    # below the LP layer's 1e20 sentinel so values merely approaching the cap
+    # are refused too — matching ``_admissible_probe_bound``.
+    _eff_inf = 1e19
+    best: Optional[float] = None
+    if (
+        tree_bound_valid
+        and tree_bound_internal is not None
+        and np.isfinite(tree_bound_internal)
+        and abs(float(tree_bound_internal)) < _eff_inf
+    ):
+        best = float(tree_bound_internal)
+    for _cand in independent_bounds_internal:
+        if _cand is None:
+            continue
+        _c = float(_cand)
+        if not np.isfinite(_c) or abs(_c) >= _eff_inf:
+            continue
+        best = _c if best is None else max(best, _c)
+    if best is None:
+        return None, None
+    if obj_val is not None and np.isfinite(obj_val):
+        # bound <= incumbent (min sense): the optimum is <= any feasible value,
+        # so a valid internal lower bound never exceeds the internal incumbent.
+        _obj_internal = -float(obj_val) if is_maximize else float(obj_val)
+        best = min(best, _obj_internal)
+    bound_val = -best if is_maximize else best
+    gap_val: Optional[float] = None
+    if obj_val is not None and np.isfinite(obj_val):
+        gap_val = abs(float(obj_val) - bound_val) / max(1.0, abs(float(obj_val)))
+    return bound_val, gap_val
 
 
 def _invoke_pre_import_callbacks(
@@ -4071,20 +4364,18 @@ def _admissible_probe_bound(
 ) -> Optional[float]:
     """The #930 root-LP-probe bound, but only when it is a valid GLOBAL bound.
 
-    STOPGAP — the real fix is #933. This function exists only because the bound
-    floats free of the node it was proved on. Seeding the root LP bound into node
-    0's ``local_lower_bound`` instead would propagate it to the whole tree for the
-    whole run (``tree_manager.rs:403`` floors every import at the inherited parent
-    bound; every child-creation site in ``branching.rs`` copies ``inherited_lb``),
-    making the dual bound anytime and monotone by construction — and letting this
-    function be **deleted** rather than hardened. Its box-equality gate, the
-    min-space/max-space conversion at the consumption site, and the ``1e20``
-    sentinel check below are all surfaces that only exist because of that. Note
-    also that this recovery lives in ``solve_model`` alone: ``_solve_nlp_bb``,
-    ``_solve_milp_bb``, ``_solve_miqp_bb`` and ``_try_native_spatial_kernel`` each
-    re-derive the reported bound with no fallback at all, which is why 27% of a
-    200-instance MINLPLib sweep reports no dual bound. See #933 for the
-    measurements.
+    #933 promoted this from a report-time recovery to the SEED GATE: under
+    ``DISCOPT_ROOT_BOUND_SEED`` the admissible probe bound is installed into node
+    0's ``local_lower_bound`` (``PyTreeManager.seed_root_bound``) the moment it is
+    proved, so it propagates to the whole tree for the whole run
+    (``tree_manager.rs`` floors every import at the inherited parent bound; every
+    child-creation site in ``branching.rs`` copies ``inherited_lb``) and the dual
+    bound is anytime and monotone by construction. The report-time consumption
+    below remains for the flag-off path and for tainted exits (a tainted tree
+    discards its bound wholesale, seed included, and this value is independently
+    rigorous). One gate, both consumers — the box-equality rule, the min-space
+    conversion at the consumption site, and the ``1e20`` sentinel check live only
+    here so the seed and the fallback can never disagree about admissibility.
 
     ``solve_model``'s root LP probe solves the McCormick relaxation over a box and
     then, historically, used the answer only as a keep/discard boolean for the
@@ -6401,11 +6692,17 @@ def solve_model(
                                     model._disjunctive_config_floor = float(_dcb.bound)
                                     logger.info(
                                         "disjunctive config bound: floor %.6g "
-                                        "(%d leaf solves, %d infeasible, %.1fs)",
+                                        "(%d leaf solves, %d infeasible, %.1fs, "
+                                        "stopped on %s)",
                                         _dcb.bound,
                                         _dcb.n_processed,
                                         _dcb.n_pruned_infeasible,
                                         _dcb.wall,
+                                        # Expected to be "deadline" here: in-solve
+                                        # the wall budget governs by design (the
+                                        # leaf cap above is a runaway backstop), so
+                                        # this floor is anytime, not reproducible.
+                                        _dcb.stopped_on,
                                     )
                             except Exception as _dcb_exc:  # pragma: no cover
                                 logger.debug("disjunctive config bound skipped: %s", _dcb_exc)
@@ -7546,6 +7843,12 @@ def solve_model(
             rust_time,
             jax_time,
             incumbent_time_extension=incumbent_time_extension,
+            # #933: the kernel-side mirror of the #844 policy — withhold the
+            # root-fallback reserve only while the kernel is bound-less, so a
+            # bound-less kernel exit can still recover a rigorous root bound
+            # inside the budget. Flag-gated with the rest of #933.
+            rr_reserve_s=_rr_reserve_s if _root_bound_seed_enabled() else 0.0,
+            psd_cuts=psd_cuts,
         )
     if _native_result is not None:
         return _native_result
@@ -8289,6 +8592,25 @@ def solve_model(
                                     np.asarray(_probe_lb, dtype=np.float64).copy(),
                                     np.asarray(_probe_ub, dtype=np.float64).copy(),
                                 )
+                                # #933 part (a): install the probe's proved bound
+                                # into the tree root, so ``global_lower_bound`` is
+                                # finite — anytime and monotone by construction —
+                                # from this first root LP onward instead of from
+                                # the first fully-processed batch. The tree was
+                                # created with exactly the snapshot box, so the
+                                # #930 box-equality gate is precisely "the bound
+                                # was proved over the tree's root box"; the same
+                                # trusted relaxer produces every node bound on
+                                # this path, so the seed adds no new arithmetic
+                                # trust surface.
+                                if _root_bound_seed_enabled():
+                                    _seed = _admissible_probe_bound(
+                                        _root_probe_bound,
+                                        _root_lb_snapshot,
+                                        _root_ub_snapshot,
+                                    )
+                                    if _seed is not None:
+                                        tree.seed_root_bound(float(_seed))
                     except Exception as e:  # pragma: no cover - defensive
                         logger.debug("McCormick LP root probe failed: %s", e)
                         _probe = None
@@ -11681,6 +12003,12 @@ def solve_model(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+    # #933: capture the tree-bound taint state NOW, before the exit-status logic
+    # below overwrites ``_gap_certified`` on limit exits. "The exit is not
+    # certified" (no incumbent at a time/node limit) says nothing about whether
+    # the tree's dual bound is valid; conflating the two is what silently
+    # discarded a finite, perfectly valid bound on every such exit.
+    _tree_bound_valid = _gap_certified
 
     # SPATIAL-CERT: the floor-inclusive rigorous bound adopted when the terminal
     # accounting below re-earns certification over soundly-floored sentinel
@@ -12882,6 +13210,15 @@ def _solve_nlp_bb(
 
     # --- Extract variable info and create tree ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    # #954: the exit gate below verifies the returned incumbent against the box
+    # the *model* declares, captured here before FBBT overwrites ``lb``/``ub``.
+    # FBBT bounds are derived, so checking against them would let a wrong
+    # inference manufacture a refusal on a point genuinely feasible for the model
+    # as written (the same reasoning as the #952 gates on the matrix paths).
+    _declared_box = np.stack([lb.copy(), ub.copy()], axis=1)
+    # ... and against the rows the model declares, counted here so the root-cut
+    # stage below (#781) cannot smuggle its appended cut rows into the gate.
+    _declared_ncons = sum(1 for _c in model._constraints if isinstance(_c, Constraint))
 
     # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
     t_rust_start = time.perf_counter()
@@ -13004,6 +13341,18 @@ def _solve_nlp_bb(
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
 
+    # #954: how many evaluator rows the DECLARED constraints occupy. Rows follow
+    # constraint order (``_infer_constraint_bounds``) and the root-cut stage
+    # appends its cuts last, so the declared rows are the leading block. Summed
+    # from the evaluator's own per-constraint flat sizes rather than assumed
+    # 1-row-per-constraint, because a vector-valued body (DAE collocation
+    # residuals) contributes many rows.
+    _declared_rows = len(cl_list)
+    _flat_sizes = getattr(evaluator, "_constraint_flat_sizes", None)
+    if _flat_sizes is not None and len(_flat_sizes) >= _declared_ncons:
+        _declared_rows = int(np.sum(np.asarray(_flat_sizes)[:_declared_ncons]))
+    _declared_rows = max(0, min(_declared_rows, len(cl_list)))
+
     opts: dict = {}
     opts.setdefault("print_level", 0)
     opts.setdefault("max_iter", 3000)
@@ -13056,6 +13405,10 @@ def _solve_nlp_bb(
     # spatial-path snapshot for the rationale.
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    # #933: the same snapshot, kept ONLY when the tree was still untainted at
+    # capture — then it is a rigorous dual bound independent of later taint,
+    # usable as the exit chokepoint's fallback candidate.
+    _root_glb_rigorous: Optional[float] = None
     # Adaptive LNS primal-improvement state (RINS + local branching). These
     # improvers existed only in solve_model's loop; syn/rsyn/clay take THIS path,
     # so they never got polished past the root incumbent (issue #267/#282). Wire
@@ -13814,6 +14167,12 @@ def _solve_nlp_bb(
             _root_glb_snap = tree.stats().get("global_lower_bound")
             if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
                 _root_glb_internal = float(_root_glb_snap)
+                # #933: rigorous fallback candidate iff still untainted here —
+                # every bound in the tree so far carries a soundness proof, so
+                # the snapshot stays a valid global dual bound even if a later
+                # node taints the tree's own frontier bound.
+                if _gap_certified:
+                    _root_glb_rigorous = _root_glb_internal
 
         iteration += 1
 
@@ -13832,6 +14191,12 @@ def _solve_nlp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+    # #933: capture the tree-bound taint state NOW, before the exit-status logic
+    # below overwrites ``_gap_certified`` on limit exits. "The exit is not
+    # certified" (no incumbent at a time/node limit) says nothing about whether
+    # the tree's dual bound is valid; conflating the two is what silently
+    # discarded a finite, perfectly valid bound on every such exit.
+    _tree_bound_valid = _gap_certified
 
     # R3a instrumentation (behavior-neutral): export the per-variable branch
     # frequency when the diagnostic sink is armed. Mirrors the capture in the
@@ -13859,11 +14224,42 @@ def _solve_nlp_bb(
         # C-3: snap near-integral discrete coordinates to exact integers before
         # reporting; the dual-recovery re-solve below is best-effort and does
         # not guarantee the reported primal is rounded (see helper docstring).
-        _rounded_inc, _rounded_feas = _round_incumbent_integers(
-            sol_flat, int_offsets, int_sizes, evaluator, cl_list, cu_list
-        )
-        if _rounded_feas:
+        #
+        # #954 item 3 — the helper's ``feas_tol`` at this call site. It used to run
+        # at the helper default ``1e-4``, 100x the declared ``abs=1e-6``, which is
+        # not a tolerance this path can justify now that the exit below refuses at
+        # 1e-6: a rounding accepted at 1e-4 and rejected by the exit would turn a
+        # solve that had a perfectly good unrounded point into a crash. So the
+        # acceptance decision is taken with the SAME arbiter the exit uses — one
+        # test, so the guard cannot admit what the gate refuses — and the helper is
+        # called in snap-only mode. Its own ``feasible`` flag is deliberately not
+        # consulted here (it would be a second, looser opinion of the same
+        # question); it stays for the call sites that have no exit arbiter.
+        _rounded_inc, _ = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
+        if np.array_equal(_rounded_inc, sol_flat):
+            # Nothing was snapped: there is no acceptance decision to take, and
+            # re-judging the unchanged point here would only pre-empt the exit
+            # gate below with a confusing "snap rejected" message.
             sol_flat = _rounded_inc
+        else:
+            _round_excess, _, _round_cmp = _nonlinear_point_excess(
+                evaluator,
+                _rounded_inc,
+                cl_list,
+                cu_list,
+                n_rows=_declared_rows,
+                box=_declared_box,
+            )
+            if _round_excess <= _NLPBB_EXIT_ABS_TOL:
+                sol_flat = _rounded_inc
+            else:
+                logger.debug(
+                    "NLP-BB: integer snap rejected (excess %.3e > %.0e over %d comparisons); "
+                    "reporting the unrounded incumbent (C-3).",
+                    _round_excess,
+                    _NLPBB_EXIT_ABS_TOL,
+                    _round_cmp,
+                )
         x_dict = _unpack_solution(model, sol_flat)
 
         # Refine the incumbent's continuous variables, then recover relaxation
@@ -13963,6 +14359,45 @@ def _solve_nlp_bb(
         except Exception as _exc:
             logger.debug("NLP-BB dual recovery failed: %s", _exc)
 
+        # --- #954: exit gate ---
+        # The last of the five solve exit paths with no verification of the point
+        # it returns. Its exit was the same three steps the MILP/MIQP paths had
+        # before #952 — snap, unpack, return — with nothing checking the point
+        # whose objective is reported as ``objective`` and, on ``optimal``, as the
+        # dual ``bound`` too. The search's own acceptance gates run at the local
+        # ``_check_constraint_feasibility`` default of 1e-4, and the terminal
+        # refine re-solve above can REPLACE the point after every one of them, so
+        # this is placed last: it judges the vector that actually leaves.
+        #
+        # This path's rows are nonlinear, so the arbiter is the nonlinear
+        # convention (``viol <= tol + rtol*term_scale``) rather than #952's
+        # ``_matrix_solution_feasible`` — same 1e-6 absolute tolerance, same 1e-9
+        # relative forgiveness as ``primal_heuristics._check_constraint_feasibility``,
+        # which is what every primal heuristic here already holds an incumbent to.
+        # Judged against the DECLARED rows (root cuts excluded, ``_declared_rows``)
+        # and the DECLARED box (captured pre-FBBT), so neither a derived bound nor
+        # an appended cut can manufacture a refusal.
+        #
+        # Refusal, not repair or a quiet downgrade (CLAUDE.md §3): a point outside
+        # the declared feasible set has no honest status here — reporting it as
+        # ``feasible`` would still publish its objective, and on this path that
+        # same number is also the dual bound.
+        _exit_excess, _exit_where, _exit_cmp = _nonlinear_point_excess(
+            evaluator,
+            sol_flat,
+            cl_list,
+            cu_list,
+            n_rows=_declared_rows,
+            box=_declared_box,
+        )
+        if _exit_excess > _NLPBB_EXIT_ABS_TOL:
+            raise RuntimeError(
+                "NLP-BB returned an infeasible point labeled feasible/optimal: "
+                f"{_exit_where} violated by {_exit_excess:.6e} beyond the "
+                f"term-scaled tolerance (declared abs tol {_NLPBB_EXIT_ABS_TOL:.0e}, "
+                f"{_exit_cmp} comparisons over {_declared_rows} declared rows)"
+            )
+
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
@@ -14025,31 +14460,39 @@ def _solve_nlp_bb(
     )
 
     # Negate bound back for maximization
-    bound_val = stats["global_lower_bound"]
     assert model._objective is not None
-    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
-        bound_val = -bound_val
-
-    # An uncertified gap is not a rigorous dual bound; do not present one.
-    gap_val = stats["gap"]
+    _bb_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
 
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). But the untainted tree bound is
-    # itself a valid global dual bound (every node floored at its valid parent
-    # bound), so keep it and recompute the gap rather than dropping to None (#138).
-    _tree_bound_valid = _gap_certified
+    # (max_nodes=1 false-certification regression). ``_tree_bound_valid`` was
+    # captured BEFORE the exit-status logic (#933): a no-incumbent limit exit
+    # de-certifies the *exit*, which says nothing about the tree bound's
+    # validity — the untainted tree bound is itself a valid global dual bound
+    # (every node floored at its valid parent bound, #138).
     if status == "feasible":
         _gap_certified = False
 
-    if not _gap_certified:
-        gap_val = None
-        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
-            if obj_val is not None and np.isfinite(obj_val):
-                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
-        else:
-            bound_val = None
+    if _gap_certified:
+        # Certified exit: the tree bound is the certificate — report it verbatim.
+        bound_val = stats["global_lower_bound"]
+        if bound_val is not None and _bb_maximize:
+            bound_val = -bound_val
+        gap_val = stats["gap"]
+    else:
+        # #933 part (b): the shared chokepoint applies the taint rule and the
+        # independent-bound fallback once, for every path. A valid tree bound is
+        # kept (even with no incumbent — previously discarded); a tainted one is
+        # replaced by the strongest independently-proved root bound (the
+        # untainted root-batch snapshot) instead of reporting no bound at all.
+        bound_val, gap_val = _finalize_reported_bound(
+            tree_bound_internal=stats["global_lower_bound"],
+            tree_bound_valid=_tree_bound_valid,
+            is_maximize=_bb_maximize,
+            obj_val=obj_val,
+            independent_bounds_internal=(_root_glb_rigorous,),
+        )
 
     # Re-earn certification when the retained valid tree bound meets the incumbent
     # within tolerance: the incumbent is then provably global and the honest status
@@ -15651,11 +16094,59 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         if np.any(viol > tol + rtol * row_scale):
             return False
     if bounds is not None:
-        for xi, (lo, hi) in zip(x, bounds):
-            row_tol = tol + rtol * abs(xi)
-            if xi < lo - row_tol or xi > hi + row_tol:
+        # Vectorised form of the original per-element loop (#952): identical
+        # semantics — same per-element ``tol + rtol*|x_i|`` threshold, same
+        # ``zip``-style truncation to the shorter of ``x``/``bounds`` — but O(n)
+        # numpy instead of O(n) Python, because the MIQP B&B node gate now calls
+        # this once per node rather than once per solve.
+        box = np.asarray(bounds, dtype=np.float64)
+        if box.size:
+            k = min(x.shape[0], box.shape[0])
+            row_tol = tol + rtol * absx[:k]
+            if np.any(x[:k] < box[:k, 0] - row_tol) or np.any(x[:k] > box[:k, 1] + row_tol):
                 return False
     return True
+
+
+def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:
+    """Human-readable worst raw residual per block — **diagnostic only**.
+
+    This is never the arbiter: it applies no tolerance and makes no accept/reject
+    decision, so it cannot drift out of agreement with
+    :func:`_matrix_solution_feasible` the way a second thresholded variant could.
+    It exists so a refusal raised by that arbiter names a magnitude instead of
+    forcing a re-run to find one.
+
+    A block is listed only when its worst residual is **positive**, i.e. when the
+    point is actually outside that block. That sign test is not a tolerance — it
+    is the definition of "outside" — so the no-drift property above still holds.
+    Listing every block unconditionally produced messages like ``A_ub row 1 by
+    9.99e-06; bound on x[0] by 0.000000e+00``, where the second clause names a
+    block the point satisfies exactly and reads as a second violation.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    parts: list[str] = []
+    if A_ub is not None and b_ub is not None and len(b_ub):
+        v = np.asarray(A_ub, dtype=np.float64) @ x - np.asarray(b_ub, dtype=np.float64)
+        if v.size and float(np.max(v)) > 0.0:
+            parts.append(f"A_ub row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+    if A_eq is not None and b_eq is not None and len(b_eq):
+        v = np.abs(np.asarray(A_eq, dtype=np.float64) @ x - np.asarray(b_eq, dtype=np.float64))
+        if v.size and float(np.max(v)) > 0.0:
+            parts.append(f"A_eq row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
+    if bounds is not None:
+        box = np.asarray(bounds, dtype=np.float64)
+        if box.size:
+            k = min(x.shape[0], box.shape[0])
+            v = np.maximum(box[:k, 0] - x[:k], x[:k] - box[:k, 1])
+            if v.size and float(np.max(v)) > 0.0:
+                parts.append(f"bound on x[{int(np.argmax(v))}] by {float(np.max(v)):.6e}")
+    if parts:
+        return "; ".join(parts)
+    # No block shows a positive residual. Reaching this from a refusal means the
+    # arbiter and this reporter disagree — worth seeing verbatim rather than
+    # papering over with an empty string.
+    return "no block shows a positive residual"
 
 
 def _solve_qp_matrix(
@@ -16315,9 +16806,10 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         return None
     if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
         x_sol = np.asarray(res.x, dtype=np.float64)
-        # Soundness gate (mirrors the JAX-IPM path's _check_lp_solution_feasibility):
-        # reject a node point that violates its own rows so a slightly-infeasible
-        # relaxation solution cannot seed a spurious incumbent or node bound.
+        # Soundness gate: reject a node point that violates its own rows so a
+        # slightly-infeasible relaxation solution cannot seed a spurious incumbent
+        # or node bound. (#952 gave the MIQP node path the equivalent check, via
+        # ``_matrix_solution_feasible``; this MILP one already checked box + rows.)
         tol = 1e-5
         feasible = True
         # An LP optimum must respect the node's variable box; an off-bound point
@@ -17671,6 +18163,10 @@ def _solve_milp_bb(
 
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
+    # #952: declared box for the exit gate, captured before reduced-cost fixing and
+    # FBBT overwrite ``lb``/``ub`` — those are derived, and a wrong inference must
+    # not be able to manufacture a refusal on a genuinely feasible point.
+    _declared_box = np.stack([lb[:n_orig].copy(), ub[:n_orig].copy()], axis=1)
 
     # Resolve the per-node LP engine. ``node_engine="simplex"`` (the pure-MILP
     # default) uses the exact-vertex warm-started simplex; it degrades to the
@@ -17777,6 +18273,12 @@ def _solve_milp_bb(
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
+    # #933 part (a): install the root LP relaxation bound (proved just above by
+    # the same structured-node engine that bounds every node on this path, over
+    # exactly this [lb, ub] box) into the tree root, so ``global_lower_bound``
+    # is finite from the start instead of -inf until the first processed batch.
+    if _root_bound_seed_enabled() and np.isfinite(_root_lp_bound):
+        tree.seed_root_bound(float(_root_lp_bound))
     # #827 (family C): seed a warm-start incumbent from ``initial_point`` (e.g. the
     # trivial-point primal seed computed in ``solve_model``). The MILP/MIQP path did
     # not previously consult ``initial_point``; without it, models like
@@ -17907,10 +18409,46 @@ def _solve_milp_bb(
             t_start,
             time_limit,
         )
-        if inc is not None:
-            tree.inject_incumbent(
-                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+        if inc is None:
+            return
+        x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
+        # #952: this is the channel the exit gate caught, and the MIQP twin of
+        # this funnel already guards it (``_node_point_feasible`` below). The
+        # snap re-solve fixes the integers and asks POUNCE for the continuous
+        # completion; POUNCE honours the slack bounds standing in for inequality
+        # rows only to its own ~1e-8 *relative* tolerance, which on a big-M row
+        # like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes
+        # back exactly integral, so nothing downstream re-examines it: the tree
+        # took it as the incumbent and reported it ``optimal``.
+        #
+        # Measured on ``test_bound_active_recourse_is_sound``: all 4 node
+        # relaxation points were inside the rows, and the offending
+        # ``[y=1.0, eta=-1.00000001e+06]`` arrived here — this funnel, not a node
+        # LP. So verify the candidate against the same rows and box the node
+        # solves are held to, at the repo's declared ``abs=1e-6``.
+        #
+        # Declining is free: injection is a heuristic accelerator, the subtree
+        # stays open, and the tree re-finds the point from a node relaxation if
+        # it is genuinely feasible. A candidate that fails here is one the exit
+        # gate would otherwise refuse the whole solve over.
+        _box_inc = np.stack(
+            [
+                np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+                np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+            ],
+            axis=1,
+        )
+        if not _matrix_solution_feasible(
+            x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
+        ):
+            logger.debug(
+                "MILP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                _matrix_solution_violations(
+                    x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
+                ),
             )
+            return
+        tree.inject_incumbent(x_inc, float(inc[0]))
 
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
     # directly (no JAX recompile on cut-augmented shapes): the exact-vertex
@@ -17933,6 +18471,9 @@ def _solve_milp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    # #933: the same snapshot, kept ONLY when the tree was still untainted at
+    # capture (see the nlp-path declaration for the rationale).
+    _root_glb_rigorous: Optional[float] = None
     from discopt import debug as _debug
 
     # Set when the interactive debugger's `quit` breaks the search loop: a
@@ -18088,6 +18629,12 @@ def _solve_milp_bb(
             _root_glb_snap = tree.stats().get("global_lower_bound")
             if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
                 _root_glb_internal = float(_root_glb_snap)
+                # #933: rigorous fallback candidate iff still untainted here —
+                # every bound in the tree so far carries a soundness proof, so
+                # the snapshot stays a valid global dual bound even if a later
+                # node taints the tree's own frontier bound.
+                if _gap_certified:
+                    _root_glb_rigorous = _root_glb_internal
 
         iteration += 1
         if tree.is_finished():
@@ -18103,6 +18650,12 @@ def _solve_milp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+    # #933: capture the tree-bound taint state NOW, before the exit-status logic
+    # below overwrites ``_gap_certified`` on limit exits. "The exit is not
+    # certified" (no incumbent at a time/node limit) says nothing about whether
+    # the tree's dual bound is valid; conflating the two is what silently
+    # discarded a finite, perfectly valid bound on every such exit.
+    _tree_bound_valid = _gap_certified
 
     # R3a instrumentation (behavior-neutral): export per-variable branch
     # frequency when the diagnostic sink is armed (integer B&B drivers too).
@@ -18127,13 +18680,74 @@ def _solve_milp_bb(
         sol_flat = np.array(sol_array)
         # C-3: snap near-integral discrete coordinates to exact integers. In the
         # MILP path each integer was branch-fixed to [k, k] before the node LP
-        # solved, so a stored k±ε is a numeric artifact and rounding to k
-        # restores exactly the point the LP was solving — it cannot move a
-        # linear row by more than the integrality tol. The dual-recovery
-        # re-solve does not round the reported primal, so round here.
+        # solved, so a stored k±ε is a numeric artifact and rounding to k restores
+        # exactly the point the LP was solving. The dual-recovery re-solve does not
+        # round the reported primal, so round here.
+        #
+        # #952 correction: this comment used to claim the snap "cannot move a linear
+        # row by more than the integrality tol". That is wrong, and measurably so —
+        # a row accumulates one snap per term, weighted by its coefficients. On
+        # ``test_nn_equivalence::test_tree_ensemble_fixed_input`` the incumbent
+        # satisfies its equalities to 4.4e-16 and the snapped point violates one by
+        # 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
+        #
+        # ``_round_incumbent_integers`` is documented to return ``feasible=False``
+        # when rounding breaks feasibility, and "the caller must not certify a
+        # rounded point that reports False" — but it can only do that when handed a
+        # checker, and this call site passes none, so the flag was unconditionally
+        # True and validated nothing. The matrix arbiter is the checker here: adopt
+        # the snap only when it keeps the point inside the declared rows, otherwise
+        # report the unrounded point. That is not a tolerance concession — the
+        # unrounded point satisfies BOTH declared tolerances (rows at 4.4e-16,
+        # integrality at 3.9e-7 against integrality_tol=1e-5), while the snapped one
+        # satisfies integrality exactly but misses abs=1e-6 on a row.
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if _rounded_feas:
+        if _rounded_feas and _matrix_solution_feasible(
+            np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            _declared_box,
+        ):
             sol_flat = _rounded_inc
+        else:
+            logger.debug(
+                "MILP-BB: integer snap would leave the declared rows (%s); "
+                "reporting the unrounded incumbent",
+                _matrix_solution_violations(
+                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                ),
+            )
+
+        # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
+        # incumbent exit was structurally identical (round, unpack, return) with no
+        # verification of the point whose objective is reported as ``objective`` and,
+        # on ``optimal``, as the dual ``bound`` too. Checked against the ORIGINAL
+        # problem's rows (``lp_data_orig``'s decomposition, not the cover-augmented
+        # ``lp_data``) and the declared box, at the repo's declared ``abs=1e-6``.
+        #
+        # This path is less exposed than the MIQP one was — ``_solve_node_lp_pounce``
+        # already gates its node points on box + rows, and the default simplex engine
+        # returns exact vertices — but the tree also takes incumbents from the root
+        # dive, RENS/feasibility-pump/local-branching injections and POUNCE recovery,
+        # none of which this exit re-checked. Refusal, not repair (CLAUDE.md §3).
+        _x_check = np.asarray(sol_flat[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(
+            _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            raise RuntimeError(
+                "MILP-BB returned an infeasible point labeled feasible/optimal: "
+                + _matrix_solution_violations(
+                    _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+                )
+            )
+
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
@@ -18211,34 +18825,47 @@ def _solve_milp_bb(
     from discopt.modeling.core import ObjectiveSense
 
     # Negate bound back for maximization
-    bound_val = stats["global_lower_bound"]
     assert model._objective is not None
     _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
-    if bound_val is not None and _maximize:
-        bound_val = -bound_val
-
-    gap_val = stats["gap"]
 
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). This path carries no rigorous
-    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    # (max_nodes=1 false-certification regression). ``_tree_bound_valid`` was
+    # captured BEFORE the exit-status logic (#933), so a valid tree bound
+    # survives a no-incumbent limit exit instead of being dropped with the
+    # exit's certification.
     if status == "feasible":
         _gap_certified = False
 
-    if not _gap_certified:
-        # Tree bound/gap are not rigorous on an uncertified exit (a node may
-        # have been pruned without proof); drop them.
-        bound_val = None
-        gap_val = None
-    # The root LP relaxation bound is always a valid dual bound. Surface it
-    # whenever the tree did not yield a usable finite bound — an uncertified
-    # exit (dropped above) or a certified-but-time-limited solve that never
-    # closed a node (global_lower_bound still -inf). This lets AMP's short
-    # per-iteration MILP budget return a finite lower bound instead of None.
-    if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
-        bound_val = -_root_lp_bound if _maximize else _root_lp_bound
+    if _gap_certified:
+        bound_val = stats["global_lower_bound"]
+        if bound_val is not None and _maximize:
+            bound_val = -bound_val
+        gap_val = stats["gap"]
+        # A certified-but-limited exit can still carry a -inf frontier (no node
+        # closed yet): surface the root LP relaxation bound then, exactly as
+        # before #933 (this is what keeps AMP's short per-iteration MILP budget
+        # returning a finite lower bound instead of None).
+        if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
+            bound_val = -_root_lp_bound if _maximize else _root_lp_bound
+    else:
+        # #933 part (b): the shared chokepoint applies the taint rule and the
+        # independent-bound fallback once, for every path. A valid tree bound is
+        # now KEPT on an uncertified exit (previously dropped wholesale); a
+        # tainted one is replaced by the strongest independently-proved root
+        # bound — the root LP relaxation bound (always valid) or the untainted
+        # root-batch snapshot.
+        bound_val, gap_val = _finalize_reported_bound(
+            tree_bound_internal=stats["global_lower_bound"],
+            tree_bound_valid=_tree_bound_valid,
+            is_maximize=_maximize,
+            obj_val=obj_val,
+            independent_bounds_internal=(
+                float(_root_lp_bound) if np.isfinite(_root_lp_bound) else None,
+                _root_glb_rigorous,
+            ),
+        )
 
     # Root-node certification metrics (cert:T0.1). Prefer the tree's global
     # lower bound snapshot at the end of the root batch; fall back to the root
@@ -18320,6 +18947,11 @@ def _solve_miqp_bb(
 
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
+    # #952: the exit gate below verifies the returned incumbent against the box the
+    # *model* declares, captured here before FBBT overwrites ``lb``/``ub``. FBBT
+    # bounds are derived, so checking against them would let a wrong inference
+    # manufacture a refusal on a point genuinely feasible for the model as written.
+    _declared_box = np.stack([lb[:n_orig].copy(), ub[:n_orig].copy()], axis=1)
 
     # --- Root presolve: FBBT before tree creation ---
     # The node QP IPM diverges to NaN on variables with infinite bounds (e.g.
@@ -18369,6 +19001,46 @@ def _solve_miqp_bb(
     _c_m = np.asarray(qp_data.c[:n_orig])
     _Q_m = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
 
+    def _node_point_feasible(x_full, node_lb_i, node_ub_i) -> bool:
+        """Does a node point satisfy the model's rows and the node's own box?
+
+        This replaces the equality-only ``A_eq_full x == b_eq`` gate this path
+        used to run (issue #952), which was a **tautology** on the batched
+        structured-QP node path and therefore measured nothing. The reason is in
+        :func:`_pounce_qp_relaxation_nodes`: that path solves only the structural
+        columns and then *reconstructs* the slacks as ``z = S⁺(b_eq - A_struct
+        x_s)``, which makes ``A_eq_full [x_s, z] == b_eq`` hold to machine
+        precision for **any** ``x_s`` — a violated inequality row simply comes
+        back as a negative slack, and the old gate never looked at slack bounds.
+        Measured on the 40-seed family in the issue: 212 gate invocations, worst
+        equality residual 8.9e-16, while the returned points sat ~9e-9 outside a
+        declared inequality row.
+
+        The honest check is against the *decomposed* rows over the structural
+        columns (``A_ub``/``A_eq``) plus the node box — which is exactly what the
+        MILP path's :func:`_solve_node_lp_pounce` already does, and what
+        :func:`_matrix_solution_feasible` (this repo's arbiter, at the declared
+        ``abs=1e-6``) implements. Checking the *node* box rather than the declared
+        one is deliberate: an off-box point can be integral (a binary at -1) and
+        still pass every row, seeding a spurious incumbent.
+        """
+        if x_full is None:
+            return False
+        return _matrix_solution_feasible(
+            np.asarray(x_full, dtype=np.float64)[:n_orig],
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            np.stack(
+                [
+                    np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+                    np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+                ],
+                axis=1,
+            ),
+        )
+
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
@@ -18389,9 +19061,21 @@ def _solve_miqp_bb(
             Q=_Q_m,
         )
         if inc is not None:
-            tree.inject_incumbent(
-                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
-            )
+            x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
+            # #952: an injected incumbent goes straight into the tree as a
+            # candidate answer, so it is verified here rather than only at the
+            # exit gate. The snap re-solve fixes the integers and asks POUNCE for
+            # the continuous completion; an "optimal" verdict there is still a
+            # POUNCE iterate, not a proof that the point sits inside the rows.
+            if _node_point_feasible(x_inc, node_lb_i, node_ub_i):
+                tree.inject_incumbent(x_inc, float(inc[0]))
+            else:
+                logger.debug(
+                    "MIQP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                    _matrix_solution_violations(
+                        x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
+                    ),
+                )
 
     def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
         # A node whose QP relaxation did not cleanly converge (non-KKT, solver
@@ -18412,7 +19096,7 @@ def _solve_miqp_bb(
         finite_feas = (
             x_full is not None
             and bool(np.all(np.isfinite(x_full)))
-            and _check_lp_solution_feasibility(_A_eq_dense, qp_data.b_eq, x_full)
+            and _node_point_feasible(x_full, node_lb_i, node_ub_i)
         )
         if finite_feas:
             # Try first to recover a trusted (KKT) lower bound; if POUNCE
@@ -18473,6 +19157,9 @@ def _solve_miqp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    # #933: the same snapshot, kept ONLY when the tree was still untainted at
+    # capture (see the nlp-path declaration for the rationale).
+    _root_glb_rigorous: Optional[float] = None
     from discopt import debug as _debug
 
     # Set when the interactive debugger's `quit` breaks the search loop: a
@@ -18556,7 +19243,7 @@ def _solve_miqp_bb(
             if infeasible[i]:
                 # POUNCE Phase-1-certified empty box: a sound infeasibility prune.
                 result_sols[i] = 0.5 * (lb_c + ub_c)
-            elif clean[i] and _check_lp_solution_feasibility(_A_eq_dense, qp_data.b_eq, x_vals[i]):
+            elif clean[i] and _node_point_feasible(x_vals[i], node_lb, node_ub):
                 # KKT-valid relaxation optimum -> a valid node lower bound.
                 result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
                 result_sols[i] = x_vals[i, :n_vars]
@@ -18613,6 +19300,12 @@ def _solve_miqp_bb(
             _root_glb_snap = tree.stats().get("global_lower_bound")
             if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
                 _root_glb_internal = float(_root_glb_snap)
+                # #933: rigorous fallback candidate iff still untainted here —
+                # every bound in the tree so far carries a soundness proof, so
+                # the snapshot stays a valid global dual bound even if a later
+                # node taints the tree's own frontier bound.
+                if _gap_certified:
+                    _root_glb_rigorous = _root_glb_internal
 
         iteration += 1
         if tree.is_finished():
@@ -18628,6 +19321,12 @@ def _solve_miqp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+    # #933: capture the tree-bound taint state NOW, before the exit-status logic
+    # below overwrites ``_gap_certified`` on limit exits. "The exit is not
+    # certified" (no incumbent at a time/node limit) says nothing about whether
+    # the tree's dual bound is valid; conflating the two is what silently
+    # discarded a finite, perfectly valid bound on every such exit.
+    _tree_bound_valid = _gap_certified
 
     # R3a instrumentation (behavior-neutral): export per-variable branch
     # frequency when the diagnostic sink is armed (integer B&B drivers too).
@@ -18654,9 +19353,77 @@ def _solve_miqp_bb(
         # MILP-BB path). Integers are branch-fixed before each node QP solve, so
         # rounding a stored k±ε restores the fixed point; the dual-recovery
         # re-solve does not round the reported primal.
+        #
+        # #952: adopt the snap only when it keeps the point inside the declared rows.
+        # Same reasoning, and the same vacuous ``_rounded_feas``, as the MILP-BB call
+        # site documents at length — this path passes no checker either, so the flag
+        # was unconditionally True. No instance in the in-repo corpus panel exercised
+        # the fallback here (the MILP path's did), but the call sites are the same
+        # shape and are kept symmetric rather than left to diverge.
         _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if _rounded_feas:
+        if _rounded_feas and _matrix_solution_feasible(
+            np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            _declared_box,
+        ):
             sol_flat = _rounded_inc
+        else:
+            logger.debug(
+                "MIQP-BB: integer snap would leave the declared rows (%s); "
+                "reporting the unrounded incumbent",
+                _matrix_solution_violations(
+                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                ),
+            )
+
+        # #952: exit gate. Every incumbent this function returns is verified here,
+        # against EVERY declared row (inequalities included) and every declared
+        # bound, at the repo's declared ``abs=1e-6`` — the same arbiter and the same
+        # loud refusal as the Gurobi QCP path (see ``_matrix_solution_feasible``).
+        # Before this, the only gate on the way out was an equality residual that
+        # the batched node path had made vacuous (see ``_node_point_feasible``), so
+        # nothing bounded how far outside a row the returned point could sit: its
+        # size was set by whatever the QP IPM happened to converge to.
+        #
+        # This covers "feasible" as well as "optimal". The certificate argument is
+        # sharpest on "optimal" — that status returns the incumbent's objective as
+        # the *dual bound* too, and an objective evaluated outside the feasible set
+        # is below the true optimum, so the bound is optimistic by exactly the
+        # excursion. But ``objective`` on a "feasible" exit is equally a claim that
+        # some feasible point attains it, and downstream callers (GBD, OA) consume
+        # it as a valid upper bound. Both are primal claims; both are checked.
+        #
+        # Per CLAUDE.md §3 the failure is a refusal, not a repair: nudging the point
+        # or quietly downgrading the status would turn a solver defect into a silent
+        # approximation, which is the failure mode this gate exists to catch.
+        #
+        # Scope, stated honestly: the rows checked are the ones ``extract_qp_data``
+        # produced (decomposed back out of slack form), the same matrices the node
+        # solves consume. So this catches an engine returning a point outside the
+        # extracted problem — the failure mode #952 is about — but not a bug in the
+        # extraction itself, which would move gate and solver together. That second
+        # class is covered from outside, against the model as declared, by
+        # ``python/tests/test_952_miqp_incumbent_feasibility.py``'s NLPEvaluator
+        # measurement; doing it here would mean a JAX compile on every solve.
+        _x_check = np.asarray(sol_flat[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(
+            _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            raise RuntimeError(
+                "MIQP-BB returned an infeasible point labeled feasible/optimal: "
+                + _matrix_solution_violations(
+                    _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+                )
+            )
+
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
@@ -18741,31 +19508,39 @@ def _solve_miqp_bb(
     from discopt.modeling.core import ObjectiveSense
 
     # Negate bound back for maximization
-    bound_val = stats["global_lower_bound"]
     assert model._objective is not None
-    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
-        bound_val = -bound_val
-
-    # An uncertified gap is not a rigorous dual bound; do not present one.
-    gap_val = stats["gap"]
+    _bb_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
 
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). But the untainted tree bound is
-    # itself a valid global dual bound (every node floored at its valid parent
-    # bound), so keep it and recompute the gap rather than dropping to None (#138).
-    _tree_bound_valid = _gap_certified
+    # (max_nodes=1 false-certification regression). ``_tree_bound_valid`` was
+    # captured BEFORE the exit-status logic (#933): a no-incumbent limit exit
+    # de-certifies the *exit*, which says nothing about the tree bound's
+    # validity — the untainted tree bound is itself a valid global dual bound
+    # (every node floored at its valid parent bound, #138).
     if status == "feasible":
         _gap_certified = False
 
-    if not _gap_certified:
-        gap_val = None
-        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
-            if obj_val is not None and np.isfinite(obj_val):
-                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
-        else:
-            bound_val = None
+    if _gap_certified:
+        # Certified exit: the tree bound is the certificate — report it verbatim.
+        bound_val = stats["global_lower_bound"]
+        if bound_val is not None and _bb_maximize:
+            bound_val = -bound_val
+        gap_val = stats["gap"]
+    else:
+        # #933 part (b): the shared chokepoint applies the taint rule and the
+        # independent-bound fallback once, for every path. A valid tree bound is
+        # kept (even with no incumbent — previously discarded); a tainted one is
+        # replaced by the strongest independently-proved root bound (the
+        # untainted root-batch snapshot) instead of reporting no bound at all.
+        bound_val, gap_val = _finalize_reported_bound(
+            tree_bound_internal=stats["global_lower_bound"],
+            tree_bound_valid=_tree_bound_valid,
+            is_maximize=_bb_maximize,
+            obj_val=obj_val,
+            independent_bounds_internal=(_root_glb_rigorous,),
+        )
 
     # Re-earn certification when the retained valid tree bound meets the incumbent
     # within tolerance: the incumbent is then provably global and the honest status

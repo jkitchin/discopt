@@ -241,7 +241,15 @@ def test_guard_abstains_never_unsound(name, build):
     # unbounded on a box where the atom is not real/definite, so NO bound is
     # reported) is as sound as bound=None — it never masquerades a bad cut as a
     # bound. What must never happen is an iteration_limit or an overshooting bound.
-    assert res.status in ("optimal", "infeasible", "unbounded"), (
+    #
+    # "uncertified" (#961) is the same clean abstain under its true name: the LP
+    # solved but every certification route declined, so no bound is reported.
+    # This box took that path before #961 too — it was just mislabeled "optimal"
+    # with lower_bound=None, which this whitelist accepted only because the label
+    # lied. Admitting the honest label does not widen what passes; the
+    # iteration_limit refusal above and the soundness assertion below are
+    # untouched, and an "uncertified" result carries no bound to overshoot with.
+    assert res.status in ("optimal", "infeasible", "unbounded", "uncertified"), (
         f"[{name}] unexpected status {res.status}"
     )
     if res.lower_bound is not None and math.isfinite(res.lower_bound):

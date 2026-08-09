@@ -204,6 +204,14 @@ pub struct TreeManager {
     /// [`Self::set_sos1_selector_cols`] (gated by `DISCOPT_SOS1_SELECTOR_BRANCH`),
     /// so this is inert by default and the legacy branch path is byte-identical.
     sos1_selector_cols: Vec<usize>,
+    /// Externally-proved rigorous lower bound for the ROOT box (#933 part (a)),
+    /// installed via [`Self::seed_root_bound`]. Every node's box is a subset of
+    /// the root box, so this value is a valid lower bound for every subtree —
+    /// including subtrees later removed without their own proof — and
+    /// [`Self::update_global_lower_bound`] may floor the reported global bound
+    /// at it unconditionally. `-inf` (never seeded) keeps every computation
+    /// byte-identical to the pre-#933 behavior.
+    root_seed: f64,
 }
 
 impl TreeManager {
@@ -247,7 +255,38 @@ impl TreeManager {
             unresolved_floor: f64::INFINITY,
             branch_var_counts: vec![0; n_vars],
             sos1_selector_cols: Vec::new(),
+            root_seed: f64::NEG_INFINITY,
         }
+    }
+
+    /// Install an externally-proved rigorous lower bound for the root box
+    /// (#933 part (a)).
+    ///
+    /// The caller asserts `bound` is a valid lower bound of the (internally
+    /// minimized) objective over the box the tree was created with — e.g. the
+    /// root LP/McCormick relaxation bound proved during setup. Soundness: every
+    /// node's box is a subset of the root box, so `bound` is a valid lower
+    /// bound for every node; flooring a node's `local_lower_bound` at it keeps
+    /// the invariant that node bounds are rigorous, and children copy the
+    /// floored value at creation. The seed also floors the reported
+    /// `global_lower_bound` permanently (see `update_global_lower_bound`), so
+    /// the tree reports a finite anytime dual bound from the moment the root
+    /// relaxation is proved instead of `-inf` until the first processed batch.
+    /// Non-finite bounds are ignored (never weakens or poisons anything).
+    pub fn seed_root_bound(&mut self, bound: f64) {
+        if !bound.is_finite() {
+            return;
+        }
+        self.root_seed = self.root_seed.max(bound);
+        for i in 0..self.pool.total_count() {
+            let node = self.pool.get_mut(NodeId(i));
+            if matches!(node.status, NodeStatus::Pending | NodeStatus::Evaluated)
+                && node.local_lower_bound < bound
+            {
+                node.local_lower_bound = bound;
+            }
+        }
+        self.update_global_lower_bound();
     }
 
     /// R3a measurement accessor (temporary): per-variable branch frequency,
@@ -822,7 +861,11 @@ impl TreeManager {
         // minimum may override an honest -inf, or the tree would certify a false
         // optimal on an unbranchable, unbounded-below root (issue #467).
         if self.bound_unresolved {
-            self.global_lower_bound = f64::NEG_INFINITY;
+            // #933: a root seed is proved over the WHOLE root box, so it covers
+            // even a subtree removed with no bound of its own; it remains the
+            // honest floor here (capped at the incumbent as below). Unseeded
+            // (`root_seed = -inf`) this is exactly the pre-#933 `-inf` pin.
+            self.global_lower_bound = self.root_seed.min(self.incumbent_value);
             return;
         }
         // Seed the frontier minimum with the unresolved-fathom floor (#598): a
@@ -851,7 +894,10 @@ impl TreeManager {
             // global_lower_bound could exceed the incumbent, producing a
             // negative gap (masked by the clamp in `gap()`) and an unsound
             // "bound > objective" at a certified-optimal exit.
-            self.global_lower_bound = min_lb.min(self.incumbent_value);
+            // #933: the root seed is a valid lower bound for every subtree, so
+            // flooring the frontier minimum at it is always sound (`-inf` when
+            // never seeded, leaving this identical to the pre-#933 value).
+            self.global_lower_bound = min_lb.max(self.root_seed).min(self.incumbent_value);
         }
     }
 
@@ -1876,5 +1922,91 @@ mod tests {
         tm.process_evaluated();
         assert_eq!(tm.incumbent().map(|(_, v)| v), Some(2.0));
         assert!(tm.is_finished());
+    }
+
+    #[test]
+    fn seed_root_bound_makes_global_bound_finite_immediately() {
+        // #933 part (a): the seeded root bound is the reported global lower
+        // bound from the moment it is installed — before any batch is
+        // exported, imported, or processed.
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        assert_eq!(tm.stats().global_lower_bound, f64::NEG_INFINITY);
+        tm.seed_root_bound(-7.5);
+        assert_eq!(tm.stats().global_lower_bound, -7.5);
+        // A non-finite seed is ignored, never installed.
+        tm.seed_root_bound(f64::NEG_INFINITY);
+        tm.seed_root_bound(f64::NAN);
+        assert_eq!(tm.stats().global_lower_bound, -7.5);
+        // A tighter (larger) seed replaces it; a looser one does not.
+        tm.seed_root_bound(-9.0);
+        assert_eq!(tm.stats().global_lower_bound, -7.5);
+        tm.seed_root_bound(-6.0);
+        assert_eq!(tm.stats().global_lower_bound, -6.0);
+    }
+
+    #[test]
+    fn seed_root_bound_propagates_to_children() {
+        // The seed floors node 0, so children inherit it and the frontier
+        // minimum stays at/above the seed for the whole search.
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        tm.seed_root_bound(1.0);
+        let batch = tm.export_batch(1);
+        // The root's own relaxation FAILS (raw -inf import): without the seed
+        // its children would carry -inf and the tree bound would be pinned
+        // there; with it, the floored root bound (the seed) is inherited.
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: f64::NEG_INFINITY,
+            solution: vec![0.5, 0.7],
+            is_feasible: false,
+        }]);
+        tm.process_evaluated();
+        let ts = tm.stats();
+        assert!(ts.open_nodes >= 2, "root must have branched");
+        assert_eq!(ts.global_lower_bound, 1.0);
+    }
+
+    #[test]
+    fn seed_root_bound_covers_unresolved_subtrees() {
+        // A subtree removed with no bound of its own (#467 pin) is still
+        // covered by the root seed: the seed was proved over the WHOLE root
+        // box, so the reported bound is the seed, not -inf — and never above
+        // the incumbent.
+        let mut tm = TreeManager::new(
+            1,
+            vec![f64::NEG_INFINITY],
+            vec![f64::INFINITY],
+            vec![],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        tm.incumbent_value = 0.3;
+        tm.incumbent_solution = Some(vec![0.0]);
+        {
+            let node = tm.pool.get_mut(NodeId(0));
+            node.status = NodeStatus::Fathomed;
+        }
+        tm.bound_unresolved = true;
+        tm.update_global_lower_bound();
+        assert_eq!(tm.global_lower_bound, f64::NEG_INFINITY);
+        tm.seed_root_bound(-2.0);
+        assert_eq!(tm.global_lower_bound, -2.0);
+        // The seed can never lift the reported bound above the incumbent.
+        tm.seed_root_bound(0.9);
+        assert_eq!(tm.global_lower_bound, 0.3);
     }
 }

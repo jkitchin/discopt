@@ -49,13 +49,54 @@ jobs:
             echo "=> code=false (schedule: only the nightly correctness lane runs)"
             exit 0
           fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # A manual run is a request to run EVERYTHING — that is the only
+            # reason to press the button. There is also no base to diff against:
+            # `github.event.before` exists only on `push`, so the generic branch
+            # below degenerated to `HEAD~1..HEAD` and answered as if only the tip
+            # commit had changed. That is how a dispatch of this workflow came
+            # back with rust / python-fast / claim-boundary / correctness / AMP
+            # all `skipped` — nine checks that read as non-red while executing
+            # nothing (found re-running #960; same genre as the #953 dark
+            # signals). Never gate a manual run on a guessed diff.
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "=> code=true (workflow_dispatch: a manual run always runs everything)"
+            exit 0
+          fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" || true
+            # No --depth: the checkout above is already `fetch-depth: 0`, and a
+            # shallow fetch would install a boundary that hides the merge base of
+            # any branch forked more than that many base commits back.
+            git fetch --no-tags origin "${{ github.base_ref }}" || true
             base="$(git merge-base "origin/${{ github.base_ref }}" HEAD 2>/dev/null || true)"
-            changed="$(git diff --name-only "${base:-HEAD~1}" HEAD 2>/dev/null || true)"
+            # Same rule as the two branches around this one: an unresolvable base
+            # is UNCERTAINTY, not a licence to guess. `${base:-HEAD~1}` used to
+            # gate the whole matrix on the tip commit's file list, so a PR whose
+            # tip happens to be docs-only skipped every solver job even when the
+            # branch changes the solver — and `pull_request` is the trigger that
+            # fires on nearly every change here. The `git fetch` above is
+            # `|| true`, so this is reachable by a silent fetch failure alone.
+            if [ -n "$base" ]; then
+              changed="$(git diff --name-only "$base" HEAD 2>/dev/null || true)"
+            else
+              changed=""   # unknown base -> falls through to code=true below
+              echo "no merge-base with origin/${{ github.base_ref }} -> treating as uncertain"
+            fi
           else
-            changed="$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null \
-                      || git diff --name-only HEAD~1 HEAD 2>/dev/null || true)"
+            # `push`: diff against the pushed-from commit. If it is unusable (an
+            # all-zero SHA on a branch's first push, a force-push, a shallow
+            # clone) do NOT substitute a guess — an unknown base is the
+            # "uncertainty" case this job promises to resolve as `true`.
+            before="${{ github.event.before }}"
+            case "$before" in
+              ""|*[!0-9a-f]*|0000000000000000000000000000000000000000) before="" ;;
+            esac
+            if [ -n "$before" ] && git cat-file -e "$before^{commit}" 2>/dev/null; then
+              changed="$(git diff --name-only "$before" "${{ github.sha }}" 2>/dev/null || true)"
+            else
+              changed=""   # unknown base -> falls through to code=true below
+              echo "no usable base ('${{ github.event.before }}') -> treating as uncertain"
+            fi
           fi
           echo "Changed files:"; printf '%s\n' "$changed"
           # Allowlist of paths that can NOT affect solver behavior (safe to skip).
@@ -300,9 +341,16 @@ jobs:
     # Serial for the same reason as `python-correctness`: a soundness lane must
     # be deterministic, and xdist can order-mask global/claim state.
     #
-    # `--timeout=900` because these tests pass real `time_limit=` budgets to the
-    # solver (ex1252 uses 200 s) and a per-test timeout below the budget would
-    # fail the harness instead of the assertion.
+    # `--timeout=1800` because these tests pass real `time_limit=` / `deadline=`
+    # budgets to the solver and a per-test timeout below the budget would fail the
+    # harness instead of the assertion. Raised from 900 s: the two ex1252
+    # disjunctive-config bars are budget-bound (`max_leaf_solves` 48 and 120), and
+    # their deadlines are backstops sized ~2x the measured runner rate (this runner
+    # manages ~0.175 leaf solves/s, so 48 leaves ~275 s and 120 leaves ~690 s;
+    # the deadlines are 600 s and 1500 s). The 120 min job timeout is the real
+    # backstop against a hang — the per-test timeout must not be what decides a
+    # quality bar, because then the bar measures the runner. See
+    # `_assert_budget_not_clock` in test_disjunctive_config_bound.py.
     #
     # Measured 313 s serially on an M-series laptop (153 selected: 146 passed,
     # 7 skipped, 1 failed — the failure being #927). `python-correctness` is
@@ -352,7 +400,7 @@ jobs:
           # prints a summary at the end cannot be distinguished from a hung one
           # (CLAUDE.md §10).
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
-            -v --tb=short --timeout=900 -p no:cacheprovider \
+            -v --tb=short --timeout=1800 -p no:cacheprovider \
             -m "correctness and slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_amp.py \
             --durations=25

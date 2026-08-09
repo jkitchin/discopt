@@ -288,6 +288,19 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Install an externally-proved rigorous lower bound for the root box
+    /// (#933 part (a)): the caller asserts `bound` is a valid lower bound of
+    /// the internally-minimized objective over the box the tree was created
+    /// with (e.g. the root LP/McCormick relaxation bound proved during setup).
+    /// The seed floors every open node's `local_lower_bound` (children inherit
+    /// it) and permanently floors the reported `global_lower_bound`, so the
+    /// tree reports a finite anytime dual bound from the first proved root
+    /// relaxation onward instead of `-inf` until the first processed batch.
+    /// Non-finite values are ignored.
+    fn seed_root_bound(&mut self, bound: f64) {
+        self.inner.seed_root_bound(bound);
+    }
+
     /// Process all evaluated nodes: prune, check integrality, branch.
     ///
     /// Returns a dict with {pruned, fathomed, branched, incumbent_updates,
