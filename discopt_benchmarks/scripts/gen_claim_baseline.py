@@ -3,10 +3,13 @@
 
 For every ``.nl`` in the vendored ``python/tests/data/minlplib_nl/`` corpus, record
 the built MILP relaxation's fingerprint, shape, integer-column count, and root LP
-bound (the LP relaxation optimum via scipy/HiGHS, integrality dropped — a
-deterministic tightness signal ``cert-baseline.jsonl`` does not carry). The output
-``docs/dev/data/claim-baseline.jsonl`` is the "old behavior" the differential gate
-(plan §3.2) compares every canonical-cutover PR against.
+status + bound (the in-house engine's root relaxation optimum, integrality dropped
+— a deterministic tightness signal ``cert-baseline.jsonl`` does not carry). The
+output ``docs/dev/data/claim-baseline.jsonl`` is the "old behavior" the
+differential gate (plan §3.2) compares every canonical-cutover PR against; since
+#961 the gate asserts ``root_lp_bound``/``root_lp_status`` too (with a relative
+tolerance), so a bound drift requires deliberately regenerating this file in the
+PR that causes it.
 
 Usage (from the repo root, with the built extension importable)::
 
@@ -50,27 +53,40 @@ def _root_box(model) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(lbs), np.concatenate(ubs)
 
 
-def _root_lp_bound(model) -> float | None:
-    """Root LP dual bound from discopt's OWN engine (the in-house Rust simplex via
-    ``MccormickLPRelaxer.solve_at_node``), not an external LP library.
+def _root_lp(model) -> tuple[str, float | None]:
+    """Root LP ``(status, bound)`` from discopt's OWN engine (the in-house Rust
+    simplex via ``MccormickLPRelaxer.solve_at_node``), not an external LP library.
 
     This is the bound the solver actually computes at the root, so the baseline
     records discopt behaviour faithfully; a foreign LP solver (scipy/HiGHS) can
     differ in the last digits on degenerate bases, which would show up as
     spurious ``changed`` noise in the differential gate instead of a genuine
-    relaxation difference. Returns None if the root solve does not certify a
-    finite bound.
-    """
-    try:
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    relaxation difference.
 
-        lb, ub = _root_box(model)
-        res = MccormickLPRelaxer(model).solve_at_node(lb, ub)
-        if res.status == "optimal" and np.isfinite(res.lower_bound):
-            return float(res.lower_bound)
-        return None
-    except Exception:
-        return None
+    The status travels with the bound so a recorded ``None`` is distinguishable:
+    ``("uncertified", None)`` / ``("numerical", None)`` etc. mean the engine
+    declined to certify a bound — a finding. A crash is NOT caught here (#961,
+    CLAUDE.md §7): the old bare ``except`` converted a ``TypeError`` from an
+    ``optimal``/``lower_bound=None`` contract violation into the same ``None``
+    the docstring described as a finding, hiding the crash from the baseline.
+    Any exception now propagates to ``main``'s per-instance handler, which
+    records it loudly as an ``error`` row.
+    """
+    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+    lb, ub = _root_box(model)
+    res = MccormickLPRelaxer(model).solve_at_node(lb, ub)
+    if res.status == "optimal":
+        # ``optimal`` guarantees a finite bound (enforced by MccormickLPResult
+        # since #961); re-check here so a future contract break crashes the
+        # generator instead of recording a wrong row.
+        if res.lower_bound is None or not np.isfinite(res.lower_bound):
+            raise RuntimeError(
+                f"solve_at_node returned status='optimal' with "
+                f"lower_bound={res.lower_bound!r} (#961 contract violation)"
+            )
+        return res.status, float(res.lower_bound)
+    return res.status, None
 
 
 def _commit() -> str:
@@ -96,7 +112,7 @@ def _row(name: str) -> dict:
     n_int = 0
     if relax._integrality is not None:
         n_int = int(np.count_nonzero(np.asarray(relax._integrality)))
-    lp = _root_lp_bound(model)
+    lp_status, lp = _root_lp(model)
     return {
         "instance": name,
         "fingerprint": relaxation_fingerprint(relax),
@@ -104,6 +120,7 @@ def _row(name: str) -> dict:
         "n_cols": int(a_ub.shape[1]) if a_ub.ndim == 2 else int(len(relax._c)),
         "n_integer_cols": n_int,
         "root_lp_bound": lp,
+        "root_lp_status": lp_status,
         "solver_commit": _commit(),
     }
 

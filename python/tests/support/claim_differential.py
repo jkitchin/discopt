@@ -82,6 +82,93 @@ class InstanceDiff:
     detail: str = ""
 
 
+# Relative tolerance for the root-LP-bound gate (#961). Wide enough to absorb
+# cross-build/platform last-digit drift in the in-house simplex (the committed
+# history shows ~1e-12-relative noise on degenerate bases), narrow enough that
+# any real relaxation/bound change (the smallest genuine drift on record moved
+# the 3rd significant digit) fails the gate and forces a deliberate baseline
+# regeneration in the PR that caused it.
+ROOT_LP_REL_TOL = 1e-6
+
+
+def current_root_lp(name: str) -> tuple[str, float | None]:
+    """Solve ``name``'s root LP now; return ``(status, certified_bound_or_None)``.
+
+    Mirrors ``gen_claim_baseline._root_lp``: the in-house engine at the declared
+    root box, no exception handling (#961 / CLAUDE.md §7 — a crash must surface
+    as a crash, not read as "no bound").
+    """
+    import numpy as np
+    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt.modeling.core import from_nl
+
+    model = from_nl(str(_NL_DIR / f"{name}.nl"))
+    lbs, ubs = [], []
+    for v in model._variables:
+        lbs.append(np.asarray(v.lb, dtype=np.float64).ravel())
+        ubs.append(np.asarray(v.ub, dtype=np.float64).ravel())
+    res = MccormickLPRelaxer(model).solve_at_node(np.concatenate(lbs), np.concatenate(ubs))
+    if res.status == "optimal":
+        if res.lower_bound is None or not np.isfinite(res.lower_bound):
+            raise RuntimeError(
+                f"solve_at_node returned status='optimal' with "
+                f"lower_bound={res.lower_bound!r} (#961 contract violation)"
+            )
+        return res.status, float(res.lower_bound)
+    return res.status, None
+
+
+def diff_root_lp(name: str, baseline: dict[str, dict]) -> InstanceDiff:
+    """Classify one instance's root LP ``(status, bound)`` vs the baseline (#961).
+
+    The bound comparison is tolerance-based (``ROOT_LP_REL_TOL``): the exact
+    float is solver output and can carry cross-build last-digit noise, unlike the
+    integer shape columns. A baseline row that predates the ``root_lp_status``
+    field is classified ``changed`` (regenerate the baseline), NOT skipped —
+    an ungated recorded field is how 52 silent drifts accumulated.
+    """
+    base = baseline.get(name)
+    if base is None:
+        return InstanceDiff(name, "missing", "no baseline row")
+    if base.get("fingerprint") is None:
+        return InstanceDiff(name, "missing", f"baseline unbuildable: {base.get('error', '')}")
+    if "root_lp_bound" not in base or "root_lp_status" not in base:
+        return InstanceDiff(
+            name, "changed", "baseline lacks root_lp_bound/root_lp_status; regenerate it"
+        )
+    try:
+        cur_status, cur_bound = current_root_lp(name)
+    except Exception as exc:  # noqa: BLE001 - report per-instance, do not abort the sweep
+        return InstanceDiff(name, "error", repr(exc))
+    base_status, base_bound = base["root_lp_status"], base["root_lp_bound"]
+    if cur_status != base_status:
+        return InstanceDiff(name, "changed", f"root LP status {base_status!r} -> {cur_status!r}")
+    if (cur_bound is None) != (base_bound is None):
+        return InstanceDiff(name, "changed", f"root LP bound {base_bound} -> {cur_bound}")
+    if cur_bound is not None and abs(cur_bound - base_bound) > ROOT_LP_REL_TOL * max(
+        1.0, abs(base_bound)
+    ):
+        return InstanceDiff(name, "changed", f"root LP bound {base_bound} -> {cur_bound}")
+    return InstanceDiff(name, "unchanged")
+
+
+def partition_corpus_root_lp(
+    baseline: Optional[dict[str, dict]] = None,
+) -> dict[str, list[InstanceDiff]]:
+    """Classify every vendored instance's root LP vs the baseline (#961)."""
+    baseline = baseline or load_baseline()
+    buckets: dict[str, list[InstanceDiff]] = {
+        "unchanged": [],
+        "changed": [],
+        "error": [],
+        "missing": [],
+    }
+    for p in sorted(_NL_DIR.glob("*.nl")):
+        d = diff_root_lp(p.stem, baseline)
+        buckets[d.status].append(d)
+    return buckets
+
+
 def diff_instance(name: str, baseline: dict[str, dict]) -> InstanceDiff:
     """Classify one instance vs the committed baseline by relaxation **shape**.
 

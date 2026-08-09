@@ -349,6 +349,33 @@ class MccormickLPResult:
     safe_bound: Optional[float] = None  # Neumaier-Shcherbina safe LP lower bound (== lower_bound)
     reduced_costs: Optional[np.ndarray] = None  # d_j = c_j - (A^T y)_j for the ORIGINAL columns
 
+    def __post_init__(self) -> None:
+        # #961 contract: ``optimal`` asserts a solved relaxation WITH a certified
+        # finite bound. A solve that finished but could not certify one must use
+        # ``"uncertified"`` (non-fathoming, no bound) instead — five corpus
+        # instances leaked ``optimal``/``lower_bound=None`` to callers, and the
+        # baseline generator recorded the resulting crash as a plausible "no
+        # bound". Refuse loudly here so the pair can never be constructed again.
+        if self.status == "optimal" and (
+            self.lower_bound is None or not np.isfinite(self.lower_bound)
+        ):
+            raise ValueError(
+                "MccormickLPResult contract violation (#961): status='optimal' "
+                f"requires a finite lower_bound, got {self.lower_bound!r}; "
+                "use status='uncertified' for a solved-but-uncertified node"
+            )
+
+
+def _no_bound_status(status: str) -> str:
+    """Status for a no-bound result derived from an LP solve with ``status``.
+
+    ``"optimal"`` may not travel without a finite bound (#961, see
+    :class:`MccormickLPResult`); a solved LP whose bound every certification
+    route declined is reported as ``"uncertified"``. Any other status (already
+    non-fathoming, bound-less) passes through unchanged.
+    """
+    return "uncertified" if status == "optimal" else status
+
 
 class MccormickLPRelaxer:
     """Reusable per-node LP-form McCormick relaxation.
@@ -1134,7 +1161,10 @@ class MccormickLPRelaxer:
         Returns a :class:`MccormickLPResult`. ``lower_bound`` is a valid lower
         bound on the original problem within this box (for minimization).
         ``x`` is the LP solution projected to the original variable columns.
-        On any solver failure, ``status != "optimal"`` and the LB is ``None``.
+        On any solver failure, ``status != "optimal"`` and the LB is ``None``;
+        a solve that reached LP optimality but whose bound every certification
+        route declined reports ``status="uncertified"`` (#961) — ``"optimal"``
+        always carries a finite ``lower_bound``.
 
         Global cut pool (P1, see ``docs/design/global-cut-pool.md``):
 
@@ -1652,7 +1682,7 @@ class MccormickLPRelaxer:
                 and np.isfinite(res.bound)
             ):
                 return MccormickLPResult(status="optimal", lower_bound=float(res.bound))
-            return MccormickLPResult(status=res.status)
+            return MccormickLPResult(status=_no_bound_status(res.status))
 
         def _certify(r) -> Optional[float]:
             """The valid lower bound this optimal solve certifies (or None)."""
@@ -1704,7 +1734,15 @@ class MccormickLPRelaxer:
                 bound, x_source = presep_bound, _presep_res
 
         if bound is None or not np.isfinite(bound):
-            return MccormickLPResult(status=res.status)
+            # #961: the LP may have solved to optimality, yet every certification
+            # route above declined (no NS safe bound; the vertex objective refused
+            # by the unbounded-nonlinear-column / conditioning guards or invalidated
+            # by ``_objective_bound_valid=False``). Passing ``res.status`` through
+            # here returned ``status="optimal"`` with ``lower_bound=None`` — a
+            # contract violation that read as a solved node with no bound. Report
+            # the decline as its own non-fathoming status instead; every caller
+            # gates on ``lower_bound``, so this only fixes the label, not behavior.
+            return MccormickLPResult(status=_no_bound_status(res.status))
         x_orig = np.asarray(x_source.x)[: self._n_orig].copy()
         _out = MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
         if want_marginals:
