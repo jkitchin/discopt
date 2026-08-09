@@ -205,6 +205,37 @@ rather than that the certificate is incomplete. The plan's kill criterion
 ("uncertified ≥ 20 % of undecided on some witness") is not met anywhere — 12 % is
 the maximum — so T2 is re-scoped to the bound-excursion class per §2 T2′.
 
+### T2′ — sub-question settled: the root cause is phase 1, not phase 2 (2026-08-09)
+
+The plan asked three questions before implementing. All three are now answered on
+W2 (`nvs20`, 20 s), and the answer is upstream of where the symptom appears.
+
+| question | measurement | reading |
+|---|---|---|
+| basic or nonbasic? | `AuditBoundsOnBasic` 846, `AuditBoundsOnNonbasic` **0** | always a BASIC variable, as theory requires |
+| can a sharper `x_B` repair it? | `AuditBoundsRefineFixes` **0** / `RefinePersists` 846 | no — `assemble`'s standing claim (#364) is CONFIRMED here too |
+| is the box empty on arrival? | `LpCrossedBox` **0** | no — falsified; `assemble_node_lp`'s intersection is not producing empty boxes |
+| **is the basis feasible when phase 1 hands off?** | `Phase1EndBoxOk` 379 / `Phase1EndBoxViolated` **612** | **NO — 62 % of solves enter phase 2 already outside the box** |
+
+So the simplex is not losing a good solution in phase 2; it never had one. Phase 1
+measures feasibility as `sum|artificials| <= 1e-6` — an absolute test on the
+artificials that says nothing about whether the *structural* basics are inside
+their boxes — and the comments at the handoff assert primal feasibility that the
+numbers do not support. Phase 2 then optimizes from an infeasible start, the final
+audit catches the excursion, and refinement cannot repair it because there was
+never a feasible basis to sharpen.
+
+This retires the three candidate fixes the plan listed (drift reset, bound-flip
+cleanup, forced refactorize-and-reprice) — all three operate on phase 2 or on
+`x_B` arithmetic, and the defect is in neither.
+
+**Remaining implementation question for T2′** (next iteration): phase 1 must
+restore *box* feasibility, not just drive artificials to zero. Two candidate
+shapes, to be chosen by measurement: (a) a composite phase-1 objective that prices
+box violations alongside the artificials, or (b) a feasibility-restore pass at the
+handoff — cheapest first: when the handoff audit fails, restart from the canonical
+all-artificial basis, which is primal-feasible by construction.
+
 **Also learned:** `DISCOPT_PROFILE` costs throughput badly (147k–475k stderr lines
 per run, W3 fell from ~6 400 nodes to 31), so node counts measured under it must
 never be compared against unprofiled runs. The verdict *shares* are still valid.

@@ -783,6 +783,38 @@ impl<'a> Simplex<'a> {
     /// update-drifted basis is recovered *inside the engine* rather than by
     /// falling back to another solver. Returns `None` if the fresh factorization
     /// or refined solve fails (the caller keeps the Numerical verdict).
+    /// Record whether the basis is primal-feasible at the phase-1 -> phase-2 handoff
+    /// (#956 T2' diagnostic; profiling-gated so production pays nothing).
+    fn audit_phase1_handoff(&mut self, art_sign: &[f64]) {
+        if !crate::profile::enabled() {
+            return;
+        }
+        let ok = match self.basic_values(art_sign) {
+            Ok(xb) => {
+                let x = self.assemble_x(&xb);
+                self.first_bound_violator(&x).is_none()
+            }
+            Err(()) => false,
+        };
+        crate::profile::incr(if ok {
+            crate::profile::Ctr::Phase1EndBoxOk
+        } else {
+            crate::profile::Ctr::Phase1EndBoxViolated
+        });
+    }
+
+    /// Index of the first column outside its box by more than the audit's own
+    /// relative tolerance, mirroring [`audit_feasibility`]'s bound test exactly.
+    /// Diagnostic only (#956 T2').
+    fn first_bound_violator(&self, x: &[f64]) -> Option<usize> {
+        const FEAS: f64 = 1e-6;
+        (0..self.n).find(|&j| {
+            (self.lb[j] > -INF && x[j] < self.lb[j] - FEAS * (1.0 + self.lb[j].abs().min(INF)))
+                || (self.ub[j] < INF
+                    && x[j] > self.ub[j] + FEAS * (1.0 + self.ub[j].abs().min(INF)))
+        })
+    }
+
     fn refined_basic_values(&self, art_sign: &[f64]) -> Option<Vec<f64>> {
         let cols: Vec<Vec<f64>> = self
             .basis
@@ -997,6 +1029,12 @@ impl<'a> Simplex<'a> {
             // only phase-1-feasible ratio-test pivots, the basis is primal-feasible.
             // Phase 2 (below) optimizes the real objective from it and yields a bound.
         }
+
+        // #956 T2': the comments above assert the basis handed to phase 2 is
+        // primal-feasible. That is a claim about the STRUCTURAL basics' boxes, while
+        // phase 1 only ever measured `sum|artificials|`, so measure it here — on
+        // every solve, not just the ones that had a phase-1 residual.
+        self.audit_phase1_handoff(&art_sign);
 
         // --- Phase 2: pin artificials to 0, optimize real objective ---
         for i in 0..m {
@@ -1846,6 +1884,27 @@ impl<'a> Simplex<'a> {
                 // Bound excursion: refinement can't help — downgrade directly.
                 Feasibility::Bounds => {
                     crate::profile::incr(crate::profile::Ctr::LpAuditBoundsFail);
+                    // #956 T2' diagnostic (profiling-gated, so production pays
+                    // nothing): re-test `assemble`'s standing claim that a bounds
+                    // excursion is a Harris artefact no sharper `x_B` can repair.
+                    if crate::profile::enabled() {
+                        if let Some(j) = self.first_bound_violator(&x) {
+                            crate::profile::incr(if self.stat[j] == BASIC {
+                                crate::profile::Ctr::AuditBoundsOnBasic
+                            } else {
+                                crate::profile::Ctr::AuditBoundsOnNonbasic
+                            });
+                        }
+                        let fixed = match self.refined_basic_values(art_sign) {
+                            Some(xb_r) => audit(&self, &self.assemble_x(&xb_r)) == Feasibility::Ok,
+                            None => false,
+                        };
+                        crate::profile::incr(if fixed {
+                            crate::profile::Ctr::AuditBoundsRefineFixes
+                        } else {
+                            crate::profile::Ctr::AuditBoundsRefinePersists
+                        });
+                    }
                     LpStatus::Numerical
                 }
                 // Row residual: the failure mode iterative refinement can recover.
@@ -1876,6 +1935,16 @@ impl<'a> Simplex<'a> {
         } else {
             status
         };
+        // #956 T2' diagnostic: was this LP's box already empty on arrival?
+        if crate::profile::enabled() {
+            let crossed = (0..self.n).any(|j| self.lb[j] > self.ub[j]);
+            if crossed {
+                crate::profile::incr(crate::profile::Ctr::LpCrossedBox);
+                if status != LpStatus::Optimal {
+                    crate::profile::incr(crate::profile::Ctr::LpCrossedBoxAndFailed);
+                }
+            }
+        }
         // #956 follow-through: the terminal verdict histogram, counted once per
         // solve at the simplex's single exit point (after the audit's say).
         crate::profile::incr(match status {

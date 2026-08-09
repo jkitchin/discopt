@@ -213,6 +213,34 @@ counters!(
     AuditExcursionLt1e3x,
     AuditExcursionLt1e6x,
     AuditExcursionGe1e6x,
+    // #956 T2': is the column the audit rejected BASIC (so `x_B` is wrong — either
+    // drift or a genuinely primal-infeasible basis) or nonbasic (which should be
+    // impossible, since a nonbasic sits exactly at a bound by construction)? And
+    // does recomputing `x_B` from a refinement-polished factorization pull it back
+    // inside? `assemble` currently asserts it cannot ("a Harris ratio-test artefact,
+    // not a solve-accuracy problem", measured for #364 on a different corpus) — these
+    // counters re-test that claim on the spatial McCormick LPs.
+    AuditBoundsOnBasic,
+    AuditBoundsOnNonbasic,
+    AuditBoundsRefineFixes,
+    AuditBoundsRefinePersists,
+    // Does the LP handed to the simplex have a CROSSED box (`l[j] > u[j]`)? Such an
+    // LP is empty by inspection — no basis can satisfy it, phase 1 cannot repair it,
+    // and no amount of refinement will pull the basic variable back inside a box
+    // that has no inside. `assemble_node_lp` can produce one: it intersects each
+    // auxiliary column's incoming bounds with the box-derived envelope range
+    // (`l[a].max(alo)` / `u[a].min(ahi)`) with nothing checking that the result is
+    // non-empty. Counted per solve, split by whether the solve then failed.
+    LpCrossedBox,
+    LpCrossedBoxAndFailed,
+    // Is the basis primal-feasible when phase 1 hands off to phase 2? `assemble`'s
+    // sibling comment asserts it is ("the LP is FEASIBLE and, because the cleanup
+    // used only phase-1-feasible ratio-test pivots, the basis is primal-feasible"),
+    // but phase 1 measures feasibility as `sum|artificials| <= 1e-6` — an ABSOLUTE
+    // test on artificials, which says nothing about whether the structural basics
+    // are inside their boxes. These counters test the claim.
+    Phase1EndBoxOk,
+    Phase1EndBoxViolated,
 );
 
 #[inline(always)]
