@@ -539,7 +539,15 @@ def test_structure_cuts_stay_jax_free():
     now comes from ``sp.diff`` (exact, since ``h`` is univariate) and the Jensen
     check runs on numpy arrays. Measured on this model before the swap: 211 jax
     modules; after: 0, with ``node_count`` unchanged.
+
+    NOTE: this skips on CI today. ``sympy`` is the optional ``discopt[sympy]``
+    extra and no CI lane installs it, so the whole structure-cut subsystem --
+    which is *default-ON* in the solver -- goes untested there, this guard
+    included. The skip is the honest state, not a fix for it; the guard is
+    scoped to this test rather than the module so it cannot take the rest of the
+    #75 acceptance suite down with it.
     """
+    pytest.importorskip("sympy")
     res = _run_raw(_STRUCTURE_CUT_DRIVER)
     # Vacuity controls first: a recognizer that matched nothing, or a cut whose
     # tangent generator was never called, would make the JAXMODS assertion below
@@ -563,7 +571,10 @@ def test_tangent_slope_matches_the_jax_reference():
     differentiation agreed to 2.2e-16 (one ulp) over 401 points; the tolerance
     here is loose enough for that and far tighter than any tolerance that would
     let a genuinely different derivative through.
+
+    Skips without the optional ``sympy`` extra, which no CI lane installs.
     """
+    pytest.importorskip("sympy")
     from discopt._jax.symbolic import cut_recognizer as R
     from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
 
