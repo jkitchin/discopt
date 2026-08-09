@@ -2231,6 +2231,132 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     return max_viol <= tol
 
 
+# The absolute tolerance the NLP-BB exit gate (#954) holds a returned incumbent
+# to: the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), the same
+# figure ``_matrix_solution_feasible`` enforces on the matrix paths (#952) and
+# ``_jax.primal_heuristics._check_constraint_feasibility`` enforces when a primal
+# heuristic accepts an incumbent. Deliberately NOT the 1e-4 that this module's
+# local ``_check_constraint_feasibility`` defaults to; see the gate's call site.
+_NLPBB_EXIT_ABS_TOL = 1e-6
+# Term-magnitude forgiveness, identical to the two arbiters above: a row built
+# from terms of size ~1e5 carries ~1e-6 of pure cancellation noise, so an
+# absolute-only test at 1e-6 rejects genuinely optimal points (the prob07 lesson
+# recorded in ``primal_heuristics._check_constraint_feasibility``). Kept extremely
+# tight so only noise proportional to the row's own terms is forgiven.
+_NLPBB_EXIT_RTOL = 1e-9
+
+
+def _nonlinear_point_excess(
+    evaluator,
+    x,
+    cl_list,
+    cu_list,
+    n_rows=None,
+    box=None,
+    tol=_NLPBB_EXIT_ABS_TOL,
+    rtol=_NLPBB_EXIT_RTOL,
+):
+    """How far ``x`` sits outside nonlinear rows + a box, net of term-scaled noise.
+
+    The nonlinear counterpart of :func:`_matrix_solution_feasible` /
+    :func:`_matrix_solution_violations`, and deliberately ONE function rather than
+    an arbiter plus a separate reporter: the decision and the reported magnitude
+    come from the same number, so they cannot drift out of agreement (#952 kept
+    them apart by giving the reporter no tolerance at all; here the reporter *is*
+    the arbiter's own quantity).
+
+    Returns ``(excess, where, n_compared)``:
+
+    * ``excess`` — ``max(viol_i - rtol*scale_i)`` over the checked rows and box
+      entries, where ``scale_i = sum_j |J_ij| |x_j|`` is the row's additive-term
+      magnitude (from the Jacobian, never from the possibly-``1e20`` bound
+      sentinels) and ``|x_i|`` for a box entry. The point is feasible at absolute
+      tolerance ``tol`` exactly when ``excess <= tol``. When the raw violation
+      already clears ``tol`` the Jacobian is not evaluated and the raw maximum is
+      returned instead — an upper bound on the excess, and exact whenever the
+      returned value exceeds ``tol``, which is the only regime a caller acts on.
+    * ``where`` — which row or variable carried the maximum, for the message.
+    * ``n_compared`` — executed comparisons (CLAUDE.md §6), so a caller can prove
+      the check looked at something rather than short-circuiting on empty inputs.
+
+    ``n_rows`` limits the check to the FIRST ``n_rows`` evaluator rows. The NLP-BB
+    path appends root cuts (#781) to the model before compiling the evaluator;
+    those rows are valid for integer-feasible points but deliberately tight, and
+    they are not rows the user declared, so a gate must not judge a returned point
+    by them.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    excess = -np.inf
+    where = "nothing checked"
+    n_compared = 0
+
+    if not np.all(np.isfinite(x)):
+        bad = int(np.argmax(~np.isfinite(x)))
+        return np.inf, f"x[{bad}] is not finite", int(x.size)
+
+    n = 0
+    viol = np.zeros(0, dtype=np.float64)
+    if cl_list is not None and len(cl_list) and getattr(evaluator, "n_constraints", 0):
+        cl = np.asarray(cl_list, dtype=np.float64)
+        cu = np.asarray(cu_list, dtype=np.float64)
+        g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+        n = min(len(g), len(cl))
+        if n_rows is not None:
+            n = min(n, int(n_rows))
+        if n > 0:
+            viol = np.maximum(np.maximum(cl[:n] - g[:n], g[:n] - cu[:n]), 0.0)
+            n_compared += 2 * n
+            excess = max(excess, float(viol.max()))
+            where = f"constraint row {int(viol.argmax())}"
+
+    box_viol = np.zeros(0, dtype=np.float64)
+    if box is not None:
+        box_arr = np.asarray(box, dtype=np.float64)
+        if box_arr.size:
+            k = min(x.shape[0], box_arr.shape[0])
+            box_viol = np.maximum(np.maximum(box_arr[:k, 0] - x[:k], x[:k] - box_arr[:k, 1]), 0.0)
+            n_compared += 2 * k
+            if k and float(box_viol.max()) > excess:
+                excess = float(box_viol.max())
+                where = f"bound on x[{int(box_viol.argmax())}]"
+
+    if excess == -np.inf:
+        return 0.0, "nothing checked", n_compared
+    if excess <= tol:
+        # Cheap path: the raw violation already clears the tolerance, so the
+        # term-scaled forgiveness cannot change the verdict. Skips the Jacobian.
+        return float(excess), where, n_compared
+
+    # Some block exceeds the absolute tolerance: net out the term-scaled noise
+    # before deciding, exactly as the two sibling arbiters do.
+    excess = -np.inf
+    where = "nothing checked"
+    if n > 0:
+        try:
+            jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
+            # ``np.asarray`` on a sparse matrix silently yields a 0-d object array
+            # (CLAUDE.md "Key Constraints"), which would feed garbage into the
+            # scale. ``evaluate_jacobian`` documents a dense (m, n) return; verify
+            # it rather than trust it, and fall back to the strict path if not.
+            if jac.ndim != 2 or jac.shape[0] < n:
+                raise TypeError(f"expected a dense (m, n) Jacobian, got shape {jac.shape}")
+            scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
+        except Exception as exc:
+            # An unevaluable Jacobian is not a licence to forgive: fall back to
+            # the raw (stricter) violation rather than silently passing a point.
+            logger.debug("#954 gate: Jacobian unavailable, using raw residuals: %s", exc)
+            scale = np.zeros(n, dtype=np.float64)
+        net = viol - rtol * scale
+        excess = float(net.max())
+        where = f"constraint row {int(net.argmax())}"
+    if box_viol.size:
+        net_box = box_viol - rtol * np.abs(x[: box_viol.size])
+        if float(net_box.max()) > excess:
+            excess = float(net_box.max())
+            where = f"bound on x[{int(net_box.argmax())}]"
+    return float(excess), where, n_compared
+
+
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     """Return True if all discrete variables are integral within tolerance."""
     for off, sz in zip(int_offsets, int_sizes):
@@ -12870,6 +12996,15 @@ def _solve_nlp_bb(
 
     # --- Extract variable info and create tree ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    # #954: the exit gate below verifies the returned incumbent against the box
+    # the *model* declares, captured here before FBBT overwrites ``lb``/``ub``.
+    # FBBT bounds are derived, so checking against them would let a wrong
+    # inference manufacture a refusal on a point genuinely feasible for the model
+    # as written (the same reasoning as the #952 gates on the matrix paths).
+    _declared_box = np.stack([lb.copy(), ub.copy()], axis=1)
+    # ... and against the rows the model declares, counted here so the root-cut
+    # stage below (#781) cannot smuggle its appended cut rows into the gate.
+    _declared_ncons = sum(1 for _c in model._constraints if isinstance(_c, Constraint))
 
     # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
     t_rust_start = time.perf_counter()
@@ -12991,6 +13126,18 @@ def _solve_nlp_bb(
     # --- Infer constraint bounds ---
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
+
+    # #954: how many evaluator rows the DECLARED constraints occupy. Rows follow
+    # constraint order (``_infer_constraint_bounds``) and the root-cut stage
+    # appends its cuts last, so the declared rows are the leading block. Summed
+    # from the evaluator's own per-constraint flat sizes rather than assumed
+    # 1-row-per-constraint, because a vector-valued body (DAE collocation
+    # residuals) contributes many rows.
+    _declared_rows = len(cl_list)
+    _flat_sizes = getattr(evaluator, "_constraint_flat_sizes", None)
+    if _flat_sizes is not None and len(_flat_sizes) >= _declared_ncons:
+        _declared_rows = int(np.sum(np.asarray(_flat_sizes)[:_declared_ncons]))
+    _declared_rows = max(0, min(_declared_rows, len(cl_list)))
 
     opts: dict = {}
     opts.setdefault("print_level", 0)
@@ -13835,11 +13982,42 @@ def _solve_nlp_bb(
         # C-3: snap near-integral discrete coordinates to exact integers before
         # reporting; the dual-recovery re-solve below is best-effort and does
         # not guarantee the reported primal is rounded (see helper docstring).
-        _rounded_inc, _rounded_feas = _round_incumbent_integers(
-            sol_flat, int_offsets, int_sizes, evaluator, cl_list, cu_list
-        )
-        if _rounded_feas:
+        #
+        # #954 item 3 — the helper's ``feas_tol`` at this call site. It used to run
+        # at the helper default ``1e-4``, 100x the declared ``abs=1e-6``, which is
+        # not a tolerance this path can justify now that the exit below refuses at
+        # 1e-6: a rounding accepted at 1e-4 and rejected by the exit would turn a
+        # solve that had a perfectly good unrounded point into a crash. So the
+        # acceptance decision is taken with the SAME arbiter the exit uses — one
+        # test, so the guard cannot admit what the gate refuses — and the helper is
+        # called in snap-only mode. Its own ``feasible`` flag is deliberately not
+        # consulted here (it would be a second, looser opinion of the same
+        # question); it stays for the call sites that have no exit arbiter.
+        _rounded_inc, _ = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
+        if np.array_equal(_rounded_inc, sol_flat):
+            # Nothing was snapped: there is no acceptance decision to take, and
+            # re-judging the unchanged point here would only pre-empt the exit
+            # gate below with a confusing "snap rejected" message.
             sol_flat = _rounded_inc
+        else:
+            _round_excess, _, _round_cmp = _nonlinear_point_excess(
+                evaluator,
+                _rounded_inc,
+                cl_list,
+                cu_list,
+                n_rows=_declared_rows,
+                box=_declared_box,
+            )
+            if _round_excess <= _NLPBB_EXIT_ABS_TOL:
+                sol_flat = _rounded_inc
+            else:
+                logger.debug(
+                    "NLP-BB: integer snap rejected (excess %.3e > %.0e over %d comparisons); "
+                    "reporting the unrounded incumbent (C-3).",
+                    _round_excess,
+                    _NLPBB_EXIT_ABS_TOL,
+                    _round_cmp,
+                )
         x_dict = _unpack_solution(model, sol_flat)
 
         # Refine the incumbent's continuous variables, then recover relaxation
@@ -13938,6 +14116,45 @@ def _solve_nlp_bb(
                 # of a deliberately relaxed box (see the two-solve note above).
         except Exception as _exc:
             logger.debug("NLP-BB dual recovery failed: %s", _exc)
+
+        # --- #954: exit gate ---
+        # The last of the five solve exit paths with no verification of the point
+        # it returns. Its exit was the same three steps the MILP/MIQP paths had
+        # before #952 — snap, unpack, return — with nothing checking the point
+        # whose objective is reported as ``objective`` and, on ``optimal``, as the
+        # dual ``bound`` too. The search's own acceptance gates run at the local
+        # ``_check_constraint_feasibility`` default of 1e-4, and the terminal
+        # refine re-solve above can REPLACE the point after every one of them, so
+        # this is placed last: it judges the vector that actually leaves.
+        #
+        # This path's rows are nonlinear, so the arbiter is the nonlinear
+        # convention (``viol <= tol + rtol*term_scale``) rather than #952's
+        # ``_matrix_solution_feasible`` — same 1e-6 absolute tolerance, same 1e-9
+        # relative forgiveness as ``primal_heuristics._check_constraint_feasibility``,
+        # which is what every primal heuristic here already holds an incumbent to.
+        # Judged against the DECLARED rows (root cuts excluded, ``_declared_rows``)
+        # and the DECLARED box (captured pre-FBBT), so neither a derived bound nor
+        # an appended cut can manufacture a refusal.
+        #
+        # Refusal, not repair or a quiet downgrade (CLAUDE.md §3): a point outside
+        # the declared feasible set has no honest status here — reporting it as
+        # ``feasible`` would still publish its objective, and on this path that
+        # same number is also the dual bound.
+        _exit_excess, _exit_where, _exit_cmp = _nonlinear_point_excess(
+            evaluator,
+            sol_flat,
+            cl_list,
+            cu_list,
+            n_rows=_declared_rows,
+            box=_declared_box,
+        )
+        if _exit_excess > _NLPBB_EXIT_ABS_TOL:
+            raise RuntimeError(
+                "NLP-BB returned an infeasible point labeled feasible/optimal: "
+                f"{_exit_where} violated by {_exit_excess:.6e} beyond the "
+                f"term-scaled tolerance (declared abs tol {_NLPBB_EXIT_ABS_TOL:.0e}, "
+                f"{_exit_cmp} comparisons over {_declared_rows} declared rows)"
+            )
 
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:

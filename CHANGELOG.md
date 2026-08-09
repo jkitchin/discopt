@@ -237,6 +237,46 @@ The release procedure that produces these entries is documented in
   /`_max` gain the same treatment, so a linear function's all-zero Hessian bounds
   come back as exactly `0.0` instead of `∓5e-324` and no longer miss a boundary
   `λ_min ≥ 0` test.
+- **The NLP-BB incumbent is verified against every declared row and bound before
+  it is returned** (`fix`, #954). `_solve_nlp_bb` was the last of the five solve
+  exit paths with nothing checking the point it returns (#779/#789 closed
+  `solve_model` and `_try_native_spatial_kernel`; #952 closed `_solve_milp_bb` and
+  `_solve_miqp_bb`). Its exit was the same three steps those two had — snap the
+  integers, unpack, return — with no verification of the point whose objective is
+  reported as `objective` and, on `optimal`, as the dual `bound` too.
+
+  Two things kept this from being "apply the #952 gate here". Its rows are
+  nonlinear, so the arbiter cannot be `_matrix_solution_feasible`; the new
+  `_nonlinear_point_excess` applies the repo's nonlinear convention instead
+  (`viol <= tol + rtol*term_scale` at `abs=1e-6`, `rtol=1e-9` — the same test
+  `_jax.primal_heuristics._check_constraint_feasibility` applies whenever a primal
+  heuristic accepts an incumbent), and returns the excess it measured so the
+  refusal names a magnitude and the reported number cannot drift from the decision.
+  And the terminal refine re-solve can *replace* the reported point after every
+  gate the search ran, so the check is the last thing before the return. The rows
+  judged are the ones the model declares — root cuts (#781) are appended to the
+  model before the evaluator is compiled and are excluded — and the box is the
+  declared one, captured before FBBT overwrites it.
+
+  The rounding guard at this call site (#954 item 3) ran at
+  `_round_incumbent_integers`'s default `feas_tol=1e-4`, 100x the declared
+  `abs=1e-6`. It now takes the exit's own arbiter, so a snap can no longer be
+  admitted at 1e-4 and then refused by the exit at 1e-6; a rejected snap keeps the
+  unrounded incumbent, which is C-3's documented fallback.
+
+  Entry experiment before the gate was written (CLAUDE.md §4), over a 106-item
+  panel — a 40-seed convex-MINLP family plus every in-repo `minlplib_nl` instance
+  driven through this path with `nlp_bb=True`: 100 entered `_solve_nlp_bb`, 69
+  returned a point, 2638 comparisons; worst raw violation 9.36e-11 (`tls2`), worst
+  tolerance that would be needed to admit any returned point 3.93e-14, and **0**
+  instances a 1e-6 gate would newly refuse. As with #952 this was never a live
+  false certificate — the defect is that nothing bounded the excursion, whose size
+  was set by whatever the NLP backend converged to, and the exit would equally
+  have returned 1e-2. Bound-neutral per CLAUDE.md §5: the gated arm reproduces the
+  baseline's `node_count`, `objective`, status and `gap_certified` on every
+  self-terminating instance; the 7 apparent drifts in the contended panel run were
+  all on wall-truncated (`gap_certified=False`) searches and vanished on
+  uncontended reruns of both arms.
 
 - **Three CI signals that had stopped signalling** (`ci`). An audit of why #927
   (an unsound `ex1252` dual bound, asserted by a test in the tree) could sit open
