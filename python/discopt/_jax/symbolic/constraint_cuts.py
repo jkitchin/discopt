@@ -23,19 +23,25 @@ This module automates that pipeline with SymPy:
    direction is verified from the sign of the derivative).
 2. :func:`power_term_underestimator` — turn a coupling ``target >= g(keep)`` and a
    product objective term ``keep * (target^exponent - 1)`` into the univariate
-   underestimator ``h(keep)`` plus a JAX closure and a tangent-cut generator,
+   underestimator ``h(keep)`` plus a numeric closure and a tangent-cut generator,
    reusing the envelope engine.
 3. :func:`verify_cut` — certify soundness of the derived cut by sampling the
    feasible manifold.
 
-Design-time only (imports SymPy); the products are pure-JAX closures + numeric
+Design-time only (imports SymPy); the products are pure-numpy closures + numeric
 cut coefficients for the solver.
+
+This module was JAX-free'd for #75: ``h`` is *univariate* and its SymPy
+expression is in hand, so the tangent slope comes from ``sp.diff`` (exact) rather
+than from autodiff'ing a lambdified copy, and the Jensen convexity check is
+elementwise numerics. See :meth:`TermUnderestimator.dh_fn`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from functools import cached_property
+from typing import Callable, Optional, cast
 
 import numpy as np
 import sympy as sp
@@ -157,7 +163,7 @@ class TermUnderestimator:
     Attributes:
         keep: The surviving variable.
         h_expr: SymPy expression for ``h(keep)`` (numeric params substituted).
-        h_fn: JAX callable ``h(keep)``.
+        h_fn: Numeric callable ``h(keep)`` (numpy-lambdified from ``h_expr``).
         is_convex: Whether ``h`` was verified convex on the sampled domain.
     """
 
@@ -166,17 +172,42 @@ class TermUnderestimator:
     h_fn: Callable
     is_convex: bool
 
+    @cached_property
+    def dh_fn(self) -> Callable:
+        """``dh/d(keep)`` as a numeric callable, differentiated symbolically.
+
+        ``h`` is univariate and we hold its SymPy expression, so ``sp.diff`` is
+        the exact derivative — there is nothing here that needs autodiff. Until
+        #75 this was ``jax.grad`` applied to a lambdified copy of ``h_expr``,
+        which pulled 210 jax modules onto a default solve (measured on the gas
+        network MINLP, where ``structure_cuts`` is default-ON) to compute a
+        univariate slope.
+
+        ``h_expr`` contains ``Max``, so the derivative carries ``Heaviside``
+        factors; SymPy's numpy printer maps those directly, and at a kink both
+        this and ``jax.grad`` pick an arbitrary one-sided subgradient — neither
+        is more correct there, and the tangent stays a valid underestimator
+        either way because ``h`` is convex (:attr:`is_convex`).
+
+        Measured against the shipped ``jax.grad`` arm on the real gas-network
+        cuts before the swap (CLAUDE.md §4): 1622 comparisons over both cuts,
+        value drift exactly **0.0**, worst relative gradient drift **2.2e-16**
+        (one ulp), and identical ``is_convex`` verdicts.
+
+        Cached because the separation loop calls :meth:`tangent_cut` per round;
+        ``cached_property`` writes straight into ``__dict__``, so it composes
+        with ``frozen=True``.
+        """
+        # ``sp.lambdify`` is untyped, hence the cast rather than a bare return.
+        return cast(Callable, sp.lambdify([self.keep], sp.diff(self.h_expr, self.keep), "numpy"))
+
     def tangent_cut(self, point: float) -> tuple[float, float]:
         """Return ``(value, slope)`` of the tangent to ``h`` at ``keep = point``.
 
         For convex ``h`` the tangent is a valid global underestimator, so
         ``term >= value + slope * (keep - point)`` is a sound linear cut.
         """
-        import jax
-
-        v = float(self.h_fn(point))
-        g = float(jax.grad(lambda t: self.h_fn(t))(float(point)))
-        return v, g
+        return float(self.h_fn(float(point))), float(self.dh_fn(float(point)))
 
 
 def power_term_underestimator(
@@ -207,23 +238,26 @@ def power_term_underestimator(
     Returns:
         A :class:`TermUnderestimator`.
     """
-    import jax.numpy as jnp
-
     keep = coupling.keep
     params = dict(param_values or {})
     lower = coupling.target_lower.subs(params)
     floor = sp.Max(1, lower)
     h_expr = sp.simplify(coefficient * keep * sp.Max(0, floor**exponent - 1))
 
-    h_fn = sp.lambdify([keep], h_expr, modules="jax")
+    # numpy, not jax (#75): this closure is evaluated pointwise by the separation
+    # loop and elementwise by the Jensen check below -- neither differentiates it
+    # (see ``TermUnderestimator.dh_fn``), so ``modules="jax"`` bought nothing and
+    # cost a jax import on every solve that recognizes this structure. The
+    # sibling lambdify calls in ``cut_recognizer`` already used "numpy".
+    h_fn = sp.lambdify([keep], h_expr, "numpy")
 
     # Verify convexity of h on the domain via midpoint (Jensen) inequality.
     lo, hi = domain
     rng = np.random.default_rng(0)
-    a = jnp.asarray(rng.uniform(lo, hi, n_check))
-    b = jnp.asarray(rng.uniform(lo, hi, n_check))
+    a = rng.uniform(lo, hi, n_check)
+    b = rng.uniform(lo, hi, n_check)
     mid = 0.5 * (a + b)
-    is_convex = bool(jnp.all(h_fn(mid) <= 0.5 * (h_fn(a) + h_fn(b)) + 1e-6))
+    is_convex = bool(np.all(h_fn(mid) <= 0.5 * (h_fn(a) + h_fn(b)) + 1e-6))
 
     return TermUnderestimator(keep=keep, h_expr=h_expr, h_fn=h_fn, is_convex=is_convex)
 

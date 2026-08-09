@@ -489,3 +489,87 @@ def test_qp_extraction_tape_matches_jax():
     assert float(res["DQ"]) == pytest.approx(0.0, abs=1e-9)
     assert float(res["DC"]) == pytest.approx(0.0, abs=1e-9)
     assert float(res["DD"]) == pytest.approx(0.0, abs=1e-9)
+
+
+# --------------------------------------------------------------------------
+# Structure cuts (#75): the symbolic constraint-cut derivation used JAX twice --
+# ``jax.grad`` for a *univariate* tangent slope and ``lambdify(modules="jax")``
+# for a 200-sample Jensen convexity check. Neither needed autodiff, and together
+# they pulled 211 jax modules onto a default gas-network solve, where
+# ``structure_cuts`` is ON by default. Both now go through SymPy + numpy.
+# --------------------------------------------------------------------------
+
+_STRUCTURE_CUT_DRIVER = """
+import sys
+from discopt._jax.symbolic import cut_recognizer as R
+from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+
+m = build_gas_network_minlp()
+
+# Exercise the derivation directly so the measurement below is about the cut
+# machinery, not merely about a solve that might never have recognized anything.
+cuts = R.recognize_and_derive_cuts(build_gas_network_minlp())
+print("CUTS:" + str(len(cuts)))
+tangents = 0
+for c in cuts:
+    lo, hi = R.under_domain_of(c.underestimator)
+    v, g = c.underestimator.tangent_cut(0.5 * (lo + hi))
+    tangents += 1
+    print("TANGENT_V:" + repr(float(v)))
+    print("TANGENT_G:" + repr(float(g)))
+    print("CONVEX:" + str(bool(c.underestimator.is_convex)))
+print("TANGENTS:" + str(tangents))
+
+r = m.solve(time_limit=90, gap_tolerance=1e-4)
+print("STATUS:" + str(r.status))
+print("NODES:" + str(r.node_count))
+print("BOUND:" + repr(float(r.bound)) if r.bound is not None else "BOUND:None")
+
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS:" + str(len(leaked)))
+print("LEAKED:" + ",".join(leaked[:6]))
+"""
+
+
+@pytest.mark.correctness
+def test_structure_cuts_stay_jax_free():
+    """Deriving and applying structure cuts must not import JAX.
+
+    Both JAX uses in ``constraint_cuts`` were removed for #75: the tangent slope
+    now comes from ``sp.diff`` (exact, since ``h`` is univariate) and the Jensen
+    check runs on numpy arrays. Measured on this model before the swap: 211 jax
+    modules; after: 0, with ``node_count`` unchanged.
+    """
+    res = _run_raw(_STRUCTURE_CUT_DRIVER)
+    # Vacuity controls first: a recognizer that matched nothing, or a cut whose
+    # tangent generator was never called, would make the JAXMODS assertion below
+    # pass while proving nothing about the code that used to import jax.
+    assert int(res["CUTS"]) == 2, f"the gas-network recognizer did not fire: {res}"
+    assert int(res["TANGENTS"]) == 2, f"tangent_cut was never exercised: {res}"
+    assert res["CONVEX"] == "True", f"underestimator lost its convexity verdict: {res}"
+    assert res["JAXMODS"] == "0", (
+        f"structure-cut derivation imported {res['JAXMODS']} jax modules "
+        f"({res.get('LEAKED', '?')}) -- #75 regression"
+    )
+    # Still correct, not merely JAX-free: the cut must still close the gap.
+    assert res["STATUS"] == "optimal", f"structure cuts stopped certifying: {res}"
+
+
+def test_tangent_slope_matches_the_jax_reference():
+    """``dh_fn`` must reproduce the slope the ``jax.grad`` arm produced.
+
+    Reference values are the shipped JAX numbers, captured on the real
+    gas-network cut at the domain midpoint before the swap. Symbolic
+    differentiation agreed to 2.2e-16 (one ulp) over 401 points; the tolerance
+    here is loose enough for that and far tighter than any tolerance that would
+    let a genuinely different derivative through.
+    """
+    from discopt._jax.symbolic import cut_recognizer as R
+    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+
+    cuts = R.recognize_and_derive_cuts(build_gas_network_minlp())
+    assert cuts, "recognizer produced no cuts -- nothing to compare"
+    under = cuts[0].underestimator
+    v, g = under.tangent_cut(37.0)
+    assert v == pytest.approx(1.1938449576366978, rel=1e-12)
+    assert g == pytest.approx(0.1022698440660875, rel=1e-12)
