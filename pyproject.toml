@@ -70,6 +70,11 @@ dev = [
     "pytest",
     "pytest-timeout",
     "pytest-cov",
+    # test_ci_changes_gate.py parses .github/workflows/ci.yml to run the real
+    # `changes` gate script. Declared here rather than relied on transitively:
+    # without it that file is a collection ERROR, not a skip — red for the wrong
+    # reason. (Also in the `gams` extra, for gamsconfig.yaml merging.)
+    "pyyaml>=6",
     "pytest-xdist",
     # Pin the lint/typecheck toolchain to the exact versions in
     # .pre-commit-config.yaml (the single source of truth CI also runs), so a

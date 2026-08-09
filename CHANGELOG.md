@@ -193,28 +193,46 @@ The release procedure that produces these entries is documented in
   driving #960 to green, and both share a shape: a check that answers confidently
   from something other than the thing it claims to be testing.
 
-  1. **A manual `workflow_dispatch` skipped the entire heavy matrix.** The
-     `changes` gate reads `github.event.before`, which exists only on `push`. On a
-     dispatch that expression expands to the empty string, the first `git diff`
-     fails, and the fallback silently diffs `HEAD~1..HEAD` — so the gate answered
-     as if only the tip commit had changed. Dispatching CI on #960, whose tip
-     touched `CHANGELOG.md` and `docs/dev/data/claim-baseline.jsonl`, produced
-     `code=false` and left Rust, `Python fast`, `Python claim-boundary`, `Python
-     correctness` and AMP all `skipped`: nine checks that render as *not red*
-     while executing nothing. That is the #953 failure mode, one trigger over.
-     A dispatch is now `code=true` unconditionally — pressing the button means
-     "run everything", and there is no base to diff against anyway. The `push`
-     branch no longer substitutes a guess either: an all-zero `before` (a
-     branch's first push), a non-existent object (force-push, shallow clone) or
-     an empty one is now the *uncertainty* case the job's own comment already
-     promised to resolve as `true`.
+  1. **The `changes` gate answered from a guessed diff on all three event
+     arms.** It resolves a base commit and diffs against it; every arm had a
+     path where the base is unavailable and the code substituted
+     `HEAD~1..HEAD` — the tip commit's file list — instead of recognising that
+     it did not know. When that guess lands on a docs-only commit the gate says
+     `code=false` and every solver job below it reports `skipped`, which renders
+     as *not red*. That is the #953 failure mode: a wrong `false` here is not a
+     missing test, it is a green-looking wall of nothing.
+
+     * `workflow_dispatch`: `github.event.before` exists only on `push`, so it
+       expands to the empty string, the first `git diff` fails, and the fallback
+       fires. Dispatching CI on #960, whose tip touched `CHANGELOG.md` and
+       `docs/dev/data/claim-baseline.jsonl`, produced `code=false` and left
+       Rust, `Python fast`, `Python claim-boundary`, `Python correctness` and
+       AMP all `skipped` — nine checks that executed nothing. Now `code=true`
+       unconditionally: pressing the button means "run everything", and there is
+       no base to diff against anyway.
+     * `pull_request` — the trigger that fires on nearly every change here —
+       used `${base:-HEAD~1}`, reachable two ways: the `git fetch` above it is
+       `|| true`, so a fetch failure is silent, and the `--depth=200` fetch
+       installed a shallow boundary that hides the merge base of a branch forked
+       further back than that. Either way a PR that changes the solver behind a
+       docs-only tip commit skipped every solver job. The depth cap is gone (the
+       checkout is already `fetch-depth: 0`) and an unresolvable base is now
+       treated as uncertain.
+     * `push`: an all-zero `before` (a branch's first push), a non-existent
+       object (force-push, shallow clone), or an empty one is likewise the
+       *uncertainty* case the job's own comment already promised to resolve as
+       `true`.
 
      New `python/tests/test_ci_changes_gate.py` extracts the gate's real shell
-     script out of `ci.yml` — not a copy — renders the `${{ github.* }}`
-     expressions, and runs it against throwaway git repos, one case per event
-     type. 9 tests; 5 fail on the pre-change workflow (the dispatch case and all
-     four unusable-base cases) and the 4 pinning the behaviour that must not
-     change (docs-only skips, a code file runs, `schedule` skips) pass both ways.
+     script out of `ci.yml` — not a copy, so it cannot drift — renders the
+     `${{ github.* }}` expressions, and runs it against throwaway git repos, one
+     case per event type. 12 tests; 6 fail on the pre-change workflow (one per
+     defective arm plus the four `push` base shapes) and the 6 pinning behaviour
+     that must not change (docs-only PRs and pushes still skip, a code file
+     runs, `schedule` still skips the PR matrix, a resolvable merge base is still
+     used in preference to the tip) pass both ways. `pyyaml` moves into the `dev`
+     extra so that file is a skip rather than a collection error where it is
+     absent.
 
   2. **Two `ex1252` quality bars measured the runner, not the relaxation.**
      `compute_disjunctive_config_bound` stops on whichever of `max_leaf_solves`

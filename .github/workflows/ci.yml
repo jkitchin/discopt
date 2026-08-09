@@ -64,9 +64,24 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" || true
+            # No --depth: the checkout above is already `fetch-depth: 0`, and a
+            # shallow fetch would install a boundary that hides the merge base of
+            # any branch forked more than that many base commits back.
+            git fetch --no-tags origin "${{ github.base_ref }}" || true
             base="$(git merge-base "origin/${{ github.base_ref }}" HEAD 2>/dev/null || true)"
-            changed="$(git diff --name-only "${base:-HEAD~1}" HEAD 2>/dev/null || true)"
+            # Same rule as the two branches around this one: an unresolvable base
+            # is UNCERTAINTY, not a licence to guess. `${base:-HEAD~1}` used to
+            # gate the whole matrix on the tip commit's file list, so a PR whose
+            # tip happens to be docs-only skipped every solver job even when the
+            # branch changes the solver — and `pull_request` is the trigger that
+            # fires on nearly every change here. The `git fetch` above is
+            # `|| true`, so this is reachable by a silent fetch failure alone.
+            if [ -n "$base" ]; then
+              changed="$(git diff --name-only "$base" HEAD 2>/dev/null || true)"
+            else
+              changed=""   # unknown base -> falls through to code=true below
+              echo "no merge-base with origin/${{ github.base_ref }} -> treating as uncertain"
+            fi
           else
             # `push`: diff against the pushed-from commit. If it is unusable (an
             # all-zero SHA on a branch's first push, a force-push, a shallow

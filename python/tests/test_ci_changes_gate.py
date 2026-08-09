@@ -66,6 +66,16 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _commit(repo: Path, files: list[str], msg: str) -> str:
+    for rel in files:
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"{msg}\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", msg)
+    return _git(repo, "rev-parse", "HEAD")
+
+
 def _make_repo(tmp_path: Path, tip_files: list[str]) -> tuple[Path, str, str]:
     """A two-commit repo; the second commit touches ``tip_files``."""
     repo = tmp_path / "repo"
@@ -77,13 +87,27 @@ def _make_repo(tmp_path: Path, tip_files: list[str]) -> tuple[Path, str, str]:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "seed")
     base = _git(repo, "rev-parse", "HEAD")
-    for rel in tip_files:
-        p = repo / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("changed\n")
+    return repo, base, _commit(repo, tip_files, "tip")
+
+
+def _make_pr_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A PR-shaped repo: base, then a solver change, then a docs-only tip.
+
+    The real change is two commits back, so a gate that diffs ``HEAD~1..HEAD``
+    cannot see it — which is the whole point of diffing against the merge base.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "feature")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "seed.py").write_text("x = 1\n")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "tip")
-    return repo, base, _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit(repo, ["python/discopt/solver.py"], "solver change")
+    tip = _commit(repo, ["docs/notes.md"], "docs tip")
+    return repo, base, tip
 
 
 def _run_gate(repo: Path, script: str) -> str:
@@ -146,6 +170,43 @@ def test_push_with_an_unusable_base_runs_everything(tmp_path, before):
     repo, _base, sha = _make_repo(tmp_path, ["CHANGELOG.md"])
     script = _render(_gate_script(), event="push", before=before, sha=sha, base_ref="main")
     assert _run_gate(repo, script) == "true"
+
+
+def test_pull_request_with_no_merge_base_runs_everything(tmp_path):
+    """`pull_request` is the trigger that fires on nearly every change here.
+
+    ``git merge-base origin/<base_ref> HEAD`` yields nothing when the ref is
+    missing — the `git fetch` above it is `|| true`, so a fetch failure is
+    silent, and a shallow fetch boundary hides a far-back merge base the same
+    way. Falling back to `HEAD~1..HEAD` then gates the whole matrix on the tip
+    commit: this repo's tip is docs-only while the solver change sits a commit
+    behind it, so every solver job would be skipped on a PR that changes the
+    solver — not red, just absent.
+    """
+    repo, _base, tip = _make_pr_repo(tmp_path)
+    script = _render(_gate_script(), event="pull_request", before="", sha=tip, base_ref="main")
+    assert _run_gate(repo, script) == "true"
+
+
+def test_pull_request_with_a_merge_base_sees_past_the_tip_commit(tmp_path):
+    """Control for the test above, and the behaviour that must be preserved.
+
+    Same repo, same event, same rendered script — only `origin/main` is made
+    resolvable. The gate must diff from the merge base, so it sees the solver
+    change two commits back even though the tip is docs-only.
+    """
+    repo, base, tip = _make_pr_repo(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(_gate_script(), event="pull_request", before="", sha=tip, base_ref="main")
+    assert _run_gate(repo, script) == "true"
+
+
+def test_pull_request_docs_only_against_its_merge_base_skips(tmp_path):
+    """A genuinely docs-only PR must still skip — the gate's reason for being."""
+    repo, base, tip = _make_repo(tmp_path, ["docs/notes.md", "README.md"])
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(_gate_script(), event="pull_request", before="", sha=tip, base_ref="main")
+    assert _run_gate(repo, script) == "false"
 
 
 # ----------------------------------------------------------------------
