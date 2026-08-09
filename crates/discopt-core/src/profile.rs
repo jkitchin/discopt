@@ -164,6 +164,55 @@ counters!(
     // existing fallback chain exactly as before the retry existed.
     LpDenseRetries,
     LpDenseRetryRescues,
+    // #956 follow-through: the TERMINAL verdict histogram of the cold primal
+    // simplex, counted once per solve at its single exit point (`assemble`, after
+    // the feasibility audit has had its say). This is the instrument that decides
+    // whether an undecided node LP is an uncertified infeasibility, a drifted
+    // optimum, or a factorization breakdown — the three have completely different
+    // fixes and were previously indistinguishable from outside.
+    LpVerdictOptimal,
+    LpVerdictInfeasible,
+    LpVerdictNumerical,
+    LpVerdictIterLimit,
+    LpVerdictUnbounded,
+    // The load-bearing bucket: phase 1 left a real residual (so the LP looks
+    // infeasible) but the Farkas ray did NOT certify, so the honest — and
+    // useless — `Numerical` is returned instead of a proof. Since #927 the spatial
+    // tree branches on that verdict, and `lp_spatial_bb` folds it into
+    // `unresolved_lb`, which is why such a tree can never conclude `infeasible`.
+    LpInfeasUncertified,
+    // Why `assemble`'s audit downgraded an `Optimal`: a column outside its bounds
+    // (refinement cannot help) vs a row residual (refinement can, and Rescues
+    // above counts when it did).
+    LpAuditBoundsFail,
+    LpAuditRowsFail,
+    // Why `farkas_ray_certifies_cols` rejected a ray: it needed a finite bound on a
+    // column the ray selected and had none (`Open` — it recovers such bounds for
+    // SLACK columns only, so a ray touching an unbounded structural/auxiliary
+    // column is rejected outright), or the Neumaier-Shcherbina margin was not met
+    // (`Margin`). Splitting these is what separates "the certificate is incomplete"
+    // from "the LP is not actually infeasible".
+    FarkasRejectOpen,
+    FarkasRejectMargin,
+    // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
+    // Python spatial engine's per-node LPs come through, and it can return without
+    // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above
+    // do not see it (measured: witness W1 runs 2495 nodes and registers ONE cold
+    // verdict). Counted separately so the two engines can be told apart.
+    WarmVerdictOptimal,
+    WarmVerdictInfeasible,
+    WarmVerdictNumerical,
+    WarmVerdictIterLimit,
+    WarmVerdictUnbounded,
+    // How FAR outside its box the audit found the offending column, as a multiple
+    // of the audit's own relative tolerance `1e-6·(1+|bound|)`. A near-miss (a few
+    // ×) is a drift the basis could be cleaned up from; a gross one means the basis
+    // is simply wrong and no tolerance change is admissible. Decides whether the
+    // dominant `LpAuditBoundsFail` bucket is repairable at all.
+    AuditExcursionLt10x,
+    AuditExcursionLt1e3x,
+    AuditExcursionLt1e6x,
+    AuditExcursionGe1e6x,
 );
 
 #[inline(always)]
@@ -224,6 +273,17 @@ pub fn reset() {
 #[inline]
 pub fn counter(c: Ctr) -> u64 {
     CVALS[c as usize].load(Ordering::Relaxed)
+}
+
+/// Every counter as `(name, value)`, without printing or resetting.
+///
+/// [`dump`] writes to stderr and zeroes the accumulators, which makes it unusable
+/// as a measurement instrument for a caller that wants the numbers back (the #956
+/// follow-through needs the verdict histogram in Python). This returns them.
+pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
+    (0..NC)
+        .map(|i| (CNAMES[i], CVALS[i].load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// Force the profiling flag on/off. Test-only: production toggles it exactly once

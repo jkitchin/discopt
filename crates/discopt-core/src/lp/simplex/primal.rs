@@ -254,6 +254,21 @@ enum Feasibility {
 /// first, so a point violating *both* reports [`Feasibility::Bounds`] — correct
 /// for the recovery decision, since refinement cannot repair a bound excursion
 /// even when it repairs the residual.
+/// Bucket how far outside its box the audit found a column, as a multiple of the
+/// audit's own tolerance (#956 follow-through instrumentation).
+#[inline]
+fn record_excursion(ratio: f64) {
+    crate::profile::incr(if ratio < 10.0 {
+        crate::profile::Ctr::AuditExcursionLt10x
+    } else if ratio < 1e3 {
+        crate::profile::Ctr::AuditExcursionLt1e3x
+    } else if ratio < 1e6 {
+        crate::profile::Ctr::AuditExcursionLt1e6x
+    } else {
+        crate::profile::Ctr::AuditExcursionGe1e6x
+    });
+}
+
 fn audit_feasibility(
     cols: &SparseCols,
     m: usize,
@@ -285,12 +300,14 @@ fn audit_feasibility(
         if l[j] > -INF {
             let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
             if x[j] < l[j] - lo_tol {
+                record_excursion((l[j] - x[j]) / lo_tol);
                 return Feasibility::Bounds;
             }
         }
         if u[j] < INF {
             let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
             if x[j] > u[j] + hi_tol {
+                record_excursion((x[j] - u[j]) / hi_tol);
                 return Feasibility::Bounds;
             }
         }
@@ -555,6 +572,10 @@ pub(super) fn farkas_ray_certifies_cols(
             abs_sum += boxmax.abs();
         }
         if open {
+            // #956 follow-through: the ray needed a finite bound on a column it
+            // selected and had none. Counted because it is a defect in the
+            // CERTIFICATE, not evidence the LP is feasible.
+            crate::profile::incr(crate::profile::Ctr::FarkasRejectOpen);
             continue;
         }
         // Neumaier–Shcherbina relative margin so the strict `> 0` is rigorous.
@@ -562,6 +583,7 @@ pub(super) fn farkas_ray_certifies_cols(
         if by - contrib > margin {
             return true;
         }
+        crate::profile::incr(crate::profile::Ctr::FarkasRejectMargin);
     }
     false
 }
@@ -966,6 +988,9 @@ impl<'a> Simplex<'a> {
                 if ray.as_ref().is_some_and(|y| self.farkas_ray_certifies(y)) {
                     return self.assemble(LpStatus::Infeasible, &art_sign);
                 }
+                // #956 follow-through: infeasible-looking but UNCERTIFIED. This is
+                // the bucket the spatial trees cannot act on.
+                crate::profile::incr(crate::profile::Ctr::LpInfeasUncertified);
                 return self.assemble(LpStatus::Numerical, &art_sign);
             }
             // Artificials cleared — the LP is FEASIBLE and, because the cleanup used
@@ -1819,7 +1844,10 @@ impl<'a> Simplex<'a> {
             match audit(&self, &x) {
                 Feasibility::Ok => LpStatus::Optimal,
                 // Bound excursion: refinement can't help — downgrade directly.
-                Feasibility::Bounds => LpStatus::Numerical,
+                Feasibility::Bounds => {
+                    crate::profile::incr(crate::profile::Ctr::LpAuditBoundsFail);
+                    LpStatus::Numerical
+                }
                 // Row residual: the failure mode iterative refinement can recover.
                 Feasibility::Rows => {
                     crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttemptsPrimal);
@@ -1834,16 +1862,29 @@ impl<'a> Simplex<'a> {
                                 obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
                                 LpStatus::Optimal
                             } else {
+                                crate::profile::incr(crate::profile::Ctr::LpAuditRowsFail);
                                 LpStatus::Numerical
                             }
                         }
-                        None => LpStatus::Numerical,
+                        None => {
+                            crate::profile::incr(crate::profile::Ctr::LpAuditRowsFail);
+                            LpStatus::Numerical
+                        }
                     }
                 }
             }
         } else {
             status
         };
+        // #956 follow-through: the terminal verdict histogram, counted once per
+        // solve at the simplex's single exit point (after the audit's say).
+        crate::profile::incr(match status {
+            LpStatus::Optimal => crate::profile::Ctr::LpVerdictOptimal,
+            LpStatus::Infeasible => crate::profile::Ctr::LpVerdictInfeasible,
+            LpStatus::Numerical => crate::profile::Ctr::LpVerdictNumerical,
+            LpStatus::IterLimit => crate::profile::Ctr::LpVerdictIterLimit,
+            LpStatus::Unbounded => crate::profile::Ctr::LpVerdictUnbounded,
+        });
 
         // Certificate vector `y = B⁻ᵀ c_B` (length m). On `Optimal` use the real
         // objective costs — these are the row duals feeding a safe (never-too-high)

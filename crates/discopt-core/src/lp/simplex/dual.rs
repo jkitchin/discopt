@@ -115,11 +115,25 @@ pub fn solve_lp_warm_csc(
                 hardened.status,
                 LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
             ) {
+                warm_verdict(hardened.status);
                 return hardened;
             }
         }
     }
+    warm_verdict(sol.status);
     sol
+}
+
+/// Count the warm path's terminal verdict (#956 follow-through instrumentation).
+#[inline]
+fn warm_verdict(status: LpStatus) {
+    crate::profile::incr(match status {
+        LpStatus::Optimal => crate::profile::Ctr::WarmVerdictOptimal,
+        LpStatus::Infeasible => crate::profile::Ctr::WarmVerdictInfeasible,
+        LpStatus::Numerical => crate::profile::Ctr::WarmVerdictNumerical,
+        LpStatus::IterLimit => crate::profile::Ctr::WarmVerdictIterLimit,
+        LpStatus::Unbounded => crate::profile::Ctr::WarmVerdictUnbounded,
+    });
 }
 
 /// Pivot cap for the #671 hardened re-solve: `8·(m+n) + 2000`, so a healthy solve
