@@ -331,3 +331,161 @@ def test_jax_arm_of_the_same_check_does_import_jax():
         "the JAX arm imported no jax modules; this check cannot distinguish "
         "'tape works' from 'nothing ran'"
     )
+
+
+# --------------------------------------------------------------------------
+# QP standard-form extraction (#75): ``extract_qp_data`` falls through to the
+# autodiff extractor whenever ``_extract_qp_data_from_repr``'s numeric probe
+# cannot reproduce the objective. That fallback imported ``jax`` unconditionally,
+# so an ordinary MIQP with no nonlinear constraint anywhere pulled in 210 jax
+# modules on an all-defaults solve (found on ``chimera_mis-01`` via
+# ``qubo_local_search`` -> ``extract_qp_data``). These pin the JAX-free route and
+# its numeric agreement with the JAX one.
+# --------------------------------------------------------------------------
+
+# f(x, y) = 2x^2 + 3y^2 + xy - 4x + 1  ->  Q = [[4, 1], [1, 6]], c = (-4, 0), d = 1
+_QP_MODEL = """
+m = Model()
+x = m.continuous("x", lb=-5.0, ub=5.0)
+y = m.continuous("y", lb=-5.0, ub=5.0)
+m.minimize(2.0 * x * x + 3.0 * y * y + x * y - 4.0 * x + 1.0)
+m.subject_to(x + y >= 1.0)
+"""
+
+_QP_FALLBACK_DRIVER = (
+    """
+import sys
+import numpy as np
+from discopt import Model
+import discopt._jax.problem_classifier as pc
+
+# extract_qp_data is a ladder: repr(builder) -> algebraic -> repr(probe) ->
+# autodiff. Only the last rung is under test, so BOTH earlier rungs must refuse
+# -- the first draft patched only the repr extractor, the algebraic one answered,
+# and the fallback never ran. The per-rung counters below are what caught that
+# (CLAUDE.md §6: prove the probe fired).
+#
+# On the real instance this is not synthetic: repr(probe) refuses on its own when
+# its numeric probe cannot reproduce the objective.
+_reached = {"repr": 0, "alg": 0}
+
+
+def _refuse_repr(model):
+    _reached["repr"] += 1
+    raise pc._NotQuadraticError("test: forcing the autodiff fallback")
+
+
+def _refuse_alg(model):
+    _reached["alg"] += 1
+    raise RuntimeError("test: forcing the autodiff fallback")
+
+
+pc._extract_qp_data_from_repr = _refuse_repr
+pc.extract_qp_data_algebraic = _refuse_alg
+"""
+    + _QP_MODEL
+    + """
+qp = pc.extract_qp_data(m)
+Q = pc.dense_Q(qp.Q)
+c = np.asarray(qp.c, dtype=float)
+print("REFUSALS_REPR:" + str(_reached["repr"]))
+print("REFUSALS_ALG:" + str(_reached["alg"]))
+print("Q00:" + repr(float(Q[0, 0])))
+print("Q01:" + repr(float(Q[0, 1])))
+print("Q11:" + repr(float(Q[1, 1])))
+print("C0:" + repr(float(c[0])))
+print("D:" + repr(float(qp.obj_const)))
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS:" + str(len(leaked)))
+if leaked:
+    print("LEAKED:" + ",".join(leaked[:8]))
+"""
+)
+
+_QP_AGREEMENT_DRIVER = (
+    """
+import sys
+import numpy as np
+from discopt import Model
+import discopt._jax.problem_classifier as pc
+"""
+    + _QP_MODEL
+    + """
+n = sum(v.size for v in m._variables)
+
+# Tape arm FIRST, so "tape works" cannot be jax quietly doing the work.
+tape = pc._qp_terms_tape(m, n)
+print("TAPE_NONE:" + str(tape is None))
+mid = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS_AFTER_TAPE:" + str(len(mid)))
+
+Qt, ct, dt = tape
+Qj, cj, dj = pc._qp_terms_jax(m, n)
+_after = [k for k in sys.modules if k == "jax" or k.startswith("jax.")]
+print("JAXMODS_AFTER_JAX:" + str(len(_after)))
+print("DQ:" + repr(float(np.max(np.abs(np.asarray(Qt) - np.asarray(Qj))))))
+print("DC:" + repr(float(np.max(np.abs(np.asarray(ct) - np.asarray(cj))))))
+print("DD:" + repr(abs(float(dt) - float(dj))))
+"""
+)
+
+
+def _run_raw(src: str) -> dict:
+    import os
+
+    out = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(src)],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+        timeout=600,
+    )
+    assert out.returncode == 0, f"driver failed\nstdout={out.stdout}\nstderr={out.stderr[-3000:]}"
+    parsed = {}
+    for line in out.stdout.splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            parsed[k] = v
+    return parsed
+
+
+# Marked ``correctness`` and NOT ``slow`` on purpose. Every CI lane's ``-m``
+# expression carries ``not slow``, except the nightly one which needs
+# ``correctness and slow`` -- so the 25 ``slow``-only tests above are selected by
+# NO lane. These two run in ~1.7 s, so ``correctness`` puts them in the
+# "Python correctness (fast subset)" lane, where a reintroduced jax import
+# actually fails a build instead of waiting for someone to run pytest by hand.
+@pytest.mark.correctness
+def test_qp_extraction_fallback_stays_jax_free():
+    """``extract_qp_data``'s autodiff fallback must not import JAX."""
+    res = _run_raw(_QP_FALLBACK_DRIVER)
+    # Vacuity control: the forced refusal must actually have fired, or the
+    # assertions below say nothing about the fallback.
+    assert res["REFUSALS_ALG"] == "1", f"the algebraic extractor was not reached: {res}"
+    assert res["REFUSALS_REPR"] != "0", f"the repr extractor was not reached: {res}"
+    assert res["JAXMODS"] == "0", (
+        f"QP autodiff fallback imported {res['JAXMODS']} jax modules "
+        f"({res.get('LEAKED', '?')}) -- #75 regression"
+    )
+    # The fallback must still be *right*, not merely JAX-free.
+    assert float(res["Q00"]) == pytest.approx(4.0)
+    assert float(res["Q01"]) == pytest.approx(1.0)
+    assert float(res["Q11"]) == pytest.approx(6.0)
+    assert float(res["C0"]) == pytest.approx(-4.0)
+    assert float(res["D"]) == pytest.approx(1.0)
+
+
+@pytest.mark.correctness
+def test_qp_extraction_tape_matches_jax():
+    """The tape and JAX differentiators must agree on ``(Q, c, d)``."""
+    res = _run_raw(_QP_AGREEMENT_DRIVER)
+    assert res["TAPE_NONE"] == "False", "tape could not represent a plain QP"
+    assert res["JAXMODS_AFTER_TAPE"] == "0", (
+        f"the tape arm imported jax ({res['JAXMODS_AFTER_TAPE']} modules) -- "
+        "it is not a JAX-free route"
+    )
+    # Control: the JAX arm must really run, else the agreement is vacuous.
+    assert int(res["JAXMODS_AFTER_JAX"]) > 0, "the JAX arm imported no jax modules"
+    assert float(res["DQ"]) == pytest.approx(0.0, abs=1e-9)
+    assert float(res["DC"]) == pytest.approx(0.0, abs=1e-9)
+    assert float(res["DD"]) == pytest.approx(0.0, abs=1e-9)

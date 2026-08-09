@@ -1867,27 +1867,90 @@ def extract_qcp_data(model: Model) -> QCPData:
     return extract_qcp_data_algebraic(model)
 
 
-def _extract_qp_data_autodiff(model: Model) -> QPData:
-    """Extract QP standard form using autodiff (original slow path)."""
+def _qp_terms_tape(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """``(Q, c, d)`` of a quadratic objective from the JAX-free tape evaluator.
+
+    Returns ``None`` when the tape cannot represent the model, so the caller
+    falls back to the JAX extractor rather than guessing.
+
+    The objective here is quadratic by construction — this function is only
+    reached for models ``classify_problem`` put in the QP/MIQP family — so its
+    Hessian is constant and one evaluation at the origin gives ``Q`` exactly.
+    That is the same identity the JAX branch below uses; only the differentiator
+    changes.
+    """
+    from discopt._tape_nlp_evaluator import try_build
+
+    ev = try_build(model)
+    if ev is None:
+        return None
+    # Guard the flat-slot correspondence: Q/c are indexed by this module's
+    # variable order, so a differing width means the two disagree about the
+    # layout and the result would be silently misaligned rather than wrong-loud.
+    if ev.n_variables != n_orig:
+        logger.debug(
+            "QP tape extraction skipped: tape has %d variables, model flat width is %d",
+            ev.n_variables,
+            n_orig,
+        )
+        return None
+
+    x_zero = np.zeros(n_orig, dtype=np.float64)
+    Q = np.asarray(ev.evaluate_hessian(x_zero), dtype=np.float64)
+    c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
+    obj_const = float(ev.evaluate_objective(x_zero))
+    return Q, c_vec, obj_const
+
+
+def _qp_terms_jax(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, float]:
+    """``(Q, c, d)`` via JAX — the legacy differentiator, kept as the fallback."""
     import jax
     import jax.numpy as jnp
 
     from discopt._jax.dag_compiler import compile_objective
-    from discopt.modeling.core import ObjectiveSense
 
-    n_orig = sum(v.size for v in model._variables)
     obj_fn = compile_objective(model)
-
     x_zero = jnp.zeros(n_orig, dtype=jnp.float64)
 
     # Q = hessian(obj) — constant for QP
-    Q = jax.hessian(obj_fn)(x_zero)
+    Q = np.asarray(jax.hessian(obj_fn)(x_zero), dtype=np.float64)
 
     # c = grad(obj)(0) = Q*0 + c = c (linear part)
-    c_vec = jax.grad(obj_fn)(x_zero)
+    c_vec = np.asarray(jax.grad(obj_fn)(x_zero), dtype=np.float64)
 
     # Constant term: f(0) = 0.5*0'Q*0 + c'*0 + d = d
     obj_const = float(obj_fn(x_zero))
+    return Q, c_vec, obj_const
+
+
+def _extract_qp_data_autodiff(model: Model) -> QPData:
+    """Extract QP standard form using autodiff (original slow path).
+
+    Tape first, JAX only if the tape cannot represent the model. Until #75 this
+    function imported ``jax`` unconditionally, which made it a *default* JAX
+    consumer on a branch meant to have none: ``extract_qp_data`` falls through to
+    here whenever ``_extract_qp_data_from_repr``'s numeric probe cannot reproduce
+    the objective, and that refusal is legitimate on larger instances (measured on
+    ``chimera_mis-01``, a 2032-variable MIQP with no nonlinear constraint
+    anywhere: the repr probe recovered -171.42 against a true -174.09, fell
+    through, and the solve imported 210 jax modules via ``qubo_local_search`` →
+    ``extract_qp_data``).
+
+    Entry experiment before the swap (CLAUDE.md §4), tape phase asserted
+    jax-free throughout: on 7 QP/MIQP instances (n = 2 … 2032, incl.
+    ``chimera_mis-01``) the tape reproduced the JAX ``Q`` to relative error
+    **0.0** and ``c`` to at most 9.8e-15, with the Hessian confirmed constant at
+    two distinct points. The JAX branch is retained rather than deleted so an
+    unrepresentable model still gets an answer.
+    """
+    from discopt.modeling.core import ObjectiveSense
+
+    n_orig = sum(v.size for v in model._variables)
+
+    terms = _qp_terms_tape(model, n_orig)
+    if terms is None:
+        terms = _qp_terms_jax(model, n_orig)
+    Q, c_vec, obj_const = terms
 
     # Extract LP data for constraints (they're all linear)
     lp_data = extract_lp_data(model)
@@ -1896,9 +1959,9 @@ def _extract_qp_data_autodiff(model: Model) -> QPData:
     # Extend Q with zeros for slack variables
     if n_slack > 0:
         n_total = n_orig + n_slack
-        Q_full = jnp.zeros((n_total, n_total), dtype=jnp.float64)
-        Q_full = Q_full.at[:n_orig, :n_orig].set(Q)
-        c_full = jnp.concatenate([c_vec, jnp.zeros(n_slack)])
+        Q_full = np.zeros((n_total, n_total), dtype=np.float64)
+        Q_full[:n_orig, :n_orig] = Q
+        c_full = np.concatenate([c_vec, np.zeros(n_slack, dtype=np.float64)])
     else:
         Q_full = Q
         c_full = c_vec
@@ -1911,8 +1974,13 @@ def _extract_qp_data_autodiff(model: Model) -> QPData:
         obj_const = -obj_const
 
     return QPData(
-        Q=Q_full,
-        c=c_full,
+        # numpy, not jnp: ``QPData`` is *annotated* for the JAX differentiation
+        # consumers but populated by the JAX-free extractors (see the module
+        # header). The ignores mirror ``_extract_qp_data_from_repr``'s; they
+        # became necessary here only because this rung stopped returning jnp
+        # arrays, which is the point of the change.
+        Q=Q_full,  # type: ignore[arg-type]
+        c=c_full,  # type: ignore[arg-type]
         A_eq=lp_data.A_eq,
         b_eq=lp_data.b_eq,
         x_l=lp_data.x_l,
