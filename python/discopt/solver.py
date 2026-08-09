@@ -9181,6 +9181,51 @@ def solve_model(
                 return False
         return True
 
+    def _hess_compile_refuses(_ev) -> bool:
+        """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
+        per-node NLP entry must be declined right now.
+
+        The first ``evaluate_hessian_values`` call inside a node NLP forces an
+        uninterruptible first-time XLA compile of the sparse-Hessian kernel —
+        caught in flight at 124 s against a 20 s budget on heatexch_gen3 (both
+        #928 arms; the issue's 200–500 s severe modes; watchdog stack in #966).
+        A compile cannot be truncated, so entry refusal is the whole treatment
+        (the F4 gate's own rationale) — extended here to the per-node NLP
+        entries that bypass ``_root_heur_nlp_entry_ok``. Nonconvex only: there
+        the NLP objective is never a dual bound, so a refused node merely stays
+        OPEN on its inherited parent bound (weaker, never false) and forgoes
+        the alphaBB/interval piggyback + a possible incumbent. On a CONVEX
+        model the node NLP is the bound producer (rule 1: never skip the sole
+        bound source) — never refused, which is why this is checked HERE with
+        the authoritative ``_model_is_convex`` rather than inside the POUNCE
+        wrapper (the root-multistart chain does not thread convexity down).
+        """
+        if _model_is_convex or not _tuning().hessian_compile_gate:
+            return False
+        # The evaluator may be the ``_AugmentedEvaluator`` cut-pool wrapper with
+        # no attribute forwarding — unwrap so the gate is not silently blind on
+        # the cut-augmented path (§6 discipline).
+        _base_ev = getattr(_ev, "_ev", _ev)
+        _est_fn = getattr(_base_ev, "hessian_compile_estimate_s", None)
+        if _est_fn is None:
+            return False
+        try:
+            _hess_est = float(_est_fn())
+        except Exception:  # pragma: no cover - defensive
+            return False
+        if _hess_est <= 0.0:
+            return False
+        _hg_remaining = _deadline - time.perf_counter()
+        if _hg_remaining >= _hess_est:
+            return False
+        logger.debug(
+            "node NLP declined (#966): first sparse-Hessian compile estimate "
+            "%.1fs exceeds the remaining budget %.1fs",
+            _hess_est,
+            _hg_remaining,
+        )
+        return True
+
     # Root-node certification instrumentation (cert:T0.1). Snapshot the tree's
     # global lower bound (internal minimization sense) and the elapsed wall
     # clock at the moment the root node has been fully processed (end of
@@ -9262,6 +9307,18 @@ def solve_model(
     # net-negative); #764 step 1 added cold-path marginals, so the reduction now
     # actually fires here.
     _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc_lp_relaxer is not None
+    # #966 (``DISCOPT_NODE_ROUND_BUDGET``, default OFF, §5 bound-changing): make a
+    # per-node separated-relaxation round honor its grant end-to-end. The grant a
+    # node LP round receives clamps only the LP solves; the round's non-LP cost
+    # (cold ``build_uniform_relaxation`` + separation, measured 3.3 s of a 5.7 s
+    # round against a 2.0 s grant on contvar) is spent after the admission check,
+    # unclamped — the measured blocker for the #928 flag's graduation. When on,
+    # each ``solve_at_node`` round below gets the global deadline as an absolute
+    # ``round_deadline`` (build truncation + internal-deadline anchor), and the
+    # admission check declines a round whose remaining grant cannot cover the
+    # relaxer's measured cold-build cost (a declined node stays open on its valid
+    # parent bound — the same semantics as the existing past-deadline skip).
+    _round_budget_enabled = _tuning().node_round_budget and _mc_lp_relaxer is not None
     _node_reduce_fn: Any = None
     if _phase2_dbbt_enabled:
         try:
@@ -10013,12 +10070,22 @@ def solve_model(
                         # a node unbounded never fathoms it, so do NOT decertify (that
                         # only discarded the bound the parent already proved, #138).
                         continue
+                    # #966 round admission: the round's non-LP cost (the cold
+                    # build) is spent regardless of the LP grant, so a grant that
+                    # cannot even cover the measured build cost buys a truncated,
+                    # near-empty relaxation for full build wall — decline instead.
+                    # Same skip semantics as the past-deadline branch above.
+                    if _round_budget_enabled:
+                        _exp_build = _mc_lp_relaxer.expected_build_cost()
+                        if _exp_build is not None and _node_remaining < _exp_build:
+                            continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
                         mc_res = _mc_lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
+                            round_deadline=(_deadline if _round_budget_enabled else None),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
@@ -10164,7 +10231,14 @@ def solve_model(
                 # LP relaxer's bound + primal below.
                 _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _eff_nlp_stride == 0)
                 nlp_result = None
-                if iteration == 0 and _mc_lp_relaxer is None:
+                # #966: on a NONCONVEX model both NLP entries below are declined
+                # when the first sparse-Hessian XLA compile cannot fit the
+                # remaining budget (see ``_hess_compile_refuses``). ``nlp_result``
+                # stays None → the existing failed-NLP handling applies (the node
+                # is sentinelled and the C-1 sweep keeps it OPEN on its valid
+                # parent bound — weaker, never false).
+                _hess_gate_blocks = _hess_compile_refuses(_active_evaluator)
+                if iteration == 0 and _mc_lp_relaxer is None and not _hess_gate_blocks:
                     # The root multistart NLP is the only bound source we have.
                     # When the LP relaxer is active, skip it: the LP block below
                     # supplies the bound + primal and SubNLP turns that into
@@ -10179,7 +10253,7 @@ def solve_model(
                         deadline=_deadline,
                         observe_cost=_observe_heur_nlp,
                     )
-                elif iteration > 0 and _node_nlp_due:
+                elif iteration > 0 and _node_nlp_due and not _hess_gate_blocks:
                     if _gate_node_nlp:
                         _adapt_nlp_fired = True
                     # Warm-start from parent solution if available
@@ -10370,11 +10444,29 @@ def solve_model(
                 # when the NLP was skipped (root) or returned infeasible /
                 # iteration_limit (any node).
                 if _mc_lp_relaxer is not None and not _reduced_done_serial:
+                    # #966 round admission (serial path). Unlike the batch path
+                    # this loop had NO past-deadline skip at all — a spent budget
+                    # still admitted a full build+separate round per node. Under
+                    # the flag, decline the round once the deadline is past or
+                    # the remaining grant cannot cover the measured build cost;
+                    # the node stays open on its valid parent bound.
+                    _serial_remaining = _deadline - time.perf_counter()
+                    if _round_budget_enabled:
+                        _exp_build = _mc_lp_relaxer.expected_build_cost()
+                        _round_blocked = _serial_remaining <= 0.0 or (
+                            _exp_build is not None and _serial_remaining < _exp_build
+                        )
+                    else:
+                        _round_blocked = False
+                else:
+                    _round_blocked = True
+                if _mc_lp_relaxer is not None and not _reduced_done_serial and not _round_blocked:
                     try:
                         mc_lp_res = _mc_lp_relaxer.solve_at_node(
                             node_lb,
                             node_ub,
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                            round_deadline=(_deadline if _round_budget_enabled else None),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
@@ -14823,6 +14915,37 @@ def _solve_batch_pounce(
         from discopt.solvers.nlp_native import get_native_base
 
         native_base = get_native_base(evaluator)
+
+    # #966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): the JAX-callback batch
+    # (``native_base is None``) triggers the same uninterruptible first-time
+    # sparse-Hessian XLA compile as the serial POUNCE path — same refusal, same
+    # rationale (see ``_solve_node_nlp_pounce``). The native-AD batch never
+    # compiles XLA and is not gated. Refused nodes report the failure sentinel;
+    # the caller's existing failed-NLP handling (C-1 sweep) keeps them OPEN on
+    # their inherited parent bounds — weaker, never false. Nonconvex only.
+    if native_base is None and not convex and _tuning().hessian_compile_gate:
+        _base_ev = getattr(evaluator, "_ev", evaluator)
+        _est_fn = getattr(_base_ev, "hessian_compile_estimate_s", None)
+        try:
+            _hess_est = float(_est_fn()) if _est_fn is not None else 0.0
+        except Exception:  # pragma: no cover - defensive
+            _hess_est = 0.0
+        if _hess_est > 0.0 and float(caller_limit) < _hess_est:
+            logger.debug(
+                "batch node NLP declined (#966): first sparse-Hessian compile "
+                "estimate %.1fs exceeds the remaining grant %.1fs",
+                _hess_est,
+                float(caller_limit),
+            )
+            result_ids = np.asarray(batch_ids, dtype=np.int64).copy()
+            result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
+            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+            for i in range(n_batch):
+                _lbc = np.clip(np.asarray(batch_lb[i], dtype=np.float64), -_SPC, _SPC)
+                _ubc = np.clip(np.asarray(batch_ub[i], dtype=np.float64), -_SPC, _SPC)
+                result_sols[i] = 0.5 * (_lbc + _ubc)
+            result_feas = np.zeros(n_batch, dtype=bool)
+            return result_ids, result_lbs, result_sols, result_feas, np.ones(n_batch, dtype=bool)
 
     # Flatten (node, start) into one problem list; node i occupies the slice
     # [i * n_starts : (i + 1) * n_starts].
