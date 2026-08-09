@@ -34,7 +34,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from .interval import Interval, _round_down, _round_up
+from .interval import (
+    Interval,
+    _round_down,
+    _round_down_exact0,
+    _round_up,
+    _round_up_exact0,
+)
 
 # Unit roundoff for IEEE-754 binary64 round-to-nearest (2**-53).
 _UNIT_ROUNDOFF = 2.0**-53
@@ -71,7 +77,13 @@ def _row_offdiag_abs_sum_upper(abs_sup: np.ndarray) -> np.ndarray:
     if mu >= 0.5:
         return _round_up(np.full_like(raw, np.inf))
     gamma = mu / (1.0 - mu)
-    return _round_up(raw / (1.0 - gamma))
+    # ``_exact0`` (#957): ``raw`` is a sum of absolute values, so it is >= 0 and
+    # the divisor is just under 1 — the quotient is >= ``raw`` and cannot
+    # underflow to a false zero. A row with no off-diagonal entries therefore
+    # keeps a row sum of exactly 0 instead of ``5e-324``, which would otherwise
+    # drag the Gershgorin bounds below (above) their true values by one
+    # subnormal and make a diagonal Hessian miss a boundary ``λ_min >= 0`` test.
+    return _round_up_exact0(raw / (1.0 - gamma))
 
 
 def gershgorin_lambda_min(H: Interval) -> float:
@@ -111,7 +123,11 @@ def gershgorin_lambda_min(H: Interval) -> float:
 
     # Diagonal lower bound minus sum — round down.
     diag_lo = np.diag(lo)
-    bounds = _round_down(diag_lo - row_sum)
+    # ``_exact0`` (#957): IEEE-754 subtraction of two doubles is zero only when
+    # the exact difference is zero, so a Gershgorin disc that lands exactly on
+    # the origin stays there instead of becoming ``-5e-324`` — the difference
+    # between certifying and declining a boundary-PSD Hessian.
+    bounds = _round_down_exact0(diag_lo - row_sum)
     return float(bounds.min())
 
 
@@ -130,7 +146,7 @@ def gershgorin_lambda_max(H: Interval) -> float:
     row_sum = _row_offdiag_abs_sum_upper(abs_sup)
 
     diag_hi = np.diag(hi)
-    bounds = _round_up(diag_hi + row_sum)
+    bounds = _round_up_exact0(diag_hi + row_sum)  # ``_exact0``: see λ_min above
     return float(bounds.max())
 
 
@@ -160,12 +176,19 @@ def psd_2x2_sufficient(H: Interval) -> bool:
     off = max(abs(lo[0, 1]), abs(hi[0, 1]), abs(lo[1, 0]), abs(hi[1, 0]))
     prod = float(lo[0, 0]) * float(lo[1, 1])
     sq = float(off) * float(off)
-    # Outward rounding is a no-op when the float product is exactly
-    # zero (no roundoff to absorb); skipping it there prevents the
-    # nextafter shift from manufacturing a spurious negative
-    # determinant on the all-zero / rank-deficient corner.
-    prod_lo = prod if prod == 0.0 else float(_round_down(np.float64(prod)))
-    sq_hi = sq if sq == 0.0 else float(_round_up(np.float64(sq)))
+    # Outward rounding is skipped when the exact result is zero, so the
+    # nextafter shift cannot manufacture a spurious negative determinant on the
+    # all-zero / rank-deficient corner. The test is on the *factors*, not on the
+    # float result (#957): a product of two nonzero factors can flush to zero by
+    # underflow while the exact value is nonzero, and ``sq``'s round is the
+    # upward one, where treating an underflowed ``off**2 ~ 1e-400`` as an exact
+    # zero would understate the off-diagonal term and let a matrix with a
+    # (barely) negative determinant pass. ``prod`` needs no such care in either
+    # direction — both diagonal entries are nonneg by the guard above, so ``0``
+    # is a valid lower bound whether the product is exactly or only nearly zero
+    # — but it is written the same way so the two lines cannot drift apart.
+    prod_lo = 0.0 if (lo[0, 0] == 0.0 or lo[1, 1] == 0.0) else float(_round_down(np.float64(prod)))
+    sq_hi = 0.0 if off == 0.0 else float(_round_up(np.float64(sq)))
     return bool(prod_lo >= sq_hi)
 
 
