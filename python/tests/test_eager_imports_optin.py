@@ -1,8 +1,9 @@
 """Guard: ``DISCOPT_EAGER_IMPORTS`` is opt-in and never changes default startup.
 
 F7 (perf-followup-plan §2, fixed-tax trims). The first ``solve()`` in a fresh
-process lazily loads ~0.4 s of solve-path modules (jax.numpy, scipy
-sparse/linalg, the discopt._jax / discopt.solvers stack). Batch/CLI/benchmark
+process lazily loads ~0.4 s of solve-path modules (scipy sparse/linalg, the
+discopt._jax / discopt.solvers stack; ``jax.numpy`` was in this list until #75
+took JAX off the solve path). Batch/CLI/benchmark
 harnesses that pay import cost once can opt in to move that tax to
 ``import discopt`` time via ``DISCOPT_EAGER_IMPORTS=1``.
 
@@ -14,7 +15,9 @@ see ``test_lazy_jax_linear_path.py``). These guards pin:
 * default (env unset / ``=0``): ``import discopt`` succeeds and does **not**
   eager-load jax or the solve orchestrator (startup stays lazy/fast);
 * opt-in (env ``=1``): ``import discopt`` succeeds and the solve-path modules
-  (jax, ``discopt.solver``) are preloaded.
+  (``discopt.solver`` and the scipy/discopt stack) are preloaded — and, since
+  #75, the opt-in stays JAX-free too, so it cannot silently reintroduce JAX on
+  a path the default keeps clean.
 
 Each case runs in a *fresh subprocess* so ``sys.modules`` reflects only what
 importing discopt did, and a regression that eager-loads on the default path
@@ -68,9 +71,23 @@ def test_default_import_stays_lazy(env_value):
 
 
 def test_eager_optin_preloads_solve_path():
-    """Opt-in (env =1): import succeeds and preloads jax + the orchestrator."""
+    """Opt-in (env =1): import succeeds and preloads the orchestrator, JAX-free.
+
+    ``JAX_LOADED`` was asserted here until #75 took JAX off the solve path.
+    ``jax.numpy`` was the first entry in ``_eager_import_solve_path()``, so the
+    opt-in pulled in 210 jax modules on a solve that otherwise imports none —
+    ``DISCOPT_EAGER_IMPORTS=1`` silently undid the whole JAX-free result. The
+    entry was removed, so the expected first line flips to ``JAX_FREE``.
+
+    The ``SOLVER_LOADED`` assertion below is deliberately **kept**: it is what
+    still proves the eager path fired at all. Dropping it would turn this into a
+    test that passes when ``DISCOPT_EAGER_IMPORTS=1`` does nothing whatsoever.
+    """
     lines = _run("1")
-    assert lines[0] == "JAX_LOADED", f"DISCOPT_EAGER_IMPORTS=1 did not eager-load JAX: {lines}"
+    assert lines[0] == "JAX_FREE", (
+        f"DISCOPT_EAGER_IMPORTS=1 eager-loaded JAX -- the eager list has "
+        f"reacquired a jax entry (#75 regression): {lines}"
+    )
     assert lines[1] == "SOLVER_LOADED", (
         f"DISCOPT_EAGER_IMPORTS=1 did not eager-load discopt.solver: {lines}"
     )

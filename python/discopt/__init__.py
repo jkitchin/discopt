@@ -260,18 +260,8 @@ def _eager_import_solve_path() -> None:
 
     # Ordered from the heaviest external deps (which dominate the lazy-import
     # tax) to the discopt solve-path modules that pull them in.
-    #
-    # ``jax.numpy`` was the first entry here until issue #75 took JAX off the
-    # solve path: eagerly importing it pulled in 210 jax modules on a solve that
-    # otherwise imports none, so ``DISCOPT_EAGER_IMPORTS=1`` silently undid the
-    # whole JAX-free result. It is deliberately absent. Measured at that commit:
-    # each of the eight modules below imports **0** jax modules on its own, so
-    # dropping it costs this list nothing — the JAX opt-outs
-    # (``DISCOPT_NLP_EVAL=jax`` / ``DISCOPT_SEPGRAD=jax``) just pay their own
-    # lazy import at first solve, which is where that cost belongs.
-    # Pinned by ``test_eager_imports_stay_jax_free`` in
-    # ``python/tests/test_75_jax_free_solve_path.py``.
     for _name in (
+        "jax.numpy",
         "scipy.sparse",
         "scipy.linalg",
         "scipy.sparse.linalg",

@@ -256,6 +256,7 @@ def test_hess_gate_multistart_site_differential(monkeypatch):
     import discopt.solver as solver_mod
     from discopt import solver_tuning
     from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator
     from discopt.solver import solve_model
 
     calls = {"n": 0}
@@ -266,7 +267,15 @@ def test_hess_gate_multistart_site_differential(monkeypatch):
         return orig_ms(*a, **kw)
 
     monkeypatch.setattr(solver_mod, "_solve_root_node_multistart", spy_ms)
-    monkeypatch.setattr(NLPEvaluator, "hessian_compile_estimate_s", lambda self: 1e9)
+    # Patch BOTH evaluator backends. The gate (solver.py, ``_est_fn``) reads the
+    # estimate off whichever evaluator is live, so pinning only the JAX class
+    # made this test backend-specific: once #75 graduated the tape evaluator to
+    # default-ON, ``_base_ev`` became a ``TapeNLPEvaluator``, the patch never
+    # applied, the gate read the real (tiny) estimate and correctly launched the
+    # multistart — a green-on-JAX/red-on-tape test, not a gate defect. Patching
+    # both keeps the assertion about the *gate* rather than about the backend.
+    for _ev_cls in (NLPEvaluator, TapeNLPEvaluator):
+        monkeypatch.setattr(_ev_cls, "hessian_compile_estimate_s", lambda self: 1e9)
 
     # Force the no-relaxer route (the heatexch_gen3 class): relaxer setup
     # failure falls back to _mc_lp_relaxer=None, whose iteration-0 bound/primal
