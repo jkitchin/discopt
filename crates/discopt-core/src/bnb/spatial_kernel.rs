@@ -577,6 +577,9 @@ mod tests {
     /// before/after demonstration.
     #[test]
     fn corner_pinned_cubic_node_lp_is_solvable() {
+        // The guard ships default-OFF (measured harmful); opt in here, since
+        // this test is about what the guard fixes.
+        mc::test_force_guard_on();
         let li = 4477.244559568261f64;
         let ui = 4989.3506965406295f64;
         let spec = SpatialKernelSpec {

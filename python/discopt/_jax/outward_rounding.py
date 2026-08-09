@@ -47,8 +47,9 @@ Hence the guard is a pure function of quantities all three engines already hold
 derivative and rhs) and is computed here, once, in a fixed operation order —
 never re-derived at a call site.
 
-``DISCOPT_ENVELOPE_OUTWARD_ROUND=0`` restores the legacy unguarded arithmetic
-bit-for-bit (the arm the differential panel A/Bs).
+``DISCOPT_ENVELOPE_OUTWARD_ROUND=1`` turns the guard on; it is **default OFF**
+because the differential panel measured it as harmful (see
+:func:`outward_rounding_enabled`). Off is bit-for-bit the pre-#956 arithmetic.
 """
 
 from __future__ import annotations
@@ -81,10 +82,23 @@ _ENABLED: bool | None = None
 
 
 def outward_rounding_enabled() -> bool:
-    """Whether the guard is applied. Default on; ``=0`` opts out. Read once."""
+    """Whether the guard is applied. **Default OFF**; ``=1`` opts in. Read once.
+
+    Default-off is a measured decision, not caution (CLAUDE.md §5, the
+    ``DISCOPT_CUT_INHERIT`` rule: a cert-clean but harmful flag stays OFF). The
+    guard is sound — it only ever loosens — but it makes the relaxation uniformly
+    weaker, and a uniformly weaker relaxation prunes less at every node. Measured
+    on the differential panel: 6/6 decisive instances regress in 3/3 interleaved
+    replicates, and on ex1252 under the #707 reform flags — the configuration
+    issue #956 was filed about — the undecided-node fraction gets WORSE, 55.3% ->
+    81.7%, with half the node throughput. See `docs/dev/performance-plan.md` §15.
+
+    With the guard off, ``outward_slack`` is identically 0.0 and ``widen`` is the
+    identity, so the whole relaxation is bit-for-bit the pre-#956 arithmetic.
+    """
     global _ENABLED
     if _ENABLED is None:
-        _ENABLED = os.environ.get("DISCOPT_ENVELOPE_OUTWARD_ROUND", "1").strip() not in (
+        _ENABLED = os.environ.get("DISCOPT_ENVELOPE_OUTWARD_ROUND", "0").strip() not in (
             "0",
             "false",
             "False",

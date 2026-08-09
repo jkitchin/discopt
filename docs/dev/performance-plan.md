@@ -1674,19 +1674,88 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > flagged instances never call the kernel in either arm and so cannot be affected at
 > all.
 >
-> **Why it ships default-ON anyway, against §5's net-positive bar.** The guard is not
-> optional bound-changing machinery; it repairs a violated invariant of the existing
-> relaxation, and the in-tree precedent is `spatial_propagate.rs`, whose outward
-> `EPS`-scaled guard is unflagged, default-on, and **1e-9 relative — six orders of
-> magnitude larger** than this one. Shipping default-OFF would require the new
-> regression tests to stop asserting the invariant by default, which CLAUDE.md §1
-> forbids. `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` keeps the legacy path intact and one
-> line flips the default for anyone reading §5 strictly.
+> **RETRACTION (2026-08-09): the flag ships default-OFF, and the claim that it is
+> merely "neutral" was wrong.** An earlier revision of this section argued for
+> default-ON on the grounds that the guard repairs an invariant and was only
+> bound-neutral. A better measurement — the interleaved-replicate method this repo
+> already validated for exactly this situation (`solver.py`, #902: `max_nodes` is
+> unusable because `node_limit` routes the kernel back to the Python path, so the
+> arms would compare OFF against OFF) — shows the guard is **harmful**, not neutral:
 >
-> **Open, same defect class:** the Python twin. `incremental_mccormick.py`'s
-> generators violate the same invariant (measured row residuals `6.0` affine-square,
-> `3.1e-2` bilinear, `2.3e-2` square). Fixing it is coupled work, not a port:
-> `_validate` compares the incremental patch against the cold build through
-> `_rowset`, which rounds each rhs absolutely to 6 decimals, so guarding one engine
-> without the other silently drops the incremental fast path to `ok=False`. Both
-> `uniform_relax.py`'s emitters and `incremental_mccormick.py` must move in lockstep.
+> | instance | ON bound (3 reps) | OFF bound (3 reps) | verdict |
+> |---|---|---|---|
+> | nvs17 | -1333.79 ± 4.8 | -1308.60 ± 1.2 | REGRESSION 3/3 |
+> | nvs19 | -5841.67 ± 130 | -5679.50 ± 30 | REGRESSION 3/3 |
+> | nvs20 | 225.342 ± 0 | 225.428 ± 0 | REGRESSION 3/3 |
+> | nvs23 | -25667.3 ± 25 | -25570.6 ± 9.3 | REGRESSION 3/3 |
+> | nvs24 | -171599 ± 600 | -170776 ± 100 | REGRESSION 3/3 |
+> | tanksize | 1.25788 ± 9.4e-5 | 1.25823 ± 2.1e-4 | REGRESSION 3/3 |
+>
+> 6/6 decisive instances regress in 3/3 replicates, outside the replicate spread;
+> `nvs20` has **zero** spread in both arms, so it is deterministic, not noise. And on
+> `ex1252` under the #707 reform flags — *the configuration #956 was filed about* —
+> the guard makes the counter the issue proposed measurably WORSE:
+>
+> | arm | undecided | fraction | nodes | bound |
+> |---|---|---|---|---|
+> | ON | 5222 / 6388 | **81.7 %** | 6388 | 12658 |
+> | OFF | 8554 / 15456 | 55.3 % | 15456 | 20520 |
+>
+> **Mechanism, and it is not what the issue assumed.** It is not build cost — the
+> guarded relaxation build is if anything faster (median 6.09/6.15 ms ON vs
+> 6.18/7.00 ms OFF on nvs20, interleaved). It is not root-relaxation weakening on
+> most instances either: root bounds move only ~6e-14 relative on nvs17/19/23/24
+> (nvs20 is the exception at 1.8e-6, because the guard is sized relative to the ROW
+> and nvs20's rows are ~1e10 against an objective of ~87). What happens is that a
+> uniformly *looser* relaxation prunes slightly less at every node, the trees
+> diverge, and under a fixed wall-clock budget the bound lands lower — which is why
+> the direction is systematic rather than 50/50. On ex1252 the loosening also makes
+> node LPs *more* degenerate, so a larger share come back undecided. That inverts
+> the issue's premise: those LPs are not unsolvable because rows cut their own
+> graph, they are unsolvable because they are ill-conditioned, and loosening them
+> makes conditioning worse.
+>
+> So this is the `DISCOPT_CUT_INHERIT` case exactly as §5 describes it — sound but
+> harmful — and the flag stays **OFF**, with the measurement recorded.
+> `DISCOPT_ENVELOPE_OUTWARD_ROUND=1` opts in. With it off, `outward_slack` is
+> identically `0.0` and `widen` is the identity, so all three engines are bit-for-bit
+> the pre-#956 arithmetic; the invariant tests opt in explicitly rather than
+> asserting a configuration that does not ship.
+>
+> **What would graduate it.** Not a bigger guard — a *cheaper* invariant. The guard
+> is currently sized by the row's whole term magnitude; sizing it by the actual
+> cancellation in each rhs (which is what genuinely needs repair) would be far
+> smaller on well-scaled rows and might cost no bound at all. Alternatively, repair
+> only the rows that demonstrably cut their own graph rather than all of them.
+>
+> **The Python twin is now closed too (2026-08-09).** `uniform_relax._emit_1d` /
+> `_emit_mccormick` and `incremental_mccormick`'s generators carry the identical
+> guard, behind the same flag. The constraint that shaped it: `_validate` compares
+> the two engines through `_rowset`, which rounds each rhs absolutely to 6 decimals,
+> so a guard applied to one and not the other — or computed from different
+> intermediates — silently drops the incremental fast path to `ok=False`. The guard
+> is therefore a pure function of quantities all three engines hold, computed once in
+> `_jax/outward_rounding.py` and mirrored term-for-term in Rust. Verified: monomial
+> and bilinear rows are BIT-IDENTICAL across the two Python engines, and the
+> pre-existing affine-square divergence is unchanged (1265 mismatches, worst |delta|
+> 1.133e-01, identical with the guard on and off). The invariant now holds on the
+> Python generators: 1 950 000 comparisons, worst residual -3.3e-15, previously
+> +1.3e+5.
+>
+> **Two defects in the Rust-only first pass, both found by doing the Python side.**
+> `widen` sized both ends of an aux interval by the larger end's magnitude (the
+> enclosure of `x**5` over [-18.3,-0.64] is [-2.06e6,-0.106], so the small end moved
+> 7.3e-9 — a 7e-8 relative widening); and `bounded_mag` zeroed anything past the
+> `1e20` sentinel, which also zeroed legitimately large DERIVED values — `x**3` over
+> a box reaching 9e6 encloses 7.3e20, whose ulp is 1.3e5, left entirely unguarded.
+> The sentinel means "this BOX is unbounded" and is now tested on box endpoints only.
+>
+> **A pre-existing gap this work exposed, worth its own issue.** The spatial path
+> cannot certify infeasibility of `x*y >= c, x + y <= 1` over `[0,1]^2` for ANY `c`
+> tested — 0.3, 0.45, 0.49, 0.55, 0.6, 0.75, 1.0, 1.5, 2.0 all run ~12 000 nodes to
+> the time limit in BOTH arms. `test_debug_adversarial`'s infeasible fixture passed
+> only because `c = 0.5` puts the root relaxation's feasible set at exactly one
+> vertex — `(0.5,0.5,0.5)` satisfies every McCormick facet with equality — so the
+> verdict came from whichever way that razor-thin LP rounded, and the solver closed
+> it in 1 node without ever branching, contradicting the fixture's own docstring.
+> The fixture now uses a model whose verdict is deterministic in both arms.

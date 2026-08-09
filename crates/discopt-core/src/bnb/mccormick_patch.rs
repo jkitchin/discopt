@@ -108,19 +108,42 @@ const INF_SENTINEL: f64 = 1e20;
 /// margin. The price is a `3.6e-15` relative loosening of every envelope.
 const ULP_GUARD: f64 = 16.0 * f64::EPSILON;
 
+/// Forces the guard on inside the test binary only, so the invariant tests below
+/// can exercise the guarded generators while the SHIPPED default stays off.
+#[cfg(test)]
+static TEST_FORCE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only seam: force the guard on for the rest of the test binary.
+#[cfg(test)]
+pub fn test_force_guard_on() {
+    TEST_FORCE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether the outward rounding is applied (issue #956).
 ///
-/// Default ON — the guarded rows are the ones that hold the relaxation's defining
-/// invariant. `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` restores the legacy unguarded
-/// generators bit-for-bit, which is what the differential panel A/Bs. Read once.
+/// **Default OFF**, and that is a measured decision rather than caution
+/// (CLAUDE.md §5, the `DISCOPT_CUT_INHERIT` rule: a cert-clean but harmful flag
+/// stays OFF). The guard is sound — it only ever loosens — but a uniformly weaker
+/// relaxation prunes less at every node: 6/6 decisive instances regress in 3/3
+/// interleaved replicates, and on `ex1252` under the #707 reform flags (the
+/// configuration #956 was filed about) the undecided-node fraction gets WORSE,
+/// 55.3 % -> 81.7 %, at half the node throughput. See `performance-plan.md` §15.
+///
+/// `DISCOPT_ENVELOPE_OUTWARD_ROUND=1` opts in. With it off, [`outward_slack`] is
+/// identically `0.0` and [`widen`] is the identity, so every generator here is
+/// bit-for-bit the pre-#956 arithmetic. Read once.
 fn outward_rounding_enabled() -> bool {
+    #[cfg(test)]
+    if TEST_FORCE_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("DISCOPT_ENVELOPE_OUTWARD_ROUND")
             .ok()
             .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
@@ -713,6 +736,18 @@ mod tests {
         row.residual(x) <= tol
     }
 
+    /// Turn the #956 guard on for the rest of this test binary.
+    ///
+    /// The shipped default is OFF (measured harmful — see
+    /// [`outward_rounding_enabled`]), so the invariant tests below opt in
+    /// explicitly rather than asserting a configuration that does not ship. Every
+    /// other test in this module tolerates the guard being on (each asserts the
+    /// reference value from the outward side, with an ulp-scaled allowance), so
+    /// setting this global is order-independent.
+    fn guard_on() {
+        super::test_force_guard_on();
+    }
+
     /// Assert an auxiliary bound pair reproduces the Python reference, allowing the
     /// #956 outward guard: the widened box must CONTAIN the reference and differ
     /// from it by at most the ulp-scaled guard, on the outward side only.
@@ -1123,6 +1158,7 @@ mod tests {
     /// where the unguarded rows cut it by 1.2e-4 (square) / 6.4e1 (cubic).
     #[test]
     fn monomial_rows_never_cut_the_true_point_at_large_magnitude() {
+        guard_on();
         let cases = [
             (66784.5398643343f64, 770432.1452594515f64, 2i32),
             (766768.5864777878, 825273.9822479703, 3),
@@ -1162,6 +1198,7 @@ mod tests {
     /// this box) — checked at the corners, where the rows are tight, and on a grid.
     #[test]
     fn bilinear_rows_never_cut_the_true_product_at_large_magnitude() {
+        guard_on();
         let (li, ui) = (-72367.88703192568f64, 89055.82553869025f64);
         let (lj, uj) = (-72619.82005656551f64, 98196.62997065719f64);
         let rows = bilinear_rows(0, 1, 2, li, ui, lj, uj);
@@ -1193,6 +1230,7 @@ mod tests {
     /// since `sqrt` compresses its argument's magnitude rather than expanding it).
     #[test]
     fn affine_square_and_sqrt_rows_never_cut_the_true_point_at_large_magnitude() {
+        guard_on();
         let mut checked = 0usize;
 
         let (coeff, cst) = (-78584.27778155846f64, 79795.31365347138f64);
@@ -1237,6 +1275,7 @@ mod tests {
     /// (unguarded residual 2.0e-3 on this box).
     #[test]
     fn bilinear_linform_rows_never_cut_the_true_product_at_large_magnitude() {
+        guard_on();
         // A = 1.7 x0 - 930.5, B = 4.3e4 x1 + 2.9e4 x2 - 1.1e5, over a large box.
         let lo = vec![-53219.7031f64, -8123.1177, 4471.3399];
         let hi = vec![91733.5297f64, 66021.8813, 77913.2231];
@@ -1289,6 +1328,7 @@ mod tests {
     /// relaxation can only get looser, and only by `~1e-14` relative.
     #[test]
     fn guard_is_outward_and_bounded() {
+        guard_on();
         let (li, ui, p) = (766768.5864777878f64, 825273.9822479703f64, 3i32);
         let (fl, fu) = (li.powi(p), ui.powi(p));
         let mid = 0.5 * (li + ui);
