@@ -1670,3 +1670,68 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > through to `solver_stats`. Separately, this panel's scorer gained the
 > `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
 > a finite bound going to `None` was invisible to it too. Both panels now score it.
+
+### 14c. #966: the caller-side seams measured, the severe mode caught in flight, and an eager-Hessian fallback falsified (2026-08-09)
+
+> #928's residual (recorded in §14b, on `claude/issue-928-as1vvj` until that
+> branch merges) named two caller-side deficiencies. Both are now measured on
+> this tree and fixed behind flags (`scratchpad/issue966_phase_probe.py`; all
+> probes print executed-comparison counts per §6).
+>
+> **Seam 1 — a round's grant clamps only its LPs.** A `solve_at_node` round
+> granted 2.0 s runs 5.2–5.8 s in BOTH `DISCOPT_LP_WARM_DEADLINE` arms on
+> contvar @ 20 s — ~3.2 s of it the cold `build_uniform_relaxation`, spent
+> after the admission check, unclamped (6/6 reps). The internal node deadline
+> is anchored AFTER the build, so the build also restarts the round's clock.
+> Fix (`DISCOPT_NODE_ROUND_BUDGET`, default OFF, §5): the spatial node loops
+> pass the global deadline into `solve_at_node` as an absolute
+> `round_deadline` (clamps the build via the #694 anytime mechanism AND caps
+> the internal anchor), and the round admission check declines a round whose
+> remaining grant cannot cover the relaxer's measured cold-build EMA
+> (`expected_build_cost()`). The serial loop previously had NO past-deadline
+> skip at all — it gets one under the flag.
+>
+> **Seam 2 — the 200–500 s severe modes are one uninterruptible XLA compile.**
+> Caught in flight with `faulthandler.dump_traceback_later` (§10):
+> heatexch_gen3 @ 20 s ran 162.5 s with the stack inside
+> `_solve_root_node_multistart → solve_nlp(pounce) → evaluate_hessian_values →
+> sparse_hess_values → jit_batch_hvp` and XLA's own slow-compile alarm
+> reporting the compile at **124 s**. The F4 gate exists for exactly this risk
+> but the per-node NLP entries (root multistart on the no-relaxer class,
+> strided node NLP, JAX-callback batch POUNCE) bypass it.
+>
+> **Falsified (§4, kill criterion hit): the eager fallback.** Hypothesis: an
+> uncompiled `jax.disable_jit()` Hessian evaluation bounds the phase at usable
+> per-call cost. Measured (`scratchpad/issue966_eager_hessian_entry.py`):
+> heatexch_gen3 eager walls 62.7 / 11.7 / 10.4 s, contvar 29.7 / 7.7 / 8.3 s —
+> the steady state alone dwarfs a per-iteration budget, so the eager route is
+> dead. A compile can neither be truncated nor cheaply avoided; **entry
+> refusal is the whole treatment** (the F4 rationale). Fix
+> (`DISCOPT_HESS_COMPILE_GATE`, default OFF, §5): `_hess_compile_refuses`
+> declines a NONCONVEX per-node NLP entry when the conservative first-compile
+> estimate exceeds the remaining budget, checked at the loop sites where
+> `_model_is_convex` is authoritative (the multistart chain does not thread
+> convexity down; on the convex path the NLP is the bound producer and is
+> never refused — rule 1).
+>
+> **A/B with both flags ON** (3 reps × {contvar, heatexch_gen3, bchoco08} ×
+> both #928 arms @ 20 s): every wall in **[20.1, 22.1] s** — the baseline's
+> worst same-container mode was 162.5 s and §14b records 500.6 s. No bound
+> lost (heatexch_gen3 `None` in both regimes; bchoco08 identical; contvar OFF
+> 183430.5 vs 183632.0 baseline — weaker by declined rounds, as the mechanism
+> predicts, and never above). The gate's refusal was confirmed non-vacuous
+> (2 firings logged on a heatexch_gen3 run, §6).
+>
+> **Honest residuals.** (1) The one-time ROOT probe build (grant 2.0 s, wall
+> ~5.5 s on contvar) is deliberately NOT clamped: it feeds the
+> `_probe_useful` decision and the incremental structure every later round
+> reuses; truncating it can drop the relaxer entirely. The overrun is one
+> bounded in-flight op (#654 policy). (2) The compile estimate is
+> measured-unpredictable (1–186 s, R² ≈ 0, see `estimate_hessian_compile_s`),
+> so an entry admitted with remaining budget above the risk floor can still
+> overrun — the flag kills the observed late-entry severe modes, not the
+> early-entry gamble the F4 floor deliberately accepts. (3) On THIS tree the
+> loop fits few rounds (contvar: 1 probe round per run); the "more rounds fit"
+> amplification §14b measured needs the #928 branch's banked dual floor, so
+> the corpus-wide differential panel for these two flags is coupled to the
+> #928 graduation panel re-run (issue #966 item 3).
