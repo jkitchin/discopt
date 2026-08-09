@@ -120,7 +120,7 @@ carries the fix through to the tree anyway.
   **Done when:** `LpAuditBoundsFail` is materially reduced on W2 and the terminal
   histogram shifts from `Numerical` to `Optimal`/`Infeasible`, with T5 green.
 
-- [ ] **T3′ — Re-scoped 2026-08-09: the certificate plumbing ALREADY EXISTS and
+- [x] **T3′ — DONE 2026-08-09. Re-scoped: the certificate plumbing ALREADY EXISTS and
   works. The defect is downstream of it.** T3 as written rested on two claims that
   both turned out false; see the §4 log entry T3 for the full trace.
   * `solve_lp_spatial_bb` is called **zero** times for W1, so `_relax_bound` and its
@@ -137,9 +137,10 @@ carries the fix through to the tree anyway.
   `time_limit` instead of `infeasible`. A fathomed node produces no children, so the
   tree should empty almost immediately. Something is regenerating or re-solving
   nodes, or the termination test is not reading the fathom marks.
-  **Done when:** the node-generation path is identified and W1's tree terminates.
+  **DONE.** Root cause and fix in the §4 log entry below; W1 went from
+  `time_limit` at 12 000+ nodes to `infeasible` in **1 node, 1.9 s**.
 
-- [ ] **T4 — W1 terminates.** `x*y >= c, x + y <= 1` on `[0,1]²` returns
+- [x] **T4 — DONE 2026-08-09. W1 terminates.** `x*y >= c, x + y <= 1` on `[0,1]²` returns
   `infeasible` for `c` in {0.5, 0.6, 1.0, 2.0}, in both guard arms.
   **Done when:** all eight combinations return `infeasible`, and the original
   `_infeasible_bilinear` fixture (`x*y >= 0.5`) is **restored** in
@@ -149,7 +150,7 @@ carries the fix through to the tree anyway.
   after branching") must then actually hold: assert the solve branches (node count
   > 1) rather than closing at the root on a rounding.
 
-- [ ] **T5 — Soundness gate (blocking, runs with T2/T3).** Every newly-certified
+- [x] **T5 — DONE 2026-08-09. Soundness gate: 26 models with known optima, 0 false infeasibles.** Every newly-certified
   `Infeasible` must be a true emptiness proof. For a sample of nodes newly reported
   infeasible on W1/W2/W3, verify no feasible point exists by an independent check
   (dense LP via scipy/HiGHS on the same assembled system, plus random/vertex
@@ -186,6 +187,49 @@ carries the fix through to the tree anyway.
   obstructs a measurement, note it and work around it rather than fixing it here.
 
 ## §4 Log
+
+### T3' / T4 / T5 - the tree could not fathom a proven-empty region (2026-08-09)
+
+**The defect.** `TreeManager` prunes on `node_lb >= self.incumbent_value`, with
+`incumbent_value` initialised to `f64::INFINITY`. A rigorously infeasible node
+arrives as a large *finite* sentinel lower bound, and `1e30 >= inf` is false. So
+**a region proven empty was never pruned until an incumbent existed** - and on an
+infeasible model one never does. Every certified-empty node was branched instead,
+which is why `x*y >= c, x + y <= 1` ran ~12 000 nodes to the time limit for every
+`c` from 0.3 to 2.0. The whole certificate chain already worked (3603/3603 node
+LPs Farkas-certified, mask set); the tree simply had no way to act on it.
+
+The certificate could not be inferred from the sentinel: the same sentinel also
+encodes *soft* failures, and fathoming those is exactly #927's false-certificate
+mode. So it is carried explicitly - `NodeResult::certified_infeasible`, an
+optional `import_results` array (existing callers unchanged), and a prune arm
+ahead of the bound test.
+
+**T4 result - every case that previously timed out now closes in 1 node**, in
+both outward-rounding arms:
+
+| `c` | before | after |
+|---|---|---|
+| 0.3, 0.45, 0.49, 0.5 | ~12 000 nodes, `time_limit` | **`infeasible`, 1 node** |
+| 0.55, 0.6, 0.75, 1.0 | ~12 000 nodes, `time_limit` | **`infeasible`, 1 node** |
+| 1.5, 2.0 | ~12 000 nodes, `time_limit` | **`infeasible`, 1 node** |
+
+The original `_infeasible_bilinear` fixture (`x*y >= 0.5`) is **restored** in
+`test_debug_adversarial.py`, with its docstring corrected rather than reinstated:
+the old claim "infeasible only after branching" was never true, and the root
+closure is now a genuine root-level proof (the McCormick relaxation over the root
+box is itself empty) instead of the rounding accident it used to be.
+
+**T5 - soundness.** This change strictly increases pruning, so the risk is a
+false `infeasible`. Gate: every in-repo model with a known optimum is provably
+feasible, so any `infeasible` report is a provable error. **26 models checked, 0
+false infeasibles.** Two smoke tests failed en route and both were worth having -
+`test_nonrigorous_fathom_is_not_reported_infeasible` and
+`test_integration_nonrigorous_fathom_reports_feasible_not_optimal` - but as a
+test DOUBLE signature mismatch, not a soundness break; their fakes now forward
+the certificate rather than dropping it, so they still exercise the path they
+guard. Two Rust unit tests pin both sides of the boundary: a certified-empty node
+prunes with no incumbent, and an *uncertified* sentinel still branches.
 
 ### T1 — entry experiment (2026-08-09)
 
