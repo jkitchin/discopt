@@ -1,8 +1,26 @@
 # Issue #956 follow-through: make undecided node LPs decidable
 
-Status: **in progress** (started 2026-08-09)
+Status: **complete** (2026-08-09). T1–T8 all closed; see §2 for each outcome and
+§4 for the measurements. #956 is closable.
+
+**Outcome in one paragraph.** The envelope fix ships **default-ON** (T7 — the
+"harmful" verdict that had kept it off was noise, measured against a proper
+identical-code control). The tree can now fathom a region proven empty without
+needing an incumbent (T3′), which is what made `x·y ≥ c, x + y ≤ 1` certifiable at
+all: `time_limit`/4927 nodes → `infeasible`/1 node. The plan's *title* goal —
+"make undecided node LPs decidable" — turned out to be already met: `n_undecided`
+is **0** across every corpus instance that reaches the native kernel, in both guard
+arms. The remaining `Numerical` verdicts on `nvs20` were traced to a genuine root
+cause (a drifted `x_B` misleading the ratio test, T2′) which is *not* what drives
+them — that hypothesis is falsified in writing, and the seams that prove it are
+kept, off, as control arms.
 
 ## §0 Why this plan exists (binding context)
+
+> **Superseded 2026-08-09.** Everything below is the framing this plan opened with.
+> Both premises fell: the "measured harmful" verdict was noise (T7) and the
+> undecided-node population is zero corpus-wide (T7/T2′). Kept verbatim because the
+> §2 task list is written against it.
 
 #956 is fixed — the McCormick envelopes no longer cut their own graph — but the fix
 ships **default-OFF** because it measured harmful (`performance-plan.md` §15):
@@ -100,7 +118,32 @@ carries the fix through to the tree anyway.
   ships as permanent instrumentation, and evaluate the 20 % kill criterion in
   writing. All of that was done; the criterion fired.)*
 
-- [ ] **T2′ — Re-scoped by T1: attack the bound-excursion class, not Farkas.**
+- [x] **T2′ — DONE 2026-08-09. Root cause proven; the premise it rested on is
+  FALSIFIED; no shippable fix, and that is the answer.** The bound excursions are
+  authored by a **drifted `x_B`**: the ratio test picks the leaving variable and
+  the step from the incrementally-maintained estimate, and re-deriving `x_B`
+  exactly every K pivots collapses the phase-1 handoff violation rate
+  monotonically, 50.3 % (K=0) → 1.7 % (K=1). EXPAND is excluded as the mechanism
+  (suppressing it globally moves the rate 49.7 % → 48.2 %; 97 % of violations
+  exceed its per-pivot ceiling 100-fold, none fall at or below it).
+
+  **But repairing the handoff does not repair what T2′ set out to repair.** With
+  the violation rate at 1.7 %, `LpAuditBoundsFail` moves 788 → 764 and
+  `LpVerdictNumerical` 864 → 856. A phase-2-feasible handoff is simply not what
+  drives the undecided verdicts, so T2′'s "done when" (`LpAuditBoundsFail`
+  materially reduced, histogram shifting to `Optimal`/`Infeasible`) cannot be met
+  this way and the hypothesis behind it is dead.
+
+  Nor is the cadence net-positive: it buys bound quality on some instances and
+  pays for it in throughput on others (K=1: 2 wins / 4 regressions, three of them
+  well outside the noise floor; K=16: 2 wins / 2 regressions / 2 unresolved). Per
+  §5's `DISCOPT_CUT_INHERIT` rule that keeps it **off**.
+  `DISCOPT_PRIMAL_XB_REFRESH` (default `0`) and `DISCOPT_SIMPLEX_NO_EXPAND`
+  (default off) remain as the measured control arms any future ratio-test
+  hypothesis must be judged against, each pinned by a test. Full entry in §4.
+
+  *(Superseded framing, kept for the record: "attack the bound-excursion class,
+  not Farkas.")*
   T1 killed the original T2 (`FarkasRejectOpen = 0`, and uncertified-infeasibility
   is only 12 % of the problem). What actually happens on W2 is that the simplex
   declares optimality on a basis that is **primal infeasible**: a basic variable
@@ -183,10 +226,13 @@ carries the fix through to the tree anyway.
   fixed at no measurable cost, which CLAUDE.md §1 settles. Corpus panel ON vs OFF
   on one build: 149 assertions, 0 false bounds / objectives / infeasibles / errors.
 
-- [ ] **T8 — Close out.** `cargo test -p discopt-core`, `pytest -m smoke`, the
-  adversarial suite, clippy/fmt/ruff. Update `performance-plan.md` §15 with the
-  final state, update this file's status line, and post the summary to #956 stating
-  explicitly whether it can be closed.
+- [x] **T8 — DONE 2026-08-09.** Gates green on the final tree: `cargo test -p
+  discopt-core` **596 passed**; `pytest -m smoke` **916 passed / 22 skipped / 2
+  xpassed**; adversarial suite **10 passed**; `cargo clippy -p discopt-core` and
+  `--no-default-features` both clean under `-D warnings`; `cargo fmt --check`,
+  `ruff check python/` and `ruff format --check python/discopt/` clean.
+  `performance-plan.md` gained §15a (the retraction and the graduation); this
+  file's status line is updated above. **#956 can be closed.**
 
 ## §3 Observations parked here (not tasks)
 
@@ -276,6 +322,73 @@ panel (147 assertions, zero violations); net-positive by the firing-instance pan
 (1 win, 9 identical, 0 regressions) plus W1's `time_limit` → `infeasible`. On the
 89 non-firing instances it cannot regress anything, because there it executes
 nothing at all. No revert.
+
+### T2′ — the excursions are authored by a drifted `x_B`, and fixing that does not help (2026-08-09)
+
+**What was proven.** The primal loop maintains `x_B` incrementally and refreshes it
+exactly only on the ≤48-update refactorizations. The Harris ratio test reads that
+estimate to decide which basic leaves and how far the entering variable moves — so
+once the estimate has drifted, the test authorises a step that is infeasible in the
+values the basis actually holds, and no later refresh can undo it (a refresh
+corrects `x_B`, not the basis). Sweeping the exact-refresh cadence on `nvs20`:
+
+| K (pivots between exact re-derivations) | handoff ok | violated | rate | refreshes |
+|---|---|---|---|---|
+| 0 (default: refactorization only) | 453 | 459 | **50.3 %** | 0 |
+| 16 | 698 | 273 | 28.1 % | 7 791 |
+| 8 | 842 | 235 | 21.8 % | 19 047 |
+| 4 | 863 | 151 | 14.9 % | 35 430 |
+| 2 | 917 | 103 | 10.1 % | 59 896 |
+| 1 (exact at every pivot) | 1 064 | 18 | **1.7 %** | 92 116 |
+
+Monotone across a 30× range — that is the mechanism, not a correlation.
+
+**What was falsified — and it is T2′'s own premise.** Driving the handoff violation
+rate to 1.7 % barely moves the thing T2′ existed to move: `LpAuditBoundsFail`
+788 → 764, `LpVerdictNumerical` 864 → 856. **Phase-1 handing phase 2 a
+box-infeasible basis is real, and is not what makes node LPs undecidable.** The
+earlier T2′ entry in this log frames the 62 % handoff-violation measurement as *the
+root cause* of the `Numerical` verdicts; that inference is retracted (CLAUDE.md
+§11). The two are correlated because both are downstream of the same drift, not
+because one causes the other.
+
+Two supporting exclusions, both measured rather than argued:
+
+* **EXPAND is not the mechanism.** Suppressed on *every* solve (not just a retry,
+  which is all the earlier 4 %-rescue figure tested): violation rate 49.7 % →
+  48.2 %. And the magnitudes rule it out independently — `Phase1ViolLe1Expand` is
+  **0** while `Phase1ViolGt100Expand` is 462/477, i.e. 97 % of violations exceed
+  EXPAND's per-pivot ceiling by more than 100×.
+* **The attribution is complete.** Each violating solve is classified by comparing
+  the ratio test's own `x_B` against a fresh re-derivation: 248 "the estimate was
+  already violating", 244 "the estimate was clean and had drifted", **0
+  unexplained**, 0 without a comparison. The first bucket is the second one later:
+  drift creates an excursion, and from then on the ratio test is reasoning about a
+  point already outside its box.
+
+**Why nothing ships.** The cadence is not net-positive under a wall-clock budget —
+the extra ftran costs throughput, and fewer nodes in the same 20 s means a lower
+bound:
+
+| instance | K=1 vs K=0 | K=16 vs K=0 |
+|---|---|---|
+| nvs20 | **WIN** 3/3 (225.34 → 229.24, 15 % fewer nodes) | regression 3/3 (tiny) |
+| tanksize | WIN 3/3 (marginal) | **WIN** 3/3 |
+| nvs17 | regression 2/3 (marginal) | **WIN** 3/3 |
+| nvs19 / nvs23 / nvs24 | **regression 3/3**, 4σ–9σ outside the replicate spread | unresolved / regression 2/3 / unresolved |
+
+So this is the `DISCOPT_CUT_INHERIT` case again: a sound, mechanism-correct change
+that is not measurably helpful broadly. `DISCOPT_PRIMAL_XB_REFRESH` stays `0`.
+Both it and `DISCOPT_SIMPLEX_NO_EXPAND` are kept as the control arms — the *only*
+way to judge a future ratio-test hypothesis is against an arm where drift is
+eliminated or EXPAND is suppressed — and each is pinned by a test rather than left
+as dead configuration.
+
+**What this leaves.** The `Numerical` verdicts on `nvs20` are a separate,
+pre-existing engine problem (the discopt#364 class), not #956's tail. And the
+counter #956 was filed to drive down is already at its floor: `n_undecided` is
+**0** across every corpus instance that reaches the native kernel, in both guard
+arms (T7). There is no undecided-node population left for this plan to attack.
 
 ### T7 — the guard graduates default-ON, and why the "harmful" verdict fell (2026-08-09)
 

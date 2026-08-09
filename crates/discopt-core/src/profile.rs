@@ -258,6 +258,15 @@ counters!(
     Phase1ViolLe1Expand,
     Phase1ViolLe100Expand,
     Phase1ViolGt100Expand,
+    // ... and, for a violating solve, whether the ratio test's OWN (incrementally
+    // maintained) x_B was already outside the box, or was clean and had merely
+    // drifted away from what the basis actually holds. Different repairs.
+    // #956 T2': mid-window exact re-derivations of x_B (DISCOPT_PRIMAL_XB_REFRESH).
+    XbMidRefresh,
+    Phase1IncrAlsoViolates,
+    Phase1DriftDominates,
+    Phase1ViolUnexplained,
+    Phase1NoIncrXb,
     // #956 T2': the EXPAND-free re-solve of a cold primal that failed to decide,
     // and how many of those reached a terminal certificate instead of failing again.
     EntryDense,

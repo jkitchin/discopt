@@ -1811,3 +1811,43 @@ in this branch: the tree pruned only on `lower_bound >= incumbent`, and with no
 incumbent that test is never true, so every certified-empty node was branched
 rather than fathomed. It now returns `infeasible` in **1 node** for every `c` from
 0.3 to 2.0, against ~12 000 nodes to the time limit before.
+
+### 15b. #956 T2′: the bound excursions are authored by a drifted `x_B` — and repairing that does not reduce them (2026-08-09)
+
+Recorded here because it is a **negative result about the LP engine**, and §15's
+cost model is where those belong.
+
+The primal loop maintains `x_B` incrementally and re-derives it exactly only on
+the ≤48-update refactorizations. The Harris ratio test reads that estimate to pick
+the leaving variable and the step, so a drifted estimate authorises a step that is
+infeasible in the values the basis actually holds — and no later refresh repairs
+it, because a refresh corrects `x_B`, not the basis. Sweeping an exact-refresh
+cadence `K` on `nvs20` moves the phase-1 handoff violation rate monotonically over
+a 30× range: **50.3 % (K=0) → 28.1 % (16) → 21.8 % (8) → 14.9 % (4) → 10.1 % (2) →
+1.7 % (K=1)**. EXPAND is excluded independently: suppressing it on every solve
+moves the rate 49.7 % → 48.2 %, and 97 % of the violations exceed its per-pivot
+ceiling by over 100× with **none** at or below it.
+
+**The falsification.** Driving that rate to 1.7 % barely touches the failures it
+was supposed to explain: `LpAuditBoundsFail` 788 → 764, `LpVerdictNumerical`
+864 → 856. So a box-infeasible phase-1 handoff is real but is **not** what makes
+node LPs come back `Numerical`. Any future work that proposes to cut the
+`Numerical` population by fixing primal feasibility should treat this as settled
+and look elsewhere (discopt#364's class).
+
+**Not shipped, and why.** The cadence is sound (it only replaces an estimate with
+the value the basis already holds — pinned by
+`xb_refresh_cadence_cannot_move_the_optimum`) but not net-positive under a
+wall-clock budget: the extra ftran costs throughput, and fewer nodes in the same
+20 s means a lower bound. K=1 is 2 wins / 4 regressions (nvs19, nvs23, nvs24 at
+4σ–9σ outside the replicate spread); K=16 is 2 wins / 2 regressions / 2 unresolved.
+`DISCOPT_PRIMAL_XB_REFRESH` therefore defaults to `0` and
+`DISCOPT_SIMPLEX_NO_EXPAND` to off — kept as the control arms, since eliminating
+drift or suppressing EXPAND is the only way to judge a future ratio-test
+hypothesis, and each is pinned by a test rather than left as dead configuration.
+
+One measurement worth keeping for CC-style costing: on `nvs20` at K=1 the engine
+performs 92 116 extra ftrans over a 20 s solve and still completes 973 nodes
+against 902 at K=0 — the exact-`x_B` refresh is far cheaper per pivot than the
+node-level work around it, so the throughput cost that decides against it is small
+and instance-dependent, not structural.

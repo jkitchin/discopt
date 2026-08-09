@@ -191,6 +191,29 @@ fn expand_suppressed_globally() -> bool {
     })
 }
 
+/// How many pivots may pass before `x_B` is re-derived exactly from the basis
+/// (`DISCOPT_PRIMAL_XB_REFRESH`, default `0` = only on refactorization). Read once.
+///
+/// The #956 T2′ attribution measured, per violating solve, whether the ratio
+/// test's own `x_B` was already outside the box or was clean and had merely
+/// drifted from what the basis holds: on `nvs20` the split is ~50/50 with **zero**
+/// unattributed, and EXPAND is excluded (suppressing it moves the violation rate
+/// 49.7 % → 48.2 %, and 97 % of violations exceed its per-pivot ceiling by 100×).
+/// Both halves are the same failure at different stages — drift authorises a step
+/// that is infeasible in the true values, and once a basic is outside its box no
+/// later ratio test can pull it back. A smaller refresh cadence is the direct test
+/// of that.
+fn xb_refresh_cadence() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("DISCOPT_PRIMAL_XB_REFRESH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Re-solve once with the EXPAND bound relaxation suppressed when the first solve
 /// failed to decide (#956 T2').
 ///
@@ -730,15 +753,27 @@ struct Simplex<'a> {
     /// zero-valued-basic-artificial finalization pass so warm-start gets a full
     /// basis. Default `false` (bound-changing; kernel path opts in).
     expel_zero_artificials: bool,
-    /// Suppress the EXPAND bound relaxation entirely (#956 T2' retry). EXPAND lets
-    /// each pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), and on the
-    /// lifted McCormick relaxations those violations accumulate into the BASIS —
-    /// measured: 62 % of `nvs20`'s solves hand phase 2 a basis already outside the
-    /// box, and an exact `x_B` recompute cannot undo it (0/846). With this set the
-    /// ratio test never permits a violation, so primal feasibility is preserved by
-    /// construction; the cost is exposure to the degeneracy stalling EXPAND exists
-    /// to avoid, which Bland's rule and `max_iter` still bound.
+    /// Suppress the EXPAND bound relaxation entirely (#956 T2'). EXPAND lets each
+    /// pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), which made it
+    /// the obvious suspect behind the bound excursions that downgrade solves to
+    /// `Numerical`.
+    ///
+    /// **It is not the mechanism, measured.** With it suppressed on *every* solve
+    /// of `nvs20` (not just a retry), the phase-1 handoff violation rate is
+    /// essentially unchanged — 49.7 % -> 48.2 % — and 97 % of the violations are
+    /// `> 1e-5`, i.e. 100x EXPAND's own per-pivot ceiling, with **zero** at or below
+    /// it. Kept as a seam (`DISCOPT_SIMPLEX_NO_EXPAND`, and the retry below) because
+    /// it is the control arm any future ratio-test hypothesis must be measured
+    /// against; the cost of setting it is exposure to the degeneracy stalling
+    /// EXPAND exists to avoid, which Bland's rule and `max_iter` still bound.
     no_expand: bool,
+    /// The incrementally-maintained `x_B` as of the last `simplex_loop` exit, kept
+    /// only while profiling so [`Self::audit_phase1_handoff`] can compare what the
+    /// ratio test *believed* against what the basis actually holds (#956 T2').
+    last_xb: Vec<f64>,
+    /// Pivots between exact re-derivations of `x_B`; `0` = only on refactorization.
+    /// Seeded from [`xb_refresh_cadence`]; a test sets it directly.
+    xb_refresh: usize,
 }
 
 impl<'a> Simplex<'a> {
@@ -794,6 +829,8 @@ impl<'a> Simplex<'a> {
             unbounded_ray: Vec::new(),
             expel_zero_artificials: opts.expel_zero_artificials,
             no_expand: false,
+            last_xb: Vec::new(),
+            xb_refresh: xb_refresh_cadence(),
         }
     }
 
@@ -905,6 +942,35 @@ impl<'a> Simplex<'a> {
             } else {
                 crate::profile::Ctr::Phase1ViolGt100Expand
             });
+            // EXPAND is excluded as the mechanism (suppressing it moves the rate
+            // 49.7 % -> 48.2 %), so the remaining candidate is that the ratio test
+            // decided on an x_B that had drifted away from what the basis actually
+            // holds. Split the violating solves three ways: the ratio test's own
+            // x_B was clean (drift), it already violated by a comparable amount
+            // (the test is admitting violations for some other reason), or there is
+            // no incremental x_B to compare (a non-optimal phase-1 exit).
+            if self.last_xb.len() == self.basis.len() {
+                let fresh = self.basic_values(art_sign).ok();
+                let drift = fresh
+                    .as_ref()
+                    .map(|f| {
+                        f.iter()
+                            .zip(self.last_xb.iter())
+                            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+                    })
+                    .unwrap_or(f64::INFINITY);
+                let believed = self.assemble_x(&self.last_xb.clone());
+                let believed_viol = self.worst_bound_violation(&believed);
+                crate::profile::incr(if believed_viol > 0.5 * worst {
+                    crate::profile::Ctr::Phase1IncrAlsoViolates
+                } else if drift >= 0.5 * worst {
+                    crate::profile::Ctr::Phase1DriftDominates
+                } else {
+                    crate::profile::Ctr::Phase1ViolUnexplained
+                });
+            } else {
+                crate::profile::incr(crate::profile::Ctr::Phase1NoIncrXb);
+            }
         }
     }
 
@@ -1671,6 +1737,11 @@ impl<'a> Simplex<'a> {
             (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64
         };
         let mut expand_tol = if self.no_expand { 0.0 } else { EXPAND_MIN };
+        // #956 T2': how many pivots may pass before `x_B` is re-derived exactly.
+        // 0 (default) keeps the pre-existing behaviour — refresh only on the
+        // ≤48-update refactorizations. See `xb_refresh_cadence`.
+        let xb_refresh_every = self.xb_refresh;
+        let mut since_xb_refresh = 0usize;
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -1722,7 +1793,14 @@ impl<'a> Simplex<'a> {
             drop(_t_sweep);
             let q = match enter {
                 Some(q) => q,
-                None => return Ok(()), // optimal
+                None => {
+                    // Hand the ratio test's own view of x_B to the handoff audit
+                    // (#956 T2'); profiling-gated, so production never clones.
+                    if crate::profile::enabled() {
+                        self.last_xb = xb.clone();
+                    }
+                    return Ok(()); // optimal
+                }
             };
             let dir = if self.stat[q] == AT_LOWER { 1.0 } else { -1.0 };
 
@@ -1972,7 +2050,24 @@ impl<'a> Simplex<'a> {
                             .basic_values(art_sign)
                             .map_err(|_| LpStatus::Numerical)?;
                         updates = 0;
+                        since_xb_refresh = 0;
                         refac_work_budget = self.lu.factor_nnz();
+                    } else if xb_refresh_every > 0 && since_xb_refresh >= xb_refresh_every {
+                        // #956 T2': re-derive x_B from the basis mid-window. The
+                        // ratio test decides which variable leaves and by how much
+                        // from `xb`; if `xb` has drifted, it authorises a step that
+                        // is infeasible in the values the basis actually holds, and
+                        // no later refresh can undo the resulting basis. Refreshing
+                        // between refactorizations costs one extra ftran per
+                        // `xb_refresh_every` pivots and cannot change the answer —
+                        // it only replaces an estimate with the exact value.
+                        xb = self
+                            .basic_values(art_sign)
+                            .map_err(|_| LpStatus::Numerical)?;
+                        since_xb_refresh = 0;
+                        crate::profile::incr(crate::profile::Ctr::XbMidRefresh);
+                    } else {
+                        since_xb_refresh += 1;
                     }
                 }
             }
@@ -2264,6 +2359,45 @@ mod tests {
     fn solve(a: &[f64], m: usize, n: usize, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> LpSolve {
         let lp = LpView { a, m, n, c, l, u };
         solve_lp(&lp, b, &SimplexOptions::default())
+    }
+
+    /// The #956 T2′ exact-`x_B` refresh must be a pure accuracy change: it replaces
+    /// an estimate with the value the basis already holds, so no cadence may move
+    /// the optimum. Also proves the seam is live — with `xb_refresh = 1` the
+    /// mid-window branch runs on every pivot, and the answer is unchanged.
+    #[test]
+    fn xb_refresh_cadence_cannot_move_the_optimum() {
+        // Same LP as `two_constraint_lp`; optimum -5 at x0=3, x1=1.
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [INF; 4];
+        let b = [4.0, 6.0];
+        let opts = SimplexOptions::default();
+        let mut objs = Vec::new();
+        for k in [0usize, 1, 4, 16] {
+            let lp = LpView {
+                a: &a,
+                m: 2,
+                n: 4,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let mut sx = Simplex::new(&lp, &b, &opts);
+            sx.xb_refresh = k;
+            let r = sx.run();
+            assert_eq!(r.status, LpStatus::Optimal, "cadence {k}");
+            objs.push(r.obj);
+        }
+        assert_eq!(objs.len(), 4, "probe did not fire for every cadence");
+        for (k, obj) in [0usize, 1, 4, 16].iter().zip(&objs) {
+            assert!(
+                (obj - objs[0]).abs() < 1e-9,
+                "cadence {k} moved obj to {obj}"
+            );
+            assert!((obj - (-5.0)).abs() < 1e-6, "cadence {k} obj {obj}");
+        }
     }
 
     #[test]
