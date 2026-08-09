@@ -1735,3 +1735,81 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > amplification §14b measured needs the #928 branch's banked dual floor, so
 > the corpus-wide differential panel for these two flags is coupled to the
 > #928 graduation panel re-run (issue #966 item 3).
+
+### 14b. #928 + #966 coupled graduation panel: FAILED, and the loss is an *interaction* (2026-08-09)
+
+> §14a left `DISCOPT_LP_WARM_DEADLINE` cert-clean but not net-positive, with a named
+> next step: "a load-gated, multi-rep panel over the instances where the deadline
+> actually binds." That panel has now run, and it grew a second question first.
+>
+> **Why the three flags were scored as one change.** #928's net-positive failure had a
+> *measured* cause, not a mysterious one: the LP layer honours its grant, but the
+> enclosing separated-relaxation round did not, so budget-honouring LPs merely let the
+> loop fit more unclamped rounds and the ON arm's wall went **up** (ON−OFF +325.4 /
+> +68.5 / +12.7 s at a 20 s budget). #966 closed that seam behind
+> `DISCOPT_NODE_ROUND_BUDGET` (a `round_deadline` threaded into `solve_at_node`, min-
+> combined with the build deadline) and `DISCOPT_HESS_COMPILE_GATE` (refuse to *start*
+> a per-node NLP whose first-time sparse-Hessian XLA compile — measured 124 s on
+> heatexch_gen3 against a 20 s budget — cannot fit; a compile is uninterruptible, so
+> entry refusal is the whole treatment). Graduating #928 without #966 re-creates the
+> known regression, so the panel has three arms rather than two:
+> `base` (all OFF) / `seam` (#966 only) / `cand` (all three), interleaved per instance,
+> every flag named explicitly in every arm so no cell can inherit a default.
+>
+> **Panel**: 19 binding instances, 20 s budget, 3 reps, `wtpanel` built from
+> `origin/main` and gated by four §8 markers per cell (`discopt.__file__`,
+> `_extend_budget_for_incumbent`, `_dual_start_slack_basis`, `round_deadline` in
+> `solve_at_node.__code__.co_varnames`). `COMPARISONS_EXECUTED=19` each rep;
+> `loadavg` recorded into every artifact.
+> Raw: `discopt_benchmarks/results/issue966_coupled_binding20_rep{1,2,3}.json`.
+>
+> **The wall regression is gone.** The entry question passes cleanly and reproducibly:
+>
+> | pair | rep1 | rep2 | rep3 | mean ± sd |
+> |---|---|---|---|---|
+> | cand − base overrun | −2.6 s | −2.7 s | −2.7 s | **−2.7 ± 0.0 s** |
+> | seam − base overrun | −6.0 s | −3.6 s | −5.2 s | **−4.9 ± 1.0 s** |
+>
+> The sign flip is attributable to #966; #928 gives back ~2.3 s of #966's gain.
+>
+> **`CERT_CLEAN=False` in 3/3 reps, on exactly one item**: contvar's bound goes
+> `183632.766 → None` in the `cand` arm — not looser, *absent*. Nothing is unsound
+> (`unsound=[]`, `incumbent_verification_failed=[]`, no cert regressions, no lost
+> incumbents in any rep), so this is a claim-quality failure, not a soundness one.
+> **Neither flag set graduates.**
+>
+> **The 3-arm panel could not attribute it, so a 4th arm was run.** `cand` loses the
+> bound and `seam` keeps it, which attributes the loss to #928 *given the seam* — not
+> to #928 by itself. The panel has no `warm`-only arm, so one was added
+> (`discopt_benchmarks/scripts/issue928_contvar_attribution_probe.py`, 2 reps,
+> `CELLS_EXECUTED=16`, bit-identical across reps):
+>
+> | contvar @20 s | nodes | status | bound | incumbent |
+> |---|---|---|---|---|
+> | base | 7 | time_limit | 183632.766 | none |
+> | warm (#928 alone) | 3 | **feasible** | 98924.530 (looser, sound) | **813745.125** |
+> | seam (#966 alone) | 7 | time_limit | 183632.766 | none |
+> | cand (all three) | **287** | time_limit | **none** | none |
+>
+> **#928 alone does not destroy the bound — it trades bound quality for an incumbent**
+> (the 98924.53 figure is exactly the one §14a reported). The destruction is an
+> **interaction**: with the round budget also clamping, the node count explodes 7 → 287
+> and no node ever certifies anything, so the tree spends the whole budget on cheap
+> uncertified nodes. The suspect is the pair "LP yields on its deadline" ×  "round
+> yields on *its* deadline" compounding into a node result that carries no adoptable
+> bound at all; that is the thing to fix before either flag is re-panelled.
+>
+> **A second cost, from #966 alone, not surfaced in PR #968**: casctanks
+> `2.9098 → −56.5001` in the `seam` arm, identical in all three reps and in both probe
+> reps (and −57.2/−60.1/−60.7 with all three on). Sound (looser) and therefore
+> invisible to `cert_clean`, but a dual bound crossing from +2.9 to −56.5 is a
+> collapse, not a drift — the round budget is declining the rounds that were producing
+> casctanks' bound. #928 alone costs it only 2.9098 → 2.4598.
+>
+> **Verdict.** `seam` (#966 alone) *is* cert-clean in 3/3 reps and is the only arm that
+> buys wall time (−4.9 ± 1.0 s), but it fails the net-positive bar on the other half of
+> the metric set: its bound ledger over three reps is 4 looser (casctanks every rep,
+> tls2 ×2, nvs05, tspn10) against 3 tiny non-reproducible tighter entries, and node
+> counts rise (1329 → 1811). This is the `DISCOPT_CUT_INHERIT` shape again — sound, and
+> genuinely better on the metric it was built for, while paying for it in the metric
+> the solver's product actually is. **All three flags stay default-OFF.**
