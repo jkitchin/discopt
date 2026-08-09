@@ -45,6 +45,7 @@ import scipy.sparse as sp
 from discopt._jax.outward_rounding import (
     envelope_1d_slack,
     envelope_product_slack,
+    relaxed_rhs,
     widen,
 )
 
@@ -92,7 +93,12 @@ def _bilinear_rows(i, j, a, li, ui, lj, uj):
         (-lj, -ui, 1.0, -ui * lj, lj, ui),  # w <= lj*xi + ui*xj - ui*lj
     ]
     return [
-        (ci, cj, cw, rhs + envelope_product_slack(ca, cb, li, ui, lj, uj, 0.0, 0.0, rhs))
+        (
+            ci,
+            cj,
+            cw,
+            relaxed_rhs(rhs, envelope_product_slack(ca, cb, li, ui, lj, uj, 0.0, 0.0, rhs)),
+        )
         for ci, cj, cw, rhs, ca, cb in spec
     ]
 
@@ -107,7 +113,8 @@ def _square_rows(i, a, li, ui):
         (-(li + ui), 1.0, -li * ui, li + ui),  # s <= (li+ui)*xi - li*ui (secant)
     ]
     return [
-        (cx, cs, rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)) for cx, cs, rhs, d in spec
+        (cx, cs, relaxed_rhs(rhs, envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)))
+        for cx, cs, rhs, d in spec
     ]
 
 
@@ -203,7 +210,8 @@ def _monomial_rows(li, ui, p):
     # what keeps the cold build and this patch bit-identical under `_validate`.
     # `t == x` here (the base is the bare variable), so `cst` is 0.
     return [
-        (cx, cs, rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)) for cx, cs, rhs, d in spec
+        (cx, cs, relaxed_rhs(rhs, envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)))
+        for cx, cs, rhs, d in spec
     ]
 
 
@@ -299,7 +307,7 @@ def _affine_square_rows(coeff, const, li, ui):
     ]
     # #956: outward guard in `t`-space, matching `_emit_1d` term for term.
     return [
-        (cx, cw, rhs + envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, const, rhs))
+        (cx, cw, relaxed_rhs(rhs, envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, const, rhs)))
         for cx, cw, rhs, d in spec
     ]
 

@@ -108,17 +108,6 @@ const INF_SENTINEL: f64 = 1e20;
 /// margin. The price is a `3.6e-15` relative loosening of every envelope.
 const ULP_GUARD: f64 = 16.0 * f64::EPSILON;
 
-/// Forces the guard on inside the test binary only, so the invariant tests below
-/// can exercise the guarded generators while the SHIPPED default stays off.
-#[cfg(test)]
-static TEST_FORCE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Test-only seam: force the guard on for the rest of the test binary.
-#[cfg(test)]
-pub fn test_force_guard_on() {
-    TEST_FORCE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Whether the outward rounding is applied (issue #956).
 ///
 /// **Default ON since 2026-08-09**, graduated on the §5 panel; `=0` is the
@@ -144,11 +133,7 @@ pub fn test_force_guard_on() {
 /// the exactly-feasible point `(x, f(x))` out of their own envelope, which is a
 /// route to a false bound — repaired at a cost that is not measurable above noise.
 /// CLAUDE.md §1 decides that case: correctness first. Read once.
-fn outward_rounding_enabled() -> bool {
-    #[cfg(test)]
-    if TEST_FORCE_ON.load(std::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
+pub(crate) fn outward_rounding_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
@@ -199,6 +184,23 @@ pub fn outward_slack(mag_sum: f64) -> f64 {
     ULP_GUARD * mag_sum.max(1.0)
 }
 
+/// `rhs` loosened by `slack` — returning `rhs` UNTOUCHED when `slack` is zero.
+///
+/// The guard-off path must be *byte*-identical, not merely value-identical, and a
+/// plain `rhs + 0.0` is not: `-0.0 + 0.0` is `+0.0`, so the no-op add clears the
+/// sign bit of every negative-zero rhs. The LP cannot see that (`-0.0 == 0.0`), but
+/// `relaxation_fingerprint` hashes the matrix bytes and the claim baseline gates on
+/// that hash — with `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` the add alone moved 34 of 66
+/// corpus instances' fingerprints. Matches `outward_rounding.relaxed_rhs` in Python.
+#[inline]
+pub fn relaxed_rhs(rhs: f64, slack: f64) -> f64 {
+    if slack == 0.0 {
+        rhs
+    } else {
+        rhs + slack
+    }
+}
+
 /// Widen `[lo, hi]` outward (issue #956), each end sized by ITS OWN magnitude, so
 /// a value the box maps to can never fall outside its own auxiliary bounds by a
 /// rounding.
@@ -212,8 +214,8 @@ pub fn outward_slack(mag_sum: f64) -> f64 {
 #[inline]
 fn widen(lo: f64, hi: f64) -> (f64, f64) {
     (
-        lo - outward_slack(bounded_mag(lo)),
-        hi + outward_slack(bounded_mag(hi)),
+        relaxed_rhs(lo, -outward_slack(bounded_mag(lo))),
+        relaxed_rhs(hi, outward_slack(bounded_mag(hi))),
     )
 }
 
@@ -360,7 +362,7 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
         cols: [i, s, 0],
         coeffs: [cx, cs, 0.0],
         nnz: 2,
-        rhs: rhs + envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs),
+        rhs: relaxed_rhs(rhs, envelope_1d_slack(d, li, ui, fl, fu, 0.0, rhs)),
     };
     if convex {
         [
@@ -408,7 +410,7 @@ pub fn affine_square_rows(
         cols: [j, w, 0],
         coeffs: [cx, cw, 0.0],
         nnz: 2,
-        rhs: rhs + envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, cst, rhs),
+        rhs: relaxed_rhs(rhs, envelope_1d_slack(d, t_lo, t_hi, f_lo, f_hi, cst, rhs)),
     };
     [
         row(-slope * coeff, 1.0, a + slope * cst, slope), // secant (overestimator)
@@ -523,7 +525,7 @@ pub fn univariate_rows(
         cols: [x, w, 0],
         coeffs: [cx, cw, 0.0],
         nnz: 2,
-        rhs: rhs + envelope_1d_slack(d, t_lo, t_hi, flo, fhi, cst, rhs),
+        rhs: relaxed_rhs(rhs, envelope_1d_slack(d, t_lo, t_hi, flo, fhi, cst, rhs)),
     };
     // secant: sign*w <= sign*(flo + slope*(t - t_lo)); intercept a = flo - slope*t_lo.
     let a = flo - slope * t_lo;
@@ -703,7 +705,7 @@ pub fn bilinear_linform_rows(
         let slack = envelope_product_slack(
             coef_a, coef_b, a_lo, a_hi, b_lo, b_hi, a_const, b_const, rhs,
         );
-        out.push((cols, coeffs, rhs + slack));
+        out.push((cols, coeffs, relaxed_rhs(rhs, slack)));
     }
 }
 
@@ -748,16 +750,22 @@ mod tests {
         row.residual(x) <= tol
     }
 
-    /// Turn the #956 guard on for the rest of this test binary.
+    /// Assert the #956 guard is the shipped default (ON) before an invariant test
+    /// leans on it.
     ///
-    /// The shipped default is OFF (measured harmful — see
-    /// [`outward_rounding_enabled`]), so the invariant tests below opt in
-    /// explicitly rather than asserting a configuration that does not ship. Every
-    /// other test in this module tolerates the guard being on (each asserts the
-    /// reference value from the outward side, with an ulp-scaled allowance), so
-    /// setting this global is order-independent.
+    /// This replaces a `static AtomicBool` seam that forced the guard on. All of
+    /// `discopt-core`'s unit tests compile into ONE binary and share process state,
+    /// so that store leaked into every later-scheduled test and silently made
+    /// `DISCOPT_ENVELOPE_OUTWARD_ROUND=0` a no-op for them — a negative control that
+    /// measures nothing (CLAUDE.md §6). Now that the guard ships ON there is nothing
+    /// to force; a run that opts out simply skips, loudly, instead of pretending.
     fn guard_on() {
-        super::test_force_guard_on();
+        if !super::outward_rounding_enabled() {
+            panic!(
+                "this test asserts the #956 guard's invariant and the guard is off; \
+                 unset DISCOPT_ENVELOPE_OUTWARD_ROUND to run it"
+            );
+        }
     }
 
     /// Assert an auxiliary bound pair reproduces the Python reference, allowing the

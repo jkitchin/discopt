@@ -62,6 +62,7 @@ __all__ = [
     "bounded_mag",
     "box_finite",
     "outward_slack",
+    "relaxed_rhs",
     "widen",
     "envelope_1d_slack",
     "envelope_product_slack",
@@ -148,6 +149,23 @@ def outward_slack(mag_sum: float) -> float:
     return _ULP_GUARD * max(mag_sum, 1.0)
 
 
+def relaxed_rhs(rhs: float, slack: float) -> float:
+    """``rhs`` loosened by ``slack`` — returning ``rhs`` UNTOUCHED when ``slack`` is 0.
+
+    The guard-off path must be *byte*-identical, not merely value-identical, and a
+    plain ``rhs + 0.0`` is not: ``-0.0 + 0.0`` is ``+0.0``, so the no-op add clears
+    the sign bit of every negative-zero rhs. That is invisible to the LP (``-0.0``
+    and ``+0.0`` compare equal) but not to ``relaxation_fingerprint``, which hashes
+    the matrix bytes — and the claim baseline gates on that hash.
+
+    Measured on the vendored corpus with ``DISCOPT_ENVELOPE_OUTWARD_ROUND=0``, this
+    single add moved 34 of 66 instances' fingerprints away from the committed
+    baseline (22 of ``4stufen``'s 247 ``b_ub`` entries and 1 of ``alan``'s 10 flip
+    sign; ``A_ub``/``c`` are untouched, and every value stays equal).
+    """
+    return rhs + slack if slack != 0.0 else rhs
+
+
 def widen(lo: float, hi: float) -> tuple[float, float]:
     """Widen ``[lo, hi]`` outward, each end sized by ITS OWN magnitude.
 
@@ -157,8 +175,14 @@ def widen(lo: float, hi: float) -> tuple[float, float]:
     end by ``7.3e-9`` — a ``7e-8`` RELATIVE widening of a quantity that is only
     wrong by an ulp of its own size. Per-end sizing is both tighter and the
     correct model of where the rounding actually happened.
+
+    Off, this is the exact identity — see :func:`relaxed_rhs` for why ``hi + 0.0``
+    is not (``-0.0`` upper bounds do occur: an aux column enclosing ``x**3`` over a
+    box whose upper end is ``-0.0``).
     """
-    return lo - outward_slack(bounded_mag(lo)), hi + outward_slack(bounded_mag(hi))
+    return relaxed_rhs(lo, -outward_slack(bounded_mag(lo))), relaxed_rhs(
+        hi, outward_slack(bounded_mag(hi))
+    )
 
 
 def envelope_1d_slack(
