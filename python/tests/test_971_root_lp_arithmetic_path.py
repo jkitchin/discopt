@@ -105,8 +105,25 @@ def test_same_bytes_different_bound_is_not_a_claim_change():
     must land in the bounded, informational ``unreproduced`` bucket instead.
     """
     baseline = load_baseline()
+    # Select on the fingerprint ITSELF, not on a "unchanged" verdict. Those are
+    # different conditions: ``diff_root_lp`` computes the fingerprint only once it
+    # has already seen a status/bound difference, so an instance whose root LP
+    # reproduces can still have drifted bytes -- and this test needs byte-identity,
+    # because that is the whole premise of the bucket under test. Measured on
+    # macOS/arm64 at this commit: the first ``unchanged`` instance is ``4stufen``
+    # and its fingerprint does NOT match the committed (linux/x86-64) baseline,
+    # while 64 of 66 instances are ``unchanged`` -- so selecting on ``unchanged``
+    # asserts byte-identity it did not establish and fails for a reason unrelated
+    # to the rule under test. This is the same predicate defect #973 removed from
+    # ``test_961_optimal_requires_bound.py``; it must not come back here.
     name = next(
-        (n for n in sorted(baseline) if diff_root_lp(n, baseline).status == "unchanged"),
+        (
+            n
+            for n in sorted(baseline)
+            if baseline[n].get("fingerprint") is not None
+            and current_row(n).get("fingerprint") == baseline[n]["fingerprint"]
+            and diff_root_lp(n, baseline).status == "unchanged"
+        ),
         None,
     )
     assert name is not None, "no exactly-reproduced instance to test the rule with"
