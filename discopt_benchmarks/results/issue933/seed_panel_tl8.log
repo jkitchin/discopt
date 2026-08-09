@@ -18,3 +18,61 @@
 [18/66] ex1225: off(status=optimal bound=30.999999999999844 wall=3.2) on(status=optimal bound=30.999999999999844 wall=2.9)
 [19/66] ex1226: off(status=optimal bound=-17.00000000000013 wall=1.8) on(status=optimal bound=-17.00000000000013 wall=1.6)
 [20/66] ex14_1_9: off(status=optimal bound=0.0 wall=1.0) on(status=optimal bound=0.0 wall=0.9)
+[21/66] fac2: off(status=feasible bound=298391803.4267932 wall=8.7) on(status=feasible bound=326941435.5439968 wall=8.9)
+[22/66] flay02m: off(status=optimal bound=37.947331863793 wall=1.4) on(status=optimal bound=37.947331863793 wall=1.2)
+[23/66] flay03m: off(status=feasible bound=41.952353888576525 wall=9.2) on(status=feasible bound=41.952353888576525 wall=9.2)
+[24/66] gbd: off(status=optimal bound=2.1999999825308127 wall=0.4) on(status=optimal bound=2.1999999825308127 wall=0.4)
+[25/66] gkocis: off(status=optimal bound=-1.9230987422706283 wall=2.8) on(status=optimal bound=-1.9230987422706283 wall=2.4)
+[26/66] hda: off(status=time_limit bound=-64473.44240243703 wall=14.0) on(status=time_limit bound=-64473.44240243703 wall=14.1)
+[27/66] heatexch_gen1: off(status=time_limit bound=38183.5317460179 wall=9.6) on(status=time_limit bound=38183.5317460179 wall=9.0)
+[28/66] heatexch_gen2: off(status=time_limit bound=555767.7902857271 wall=8.7) on(status=time_limit bound=555767.7902857271 wall=14.5)
+[29/66] heatexch_gen3: off(status=time_limit bound=None wall=16.8) on(status=time_limit bound=None wall=9.9)
+[30/66] m3: off(status=optimal bound=37.799999670024405 wall=8.2) on(status=optimal bound=37.79999967002439 wall=7.3)
+[31/66] nvs01: off(status=optimal bound=12.46966882156821 wall=2.4) on(status=optimal bound=12.46966882156821 wall=2.2)
+[32/66] nvs02: off(status=optimal bound=5.96418452307 wall=0.8) on(status=optimal bound=5.96418452307 wall=0.8)
+[33/66] nvs03: off(status=optimal bound=16.0 wall=0.9) on(status=optimal bound=16.0 wall=0.8)
+[34/66] nvs04: off(status=optimal bound=0.7199999999999773 wall=1.2) on(status=optimal bound=0.7199999999999773 wall=1.1)
+[35/66] nvs05: off(status=feasible bound=0.6149450688180482 wall=8.7) on(status=feasible bound=0.6149450688180482 wall=8.7)
+[36/66] nvs06: off(status=optimal bound=1.7703124999999627 wall=2.2) on(status=optimal bound=1.7703124999999627 wall=1.9)
+[37/66] nvs07: off(status=optimal bound=4.0 wall=0.5) on(status=optimal bound=4.0 wall=0.5)
+[38/66] nvs08: off(status=optimal bound=23.449727347447233 wall=2.2) on(status=optimal bound=23.449727347447233 wall=2.1)
+[39/66] nvs09: off(status=optimal bound=-43.13433691803662 wall=6.6) on(status=optimal bound=-43.13433691803662 wall=5.3)
+[40/66] nvs10: off(status=optimal bound=-310.7999999999999 wall=0.6) on(status=optimal bound=-310.7999999999999 wall=0.6)
+[41/66] nvs11: off(status=optimal bound=-431.0000000000085 wall=1.1) on(status=optimal bound=-431.0000000000085 wall=1.0)
+[42/66] nvs12: off(status=optimal bound=-481.20000000001 wall=2.6) on(status=optimal bound=-481.20000000001 wall=2.5)
+[43/66] nvs13: off(status=optimal bound=-585.2 wall=2.4) on(status=optimal bound=-585.2 wall=1.9)
+[44/66] nvs14: off(status=optimal bound=-40358.154769299996 wall=1.3) on(status=optimal bound=-40358.154769299996 wall=1.3)
+[45/66] nvs15: off(status=optimal bound=1.0 wall=0.1) on(status=optimal bound=1.0 wall=0.1)
+[46/66] nvs21: off(status=optimal bound=-5.684782500000104 wall=3.0) on(status=optimal bound=-5.684782500000104 wall=3.0)
+[47/66] oaer: off(status=optimal bound=-1.9230985229112765 wall=2.2) on(status=optimal bound=-1.9230985229112765 wall=2.0)
+[48/66] st_e11: off(status=optimal bound=189.311629686619 wall=3.0) on(status=optimal bound=189.311629686619 wall=2.8)
+[49/66] st_e13: off(status=optimal bound=2.0 wall=0.9) on(status=optimal bound=2.0 wall=0.8)
+[50/66] st_e29: off(status=optimal bound=-0.9434705000000165 wall=3.3) on(status=optimal bound=-0.9434705000000165 wall=3.3)
+[51/66] st_e36: off(status=feasible bound=-270.19568750006994 wall=8.7) on(status=feasible bound=-270.19568750006994 wall=8.7)
+[52/66] st_e38: off(status=optimal bound=7197.727148526159 wall=2.0) on(status=optimal bound=7197.727148526159 wall=1.7)
+[53/66] st_miqp1: off(status=optimal bound=280.9999999906497 wall=0.4) on(status=optimal bound=280.9999999906497 wall=0.4)
+[54/66] st_miqp2: off(status=optimal bound=2.0 wall=0.4) on(status=optimal bound=2.0 wall=0.4)
+[55/66] st_miqp3: off(status=optimal bound=-6.0 wall=0.4) on(status=optimal bound=-6.0 wall=0.4)
+[56/66] st_miqp4: off(status=optimal bound=-4574.0000024840665 wall=0.4) on(status=optimal bound=-4574.0000024840665 wall=0.4)
+[57/66] st_miqp5: off(status=optimal bound=-333.88889024868075 wall=0.4) on(status=optimal bound=-333.88889024868075 wall=0.4)
+[58/66] st_test1: off(status=optimal bound=-1.6495994490692313e-08 wall=0.4) on(status=optimal bound=-1.6495994490692313e-08 wall=0.4)
+[59/66] st_testgr3: off(status=optimal bound=-20.59070709795548 wall=0.7) on(status=optimal bound=-20.59070709795548 wall=0.7)
+[60/66] syn05hfsg: off(status=feasible bound=854.4442885778368 wall=8.6) on(status=feasible bound=851.0639474502277 wall=8.5)
+[61/66] tanksize: off(status=time_limit bound=0.8922612039733074 wall=8.5) on(status=time_limit bound=1.1104885061313865 wall=8.5)
+[62/66] tls2: off(status=time_limit bound=0.9359146469655356 wall=8.6) on(status=time_limit bound=1.1964300462250625 wall=8.9)
+[63/66] tspn05: off(status=feasible bound=173.53413970770197 wall=8.5) on(status=feasible bound=173.77889444878608 wall=8.5)
+[64/66] tspn08: off(status=feasible bound=None wall=7.9) on(status=feasible bound=None wall=6.3)
+[65/66] tspn10: off(status=feasible bound=None wall=8.8) on(status=feasible bound=None wall=9.2)
+[66/66] tspn12: off(status=time_limit bound=None wall=31.9) on(status=feasible bound=None wall=7.8)
+
+=== #933 seed graduation panel ===
+instances run              : 66
+oracle bound checks        : 31
+paired bound comparisons   : 61
+bound coverage OFF -> ON   : 61 -> 62
+ON tighter / equal / looser: 6 / 52 / 0
+incorrect (oracle crossed) : 0  []
+certification regressions  : 0  []
+objective drift            : 0  []
+rows -> discopt_benchmarks/results/issue933/seed_panel_tl8.json
+cert-clean bar met; judge net-positive from the numbers above

@@ -34,9 +34,15 @@ The release procedure that produces these entries is documented in
   root-fallback reserve, reclaimed once (`bound_time_extension`) the moment its
   own bound is finite, so only a bound-less kernel forfeits the slice — which
   the caller then spends on the rigorous root-relaxation fallback. Seeding and
-  the kernel reserve are **bound-changing** and ship behind
-  `DISCOPT_ROOT_BOUND_SEED` (default OFF pending the Regime-2 graduation
-  panel, `discopt_benchmarks/scripts/issue933_seed_graduation_panel.py`).
+  the kernel reserve are **bound-changing** and gated by
+  `DISCOPT_ROOT_BOUND_SEED` — graduated **default ON** through the Regime-2
+  panel (`discopt_benchmarks/scripts/issue933_seed_graduation_panel.py`,
+  66 in-repo instances at TL=8, paired OFF/ON: 31 oracle checks with 0
+  crossings, 0 certification regressions, 0 objective drift; bound coverage
+  61→62, ON tighter on 6 / looser on 0 paired bounds, one
+  feasible→certified-optimal upgrade, wall mean −0.55 s; raw log in
+  `discopt_benchmarks/results/issue933/`). `=0` opts out and restores the
+  legacy unseeded tree.
 
   Part (b) (unconditional, reporting-only): `_finalize_reported_bound` is the
   one chokepoint for an uncertified exit's reported bound — taint rule applied

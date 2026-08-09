@@ -1,8 +1,11 @@
 """#933 Regime-2 graduation panel: DISCOPT_ROOT_BOUND_SEED ON vs OFF, in-repo corpus.
 
 CLAUDE.md §5 (bound-changing): the root-bound seed changes which nodes prune
-first, so it ships default-OFF behind ``DISCOPT_ROOT_BOUND_SEED`` until a
-corpus-wide differential panel passes BOTH bars:
+first, so it shipped default-OFF behind ``DISCOPT_ROOT_BOUND_SEED`` until this
+panel's 2026-08-09 run passed both bars (see the graduation record in
+``_root_bound_seed_enabled``'s docstring; the flag is now default ON with
+``=0`` as the opt-out). The panel remains runnable as the ongoing regression
+watch. The two bars:
 
   (1) cert-clean — ``incorrect_count = 0``: no reported bound crosses its
       reference optimum (registry ``python/tests/data/known_optima.toml``), no

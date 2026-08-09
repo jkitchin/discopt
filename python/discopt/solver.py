@@ -3155,9 +3155,9 @@ def _certified_callback_bound(
 
 
 def _root_bound_seed_enabled() -> bool:
-    """Whether the #933 root dual-bound seeding is engaged (default OFF pending the
-    CLAUDE.md Regime-2 graduation panel; ``DISCOPT_ROOT_BOUND_SEED=1`` opts in,
-    ``=0`` opts out once graduated).
+    """Whether the #933 root dual-bound seeding is engaged (**default ON** since the
+    2026-08-09 Regime-2 graduation panel; ``DISCOPT_ROOT_BOUND_SEED=0`` opts out and
+    restores the legacy unseeded tree byte-for-byte).
 
     Bound-changing: a proved root relaxation bound is installed into node 0's
     ``local_lower_bound`` (``PyTreeManager.seed_root_bound``), so every descendant
@@ -3169,12 +3169,21 @@ def _root_bound_seed_enabled() -> bool:
     #930 box-equality gate; the MILP path's structured-node root LP); the #781
     HiGHS root-cut bound is deliberately NOT seeded — it stays a report-only value
     outside the pruning machinery, exactly as #781 designed.
+
+    Graduation record (in-repo corpus, 66 instances, TL=8, paired OFF/ON —
+    ``discopt_benchmarks/scripts/issue933_seed_graduation_panel.py``, raw log in
+    ``discopt_benchmarks/results/issue933/``): cert-clean — 31 oracle checks,
+    0 bounds past the reference optimum, 0 certification regressions, 0 objective
+    drift; net-positive — bound coverage 61 -> 62, ON tighter on 6 / equal on 52 /
+    looser on 0 paired bounds, one feasible -> certified-optimal upgrade
+    (cvxnonsep_nsig30), wall mean -0.55 s (sd 3.66, median -0.05 s; bounded
+    overruns like heatexch_gen2 8.7 -> 14.5 s offset by tspn12 31.9 -> 7.8 s).
     """
-    return os.environ.get("DISCOPT_ROOT_BOUND_SEED", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_ROOT_BOUND_SEED", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
