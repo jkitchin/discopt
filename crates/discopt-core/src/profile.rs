@@ -241,6 +241,14 @@ counters!(
     // are inside their boxes. These counters test the claim.
     Phase1EndBoxOk,
     Phase1EndBoxViolated,
+    // #956 T2': the EXPAND-free re-solve of a cold primal that failed to decide,
+    // and how many of those reached a terminal certificate instead of failing again.
+    EntryDense,
+    EntryCols,
+    EntryColsWarm,
+    ExpandResetArmed,
+    ExpandResetRetries,
+    ExpandResetRescues,
 );
 
 #[inline(always)]

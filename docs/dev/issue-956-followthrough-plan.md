@@ -229,12 +229,39 @@ This retires the three candidate fixes the plan listed (drift reset, bound-flip
 cleanup, forced refactorize-and-reprice) — all three operate on phase 2 or on
 `x_B` arithmetic, and the defect is in neither.
 
-**Remaining implementation question for T2′** (next iteration): phase 1 must
-restore *box* feasibility, not just drive artificials to zero. Two candidate
-shapes, to be chosen by measurement: (a) a composite phase-1 objective that prices
-box violations alongside the artificials, or (b) a feasibility-restore pass at the
-handoff — cheapest first: when the handoff audit fails, restart from the canonical
-all-artificial basis, which is primal-feasible by construction.
+**First candidate implemented and mostly falsified: EXPAND is not the mechanism.**
+EXPAND (Gill et al.) lets each pivot violate a bound by up to `EXPAND_MAX = 1e-7`
+(absolute) to escape degeneracy, which looked like the obvious accumulation
+source. Implemented `Simplex::no_expand` plus a flag-gated, audit-guarded re-solve
+(`DISCOPT_PRIMAL_EXPAND_RESET=1`) in the same shape as the #671 hardening retry —
+only a terminal certificate is accepted, so it can rescue but never certify.
+Measured on W2: **309 retries, 13 rescues — a 4.2 % rescue rate.** Suppressing the
+bound relaxation entirely leaves 96 % of the failures in place, so EXPAND
+accumulation is a minor contributor at most. (It is not worthless: the run's dual
+bound came out *higher*, 227.23 vs 225.43. Kept, default-OFF, pending T6.)
+
+Two instrumentation lessons paid for here, both CLAUDE.md §6:
+* the retry armed **0** times at first because the failing solves do not enter via
+  `solve_lp_cols` — the counter caught it rather than the run reporting a silent
+  no-op;
+* it then armed 115 times against 597 entries, because the #85 dense retry
+  `return`s early on exactly the solves this one targets. The two retries are now
+  chained rather than exclusive.
+
+**Where T2′ goes next.** With EXPAND excluded, the surviving explanation is that
+phase 1 has *no term at all* for box infeasibility of basic variables: it minimizes
+`sum|artificials|` and stops at zero, while a basic structural sits outside its box.
+The crash basis is box-feasible by construction (it only crashes a column whose
+value lands inside its box), so feasibility is lost during pivoting, and the exact
+`x_B` recompute cannot undo it — meaning incremental drift steered a wrong *basis
+choice* rather than a wrong *value*.
+
+The decisive next measurement, before any more implementation: **dump one of these
+node LPs and hand it to HiGHS/scipy.** If HiGHS calls it infeasible, our phase 1 is
+producing a false *feasible* and the fix belongs in infeasibility detection — which
+is exactly what W1 and W2 both need, and would convert `Numerical` into certified
+`Infeasible`. If HiGHS solves it, the fix belongs in phase-1 feasibility
+maintenance (more frequent exact recompute / a composite phase-1 objective).
 
 **Also learned:** `DISCOPT_PROFILE` costs throughput badly (147k–475k stderr lines
 per run, W3 fell from ~6 400 nodes to 31), so node counts measured under it must

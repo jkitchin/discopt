@@ -100,6 +100,7 @@ fn dense_retry(failed: LpSolve, re_solve: impl FnOnce() -> LpSolve) -> LpSolve {
 /// so the matrix is not scaled twice; the caller owns the [`scaling::Scaling`]
 /// and unscales the returned `x` itself.
 pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
+    crate::profile::incr(crate::profile::Ctr::EntryDense);
     let sol = Simplex::new(lp, b, opts).run();
     if dense_retry_wanted(&sol) {
         return dense_retry(sol, || Simplex::new(lp, b, opts).run());
@@ -126,15 +127,73 @@ pub fn solve_lp_cols(
     // dual path already clones the CSC per solve — see dual.rs — so this is
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
-    let sol = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run();
+    // #956 T2': keep a copy for the EXPAND-free retry too (flag-gated, so the clone
+    // is not paid on the default path).
+    crate::profile::incr(crate::profile::Ctr::EntryCols);
+    let expand_retry_cols = expand_reset_retry_available().then(|| cols.clone());
+    let mut sol = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run();
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
-            return dense_retry(sol, || {
+            sol = dense_retry(sol, || {
                 Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
             });
         }
     }
+    // #956 T2': chained AFTER the #85 dense retry rather than instead of it — the
+    // dense retry returns early on the very solves this one exists to rescue, so an
+    // `if`/`else` here would leave the EXPAND retry permanently unreachable
+    // (measured: it armed 115 times against 597 entries, exactly the 482 solves the
+    // dense route had already claimed).
+    if let Some(cols2) = expand_retry_cols {
+        if let Some(rescued) = expand_reset_retry(&sol, || {
+            let mut sx = Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts);
+            sx.no_expand = true;
+            sx.run()
+        }) {
+            return rescued;
+        }
+    }
     sol
+}
+
+/// Whether the #956 T2' EXPAND-free retry is enabled. Default OFF pending the
+/// plan's §5 panel; `DISCOPT_PRIMAL_EXPAND_RESET=1` opts in. Read once.
+fn expand_reset_retry_available() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_PRIMAL_EXPAND_RESET")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
+            .unwrap_or(false)
+    })
+}
+
+/// Re-solve once with the EXPAND bound relaxation suppressed when the first solve
+/// failed to decide (#956 T2').
+///
+/// EXPAND permits each pivot a bounded bound violation to escape degeneracy; the
+/// measured failure mode is that those violations accumulate into the basis, so the
+/// solve ends primal-infeasible and `assemble`'s audit downgrades it to `Numerical`.
+/// Suppressing EXPAND makes the ratio test refuse any violation, so the retry either
+/// reaches a genuine certificate or stalls out on degeneracy — and only a terminal
+/// certificate is accepted, exactly like the #671 hardening retry. Soundness rests
+/// on the retry passing the SAME `assemble` audit as any other solve: this can
+/// rescue a solve that would have been `Numerical`, never certify a wrong `Optimal`.
+fn expand_reset_retry(sol: &LpSolve, resolve: impl FnOnce() -> LpSolve) -> Option<LpSolve> {
+    if !matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::ExpandResetRetries);
+    let retried = resolve();
+    if matches!(
+        retried.status,
+        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+    ) {
+        crate::profile::incr(crate::profile::Ctr::ExpandResetRescues);
+        return Some(retried);
+    }
+    None
 }
 
 /// Sparse-native equivalent of [`solve_lp`]: a cold CSC solve with the SAME
@@ -207,6 +266,7 @@ pub fn solve_lp_cols_warm(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    crate::profile::incr(crate::profile::Ctr::EntryColsWarm);
     // #85: cloned up front for a possible dense retry (see solve_lp_cols).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
     let s = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
@@ -648,6 +708,15 @@ struct Simplex<'a> {
     /// zero-valued-basic-artificial finalization pass so warm-start gets a full
     /// basis. Default `false` (bound-changing; kernel path opts in).
     expel_zero_artificials: bool,
+    /// Suppress the EXPAND bound relaxation entirely (#956 T2' retry). EXPAND lets
+    /// each pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), and on the
+    /// lifted McCormick relaxations those violations accumulate into the BASIS —
+    /// measured: 62 % of `nvs20`'s solves hand phase 2 a basis already outside the
+    /// box, and an exact `x_B` recompute cannot undo it (0/846). With this set the
+    /// ratio test never permits a violation, so primal feasibility is preserved by
+    /// construction; the cost is exposure to the degeneracy stalling EXPAND exists
+    /// to avoid, which Bland's rule and `max_iter` still bound.
+    no_expand: bool,
 }
 
 impl<'a> Simplex<'a> {
@@ -702,6 +771,7 @@ impl<'a> Simplex<'a> {
             ub,
             unbounded_ray: Vec::new(),
             expel_zero_artificials: opts.expel_zero_artificials,
+            no_expand: false,
         }
     }
 
@@ -1539,8 +1609,14 @@ impl<'a> Simplex<'a> {
         const EXPAND_MIN: f64 = 1e-8;
         const EXPAND_MAX: f64 = 1e-7;
         const EXPAND_RESET: usize = 10_000;
-        let expand_incr = (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64;
-        let mut expand_tol = EXPAND_MIN;
+        // #956 T2': with EXPAND suppressed the relaxation is identically zero, so no
+        // pivot may push a basic variable outside its true bound.
+        let expand_incr = if self.no_expand {
+            0.0
+        } else {
+            (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64
+        };
+        let mut expand_tol = if self.no_expand { 0.0 } else { EXPAND_MIN };
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
