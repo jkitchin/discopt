@@ -179,30 +179,69 @@ def test_lshaped_cut_soundness_panel(seed, exact_recourse_bounds):
         assert r.objective == pytest.approx(mono.objective, abs=1e-2)
 
 
-def test_nonbinary_first_stage_explains_the_lost_certificate(exact_recourse_bounds, caplog):
-    """Item 3 of #946: a *non-binary* first stage has no cheap exact cut, so the
-    honest outcome is the uncertified one — but GBD must say why rather than
-    silently exhausting its iteration budget."""
+def _nonbinary_degenerate_model():
+    """``_degenerate_model`` with an *integer* first stage ``y in [0, 3]``.
+
+    Same degeneracy at ``y = 0``; no all-0/1 first stage, so the multiplier-free
+    integer L-shaped cut is unavailable.
+    """
     m = dm.Model("linnl_int")
     y = m.integer("y", lb=0, ub=3)
     x = m.continuous("x", shape=(2,), lb=0, ub=5)
     m.first_stage(y)
     m.minimize(3 * y - x[0] - x[1])
     m.subject_to(x[0] * x[0] + x[1] * x[1] <= 8 * y)
+    return m
 
+
+def test_nonbinary_first_stage_explains_the_lost_certificate(exact_recourse_bounds, caplog):
+    """Item 3 of #946: a *non-binary* first stage has no cheap exact cut, so when
+    the budget runs out before the master bound catches up the honest outcome is
+    the uncertified one — and GBD must say why rather than exhausting the budget
+    silently.
+
+    The budget is capped at one iteration to reach that exit deterministically.
+    It used to be reached with the default 100-iteration budget, because the MILP
+    master promoted an incumbent that was outside its own declared rows and the
+    resulting cut sequence stalled; #952 stops that promotion and the uncapped
+    run now certifies (pinned by the companion test below). Capping is what keeps
+    this test about the *explanation* rather than about a stall that has since
+    been fixed — the assertion below would otherwise pass vacuously or not at all.
+    """
     with caplog.at_level(logging.WARNING, logger="discopt.decomposition.benders.gbd"):
-        r = solve_benders(m, time_limit=60)
+        r = solve_benders(_nonbinary_degenerate_model(), time_limit=60, max_iterations=1)
 
-    assert exact_recourse_bounds.saw_degenerate_multiplier
+    assert exact_recourse_bounds.saw_degenerate_multiplier, (
+        "reproducer no longer degenerate (max |mu| = "
+        f"{exact_recourse_bounds.mu_max:.3e}); this test would pass for the wrong reason"
+    )
+    assert r.status == "iteration_limit", (
+        f"expected the uncertified exit at max_iterations=1, got {r.status!r}"
+    )
     # Sound, just uncertified: the bound never exceeds the true optimum (-1).
     assert r.bound is None or r.bound <= -1.0 + 1e-6
     assert r.objective == pytest.approx(-1.0, abs=1e-3)
     text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "degenerate" in text, f"no explanation logged; got: {text!r}"
-    # And it stopped early instead of burning all 100 iterations on a master
-    # that keeps re-proposing the same point.
+
+
+def test_nonbinary_first_stage_certifies_with_the_full_budget(exact_recourse_bounds):
+    """The other half of the above: with its default budget the non-binary arm
+    closes the gap, and its bound stays sound while doing so.
+
+    This is what #952 bought — before it, the master's incumbent could sit
+    outside the master's own rows, the cut added there carried no usable eta
+    information, and GBD burned its budget re-proposing the same point.
+    """
+    r = solve_benders(_nonbinary_degenerate_model(), time_limit=60)
+
+    assert exact_recourse_bounds.saw_degenerate_multiplier
+    assert r.bound is None or r.bound <= -1.0 + 1e-6
+    assert r.objective == pytest.approx(-1.0, abs=1e-3)
+    assert r.status == "optimal"
+    # And it got there without burning all 100 iterations.
     assert exact_recourse_bounds.calls <= 10, (
-        f"{exact_recourse_bounds.calls} recourse solves: the stall was not detected"
+        f"{exact_recourse_bounds.calls} recourse solves: the master is stalling"
     )
 
 
