@@ -160,6 +160,22 @@ pub struct SpatialTreeConfig {
     /// (closing onto its own incumbent), nvs19 -4017.37 -> -2303.40, nvs23
     /// -23735.23 -> -18951.65.
     pub incumbent_time_extension: Option<Duration>,
+    /// Extra wall-clock time this search may take when [`Self::deadline`] expires —
+    /// but ONLY if its global dual bound is already finite (#933).
+    ///
+    /// This is the kernel-side mirror of `Model.solve`'s #844 policy ("withhold the
+    /// root-fallback reserve precisely while the search is bound-less"): the caller
+    /// shortens the kernel's deadline by the reserve it wants to keep for the
+    /// root-relaxation fallback and passes that reserve here. A kernel whose
+    /// frontier is finite at the shortened deadline reclaims the slice (the
+    /// fallback has nothing to contribute — the kernel's own bound is at least as
+    /// tight as any root bound); a kernel still bound-less exits immediately,
+    /// leaving the reserve unspent so the caller can compute a root-relaxation
+    /// bound INSIDE the original budget instead of reporting no bound at all.
+    ///
+    /// Taken at most once. `None` (the default) reproduces the prior deadline
+    /// exactly.
+    pub bound_time_extension: Option<Duration>,
 }
 
 impl Default for SpatialTreeConfig {
@@ -176,6 +192,7 @@ impl Default for SpatialTreeConfig {
             propagation_rounds: 15,
             initial_incumbent: None,
             incumbent_time_extension: None,
+            bound_time_extension: None,
         }
     }
 }
@@ -212,6 +229,12 @@ pub struct SpatialTreeResult {
     /// observable instead of inferred from a wall-clock reading — a panel that can
     /// only guess whether the mechanism ran cannot score it (CLAUDE.md §6).
     pub incumbent_extension_s: f64,
+    /// #933: seconds of the caller's withheld bound-fallback reserve this search
+    /// reclaimed because its dual bound was already finite at the shortened
+    /// deadline (0.0 when it never did — including the bound-less exit that
+    /// leaves the reserve to the caller's root-relaxation fallback). Reported
+    /// for the same §6 observability reason as `incumbent_extension_s`.
+    pub bound_extension_s: f64,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -297,6 +320,8 @@ pub fn solve_spatial_tree(
     let mut deadline = config.deadline;
     let mut extension_taken = false;
     let mut extension_s = 0.0f64;
+    let mut bound_extension_taken = false;
+    let mut bound_extension_s = 0.0f64;
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
     let mut n_uncertified = 0usize;
@@ -336,6 +361,28 @@ pub fn solve_spatial_tree(
                 extension_s = ext.as_secs_f64();
             }
         }
+        if deadline.is_some_and(|d| Instant::now() >= d)
+            && !bound_extension_taken
+            && config.bound_time_extension.is_some()
+        {
+            // #933: the caller shortened this kernel's deadline by the reserve it
+            // withholds for its root-relaxation fallback. If the global bound is
+            // already finite, that fallback has nothing to contribute (the
+            // kernel's frontier bound is at least as tight as any root bound), so
+            // reclaim the slice — once — and keep searching. If the bound is
+            // still -inf, fall through to the exit below with the reserve
+            // unspent, so the caller can still prove a root bound inside the
+            // original budget instead of reporting none at all.
+            let frontier = heap.iter().map(|n| n.pb).fold(f64::INFINITY, f64::min);
+            let gb = global_lb_closed.min(frontier).min(parent_bound);
+            if gb.is_finite() {
+                if let (Some(d), Some(ext)) = (deadline, config.bound_time_extension) {
+                    deadline = Some(d + ext);
+                    bound_extension_taken = true;
+                    bound_extension_s = ext.as_secs_f64();
+                }
+            }
+        }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             // Global bound = min(closed regions, open frontier, this unprocessed
             // node). Every term is rigorous for its region, so the partial result
@@ -352,6 +399,7 @@ pub fn solve_spatial_tree(
                 n_uncertified,
                 n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -378,6 +426,7 @@ pub fn solve_spatial_tree(
                 n_uncertified,
                 n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             };
         }
         node_count += 1;
@@ -611,6 +660,7 @@ pub fn solve_spatial_tree(
                 n_uncertified,
                 n_undecided,
                 incumbent_extension_s: extension_s,
+                bound_extension_s,
             }
         }
         None => SpatialTreeResult {
@@ -623,6 +673,7 @@ pub fn solve_spatial_tree(
             n_uncertified,
             n_undecided,
             incumbent_extension_s: extension_s,
+            bound_extension_s,
         },
     }
 }
