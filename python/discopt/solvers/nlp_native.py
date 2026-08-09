@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -242,6 +243,69 @@ def build_native_base(evaluator, *, validate: bool = True) -> Optional[NativeNlp
     )
 
 
+# Cross-thread capability of POUNCE's ``NlProblem`` (issue #932).
+#
+# The base is cached on the *model* and handed to whichever thread solves a node,
+# so discopt relies on one ``NlProblem`` being usable — and droppable — from more
+# than one thread. POUNCE guarantees that as of pounce#477 ("Let one NlProblem
+# serve a whole worker pool"), which removed the pyo3 ``unsendable`` marker after
+# establishing that ``NlTnlp`` is ``Send`` and that every ``&self`` method
+# evaluates under the GIL.
+#
+# Against an *older* POUNCE the marker is still present and the guarantee does not
+# hold. That failure is not survivable in place: pyo3 raises ``PanicException``,
+# which derives from ``BaseException`` and so slips past every ``except Exception``
+# in the solver — a cross-thread access would abort the run rather than surface as
+# an error, and the *drop* path trips even for code that never used an instance
+# cross-thread (whichever thread runs the cyclic GC inherits the object). Both are
+# the failures #932 reported.
+#
+# POUNCE's version string cannot express the requirement (pounce#477 landed inside
+# an unreleased ``0.9.0``), so the capability is *measured* once per process, on
+# the first base built, and the native path is disabled if it does not hold. The
+# probe deliberately performs the access pyo3 would reject, on a real second
+# thread, and catches ``BaseException`` there — the panic is the observation, and
+# it is reported, never swallowed.
+_CROSS_THREAD_OK: Optional[bool] = None
+_CROSS_THREAD_LOCK = threading.Lock()
+
+
+def _probe_cross_thread_use(nb: NativeNlpBase) -> bool:
+    """Touch ``nb``'s ``NlProblem`` from a second thread; True if POUNCE allows it."""
+    outcome: dict = {}
+
+    def worker():
+        outcome["tid"] = threading.get_ident()
+        try:
+            outcome["value"] = nb.base.n
+        except BaseException as exc:  # noqa: BLE001 - a pyo3 PanicException is the signal
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    t = threading.Thread(target=worker, name="discopt-native-base-probe")
+    t.start()
+    t.join()
+
+    if outcome.get("tid") == threading.get_ident():  # pragma: no cover - defensive
+        raise RuntimeError("cross-thread probe ran on the calling thread; it proves nothing")
+    return "error" not in outcome
+
+
+def _cross_thread_use_supported(nb: NativeNlpBase) -> bool:
+    """Establish the cross-thread guarantee once per process (see the note above)."""
+    global _CROSS_THREAD_OK
+    with _CROSS_THREAD_LOCK:
+        if _CROSS_THREAD_OK is None:
+            _CROSS_THREAD_OK = _probe_cross_thread_use(nb)
+            if not _CROSS_THREAD_OK:
+                logger.warning(
+                    "POUNCE's NlProblem cannot be used off its creating thread, so the "
+                    "native NLP path is disabled for this process (falling back to the "
+                    "JAX callback bridge). This POUNCE predates pounce#477; upgrade to a "
+                    "build that drops the pyo3 `unsendable` marker. See discopt#932."
+                )
+    return _CROSS_THREAD_OK
+
+
 def get_native_base(evaluator) -> Optional[NativeNlpBase]:
     """Return a cached native base for ``evaluator``'s model, building once.
 
@@ -249,6 +313,10 @@ def get_native_base(evaluator) -> Optional[NativeNlpBase]:
     evaluator cache uses, so a reformulated/edited model rebuilds its base.
     ``False`` is cached for a model that cannot use the native path, so we do not
     repeatedly re-attempt (and re-emit) a failing model.
+
+    The cache is shared across threads, which POUNCE supports as of pounce#477;
+    the first base built in a process verifies that (see ``_CROSS_THREAD_OK``) and
+    the native path is disabled outright against a POUNCE that does not.
     """
     model = getattr(evaluator, "_model", None)
     if model is None:
@@ -263,6 +331,8 @@ def get_native_base(evaluator) -> Optional[NativeNlpBase]:
             return base or None  # may be False (sentinel for "unavailable")
 
     nb = build_native_base(evaluator)
+    if nb is not None and not _cross_thread_use_supported(nb):
+        nb = None
     model._native_nlp_base_cache = (nb if nb is not None else False, fp)
     return nb
 
