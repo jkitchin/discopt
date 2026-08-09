@@ -237,6 +237,62 @@ The release procedure that produces these entries is documented in
   /`_max` gain the same treatment, so a linear function's all-zero Hessian bounds
   come back as exactly `0.0` instead of `∓5e-324` and no longer miss a boundary
   `λ_min ≥ 0` test.
+
+  **Claim-boundary baseline regenerated, attributed against a `main` control.**
+  This is a bound-changing change, so `docs/dev/data/claim-baseline.jsonl` moves —
+  but `claim_differential`'s contract is that every changed instance be
+  independently attributed, not merely re-recorded. A naive regeneration is
+  *not* attributable here: the committed baseline was stamped at `605d29b` and
+  its `root_lp_bound` column had gone stale, so regenerating on this branch
+  showed 56 bound moves and looked like this PR had done all of them.
+
+  Three-way measurement, with the control arm asserted to lack the marker
+  (`_round_down_exact0` absent in the `main` tree, checked before generating):
+
+  - **committed `605d29b` → `main` `d5f6eff6`** (62 instances): `SHAPE_MOVED=0`,
+    `ROOT_LP_MOVED=52`. All 52 predate this branch, including every one that
+    looked alarming — `nvs13` −4843.01 → −751.12, and `beuster`/`casctanks`/
+    `st_miqp2`/`st_miqp3`/`st_miqp4` dropping to no recorded root bound. The
+    *shape* column was never stale, which is why the gate — shape-only — has been
+    passing on `main` throughout.
+  - **`main` → this branch** (66 instances): `SHAPE_MOVED=7`, `ROOT_LP_MOVED=18`.
+    That is this PR's actual footprint.
+
+  The 7 shape movers are rows-only — column and integer-column counts unchanged
+  everywhere, the signature of extra cuts rather than a different formulation —
+  and they are the claim-boundary job's list instance for instance: `bchoco06`
+  832→848, `bchoco07` 1081→1163, `bchoco08` 1604→1898, `fac2` 54→66, `tspn08`
+  604→609, `tspn10` 935→940, `tspn12` 1340→1345. An independent two-arm probe in
+  a single tree (OFF = the opt-in helpers rebound to the unconditional
+  `_round_down`/`_round_up` in both modules plus the pre-#960 `psd_2x2_sufficient`
+  at both its import sites) reproduces exactly that set, and its OFF arm
+  reproduces the committed baseline shape for all 62 rows
+  (`CONTROL_MATCHED_BASELINE=62 MISMATCHED=[]`).
+
+  Of the 18 bound moves, 12 are last-digit (≤1e-10 relative: `bchoco06/07/08`,
+  `hda`, `heatexch_gen1/2`, `nvs12`, `nvs13`, `nvs21`, `st_e36`, `st_miqp1`,
+  `tspn05`). The 6 substantive ones are all tightenings that stay below their
+  reference optimum — every one of these instances minimizes (`O0 0`), so a valid
+  dual bound may rise but never past the optimum:
+
+  | instance | `main` | this branch | reference optimum |
+  | --- | --- | --- | --- |
+  | `fac2` | none | 303 398.521 | 331 837 498.2 |
+  | `tspn08` | none | 231.983 | 290.567 |
+  | `tspn10` | none | 161.161 | 225.126 |
+  | `tspn12` | none | 183.326 | 262.647 |
+  | `chance` | 26.350 | 28.943 | 29.894 |
+  | `nvs04` | −5e-322 | 0.0 | 0.72 |
+
+  `nvs04` is the bug itself in the baseline: the recorded root bound *was* the
+  subnormal artifact, and it is now an exact zero. Solving the relaxation MILP
+  rather than the root LP tells the same story — `fac2` no usable bound →
+  2 132 258.914, and `tspn08/10/12` go from **unbounded** to a finite valid bound
+  (246.211 / 183.117 / 203.126), all below their optima, `UNSOUND=0`.
+
+  The 52 pre-existing `root_lp_bound` drifts are carried in by this regeneration
+  because the file is generated wholesale; they are recorded here as measured on
+  `main`, not claimed as this PR's doing.
 - **The NLP-BB incumbent is verified against every declared row and bound before
   it is returned** (`fix`, #954). `_solve_nlp_bb` was the last of the five solve
   exit paths with nothing checking the point it returns (#779/#789 closed
