@@ -34,6 +34,19 @@ pub struct NodeResult {
     pub solution: Vec<f64>,
     /// Whether the relaxation solution is integer-feasible.
     pub is_feasible: bool,
+    /// The node's region was proven EMPTY by a rigorous certificate (a
+    /// Farkas-verified infeasible relaxation, or an empty box) — not merely a
+    /// failure sentinel (#956 T3').
+    ///
+    /// This has to be carried explicitly rather than inferred from
+    /// `lower_bound`. The caller encodes an infeasible node as a large finite
+    /// sentinel bound, and the prune test is `lower_bound >= incumbent_value`
+    /// with `incumbent_value` starting at `+inf` — so `1e30 >= inf` is FALSE and
+    /// a rigorously empty node was branched instead of pruned on every model that
+    /// never finds an incumbent, i.e. on exactly the infeasible ones. Inferring it
+    /// from the sentinel instead would be unsound: the same sentinel also encodes
+    /// *soft* failures, and fathoming those is the #927 false-certificate mode.
+    pub certified_infeasible: bool,
 }
 
 /// Statistics from processing a batch of evaluated nodes.
@@ -95,6 +108,9 @@ struct PendingResult {
     /// midpoint) that must never fathom the node as integer-feasible or become
     /// the incumbent (#598).
     bound_trusted: bool,
+    /// Carried through from [`NodeResult::certified_infeasible`] — the node's
+    /// region was PROVEN empty, so it prunes regardless of the incumbent (#956 T3').
+    certified_infeasible: bool,
 }
 
 /// Record of a branching decision at a node, used for retroactive
@@ -415,6 +431,7 @@ impl TreeManager {
                 // parent bound (valid for pruning, but the solution is an
                 // untrusted placeholder). See `PendingResult::bound_trusted`.
                 bound_trusted: r.lower_bound.is_finite(),
+                certified_infeasible: r.certified_infeasible,
             }));
     }
 
@@ -450,6 +467,18 @@ impl TreeManager {
                     record.frac_part,
                     is_down,
                 );
+            }
+
+            // 0. Prune a region PROVEN empty, regardless of the incumbent (#956
+            //    T3'). Pruning by bound cannot do this job before the first
+            //    incumbent exists — `lb >= +inf` is never true — so without this an
+            //    infeasible model branches its certified-empty nodes until the time
+            //    limit. Sound: the flag is set only from a rigorous emptiness
+            //    certificate, never from a failure sentinel.
+            if result.certified_infeasible {
+                self.pool.prune(result.node_id);
+                stats.pruned += 1;
+                continue;
             }
 
             // 1. Prune if lower bound >= incumbent (node can't improve).
@@ -1054,6 +1083,7 @@ mod tests {
             lower_bound: 1.2,
             solution: vec![0.5, 0.7],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
 
         let proc_stats = tm.process_evaluated();
@@ -1084,11 +1114,80 @@ mod tests {
             lower_bound: 5.0,
             solution: vec![1.0, 0.0],
             is_feasible: true,
+            certified_infeasible: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.fathomed, 1);
         assert_eq!(stats.incumbent_updates, 1);
         assert_eq!(tm.incumbent().unwrap().1, 5.0);
+    }
+
+    #[test]
+    fn certified_infeasible_prunes_without_an_incumbent() {
+        // #956 T3' regression. Pruning by bound is `lower_bound >= incumbent_value`
+        // and `incumbent_value` starts at `+inf`, so a node whose region is PROVEN
+        // empty — encoded by the caller as a large finite sentinel bound — was
+        // never pruned before an incumbent existed, i.e. never at all on an
+        // infeasible model. Measured consequence: `x*y >= 0.6, x + y <= 1` on the
+        // unit box certified 3603/3603 of its node LPs infeasible and still ran
+        // 4000+ nodes to the time limit.
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        assert_eq!(tm.incumbent_value, f64::INFINITY, "no incumbent yet");
+
+        // A huge finite sentinel bound, exactly as the Python orchestrator encodes
+        // an infeasible node — and NOT >= +inf, which is the whole defect.
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1e30,
+            solution: vec![3.5],
+            is_feasible: false,
+            certified_infeasible: true,
+        }]);
+        let stats = tm.process_evaluated();
+
+        assert_eq!(stats.pruned, 1, "a proven-empty region must prune");
+        assert_eq!(stats.branched, 0, "a proven-empty region must not branch");
+        assert!(tm.is_finished(), "tree should be exhausted, not still open");
+    }
+
+    /// The same sentinel WITHOUT a certificate must still branch — fathoming a
+    /// mere failure sentinel is #927's false-certificate mode.
+    #[test]
+    fn uncertified_sentinel_still_branches_without_an_incumbent() {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1e30,
+            solution: vec![3.5],
+            is_feasible: false,
+            certified_infeasible: false,
+        }]);
+        let stats = tm.process_evaluated();
+        assert_eq!(stats.pruned, 0, "an UNPROVEN sentinel must not prune");
     }
 
     #[test]
@@ -1112,6 +1211,7 @@ mod tests {
             lower_bound: 1.0,
             solution: vec![3.5],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
 
@@ -1128,12 +1228,14 @@ mod tests {
                 lower_bound: 3.0,
                 solution: vec![2.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
                 lower_bound: 5.0,
                 solution: vec![5.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
         ]);
         let stats = tm.process_evaluated();
@@ -1305,6 +1407,7 @@ mod tests {
             lower_bound: 3.0,
             solution: vec![1.0],
             is_feasible: true,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
 
@@ -1334,6 +1437,7 @@ mod tests {
                 lower_bound: 1.0,
                 solution: vec![2.3, 1.7],
                 is_feasible: false,
+                certified_infeasible: false,
             }]);
             let stats = tm.process_evaluated();
 
@@ -1371,6 +1475,7 @@ mod tests {
             lower_bound: 10.0,
             solution: vec![5.0],
             is_feasible: true,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().unwrap().1, 10.0);
@@ -1402,6 +1507,7 @@ mod tests {
             lower_bound: f64::NEG_INFINITY,
             solution: vec![5.0],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
 
@@ -1433,6 +1539,7 @@ mod tests {
             lower_bound: 1.0,
             solution: vec![3.5, 4.5],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         // Root branched on the most-fractional variable (both are 0.5 from
@@ -1449,12 +1556,14 @@ mod tests {
                 lower_bound: 3.0, // LB improved by 2.0 from parent's 1.0
                 solution: vec![3.0, 4.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
                 lower_bound: 2.5, // LB improved by 1.5 from parent's 1.0
                 solution: vec![4.0, 4.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
         ]);
         let stats = tm.process_evaluated();
@@ -1480,6 +1589,7 @@ mod tests {
             lower_bound: 0.0,
             solution: vec![0.5, 0.5],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         let stats = tm.process_evaluated();
         // With no pseudocost observations and threshold=8, both fractional
@@ -1510,6 +1620,7 @@ mod tests {
             lower_bound: 0.0,
             solution: vec![0.5, 0.5],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
 
@@ -1523,12 +1634,14 @@ mod tests {
                 lower_bound: 1.0,
                 solution: vec![0.0, 0.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
                 lower_bound: 0.5,
                 solution: vec![1.0, 0.5],
                 is_feasible: false,
+                certified_infeasible: false,
             },
         ]);
         tm.process_evaluated();
@@ -1544,6 +1657,7 @@ mod tests {
                 lower_bound: (i as f64) + 1.0,
                 solution: batch.lb[i].clone(),
                 is_feasible: true,
+                certified_infeasible: false,
             });
         }
         tm.import_results(&node_results);
@@ -1604,6 +1718,7 @@ mod tests {
             lower_bound: 1.0,
             solution: vec![0.5, 0.0],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         // Children c1, c2 (x0 fixed to 0 / 1). c1: good LP, lb=2.0, fractional
@@ -1621,12 +1736,14 @@ mod tests {
                     s
                 },
                 is_feasible: false,
+                certified_infeasible: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
                 lower_bound: 5.0,
                 solution: batch.lb[1].clone(),
                 is_feasible: true,
+                certified_infeasible: false,
             },
         ]);
         tm.process_evaluated();
@@ -1643,12 +1760,14 @@ mod tests {
                 lower_bound: f64::NEG_INFINITY,
                 solution: mid(&batch.lb[0], &batch.ub[0]),
                 is_feasible: false,
+                certified_infeasible: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
                 lower_bound: 6.0,
                 solution: mid(&batch.lb[1], &batch.ub[1]),
                 is_feasible: false,
+                certified_infeasible: false,
             },
         ]);
         tm.process_evaluated();
@@ -1706,6 +1825,7 @@ mod tests {
             lower_bound: 1.5,
             solution: vec![0.5, 0.0],
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         // One child's LP fails; its box midpoint is fractional at var 1.
@@ -1716,6 +1836,7 @@ mod tests {
             lower_bound: f64::NEG_INFINITY,
             solution: mid(&batch.lb[0], &batch.ub[0]),
             is_feasible: false,
+            certified_infeasible: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(
@@ -1750,6 +1871,7 @@ mod tests {
             lower_bound: 2.0,
             solution: vec![1.0, 0.0],
             is_feasible: true,
+            certified_infeasible: false,
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().map(|(_, v)| v), Some(2.0));

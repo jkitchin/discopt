@@ -1057,6 +1057,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 lower_bound: f64::NEG_INFINITY,
                 solution: Vec::new(),
                 is_feasible: false,
+                certified_infeasible: false,
             },
             basis: None,
             incumbent: None,
@@ -1109,6 +1110,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     lower_bound: INFEAS_SENTINEL,
                     solution: vec![0.0; ctx.ns],
                     is_feasible: false,
+                    certified_infeasible: false,
                 },
                 basis: None,
                 incumbent: None,
@@ -1240,6 +1242,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             lower_bound: 0.0,
             solution: Vec::new(),
             is_feasible: false,
+            certified_infeasible: false,
         },
         basis: None,
         incumbent: None,
@@ -1374,6 +1377,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 lower_bound: sol.obj + ctx.obj_const,
                 solution: xs.to_vec(),
                 is_feasible: feasible,
+                certified_infeasible: false,
             };
         }
         LpStatus::Infeasible => {
@@ -1402,6 +1406,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     lower_bound: INFEAS_SENTINEL, // pruned
                     solution: vec![0.0; ctx.ns],
                     is_feasible: false,
+                    certified_infeasible: false,
                 };
             } else {
                 out.result = NodeResult {
@@ -1409,6 +1414,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     lower_bound: f64::NEG_INFINITY,
                     solution: midpoint(lb_k, ub_k),
                     is_feasible: false,
+                    certified_infeasible: false,
                 };
             }
         }
@@ -1434,6 +1440,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 lower_bound: f64::NEG_INFINITY,
                 solution: midpoint(lb_k, ub_k),
                 is_feasible: false,
+                certified_infeasible: false,
             };
         }
     }

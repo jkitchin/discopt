@@ -578,26 +578,31 @@ def _milp_model():
 
 
 def _infeasible_bilinear():
-    """A bilinear model whose infeasibility the solver actually CERTIFIES:
-    ``x*y <= 1`` with ``x, y in [2,3]`` (the product is at least 4).
+    """Certifiably infeasible bilinear model: ``x*y >= 0.5`` with ``x + y <= 1``
+    on ``[0,1]^2`` (the product cannot exceed 0.25 under the linear cap).
 
-    The previous fixture was ``x*y >= 0.5`` with ``x + y <= 1`` on ``[0,1]^2``,
-    documented as "infeasible only after branching". It was not: the solver never
-    branched it, and it never proved it either. Its root relaxation is feasible at
-    EXACTLY one vertex — ``(x, y, w) = (0.5, 0.5, 0.5)`` satisfies every McCormick
-    facet with equality — so the verdict came from whichever way that razor-thin LP
-    happened to round. Measured (#956): the rhs ``0.5`` case was the ONLY one that
-    ever terminated, and only before the envelopes were outward-rounded; every
-    other margin — 0.3, 0.45, 0.49, 0.55, 0.6, 0.75, 1.0, 1.5, 2.0 — runs ~12 000
-    nodes to the time limit in BOTH arms, so no amount of margin recovers it.
-    The solver's inability to close that family is a real, separate gap; this test
-    is about the DEBUGGER, so it now uses a fixture whose verdict is deterministic
-    (0 nodes, ~0.4 s, identical with the guard on and off) rather than one that
-    passed on a rounding coincidence."""
+    Restored in the #956 follow-through. It had been swapped out because the
+    solver could not certify it: every margin from 0.3 to 2.0 ran ~12 000 nodes to
+    the time limit, and the ``0.5`` case only ever "passed" because its root
+    relaxation is feasible at exactly one vertex, so the verdict came from
+    whichever way that razor-thin LP rounded. The cause was that a node proven
+    empty was pruned only via ``lower_bound >= incumbent``, which cannot fire
+    before an incumbent exists — i.e. never, on an infeasible model. With the
+    emptiness certificate now carried to the tree, this closes at the root in 1
+    node on a rigorous Farkas-verified proof, deterministically and in both
+    outward-rounding arms.
+
+    Note the fixture's original docstring claimed "infeasible only after
+    branching". That was never true and is not true now — but the reason has
+    changed from a rounding accident to a genuine root-level proof: the McCormick
+    relaxation over the root box is itself empty (``w <= x``, ``w <= y``,
+    ``w >= 0.5`` forces ``x + y >= 1``, which the cap meets only at the single
+    point ``(0.5, 0.5)``)."""
     m = do.Model("adv2_infeas")
-    x = m.continuous("x", lb=2.0, ub=3.0)
-    y = m.continuous("y", lb=2.0, ub=3.0)
-    m.subject_to(x * y <= 1.0)
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x * y >= 0.5)
+    m.subject_to(x + y <= 1.0)
     m.minimize(x + y)
     return m
 

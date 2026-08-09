@@ -11340,9 +11340,21 @@ def solve_model(
                     logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
             rust_time += time.perf_counter() - t_rust_start
 
-        # Import results back to Rust tree
+        # Import results back to Rust tree.
+        #
+        # #956 T3': hand the tree the RIGOROUS emptiness certificate as well, not
+        # just the sentinel bound. The prune test is `lower_bound >= incumbent`, and
+        # `incumbent` starts at +inf, so `sentinel >= inf` is False and a node whose
+        # relaxation was PROVEN empty was branched rather than pruned on every model
+        # that never finds an incumbent — i.e. on exactly the infeasible ones
+        # (`x*y >= 0.6, x + y <= 1` on the unit box: 3603/3603 node LPs certified
+        # infeasible, tree still ran 4000+ nodes to the time limit). The mask is set
+        # only from a rigorous certificate; the same sentinel also encodes soft
+        # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.import_results(
+            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
+        )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -13599,9 +13611,21 @@ def _solve_nlp_bb(
             _debug_quit = True
             break
 
-        # Import results back to Rust tree
+        # Import results back to Rust tree.
+        #
+        # #956 T3': hand the tree the RIGOROUS emptiness certificate as well, not
+        # just the sentinel bound. The prune test is `lower_bound >= incumbent`, and
+        # `incumbent` starts at +inf, so `sentinel >= inf` is False and a node whose
+        # relaxation was PROVEN empty was branched rather than pruned on every model
+        # that never finds an incumbent — i.e. on exactly the infeasible ones
+        # (`x*y >= 0.6, x + y <= 1` on the unit box: 3603/3603 node LPs certified
+        # infeasible, tree still ran 4000+ nodes to the time limit). The mask is set
+        # only from a rigorous certificate; the same sentinel also encodes soft
+        # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.import_results(
+            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
+        )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
