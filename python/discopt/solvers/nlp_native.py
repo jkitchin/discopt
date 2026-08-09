@@ -41,6 +41,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
+import weakref
 from dataclasses import dataclass
 from typing import Optional
 
@@ -242,12 +244,51 @@ def build_native_base(evaluator, *, validate: bool = True) -> Optional[NativeNlp
     )
 
 
-def get_native_base(evaluator) -> Optional[NativeNlpBase]:
-    """Return a cached native base for ``evaluator``'s model, building once.
+# Native-base cache, PER THREAD (issue #932). POUNCE's ``PyNlProblem`` is a
+# pyo3 ``unsendable`` pyclass: it must be created, used, AND dropped on a single
+# thread — pyo3 panics on any cross-thread access ("unsendable, but sent to
+# another thread") and on a cross-thread dealloc ("unsendable, but is being
+# dropped on another thread"). The previous cache lived on the Model
+# (``model._native_nlp_base_cache``), which broke that contract two ways:
+#
+# 1. *Access*: any thread calling :func:`get_native_base` on a model whose base
+#    another thread had built received the same ``PyNlProblem``; the first
+#    ``variant()``/``objective()`` call then panicked.
+# 2. *Drop*: a discarded Model is cyclic garbage (its expression DAG holds
+#    reference cycles), so the cached problem's dealloc ran inside whichever
+#    thread happened to trigger the next cyclic-GC collection — under
+#    pytest-xdist, a JAX/execnet service thread, or a POUNCE callback worker
+#    holding the GIL — and panicked there.
+#
+# A ``threading.local`` cache makes both same-thread by construction: each
+# thread builds, uses, and (via same-thread eviction below, or its own
+# thread-state teardown) drops only its own bases, and the unsendable object is
+# never woven into the model's reference cycles at all. The cost is a rebuild
+# when a second thread solves the same model — correct, and cheap next to a
+# node NLP solve.
+_TLS = threading.local()
+# Per-thread entry cap. Eviction is insertion-ordered and runs on the owning
+# thread (the only place a drop is legal), so the cap just bounds memory for a
+# long-lived thread that solves many distinct models.
+_TLS_MAX_ENTRIES = 4
 
-    Cached on the model and invalidated by the same structural fingerprint the
-    evaluator cache uses, so a reformulated/edited model rebuilds its base.
-    ``False`` is cached for a model that cannot use the native path, so we do not
+
+def _tls_entries() -> dict:
+    entries = getattr(_TLS, "entries", None)
+    if entries is None:
+        entries = {}
+        _TLS.entries = entries
+    return entries
+
+
+def get_native_base(evaluator) -> Optional[NativeNlpBase]:
+    """Return this thread's cached native base for ``evaluator``'s model.
+
+    Cached per ``(thread, model)`` — never on the model itself, because the
+    underlying ``PyNlProblem`` is pyo3-``unsendable`` (see the ``_TLS`` note
+    above) — and invalidated by the same structural fingerprint the evaluator
+    cache uses, so a reformulated/edited model rebuilds its base. ``False`` is
+    cached for a model that cannot use the native path, so a thread does not
     repeatedly re-attempt (and re-emit) a failing model.
     """
     model = getattr(evaluator, "_model", None)
@@ -256,14 +297,24 @@ def get_native_base(evaluator) -> Optional[NativeNlpBase]:
     from discopt.solver import _evaluator_fingerprint
 
     fp = _evaluator_fingerprint(model)
-    cached = getattr(model, "_native_nlp_base_cache", None)
-    if cached is not None:
-        base, cached_fp = cached
-        if cached_fp == fp:
+    entries = _tls_entries()
+    key = id(model)
+    entry = entries.get(key)
+    if entry is not None:
+        model_ref, cached_fp, base = entry
+        # ``model_ref() is model`` guards id() reuse after a model is freed.
+        if model_ref() is model and cached_fp == fp:
             return base or None  # may be False (sentinel for "unavailable")
+        del entries[key]  # stale: dead/reused id or refingerprinted model
 
     nb = build_native_base(evaluator)
-    model._native_nlp_base_cache = (nb if nb is not None else False, fp)
+    # Housekeeping on the owning thread, where dropping a base is legal:
+    # prune entries whose model died, then enforce the cap oldest-first.
+    for k in [k for k, (ref, _f, _b) in entries.items() if ref() is None]:
+        del entries[k]
+    while len(entries) >= _TLS_MAX_ENTRIES:
+        del entries[next(iter(entries))]
+    entries[key] = (weakref.ref(model), fp, nb if nb is not None else False)
     return nb
 
 

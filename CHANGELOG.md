@@ -10,6 +10,26 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The POUNCE-native NLP base no longer crosses threads** (`fix`, #932).
+  POUNCE's `PyNlProblem` is a pyo3 `unsendable` pyclass — it must be created,
+  used, and dropped on one thread; pyo3 panics on any violation
+  (`_pounce::nl_problem::PyNlProblem is unsendable, but sent to another
+  thread`). `get_native_base` cached it on the *Model*, which broke the
+  contract both ways: any thread asking for the base received another thread's
+  `PyNlProblem` (access panic — and `PanicException` subclasses
+  `BaseException`, so no `except Exception` in the solver would have contained
+  it: landing in a node solve would have aborted the run), and a discarded
+  Model is cyclic garbage, so the cached problem's dealloc ran on whichever
+  thread triggered the next cyclic-GC collection (drop panic, the one #932
+  observed printing mid-run). The cache now lives in `threading.local` storage
+  keyed per `(thread, model)` with same-thread eviction, so construction,
+  every access, and the drop are single-threaded by construction — the panic
+  is removed, not suppressed. Regression:
+  `test_932_native_base_thread_affinity.py` (pre-fix, both crossings reproduce
+  the exact pyo3 panics).
+
 ### Added
 
 - **Deterministic work budgets for the root primal heuristics** (`fix`, #912).

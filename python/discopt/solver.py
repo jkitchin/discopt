@@ -1509,11 +1509,13 @@ _POUNCE_BATCH_MULTISTART = False
 # POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Opt-in
 # (DISCOPT_NLP_NATIVE / options["nlp_native"]); falls back to the JAX path
 # automatically whenever a native base cannot be built/validated for the model
-# (see solvers.nlp_native). Default OFF: POUNCE's PyNlProblem is unsendable
-# (pyo3), so caching it on the model and using it across the batch/parallel paths
-# trips "unsendable ... dropped on another thread" under pytest-xdist and can
-# perturb MIQP-batch certification; and the speedup is neutral-to-modest. Enable
-# explicitly once PyNlProblem is made Send-safe.
+# (see solvers.nlp_native). POUNCE's PyNlProblem is unsendable (pyo3); #932
+# moved the base cache off the Model and into thread-local storage so the
+# object is created, used, and dropped on one thread — the "unsendable ...
+# another thread" panics this comment used to warn about are fixed, not
+# suppressed. Default stays OFF on the remaining grounds: the speedup is
+# neutral-to-modest and the path can perturb MIQP-batch certification;
+# flipping the default is a §5 graduation-panel decision, not a bug fix.
 _NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
     "0",
     "false",
