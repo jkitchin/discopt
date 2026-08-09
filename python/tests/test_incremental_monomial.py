@@ -71,14 +71,32 @@ def test_monomial_patch_matches_cold_build(p, regime):
 
 
 def test_monomial_rows_unit():
-    """Direct check of the row/aux-bound generators vs hand values for x**2."""
+    """Direct check of the row/aux-bound generators vs hand values for x**2.
+
+    Coefficients are exact; each rhs and each aux bound carries the #956 outward
+    guard, so they are asserted to reproduce the hand value **from the outward
+    side only** and by at most an ulp-scaled amount. The direction is the point:
+    an rhs that moved INWARD would cut the graph of the function being relaxed.
+    """
     rows = _monomial_rows(1.0, 4.0, 2)
     # tangent at 1: (2, -1, 1); tangent at 4: (8, -1, 16); secant: (-5, 1, -4)
-    assert (2.0, -1.0, 1.0) in [tuple(r) for r in rows]
-    assert (8.0, -1.0, 16.0) in [tuple(r) for r in rows]
-    assert (-5.0, 1.0, -4.0) in [tuple(r) for r in rows]
-    assert _monomial_aux_bounds(1.0, 4.0, 2) == (1.0, 16.0)
-    assert _monomial_aux_bounds(-4.0, -1.0, 3) == (-64.0, -1.0)
+    hand = {(2.0, -1.0): 1.0, (8.0, -1.0): 16.0, (-5.0, 1.0): -4.0}
+    seen = 0
+    for cx, cs, rhs in rows:
+        want = hand.get((cx, cs))
+        if want is None:
+            continue  # the midpoint tangent, not pinned here
+        assert rhs >= want, f"rhs {rhs} moved INWARD of {want}"
+        assert rhs <= want + 1e-12 + 1e-13 * abs(want), f"rhs {rhs} beyond the guard on {want}"
+        seen += 1
+    assert seen == 3, f"probe matched {seen}/3 pinned rows"
+
+    for got, want in (
+        (_monomial_aux_bounds(1.0, 4.0, 2), (1.0, 16.0)),
+        (_monomial_aux_bounds(-4.0, -1.0, 3), (-64.0, -1.0)),
+    ):
+        assert got[0] <= want[0] and got[0] >= want[0] - 1e-12 - 1e-13 * abs(want[0])
+        assert got[1] >= want[1] and got[1] <= want[1] + 1e-12 + 1e-13 * abs(want[1])
 
 
 def test_spanning_root_box_falls_back():
