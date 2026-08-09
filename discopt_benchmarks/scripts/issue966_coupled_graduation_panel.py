@@ -66,13 +66,43 @@ def loadavg() -> list[float]:
 
 
 def reference_optimum(name: str):
-    sys.path.insert(0, str(ROOT / "python/tests"))
-    try:
-        from _optima import known_optimum  # type: ignore
+    """The largest value a valid dual bound may take, or ``None`` if unknown.
 
+    This used to read ``python/tests/_optima.py`` behind a bare ``except``, which
+    is CLAUDE.md §7's failure exactly: the module covers 27 curated instances, so
+    for the other 18 of this panel's 19 the lookup returned ``None`` and the arm
+    was skipped -- and the panel still printed ``unsound: []``, which reads as a
+    soundness result over 19 instances and was one comparison. The oracle is now
+    ``minlplib.solu``, which covers the library; ``_optima`` remains the fallback
+    for anything the .solu file does not name, and a missing/unreadable .solu is
+    reported rather than swallowed (the caller counts coverage, see
+    ``soundness``).
+    """
+    ceiling = _solu_ceiling(name)
+    if ceiling is not None:
+        return ceiling
+    sys.path.insert(0, str(ROOT / "python/tests"))
+    from _optima import known_optimum  # type: ignore
+
+    try:
         return known_optimum(name)
-    except Exception:
+    except KeyError:
+        # The one genuine "no oracle" outcome, and the only one that may be
+        # swallowed: everything else (missing .solu, bad import) must crash.
         return None
+
+
+def _solu_ceiling(name: str):
+    sys.path.insert(0, str(Path(__file__).parent))
+    from minlplib_solu import load, primal_ceiling  # type: ignore
+
+    global _SOLU
+    if _SOLU is None:
+        _SOLU = load()
+    return primal_ceiling(name, _SOLU)
+
+
+_SOLU: dict | None = None
 
 
 def run_one(nl: Path, budget: float, env: dict) -> dict:
@@ -91,10 +121,18 @@ def run_one(nl: Path, budget: float, env: dict) -> dict:
 
 def soundness(cells: list[dict]) -> dict:
     """Per-arm soundness scoring: a bound past the oracle or across the incumbent,
-    or an incumbent that failed verification, is disqualifying on its own."""
-    unsound, verification_failed = [], []
+    or an incumbent that failed verification, is disqualifying on its own.
+
+    Returns the number of oracle comparisons actually executed and the instances
+    with no oracle at all (§6). ``unsound: []`` over zero comparisons is not a
+    soundness result, and the caller must be able to tell the two apart.
+    """
+    unsound, verification_failed, uncovered = [], [], []
+    oracle_cmps = 0
     for c in cells:
         ref = c["reference_optimum"]
+        if ref is None:
+            uncovered.append(c["instance"])
         for key, _label, _env in ARMS:
             rec = c[key]
             sense = rec["sense"]
@@ -109,6 +147,7 @@ def soundness(cells: list[dict]) -> dict:
                 if bad:
                     unsound.append(f"{c['instance']}:{key}:bound-crosses-incumbent")
             if rec["bound"] is not None and ref is not None:
+                oracle_cmps += 1
                 bad = (
                     rec["bound"] < float(ref) - 1e-4
                     if sense == "max"
@@ -116,7 +155,12 @@ def soundness(cells: list[dict]) -> dict:
                 )
                 if bad:
                     unsound.append(f"{c['instance']}:{key}:bound-past-oracle")
-    return {"unsound": unsound, "incumbent_verification_failed": verification_failed}
+    return {
+        "unsound": unsound,
+        "incumbent_verification_failed": verification_failed,
+        "oracle_comparisons_executed": oracle_cmps,
+        "instances_without_oracle": sorted(set(uncovered)),
+    }
 
 
 def compare(cells: list[dict], a_key: str, b_key: str) -> dict:
@@ -201,7 +245,23 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=20.0)
     ap.add_argument("--instances", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument(
+        "--rescore",
+        default=None,
+        help="Re-run soundness() over a saved artifact's cells instead of solving. "
+        "The cells already carry every arm's bound, so a panel whose oracle was "
+        "broken can be re-scored without spending the wall time again.",
+    )
     args = ap.parse_args()
+
+    if args.rescore:
+        saved = json.loads(Path(args.rescore).read_text())["cells"]
+        for c in saved:
+            c["reference_optimum"] = reference_optimum(c["instance"])
+        snd = soundness(saved)
+        print(json.dumps(snd, indent=2))
+        print(f"ORACLE_COMPARISONS_EXECUTED={snd['oracle_comparisons_executed']}")
+        return 0 if snd["oracle_comparisons_executed"] else 1
 
     names = (
         [s for s in args.instances.split(",") if s]
@@ -257,6 +317,8 @@ def main() -> int:
     print(f"\nCERT_CLEAN={cert_clean}  (graduation pair: cand vs base)")
     print(f"OVERRUN_DELTA_S_CAND_VS_BASE={grad['overrun_delta_s']}")
     print(f"COMPARISONS_EXECUTED={compared}")
+    print(f"ORACLE_COMPARISONS_EXECUTED={snd['oracle_comparisons_executed']}")
+    print(f"INSTANCES_WITHOUT_ORACLE={snd['instances_without_oracle']}")
 
     if args.out:
         out = Path(args.out)
@@ -268,6 +330,11 @@ def main() -> int:
 
     if compared == 0:
         print("PANEL FIRED NOTHING", file=sys.stderr)
+        return 1
+    if snd["oracle_comparisons_executed"] == 0:
+        # A panel that never reached an oracle cannot report on soundness, and
+        # ``unsound: []`` from it is a formatting artifact, not a measurement.
+        print("PANEL MADE NO ORACLE COMPARISONS", file=sys.stderr)
         return 1
     return 0
 
