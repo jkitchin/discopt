@@ -64,19 +64,20 @@ pytestmark = pytest.mark.skipif(
 
 # Items where discopt's forward interval has an unbounded endpoint and so cannot
 # be compared for tightness. Pinned so the set cannot silently grow.
-#   - euclidean_norm / norm_le : sqrt(x^2 + y^2); the inner square's exact 0
-#     minimum outward-rounds just below 0, poisoning sqrt's domain to a -inf
-#     lower endpoint (sound, but loose).
 #
-# The inverse-trig atoms (asin / acos / atan) used to live here; issue #136
-# wired their monotone enclosures into the interval evaluator, so they now
-# produce finite bounds and are no longer pinned.
-DISCOPT_UNBOUNDED: frozenset[str] = frozenset(
-    {
-        "euclidean_norm::objective",
-        "norm_le::soc",
-    }
-)
+# The set is currently EMPTY, and the test below still fires: it asserts the
+# pinned items are all still unbounded *and* that nothing outside the set became
+# unbounded, so an empty set is the strongest form of the pin, not a disabled one.
+#
+# Two families used to live here:
+#   - asin / acos / atan : issue #136 wired their monotone enclosures into the
+#     interval evaluator, so they produce finite bounds.
+#   - euclidean_norm / norm_le : sqrt(x^2 + y^2), where the inner square's exact 0
+#     minimum outward-rounded just below 0 and poisoned sqrt's domain to a -inf
+#     lower endpoint (sound, but loose). Issue #957 stopped the outward rounding
+#     where fl(result) == 0 implies result == 0 — squaring is exactly that case —
+#     so the square's lower endpoint is now an honest 0 and sqrt stays in domain.
+DISCOPT_UNBOUNDED: frozenset[str] = frozenset()
 
 _TOL = 1e-6
 

@@ -63,14 +63,31 @@ def test_norm_sound_and_finite(_flag_on, n, s):
     assert abs(on - true_min) < 1e-3, f"not exact on symmetric case: ON={on} true={true_min}"
 
 
-def test_norm_unbounded_off_becomes_finite_on(_flag_on):
-    """The loose concave-sqrt relaxation is unbounded here; the norm OA makes it finite."""
+def test_norm_atom_beats_the_loose_sqrt_relaxation(_flag_on):
+    """The norm OA is exact here; the factorable concave-sqrt path is 4x weaker.
+
+    This used to assert the OFF arm came back ``unbounded``, which is what the
+    wrong-curvature relaxation produced when the inner square's exact 0 minimum
+    outward-rounded below 0 and poisoned sqrt's domain. Issue #957 removed that
+    nudge (fl(result) == 0 implies result == 0 for squaring), so OFF is now
+    finite — 0.3536 against the true 1.4142 — and the claim this test exists to
+    make is the one restated here: the atom is what recovers the exact bound, and
+    it is a *strict* improvement, not merely a finite one.
+    """
+    true_min = math.sqrt(2.0)
     st_on, on = _bound(_norm_on_simplex(2, 2.0))
     os.environ.pop("DISCOPT_NORM_ATOM", None)
-    st_off, _off = _bound(_norm_on_simplex(2, 2.0))
+    st_off, off = _bound(_norm_on_simplex(2, 2.0))
     os.environ["DISCOPT_NORM_ATOM"] = "1"
-    assert st_off == "unbounded"
     assert st_on == "optimal" and isinstance(on, (int, float))
+    assert st_off == "optimal" and isinstance(off, (int, float)), (
+        f"OFF arm is no longer a finite bound (status={st_off}); this test compares "
+        "the two relaxations and cannot do so without both"
+    )
+    # Both are lower bounds, and both must stay sound.
+    assert off <= true_min + 1e-6 and on <= true_min + 1e-6
+    assert on > off + 0.5, f"norm atom no longer strictly tighter: ON={on} OFF={off}"
+    assert abs(on - true_min) < 1e-3
 
 
 def test_plain_sqrt_unaffected_when_on(_flag_on):
