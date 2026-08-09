@@ -179,7 +179,7 @@ class TermUnderestimator:
         ``h`` is univariate and we hold its SymPy expression, so ``sp.diff`` is
         the exact derivative — there is nothing here that needs autodiff. Until
         #75 this was ``jax.grad`` applied to a lambdified copy of ``h_expr``,
-        which pulled 210 jax modules onto a default solve (measured on the gas
+        which pulled 211 jax modules onto a default solve (measured on the gas
         network MINLP, where ``structure_cuts`` is default-ON) to compute a
         univariate slope.
 
