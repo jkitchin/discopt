@@ -77,3 +77,36 @@ def test_certify_decline_reports_uncertified_not_optimal():
         # must be labeled as such, never "optimal" with no bound.
         assert res.status == "uncertified"
         assert res.lower_bound is None
+
+
+@pytest.mark.claim_boundary
+def test_root_lp_gate_bites_when_the_matrix_bytes_are_identical():
+    """The build-boundary bucket must excuse only a *different* LP, never a drift.
+
+    ``diff_root_lp`` declines to call a root-LP difference a claim change when the
+    relaxation fingerprint differs too — the two sides did not solve the same
+    matrix (``contvar`` does this across builds; see the docstring there). That
+    escape must be conditional: with the recorded bytes matching what this build
+    produces, an altered status or bound is still ``changed``. Without this test,
+    widening the bucket to a blanket skip would look like a pass.
+    """
+    from support.claim_differential import current_row, diff_root_lp, load_baseline
+
+    baseline = load_baseline()
+    # Pick an instance this build reproduces exactly, so the only thing under
+    # test is the doctored field (proves the probe fired -- CLAUDE.md §6).
+    name = next(
+        (n for n in sorted(baseline) if diff_root_lp(n, baseline).status == "unchanged"),
+        None,
+    )
+    assert name is not None, "no exactly-reproduced instance to test the gate with"
+    row = dict(baseline[name])
+    assert row["fingerprint"] == current_row(name)["fingerprint"]
+
+    same_bytes = dict(row, root_lp_status="a-status-this-build-does-not-produce")
+    d = diff_root_lp(name, {name: same_bytes})
+    assert d.status == "changed", f"gate did not bite on {name}: {d}"
+
+    drifted = dict(same_bytes, fingerprint="0" * 64)
+    d2 = diff_root_lp(name, {name: drifted})
+    assert d2.status == "fingerprint_drift", f"drifted bytes not excused on {name}: {d2}"

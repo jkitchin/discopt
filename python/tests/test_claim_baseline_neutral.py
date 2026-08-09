@@ -97,4 +97,16 @@ def test_current_root_lp_matches_committed_baseline():
         f"{d.instance} ({d.detail})" for d in errored
     )
     # Sanity (CLAUDE.md §6): the sweep actually compared the bulk of the corpus.
+    # This counts only exactly-compared instances, so the drift bucket below can
+    # never grow into a way for the gate to stop measuring.
     assert len(buckets["unchanged"]) >= 50
+    # Informational, mirroring the shape gate: an instance whose relaxation bytes
+    # differ from the baseline's did not solve the same LP, so its root LP result
+    # is not attributable (see diff_root_lp). Reported, never silent.
+    drift = buckets["fingerprint_drift"]
+    if drift:
+        print(
+            f"\n[info] {len(drift)} instance(s) whose root LP differs but whose matrix "
+            f"bytes differ too (cross-build boundary, not a claim change): "
+            + "; ".join(f"{d.instance} ({d.detail})" for d in drift)
+        )

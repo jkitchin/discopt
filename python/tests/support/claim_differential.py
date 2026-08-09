@@ -126,6 +126,25 @@ def diff_root_lp(name: str, baseline: dict[str, dict]) -> InstanceDiff:
     integer shape columns. A baseline row that predates the ``root_lp_status``
     field is classified ``changed`` (regenerate the baseline), NOT skipped —
     an ungated recorded field is how 52 silent drifts accumulated.
+
+    A difference is only attributable when both sides solved the **same** LP.
+    ``diff_instance`` already records that the relaxation fingerprint is not
+    reproducible across Rust builds/platforms, naming ``contvar``/``tanksize``
+    as the known drifters; where those bytes differ, the matrix this root LP was
+    built from is not the matrix the baseline recorded, so a status/bound
+    difference says nothing about a claim change. Such an instance is bucketed
+    ``fingerprint_drift`` (reported, never silent) instead of ``changed``, for
+    the same reason and by the same rule the shape gate uses. The fingerprint is
+    only computed when a difference is seen, so the gating path is unaffected:
+    an instance whose bytes match is still compared exactly.
+
+    Measured (#961/#964): ``contvar``'s root LP certifies on the host that
+    generated the committed row, and declines (``uncertified``, no bound) on both
+    CI (ubuntu/x86-64) and a macOS/arm64 build — 5/5 deterministic per host — with
+    its fingerprint differing from the committed one on the declining build. Its
+    certification sits on the edge of the Neumaier–Shcherbina/conditioning guards,
+    so last-digit matrix differences flip it. That is a build boundary, not a
+    drift to gate on.
     """
     base = baseline.get(name)
     if base is None:
@@ -141,15 +160,24 @@ def diff_root_lp(name: str, baseline: dict[str, dict]) -> InstanceDiff:
     except Exception as exc:  # noqa: BLE001 - report per-instance, do not abort the sweep
         return InstanceDiff(name, "error", repr(exc))
     base_status, base_bound = base["root_lp_status"], base["root_lp_bound"]
+    detail = ""
     if cur_status != base_status:
-        return InstanceDiff(name, "changed", f"root LP status {base_status!r} -> {cur_status!r}")
-    if (cur_bound is None) != (base_bound is None):
-        return InstanceDiff(name, "changed", f"root LP bound {base_bound} -> {cur_bound}")
-    if cur_bound is not None and abs(cur_bound - base_bound) > ROOT_LP_REL_TOL * max(
-        1.0, abs(base_bound)
+        detail = f"root LP status {base_status!r} -> {cur_status!r}"
+    elif (cur_bound is None) != (base_bound is None) or (
+        cur_bound is not None
+        and abs(cur_bound - base_bound) > ROOT_LP_REL_TOL * max(1.0, abs(base_bound))
     ):
-        return InstanceDiff(name, "changed", f"root LP bound {base_bound} -> {cur_bound}")
-    return InstanceDiff(name, "unchanged")
+        detail = f"root LP bound {base_bound} -> {cur_bound}"
+    if not detail:
+        return InstanceDiff(name, "unchanged")
+    # A difference is only a claim change if both sides solved the same matrix.
+    try:
+        cur_fp = current_row(name)["fingerprint"]
+    except Exception as exc:  # noqa: BLE001 - report per-instance, do not abort the sweep
+        return InstanceDiff(name, "error", f"{detail}; fingerprint unavailable: {exc!r}")
+    if cur_fp != base["fingerprint"]:
+        return InstanceDiff(name, "fingerprint_drift", f"{detail}; matrix bytes differ too")
+    return InstanceDiff(name, "changed", detail)
 
 
 def partition_corpus_root_lp(
@@ -160,6 +188,7 @@ def partition_corpus_root_lp(
     buckets: dict[str, list[InstanceDiff]] = {
         "unchanged": [],
         "changed": [],
+        "fingerprint_drift": [],
         "error": [],
         "missing": [],
     }
