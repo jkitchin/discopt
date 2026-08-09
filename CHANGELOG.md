@@ -10,7 +10,81 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The POUNCE-native NLP path now requires — and verifies — a cross-thread-safe
+  `NlProblem`** (`fix`, #932). #932 reported the pyo3 panic
+  `_pounce::nl_problem::PyNlProblem is unsendable, but sent to another thread`
+  and asked for one of two outcomes: pin the object to one thread, or establish
+  that it is safe to send and drop the marker. **POUNCE took the second route** —
+  pounce#477 ("Let one NlProblem serve a whole worker pool") removed the
+  `unsendable` marker after establishing that `NlTnlp` is `Send` and that every
+  `&self` method evaluates under the GIL, citing the same reasoning #932 did:
+  `PanicException` derives from `BaseException`, so a cross-thread access slips
+  past every `except Exception` in a host and surfaces as a wrong answer rather
+  than an error, and the *drop* path tripped even for code that never used an
+  instance cross-thread. There is therefore no discopt-side thread-affinity bug,
+  and the model-level base cache — one `NlProblem` shared by every thread that
+  solves a node — is correct as written.
+
+  What changed here is the requirement being made explicit instead of assumed.
+  POUNCE's version string cannot express it (pounce#477 landed inside an
+  unreleased `0.9.0`, so a pre- and post-fix build are both "0.9.0"), so
+  `nlp_native` now *measures* the guarantee once per process on the first base
+  built — a real second thread touching the problem, catching `BaseException`
+  because a pyo3 panic is one — and disables the native path with a warning
+  naming pounce#477 when it does not hold, falling back to the JAX callback
+  bridge rather than letting an uncatchable panic abort a solve. The stale
+  "enable explicitly once PyNlProblem is made Send-safe" note in `solver.py` is
+  corrected; `DISCOPT_NLP_NATIVE` stays default-OFF on its remaining grounds
+  (neutral-to-modest speedup, MIQP-batch certification perturbation), which is a
+  §5 graduation-panel decision rather than a bug fix.
+  Tests: `test_932_native_base_thread_sharing.py`.
+
 ### Added
+
+- **Anytime dual bound: root seeding + one unified report** (`fix`, #933).
+  27% of a 200-instance MINLPLib sweep reported **no dual bound at all** at
+  `time_limit=8`, for two architectural reasons #933 measured: (a) the root
+  relaxation bound proved during setup was never installed into the tree, so
+  `global_lower_bound` stayed `-inf` until the first fully-processed batch; and
+  (b) the reported bound was re-derived independently in five solve exit paths,
+  four of which had no recovery when the tree bound was unusable — including
+  silently discarding a perfectly *valid* finite tree bound on every
+  no-incumbent limit exit by conflating "the exit is not certified" with "the
+  tree bound is invalid".
+
+  Part (a): `TreeManager::seed_root_bound` (new PyO3 entry point) floors node
+  0's `local_lower_bound` — and permanently the reported global bound — at a
+  root-box bound proved by the *same trusted engine* that bounds the path's
+  nodes (the spatial path's McCormick root probe behind the #930 box-equality
+  gate; the MILP path's structured-node root LP; the #781 HiGHS root-cut bound
+  is deliberately not seeded). Children inherit the floor, so the dual bound is
+  anytime and monotone by construction. The native spatial kernel gets the
+  kernel-side mirror of the #844 policy: its deadline is shortened by the
+  root-fallback reserve, reclaimed once (`bound_time_extension`) the moment its
+  own bound is finite, so only a bound-less kernel forfeits the slice — which
+  the caller then spends on the rigorous root-relaxation fallback. Seeding and
+  the kernel reserve are **bound-changing** and gated by
+  `DISCOPT_ROOT_BOUND_SEED` — graduated **default ON** through the Regime-2
+  panel (`discopt_benchmarks/scripts/issue933_seed_graduation_panel.py`,
+  66 in-repo instances at TL=8, paired OFF/ON: 31 oracle checks with 0
+  crossings, 0 certification regressions, 0 objective drift; bound coverage
+  61→62, ON tighter on 6 / looser on 0 paired bounds, one
+  feasible→certified-optimal upgrade, wall mean −0.55 s; raw log in
+  `discopt_benchmarks/results/issue933/`). `=0` opts out and restores the
+  legacy unseeded tree.
+
+  Part (b) (unconditional, reporting-only): `_finalize_reported_bound` is the
+  one chokepoint for an uncertified exit's reported bound — taint rule applied
+  once (valid+finite+sub-sentinel at the 1e19 threshold, closing the #930
+  `np.isfinite(1e20)` hole for every path), independent-root-bound fallback
+  applied once (root LP / untainted root-batch snapshot; tightest wins), the
+  `bound <= incumbent` certificate invariant enforced, sense mapped once. The
+  NLP-BB/MILP-BB/MIQP-BB paths now capture the taint flag *before* the
+  exit-status logic overwrites it, so a valid tree bound survives no-incumbent
+  time/node-limit exits, and the MILP path reports its live frontier bound
+  instead of the stale root LP value on budget-limited exits.
 
 - **Deterministic work budgets for the root primal heuristics** (`fix`, #912).
   The search tree was a function of *machine speed*: the root
@@ -189,6 +263,178 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Two CI signals that reported without measuring** (`ci`). Both were found while
+  driving #960 to green, and both share a shape: a check that answers confidently
+  from something other than the thing it claims to be testing.
+
+  1. **The `changes` gate answered from a guessed diff on all three event
+     arms.** It resolves a base commit and diffs against it; every arm had a
+     path where the base is unavailable and the code substituted
+     `HEAD~1..HEAD` — the tip commit's file list — instead of recognising that
+     it did not know. When that guess lands on a docs-only commit the gate says
+     `code=false` and every solver job below it reports `skipped`, which renders
+     as *not red*. That is the #953 failure mode: a wrong `false` here is not a
+     missing test, it is a green-looking wall of nothing.
+
+     * `workflow_dispatch`: `github.event.before` exists only on `push`, so it
+       expands to the empty string, the first `git diff` fails, and the fallback
+       fires. Dispatching CI on #960, whose tip touched `CHANGELOG.md` and
+       `docs/dev/data/claim-baseline.jsonl`, produced `code=false` and left
+       Rust, `Python fast`, `Python claim-boundary`, `Python correctness` and
+       AMP all `skipped` — nine checks that executed nothing. Now `code=true`
+       unconditionally: pressing the button means "run everything", and there is
+       no base to diff against anyway.
+     * `pull_request` — the trigger that fires on nearly every change here —
+       used `${base:-HEAD~1}`, reachable two ways: the `git fetch` above it is
+       `|| true`, so a fetch failure is silent, and the `--depth=200` fetch
+       installed a shallow boundary that hides the merge base of a branch forked
+       further back than that. Either way a PR that changes the solver behind a
+       docs-only tip commit skipped every solver job. The depth cap is gone (the
+       checkout is already `fetch-depth: 0`) and an unresolvable base is now
+       treated as uncertain.
+     * `push`: an all-zero `before` (a branch's first push), a non-existent
+       object (force-push, shallow clone), or an empty one is likewise the
+       *uncertainty* case the job's own comment already promised to resolve as
+       `true`.
+
+     New `python/tests/test_ci_changes_gate.py` extracts the gate's real shell
+     script out of `ci.yml` — not a copy, so it cannot drift — renders the
+     `${{ github.* }}` expressions, and runs it against throwaway git repos, one
+     case per event type. 12 tests; 6 fail on the pre-change workflow (one per
+     defective arm plus the four `push` base shapes) and the 6 pinning behaviour
+     that must not change (docs-only PRs and pushes still skip, a code file
+     runs, `schedule` still skips the PR matrix, a resolvable merge base is still
+     used in preference to the tip) pass both ways. `pyyaml` moves into the `dev`
+     extra so that file is a skip rather than a collection error where it is
+     absent.
+
+  2. **Two `ex1252` quality bars measured the runner, not the relaxation.**
+     `compute_disjunctive_config_bound` stops on whichever of `max_leaf_solves`
+     and `deadline` comes first, and reported no indication of which. The leaf
+     budget is reproducible; the clock is not. The nightly lane read 33498
+     (42/120 leaves) and 31567 (32/48) on a runner ~3x slower than the reference
+     machine and failed both bars as if the bound had regressed. It had not: at
+     the full budget the bound is **bit-identical** across the #957 boundary —
+     37945.427865923564 at 48 leaves and 63080.286987442756 at 120, matching the
+     values the tests' own docstrings record, with the same leaf and prune counts
+     in both arms.
+
+     `DisjunctiveConfigResult` gains `stopped_on` (`"budget"` / `"deadline"` /
+     `"exhausted"`), mirroring `WorkBudget.stopped_on` from #912 — the same
+     distinction between a search decided by work and one decided by the clock.
+     The two bars now assert `stopped_on != "deadline"` *before* the bound
+     comparison, so a slow machine and a bound regression produce different
+     failures with different instructions, and the clock-bound message says
+     explicitly not to lower the bar. Deadlines are re-sized as backstops at ~2x
+     the measured runner rate (0.175 leaf solves/s → 600 s for 48 leaves, 1500 s
+     for 120), and the nightly lane's `--timeout` goes 900 s → 1800 s so the
+     harness timeout is never what decides a quality bar. The 120-minute job
+     timeout remains the backstop against a hang.
+
+- **Outward rounding no longer turns an exact zero into a subnormal** (`fix`, #957).
+  `interval.py`'s `_round_down`/`_round_up` are `np.nextafter(x, ∓inf)`, and
+  `nextafter(0.0, ±inf)` is `±5e-324`. At every other magnitude "one ULP" is a
+  negligible *relative* widening; at zero it crosses into the subnormal range and
+  manufactures a coefficient ~300 orders of magnitude below everything else in
+  the model. Measured on the in-repo corpus, **384 of 730 relaxation LPs carried
+  such a value**, and in 67 of them the coefficient-spread guard at
+  `milp_relaxation.py:548` — `nz.max() / nz.min() > TRIGGER` — *overflowed to
+  `inf`* while making its decision (with a `RuntimeWarning` as the tell), so
+  equilibration fired unconditionally regardless of how benign the matrix was.
+
+  **The obvious fix — leave every exact zero alone — is unsound, and was not
+  taken.** The nudge at zero is load-bearing wherever the producing operation can
+  underflow: `fl(exp(-800))` is `0.0` while the exact value is `3.6e-348`, so a
+  blanket special-case would give `exp` an upper endpoint *below* its own image.
+  What ships instead is an opt-in pair, `_round_down_exact0` / `_round_up_exact0`,
+  applied only where `fl(result) == 0 ⟹ result == 0` is provable: `+`, `-` and
+  `width` (every double is a multiple of `2**-1074`, so a float sum is zero only
+  when the exact sum is — fuzz-checked against `longdouble` over 14 268 cancelling
+  pairs), `abs`, `sqrt`, `log`, the reciprocal, and `*` / `**2` behind an explicit
+  no-underflow guard on the corner factors. The generic monotone wrapper keeps the
+  unconditional helpers, so a future atom inherits the safe behaviour by default.
+
+  Second, independent half: `_coefficient_spread_exceeds()` replaces the open-coded
+  spread test at both conditioning seams. It uses the overflow-free cross-multiplied
+  form (already applied at the false-infeasible seam by #732 Stage 1-B) *and* drops
+  entries below the smallest normal double, so the guard measures the conditioning
+  of the model rather than of an underflow artifact. Both halves were needed: the
+  interval fix clears `A_ub` on 14 of the 15 affected instances, and `st_e11`'s
+  subnormals — which come from a different producer — are neutralised by the floor
+  (19 overflowing LPs → 0).
+
+  Corpus panel (66 instances, 10 s budget, arms interleaved): **0 soundness
+  violations** against the 16 oracle-checked instances, total node count identical
+  (3298 → 3298), subnormal-carrying LPs 384/730 → 28/782, spread-test overflows
+  67 → 0. Every status/bound/node difference the panel reported was on an instance
+  sitting within ~1 s of the deadline; re-measured unloaded with the arms
+  interleaved, the two decisive ones (`cvxnonsep_nsig30`, `st_e36`) are bit-identical
+  between arms.
+
+  Found while fixing the above: `psd_2x2_sufficient` had the same bug pointing the
+  other way. It skipped its upward round when `fl(off**2) == 0.0`, which is *not*
+  an exact zero when `off` is around `1e-200` — the exact `off**2` is ~1e-400, so
+  a matrix with a (barely) negative determinant could pass the PSD test. The zero
+  test now reads the *factors*, not the flushed product. `gershgorin_lambda_min`
+  /`_max` gain the same treatment, so a linear function's all-zero Hessian bounds
+  come back as exactly `0.0` instead of `∓5e-324` and no longer miss a boundary
+  `λ_min ≥ 0` test.
+
+  **Claim-boundary baseline regenerated, attributed against a `main` control.**
+  This is a bound-changing change, so `docs/dev/data/claim-baseline.jsonl` moves —
+  but `claim_differential`'s contract is that every changed instance be
+  independently attributed, not merely re-recorded. A naive regeneration is
+  *not* attributable here: the committed baseline was stamped at `605d29b` and
+  its `root_lp_bound` column had gone stale, so regenerating on this branch
+  showed 56 bound moves and looked like this PR had done all of them.
+
+  Three-way measurement, with the control arm asserted to lack the marker
+  (`_round_down_exact0` absent in the `main` tree, checked before generating):
+
+  - **committed `605d29b` → `main` `d5f6eff6`** (62 instances): `SHAPE_MOVED=0`,
+    `ROOT_LP_MOVED=52`. All 52 predate this branch, including every one that
+    looked alarming — `nvs13` −4843.01 → −751.12, and `beuster`/`casctanks`/
+    `st_miqp2`/`st_miqp3`/`st_miqp4` dropping to no recorded root bound. The
+    *shape* column was never stale, which is why the gate — shape-only — has been
+    passing on `main` throughout.
+  - **`main` → this branch** (66 instances): `SHAPE_MOVED=7`, `ROOT_LP_MOVED=18`.
+    That is this PR's actual footprint.
+
+  The 7 shape movers are rows-only — column and integer-column counts unchanged
+  everywhere, the signature of extra cuts rather than a different formulation —
+  and they are the claim-boundary job's list instance for instance: `bchoco06`
+  832→848, `bchoco07` 1081→1163, `bchoco08` 1604→1898, `fac2` 54→66, `tspn08`
+  604→609, `tspn10` 935→940, `tspn12` 1340→1345. An independent two-arm probe in
+  a single tree (OFF = the opt-in helpers rebound to the unconditional
+  `_round_down`/`_round_up` in both modules plus the pre-#960 `psd_2x2_sufficient`
+  at both its import sites) reproduces exactly that set, and its OFF arm
+  reproduces the committed baseline shape for all 62 rows
+  (`CONTROL_MATCHED_BASELINE=62 MISMATCHED=[]`).
+
+  Of the 18 bound moves, 12 are last-digit (≤1e-10 relative: `bchoco06/07/08`,
+  `hda`, `heatexch_gen1/2`, `nvs12`, `nvs13`, `nvs21`, `st_e36`, `st_miqp1`,
+  `tspn05`). The 6 substantive ones are all tightenings that stay below their
+  reference optimum — every one of these instances minimizes (`O0 0`), so a valid
+  dual bound may rise but never past the optimum:
+
+  | instance | `main` | this branch | reference optimum |
+  | --- | --- | --- | --- |
+  | `fac2` | none | 303 398.521 | 331 837 498.2 |
+  | `tspn08` | none | 231.983 | 290.567 |
+  | `tspn10` | none | 161.161 | 225.126 |
+  | `tspn12` | none | 183.326 | 262.647 |
+  | `chance` | 26.350 | 28.943 | 29.894 |
+  | `nvs04` | −5e-322 | 0.0 | 0.72 |
+
+  `nvs04` is the bug itself in the baseline: the recorded root bound *was* the
+  subnormal artifact, and it is now an exact zero. Solving the relaxation MILP
+  rather than the root LP tells the same story — `fac2` no usable bound →
+  2 132 258.914, and `tspn08/10/12` go from **unbounded** to a finite valid bound
+  (246.211 / 183.117 / 203.126), all below their optima, `UNSOUND=0`.
+
+  The 52 pre-existing `root_lp_bound` drifts are carried in by this regeneration
+  because the file is generated wholesale; they are recorded here as measured on
+  `main`, not claimed as this PR's doing.
 - **The MILP/MIQP B&B incumbents are verified against every declared row and
   bound before they are returned** (`fix`, #952). `_solve_miqp_bb`'s only
   feasibility gate was `_check_lp_solution_feasibility(A_eq_full, b_eq, x_full)`

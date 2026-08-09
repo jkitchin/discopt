@@ -55,6 +55,40 @@ def _round_up(x: Number) -> np.ndarray:
     return np.nextafter(x, np.float64(np.inf))
 
 
+def _round_down_exact0(x: Number) -> np.ndarray:
+    """:func:`_round_down`, but leaving an **exact zero** exactly zero (#957).
+
+    ``nextafter(0.0, -inf)`` is ``-5e-324``. At every other magnitude "one
+    ULP" is a negligible *relative* widening; at zero it crosses into the
+    subnormal range and manufactures a coefficient ~300 orders of magnitude
+    below everything else in the model. That value is still a sound
+    enclosure, but it defeats downstream code that reasons about
+    *magnitudes* — the coefficient-spread test in ``milp_relaxation`` divides
+    by the smallest nonzero entry and overflows to ``inf`` on it.
+
+    Skipping the nudge is sound **only** where a floating-point result of
+    exactly ``0`` implies the exact real result is ``0`` — i.e. where the
+    producing operation cannot underflow to zero. That is a property of the
+    operation, not of the value, so this variant is strictly opt-in: reach
+    for :func:`_round_down`, which is sound unconditionally, unless the call
+    site carries the argument for its own operation. ``exp`` is the
+    counter-example that makes the distinction real, not theoretical:
+    ``fl(exp(-800))`` is ``0.0`` while the exact value is ``3.6e-348 > 0``,
+    so ``exp``'s upper endpoint must keep the nudge or the enclosure would
+    exclude the true image.
+    """
+    return np.where(x == 0.0, np.float64(0.0), np.nextafter(x, np.float64(-np.inf)))
+
+
+def _round_up_exact0(x: Number) -> np.ndarray:
+    """:func:`_round_up`, but leaving an **exact zero** exactly zero (#957).
+
+    The upward twin of :func:`_round_down_exact0`; the same opt-in rule and
+    the same underflow caveat apply.
+    """
+    return np.where(x == 0.0, np.float64(0.0), np.nextafter(x, np.float64(np.inf)))
+
+
 def _nan_corner_to_zero(x: Number) -> np.ndarray:
     """Replace ``NaN`` corner products with ``0``, preserving ±inf (C-36).
 
@@ -143,7 +177,11 @@ class Interval:
     @property
     def width(self) -> np.ndarray:
         """Element-wise width ``hi - lo``."""
-        return _round_up(self.hi - self.lo)
+        # ``_exact0`` (#957): IEEE-754 subtraction of two doubles cannot
+        # underflow to a false zero — the exact difference is a multiple of
+        # ``2**-1074``, so it is either representable or nonzero-after-rounding.
+        # ``fl(hi - lo) == 0`` therefore means the width really is zero.
+        return _round_up_exact0(self.hi - self.lo)
 
     @property
     def mid(self) -> np.ndarray:
@@ -162,14 +200,21 @@ class Interval:
         return Interval(-self.hi, -self.lo)
 
     def __add__(self, other: Union["Interval", Number]) -> "Interval":
+        # ``_exact0`` (#957): see :attr:`width` — a floating-point sum of two
+        # doubles is zero only when the exact sum is zero, so there is no
+        # underflow for the outward nudge to cover here.
         other = _as_interval(other)
-        return Interval(_round_down(self.lo + other.lo), _round_up(self.hi + other.hi))
+        return Interval(
+            _round_down_exact0(self.lo + other.lo), _round_up_exact0(self.hi + other.hi)
+        )
 
     __radd__ = __add__
 
     def __sub__(self, other: Union["Interval", Number]) -> "Interval":
         other = _as_interval(other)
-        return Interval(_round_down(self.lo - other.hi), _round_up(self.hi - other.lo))
+        return Interval(
+            _round_down_exact0(self.lo - other.hi), _round_up_exact0(self.hi - other.lo)
+        )
 
     def __rsub__(self, other: Union["Interval", Number]) -> "Interval":
         return _as_interval(other) - self
@@ -216,6 +261,28 @@ class Interval:
                 d = _nan_corner_to_zero(d)
                 lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
                 hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+        # #957: an endpoint of exactly ``0`` is either a *genuine* zero — some
+        # corner had a zero factor, and ``0 * x`` is exact in IEEE-754,
+        # including the ``0 * ±∞ -> 0`` convention applied just above — or an
+        # *underflowed* nonzero product (``1e-200 * 1e-200`` flushes to zero
+        # with the exact value ~1e-400). Only the second needs the outward
+        # nudge; nudging the first manufactures a ±5e-324 subnormal, and
+        # ``[0,0] * [-3,7]`` (a very common shape: a zero gradient or Hessian
+        # entry) is exactly that case. A corner is an exact zero iff one of its
+        # factors is zero, so scanning for a zero corner with two nonzero
+        # factors *is* the underflow test. Detect on the already-computed
+        # endpoints — the same "pay only when it happens" shape as the NaN
+        # cleanup above, since the interval AD / monotonicity walkers build
+        # millions of these and the vast majority have no zero endpoint at all.
+        if bool(np.any(lo == 0.0)) or bool(np.any(hi == 0.0)):
+            underflowed = (
+                ((a == 0.0) & (self.lo != 0.0) & (other.lo != 0.0))
+                | ((b == 0.0) & (self.lo != 0.0) & (other.hi != 0.0))
+                | ((c == 0.0) & (self.hi != 0.0) & (other.lo != 0.0))
+                | ((d == 0.0) & (self.hi != 0.0) & (other.hi != 0.0))
+            )
+            if not bool(np.any(underflowed)):
+                return Interval(_round_down_exact0(lo), _round_up_exact0(hi))
         return Interval(_round_down(lo), _round_up(hi))
 
     __rmul__ = __mul__
@@ -232,7 +299,11 @@ class Interval:
             return Interval(np.full_like(self.lo, -inf), np.full_like(self.hi, inf))
         inv_lo = 1.0 / other.hi
         inv_hi = 1.0 / other.lo
-        return self * Interval(_round_down(inv_lo), _round_up(inv_hi))
+        # ``_exact0`` (#957): ``1/x`` is zero only for ``x = ±inf``, where the
+        # exact reciprocal is zero too — the smallest finite reciprocal,
+        # ``1/1.8e308``, is ~5.6e-309, so this division never underflows to a
+        # false zero.
+        return self * Interval(_round_down_exact0(inv_lo), _round_up_exact0(inv_hi))
 
     def __rtruediv__(self, other: Union["Interval", Number]) -> "Interval":
         return _as_interval(other) / self
@@ -260,6 +331,18 @@ class Interval:
             sq_min = np.minimum(lo_sq, hi_sq)
             lo = np.where(zero_in, 0.0, sq_min)
             hi = sq_max
+            # #957, same rule as ``__mul__``: a squared endpoint is exactly
+            # zero either because the endpoint itself was zero (exact) or
+            # because the square underflowed. Only the latter needs the nudge,
+            # and a *negative* subnormal lower endpoint on a square — which is
+            # what the unconditional nudge produces for any box containing
+            # zero — is precisely the artifact #957 is about.
+            if bool(np.any(lo == 0.0)) or bool(np.any(hi == 0.0)):
+                underflowed = ((lo_sq == 0.0) & (self.lo != 0.0)) | (
+                    (hi_sq == 0.0) & (self.hi != 0.0)
+                )
+                if not bool(np.any(underflowed)):
+                    return Interval(_round_down_exact0(lo), _round_up_exact0(hi))
             return Interval(_round_down(lo), _round_up(hi))
         # General integer power via repeated squaring; soundness
         # preserved because every op outward-rounds.
@@ -276,6 +359,13 @@ class Interval:
 
 def _monotonic_nondec(x: Interval, f) -> Interval:
     """Image of ``x`` under a nondecreasing function ``f``, outward-rounded."""
+    # Deliberately the *unconditional* ``_round_down``/``_round_up``, not the
+    # ``_exact0`` variants (#957): this wrapper is generic over ``f``, and
+    # ``exp`` underflows — ``fl(exp(-800))`` is ``0.0`` while the exact value
+    # is ``3.6e-348``, so dropping the nudge here would produce an upper
+    # endpoint *below* the true image. Any future atom routed through this
+    # wrapper inherits the safe behaviour by default.
+    #
     # Wide boxes can intentionally overflow to unbounded enclosures. The
     # certificate code treats non-finite endpoints as an abstention signal, so
     # keep the interval sound without emitting benchmark-visible warnings.
@@ -349,7 +439,10 @@ def log(x: Interval) -> Interval:
             safe_lo = np.log(lo)
     with np.errstate(divide="ignore", invalid="ignore"):
         hi = np.log(x.hi)
-    return Interval(_round_down(safe_lo), _round_up(hi))
+    # ``_exact0`` (#957): ``log`` has no underflow region — ``log(t) == 0``
+    # only at ``t == 1``, and the nearest other double, ``1 ± 1.1e-16``, maps
+    # to ``±1.1e-16``, nowhere near zero. So a zero endpoint here is exact.
+    return Interval(_round_down_exact0(safe_lo), _round_up_exact0(hi))
 
 
 def sqrt(x: Interval) -> Interval:
@@ -358,7 +451,10 @@ def sqrt(x: Interval) -> Interval:
     with np.errstate(invalid="ignore"):
         safe_lo = np.where(lo >= 0, np.sqrt(np.where(lo >= 0, lo, 0.0)), -np.inf)
         hi = np.sqrt(x.hi)
-    return Interval(_round_down(safe_lo), _round_up(hi))
+    # ``_exact0`` (#957): ``sqrt`` moves toward 1, so it cannot underflow
+    # (``sqrt(5e-324)`` is ~2.2e-162); IEEE-754 requires it to be correctly
+    # rounded, and ``sqrt(t) == 0`` only for ``t == 0``, where it is exact.
+    return Interval(_round_down_exact0(safe_lo), _round_up_exact0(hi))
 
 
 def absolute(x: Interval) -> Interval:
@@ -368,7 +464,11 @@ def absolute(x: Interval) -> Interval:
     abs_hi = np.abs(x.hi)
     lo = np.where(zero_in, 0.0, np.minimum(abs_lo, abs_hi))
     hi = np.maximum(abs_lo, abs_hi)
-    return Interval(_round_down(lo), _round_up(hi))
+    # ``_exact0`` (#957): ``abs`` and min/max are exact operations — they only
+    # select and re-sign existing doubles — so a zero endpoint is a real zero.
+    # (The unconditional nudge would give ``|[-1, 1]|`` a *negative* lower
+    # endpoint, which is the artifact in its most visible form.)
+    return Interval(_round_down_exact0(lo), _round_up_exact0(hi))
 
 
 def tanh(x: Interval) -> Interval:

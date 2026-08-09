@@ -68,16 +68,18 @@ pytestmark = pytest.mark.skipif(
 # discopt rightly avoids:
 #   - sqrt_concave : sqrt is nondecreasing, but its derivative is unbounded at
 #     x=0 (the box touches 0), so discopt's interval-gradient enclosure abstains.
-#   - cubic        : x^3 is nondecreasing (3x^2 >= 0), but squaring outward-rounds
-#     the exact 0 minimum to a sub-ULP negative, so the gradient enclosure admits
-#     a negative sliver and discopt abstains. A sound (if conservative) miss.
 #   - sine         : SUSPECT declares sin(x) on [-3, 3] *nonincreasing* via its
 #     unsound interval cosine; sin is NOT monotone there. discopt correctly
 #     abstains. This entry documents a SUSPECT unsoundness, not a discopt gap.
+#
+# ``cubic::objective`` used to be pinned here: x^3 is nondecreasing (3x^2 >= 0),
+# but squaring outward-rounded the exact 0 minimum to a sub-ULP negative, so the
+# gradient enclosure admitted a negative sliver and discopt abstained. Issue #957
+# removed that nudge where fl(result) == 0 implies result == 0 — which is exactly
+# the squaring case — so discopt now proves the direction and the gap is closed.
 KNOWN_SUSPECT_STRONGER: frozenset[str] = frozenset(
     {
         "sqrt_concave::objective",
-        "cubic::objective",
         "sine::objective",
     }
 )

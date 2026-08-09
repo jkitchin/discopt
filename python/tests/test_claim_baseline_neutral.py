@@ -40,7 +40,7 @@ exact committed hash unachievable cross-build.
 from __future__ import annotations
 
 import pytest
-from support.claim_differential import load_baseline, partition_corpus
+from support.claim_differential import load_baseline, partition_corpus, partition_corpus_root_lp
 
 # slow: rebuilds all 62 corpus relaxations in one test (~120s+), so it runs in the
 # serial claim-boundary CI job (generous timeout), not the parallel python-fast job.
@@ -69,4 +69,44 @@ def test_current_build_matches_committed_baseline_shape():
         print(
             f"\n[info] {len(drift)} instance(s) with identical shape but drifted "
             f"matrix bytes (cross-build float noise): {[d.instance for d in drift]}"
+        )
+
+
+@pytest.mark.timeout(1800)
+def test_current_root_lp_matches_committed_baseline():
+    """The recorded ``root_lp_bound``/``root_lp_status`` are gated, not ornamental.
+
+    Issue #961: the baseline spent effort computing a root LP bound per instance,
+    committed it, and never asserted on it — 52 of 62 instances drifted silently,
+    five of them hiding an ``optimal``/``lower_bound=None`` contract violation that
+    the generator's bare ``except`` recorded as a plausible "no bound". This gate
+    re-solves every root LP with the in-house engine and compares status exactly
+    and the bound within ``ROOT_LP_REL_TOL`` (cross-build last-digit noise is not
+    a claim change; anything larger is bound-changing per CLAUDE.md §5 and must
+    regenerate the baseline in the PR that causes it).
+    """
+    baseline = load_baseline()
+    assert baseline, "claim-baseline.jsonl is empty or missing"
+    buckets = partition_corpus_root_lp(baseline)
+    changed = buckets["changed"]
+    errored = buckets["error"]
+    assert not changed, "root LP bound/status drifted vs committed baseline: " + "; ".join(
+        f"{d.instance} ({d.detail})" for d in changed
+    )
+    assert not errored, "root LP solve crashed vs baseline: " + "; ".join(
+        f"{d.instance} ({d.detail})" for d in errored
+    )
+    # Sanity (CLAUDE.md §6): the sweep actually compared the bulk of the corpus.
+    # This counts only exactly-compared instances, so the drift bucket below can
+    # never grow into a way for the gate to stop measuring.
+    assert len(buckets["unchanged"]) >= 50
+    # Informational, mirroring the shape gate: an instance whose relaxation bytes
+    # differ from the baseline's did not solve the same LP, so its root LP result
+    # is not attributable (see diff_root_lp). Reported, never silent.
+    drift = buckets["fingerprint_drift"]
+    if drift:
+        print(
+            f"\n[info] {len(drift)} instance(s) whose root LP differs but whose matrix "
+            f"bytes differ too (cross-build boundary, not a claim change): "
+            + "; ".join(f"{d.instance} ({d.detail})" for d in drift)
         )
