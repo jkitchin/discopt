@@ -89,14 +89,32 @@ def test_root_lp_gate_bites_when_the_matrix_bytes_are_identical():
     escape must be conditional: with the recorded bytes matching what this build
     produces, an altered status or bound is still ``changed``. Without this test,
     widening the bucket to a blanket skip would look like a pass.
+
+    The instance is selected on the fingerprint itself, not on
+    ``diff_root_lp(...) == "unchanged"``. Those are not the same condition:
+    ``diff_root_lp`` computes the fingerprint only when it already sees a
+    status/bound difference, so an instance whose root LP is unchanged can still
+    have drifted bytes — and the committed baseline is host-sensitive (measured
+    2026-08-09: 42 of 66 rows differ from a local build with #956's envelope guard
+    OFF, 61 of 66 with it ON, while the root-LP status/bound gate stays green).
+    Selecting on ``unchanged`` therefore picked a byte-drifted instance whenever
+    the host's luck ran out, and the assertion below failed for a reason that had
+    nothing to do with the gate under test.
     """
     from support.claim_differential import current_row, diff_root_lp, load_baseline
 
     baseline = load_baseline()
-    # Pick an instance this build reproduces exactly, so the only thing under
-    # test is the doctored field (proves the probe fired -- CLAUDE.md §6).
+    # Pick an instance this build reproduces EXACTLY -- byte-identical relaxation
+    # AND an unchanged root LP -- so the only thing under test is the doctored
+    # field (proves the probe fired -- CLAUDE.md §6).
     name = next(
-        (n for n in sorted(baseline) if diff_root_lp(n, baseline).status == "unchanged"),
+        (
+            n
+            for n in sorted(baseline)
+            if baseline[n].get("fingerprint") is not None
+            and current_row(n).get("fingerprint") == baseline[n]["fingerprint"]
+            and diff_root_lp(n, baseline).status == "unchanged"
+        ),
         None,
     )
     assert name is not None, "no exactly-reproduced instance to test the gate with"

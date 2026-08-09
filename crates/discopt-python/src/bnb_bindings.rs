@@ -150,12 +150,17 @@ impl PyTreeManager {
     ///     lower_bounds: [N] array of relaxation lower bounds.
     ///     solutions: [N, n_vars] array of relaxation solutions.
     ///     feasible: [N] boolean array (is solution integer-feasible?).
+    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None))]
     fn import_results(
         &mut self,
         node_ids: PyReadonlyArray1<i64>,
         lower_bounds: PyReadonlyArray1<f64>,
         solutions: PyReadonlyArray2<f64>,
         feasible: PyReadonlyArray1<bool>,
+        // #956 T3': per-node RIGOROUS emptiness certificate (Farkas-verified
+        // infeasible relaxation / empty box). Optional so existing callers are
+        // unchanged; omitted means "no certificate", the pre-fix behaviour.
+        certified_infeasible: Option<PyReadonlyArray1<bool>>,
     ) -> PyResult<()> {
         let ids = node_ids.as_array();
         let lbs = lower_bounds.as_array();
@@ -183,6 +188,14 @@ impl PyTreeManager {
             )));
         }
 
+        let cinf = certified_infeasible.as_ref().map(|a| a.as_array());
+        if let Some(ci) = cinf.as_ref() {
+            if ci.len() != n {
+                return Err(PyValueError::new_err(
+                    "certified_infeasible must have the same length as node_ids",
+                ));
+            }
+        }
         let results: Vec<NodeResult> = (0..n)
             .map(|i| {
                 let nid = discopt_core::bnb::NodeId(ids[i] as usize);
@@ -191,6 +204,7 @@ impl PyTreeManager {
                     lower_bound: lbs[i],
                     solution: sols.row(i).to_vec(),
                     is_feasible: feas[i],
+                    certified_infeasible: cinf.as_ref().map(|c| c[i]).unwrap_or(false),
                 }
             })
             .collect();

@@ -628,6 +628,31 @@ pub fn solve_lp_warm_csc_py<'py>(
 /// the batch, and the instances are solved in parallel.
 ///
 /// Returns `(statuses, x, objs)` where `statuses` is a length-`k` list of
+/// Read every profiling counter as a dict, without printing or resetting.
+///
+/// `profile::dump()` writes to stderr and zeroes the accumulators, so it cannot
+/// serve as a measurement instrument for a caller that wants the numbers back. The
+/// #956 follow-through needs the simplex's terminal-verdict histogram in Python to
+/// tell an uncertified infeasibility apart from a drifted optimum or a
+/// factorization breakdown. Counters only accumulate while `DISCOPT_PROFILE` is
+/// set, so this returns zeros otherwise.
+#[pyfunction]
+pub fn profile_counters_py(py: Python<'_>) -> PyResult<PyObject> {
+    discopt_core::profile::init_from_env();
+    let out = PyDict::new(py);
+    for (name, value) in discopt_core::profile::counter_snapshot() {
+        out.set_item(name, value)?;
+    }
+    Ok(out.into())
+}
+
+/// Zero every profiling counter, so a caller can bracket one measurement.
+#[pyfunction]
+pub fn profile_reset_py() {
+    discopt_core::profile::init_from_env();
+    discopt_core::profile::reset_totals();
+}
+
 /// strings (`optimal`/`infeasible`/`unbounded`/`iter_limit`/`numerical`), `x` is
 /// a `k × n` array of solutions, and `objs` is length `k`.
 #[pyfunction]

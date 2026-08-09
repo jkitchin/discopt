@@ -87,9 +87,12 @@ class _ExhaustNoIncumbentTree:
         # fathoming.
         return None
 
-    def import_results(self, ids, lbs, sols, feas):
+    def import_results(self, ids, lbs, sols, feas, certified_infeasible=None):
+        # #956 T3': the real tree now also takes a per-node RIGOROUS emptiness
+        # certificate. Forwarded verbatim — this double must not silently drop it,
+        # or these tests would stop exercising the path they guard.
         self._imported += 1
-        return self._t.import_results(ids, lbs, sols, feas)
+        return self._t.import_results(ids, lbs, sols, feas, certified_infeasible)
 
     def incumbent(self):
         return None
@@ -158,3 +161,41 @@ def test_rigorous_infeasibility_is_preserved():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.smoke
+def test_certified_empty_relaxation_terminates_without_an_incumbent():
+    """A model whose node relaxations are PROVEN empty must terminate as
+    ``infeasible``, even though it never finds an incumbent (#956 T3').
+
+    Regression for a defect that made every infeasible bilinear model run to the
+    time limit. The tree pruned only via ``lower_bound >= incumbent_value``, with
+    ``incumbent_value`` starting at ``+inf``; the orchestrator encodes an
+    infeasible node as a large FINITE sentinel bound, and ``1e30 >= inf`` is
+    false, so a rigorously empty node was branched instead of pruned — on exactly
+    the models that never produce an incumbent. Measured before the fix on this
+    very model: 3603/3603 node LPs certified infeasible (Farkas-verified), tree
+    still ran 4000+ nodes and returned ``time_limit``. After: 1 node.
+
+    ``x*y >= 0.5`` with ``x + y <= 1`` on ``[0,1]^2`` is infeasible because the
+    product cannot exceed 0.25 under the cap, and its McCormick relaxation over
+    the root box is itself empty — so this is a rigorous proof, not a tolerance
+    artefact.
+    """
+    m = Model("c1_certified_empty")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x * y >= 0.5)
+    m.subject_to(x + y <= 1.0)
+    m.minimize(x + y)
+
+    res = m.solve(time_limit=20.0)
+
+    assert res.status == "infeasible", (
+        f"a certifiably empty model must be reported infeasible, got {res.status!r} "
+        f"(pre-fix this ran to the time limit)"
+    )
+    assert res.objective is None, "an infeasible model must carry no incumbent"
+    # The proof is available at the root; it must not need thousands of nodes.
+    nodes = getattr(res, "node_count", None)
+    assert nodes is None or nodes <= 50, f"expected a near-immediate proof, took {nodes} nodes"

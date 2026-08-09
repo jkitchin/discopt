@@ -100,6 +100,7 @@ fn dense_retry(failed: LpSolve, re_solve: impl FnOnce() -> LpSolve) -> LpSolve {
 /// so the matrix is not scaled twice; the caller owns the [`scaling::Scaling`]
 /// and unscales the returned `x` itself.
 pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
+    crate::profile::incr(crate::profile::Ctr::EntryDense);
     let sol = Simplex::new(lp, b, opts).run();
     if dense_retry_wanted(&sol) {
         return dense_retry(sol, || Simplex::new(lp, b, opts).run());
@@ -126,15 +127,118 @@ pub fn solve_lp_cols(
     // dual path already clones the CSC per solve — see dual.rs — so this is
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
-    let sol = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run();
+    // #956 T2': keep a copy for the EXPAND-free retry too (flag-gated, so the clone
+    // is not paid on the default path).
+    crate::profile::incr(crate::profile::Ctr::EntryCols);
+    let expand_retry_cols = expand_reset_retry_available().then(|| cols.clone());
+    let mut sx0 = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
+    sx0.no_expand = expand_suppressed_globally();
+    let mut sol = sx0.run();
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
-            return dense_retry(sol, || {
+            sol = dense_retry(sol, || {
                 Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
             });
         }
     }
+    // #956 T2': chained AFTER the #85 dense retry rather than instead of it — the
+    // dense retry returns early on the very solves this one exists to rescue, so an
+    // `if`/`else` here would leave the EXPAND retry permanently unreachable
+    // (measured: it armed 115 times against 597 entries, exactly the 482 solves the
+    // dense route had already claimed).
+    if let Some(cols2) = expand_retry_cols {
+        if let Some(rescued) = expand_reset_retry(&sol, || {
+            let mut sx = Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts);
+            sx.no_expand = true;
+            sx.run()
+        }) {
+            return rescued;
+        }
+    }
     sol
+}
+
+/// Whether the #956 T2' EXPAND-free retry is enabled. Default OFF pending the
+/// plan's §5 panel; `DISCOPT_PRIMAL_EXPAND_RESET=1` opts in. Read once.
+fn expand_reset_retry_available() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_PRIMAL_EXPAND_RESET")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
+            .unwrap_or(false)
+    })
+}
+
+/// Whether EXPAND is suppressed on the **primary** solve, not just the retry
+/// (`DISCOPT_SIMPLEX_NO_EXPAND=1`, default OFF, read once).
+///
+/// This is the seam the #956 T2′ entry experiment needs. The retry above measures
+/// "how many already-failed solves does an EXPAND-free re-solve rescue" (4 %),
+/// which cannot settle whether EXPAND *causes* the bound excursions — a failed
+/// solve is already deep in trouble for other reasons. The question that decides
+/// the mechanism is what `Phase1EndBoxViolated` does when no pivot anywhere is
+/// ever allowed to cross a bound. Default OFF; it graduates only on the §5 panel.
+fn expand_suppressed_globally() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_SIMPLEX_NO_EXPAND")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
+            .unwrap_or(false)
+    })
+}
+
+/// How many pivots may pass before `x_B` is re-derived exactly from the basis
+/// (`DISCOPT_PRIMAL_XB_REFRESH`, default `0` = only on refactorization). Read once.
+///
+/// The #956 T2′ attribution measured, per violating solve, whether the ratio
+/// test's own `x_B` was already outside the box or was clean and had merely
+/// drifted from what the basis holds: on `nvs20` the split is ~50/50 with **zero**
+/// unattributed, and EXPAND is excluded (suppressing it moves the violation rate
+/// 49.7 % → 48.2 %, and 97 % of violations exceed its per-pivot ceiling by 100×).
+/// Both halves are the same failure at different stages — drift authorises a step
+/// that is infeasible in the true values, and once a basic is outside its box no
+/// later ratio test can pull it back. A smaller refresh cadence is the direct test
+/// of that.
+fn xb_refresh_cadence() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("DISCOPT_PRIMAL_XB_REFRESH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Re-solve once with the EXPAND bound relaxation suppressed when the first solve
+/// failed to decide (#956 T2').
+///
+/// EXPAND permits each pivot a bounded bound violation to escape degeneracy; the
+/// measured failure mode is that those violations accumulate into the basis, so the
+/// solve ends primal-infeasible and `assemble`'s audit downgrades it to `Numerical`.
+/// Suppressing EXPAND makes the ratio test refuse any violation, so the retry either
+/// reaches a genuine certificate or stalls out on degeneracy — and only a terminal
+/// certificate is accepted, exactly like the #671 hardening retry. Soundness rests
+/// on the retry passing the SAME `assemble` audit as any other solve: this can
+/// rescue a solve that would have been `Numerical`, never certify a wrong `Optimal`.
+fn expand_reset_retry(sol: &LpSolve, resolve: impl FnOnce() -> LpSolve) -> Option<LpSolve> {
+    if !matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::ExpandResetRetries);
+    let retried = resolve();
+    if matches!(
+        retried.status,
+        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+    ) {
+        crate::profile::incr(crate::profile::Ctr::ExpandResetRescues);
+        return Some(retried);
+    }
+    None
 }
 
 /// Sparse-native equivalent of [`solve_lp`]: a cold CSC solve with the SAME
@@ -207,6 +311,7 @@ pub fn solve_lp_cols_warm(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    crate::profile::incr(crate::profile::Ctr::EntryColsWarm);
     // #85: cloned up front for a possible dense retry (see solve_lp_cols).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
     let s = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
@@ -254,6 +359,21 @@ enum Feasibility {
 /// first, so a point violating *both* reports [`Feasibility::Bounds`] — correct
 /// for the recovery decision, since refinement cannot repair a bound excursion
 /// even when it repairs the residual.
+/// Bucket how far outside its box the audit found a column, as a multiple of the
+/// audit's own tolerance (#956 follow-through instrumentation).
+#[inline]
+fn record_excursion(ratio: f64) {
+    crate::profile::incr(if ratio < 10.0 {
+        crate::profile::Ctr::AuditExcursionLt10x
+    } else if ratio < 1e3 {
+        crate::profile::Ctr::AuditExcursionLt1e3x
+    } else if ratio < 1e6 {
+        crate::profile::Ctr::AuditExcursionLt1e6x
+    } else {
+        crate::profile::Ctr::AuditExcursionGe1e6x
+    });
+}
+
 fn audit_feasibility(
     cols: &SparseCols,
     m: usize,
@@ -285,12 +405,14 @@ fn audit_feasibility(
         if l[j] > -INF {
             let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
             if x[j] < l[j] - lo_tol {
+                record_excursion((l[j] - x[j]) / lo_tol);
                 return Feasibility::Bounds;
             }
         }
         if u[j] < INF {
             let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
             if x[j] > u[j] + hi_tol {
+                record_excursion((x[j] - u[j]) / hi_tol);
                 return Feasibility::Bounds;
             }
         }
@@ -555,6 +677,10 @@ pub(super) fn farkas_ray_certifies_cols(
             abs_sum += boxmax.abs();
         }
         if open {
+            // #956 follow-through: the ray needed a finite bound on a column it
+            // selected and had none. Counted because it is a defect in the
+            // CERTIFICATE, not evidence the LP is feasible.
+            crate::profile::incr(crate::profile::Ctr::FarkasRejectOpen);
             continue;
         }
         // Neumaier–Shcherbina relative margin so the strict `> 0` is rigorous.
@@ -562,6 +688,7 @@ pub(super) fn farkas_ray_certifies_cols(
         if by - contrib > margin {
             return true;
         }
+        crate::profile::incr(crate::profile::Ctr::FarkasRejectMargin);
     }
     false
 }
@@ -626,6 +753,27 @@ struct Simplex<'a> {
     /// zero-valued-basic-artificial finalization pass so warm-start gets a full
     /// basis. Default `false` (bound-changing; kernel path opts in).
     expel_zero_artificials: bool,
+    /// Suppress the EXPAND bound relaxation entirely (#956 T2'). EXPAND lets each
+    /// pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), which made it
+    /// the obvious suspect behind the bound excursions that downgrade solves to
+    /// `Numerical`.
+    ///
+    /// **It is not the mechanism, measured.** With it suppressed on *every* solve
+    /// of `nvs20` (not just a retry), the phase-1 handoff violation rate is
+    /// essentially unchanged — 49.7 % -> 48.2 % — and 97 % of the violations are
+    /// `> 1e-5`, i.e. 100x EXPAND's own per-pivot ceiling, with **zero** at or below
+    /// it. Kept as a seam (`DISCOPT_SIMPLEX_NO_EXPAND`, and the retry below) because
+    /// it is the control arm any future ratio-test hypothesis must be measured
+    /// against; the cost of setting it is exposure to the degeneracy stalling
+    /// EXPAND exists to avoid, which Bland's rule and `max_iter` still bound.
+    no_expand: bool,
+    /// The incrementally-maintained `x_B` as of the last `simplex_loop` exit, kept
+    /// only while profiling so [`Self::audit_phase1_handoff`] can compare what the
+    /// ratio test *believed* against what the basis actually holds (#956 T2').
+    last_xb: Vec<f64>,
+    /// Pivots between exact re-derivations of `x_B`; `0` = only on refactorization.
+    /// Seeded from [`xb_refresh_cadence`]; a test sets it directly.
+    xb_refresh: usize,
 }
 
 impl<'a> Simplex<'a> {
@@ -680,6 +828,9 @@ impl<'a> Simplex<'a> {
             ub,
             unbounded_ray: Vec::new(),
             expel_zero_artificials: opts.expel_zero_artificials,
+            no_expand: false,
+            last_xb: Vec::new(),
+            xb_refresh: xb_refresh_cadence(),
         }
     }
 
@@ -761,6 +912,99 @@ impl<'a> Simplex<'a> {
     /// update-drifted basis is recovered *inside the engine* rather than by
     /// falling back to another solver. Returns `None` if the fresh factorization
     /// or refined solve fails (the caller keeps the Numerical verdict).
+    /// Record whether the basis is primal-feasible at the phase-1 -> phase-2 handoff
+    /// (#956 T2' diagnostic; profiling-gated so production pays nothing).
+    fn audit_phase1_handoff(&mut self, art_sign: &[f64]) {
+        if !crate::profile::enabled() {
+            return;
+        }
+        let worst = match self.basic_values(art_sign) {
+            Ok(xb) => {
+                let x = self.assemble_x(&xb);
+                self.worst_bound_violation(&x)
+            }
+            Err(()) => f64::INFINITY,
+        };
+        crate::profile::incr(if worst <= 0.0 {
+            crate::profile::Ctr::Phase1EndBoxOk
+        } else {
+            crate::profile::Ctr::Phase1EndBoxViolated
+        });
+        // Size the violation against EXPAND's own per-pivot ceiling (1e-7). A
+        // violation at that scale is one pivot's sanctioned Harris excursion; one
+        // 100x larger can only be an accumulation across pivots (or drift), and the
+        // two call for different repairs (#956 T2').
+        if worst > 0.0 && worst.is_finite() {
+            crate::profile::incr(if worst <= 1e-7 {
+                crate::profile::Ctr::Phase1ViolLe1Expand
+            } else if worst <= 1e-5 {
+                crate::profile::Ctr::Phase1ViolLe100Expand
+            } else {
+                crate::profile::Ctr::Phase1ViolGt100Expand
+            });
+            // EXPAND is excluded as the mechanism (suppressing it moves the rate
+            // 49.7 % -> 48.2 %), so the remaining candidate is that the ratio test
+            // decided on an x_B that had drifted away from what the basis actually
+            // holds. Split the violating solves three ways: the ratio test's own
+            // x_B was clean (drift), it already violated by a comparable amount
+            // (the test is admitting violations for some other reason), or there is
+            // no incremental x_B to compare (a non-optimal phase-1 exit).
+            if self.last_xb.len() == self.basis.len() {
+                let fresh = self.basic_values(art_sign).ok();
+                let drift = fresh
+                    .as_ref()
+                    .map(|f| {
+                        f.iter()
+                            .zip(self.last_xb.iter())
+                            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+                    })
+                    .unwrap_or(f64::INFINITY);
+                let believed = self.assemble_x(&self.last_xb.clone());
+                let believed_viol = self.worst_bound_violation(&believed);
+                crate::profile::incr(if believed_viol > 0.5 * worst {
+                    crate::profile::Ctr::Phase1IncrAlsoViolates
+                } else if drift >= 0.5 * worst {
+                    crate::profile::Ctr::Phase1DriftDominates
+                } else {
+                    crate::profile::Ctr::Phase1ViolUnexplained
+                });
+            } else {
+                crate::profile::incr(crate::profile::Ctr::Phase1NoIncrXb);
+            }
+        }
+    }
+
+    /// Largest absolute bound violation over the structural columns, measured
+    /// against the same relative tolerance [`Self::first_bound_violator`] uses;
+    /// `0.0` when every column is inside its box. Diagnostic only (#956 T2').
+    fn worst_bound_violation(&self, x: &[f64]) -> f64 {
+        const FEAS: f64 = 1e-6;
+        let mut worst = 0.0f64;
+        for j in 0..self.n {
+            if self.lb[j] > -INF {
+                let slack = self.lb[j] - FEAS * (1.0 + self.lb[j].abs().min(INF)) - x[j];
+                worst = worst.max(slack);
+            }
+            if self.ub[j] < INF {
+                let slack = x[j] - self.ub[j] - FEAS * (1.0 + self.ub[j].abs().min(INF));
+                worst = worst.max(slack);
+            }
+        }
+        worst
+    }
+
+    /// Index of the first column outside its box by more than the audit's own
+    /// relative tolerance, mirroring [`audit_feasibility`]'s bound test exactly.
+    /// Diagnostic only (#956 T2').
+    fn first_bound_violator(&self, x: &[f64]) -> Option<usize> {
+        const FEAS: f64 = 1e-6;
+        (0..self.n).find(|&j| {
+            (self.lb[j] > -INF && x[j] < self.lb[j] - FEAS * (1.0 + self.lb[j].abs().min(INF)))
+                || (self.ub[j] < INF
+                    && x[j] > self.ub[j] + FEAS * (1.0 + self.ub[j].abs().min(INF)))
+        })
+    }
+
     fn refined_basic_values(&self, art_sign: &[f64]) -> Option<Vec<f64>> {
         let cols: Vec<Vec<f64>> = self
             .basis
@@ -966,12 +1210,21 @@ impl<'a> Simplex<'a> {
                 if ray.as_ref().is_some_and(|y| self.farkas_ray_certifies(y)) {
                     return self.assemble(LpStatus::Infeasible, &art_sign);
                 }
+                // #956 follow-through: infeasible-looking but UNCERTIFIED. This is
+                // the bucket the spatial trees cannot act on.
+                crate::profile::incr(crate::profile::Ctr::LpInfeasUncertified);
                 return self.assemble(LpStatus::Numerical, &art_sign);
             }
             // Artificials cleared — the LP is FEASIBLE and, because the cleanup used
             // only phase-1-feasible ratio-test pivots, the basis is primal-feasible.
             // Phase 2 (below) optimizes the real objective from it and yields a bound.
         }
+
+        // #956 T2': the comments above assert the basis handed to phase 2 is
+        // primal-feasible. That is a claim about the STRUCTURAL basics' boxes, while
+        // phase 1 only ever measured `sum|artificials|`, so measure it here — on
+        // every solve, not just the ones that had a phase-1 residual.
+        self.audit_phase1_handoff(&art_sign);
 
         // --- Phase 2: pin artificials to 0, optimize real objective ---
         for i in 0..m {
@@ -1476,8 +1729,19 @@ impl<'a> Simplex<'a> {
         const EXPAND_MIN: f64 = 1e-8;
         const EXPAND_MAX: f64 = 1e-7;
         const EXPAND_RESET: usize = 10_000;
-        let expand_incr = (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64;
-        let mut expand_tol = EXPAND_MIN;
+        // #956 T2': with EXPAND suppressed the relaxation is identically zero, so no
+        // pivot may push a basic variable outside its true bound.
+        let expand_incr = if self.no_expand {
+            0.0
+        } else {
+            (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64
+        };
+        let mut expand_tol = if self.no_expand { 0.0 } else { EXPAND_MIN };
+        // #956 T2': how many pivots may pass before `x_B` is re-derived exactly.
+        // 0 (default) keeps the pre-existing behaviour — refresh only on the
+        // ≤48-update refactorizations. See `xb_refresh_cadence`.
+        let xb_refresh_every = self.xb_refresh;
+        let mut since_xb_refresh = 0usize;
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -1529,7 +1793,14 @@ impl<'a> Simplex<'a> {
             drop(_t_sweep);
             let q = match enter {
                 Some(q) => q,
-                None => return Ok(()), // optimal
+                None => {
+                    // Hand the ratio test's own view of x_B to the handoff audit
+                    // (#956 T2'); profiling-gated, so production never clones.
+                    if crate::profile::enabled() {
+                        self.last_xb = xb.clone();
+                    }
+                    return Ok(()); // optimal
+                }
             };
             let dir = if self.stat[q] == AT_LOWER { 1.0 } else { -1.0 };
 
@@ -1779,7 +2050,24 @@ impl<'a> Simplex<'a> {
                             .basic_values(art_sign)
                             .map_err(|_| LpStatus::Numerical)?;
                         updates = 0;
+                        since_xb_refresh = 0;
                         refac_work_budget = self.lu.factor_nnz();
+                    } else if xb_refresh_every > 0 && since_xb_refresh >= xb_refresh_every {
+                        // #956 T2': re-derive x_B from the basis mid-window. The
+                        // ratio test decides which variable leaves and by how much
+                        // from `xb`; if `xb` has drifted, it authorises a step that
+                        // is infeasible in the values the basis actually holds, and
+                        // no later refresh can undo the resulting basis. Refreshing
+                        // between refactorizations costs one extra ftran per
+                        // `xb_refresh_every` pivots and cannot change the answer —
+                        // it only replaces an estimate with the exact value.
+                        xb = self
+                            .basic_values(art_sign)
+                            .map_err(|_| LpStatus::Numerical)?;
+                        since_xb_refresh = 0;
+                        crate::profile::incr(crate::profile::Ctr::XbMidRefresh);
+                    } else {
+                        since_xb_refresh += 1;
                     }
                 }
             }
@@ -1819,7 +2107,31 @@ impl<'a> Simplex<'a> {
             match audit(&self, &x) {
                 Feasibility::Ok => LpStatus::Optimal,
                 // Bound excursion: refinement can't help — downgrade directly.
-                Feasibility::Bounds => LpStatus::Numerical,
+                Feasibility::Bounds => {
+                    crate::profile::incr(crate::profile::Ctr::LpAuditBoundsFail);
+                    // #956 T2' diagnostic (profiling-gated, so production pays
+                    // nothing): re-test `assemble`'s standing claim that a bounds
+                    // excursion is a Harris artefact no sharper `x_B` can repair.
+                    if crate::profile::enabled() {
+                        if let Some(j) = self.first_bound_violator(&x) {
+                            crate::profile::incr(if self.stat[j] == BASIC {
+                                crate::profile::Ctr::AuditBoundsOnBasic
+                            } else {
+                                crate::profile::Ctr::AuditBoundsOnNonbasic
+                            });
+                        }
+                        let fixed = match self.refined_basic_values(art_sign) {
+                            Some(xb_r) => audit(&self, &self.assemble_x(&xb_r)) == Feasibility::Ok,
+                            None => false,
+                        };
+                        crate::profile::incr(if fixed {
+                            crate::profile::Ctr::AuditBoundsRefineFixes
+                        } else {
+                            crate::profile::Ctr::AuditBoundsRefinePersists
+                        });
+                    }
+                    LpStatus::Numerical
+                }
                 // Row residual: the failure mode iterative refinement can recover.
                 Feasibility::Rows => {
                     crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttemptsPrimal);
@@ -1834,16 +2146,39 @@ impl<'a> Simplex<'a> {
                                 obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
                                 LpStatus::Optimal
                             } else {
+                                crate::profile::incr(crate::profile::Ctr::LpAuditRowsFail);
                                 LpStatus::Numerical
                             }
                         }
-                        None => LpStatus::Numerical,
+                        None => {
+                            crate::profile::incr(crate::profile::Ctr::LpAuditRowsFail);
+                            LpStatus::Numerical
+                        }
                     }
                 }
             }
         } else {
             status
         };
+        // #956 T2' diagnostic: was this LP's box already empty on arrival?
+        if crate::profile::enabled() {
+            let crossed = (0..self.n).any(|j| self.lb[j] > self.ub[j]);
+            if crossed {
+                crate::profile::incr(crate::profile::Ctr::LpCrossedBox);
+                if status != LpStatus::Optimal {
+                    crate::profile::incr(crate::profile::Ctr::LpCrossedBoxAndFailed);
+                }
+            }
+        }
+        // #956 follow-through: the terminal verdict histogram, counted once per
+        // solve at the simplex's single exit point (after the audit's say).
+        crate::profile::incr(match status {
+            LpStatus::Optimal => crate::profile::Ctr::LpVerdictOptimal,
+            LpStatus::Infeasible => crate::profile::Ctr::LpVerdictInfeasible,
+            LpStatus::Numerical => crate::profile::Ctr::LpVerdictNumerical,
+            LpStatus::IterLimit => crate::profile::Ctr::LpVerdictIterLimit,
+            LpStatus::Unbounded => crate::profile::Ctr::LpVerdictUnbounded,
+        });
 
         // Certificate vector `y = B⁻ᵀ c_B` (length m). On `Optimal` use the real
         // objective costs — these are the row duals feeding a safe (never-too-high)
@@ -2024,6 +2359,45 @@ mod tests {
     fn solve(a: &[f64], m: usize, n: usize, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> LpSolve {
         let lp = LpView { a, m, n, c, l, u };
         solve_lp(&lp, b, &SimplexOptions::default())
+    }
+
+    /// The #956 T2′ exact-`x_B` refresh must be a pure accuracy change: it replaces
+    /// an estimate with the value the basis already holds, so no cadence may move
+    /// the optimum. Also proves the seam is live — with `xb_refresh = 1` the
+    /// mid-window branch runs on every pivot, and the answer is unchanged.
+    #[test]
+    fn xb_refresh_cadence_cannot_move_the_optimum() {
+        // Same LP as `two_constraint_lp`; optimum -5 at x0=3, x1=1.
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [INF; 4];
+        let b = [4.0, 6.0];
+        let opts = SimplexOptions::default();
+        let mut objs = Vec::new();
+        for k in [0usize, 1, 4, 16] {
+            let lp = LpView {
+                a: &a,
+                m: 2,
+                n: 4,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let mut sx = Simplex::new(&lp, &b, &opts);
+            sx.xb_refresh = k;
+            let r = sx.run();
+            assert_eq!(r.status, LpStatus::Optimal, "cadence {k}");
+            objs.push(r.obj);
+        }
+        assert_eq!(objs.len(), 4, "probe did not fire for every cadence");
+        for (k, obj) in [0usize, 1, 4, 16].iter().zip(&objs) {
+            assert!(
+                (obj - objs[0]).abs() < 1e-9,
+                "cadence {k} moved obj to {obj}"
+            );
+            assert!((obj - (-5.0)).abs() < 1e-6, "cadence {k} obj {obj}");
+        }
     }
 
     #[test]
