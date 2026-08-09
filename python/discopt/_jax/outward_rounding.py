@@ -47,9 +47,9 @@ Hence the guard is a pure function of quantities all three engines already hold
 derivative and rhs) and is computed here, once, in a fixed operation order —
 never re-derived at a call site.
 
-``DISCOPT_ENVELOPE_OUTWARD_ROUND=1`` turns the guard on; it is **default OFF**
-because the differential panel measured it as harmful (see
-:func:`outward_rounding_enabled`). Off is bit-for-bit the pre-#956 arithmetic.
+The guard is **default ON** (graduated on the §5 panel, 2026-08-09);
+``DISCOPT_ENVELOPE_OUTWARD_ROUND=0`` opts out and is bit-for-bit the pre-#956
+arithmetic. See :func:`outward_rounding_enabled` for the measurement.
 """
 
 from __future__ import annotations
@@ -82,23 +82,28 @@ _ENABLED: bool | None = None
 
 
 def outward_rounding_enabled() -> bool:
-    """Whether the guard is applied. **Default OFF**; ``=1`` opts in. Read once.
+    """Whether the guard is applied. **Default ON**; ``=0`` opts out. Read once.
 
-    Default-off is a measured decision, not caution (CLAUDE.md §5, the
-    ``DISCOPT_CUT_INHERIT`` rule: a cert-clean but harmful flag stays OFF). The
-    guard is sound — it only ever loosens — but it makes the relaxation uniformly
-    weaker, and a uniformly weaker relaxation prunes less at every node. Measured
-    on the differential panel: 6/6 decisive instances regress in 3/3 interleaved
-    replicates, and on ex1252 under the #707 reform flags — the configuration
-    issue #956 was filed about — the undecided-node fraction gets WORSE, 55.3% ->
-    81.7%, with half the node throughput. See `docs/dev/performance-plan.md` §15.
+    Mirrors ``mccormick_patch.rs::outward_rounding_enabled`` exactly — the three
+    engines must agree row for row, so they must agree on this too.
+
+    It shipped default-OFF first, on a measurement that read as "cert-clean but
+    harmful". Re-measured after the #956 T3′ fix, neither half survives: the
+    regression signal sits inside this harness's measured noise floor (two builds
+    running *identical* code produce win/loss splits up to 5/7), and the
+    undecided-fraction evidence is no longer measurable at all (``n_undecided`` is
+    0 across every corpus instance that reaches the native kernel, in both arms).
+    What remains is a demonstrated soundness defect — the unguarded generators cut
+    ``(x, f(x))`` out of their own envelope — repaired at no measurable cost, which
+    CLAUDE.md §1 settles in favour of correctness. See
+    ``docs/dev/issue-956-followthrough-plan.md`` §4 (T6/T7).
 
     With the guard off, ``outward_slack`` is identically 0.0 and ``widen`` is the
     identity, so the whole relaxation is bit-for-bit the pre-#956 arithmetic.
     """
     global _ENABLED
     if _ENABLED is None:
-        _ENABLED = os.environ.get("DISCOPT_ENVELOPE_OUTWARD_ROUND", "0").strip() not in (
+        _ENABLED = os.environ.get("DISCOPT_ENVELOPE_OUTWARD_ROUND", "1").strip() not in (
             "0",
             "false",
             "False",

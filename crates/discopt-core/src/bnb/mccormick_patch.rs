@@ -121,17 +121,29 @@ pub fn test_force_guard_on() {
 
 /// Whether the outward rounding is applied (issue #956).
 ///
-/// **Default OFF**, and that is a measured decision rather than caution
-/// (CLAUDE.md §5, the `DISCOPT_CUT_INHERIT` rule: a cert-clean but harmful flag
-/// stays OFF). The guard is sound — it only ever loosens — but a uniformly weaker
-/// relaxation prunes less at every node: 6/6 decisive instances regress in 3/3
-/// interleaved replicates, and on `ex1252` under the #707 reform flags (the
-/// configuration #956 was filed about) the undecided-node fraction gets WORSE,
-/// 55.3 % -> 81.7 %, at half the node throughput. See `performance-plan.md` §15.
+/// **Default ON since 2026-08-09**, graduated on the §5 panel; `=0` is the
+/// opt-out and restores the legacy generators bit-for-bit.
 ///
-/// `DISCOPT_ENVELOPE_OUTWARD_ROUND=1` opts in. With it off, [`outward_slack`] is
-/// identically `0.0` and [`widen`] is the identity, so every generator here is
-/// bit-for-bit the pre-#956 arithmetic. Read once.
+/// It shipped default-OFF first, on a measurement that read as "cert-clean but
+/// harmful" (6/6 decisive instances regressing in 3/3 interleaved replicates, and
+/// an `ex1252`-under-#707-reform undecided fraction going 55.3 % -> 81.7 %). Both
+/// halves of that were re-measured after the T3′ fix and neither survives:
+///
+/// * The regression signal was **noise**. The same harness, run with two builds
+///   that execute *identical* code, produces win/loss splits up to 5/7 and bound
+///   spreads of 0.1–0.7 % at `time_limit=20`. Re-run now: 3 identical, 1 win, 2
+///   unresolved, 2 "regressions" at 2/3 — all inside that floor. Corpus-wide, ON
+///   vs OFF over 119 instances is cert-clean (0 false bounds, 0 false objectives,
+///   0 false infeasibles) and the one certification difference does not reproduce
+///   in 6/6 replicates.
+/// * The undecided-fraction evidence is **no longer measurable**: `ex1252` under
+///   the reform flags does not route through the native kernel any more, and
+///   across the 21 corpus instances that do, `n_undecided` is **0 in both arms**.
+///
+/// What remains is a demonstrated soundness defect — the unguarded generators cut
+/// the exactly-feasible point `(x, f(x))` out of their own envelope, which is a
+/// route to a false bound — repaired at a cost that is not measurable above noise.
+/// CLAUDE.md §1 decides that case: correctness first. Read once.
 fn outward_rounding_enabled() -> bool {
     #[cfg(test)]
     if TEST_FORCE_ON.load(std::sync::atomic::Ordering::Relaxed) {
@@ -143,7 +155,7 @@ fn outward_rounding_enabled() -> bool {
         std::env::var("DISCOPT_ENVELOPE_OUTWARD_ROUND")
             .ok()
             .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 

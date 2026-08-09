@@ -11674,9 +11674,7 @@ def solve_model(
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(
-            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
-        )
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -13976,9 +13974,7 @@ def _solve_nlp_bb(
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(
-            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
-        )
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 

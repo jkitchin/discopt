@@ -1759,3 +1759,55 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > verdict came from whichever way that razor-thin LP rounded, and the solver closed
 > it in 1 node without ever branching, contradicting the fixture's own docstring.
 > The fixture now uses a model whose verdict is deterministic in both arms.
+
+### 15a. Retraction and graduation: the "harmful" verdict on #956 was noise, and the guard ships ON (2026-08-09)
+
+Everything in §15 above marked as evidence that
+`DISCOPT_ENVELOPE_OUTWARD_ROUND` is *harmful* is **retracted**. Both measurements
+were re-run on the current tree after the #956 T3′ fix (a proven-empty region can
+now be fathomed without an incumbent) and neither survives.
+
+**The 6/6-regressions table was noise, and the missing piece was a control.** That
+table has no arm in which the two builds are known to be identical, so it had no
+way to distinguish a real effect from run-to-run variation. The T6 panel supplied
+one: comparing this branch against `origin/main` on six instances where the only
+differing code path *provably never executes* (`TreeCertInfeasPrunes = 0` on all
+six), the same harness still reported "WIN 3/3" for one instance and "REGRESSION
+4/7" for two others, with bound spreads of 0.1–0.7 % at `time_limit=20`. That is
+the noise floor. Re-run against it, the guard's own A/B is a wash: 3 identical, 1
+win (tanksize, every replicate), 2 unresolved, 2 "regressions" at 2/3 — every one
+of them inside the floor. `nvs20`'s "deterministic, not noise" reading also fails:
+it is now *identical* in both arms.
+
+**The ex1252 undecided-fraction table can no longer be measured at all.** That
+configuration does not route through the native spatial kernel any more — the
+panel's wrapper counts 0 kernel calls for it, while counting 21 elsewhere in the
+same run, so the probe is live and the answer is real. Across the 21 corpus
+instances that do reach the kernel, `n_undecided` is **0 in both arms** over
+12 636 (ON) / 12 255 (OFF) kernel nodes. There is no undecided fraction left for
+the guard to worsen. The mechanism story §15 built on that table — "loosening
+makes conditioning worse, so more LPs come back undecided" — has no surviving
+measurement behind it and should not be cited.
+
+**Cert-clean panel, ON vs OFF, one build, 119 instances:** 149 executed
+assertions, **0 false bounds, 0 false objectives, 0 false infeasibles, 0 new
+errors**. The single flagged certification difference (`nvs12`) does not reproduce
+— 6/6 interleaved replicates return `optimal`, 231 nodes, bound −481.2 in both
+arms.
+
+**Graduated default-ON.** §5's net-positive bar exists to keep sound-but-useless
+*performance* machinery off the default path. The outward-rounding guard is not
+that — it is the repair for the reported defect (unguarded generators cut
+`(x, f(x))` out of their own envelope, a route to a false bound; six Rust
+regression tests fail with `=0`), and its cost is not measurable above the noise
+floor. §1 governs: correctness before performance. `=0` remains the opt-out and
+the legacy arithmetic behind it is untouched. §15's "what would graduate it"
+paragraph — a cheaper, cancellation-sized guard — is still the right *next*
+refinement, but it is no longer a precondition for shipping.
+
+**Also closed here:** §15's last paragraph called the `x*y >= c, x + y <= 1`
+non-certification "a pre-existing gap worth its own issue". It was fixed instead,
+in this branch: the tree pruned only on `lower_bound >= incumbent`, and with no
+incumbent that test is never true, so every certified-empty node was branched
+rather than fathomed. It now returns `infeasible` in **1 node** for every `c` from
+0.3 to 2.0, against ~12 000 nodes to the time limit before.

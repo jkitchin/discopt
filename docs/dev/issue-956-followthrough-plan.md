@@ -174,14 +174,14 @@ carries the fix through to the tree anyway.
   revert. Full entry in §4, including the retraction of the first
   (instrument-broken) fired-check.
 
-- [ ] **T7 — Re-decide the #956 guard default.** With undecided nodes now decidable,
-  re-run the guard's own interleaved-replicate A/B (the table in
-  `performance-plan.md` §15) and the W3 undecided-fraction measurement.
-  **Done when:** either the guard is cert-clean AND net-positive → flip
-  `DISCOPT_ENVELOPE_OUTWARD_ROUND` to default-ON, remove the test-only opt-in seams,
-  and #956 is closable; or it is still harmful → it stays OFF and this plan records
-  why, with #956 closable on the narrower ground that the defect is fixed and
-  available. Either way the outcome is written down, not left implicit.
+- [x] **T7 — DONE 2026-08-09. `DISCOPT_ENVELOPE_OUTWARD_ROUND` graduates to
+  default-ON; `=0` remains the opt-out.** Both halves of the original "harmful"
+  verdict were re-measured and neither survives (§4 entry below): the regression
+  signal is inside this harness's now-measured noise floor, and the
+  undecided-fraction evidence is unmeasurable because `n_undecided` is **0 across
+  the whole corpus in both arms**. What is left is a demonstrated soundness defect
+  fixed at no measurable cost, which CLAUDE.md §1 settles. Corpus panel ON vs OFF
+  on one build: 149 assertions, 0 false bounds / objectives / infeasibles / errors.
 
 - [ ] **T8 — Close out.** `cargo test -p discopt-core`, `pytest -m smoke`, the
   adversarial suite, clippy/fmt/ruff. Update `performance-plan.md` §15 with the
@@ -276,6 +276,55 @@ panel (147 assertions, zero violations); net-positive by the firing-instance pan
 (1 win, 9 identical, 0 regressions) plus W1's `time_limit` → `infeasible`. On the
 89 non-firing instances it cannot regress anything, because there it executes
 nothing at all. No revert.
+
+### T7 — the guard graduates default-ON, and why the "harmful" verdict fell (2026-08-09)
+
+The #956 guard shipped default-OFF on two measurements. Both were re-run on the
+current tree; **neither reproduces**, and one of them can no longer even be taken.
+
+**1. "6/6 decisive instances regress in 3/3 replicates" was noise.** T6 supplied
+the missing control: two *builds* that execute identical code on those instances
+still produce win/loss splits up to 5/7 and bound spreads of 0.1–0.7 % at
+`time_limit=20`. Measured against that floor, the guard's re-run A/B (ON vs OFF,
+one build, 3 interleaved replicates) is a wash:
+
+| instance | ON bound (sd) | OFF bound (sd) | verdict |
+|---|---|---|---|
+| nvs20, tls2, trig | — | — | identical |
+| tanksize | 1.25532 ± 0.00037 | 1.25498 ± 0.00035 | WIN, every replicate |
+| nvs17 | −1316.59 ± 3.6 | −1319.23 ± 1.5 | unresolved (w2/l1) |
+| nvs23 | −25851.5 ± 23 | −25868.7 ± 47 | unresolved (w2/l1) |
+| nvs19 | −5820.58 ± 31 | −5799.21 ± 11 | "regression" 2/3 — inside the floor |
+| nvs24 | −172448 ± 94 | −172248 ± 200 | "regression" 2/3 — inside the floor |
+
+**2. The undecided-fraction evidence no longer exists.** The figure that carried
+the original decision — `ex1252` under the #707 reform flags going 55.3 % → 81.7 %
+undecided — cannot be reproduced, because that configuration no longer routes
+through the native spatial kernel at all (the wrapper counts **0** kernel calls
+for it, while counting 21 elsewhere, so the probe is live and the answer is real).
+Across the 21 corpus instances that *do* reach the kernel, `n_undecided` is **0 in
+both arms** over 12 636 / 12 255 kernel nodes. There is no undecided fraction left
+to make worse.
+
+**Corpus panel, ON vs OFF, one build, 119 instances:** 149 executed assertions —
+**0 false bounds, 0 false objectives, 0 false infeasibles, 0 new errors.** One
+certification difference was flagged (`nvs12`, OFF `optimal` / ON `feasible`) and
+does **not** reproduce: 6/6 interleaved replicates return `optimal` at 231 nodes
+with bound −481.2 in *both* arms. Same for `ex1265` in the other direction (6/6
+`optimal`, 1555 nodes, both arms). Both were TL=5 deadline flicker of the kind T6
+already characterised.
+
+**Decision.** §5's net-positive bar exists to keep sound-but-useless *performance*
+machinery out of the default path (the `DISCOPT_CUT_INHERIT` rule). This is not
+that: it is the repair for the defect the issue reports — unguarded generators cut
+the exactly-feasible point `(x, f(x))` out of their own envelope, which is a route
+to a false bound, and six Rust regression tests fail with `=0` to prove it. §1
+governs: *correctness before performance, always.* Shipping the repair off by
+default means #956 is not fixed for anyone who does not know the flag exists. The
+guard is now **default ON** in both engines (`mccormick_patch.rs` and
+`_jax/outward_rounding.py` — they must agree, or `_validate`'s row-set comparison
+drops the incremental path), with `=0` preserved as the opt-out and the legacy
+arithmetic intact behind it.
 
 ### T3' / T4 / T5 - the tree could not fathom a proven-empty region (2026-08-09)
 
