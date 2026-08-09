@@ -80,15 +80,15 @@ def test_certify_decline_reports_uncertified_not_optimal():
 
 
 @pytest.mark.claim_boundary
-def test_root_lp_gate_bites_when_the_matrix_bytes_are_identical():
-    """The build-boundary bucket must excuse only a *different* LP, never a drift.
+def test_root_lp_gate_separates_the_two_ways_a_difference_arises():
+    """Each non-reproducing bucket must be reached by its own cause, not one blanket.
 
-    ``diff_root_lp`` declines to call a root-LP difference a claim change when the
-    relaxation fingerprint differs too — the two sides did not solve the same
-    matrix (``contvar`` does this across builds; see the docstring there). That
-    escape must be conditional: with the recorded bytes matching what this build
-    produces, an altered status or bound is still ``changed``. Without this test,
-    widening the bucket to a blanket skip would look like a pass.
+    ``diff_root_lp`` excuses a root-LP difference from being a claim change in two
+    distinct situations, and the buckets must stay distinguishable: differing
+    relaxation bytes (``fingerprint_drift`` — the two sides did not solve the same
+    matrix) versus identical bytes with a different answer (``unreproduced`` — the
+    arithmetic path differs, #971). Without this test, collapsing either into a
+    blanket skip would look like a pass.
     """
     from support.claim_differential import current_row, diff_root_lp, load_baseline
 
@@ -105,7 +105,7 @@ def test_root_lp_gate_bites_when_the_matrix_bytes_are_identical():
 
     same_bytes = dict(row, root_lp_status="a-status-this-build-does-not-produce")
     d = diff_root_lp(name, {name: same_bytes})
-    assert d.status == "changed", f"gate did not bite on {name}: {d}"
+    assert d.status == "unreproduced", f"wrong bucket for a same-bytes difference on {name}: {d}"
 
     drifted = dict(same_bytes, fingerprint="0" * 64)
     d2 = diff_root_lp(name, {name: drifted})
