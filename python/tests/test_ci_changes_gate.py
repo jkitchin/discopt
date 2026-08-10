@@ -227,8 +227,48 @@ def test_push_with_a_code_file_runs(tmp_path):
     assert _run_gate(repo, script) == "true"
 
 
-def test_schedule_still_skips_the_pr_matrix(tmp_path):
-    """The nightly lane does not gate on this output; the rest must not re-run."""
-    repo, _base, sha = _make_repo(tmp_path, ["python/discopt/solver.py"])
-    script = _render(_gate_script(), event="schedule", before="", sha=sha, base_ref="main")
-    assert _run_gate(repo, script) == "false"
+def test_ci_has_no_schedule_trigger():
+    """No nightly. This is a cost decision, and it has been reversed twice.
+
+    A daily run of the slow correctness lane is a ~2 h runner job against a SHA
+    that has usually not moved. ``143bd1e9`` removed the first nightly for that
+    reason; ``23fff2a6`` re-added one; the owner's call is that it should not
+    exist. This test is what makes the third re-add a red check instead of a
+    silent line in an ``on:`` block.
+
+    It replaces ``test_schedule_still_skips_the_pr_matrix``, which pinned the
+    gate's answer for a ``schedule`` event that can no longer occur.
+    """
+    wf = yaml.safe_load(_CI.read_text())
+    # PyYAML parses a bare `on:` key as the boolean True (YAML 1.1).
+    triggers = wf.get(True, wf.get("on"))
+    assert "schedule" not in triggers, (
+        "ci.yml grew a schedule trigger again. If a periodic run is genuinely "
+        "wanted, weigh the runner minutes first and delete this test "
+        "deliberately -- do not make it pass by narrowing what it checks."
+    )
+
+
+def test_slow_correctness_lane_and_its_reporter_stay_reachable():
+    """With the schedule gone, the lane's only trigger is a manual dispatch.
+
+    The reporter must NOT gate on ``github.event_name``: ``23fff2a6`` shipped
+    three reporters whose event gate could never be true, and they filed nothing
+    for two days while the lane was red (#977). A reporter that cannot fire is
+    the same as no reporter, but it reads as one.
+    """
+    wf = yaml.safe_load(_CI.read_text())
+    jobs = wf["jobs"]
+
+    lane = jobs["python-correctness-slow"]
+    assert lane["if"] == "github.event_name == 'workflow_dispatch'"
+
+    rep = jobs["report-slow-correctness-failure"]
+    assert rep["needs"] == "python-correctness-slow"
+    assert rep["if"] == "failure()", (
+        "the reporter must fire on any failure of the lane it watches; an "
+        f"event_name gate here is unreachable, got {rep['if']!r}"
+    )
+    # `gh` resolves the repo from the git remote and this job has no checkout.
+    env = rep["steps"][0]["env"]
+    assert env["GH_REPO"] == "${{ github.repository }}"
