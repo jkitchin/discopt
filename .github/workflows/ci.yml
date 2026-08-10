@@ -7,11 +7,14 @@ on:
   pull_request:
     branches: [main, feature/mip-nlp-solver]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  schedule:
-    # Nightly, 06:20 UTC. Only `python-correctness-nightly` runs on this trigger;
-    # every other job below is gated on `needs.changes`, which is `false` for a
-    # schedule event (no diff to inspect).
-    - cron: "20 6 * * *"
+
+# NO `schedule:` trigger. A nightly re-run of the slow correctness lane is a
+# ~2 h runner job every day against a SHA that has usually not moved, and the
+# CI-minute cost is not worth it — the same judgement `143bd1e9` made when it
+# removed the previous nightly ("duplicate work and the source of false-alarm
+# emails"), and re-adding it in `23fff2a6` was a mistake. `python-correctness-slow`
+# below is `workflow_dispatch`-only: run it deliberately, before a release or
+# when touching the certificate path.
 
 # Cancel superseded runs on the same PR/branch — saves CI minutes when
 # pushes land in quick succession.
@@ -39,16 +42,6 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            # The nightly trigger exists solely for `python-correctness-nightly`,
-            # which does NOT gate on this output. This is not the "uncertainty"
-            # case the rule below covers — there is no diff to be uncertain
-            # about, and re-running the whole PR matrix nightly would buy nothing
-            # that the last push already proved.
-            echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "=> code=false (schedule: only the nightly correctness lane runs)"
-            exit 0
-          fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # A manual run is a request to run EVERYTHING — that is the only
             # reason to press the button. There is also no base to diff against:
@@ -228,7 +221,9 @@ jobs:
           # --dist loadgroup keeps tests sharing a class on the same worker
           #   so xdist-incompatible fixtures stay serialized.
           # Coverage is intentionally dropped from the PR path — see the
-          # `python-coverage` job (nightly + label-triggered) for full coverage.
+          # `python-coverage` job (main pushes + the `coverage` label) instead.
+          # That parenthetical used to read "nightly + label-triggered";
+          # `python-coverage` has never had a schedule trigger.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             -q --tb=short --timeout=120 \
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
@@ -250,15 +245,13 @@ jobs:
     # #248's nvs16 garbage-bound guard regressed at the #632 uniform-relax cutover
     # and sat unnoticed for a full release cycle because no PR job ran the
     # `correctness` marker. This lane closes that gap. It runs only the cheap
-    # subset (`not slow`); the `slow` half is the `python-correctness-nightly`
-    # job below.
-    #
-    # That sentence used to read "remains the nightly `python-coverage` job's
-    # responsibility", and it was false in two ways at once: `python-coverage`
-    # runs `-m "not slow and not correctness ..."`, and this workflow had no
-    # `schedule:` trigger, so there was no nightly. The 153 `slow`+`correctness`
-    # tests ran in NO lane — including the one asserting that ex1252's dual bound
-    # under the #707/#721/#732 reform flags is sound, which is red (#927).
+    # subset (`not slow`); the `slow` half is `python-correctness-slow` below,
+    # which is manual-dispatch only — no automatic lane runs it, by design
+    # (see the `on:` block: a nightly costs more CI minutes than it is worth).
+    # Running it is therefore a deliberate act before a release or after a
+    # change to the certificate path, and its 153 `slow`+`correctness` tests
+    # have no continuous watch. That is a known, accepted gap; #927 (ex1252
+    # dual-bound soundness) is one of the things it would have caught.
     name: Python correctness (fast subset, 3.12, ubuntu)
     runs-on: ubuntu-latest
     needs: changes
@@ -330,12 +323,12 @@ jobs:
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
 
-  python-correctness-nightly:
+  python-correctness-slow:
     # The other half of the correctness marker: the 153 tests that are `slow`
     # AND `correctness`. These are the end-to-end known-optima and soundness
     # assertions — the ones that solve a real instance and check the certificate
-    # against `minlplib.solu` — and until this job existed they ran in no lane at
-    # all. Nightly rather than per-PR because it is hours, not minutes; the
+    # against `minlplib.solu`. Manual dispatch only: hours rather than minutes,
+    # so it is neither a PR lane nor a nightly (see the `on:` block). The
     # `not slow` half stays on `python-correctness` for the PR-fast signal.
     #
     # Serial for the same reason as `python-correctness`: a soundness lane must
@@ -356,8 +349,8 @@ jobs:
     # 7 skipped, 1 failed — the failure being #927). `python-correctness` is
     # ~5 min locally and 23 min on a runner, so budget ~25 min here and leave
     # headroom for a slower runner rather than a hung solve.
-    name: Python correctness (slow, nightly, 3.12, ubuntu)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Python correctness (slow, on demand, 3.12, ubuntu)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -410,12 +403,16 @@ jobs:
           PYTHONUNBUFFERED: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
 
-  # Same argument as the other two scheduled lanes: a nightly that fails into an
-  # empty room is not a signal.
-  report-nightly-failure:
+  # Same argument as the other two scheduled lanes: a lane that fails into an
+  # empty room is not a signal. This one is now dispatch-only, and a dispatched
+  # 2 h run is exactly the kind you walk away from, so the report still earns
+  # its place. It is NOT gated on `github.event_name` — the lane above has only
+  # one trigger left, and gating on a trigger that can no longer fire is how
+  # `23fff2a6` shipped three reporters that never reported.
+  report-slow-correctness-failure:
     name: File/refresh the CI-signal issue
-    needs: python-correctness-nightly
-    if: failure() && github.event_name == 'schedule'
+    needs: python-correctness-slow
+    if: failure()
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -423,14 +420,20 @@ jobs:
       - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `gh` resolves the repo from the git remote, and these reporter jobs
+          # deliberately skip `actions/checkout` -- so every `gh` call died with
+          # "fatal: not a git repository" and the reporter that exists to make a
+          # failure visible failed silently itself. GH_REPO removes the git
+          # dependency without paying for a checkout.
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: "CI signal down: nightly slow-correctness lane is failing"
+          TITLE: "CI signal down: slow-correctness lane is failing"
         run: |
           set -euo pipefail
           gh label create ci-signal --force --color B60205 \
             --description "A CI lane that is supposed to be watching something has stopped watching"
           printf '%s\n' \
-            "The nightly \`slow\`+\`correctness\` lane failed." \
+            "The \`slow\`+\`correctness\` lane failed." \
             "" \
             "Run: ${RUN_URL}" \
             "" \

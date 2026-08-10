@@ -112,6 +112,12 @@ jobs:
       - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `gh` resolves the repo from the git remote, and these reporter jobs
+          # deliberately skip `actions/checkout` -- so every `gh` call died with
+          # "fatal: not a git repository" and the reporter that exists to make a
+          # failure visible failed silently itself. GH_REPO removes the git
+          # dependency without paying for a checkout.
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TITLE: "CI signal down: AMP integration suite is failing on main"
         run: |

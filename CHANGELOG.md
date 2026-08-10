@@ -234,6 +234,27 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **CI no longer runs a nightly, and the three failure reporters can now reach
+  GitHub** (`ci`). Two coupled corrections to `23fff2a6`:
+  1. **The nightly schedule is removed.** A daily ~2 h runner job against a SHA
+     that has usually not moved is not worth the CI minutes — the same judgement
+     `143bd1e9` made on 2026-05-28 when it deleted the previous nightly
+     ("duplicate work and the source of false-alarm emails"). The lane survives
+     as `python-correctness-slow`, `workflow_dispatch`-only. **Stated cost:** its
+     153 `slow`+`correctness` tests now have no continuous watch; running them is
+     a deliberate act before a release or after a change to the certificate path.
+     Two tests in `test_ci_changes_gate.py` pin the decision so a third re-add of
+     a `schedule:` trigger is a red check rather than a silent line.
+  2. **All three `report-failure` jobs died on their first `gh` call.** They skip
+     `actions/checkout` by design, so `gh` — which resolves the repo from the git
+     remote — exited `fatal: not a git repository`. The three reporters titled
+     "repair three signals that had stopped signalling" had therefore never
+     signalled: the `ci-signal` label does not exist and no issue was ever filed.
+     A real solver defect (#977) sat unrecorded for two days behind a red nightly
+     because of it. Fixed with `GH_REPO: ${{ github.repository }}`, which needs no
+     checkout. The `ci.yml` reporter also loses its now-unreachable
+     `github.event_name == 'schedule'` gate.
+
 - **The #843 QUBO/Ising local-search primal is now default-ON** (`perf`, #843,
   graduating the #846 seed; opt out with `DISCOPT_QUBO_PRIMAL=0`). An
   unconstrained all-binary quadratic model (the `chimera_k64ising` /Max-Cut
