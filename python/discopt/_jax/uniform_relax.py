@@ -84,19 +84,17 @@ logger = logging.getLogger(__name__)
 #: graduated tape default, not once per node (`_compiled` runs per B&B node).
 _analytic_sepgrad_preempt_warned = False
 
-#: Nodes whose expression the tape could not lower, so separation fell through to
-#: JAX. The fall-through is *deliberate* -- soundness first, an unlowerable node
-#: must lose its tape and not its separation -- but it was also silent, which is
-#: the problem: it is the one remaining route by which a default #75 solve can
-#: still import JAX, and nothing said so. Counted and warned (once) rather than
-#: removed: `DISCOPT_SEPGRAD=jax` is the graduated flag's documented opt-out, so
-#: CLAUDE.md §5 requires the JAX arm stay intact.
+#: Nodes whose expression the tape could not lower. Such a node abstains from the
+#: composite-convex lift and keeps its ordinary term-by-term decomposition, which
+#: is sound but possibly looser; it does NOT fall through to JAX (#75). See the
+#: comment at the abstention site for why abstaining is sound.
 #:
-#: Not observed to fire on any instance measured so far: 66 in-repo plus 139
-#: off-corpus MINLPLib instances, and 734 lift-node compiles at the real call
-#: site with 100% tape coverage. A nonzero count here is therefore news.
+#: Counted and warned once so that the weakening is never silent. Not observed to
+#: fire on any instance measured: 66 in-repo plus 139 off-corpus MINLPLib
+#: instances, and 734 lift-node compiles at the real call site with 100% tape
+#: coverage. A nonzero count here is therefore news.
 _tape_unlowerable_nodes = 0
-_tape_fallthrough_warned = False
+_tape_unlowerable_warned = False
 
 __all__ = [
     "LinForm",
@@ -837,8 +835,10 @@ class _Builder:
         #
         # Ordering the explicit flag first changes nothing for a default install
         # (the flag is default-OFF), and a node the analytic path declines still
-        # falls through to the tape below and then to JAX, so the graduated
-        # default keeps every node the analytic table cannot cover.
+        # falls through to the tape below, so the graduated default keeps every
+        # node the analytic table cannot cover. (Before #75 that sentence ended
+        # "and then to JAX"; a node neither path can lower now abstains from the
+        # lift instead -- see the tape arm below.)
         if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
             global _analytic_sepgrad_preempt_warned
             if not _analytic_sepgrad_preempt_warned:
@@ -865,25 +865,44 @@ class _Builder:
 
         if os.environ.get("DISCOPT_SEPGRAD", "tape").strip().lower() != "jax" and pounce_usable():
             v = self._compiled_tape(node)
-            if v is not None:
-                cache[nid] = v
-                return v
-            # fall through to JAX: an unlowerable node must lose its tape, never
-            # its separation. Count it and say so once -- this is the last route
-            # by which a default solve can still import JAX (#75), and a silent
-            # fall-through means nobody learns which operator is missing a
-            # lowering. See `_tape_unlowerable_nodes`.
-            global _tape_unlowerable_nodes, _tape_fallthrough_warned
-            _tape_unlowerable_nodes += 1
-            if not _tape_fallthrough_warned:
-                _tape_fallthrough_warned = True
-                logger.warning(
-                    "separation gradients fell back to JAX: the tape could not lower "
-                    "this node's expression [tape-sepgrad-fallthrough]. The bound stays "
-                    "sound, but this solve imports JAX. Please report the model -- the "
-                    "operator needs an NlExpr lowering."
-                )
+            if v is None:
+                # #75: a node the tape cannot lower ABSTAINS from the composite-
+                # convex lift; it does NOT fall through to JAX. This used to be a
+                # silent fall-through, and it was the last route by which a
+                # default solve could still import JAX (measured at 211 modules).
+                #
+                # Abstaining is sound, and not by a new argument -- it is the
+                # behaviour two sibling guards in `_lift` already rely on. A node
+                # with non-finite bounds, and a node above the #358 conditioning
+                # magnitude, both return `None` there and "stay on the sound
+                # term-by-term decomposition path". The lift only ever ADDS outer-
+                # approximation rows on top of that decomposition, so it "can
+                # tighten, never loosen" (see `_lift`); declining it yields a
+                # possibly weaker but always valid relaxation. An unlowerable node
+                # now behaves exactly like an ill-conditioned one.
+                #
+                # Counted and warned once so the weakening is never silent: the
+                # bound stays sound but may be looser, and the operator wants an
+                # NlExpr lowering. Never observed to fire -- 66 in-repo instances,
+                # 139 off-corpus MINLPLib instances (JAX_LEAKS=0, which is exactly
+                # this path not firing), 734 lift-node compiles at 100% coverage.
+                global _tape_unlowerable_nodes, _tape_unlowerable_warned
+                _tape_unlowerable_nodes += 1
+                if not _tape_unlowerable_warned:
+                    _tape_unlowerable_warned = True
+                    logger.warning(
+                        "the tape could not lower this node's expression, so it abstains "
+                        "from the composite-convex lift [tape-sepgrad-unlowerable]. The "
+                        "bound stays sound but may be looser. Please report the model -- "
+                        "the operator needs an NlExpr lowering."
+                    )
+            cache[nid] = v
+            return v
 
+        # Reached only when JAX separation was asked for explicitly
+        # (`DISCOPT_SEPGRAD=jax`, the graduated flag's opt-out that CLAUDE.md §5
+        # requires stay intact) or when POUNCE is absent/too old and there is no
+        # tape to use at all. Never on a default install.
         import jax
         import jax.numpy as jnp
 

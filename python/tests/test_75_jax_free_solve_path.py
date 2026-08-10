@@ -587,56 +587,93 @@ def test_tangent_slope_matches_the_jax_reference():
 
 
 # --------------------------------------------------------------------------
-# The last JAX route on a default solve (#75): when the tape cannot lower a
-# node's expression, separation falls through to JAX. That fall-through is
-# deliberate and stays -- an unlowerable node must lose its tape, not its
-# separation, and `DISCOPT_SEPGRAD=jax` is the graduated flag's documented
-# opt-out, which CLAUDE.md §5 requires stay intact. What was wrong is that it
-# was *silent*: the one path that can still import 211 jax modules on a default
-# solve said nothing about having done so.
+# The last JAX route on a default solve (#75). When the tape cannot lower a
+# node's expression, that node now ABSTAINS from the composite-convex lift and
+# keeps its ordinary term-by-term decomposition. It used to fall through to JAX,
+# silently, which is how a "JAX-free" default solve could still import 211
+# modules.
+#
+# Abstaining is sound by the argument already in `_lift`: the lift only ADDS
+# outer-approximation rows to the decomposition, so it can tighten but never
+# loosen, and two sibling guards there (non-finite bounds, the #358 conditioning
+# magnitude) already decline it for exactly this reason. An unlowerable node now
+# behaves like an ill-conditioned one -- possibly looser, always valid.
+#
+# `DISCOPT_SEPGRAD=jax` still reaches the JAX arm; that is the graduated flag's
+# opt-out, which CLAUDE.md §5 requires stay intact, and it is not a default path.
 # --------------------------------------------------------------------------
+
+_UNLOWERABLE_DRIVER = """
+import logging, sys
+logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+import discopt._nl_expr_compiler as nlc
+import discopt.modeling as dm
+from discopt._jax import uniform_relax as ur
+
+refusals = []
+def _refuse(*a, **k):
+    refusals.append(1)
+    return None
+nlc.try_compile = _refuse
+
+# `dispatch` actually reaches the separation path (2 tape compiles); most
+# instances never call it at all, which would make the measurement vacuous.
+# It is also chosen because it still solves to `optimal` with every node
+# abstaining, so the bound assertion below runs for real rather than being
+# skipped by a `bound is None` guard (`beuster`, the other candidate, hits the
+# time limit with no bound and would make that check dead code).
+m = dm.from_nl("python/tests/data/minlplib_nl/dispatch.nl")
+r = m.solve(time_limit=60)
+
+print("REFUSALS:" + str(len(refusals)))
+print("COUNTED:" + str(ur._tape_unlowerable_nodes))
+print("WARNED:" + str(ur._tape_unlowerable_warned))
+print("STATUS:" + str(r.status))
+print("BOUND:" + (repr(float(r.bound)) if r.bound is not None else "None"))
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS:" + str(len(leaked)))
+print("LEAKED:" + ",".join(leaked[:6]))
+"""
 
 
 @pytest.mark.correctness
-def test_tape_fallthrough_to_jax_is_counted_and_warned(monkeypatch, caplog):
-    """A node the tape cannot lower is counted, warned once, and still separated.
+def test_unlowerable_node_abstains_instead_of_importing_jax():
+    """A node the tape cannot lower must abstain, not fall through to JAX.
 
-    Forces the fall-through by making `try_compile` refuse every node, which is
-    the only way to reach it: the tape lowered 100% of nodes on every instance
-    measured (66 in-repo + 139 off-corpus MINLPLib, 734 lift-node compiles), so
+    Forces the path by making `try_compile` refuse every node -- the only way to
+    reach it, since the tape lowered 100% of nodes on everything measured (66
+    in-repo + 139 off-corpus MINLPLib instances, 734 lift-node compiles), so
     there is no natural trigger to test against.
+
+    Runs in a subprocess because the headline assertion is about `sys.modules`,
+    which any earlier test in the session could have already polluted with jax.
     """
-    import logging
-
-    import discopt._nl_expr_compiler as nlc
-    import discopt.modeling as dm
-    from discopt._jax import uniform_relax as ur
-
-    refusals = {"n": 0}
-
-    def _refuse(*a, **k):
-        refusals["n"] += 1
-        return None
-
-    monkeypatch.setattr(nlc, "try_compile", _refuse)
-    monkeypatch.setattr(ur, "_tape_unlowerable_nodes", 0)
-    monkeypatch.setattr(ur, "_tape_fallthrough_warned", False)
-
-    # `beuster` reaches the separation path (8 tape compiles); most instances
-    # never call it at all, which would make this test vacuous.
-    m = dm.from_nl("python/tests/data/minlplib_nl/beuster.nl")
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.uniform_relax"):
-        m.solve(time_limit=5)
-
+    res = _run_raw(_UNLOWERABLE_DRIVER)
     # Vacuity control: if the separation path was never reached, everything
     # below is trivially satisfiable and proves nothing.
-    assert refusals["n"] > 0, "the tape compile path was never reached -- test is vacuous"
-    assert ur._tape_unlowerable_nodes == refusals["n"], (
-        f"counted {ur._tape_unlowerable_nodes} fall-throughs but forced {refusals['n']}"
+    assert int(res["REFUSALS"]) > 0, f"the tape compile path was never reached: {res}"
+    assert res["COUNTED"] == res["REFUSALS"], (
+        f"counted {res['COUNTED']} unlowerable nodes but forced {res['REFUSALS']}"
     )
-    assert "tape-sepgrad-fallthrough" in caplog.text, (
-        "the fall-through to JAX was silent -- a default solve can import 211 jax "
-        "modules with nothing said about it"
+    assert res["WARNED"] == "True", f"the abstention was silent: {res}"
+    # The point of the change: every one of those nodes used to route to JAX.
+    assert res["JAXMODS"] == "0", (
+        f"an unlowerable node still imported {res['JAXMODS']} jax modules "
+        f"({res.get('LEAKED', '?')}) -- the fall-through is back"
     )
-    # Warned once per process, not once per node: 8 nodes, 1 record.
-    assert sum("tape-sepgrad-fallthrough" in r.message for r in caplog.records) == 1
+    # Abstaining must not break the solve: the relaxation may be looser, but the
+    # search still runs and still produces a sound bound.
+    assert res["STATUS"] in {"optimal", "feasible", "time_limit"}, (
+        f"abstaining broke the solve: {res}"
+    )
+    # Unconditional on purpose. An earlier draft guarded this with
+    # `if res["BOUND"] != "None"` on an instance that timed out without a bound,
+    # so the only soundness check in the test never executed once (CLAUDE.md §6).
+    assert res["BOUND"] != "None", (
+        f"no bound was produced, so the soundness check below would be vacuous: {res}"
+    )
+    # `dispatch` is a minimisation whose reference optimum is 3155.287927
+    # (`=opt=` in minlplib.solu); a valid dual bound never exceeds it.
+    assert float(res["BOUND"]) <= 3155.287927 + 1e-6, (
+        f"abstaining produced a bound ABOVE the known optimum: {res}"
+    )
