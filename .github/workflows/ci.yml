@@ -216,7 +216,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -303,7 +303,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -389,7 +389,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -480,7 +480,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
