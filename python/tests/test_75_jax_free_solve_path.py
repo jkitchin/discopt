@@ -677,3 +677,236 @@ def test_unlowerable_node_abstains_instead_of_importing_jax():
     assert float(res["BOUND"]) <= 3155.287927 + 1e-6, (
         f"abstaining produced a bound ABOVE the known optimum: {res}"
     )
+
+
+# --------------------------------------------------------------------------
+# Vector-valued constraint bodies (#75). Every JAX-free LP extractor reduced a
+# constraint to ONE scalar row: `_extract_lp_data_from_repr` probes
+# `ModelRepr.evaluate_constraint` at unit vectors, which returns NaN for an
+# array-valued body, and `_extract_linear_coefficients_sparse` refuses an array
+# variable in scalar position outright (C-29). So a DAE collocation model or an
+# MOL spatial stencil fell all the way through to `_extract_lp_data_autodiff`,
+# whose whole reason for using `jax.jacobian` rather than `jax.grad` is that
+# fan-out -- and a default solve imported 210 jax modules.
+#
+# `_extract_lp_data_tape` closes it: `TapeNLPEvaluator` already compiles each
+# body with `compile_to_nl_array(...).reshape(-1)`, so an array body is one
+# `Constraint` and many rows in the same C order, and `constraint_row_map()`
+# hands the senses back.
+# --------------------------------------------------------------------------
+
+_DAE_MODEL = """
+import discopt.modeling as dm
+from discopt.dae import ContinuousSet, DAEBuilder
+
+m = dm.Model("dae")
+cs = ContinuousSet("t", (0.0, 1.0), nfe=3, ncp=3)
+b = DAEBuilder(m, cs)
+b.add_state("z", bounds=(-10.0, 10.0), initial=1.0)
+b.set_ode(lambda t, s, a, c: {"z": -2.0 * s["z"]})
+b.discretize()
+m.minimize(b.state_at("z", 1.0) ** 2)
+"""
+
+_VECTOR_SOLVE_DRIVER = (
+    """
+import sys
+import discopt._jax.problem_classifier as pc
+
+_reached = []
+_answered = []
+_orig = pc._extract_lp_data_tape
+
+
+def _counting(model):
+    _reached.append(1)
+    out = _orig(model)
+    if out is not None:
+        _answered.append(1)
+    return out
+
+
+pc._extract_lp_data_tape = _counting
+"""
+    + _DAE_MODEL
+    + """
+r = m.solve(time_limit=120)
+print("REACHED:" + str(len(_reached)))
+print("ANSWERED:" + str(len(_answered)))
+print("STATUS:" + str(r.status))
+print("OBJ:" + repr(float(r.objective)))
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS:" + str(len(leaked)))
+print("LEAKED:" + ",".join(leaked[:6]))
+"""
+)
+
+_VECTOR_AGREEMENT_DRIVER = (
+    """
+import sys
+import numpy as np
+import discopt._jax.problem_classifier as pc
+"""
+    + _DAE_MODEL
+    + """
+# Tape arm FIRST, so "the tape works" cannot be jax quietly doing the work.
+tape = pc._extract_lp_data_tape(m)
+print("TAPE_NONE:" + str(tape is None))
+_jm = lambda: len([k for k in sys.modules if k == "jax" or k.startswith("jax.")])
+print("JAXMODS_AFTER_TAPE:" + str(_jm()))
+
+ref = pc._extract_lp_data_autodiff(m)
+print("JAXMODS_AFTER_JAX:" + str(_jm()))
+
+A_t = pc.dense_A(tape.A_eq)
+A_j = np.asarray(ref.A_eq, dtype=float)
+print("SHAPE_T:" + str(A_t.shape))
+print("SHAPE_J:" + str(A_j.shape))
+# Vacuity control: a (0, n) matrix would satisfy every comparison below while
+# comparing nothing, and that is exactly the shape a "collapse to one scalar
+# row" bug would NOT produce -- so assert the fan-out happened.
+print("ROWS:" + str(A_t.shape[0]))
+print("NNZ:" + str(int(np.count_nonzero(A_j))))
+comparisons = A_t.size
+worst = float(np.max(np.abs(A_t - A_j))) if A_t.size else -1.0
+for name in ("c", "b_eq", "x_l", "x_u"):
+    a = np.asarray(getattr(tape, name), dtype=float).ravel()
+    b_ = np.asarray(getattr(ref, name), dtype=float).ravel()
+    assert a.shape == b_.shape, (name, a.shape, b_.shape)
+    comparisons += a.size
+    worst = max(worst, float(np.max(np.abs(a - b_))) if a.size else 0.0)
+worst = max(worst, abs(float(tape.obj_const) - float(ref.obj_const)))
+comparisons += 1
+print("COMPARISONS:" + str(comparisons))
+print("WORST:" + repr(worst))
+"""
+)
+
+
+@pytest.mark.correctness
+def test_vector_valued_constraint_body_solves_without_jax():
+    """A DAE collocation solve must not import JAX.
+
+    Before `_extract_lp_data_tape` this exact model imported 210 jax modules on a
+    default `solve()`; the collocation residuals are array-valued, which every
+    other JAX-free extractor declines.
+    """
+    res = _run_raw(_VECTOR_SOLVE_DRIVER)
+    # Vacuity control: if the new rung was never reached the jax count below says
+    # nothing about it (CLAUDE.md §6).
+    assert int(res["REACHED"]) > 0, f"the new LP rung was never reached: {res}"
+    assert int(res["ANSWERED"]) > 0, (
+        f"the new LP rung declined every time, so the solve was carried by something else: {res}"
+    )
+    assert res["JAXMODS"] == "0", (
+        f"a vector-valued constraint body still imported {res['JAXMODS']} jax "
+        f"modules ({res.get('LEAKED', '?')}) -- #75 regression"
+    )
+    # JAX-free is worthless if it is also wrong: z' = -2z from z(0) = 1 gives
+    # z(1) = e^-2, and the objective is z(1)**2 = e^-4 = 0.0183156... The Radau
+    # collocation value is that to ~1e-5 on 3 elements x 3 points.
+    assert res["STATUS"] == "optimal", f"the DAE solve did not close: {res}"
+    assert float(res["OBJ"]) == pytest.approx(0.0183156, abs=1e-4)
+
+
+@pytest.mark.correctness
+def test_lp_tape_rung_matches_the_jax_rung_on_a_vector_body():
+    """The tape and `jax.jacobian` LP extractions must agree elementwise."""
+    res = _run_raw(_VECTOR_AGREEMENT_DRIVER)
+    assert res["TAPE_NONE"] == "False", "the tape declined a plain collocation model"
+    assert res["JAXMODS_AFTER_TAPE"] == "0", (
+        f"the tape arm imported jax ({res['JAXMODS_AFTER_TAPE']} modules) -- "
+        "it is not a JAX-free route"
+    )
+    # Control: the reference arm must really be the JAX one, else "they agree"
+    # is a comparison of the new code against itself.
+    assert int(res["JAXMODS_AFTER_JAX"]) > 0, "the reference arm imported no jax modules"
+    assert res["SHAPE_T"] == res["SHAPE_J"], f"row/column counts differ: {res}"
+    # The fan-out is the point: one Constraint per state equation, many rows.
+    assert int(res["ROWS"]) > 1, f"the body was collapsed to {res['ROWS']} row(s): {res}"
+    assert int(res["NNZ"]) > 0, f"the reference matrix is all zeros, so agreement is vacuous: {res}"
+    assert int(res["COMPARISONS"]) > 0, f"nothing was compared: {res}"
+    assert float(res["WORST"]) == pytest.approx(0.0, abs=1e-12)
+
+
+_QP_MAXIMIZE_AGREEMENT_DRIVER = """
+import sys
+import numpy as np
+from discopt import Model
+import discopt._jax.problem_classifier as pc
+
+m = Model()
+x = m.continuous("x", lb=-10.0, ub=10.0)
+m.maximize(-(x * x) + 4.0 * x - 4.0)
+m.subject_to(x <= 100.0)
+n = sum(v.size for v in m._variables)
+
+Qt, ct, dt = pc._qp_terms_tape(m, n)
+Qj, cj, dj = pc._qp_terms_jax(m, n)
+print("DQ:" + repr(float(np.max(np.abs(np.asarray(Qt) - np.asarray(Qj))))))
+print("DC:" + repr(float(np.max(np.abs(np.asarray(ct) - np.asarray(cj))))))
+print("DD:" + repr(abs(float(dt) - float(dj))))
+
+qp = pc._extract_qp_data_autodiff(m)
+Q = pc.dense_Q(qp.Q)
+c = np.asarray(qp.c, dtype=float)
+print("Q00:" + repr(float(Q[0, 0])))
+print("C0:" + repr(float(c[0])))
+print("D:" + repr(float(qp.obj_const)))
+"""
+
+
+@pytest.mark.correctness
+def test_qp_tape_terms_are_in_the_models_own_sense_for_a_maximize_objective():
+    """`_qp_terms_tape` must agree with `_qp_terms_jax` on a MAXIMIZE objective.
+
+    `TapeNLPEvaluator._build` negates a MAXIMIZE objective, so the tape already
+    minimises. `_extract_qp_data_autodiff` then applied the shared MAXIMIZE
+    negation on top, and the double flip handed a *maximisation* to a minimiser:
+    on `maximize -(x-2)**2` the tape arm produced `Q=-2, c=+4, d=-4` where the
+    JAX arm produced `Q=+2, c=-4, d=+4`. A false optimum, not a slow path -- and
+    invisible to `test_qp_extraction_tape_matches_jax`, which minimises.
+    """
+    res = _run_raw(_QP_MAXIMIZE_AGREEMENT_DRIVER)
+    assert float(res["DQ"]) == pytest.approx(0.0, abs=1e-9), f"tape and JAX disagree on Q: {res}"
+    assert float(res["DC"]) == pytest.approx(0.0, abs=1e-9), f"tape and JAX disagree on c: {res}"
+    assert float(res["DD"]) == pytest.approx(0.0, abs=1e-9), f"tape and JAX disagree on d: {res}"
+    # And the assembled standard form must be the MINIMISATION of -(x-2)**2's
+    # negation: 0.5*Q*x^2 + c*x + d with Q = 2, c = -4, d = 4.
+    assert float(res["Q00"]) == pytest.approx(2.0)
+    assert float(res["C0"]) == pytest.approx(-4.0)
+    assert float(res["D"]) == pytest.approx(4.0)
+
+
+@pytest.mark.correctness
+def test_lp_tape_rung_declines_a_nonlinear_body():
+    """The affine gate must refuse to linearise a nonlinear body.
+
+    `_extract_lp_data_tape` reads the constraint matrix off a Jacobian evaluated
+    at the origin, which is the true model only when the bodies are affine. A
+    mis-classified nonlinear body would become a relaxation that cuts off
+    feasible points -- a false `optimal` with no symptom -- so the extractor
+    checks its own affine model at two off-origin points and declines on
+    disagreement.
+
+    Two points, not one: `x * (x - 1/7)` agrees with its origin tangent EXACTLY
+    at `x = 1/7`, which is the first probe pattern. The paired control keeps this
+    honest -- if the gate declined everything, the test would still pass on the
+    first assertion alone.
+    """
+    import discopt.modeling as dm
+    from discopt._jax import problem_classifier as pc
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-5.0, ub=5.0)
+    m.subject_to(x * (x - 1.0 / 7.0) <= 1.0)
+    m.minimize(x)
+    assert pc._extract_lp_data_tape(m) is None, "a nonlinear body was linearised into the LP"
+
+    affine = dm.Model()
+    y = affine.continuous("y", lb=-5.0, ub=5.0)
+    affine.subject_to(y - 1.0 / 7.0 <= 1.0)
+    affine.minimize(y)
+    assert pc._extract_lp_data_tape(affine) is not None, (
+        "the gate declined an affine body, so the decline above proves nothing"
+    )

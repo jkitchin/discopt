@@ -1704,7 +1704,205 @@ def extract_lp_data(model: Model) -> LPData:
             exc,
         )
 
+    # #75: the last JAX-free rung. The three above all reduce a constraint to one
+    # scalar row, so a vector-valued body (DAE collocation residual, MOL spatial
+    # stencil) reached `_extract_lp_data_autodiff` and imported JAX on a default
+    # solve. The tape fans such a body out into one row per component, which is
+    # the only thing `jax.jacobian` was still being used for here.
+    _tape_lp = _extract_lp_data_tape(model)
+    if _tape_lp is not None:
+        return _tape_lp
+
     return _extract_lp_data_autodiff(model)
+
+
+def _extract_lp_data_tape(model: Model) -> LPData | None:
+    """Extract LP standard form from the JAX-free tape evaluator, or ``None``.
+
+    This is the rung that takes **vector-valued constraint bodies** off JAX.
+    Every other JAX-free extractor collapses a constraint to one scalar row:
+    ``_extract_lp_data_from_repr`` probes ``ModelRepr.evaluate_constraint`` at
+    unit vectors, which returns NaN for an array-valued body, and
+    ``_extract_linear_coefficients_sparse`` refuses an array variable in scalar
+    position outright (C-29 — collapsing it to one summed row certifies
+    infeasible points). So a DAE collocation model or an MOL spatial stencil
+    fell all the way through to ``_extract_lp_data_autodiff`` and imported JAX on
+    a default solve; measured on a 3-element/3-point Radau collocation model,
+    210 ``jax*`` modules.
+
+    ``TapeNLPEvaluator`` already has exactly the fan-out ``jax.jacobian`` was
+    being used for: ``_build`` compiles each body with
+    ``compile_to_nl_array(...).reshape(-1)``, so an array-valued body is one
+    ``Constraint`` and many tape rows, in the same C order the JAX evaluator
+    concatenates. ``constraint_row_map()`` gives the ``(start, stop,
+    Constraint)`` back, which is what turns tape rows into LP rows with the
+    right sense and the right slack column.
+
+    Returns ``None`` — never a guess — when the tape cannot represent the model,
+    when its variable layout disagrees with this module's flat order, or when
+    the affine check below fails; the caller then falls back to JAX.
+    """
+    from discopt._tape_nlp_evaluator import try_build
+    from discopt.modeling.core import ObjectiveSense
+
+    n_orig = sum(v.size for v in model._variables)
+    ev = try_build(model)
+    if ev is None:
+        return None
+    if ev.n_variables != n_orig:
+        # Same guard as `_qp_terms_tape`: the columns are this module's flat slot
+        # order, so a differing width means the two disagree about the layout and
+        # every coefficient would land in the wrong column — silently.
+        logger.debug(
+            "LP tape extraction skipped: tape has %d variables, model flat width is %d",
+            ev.n_variables,
+            n_orig,
+        )
+        return None
+
+    x_zero = np.zeros(n_orig, dtype=np.float64)
+    body0 = np.asarray(ev.evaluate_constraints(x_zero), dtype=np.float64).reshape(-1)
+    m_rows = int(body0.shape[0])
+
+    # Row -> sense, via the map the tape builds from the same list its rows come
+    # from. `""` marks a row no source constraint claimed; that would mean the
+    # map and the row list have drifted, so decline rather than emit a row whose
+    # sense is a guess.
+    row_sense: list[str] = [""] * m_rows
+    for start, stop, con in ev.constraint_row_map():
+        if con.sense not in ("==", "<=", ">="):
+            logger.debug("LP tape extraction declined: unsupported sense %r", con.sense)
+            return None
+        if stop > m_rows:
+            logger.debug("LP tape extraction declined: row map overruns %d tape rows", m_rows)
+            return None
+        for r in range(start, stop):
+            row_sense[r] = con.sense
+    if any(s == "" for s in row_sense):
+        logger.debug("LP tape extraction declined: row map does not cover every tape row")
+        return None
+
+    jac_rows, jac_cols = ev.jacobian_structure()
+    jac_vals = np.asarray(ev.evaluate_jacobian_values(x_zero), dtype=np.float64)
+
+    # Soundness gate, not a sanity check. `c`/`A` here are the *affine model* of
+    # the objective and bodies at the origin, which is the true model only when
+    # both are affine. `classify_problem` says LP/QP, but this extractor is the
+    # last rung before JAX and a mis-classification would linearise a nonlinear
+    # body and hand the B&B a relaxation that cuts off feasible points — a false
+    # `optimal`, with no symptom. Two extra tape evaluations rule that out.
+    # Two points, not one: a single point can agree by coincidence (``x*(x -
+    # 1/7)`` matches its origin tangent exactly at ``x = 1/7``, which is the
+    # first pattern), and the second pattern is not a multiple of the first.
+    # Deterministic, not random, so a decline is reproducible.
+    lb_p, ub_p = _get_variable_bounds(model)
+    for _period, _scale in ((7, 1.0), (5, -0.5)):
+        x_probe = np.array(
+            [_scale * ((j % _period) + 1) / _period for j in range(n_orig)], dtype=np.float64
+        )
+        x_probe = np.clip(x_probe, lb_p, ub_p)
+        x_probe = np.where(np.isfinite(x_probe), x_probe, 0.0)
+        body_probe = np.asarray(ev.evaluate_constraints(x_probe), dtype=np.float64).reshape(-1)
+        affine_probe = body0.copy()
+        if jac_vals.size:
+            np.add.at(affine_probe, jac_rows, jac_vals * x_probe[jac_cols])
+        tol = 1e-7 * (1.0 + np.abs(body_probe))
+        if body_probe.shape != affine_probe.shape or not np.all(
+            np.abs(body_probe - affine_probe) <= tol
+        ):
+            logger.debug("LP tape extraction declined: constraint bodies are not affine")
+            return None
+
+    # `c`/`obj_const` are the affine model of the objective at the origin, which
+    # is what `jax.grad(obj_fn)(0)` / `obj_fn(0)` give in the JAX arm. No affine
+    # gate on the objective, deliberately: `_extract_qp_data_autodiff` calls this
+    # function *for the constraints* on a QP, where the objective is quadratic by
+    # construction and this `c` is discarded. Gating on it would decline every QP.
+    c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
+    obj_const = float(ev.evaluate_objective(x_zero))
+
+    assert model._objective is not None
+    _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+    if _maximize:
+        # Back to the MODEL's sense: `TapeNLPEvaluator._build` negates a MAXIMIZE
+        # objective, so the tape already minimises. Undo it here and let the
+        # shared negation at the tail apply, so this arm's sense handling is
+        # literally the same code as every other extractor's. Eliding this pair
+        # is what made `_qp_terms_tape` hand a maximisation to a minimiser.
+        c_vec = -c_vec
+        obj_const = -obj_const
+
+    # Equalities first, then inequalities with one slack each — the row order
+    # every other extractor in this module produces.
+    eq_src = [r for r in range(m_rows) if row_sense[r] == "=="]
+    ineq_src = [r for r in range(m_rows) if row_sense[r] != "=="]
+    n_eq = len(eq_src)
+    n_slack = len(ineq_src)
+    n_total = n_orig + n_slack
+
+    new_row = np.full(m_rows, -1, dtype=np.int64)
+    for k, r in enumerate(eq_src):
+        new_row[r] = k
+    for k, r in enumerate(ineq_src):
+        new_row[r] = n_eq + k
+
+    if m_rows and n_orig and jac_vals.size:
+        # Sum duplicate (row, col) entries the way `evaluate_jacobian`'s
+        # `np.add.at` does — `_materialise_A` *assigns*, so a repeated structure
+        # entry would otherwise drop every contribution but the last.
+        key = new_row[jac_rows] * np.int64(n_orig) + jac_cols.astype(np.int64)
+        uniq, inverse = np.unique(key, return_inverse=True)
+        summed = np.bincount(inverse, weights=jac_vals, minlength=uniq.shape[0])
+        coo_rows = (uniq // np.int64(n_orig)).astype(np.intp)
+        coo_cols = (uniq % np.int64(n_orig)).astype(np.intp)
+        coo_vals = summed.astype(np.float64)
+    else:
+        coo_rows = np.zeros(0, dtype=np.intp)
+        coo_cols = np.zeros(0, dtype=np.intp)
+        coo_vals = np.zeros(0, dtype=np.float64)
+
+    # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
+    slack_rows = np.arange(n_eq, n_eq + n_slack, dtype=np.intp)
+    slack_cols = np.arange(n_orig, n_orig + n_slack, dtype=np.intp)
+    slack_vals = np.array(
+        [1.0 if row_sense[r] == "<=" else -1.0 for r in ineq_src], dtype=np.float64
+    )
+
+    coo_rows = np.concatenate([coo_rows, slack_rows])
+    coo_cols = np.concatenate([coo_cols, slack_cols])
+    coo_vals = np.concatenate([coo_vals, slack_vals])
+
+    b_eq = np.zeros(m_rows, dtype=np.float64)
+    if m_rows:
+        b_eq[new_row] = -body0
+
+    A_eq = _materialise_A(
+        coo_rows,  # type: ignore[arg-type]  # arrays, not lists: nnz can be millions
+        coo_cols,  # type: ignore[arg-type]
+        coo_vals,  # type: ignore[arg-type]
+        m_rows,
+        n_total,
+    )
+
+    x_l_orig, x_u_orig = _get_variable_bounds(model)
+    c_full = np.concatenate([c_vec, np.zeros(n_slack, dtype=np.float64)])
+    x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
+    x_u = np.concatenate([x_u_orig, np.full(n_slack, np.inf, dtype=np.float64)])
+
+    # Handle objective sense: negate for maximization (solvers always minimize).
+    if _maximize:
+        c_full = -c_full
+        obj_const = -obj_const
+
+    return LPData(
+        # numpy, not jnp — see `_extract_qp_data_autodiff`'s note.
+        c=c_full,  # type: ignore[arg-type]
+        A_eq=A_eq,  # type: ignore[arg-type]
+        b_eq=b_eq,  # type: ignore[arg-type]
+        x_l=x_l,  # type: ignore[arg-type]
+        x_u=x_u,  # type: ignore[arg-type]
+        obj_const=obj_const,
+    )
 
 
 def _extract_lp_data_autodiff(model: Model) -> LPData:
@@ -1878,8 +2076,18 @@ def _qp_terms_tape(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, f
     Hessian is constant and one evaluation at the origin gives ``Q`` exactly.
     That is the same identity the JAX branch below uses; only the differentiator
     changes.
+
+    Returned in the MODEL's own sense, exactly as ``_qp_terms_jax`` is, so the
+    caller's shared ``MAXIMIZE`` negation applies to both arms identically. The
+    tape itself minimises — ``TapeNLPEvaluator._build`` does ``obj = -obj`` for a
+    maximisation — so this function has to undo that. Without the undo the caller
+    negated an already-negated objective and handed a *maximisation* to a
+    minimiser: measured on ``maximize -(x-2)**2`` the tape arm produced
+    ``Q=-2, c=+4, d=-4`` where the JAX arm produced ``Q=+2, c=-4, d=+4``. That is
+    a false optimum, not a slow path.
     """
     from discopt._tape_nlp_evaluator import try_build
+    from discopt.modeling.core import ObjectiveSense
 
     ev = try_build(model)
     if ev is None:
@@ -1899,6 +2107,10 @@ def _qp_terms_tape(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, f
     Q = np.asarray(ev.evaluate_hessian(x_zero), dtype=np.float64)
     c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
     obj_const = float(ev.evaluate_objective(x_zero))
+    assert model._objective is not None
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        # Undo the tape's internal minimisation flip; see the docstring.
+        Q, c_vec, obj_const = -Q, -c_vec, -obj_const
     return Q, c_vec, obj_const
 
 
