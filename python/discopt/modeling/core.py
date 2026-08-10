@@ -3060,6 +3060,8 @@ class Model:
         tol: float = 1e-10,
         max_iter: int = 50,
         name: str = "implicit",
+        formulation: str = "custom_root",
+        bounds=None,
     ) -> Expression:
         """Define a vector ``v`` implicitly by ``residual(u, v) = 0`` (issue #379).
 
@@ -3071,6 +3073,18 @@ class Model:
         rejected. ``u_inputs`` are the model expressions the block depends on
         (the DAG edges into the solve); they are required, not inferred.
 
+        ``formulation="full_space"`` is the alternative lowering: ``v`` becomes a
+        real vector variable and the residuals become real ``== 0`` constraints,
+        so the block is ordinary algebra. That keeps JAX off the solve path (the
+        tape refuses a ``CustomCall``) and keeps a global certificate reachable
+        (a relaxation needs the equations), at the cost of the reduced-space size
+        win. In that mode ``residual`` receives **discopt expressions** and must
+        be written in discopt operators rather than ``jnp.*``. There is no inner
+        Newton solve, so ``x0`` / ``tol`` / ``max_iter`` are *refused* rather
+        than silently dropped -- select a root with ``bounds`` and warm-start
+        through ``solve(initial_solution=...)``.
+        See :func:`discopt.modeling.implicit_full_space`.
+
         See :func:`discopt.modeling.implicit` for parameter details.
 
         Examples
@@ -3079,6 +3093,35 @@ class Model:
         >>> v = m.implicit(lambda U, V: [V[0] ** 2 - U[0]], [u], n_unknowns=1)
         >>> m.minimize((v[0] - 3.0) ** 2)   # v = sqrt(u); optimum at u = 9
         """
+        if formulation == "full_space":
+            from discopt.modeling.implicit import implicit_full_space as _full
+
+            # There is no inner Newton solve in this arm, so these two control
+            # nothing.  Accepting them silently would let a caller tune a knob
+            # that is not connected to anything (CLAUDE.md §3: no dead flags).
+            for _k, _v, _default in (("tol", tol, 1e-10), ("max_iter", max_iter, 50)):
+                if _v != _default:
+                    raise ValueError(
+                        f"{_k}= does not apply with formulation='full_space': the "
+                        "residuals become ordinary equality constraints and are "
+                        "solved by the outer solver, not by an inner Newton "
+                        "iteration. Use solve() tolerances instead."
+                    )
+            return _full(self, residual, u_inputs, n_unknowns, x0, bounds=bounds, name=name)
+        if formulation != "custom_root":
+            raise ValueError(
+                f"formulation must be 'custom_root' or 'full_space', got {formulation!r}"
+            )
+        if bounds is not None:
+            # Not a silent no-op: the opaque node has no column to put a box on,
+            # so honouring `bounds` here would mean emitting inequality
+            # constraints on the node output -- a different model than the caller
+            # asked for.  Refuse rather than guess (CLAUDE.md §3).
+            raise ValueError(
+                "bounds= is only supported with formulation='full_space'; the "
+                "custom_root node has no variable to bound. Add explicit "
+                "constraints on the returned node if you need them."
+            )
         from discopt.modeling.implicit import implicit as _implicit
 
         return _implicit(residual, u_inputs, n_unknowns, x0, tol=tol, max_iter=max_iter, name=name)
