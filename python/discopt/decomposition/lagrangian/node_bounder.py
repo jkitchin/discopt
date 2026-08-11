@@ -68,6 +68,8 @@ class LagrangianNodeBounder:
     def try_build(
         cls,
         model: Model,
+        *,
+        prefer_pounce: bool = True,
     ) -> "LagrangianNodeBounder | None":
         """Build a bounder, or return ``None`` if the hook does not apply.
 
@@ -120,11 +122,7 @@ class LagrangianNodeBounder:
         from discopt.solvers.lp_backend import get_milp_solver
 
         try:
-            # #977: linear subproblem -> exact-vertex simplex. The old
-            # ``prefer_pounce`` argument routed this to the POUNCE-IPM-backed B&B,
-            # whose analytic-centre objective makes the node's dual bound
-            # non-rigorous; it is gone rather than left as a dead flag.
-            milp = get_milp_solver(backend="simplex")
+            milp = get_milp_solver(prefer_pounce=prefer_pounce)
         except ImportError:
             return None
         return cls(lin.c, lin.c_offset, A_c, r_c, A_b, r_b, integrality, milp)

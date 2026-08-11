@@ -272,10 +272,34 @@ def solve_gbd(
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     t0 = time.time()
-    # #977: the GBD master is a linear MILP -> exact-vertex simplex, never routed by
-    # ``nlp_solver`` (which selects the *NLP recourse* engine). See the companion
-    # comment in ``benders/solver.py`` for the measurement; ``get_milp_solver`` still
-    # falls back to POUNCE when the Rust simplex binding is unavailable.
+    # #977: the GBD master is a *linear* MILP, so it is pinned to the exact-vertex
+    # simplex B&B and NOT routed by ``nlp_solver``, which selects the engine for the
+    # *NLP recourse* subproblem. Reusing it here sent the master to the
+    # POUNCE-IPM-backed B&B, whose returned points are interior, not vertices.
+    #
+    # Measured on the master rows the engine was handed (identical arrays in and
+    # out, so any error in the cut coefficients cancels exactly — that is what
+    # distinguished the two candidate root causes in #977): the IPM path leaves row
+    # residuals up to 5.9e-06, six times the repo's declared ``abs=1e-6``, where the
+    # simplex is exact to ~1e-14 on the same input. Two consequences, both fixed by
+    # this line: the master could hand back a point violating its own optimality cut
+    # (the #952 exit gate then correctly refuses it, which is how #977 surfaced), and
+    # the master objective — which *is* the GBD lower ``bound`` — was an
+    # analytic-centre value that drifted above the incumbent it certifies, breaking
+    # ``bound <= incumbent``. ``get_milp_solver`` still falls back to POUNCE when the
+    # Rust simplex binding is unavailable, so POUNCE-only installs keep working.
+    #
+    # Scope note (#977, falsified extension): the same conflation exists in
+    # *classical* Benders (``solver.py``) and in the Lagrangian solver/node bounder.
+    # Pinning those masters to the simplex too was tried and reverted — it is sound
+    # but not free. An exact master returns a vertex where the recourse LP is
+    # degenerate, and classical Benders' cut generation then produces no separating
+    # cut and stalls out with the gap still open (measured in CI: three
+    # ``test_decomposition_solve_equivalence`` cases fell to ``iteration_limit``,
+    # with "added no separating cut" twice per run). The interior-point master had
+    # been masking that weakness by proposing luckier points. Fixing it is the
+    # classical-Benders analogue of the #946 degenerate-recourse work and needs its
+    # own change; this line stays scoped to GBD, where #977 actually fired.
     milp = get_milp_solver(backend="simplex")
 
     if structure is None:
