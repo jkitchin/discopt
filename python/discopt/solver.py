@@ -3147,6 +3147,38 @@ def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool)
     return node_lower_bound >= _SENTINEL_THRESHOLD and not node_infeasible
 
 
+def _yield_keeps_node_open(
+    yielded: bool,
+    nlp_failed: bool,
+    result_lbs,
+    i: int,
+) -> bool:
+    """Keep a node whose YIELDED round banked no bound OPEN instead of fathomed.
+
+    #966. A node whose per-node NLP failed carries the failure sentinel
+    (``_INFEASIBILITY_SENTINEL``) into the LP round; the round is what normally
+    replaces it with a real bound. When the round is cut short by the budget and
+    returns none, leaving the sentinel hands the node to the Rust tree's
+    bound-cut (``1e30 >= incumbent``) — a fathom with NO proof, which
+    :func:`_nonrigorous_sentinel_fathom` then turns into a discarded global dual
+    bound. That converts a *scheduling* decision into a lost certificate, which
+    is the wrong trade (CLAUDE.md §1): the solver's product is the bound.
+
+    Importing ``-inf`` instead keeps the node OPEN, floored on import at its
+    inherited (proved) parent bound — the same sound mechanism the batch path's
+    past-deadline branch uses (#138). It fathoms nothing, so nothing is
+    decertified; the node is simply re-visited or branched.
+
+    Only fires for a round the caller ran in yield mode (i.e. under
+    ``DISCOPT_NODE_ROUND_BUDGET``), so the default path is untouched. Returns
+    True when the node was kept open, for the caller's counters/tests.
+    """
+    if not (yielded and nlp_failed):
+        return False
+    result_lbs[i] = -np.inf
+    return True
+
+
 def _certified_callback_bound(
     global_lower_bound: Optional[float],
     tree_bound_valid: bool,
@@ -10157,26 +10189,36 @@ def solve_model(
                         continue
                     # #966 round admission: the round's non-LP cost (the cold
                     # build) is spent regardless of the LP grant, so a grant that
-                    # cannot even cover the measured build cost buys a truncated,
-                    # near-empty relaxation for full build wall — decline instead.
-                    # Same skip semantics as the past-deadline branch above.
+                    # cannot cover the measured build cost cannot buy a full
+                    # round. It does NOT follow that the round should buy nothing:
+                    # a skipped round banks no bound AND no LP point, which costs
+                    # the brancher and the primal heuristics too (measured:
+                    # nvs05@20 s with every round skipped loses the bound
+                    # 3.514 -> 0.684, the incumbent 8.73 -> 523.69, and the search
+                    # itself 29 -> 1 nodes, ending 16 s inside its own budget).
+                    # Yield instead: no separation chain, build truncated by the
+                    # grant, valid weaker bound + vertex for a fraction of the
+                    # cost (same cell, yield mode: bound 1.353, incumbent 8.73
+                    # recovered, 45 nodes). Sound — dropped rows only enlarge the
+                    # relaxed set, and #928's cut-short floor then reports the
+                    # relaxation's rigorous box floor for the truncated build.
                     #
-                    # #928 rule 1: NEVER decline while the node holds no valid
-                    # bound of its own. A branched node always carries its parent's
-                    # bound (the Rust import floors every node at it), so declining
-                    # there forgoes tightening only. The ROOT batch has no parent —
-                    # declining its round leaves the whole tree bound-less, which is
-                    # exactly the collapse the coupled panel measured (contvar: the
+                    # #928 rule 1: the ROOT batch runs a FULL round, never a
+                    # yielded one. A branched node always carries its parent's
+                    # bound (the Rust import floors every node at it), so a
+                    # weaker round there forgoes tightening only; the root has no
+                    # parent, and the whole tree's bound descends from it — which
+                    # is the collapse the coupled panel measured (contvar: the
                     # root probe sets a build EMA larger than what is left of the
-                    # grant, the root round is then declined, and the search spends
-                    # its budget on cheap uncertified nodes for a final
-                    # ``bound=None``). This is the same rule ``_fb_stop`` already
-                    # applies in the root-relaxation fallback: a phase is optional
-                    # tightening only once some valid bound has landed.
+                    # grant, the root round is degraded, and the search spends its
+                    # budget on cheap uncertified nodes for a final
+                    # ``bound=None``). Same rule ``_fb_stop`` already applies in
+                    # the root-relaxation fallback: a phase is optional tightening
+                    # only once some valid bound has landed.
+                    _yield_round = False
                     if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
-                        if _exp_build is not None and _node_remaining < _exp_build:
-                            continue
+                        _yield_round = _exp_build is not None and _node_remaining < _exp_build
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
                         mc_res = _mc_lp_relaxer.solve_at_node(
@@ -10184,6 +10226,7 @@ def solve_model(
                             np.asarray(batch_ub[i]),
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             round_deadline=(_deadline if _round_budget_enabled else None),
+                            yield_round=_yield_round,
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
@@ -10199,6 +10242,7 @@ def solve_model(
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
+                        _yield_keeps_node_open(_yield_round, nlp_failed, result_lbs, i)
                         continue
                     if mc_res.status == "infeasible":
                         # Rigorous fathom: the McCormick LP is a valid outer
@@ -10209,7 +10253,12 @@ def solve_model(
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                         result_feas[i] = False
                         continue
-                    if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                    if mc_res.lower_bound is None or not np.isfinite(mc_res.lower_bound):
+                        # A yielded round that banked no bound must not leave the
+                        # node fathomed-without-proof on the failure sentinel
+                        # (#966; see :func:`_yield_keeps_node_open`).
+                        _yield_keeps_node_open(_yield_round, nlp_failed, result_lbs, i)
+                    else:
                         if nlp_failed:
                             # A failed / locally-infeasible NLP solve is not an
                             # infeasibility proof. Adopt the LP bound + LP point
@@ -10541,24 +10590,28 @@ def solve_model(
                 # and a feasible LP point usable for spatial branching even
                 # when the NLP was skipped (root) or returned infeasible /
                 # iteration_limit (any node).
+                _serial_yield_round = False
                 if _mc_lp_relaxer is not None and not _reduced_done_serial:
                     # #966 round admission (serial path). Unlike the batch path
                     # this loop had NO past-deadline skip at all — a spent budget
                     # still admitted a full build+separate round per node. Under
-                    # the flag, decline the round once the deadline is past or
-                    # the remaining grant cannot cover the measured build cost;
-                    # the node stays open on its valid parent bound.
+                    # the flag, a spent deadline skips the round (the node stays
+                    # open on its valid parent bound, mirroring the batch path);
+                    # a grant that is merely too short for a full round YIELDS
+                    # instead of skipping, so it still banks a valid weaker bound
+                    # and an LP point (see the batch-path note above).
                     # #928 rule 1 (see the batch path): the ROOT batch holds no
-                    # parent bound, so its round is never declined — declining it
-                    # leaves the tree with no bound source at all. That covers the
-                    # past-deadline arm of this check too: a root round entered on
-                    # a spent grant truncates its build and reports the relaxation's
-                    # rigorous box floor, which is strictly more than the nothing a
-                    # declined root leaves behind.
+                    # parent bound, so its round is neither skipped nor yielded —
+                    # both would leave the tree with no bound source at all. A
+                    # root round entered on a spent grant still runs, truncates
+                    # its build and reports the relaxation's rigorous box floor,
+                    # which is strictly more than the nothing a declined root
+                    # leaves behind.
                     _serial_remaining = _deadline - time.perf_counter()
                     if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
-                        _round_blocked = _serial_remaining <= 0.0 or (
+                        _round_blocked = _serial_remaining <= 0.0
+                        _serial_yield_round = not _round_blocked and (
                             _exp_build is not None and _serial_remaining < _exp_build
                         )
                     else:
@@ -10572,6 +10625,7 @@ def solve_model(
                             node_ub,
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             round_deadline=(_deadline if _round_budget_enabled else None),
+                            yield_round=_serial_yield_round,
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
@@ -10617,6 +10671,16 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(cur, mc_lp_lb)
+                    else:
+                        # A yielded round that banked no bound must not leave the
+                        # node fathomed-without-proof on the failure sentinel
+                        # (#966; see :func:`_yield_keeps_node_open`).
+                        _yield_keeps_node_open(
+                            _serial_yield_round,
+                            result_lbs[i] >= _SENTINEL_THRESHOLD,
+                            result_lbs,
+                            i,
+                        )
                     # Phase 2 (#764): free DBBT + cutoff-FBBT from this serial node
                     # solve's marginals; stage the tightened child box. Skip the root
                     # batch (iteration 0) — see the batch-path note above (#287).

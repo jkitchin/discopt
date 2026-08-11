@@ -1068,29 +1068,41 @@ class SolverTuning:
       rows is a valid weaker outer relaxation) and (b) anchors the node's
       internal solve/separation deadline at the grant instead of restarting the
       clock after the build; and
-    * decline to START a round whose grant cannot cover the relaxer's measured
-      cold-build cost (an EMA over this solve's builds) — the round admission
-      check accounting for the round's expected non-LP cost. A declined node
-      keeps its inherited (valid) parent bound and stays open, exactly like the
-      existing past-deadline skip — **except in the ROOT batch, which is never
-      declined** (#928 rule 1). The root has no parent bound, so declining its
-      round leaves the whole tree with no bound source; that is the ``bound=None``
-      collapse the first coupled graduation panel measured on contvar (7 → 287
-      nodes, nothing ever certified). The same rule already governs the
-      root-relaxation fallback's ``_fb_stop``: a phase is optional tightening only
-      once some valid bound is in hand.
+    * run a round whose grant cannot cover the relaxer's measured cold-build cost
+      (an EMA over this solve's builds) in **yield mode** instead of a full
+      round: no per-node separation chain, and the cold build truncated at the
+      grant, so the round banks the weaker-but-valid bound and the LP vertex it
+      can afford rather than nothing — **except in the ROOT batch, which always
+      runs a full round** (#928 rule 1). The root has no parent bound, so a
+      weakened round there leaves the whole tree with no bound source; that is
+      the ``bound=None`` collapse the first coupled graduation panel measured on
+      contvar (7 → 287 nodes, nothing ever certified). The same rule already
+      governs the root-relaxation fallback's ``_fb_stop``: a phase is optional
+      tightening only once some valid bound is in hand.
 
-    Sound by construction: build truncation only drops rows (weaker, never
-    falsified — the ``_objective_bound_valid`` gate catches an un-bounded cost
-    column), deadline-cut LP solves already bank the Neumaier-Shcherbina floor,
-    and a declined round only leaves a node on its parent's valid bound. A round
-    that IS cut short no longer returns nothing: it reports the rigorous
-    box-interval objective floor of the (possibly truncated) relaxation it built
-    — measured, a spent round grant lost the bound outright on 16 of 114 cells of
-    the binding subset before that (#928, see ``_solve_at_node_impl``). Default
-    off pending the §5 corpus-wide differential panel (cert-clean AND
-    net-positive); graduation is coupled to the #928
-    ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""
+    Yield mode replaced an outright *decline* (the first cut of this flag, and
+    the measured cause of the coupled panel's bound ledger: casctanks
+    2.9098 → −56.5001, contvar's bound lost outright). A skipped round banks no
+    bound AND no LP point, and the point is what the spatial brancher and the
+    primal heuristics run on: forcing every round to skip on nvs05 @ 20 s cost
+    the bound (3.514 → 0.684), the incumbent (8.73 → 523.69) and the search
+    itself (29 → 1 nodes, ending 16 s inside its own budget), while yielding the
+    same rounds kept the incumbent, recovered half the lost bound (1.353) and
+    branched 45 nodes (``scratchpad/issue966_yield_vs_decline.py``).
+
+    Sound by construction: build truncation and skipped separation only drop
+    rows/cuts (weaker, never falsified — the ``_objective_bound_valid`` gate
+    catches an un-bounded cost column), deadline-cut LP solves already bank the
+    Neumaier-Shcherbina floor, and a round that IS cut short no longer returns
+    nothing: it reports the rigorous box-interval objective floor of the
+    (possibly truncated) relaxation it built — measured, a spent round grant lost
+    the bound outright on 16 of 114 cells of the binding subset before that
+    (#928, see ``_solve_at_node_impl``). Should even that floor be unavailable, a
+    yielded round leaves its node OPEN at ``-inf`` (floored at the proved parent
+    bound) rather than fathomed-without-proof on the failure sentinel — see
+    ``solver._yield_keeps_node_open``. Default off pending the §5 corpus-wide
+    differential panel (cert-clean AND net-positive); graduation is coupled to
+    the #928 ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""
 
     hessian_compile_gate: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HESS_COMPILE_GATE", default=False)

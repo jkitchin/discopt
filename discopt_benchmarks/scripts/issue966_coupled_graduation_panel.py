@@ -93,6 +93,20 @@ def reference_optimum(name: str):
 
 
 def _solu_ceiling(name: str):
+    """``minlplib.solu``'s ceiling for ``name``, or ``None`` when unnamed there.
+
+    ``DISCOPT_MINLPLIB_SOLU=none`` declares the library oracle **unavailable in
+    this environment** (the benchmark snapshot is not mounted and minlplib.org is
+    unreachable). It is an explicit, recorded declaration -- ``solu_oracle`` in
+    the panel summary -- not a swallowed error: a .solu path that is *set* but
+    unreadable still crashes, which is the §7 state this keeps distinguishable.
+    Under it every instance falls through to the narrow ``_optima`` fallback, so
+    the run's oracle coverage collapses (1/19 on this panel's names) and the
+    printed ``oracle_comparisons_executed`` / ``instances_without_oracle`` counts
+    are what the soundness claim may rest on -- exactly the §14b-qual lesson.
+    """
+    if solu_oracle_state() == "none":
+        return None
     sys.path.insert(0, str(Path(__file__).parent))
     from minlplib_solu import load, primal_ceiling  # type: ignore
 
@@ -100,6 +114,11 @@ def _solu_ceiling(name: str):
     if _SOLU is None:
         _SOLU = load()
     return primal_ceiling(name, _SOLU)
+
+
+def solu_oracle_state() -> str:
+    """``"none"`` when the library oracle is declared unavailable, else its path."""
+    return "none" if os.environ.get("DISCOPT_MINLPLIB_SOLU", "").strip() == "none" else "solu"
 
 
 _SOLU: dict | None = None
@@ -307,6 +326,7 @@ def main() -> int:
         "arms": {k: lbl for k, lbl, _e in ARMS},
         **snd,
         "pairs": pairs,
+        "solu_oracle": solu_oracle_state(),
         "panel_wall_s": round(time.perf_counter() - t_panel, 1),
         "loadavg_start": [round(x, 2) for x in load_start],
         "loadavg_end": [round(x, 2) for x in loadavg()],

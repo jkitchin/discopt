@@ -1975,6 +1975,144 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > holds — is fixed and measured; what remains is #966's round-admission policy losing
 > a primal trajectory, which belongs on that issue.
 
+### 14e. #966: a short-granted round YIELDS instead of skipping — §14b's bound ledger root-caused and fixed; graduation still fails (2026-08-11)
+
+> §14b's coupled panel failed on one thing: the `seam` arm (#966's two flags) bought
+> wall time (−4.9 ± 1.0 s, cert-clean 3/3) and paid in the metric the solver's product
+> actually is — 4 looser bounds against 3 non-reproducible tighter, node counts
+> 1329 → 1811, casctanks collapsing `2.9098 → −56.5001` in every rep. Its closing
+> sentence named the fix: *"a round that yields on its deadline must still be able to
+> bank a bound, the way §14a taught an LP cut short to export its dual."* That is what
+> this entry implements — after two hypotheses died on the way.
+>
+> **Base note (2026-08-11, after the merge with §14d).** Everything measured below
+> was run on `aca13dd`, i.e. BEFORE §14d's cut-short floor and root-round exemption
+> landed. The two changes are complementary — §14d makes a cut-short round *report*
+> the box floor it already holds, this entry makes a short-granted round *run* in
+> the first place (banking an LP point as well as a bound), and the merged code
+> yields only on non-root nodes so §14d's rule-1 root exemption governs both. The
+> panel numbers below therefore understate the merged tree, and the §5 verdict for
+> the merged code needs its own panel run: see the residual note at the end.
+>
+> **§14d does not subsume this entry, measured on the merged base.** Re-running the
+> A/B there (nvs05 @ 20 s, forced-admission regime) with §14d's cut-short floor
+> present: base 3.5425 / incumbent 8.7320 / 39 nodes, **skip 0.6323 / 6.3870 / 77**,
+> **yield 3.5067 / 8.7320 / 59** (38 yields counted). The floor rescues a round that
+> RUNS and is cut short; it can do nothing for a round that never runs, which is why
+> the skip arm still loses the bound and the incumbent on the merged tree.
+> Flag-OFF bound-neutrality was re-verified against the merged base as well
+> (13/13 byte-identical, markers both ways).
+
+> **FALSIFIED (H1): the cheap tier is the incremental fast path.** A round the grant
+> cannot afford could fall back to `_try_incremental_node` (patch + warm start, ~ms).
+> Measured (`scratchpad/issue966_inc_scope.py`, 5/5 instances the flag hurt):
+> `IncrementalMcCormickLP` is **out of scope on every one** — nvs05, tspn10, casctanks,
+> contvar, tls2 all construct with `_inc = None`, and the whole-solve probes see
+> `fast_path_hits = 0`. There is no incremental tier on this class.
+>
+> **CONFIRMED (H2): the #694 anytime build already is the cheap tier**
+> (`scratchpad/issue966_truncated_floor.py`, 2 reps/instance). A build whose deadline
+> is already spent emits zero constraint rows but still linearizes the objective, so it
+> returns a valid weaker relaxation *and* the rigorous box-interval `_objective_floor`:
+>
+> | instance | full build | truncated build | full round | truncated-round bound |
+> |---|---|---|---|---|
+> | contvar | 0.39–1.83 s | **0.008 s** | 19.6–23.9 s | 87754.998 (full: 164927.75) |
+> | casctanks | 0.06–0.16 s | **0.025 s** | 0.16–0.27 s | 0.0 (full: *no bound at all*) |
+> | tspn10 | 0.18–0.91 s | **0.068 s** | 2.2–16.0 s | 0.0 (full: 161.16) |
+> | nvs05 | 0.74 s | **0.002 s** | 0.93 s | 0.674 (full: −323.05) |
+>
+> Truncation is effective at the *build* and nowhere else, so a yield must skip the
+> separation chain too (tspn10's truncated-build round still cost 1.85–1.94 s with
+> separation on).
+>
+> **What the flag's skip actually cost** (`scratchpad/issue966_yield_vs_decline.py`,
+> nvs05 @ 20 s, every round forced through the admission branch): a skipped round banks
+> no bound **and no LP point**, and the point is what the spatial brancher and the
+> primal heuristics consume:
+>
+> | arm | bound | incumbent | nodes | wall |
+> |---|---|---|---|---|
+> | base (flag off) | 3.5139 | 8.7320 | 29–39 | 20.9 s |
+> | every round SKIPPED | 0.6842 | **523.69** | **1** | **4.1 s** (16 s of budget unused) |
+> | every round YIELDED | 1.3529 | 8.7320 | 45 | 21.0 s |
+>
+> **The fix** (`DISCOPT_NODE_ROUND_BUDGET`, still default OFF). A round whose grant
+> cannot cover the measured cold-build EMA now runs with `yield_round=True` —
+> separation off, build truncated at the grant — instead of being skipped. Sound by the
+> same argument as the truncation: dropping cuts and rows only enlarges the relaxed
+> set. Shipped-code A/B (`scratchpad/issue966_yield_fix_ab.py`, same forced regime):
+>
+> | nvs05 @ 20 s | bound | incumbent | nodes |
+> |---|---|---|---|
+> | base | 3.5139 | 8.7320 | 39 |
+> | skip (pre-fix) | 0.6323 | 6.9358 | 35 |
+> | yield (shipped) | **3.5061** | **8.7320** | 59 |
+>
+> Second half: a yielded round that banks *nothing* must not leave its node holding the
+> failure sentinel. The slot carries `_INFEASIBILITY_SENTINEL` when the per-node NLP
+> failed and the LP round is what replaces it; leaving it hands the node to the Rust
+> tree's bound-cut — a fathom with no proof, which `_nonrigorous_sentinel_fathom` turns
+> into a *discarded global dual bound* (§14b's contvar `183632.766 → None` has exactly
+> this shape). `_yield_keeps_node_open` imports `-inf` instead: the node stays open,
+> floored at its proved parent bound, and nothing is decertified.
+>
+> **Flag-OFF bound-neutrality** (§5 regime 1): 13 certifying instances,
+> `node_count`/`objective`/`bound`/`status`/`gap_certified` byte-identical against the
+> pre-change tree, markers asserted in both directions (§8) —
+> `scratchpad/issue966_neutrality.py`, `BOUND_NEUTRAL=True  COMPARED=13`.
+>
+> **Coupled panel re-run**, same script and instance list as §14b (19 binding
+> instances, 20 s, 3 arms interleaved per instance, 2 reps;
+> `discopt_benchmarks/results/issue966_yield_binding20_rep{1,2}.json`):
+>
+> | pair | rep1 | rep2 |
+> |---|---|---|
+> | total overrun, base | 104.9 s | 300.8 s |
+> | seam − base overrun | **−60.6 s** | **−261.7 s** |
+> | cand − base overrun | −53.1 s | −269.3 s |
+> | seam bound ledger vs base | 6 tighter / 1 looser | 6 tighter / 1 looser |
+> | cand bound ledger vs base | 11 tighter / 2 looser | 10 tighter / 2 looser |
+> | `CERT_CLEAN` (cand vs base) | **True** | **False** (tspn12 lost incumbent) |
+>
+> §14b's two named casualties are gone: casctanks is *tighter* in both flag arms in
+> both reps (no collapse), and contvar keeps a finite bound in `cand` (180782.86 →
+> 171244.81, sound) instead of losing it. The severe modes the base arm still hits are
+> what the overrun deltas are made of — heatexch_gen3 base 210.1 s (10.5×) vs seam
+> 21.8 s in rep2, bchoco08 base 86.2 s (4.31×) vs 21.0 s, tspn12 base 57.8 s (2.89×)
+> vs 20.8 s in rep1 — each with an equal or *tighter* flag-arm bound.
+>
+> **Verdict: the flags stay default-OFF.** §14b's failure mode is fixed (the bound
+> ledger is now positive and the wall win is large and reproducible), but §5 bar 1 is
+> per-run and rep2's graduation pair is not cert-clean: tspn12 loses its incumbent
+> (rep1 lost tspn10's in the `seam` arm). Lost incumbents are the residual, and they
+> are not reproducible rep-to-rep — which is itself the signal that the *anytime*
+> character of a yielded round is now trading primal luck, not bound quality.
+>
+> **Two honest limits on this measurement, both environmental.** (1) It ran in a
+> container where POUNCE lacks the tape NLP evaluator, so every cell used the JAX
+> evaluator; absolute walls and even base bounds differ from §14b's machine
+> (casctanks base is −90.1786 here vs 2.9098 there), so this is the same panel on a
+> different machine, not a reproduction of §14b's cells. (2) `minlplib.solu` is not
+> reachable here, so oracle coverage was **1/19 instances (3 comparisons)** — the very
+> state §14b-qual retracted a claim over. It is declared explicitly
+> (`DISCOPT_MINLPLIB_SOLU=none`, recorded as `solu_oracle` in every artifact) rather
+> than swallowed, and the panel's other soundness checks (bound-crosses-incumbent,
+> incumbent verification) fired on all 19 × 3 cells with `unsound=[]`. **No soundness
+> claim over the corpus may rest on these two runs**; re-run on the benchmark machine
+> with the .solu oracle before graduating anything.
+>
+> **Residual, and how it meets §14d.** §14d's own verdict ends "what remains is #966's
+> round-admission policy losing a primal trajectory, which belongs on that issue" —
+> the same lost-incumbent item this panel's rep2 failed on (tspn12), from the other
+> side. Yield mode is the candidate treatment for exactly that residual: an admission
+> policy that runs a weaker round instead of discarding it keeps the primal
+> trajectory alive (nvs05's incumbent survives at its base value where a skip lost it
+> 8.73 → 523.69). Whether it *does* on the corpus is unmeasured on the merged base —
+> both changes were panelled separately, each against `aca13dd`. The graduation panel
+> owed to #966 item 3 must now be run once, on the merged tree, on the benchmark
+> machine.
+
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
 > **The defect (confirmed).** The McCormick row generators in

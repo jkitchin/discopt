@@ -101,3 +101,8 @@ scratchpad/*.log
 scratchpad/**/*_out*.txt
 scratchpad/**/*.log
 scratchpad/**/*.out
+# per-cell worker scripts a probe WRITES at run time (same rule: keep the
+# harness, drop what it generates). The leading underscore is the convention —
+# a hand-written harness like ``issue966_neutral_worker.py`` has none and stays
+# tracked; ``_issue966_yield_fix_worker.py`` is re-emitted on every run.
+scratchpad/_*_worker.py
