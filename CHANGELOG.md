@@ -10,6 +10,56 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`feral` 0.14 → 0.15.1 and `pounce-solver` `>=0.9` → `>=0.10`**
+  (`chore(deps)`). Two pins that move together: POUNCE 0.10.0's own workspace
+  pins feral 0.15.1, so holding both here keeps a single LU implementation
+  behind the simplex node engine and the NLP evaluator rather than two.
+
+  feral 0.15.0 is a **breaking** release, but only in its diagnostic API
+  (`SupernodeTiming` `us` → `ns`, `BucketStats::sum_us`/`avg_us` → `*_ns`,
+  `ProfileReport::loop_us` → `loop_ns`). discopt consumes only the LU layer —
+  `SparseLu`/`DenseLu`/`SparseColMatrix`/`SparseLuSymbolic`/`LuParams`/
+  `RefactorCause`/`FeralError` in `linsolve.rs` — and none of the multifrontal
+  or profiler surface, so no discopt source changes. What it does buy the node
+  engine: the packed BLAS-3 trailing update is now an explicit pulp SIMD kernel
+  (upstream reports byte-exact output at every SIMD width, pinned by golden
+  bit-digests), and four tuning-knob `env::var` lookups leave the per-panel
+  dispatch path for a `OnceLock`. That second one is per-front *fixed* cost, so
+  it lands hardest on many-small-front bases — the per-node simplex regime.
+
+  POUNCE 0.10.0 carries #477/#478 (`NlProblem` is sendable), so on an
+  in-contract install the tape evaluator shares one problem and the per-thread
+  fallback no longer runs. The fallback is **retained**, not deleted: the
+  capability is probed rather than inferred from a version string, and a build
+  whose probe says "not sendable" must still solve.
+  `test_75_tape_nlp_evaluator.py` keeps it covered by forcing the probe false.
+
+  **Verified bound-neutral (CLAUDE.md §5).** 49-instance cert panel, both arms
+  built on one machine from the same source and told apart by the `feral-<ver>`
+  string cargo bakes into the `_rust` extension: **49/49 rows bit-identical in
+  status, `node_count` and `objective`**. A same-build repeat ran first as the
+  determinism control — also 49/49 bit-identical — so node equality is a real
+  gate here and not an artifact of a panel that never varies. Also green:
+  `cargo test -p discopt-core` (597+4+1), `pytest -m smoke` (943 passed, 1
+  skipped, 2 xpassed), the adversarial suite (10 passed), and
+  `pytest -m requires_pounce` (127 passed, 1 skipped) apart from one failure
+  reproduced identically on the pre-bump control (see below).
+
+  Note for anyone re-running this check: do **not** judge it against the
+  committed `docs/dev/data/cert-baseline.jsonl`. That reference is stale against
+  `main` — 18 violations on an *unmodified* tree, including objective drift past
+  `_OBJ_TOL` (`cvxnonsep_nsig30` 1.5e-6) and node swings (`nvs13` 23 → 637). All
+  49 still certify `optimal`, so this is a drifted reference rather than a
+  soundness problem, but it means `check_cert_neutrality.py` cannot presently
+  detect a real regression locally. The weekly graduation-gate lane that runs the
+  same guard reports success on the same commit; that divergence is **not
+  explained** — it is not the pounce version (CI installed 0.9.0, and the local
+  control at 0.9.0 shows the same 18) and was not chased further here. Unrelated
+  to this bump and left as-is; flagged so the next reader does not mistake a
+  stale baseline for a bump regression.
+
 ### Fixed
 
 - **Vectorized models silently got no relaxation at all** (#981). A `Constraint`

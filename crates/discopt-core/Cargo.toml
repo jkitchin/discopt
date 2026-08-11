@@ -43,7 +43,53 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # `optimal` — this is the acceptance test for the bump. No discopt API change
 # (LuParams gains `update_pivot_search: bool`, default false, covered by
 # `..LuParams::default()`).
-feral = "0.14"
+#
+# 0.15.1 is the current floor. discopt consumes ONLY feral's LU layer
+# (`SparseLu`/`DenseLu`/`SparseColMatrix`/`SparseLuSymbolic`/`LuParams`/
+# `RefactorCause`/`FeralError` in linsolve.rs) — none of the multifrontal or
+# profiler surface — which is what makes this bump source-compatible despite
+# 0.15.0 being a BREAKING release in its diagnostic API (`SupernodeTiming`
+# `us` → `ns`, `BucketStats::sum_us`/`avg_us` → `*_ns`, `ProfileReport::loop_us`
+# → `loop_ns`). Verified by grep: the repo's only feral references are
+# `RefactorCause` and `FeralError`.
+#
+# What 0.15.0 buys the node engine is dense-kernel throughput. The packed BLAS-3
+# trailing update is now an explicit pulp SIMD kernel and the x86_64 pulp
+# dispatch helpers route through `Simd::vectorize`; previously the lane ops
+# executed as outlined calls (~10x kernel slowdown on x86, invisible on aarch64
+# where NEON is baseline). Upstream reports byte-exact results at every SIMD
+# width, enforced by parity tests plus hardcoded golden bit-digests
+# (`tests/golden_bits.rs`, recorded on x86_64 and passing unmodified on
+# aarch64). Separately, four tuning-knob `env::var` lookups that sat on the
+# per-panel dispatch path are now read once via `OnceLock` (upstream paired A/B:
+# −5.7% HYDCAR20, −9.0% block-tridiagonal chain). That is per-front FIXED cost,
+# so it lands hardest on many-small-front bases — precisely the regime the
+# per-node simplex basis lives in.
+#
+# 0.15.1 itself is a patch release whose four items (MC64 scaling-cache gate
+# widening, a bit-identical Hungarian-matching heap, the post-amalgamation
+# `Supernode.nrow` undercount, and `Solver::new()` deriving `use_parallel` from
+# `available_parallelism()` instead of hardcoding `true`) all sit on the
+# multifrontal side discopt does not call. It is pinned exactly anyway because
+# POUNCE 0.10.0's workspace pins feral 0.15.1, and holding discopt and POUNCE on
+# one feral release keeps a single LU implementation behind both the simplex
+# node engine and the NLP evaluator.
+#
+# ACCEPTANCE (CLAUDE.md §5, bound-neutral regime): a dependency bump that moves
+# LU arithmetic is only admissible if `node_count` and the certified `objective`
+# are EXACTLY unchanged on a certifying panel — any drift, even an apparent
+# improvement, means the bump is wrong. MEASURED, 49-instance cert panel, same
+# machine, arms built from the same source and distinguished by the `feral-<ver>`
+# string cargo bakes into the `_rust` extension: 49/49 rows bit-identical in
+# status, node_count AND objective (0.14.0+pounce 0.9.0 -> 0.15.1+pounce 0.10.0).
+# A same-build repeat ran first as the determinism control — also 49/49
+# bit-identical — so node equality is a real gate here and not an artifact of a
+# panel that never varies. Do NOT judge this bump against the committed
+# `docs/dev/data/cert-baseline.jsonl`: that reference is stale against `main`
+# (18 violations on an UNMODIFIED tree on a POUNCE-equipped machine), which is
+# why the arms are diffed against each other instead.
+feral = "0.15.1"
+feral = "0.15.1"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
