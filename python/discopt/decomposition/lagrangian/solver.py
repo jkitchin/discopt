@@ -120,7 +120,20 @@ def solve_lagrangian(
         )
     t0 = time.time()
 
-    milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
+    # #986: the per-block relaxed subproblems are *linear* MILPs whose returned
+    # ``bound`` sums into the Lagrangian dual bound this solver reports, so they
+    # are pinned to the exact-vertex simplex B&B rather than routed by
+    # ``nlp_solver`` — which selects the engine for the *NLP* subproblem and has
+    # no business choosing the engine for a linear one. The POUNCE-IPM-backed B&B
+    # returns an analytic-centre objective that is not a rigorous bound on an
+    # ill-conditioned LP (#145), and here that value *is* the certificate.
+    # ``get_milp_solver`` still falls back to POUNCE when the Rust simplex binding
+    # is unavailable, so POUNCE-only installs keep working.
+    milp = get_milp_solver(backend="simplex")
+    # ``lp`` only picks the next multiplier iterate (the Kelley/bundle master over
+    # λ) and recovers a primal incumbent; the dual bound at that λ is always
+    # recomputed by ``_subproblem``, so this seam is not certificate-producing and
+    # stays on the caller's engine.
     lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
     # The level-bundle projection is a small QP; fall back to Kelley if no QP
     # backend is installed (T2.1).
