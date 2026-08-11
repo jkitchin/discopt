@@ -89,7 +89,6 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # (18 violations on an UNMODIFIED tree on a POUNCE-equipped machine), which is
 # why the arms are diffed against each other instead.
 feral = "0.15.1"
-feral = "0.15.1"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
