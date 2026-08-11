@@ -513,6 +513,20 @@ def _run_benchmark(args):
     else:
         instances, known_optima = _load_minlplib_instances(suite_config)
 
+    # A suite that resolves to nothing must not report metrics. Every rate in
+    # the gate table (incorrect_count, geomean ratios, root-gap coverage) is
+    # computed over the rows that ran, so an empty panel produces a full set of
+    # vacuously-passing numbers -- a green gate that measured nothing. Refuse.
+    if not instances:
+        print(
+            f"ERROR: suite {args.suite!r} resolved to 0 instances. Its declared "
+            "instance_list is missing or matches nothing in the local corpus "
+            "(see the WARN above). Not running: an empty panel would report "
+            "gate metrics that passed by not being evaluated.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Subprocess-isolated, resumable path (recommended for full MINLPLib).
     if args.subprocess:
         _run_scaled(args, suite_config or {}, instances, known_optima)
@@ -681,6 +695,26 @@ def _read_instance_list(path: str | Path | None) -> set[str] | None:
     return names
 
 
+def _load_cert_optima() -> dict[str, float]:
+    """The vendored BARON optima for the certification panel.
+
+    ``docs/dev/data/cert-optima.json`` is the panel's oracle (global50 + the
+    perf panel). Returns ``{}`` if it is absent -- a missing oracle must not
+    take the runner down, but it must also not be mistaken for "everything was
+    verified": every caller merges this on top of its own map and instances
+    with no entry keep ``best_known_objective=None``, which the metrics layer
+    already reports as unverified rather than correct.
+    """
+    p = Path(__file__).parent.parent / "docs" / "dev" / "data" / "cert-optima.json"
+    if not p.exists():
+        print(f"WARN: cert optima {p} not found; panel instances will have no oracle",
+              file=sys.stderr)
+        return {}
+    with open(p) as f:
+        raw = json.load(f)
+    return {str(k): float(v) for k, v in raw.items()}
+
+
 def _instance_list_order(path: str | Path | None) -> list[str]:
     """Same as _read_instance_list but preserves file order."""
     if not path:
@@ -728,10 +762,25 @@ def _load_minlplib_instances(
 
     Returns (instances, known_optima) where instances is a list of InstanceInfo
     and known_optima maps instance name to expected objective.
+
+    This is the DEFAULT path (no --fetch/--use-cache). It must apply the same
+    suite filters as ``_load_minlplib_from_cache``: until it did, a suite whose
+    membership is a list *file* (``instance_list``) silently ran every ``.nl``
+    in the local corpus instead. ``--suite global50`` ran 119 instances, not 50,
+    and reported them under the panel's name.
     """
     from benchmarks.metrics import InstanceInfo
 
-    # Known optima from MINLPLib (verified by BARON/ANTIGONE/SCIP)
+    # Known optima from MINLPLib (verified by BARON/ANTIGONE/SCIP).
+    #
+    # This literal covers 21 of the 50 global50 names, so on the panel it left
+    # ~85 of the instances it was asked about with no oracle at all. An instance
+    # with `best_known_objective=None` cannot be counted incorrect, which makes
+    # `incorrect_count` -- the zero-slack gate -- read 0 by not being evaluated.
+    # `docs/dev/data/cert-optima.json` is the vendored BARON panel and covers 48
+    # of the 50. The two are merged below rather than one replacing the other:
+    # where both carry a value they agree to within 1e-6 (measured), so this
+    # widens coverage without re-baselining any existing verdict.
     known_optima_map = {
         "ex1221": 7.66718007,
         "ex1225": 31.0,
@@ -767,6 +816,7 @@ def _load_minlplib_instances(
         "meanvar": 5.24339907,
         "alan": 2.9250,
     }
+    known_optima_map.update(_load_cert_optima())
 
     # Load instance classifications
     instance_classes = _load_instance_classes()
@@ -792,14 +842,19 @@ def _load_minlplib_instances(
     max_instances = suite_config.get("max_instances", 10000) if suite_config else 10000
     problem_class_filter = suite_config.get("problem_class") if suite_config else None
     instance_list_inline = suite_config.get("instance_list_inline") if suite_config else None
+    list_file = suite_config.get("instance_list") if suite_config else None
 
-    # If inline instance list specified, only use those
+    # Membership can be declared inline (`instance_list_inline`) or as a list
+    # FILE (`instance_list`). Both must be honoured, and both fail closed:
+    # `_read_instance_list` returns an empty set for a missing file, so a typo
+    # in a suite table filters to nothing loudly instead of running the whole
+    # corpus under the suite's name. Reading only the inline form is what let
+    # `--suite global50` report 119 instances as the 50-instance panel.
+    allowed = _read_instance_list(list_file)
     if instance_list_inline:
-        filtered = {}
-        for name in instance_list_inline:
-            if name in found_instances:
-                filtered[name] = found_instances[name]
-        found_instances = filtered
+        allowed = (allowed or set()) | set(instance_list_inline)
+    if allowed is not None:
+        found_instances = {n: p for n, p in found_instances.items() if n in allowed}
 
     instances = []
     for name, nl_path in sorted(found_instances.items()):

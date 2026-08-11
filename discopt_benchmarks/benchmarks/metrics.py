@@ -35,6 +35,24 @@ class SolveStatus(Enum):
     UNKNOWN = "unknown"
 
 
+def time_fraction(seconds: Optional[float], wall: float) -> Optional[float]:
+    """A layer's share of the wall clock, or None if the layer was not measured.
+
+    The distinction this exists to preserve: **a measured 0.0 is data, not a
+    missing value.** Both call sites used to write ``x / wt if x else None``,
+    which collapses "this layer took no time" into "this layer was never
+    instrumented". That is the wrong way round for the case that matters --
+    ``jax_time`` is exactly 0.0 across the whole global50 panel now, and that
+    zero is the measurement, not its absence.
+
+    None is reserved for a solver that genuinely does not report the field at
+    all (every non-discopt solver, whose adapters leave these unset).
+    """
+    if seconds is None:
+        return None
+    return float(seconds) / wall
+
+
 @dataclass
 class SolveResult:
     """Result from a single solver run on a single instance."""
@@ -55,10 +73,19 @@ class SolveResult:
     # objective (None until the first incumbent is found).
     trajectory: Optional[list[list[float]]] = None
 
-    # Layer profiling (discopt-specific)
+    # Layer profiling (discopt-specific). These are NOT four peers that sum to
+    # 1.0 -- see discopt.modeling.core.SolveResult and discopt._timing:
+    #   rust + python  partition the wall clock (disjoint)
+    #   jax    <= python   (JAX cost is ~96% interpreted Python, not XLA)
+    #   pounce <= rust     (POUNCE is native)
+    # Summing them double-counts; the pre-#921 model did exactly that.
     rust_time_fraction: Optional[float] = None
     jax_time_fraction: Optional[float] = None
     python_time_fraction: Optional[float] = None
+    # POUNCE's share. Absent before: after the NLP work moved off JAX this is
+    # where it went, so the benchmark could not see its dominant cost -- 11.69 s
+    # of a 15 s tspn08 solve (78%) had no field to land in.
+    pounce_time_fraction: Optional[float] = None
     batch_sizes: Optional[list[int]] = None  # Node batch sizes during solve
 
     # NLP/LP subsolver stats
@@ -555,20 +582,32 @@ def node_count_reduction(
 
 def layer_profiling_summary(results: list[SolveResult]) -> dict[str, float]:
     """
-    Aggregate Rust/JAX/Python time fractions across runs.
+    Aggregate Rust/JAX/POUNCE/Python time fractions across runs.
 
     This is discopt-specific: measures where time is spent
     across the hybrid architecture layers.
+
+    ``nan`` here means **no run reported that layer** and nothing else. A layer
+    measured at 0.0 must aggregate to 0.0, not vanish -- ``mean_jax_fraction``
+    returning ``nan`` while JAX provably never ran is the instrument failing to
+    report its own strongest result. ``n_profiled`` is emitted so a caller can
+    tell "0.0 across 50 runs" from "0 runs had the field", which the fractions
+    alone cannot express.
     """
-    rust_fracs = [r.rust_time_fraction for r in results if r.rust_time_fraction is not None]
-    jax_fracs = [r.jax_time_fraction for r in results if r.jax_time_fraction is not None]
+    def _mean(attr: str) -> float:
+        vals = [getattr(r, attr) for r in results]
+        vals = [v for v in vals if v is not None]
+        return float(np.mean(vals)) if vals else float("nan")
+
     py_fracs = [r.python_time_fraction for r in results if r.python_time_fraction is not None]
 
     return {
-        "mean_rust_fraction": float(np.mean(rust_fracs)) if rust_fracs else float("nan"),
-        "mean_jax_fraction": float(np.mean(jax_fracs)) if jax_fracs else float("nan"),
-        "mean_python_fraction": float(np.mean(py_fracs)) if py_fracs else float("nan"),
+        "mean_rust_fraction": _mean("rust_time_fraction"),
+        "mean_jax_fraction": _mean("jax_time_fraction"),
+        "mean_pounce_fraction": _mean("pounce_time_fraction"),
+        "mean_python_fraction": _mean("python_time_fraction"),
         "max_python_fraction": float(np.max(py_fracs)) if py_fracs else float("nan"),
+        "n_profiled": float(len(py_fracs)),
     }
 
 

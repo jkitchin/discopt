@@ -19,6 +19,7 @@ from benchmarks.metrics import (
     InstanceInfo,
     SolveResult,
     SolveStatus,
+    time_fraction,
 )
 
 
@@ -340,11 +341,21 @@ class BenchmarkRunner:
             }
             bench_status = status_map.get(result.status, SolveStatus.UNKNOWN)
 
-            # Compute layer profiling fractions
+            # Compute layer profiling fractions.
+            #
+            # `is not None`, NOT truthiness. A measured 0.0 is a RESULT -- on the
+            # global50 panel `jax_time` is exactly 0.0 on all 50 instances because
+            # JAX no longer runs on the solve path, which is the single most
+            # useful thing this profile can say. Truthiness mapped that to None,
+            # `layer_profiling_summary` then filtered the Nones out, and
+            # `mean_jax_fraction` came back `nan` -- indistinguishable from "this
+            # was never instrumented". The instrument reported nothing precisely
+            # when it had the strongest thing to report.
             wt = result.wall_time if result.wall_time > 0 else 1e-10
-            rust_frac = result.rust_time / wt if result.rust_time else None
-            jax_frac = result.jax_time / wt if result.jax_time else None
-            py_frac = result.python_time / wt if result.python_time else None
+            rust_frac = time_fraction(getattr(result, "rust_time", None), wt)
+            jax_frac = time_fraction(getattr(result, "jax_time", None), wt)
+            py_frac = time_fraction(getattr(result, "python_time", None), wt)
+            pounce_frac = time_fraction(getattr(result, "pounce_time", None), wt)
 
             traj = (
                 _downsample_trajectory(
@@ -368,6 +379,7 @@ class BenchmarkRunner:
                 rust_time_fraction=rust_frac,
                 jax_time_fraction=jax_frac,
                 python_time_fraction=py_frac,
+                pounce_time_fraction=pounce_frac,
             )
         except Exception as e:
             elapsed = time.monotonic() - start_time
