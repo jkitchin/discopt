@@ -81,7 +81,7 @@ def test_node_bound_never_exceeds_true_optimum(seed):
     opt = _brute_force(cost, w, cap, K, N)
     if not np.isfinite(opt):
         pytest.skip("infeasible instance")
-    b = LagrangianNodeBounder.try_build(m, prefer_pounce=True)
+    b = LagrangianNodeBounder.try_build(m)
     assert b is not None
     lb, ub = flat_bounds(m)
     root = b.solve_root_dual(lb, ub)
@@ -107,7 +107,7 @@ def test_bound_can_beat_lp_relaxation():
     beat = False
     for seed in range(40):
         m, cost, w, cap, K, N = _build_gap(seed, K=3, N=6)
-        b = LagrangianNodeBounder.try_build(m, prefer_pounce=True)
+        b = LagrangianNodeBounder.try_build(m)
         if b is None:
             continue
         lb, ub = flat_bounds(m)

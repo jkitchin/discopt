@@ -371,29 +371,55 @@ def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
     """An exactly-integral candidate outside a declared row must be declined where
     it is injected, not discovered at the exit gate.
 
-    The Benders master for ``min y - v`` s.t. ``v <= vub*y`` is the reproducer:
-    the master's LP relaxation lands ``y`` a hair under 1,
-    ``_pounce_snap_incumbent`` fixes ``y = 1`` and re-solves for ``v``, and the IPM
-    returns ``v`` about ``1e-8*vub`` past the big-M row — 1e-2 at ``vub = 1e6``,
-    four orders of magnitude outside the declared ``abs=1e-6``. Nothing downstream
-    re-examines it (it is already integral), so it reached the exit gate as the
-    answer and the whole solve died with ``MILP-BB returned an infeasible point
-    labeled feasible/optimal``.
+    The reproducer is a two-row big-M master handed straight to the POUNCE-IPM
+    matrix-MILP engine (``get_milp_solver(backend="pounce")`` ->
+    ``_solve_milp_bb(prefer_pounce=True)``)::
+
+        min  y + eta
+        s.t. -M*y - eta <= 0          (a big-M row, slack at the optimum)
+             -s*y - eta <= vub - s    (the binding row, rhs of order vub)
+             y in {0,1},  eta >= -1e12
+
+    The relaxation lands ``y`` a hair under 1, ``_pounce_snap_incumbent`` fixes
+    ``y = 1`` and re-solves for ``eta``, and the IPM returns ``eta`` about
+    ``1e-8*vub`` past the binding row — 1e-5 at ``vub = 1e3`` and 1e-2 at
+    ``vub = 1e6``, four orders of magnitude outside the declared ``abs=1e-6``.
+    Nothing downstream re-examines it (it is already integral), so it reached the
+    exit gate as the answer and the whole solve died with ``MILP-BB returned an
+    infeasible point labeled feasible/optimal``.
 
     Declining at the funnel is free — injection is a heuristic accelerator, the
     subtree stays open — so the solve completes and its answer is exact.
-    """
-    from discopt.decomposition.benders import solve_benders
 
-    m = dm.Model("bigM")
-    y = m.binary("y")
-    v = m.continuous("v", lb=0, ub=vub)
-    m.first_stage(y)
-    m.minimize(y - v)
-    m.subject_to(v <= vub * y)
+    This used to drive the same funnel through ``solve_benders`` on a linear
+    model, i.e. through the classical-Benders master. #986 pinned that master to
+    the exact-vertex simplex (an interior master point is not a valid Benders
+    iterate and its objective is the reported dual bound), which removed the IPM
+    path this test exists to exercise. The guard it pins is still needed for the
+    ``_solve_milp_bb`` callers that do run on the IPM engine — the matrix-MILP
+    seam used here, OA masters, GDP-LOA, ``milp_relaxation`` — so the test is
+    re-pointed at one of those rather than deleted. The rows above are the shape
+    the Benders master actually produced, and reproduce the funnel's violation
+    magnitudes exactly (9.994994e-06 / 9.999995e-03).
+    """
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.lp_backend import get_milp_solver
+
+    milp = get_milp_solver(backend="pounce")
+    big_m, slope = 3.0 * vub, 0.25
+    A_ub = np.array([[-big_m, -1.0], [-slope, -1.0]])
+    b_ub = np.array([0.0, vub - slope])
 
     with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
-        r = solve_benders(m, time_limit=60)
+        r = milp(
+            np.array([1.0, 1.0]),
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=[(0.0, 1.0), (-1e12, 1e20)],
+            integrality=np.array([1, 0], dtype=np.int32),
+            time_limit=60.0,
+            gap_tolerance=1e-4,
+        )
 
     declined = [
         rec.getMessage()
@@ -405,8 +431,6 @@ def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
         "reason (the off-row candidate is what it is meant to exercise)"
     )
 
-    # And the solve still lands on the exact optimum (y=1, v=vub -> 1 - vub).
-    assert r.status in ("optimal", "iteration_limit")
+    # And the solve still lands on the exact optimum (y=1, eta=-vub -> 1 - vub).
+    assert r.status == SolveStatus.OPTIMAL
     assert r.objective == pytest.approx(1.0 - vub, rel=1e-9)
-    if r.bound is not None:
-        assert r.bound <= (1.0 - vub) + 1e-3 * (1.0 + abs(1.0 - vub))
