@@ -10160,7 +10160,20 @@ def solve_model(
                     # cannot even cover the measured build cost buys a truncated,
                     # near-empty relaxation for full build wall — decline instead.
                     # Same skip semantics as the past-deadline branch above.
-                    if _round_budget_enabled:
+                    #
+                    # #928 rule 1: NEVER decline while the node holds no valid
+                    # bound of its own. A branched node always carries its parent's
+                    # bound (the Rust import floors every node at it), so declining
+                    # there forgoes tightening only. The ROOT batch has no parent —
+                    # declining its round leaves the whole tree bound-less, which is
+                    # exactly the collapse the coupled panel measured (contvar: the
+                    # root probe sets a build EMA larger than what is left of the
+                    # grant, the root round is then declined, and the search spends
+                    # its budget on cheap uncertified nodes for a final
+                    # ``bound=None``). This is the same rule ``_fb_stop`` already
+                    # applies in the root-relaxation fallback: a phase is optional
+                    # tightening only once some valid bound has landed.
+                    if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
                         if _exp_build is not None and _node_remaining < _exp_build:
                             continue
@@ -10535,8 +10548,15 @@ def solve_model(
                     # the flag, decline the round once the deadline is past or
                     # the remaining grant cannot cover the measured build cost;
                     # the node stays open on its valid parent bound.
+                    # #928 rule 1 (see the batch path): the ROOT batch holds no
+                    # parent bound, so its round is never declined — declining it
+                    # leaves the tree with no bound source at all. That covers the
+                    # past-deadline arm of this check too: a root round entered on
+                    # a spent grant truncates its build and reports the relaxation's
+                    # rigorous box floor, which is strictly more than the nothing a
+                    # declined root leaves behind.
                     _serial_remaining = _deadline - time.perf_counter()
-                    if _round_budget_enabled:
+                    if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
                         _round_blocked = _serial_remaining <= 0.0 or (
                             _exp_build is not None and _serial_remaining < _exp_build

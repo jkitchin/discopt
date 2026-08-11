@@ -1,0 +1,93 @@
+{
+  "nvs03": {
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 16.0,
+    "node_count": 3,
+    "gap_certified": true
+  },
+  "nvs07": {
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "gap_certified": true
+  },
+  "nvs10": {
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5,
+    "gap_certified": true
+  },
+  "nvs11": {
+    "status": "optimal",
+    "objective": -431.0000000000085,
+    "bound": -431.0000000000085,
+    "node_count": 55,
+    "gap_certified": true
+  },
+  "nvs12": {
+    "status": "optimal",
+    "objective": -481.20000000001,
+    "bound": -481.20000000001,
+    "node_count": 231,
+    "gap_certified": true
+  },
+  "nvs15": {
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7,
+    "gap_certified": true
+  },
+  "prob02": {
+    "status": "optimal",
+    "objective": 112235.0,
+    "bound": 112235.0,
+    "node_count": 177,
+    "gap_certified": true
+  },
+  "prob03": {
+    "status": "optimal",
+    "objective": 10.0,
+    "bound": 10.0,
+    "node_count": 11,
+    "gap_certified": true
+  },
+  "st_miqp1": {
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15,
+    "gap_certified": true
+  },
+  "st_miqp2": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9,
+    "gap_certified": true
+  },
+  "st_miqp3": {
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1,
+    "gap_certified": true
+  },
+  "st_test1": {
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15,
+    "gap_certified": true
+  },
+  "st_testgr3": {
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549,
+    "gap_certified": true
+  }
+}

@@ -1072,12 +1072,22 @@ class SolverTuning:
       cold-build cost (an EMA over this solve's builds) — the round admission
       check accounting for the round's expected non-LP cost. A declined node
       keeps its inherited (valid) parent bound and stays open, exactly like the
-      existing past-deadline skip.
+      existing past-deadline skip — **except in the ROOT batch, which is never
+      declined** (#928 rule 1). The root has no parent bound, so declining its
+      round leaves the whole tree with no bound source; that is the ``bound=None``
+      collapse the first coupled graduation panel measured on contvar (7 → 287
+      nodes, nothing ever certified). The same rule already governs the
+      root-relaxation fallback's ``_fb_stop``: a phase is optional tightening only
+      once some valid bound is in hand.
 
     Sound by construction: build truncation only drops rows (weaker, never
     falsified — the ``_objective_bound_valid`` gate catches an un-bounded cost
     column), deadline-cut LP solves already bank the Neumaier-Shcherbina floor,
-    and a declined round only leaves a node on its parent's valid bound. Default
+    and a declined round only leaves a node on its parent's valid bound. A round
+    that IS cut short no longer returns nothing: it reports the rigorous
+    box-interval objective floor of the (possibly truncated) relaxation it built
+    — measured, a spent round grant lost the bound outright on 16 of 114 cells of
+    the binding subset before that (#928, see ``_solve_at_node_impl``). Default
     off pending the §5 corpus-wide differential panel (cert-clean AND
     net-positive); graduation is coupled to the #928
     ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""
