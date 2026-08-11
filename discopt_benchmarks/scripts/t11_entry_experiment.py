@@ -15,10 +15,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import ObjectiveSense, VarType
 
 # Families the incremental engine patches in closed form today.

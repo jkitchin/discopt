@@ -4,7 +4,7 @@
 **Scope:** `python/discopt/_numpy/mccormick.py` (352), `relaxation_compiler.py`
 (476) — numpy McCormick/factorable convex relaxations. The soundness of the
 `asin`/`acos` primitive is **shared with the live JAX layer**
-(`_jax/mccormick.py`), so a finding here reaches the shipping path.
+(`_relax/mccormick.py`), so a finding here reaches the shipping path.
 **Method:** Delegated soundness fuzz (~3.4M primitive samples + composite checks,
 harness modeled on `test_gp_hull.py::test_soundness`); the two findings
 re-confirmed here, including on the **live JAX primitive**.
@@ -26,7 +26,7 @@ direct route to an invalid bound the instant the path is exercised.
 
 | # | Severity | Loc | Finding |
 |---|----------|-----|---------|
-| NM-1 | **P0 soundness (live)** | `_numpy/mccormick.py:210-241` **and** `_jax/mccormick.py:474-524` | `relax_asin`/`relax_acos` have **inverted curvature regimes**. `arcsin''(x)=x(1−x²)^{−3/2}` so arcsin is **convex on [0,1]**, but the code sets `is_concave = lb≥0` and swaps cv/cc. The convex under-estimator sits **above** the function → cuts feasible points → invalid bound. **Present in the live JAX primitive** [CONFIRMED both: `relax_asin(0.5)` on `[0.1,0.9]` returns cv=0.609968 > true=0.523599, gap 0.086] |
+| NM-1 | **P0 soundness (live)** | `_numpy/mccormick.py:210-241` **and** `_relax/mccormick.py:474-524` | `relax_asin`/`relax_acos` have **inverted curvature regimes**. `arcsin''(x)=x(1−x²)^{−3/2}` so arcsin is **convex on [0,1]**, but the code sets `is_concave = lb≥0` and swaps cv/cc. The convex under-estimator sits **above** the function → cuts feasible points → invalid bound. **Present in the live JAX primitive** [CONFIRMED both: `relax_asin(0.5)` on `[0.1,0.9]` returns cv=0.609968 > true=0.523599, gap 0.086] |
 | NM-2 | ✅ **RESOLVED by deletion** (was P0 soundness, latent) | ~~`relaxation_compiler.py:164-181`~~ (deleted) | The numpy compiler's `Variable` leaf returned `(x_cv, x_cc)` and **never read the box `lb/ub`**. Under the real calling convention (`relax_fn(x, x, lb, ub)` → leaf sees `(x,x)`), the whole tree collapsed and returned the **exact nonconvex function** as its own "relaxation" [CONFIRMED: `x*y` on `[1,5]²` at (3,3) → numpy cv=cc=9.0 (the true product); JAX cv=5.0 (real underestimator)]. **The entire `discopt._numpy` backend has been deleted** (see §4) — the "avoid JAX compile overhead" motivation was stale and the backend was compiled-but-unused, so deletion is behavior-preserving and removes the latent-unsound path outright. |
 | NM-3 | P3 robustness | `_numpy/mccormick.py` `_secant`/primitives | No `lb>ub` guard — an inverted box yields a finite envelope from a negative-width secant with no loud refusal (`lb==ub` degeneracy *is* handled correctly). Callers currently pass valid boxes [SUSPECTED] |
 
@@ -103,7 +103,7 @@ by POUNCE (pure-Rust), which has no JAX compile floor. The backend was
   into `_mc_obj_relax_fn_np` / `_mc_con_relax_fns_np` and passed them as
   `obj_relax_fn_numpy=` / `con_relax_fns_numpy=` into `solve_mccormick_batch` and
   `solve_mccormick_relaxation_nlp`.
-- In `_jax/mccormick_nlp.py`, both functions **accepted** those params but **never
+- In `_relax/mccormick_nlp.py`, both functions **accepted** those params but **never
   read them**: `solve_mccormick_batch` only forwarded them down to
   `solve_mccormick_relaxation_nlp`, which ignored them entirely — the bound is
   produced by `_solve_relaxation_with_pounce(obj_relax_fn, …)` from the **JAX**
@@ -120,7 +120,7 @@ by POUNCE (pure-Rust), which has no JAX compile floor. The backend was
 `obj_relax_fn_numpy=`/`con_relax_fns_numpy=` call sites plus the
 `_mc_obj_relax_fn_np`/`_mc_con_relax_fns_np` locals; the dead
 `obj_relax_fn_numpy`/`con_relax_fns_numpy` params + forwarding in
-`_jax/mccormick_nlp.py`; the numpy `id`s from `_BACKENDS` in the three envelope
+`_relax/mccormick_nlp.py`; the numpy `id`s from `_BACKENDS` in the three envelope
 tests; and the stale `discopt._numpy.relaxation_compiler` mypy override in
 `pyproject.toml`.
 

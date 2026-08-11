@@ -85,7 +85,7 @@ class TestC18MidpointNotABound:
         produced (cv at the midpoint) directly from the compiled relaxation and
         show it exceeds the true box minimum.
         """
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+        from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
         m = Model()
         x = m.continuous("x", lb=1.0, ub=3.0)
@@ -120,7 +120,7 @@ class TestC18MidpointNotABound:
 
     def test_evaluate_midpoint_helpers_are_gone(self):
         """The unsound helpers were deleted, not just left unwired."""
-        import discopt._jax.mccormick_nlp as mn
+        import discopt._relax.mccormick_nlp as mn
 
         assert not hasattr(mn, "evaluate_midpoint_bound")
         assert not hasattr(mn, "evaluate_midpoint_bound_batch")
@@ -136,8 +136,8 @@ class TestNLPBounds:
 
     def test_nlp_bound_is_valid_lower_bound(self):
         """NLP relaxation bound <= true optimum (since cv <= f)."""
-        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+        from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
+        from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
         model = _simple_minimize_model()
         relax_fn = compile_objective_relaxation(model)
@@ -159,8 +159,8 @@ class TestNLPBounds:
         it is sound where the removed "midpoint" mode was not: it returns
         ``min_box cv`` rather than ``cv(mid)``.
         """
-        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+        from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
+        from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
         model = _simple_minimize_model()
         relax_fn = compile_objective_relaxation(model)
@@ -180,8 +180,8 @@ class TestNLPBounds:
 
     def test_handles_ge_constraint(self):
         """NLP relaxation with >= constraints (binding)."""
-        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
-        from discopt._jax.relaxation_compiler import (
+        from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
+        from discopt._relax.relaxation_compiler import (
             compile_constraint_relaxation,
             compile_objective_relaxation,
         )
@@ -206,8 +206,8 @@ class TestNLPBounds:
 
     def test_handles_eq_constraint(self):
         """NLP relaxation with == constraints (one-sided relaxation)."""
-        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
-        from discopt._jax.relaxation_compiler import (
+        from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
+        from discopt._relax.relaxation_compiler import (
             compile_constraint_relaxation,
             compile_objective_relaxation,
         )
@@ -231,8 +231,8 @@ class TestNLPBounds:
 
     def test_convex_fast_convergence(self):
         """Convex problem converges quickly with few IPM iterations."""
-        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+        from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
+        from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
         model = _convex_quadratic_model()
         relax_fn = compile_objective_relaxation(model)
@@ -248,7 +248,7 @@ class TestNLPBounds:
 
     def test_expired_deadline_skips_relaxation_solves(self):
         """Expired B&B deadlines should not start more McCormick NLP solves."""
-        from discopt._jax.mccormick_nlp import (
+        from discopt._relax.mccormick_nlp import (
             solve_mccormick_batch,
             solve_mccormick_relaxation_nlp,
         )

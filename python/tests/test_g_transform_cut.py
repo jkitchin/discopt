@@ -16,15 +16,15 @@ import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity.g_convex_cut import g_convex_supporting_cut
-from discopt._jax.convexity.g_convexity import GConvexCertificate
-from discopt._jax.convexity.g_transform import (
+from discopt._relax.convexity.g_convex_cut import g_convex_supporting_cut
+from discopt._relax.convexity.g_convexity import GConvexCertificate
+from discopt._relax.convexity.g_transform import (
     ExpTransform,
     compose_affine_inner,
     compose_increasing_outer,
     least_convexifying_transform,
 )
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Model
 
 # ──────────────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ class TestSupportingCut:
         m = Model("t")
         x = m.continuous("x", lb=1.0, ub=3.0)
         y = m.continuous("y", lb=1.0, ub=3.0)
-        from discopt._jax.convexity.interval import Interval
+        from discopt._relax.convexity.interval import Interval
 
         tight = {x: Interval.from_bounds(1.4, 1.5), y: Interval.from_bounds(1.6, 1.7)}
         assert g_convex_supporting_cut(dm.log(x**2 + y**2), m) is None

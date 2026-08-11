@@ -209,7 +209,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -296,7 +296,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -382,7 +382,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -483,7 +483,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
@@ -601,7 +601,14 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout pytest-cov "ruff==0.14.6"
+          # pounce-solver matches the other four lanes. It was missing here, which
+          # was invisible while the tape NLP evaluator was opt-in and became a hard
+          # failure the moment it graduated to default-ON (#75): every solve raised
+          # ModuleNotFoundError. discopt now degrades to the JAX evaluator when
+          # POUNCE is absent, so this lane would pass either way — but it should
+          # exercise the same backend as everything else, not the fallback.
+          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout pytest-cov "ruff==0.14.6" \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python"
           maturin develop
       - name: Test AMP fast battery with coverage
         run: |

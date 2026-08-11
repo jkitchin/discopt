@@ -10,7 +10,7 @@ tl = 12.0
 if "--tl" in sys.argv: tl = float(sys.argv[sys.argv.index("--tl")+1])
 
 def dis():
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     oi=nev.NLPEvaluator.__init__
     def p(self,*a,**k):
         oi(self,*a,**k); self._fused_fc_jit=None; self._gj_fusable_cache=False
@@ -18,7 +18,7 @@ def dis():
 if baseline: dis()
 
 import numpy as np
-import discopt._jax.nlp_evaluator as nev
+import discopt._relax.nlp_evaluator as nev
 # census counters
 cnt=defaultdict(lambda:[0,0])  # name->[calls, ns]
 Ev=nev.NLPEvaluator

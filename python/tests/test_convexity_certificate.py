@@ -24,9 +24,9 @@ import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity import Curvature, certify_convex, classify_expr
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.convexity import Curvature, certify_convex, classify_expr
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Model
 
 

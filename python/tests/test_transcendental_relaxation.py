@@ -19,8 +19,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
 
 
 def _root_bound(model):

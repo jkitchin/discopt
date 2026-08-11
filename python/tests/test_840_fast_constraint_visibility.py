@@ -24,8 +24,8 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import scipy.sparse as sp
-from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _check_constraint_feasibility, is_qubo
+from discopt._relax.nlp_evaluator import cached_evaluator
+from discopt._relax.primal_heuristics import _check_constraint_feasibility, is_qubo
 
 _WORKERS = ["w1", "w2", "w3"]
 _TASKS = ["a", "b", "c"]

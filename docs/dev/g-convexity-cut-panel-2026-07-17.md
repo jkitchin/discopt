@@ -4,7 +4,7 @@ Flag: `DISCOPT_G_CONVEX_CUTS` (bound-changing, default-OFF). Capability:
 `inject_g_convex_cuts` recognizes constraint bodies certified **G-convex** on
 the declared box and injects rigorously valid linear transformation cuts
 (`exp(ρ·body) ≤ 1` supported at `x₀` with an interval-safe intercept). See
-`python/discopt/_jax/convexity/g_convex_inject.py`.
+`python/discopt/_relax/convexity/g_convex_inject.py`.
 
 ## Verdict: **does NOT graduate — cert-clean but inert (net-neutral).**
 

@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import (
+from discopt._relax.nlp_evaluator import (
     _HESSIAN_COMPILE_DENSE_S,
     _HESSIAN_COMPILE_SPARSE_FLOOR_S,
     NLPEvaluator,
@@ -106,7 +106,7 @@ def test_diving_returns_immediately_when_deadline_passed():
     stops these loops from running tens of seconds past a tight ``time_limit``.
     Deterministic: with a deadline already in the past not a single backend call
     is made. Fail-before: without the deadline poll the first sub-NLP would run."""
-    from discopt._jax.primal_heuristics import diving
+    from discopt._relax.primal_heuristics import diving
 
     m = Model("dive")
     x = m.continuous("x", lb=0.0, ub=5.0)

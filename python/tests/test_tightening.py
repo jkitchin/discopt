@@ -113,7 +113,7 @@ def test_no_constraints_returns_original_box():
 
 
 def _run_bilinear_rule(model):
-    from discopt._jax.nonlinear_bound_tightening import (
+    from discopt._relax.nonlinear_bound_tightening import (
         BilinearProductEqualityRule,
         build_flat_variable_metadata,
     )

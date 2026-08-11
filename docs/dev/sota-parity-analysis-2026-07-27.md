@@ -214,9 +214,9 @@ probes executed; harness exits non-zero at zero.
 
 | where | kind | reachable on the default nonconvex path? |
 |---|---|---|
-| `_jax/primal_heuristics.py:341` `feasibility_pump` | round → **pin** integers → re-solve continuous NLP, ≤5 rounds, random ±1 perturbation | **yes** — root, `solver.py:9926` and `:12903`. Not a projection pump: it never changes the relaxation objective, so on an all-integer model it degenerates to round-and-check (#844's own wording, confirmed) |
+| `_relax/primal_heuristics.py:341` `feasibility_pump` | round → **pin** integers → re-solve continuous NLP, ≤5 rounds, random ±1 perturbation | **yes** — root, `solver.py:9926` and `:12903`. Not a projection pump: it never changes the relaxation objective, so on an all-integer model it degenerates to round-and-check (#844's own wording, confirmed) |
 | `solvers/oa.py:1920` `_run_feasibility_pump` | MindtPy-style L1/L2 projection, MILP master + NLP projection + no-good cuts | no — OA/GDP route (convex MINLP, highspy) |
-| `_jax/lp_spatial_bb.py:802` `feasibility_pump` (closure) | **the real thing**: Fischetti-Glover-Lodi objective pump over the McCormick LP, cycle-breaking perturbation, exact verification; called at the root (`:904`) and at every node (`:992`) | **no, on the target class** — see Q2 |
+| `_relax/lp_spatial_bb.py:802` `feasibility_pump` (closure) | **the real thing**: Fischetti-Glover-Lodi objective pump over the McCormick LP, cycle-breaking perturbation, exact verification; called at the root (`:904`) and at every node (`:992`) | **no, on the target class** — see Q2 |
 
 So #844's ask ("LP-based feasibility pump … over a tightened McCormick relaxation") is
 **built**. The task is reachability, not construction.

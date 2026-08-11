@@ -23,7 +23,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
 pytestmark = [pytest.mark.claim_boundary]
 

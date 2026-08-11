@@ -30,9 +30,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np  # noqa: E402
 
 import discopt  # noqa: E402
-import discopt._jax.mccormick_lp as MC  # noqa: E402
-import discopt._jax.milp_relaxation as MR  # noqa: E402
-from discopt._jax.deadline import deadline_scope  # noqa: E402
+import discopt._relax.mccormick_lp as MC  # noqa: E402
+import discopt._relax.milp_relaxation as MR  # noqa: E402
+from discopt._relax.deadline import deadline_scope  # noqa: E402
 from discopt.modeling.core import from_nl  # noqa: E402
 from discopt.solver import solve_model  # noqa: E402
 

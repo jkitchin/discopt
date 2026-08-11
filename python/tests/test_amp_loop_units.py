@@ -17,9 +17,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.nlp_evaluator import NLPEvaluator
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Model
 from discopt.solvers.amp import (
     _amp_abs_gap_with_bound_tolerance,
@@ -391,7 +391,7 @@ def test_append_upper_bound_constraint_builds_and_stacks():
 
 def _cutoff_obbt_args(model, UB, deadline, obbt_time_limit=5.0):
     terms = classify_nonlinear_terms(model)
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
 
     flat_lb, flat_ub = flat_variable_bounds(model)
     part_vars = sorted(terms.partition_candidates)

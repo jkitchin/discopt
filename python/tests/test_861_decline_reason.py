@@ -29,8 +29,8 @@ import time
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 
 def _admitting_model():

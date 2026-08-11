@@ -42,9 +42,9 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.model_utils import flat_variable_bounds
 from discopt.solver import _extract_variable_info
 from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 
@@ -221,7 +221,7 @@ def test_nested_division_engages_on_nvs22(caplog):
     m = dm.from_nl(str(nl))
     _, elb, eub, io, isz = _extract_variable_info(m)
     tlb, tub, _, _ = tighten_root_bounds_with_fbbt(m, elb.copy(), eub.copy(), io, isz)
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
         _root_bound(m, backend="auto", bounds=(tlb, tub))
     omitted = "\n".join(
         r.getMessage() for r in caplog.records if "omitting constraint" in r.getMessage()

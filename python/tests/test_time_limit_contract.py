@@ -63,7 +63,7 @@ _SLACK_FRAC = 0.10
 # the independently sufficient reason it stays off, are unaffected.
 #
 # That drop is issue #928 (``_lp_warm_deadline_enabled`` in
-# ``_jax/milp_relaxation.py``): the warm pure-LP fast path discards the caller's
+# ``_relax/milp_relaxation.py``): the warm pure-LP fast path discards the caller's
 # ``time_limit``. It predates this test and is not the reserve's to fix. The
 # ``_fb_left()`` clamp on that call site is already in place and correct; it is
 # inert only because the callee drops it. (The flag's panel script and companion

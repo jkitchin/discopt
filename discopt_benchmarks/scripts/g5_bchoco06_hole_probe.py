@@ -36,8 +36,8 @@ _NL = _REPO / "python" / "tests" / "data" / "minlplib_nl" / "bchoco06.nl"
 
 def _build_ctx(model, flat_lb, flat_ub):
     """Mirror build_uniform_relaxation's assembly, keeping ctx + obj_lin."""
-    from discopt._jax.uniform_relax import LinForm, _Builder
-    from discopt._jax.canonical_expr import canonicalize
+    from discopt._relax.uniform_relax import LinForm, _Builder
+    from discopt._relax.canonical_expr import canonicalize
     from discopt.modeling.core import ObjectiveSense
 
     dag = canonicalize(model)
@@ -71,8 +71,8 @@ def _build_ctx(model, flat_lb, flat_ub):
 
 def main() -> None:
     from discopt.modeling.core import from_nl
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.milp_relaxation import MilpRelaxationModel
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
 
     model = from_nl(str(_NL))
     flat_lb, flat_ub = flat_variable_bounds(model)

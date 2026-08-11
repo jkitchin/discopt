@@ -10,8 +10,8 @@ silently lose the tightening effect.
 from __future__ import annotations
 
 import discopt.modeling as dm
-from discopt._jax.convexity import Curvature, classify_expr, classify_model
-from discopt._jax.convexity.certificate import certify_convex
+from discopt._relax.convexity import Curvature, classify_expr, classify_model
+from discopt._relax.convexity.certificate import certify_convex
 from discopt.modeling.core import Model
 
 

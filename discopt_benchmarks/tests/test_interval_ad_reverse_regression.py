@@ -1,6 +1,6 @@
 """M9 regression: reverse-mode interval AD on benchmark-style constraints.
 
-The reverse-mode propagator (``discopt._jax.convexity.interval_ad_reverse``)
+The reverse-mode propagator (``discopt._relax.convexity.interval_ad_reverse``)
 is not yet wired into the LP relaxation compiler — that integration
 ships alongside the M2/M3 kernel and M11 wrapper integration as a
 follow-up. This regression exercises the pass directly on constraint
@@ -24,12 +24,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.convexity.interval_ad_reverse import (
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.convexity.interval_ad_reverse import (
     reverse_propagate,
     tighten_box,
 )
-from discopt._jax.convexity.interval_eval import evaluate_interval
+from discopt._relax.convexity.interval_eval import evaluate_interval
 from discopt.modeling.core import FunctionCall
 
 N_REGRESSION_SAMPLES = 10_000

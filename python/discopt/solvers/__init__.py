@@ -174,7 +174,7 @@ class NLPResult:
 # Requested absolute cap on the max-norm of the UNSCALED constraint violation at
 # termination. POUNCE inherits Ipopt's default of 1e-4, two orders LOOSER than
 # discopt's own 1e-6 constraint tolerance
-# (``solver._matrix_solution_feasible``, ``_jax.primal_heuristics.
+# (``solver._matrix_solution_feasible``, ``_relax.primal_heuristics.
 # _check_constraint_feasibility``), so a converged point can sit 1e-4 on the
 # infeasible side of a row and still be reported OPTIMAL. Dominant on the
 # published pounce-solver wheel; a no-op on current ``main``.

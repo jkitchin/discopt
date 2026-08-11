@@ -20,8 +20,8 @@ import sys
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt._jax.sparse_hessian import build_hessian_coloring
+from discopt._relax.nlp_evaluator import NLPEvaluator
+from discopt._relax.sparse_hessian import build_hessian_coloring
 
 pytestmark = pytest.mark.unit
 

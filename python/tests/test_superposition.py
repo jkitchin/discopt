@@ -1,6 +1,6 @@
 """Tests for multivariate superposition cuts (M8 of issue #81).
 
-Covers the standalone cut generator in :mod:`discopt._jax.superposition`:
+Covers the standalone cut generator in :mod:`discopt._relax.superposition`:
 
 * **Soundness** — every generated cut is a valid global bound on the lifted
   graph ``w = f(x) y`` over the box (checked on > 10^4 samples), so the
@@ -19,7 +19,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.superposition import (
+from discopt._relax.superposition import (
     BilinearNonlinearTerm,
     bilinear_nonlinear_cuts,
     interior_references,

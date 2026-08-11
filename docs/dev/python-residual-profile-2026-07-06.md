@@ -58,8 +58,8 @@ bridge* that POUNCE re-enters on every IPM iteration.**
    native compute (POUNCE IPM + Rust) is the *majority* (52–70 %) on 5 of 6
    instances, but the removable Python slice is large enough to be the lever.
 2. **The single biggest removable sink is `P_nlp_bridge`** — the Python glue in
-   `_jax/nlp_evaluator.py` + `solvers/nlp_ipopt.py` (the `_IpoptCallbacks`
-   adapter) + `_jax/sparse_jacobian.py`/`sparse_hessian.py` that POUNCE calls
+   `_relax/nlp_evaluator.py` + `solvers/nlp_ipopt.py` (the `_IpoptCallbacks`
+   adapter) + `_relax/sparse_jacobian.py`/`sparse_hessian.py` that POUNCE calls
    **once per IPM iteration** to evaluate objective/gradient/constraints/
    Jacobian/Hessian. It is **24–31 % of wall on m3/fac2** and 14–15 % on
    nvs08/nvs06/ex1224. Call-count evidence: **fac2 issues 22,676
@@ -125,7 +125,7 @@ mine.
 
 **What it is.** discopt's node/root NLPs are solved by POUNCE through the shared
 `solvers/nlp_ipopt.py::_IpoptCallbacks` adapter, which on every IPM iteration
-calls into `_jax/nlp_evaluator.py` (`evaluate_objective`,
+calls into `_relax/nlp_evaluator.py` (`evaluate_objective`,
 `evaluate_constraints`, `evaluate_gradient`, `_evaluate_dense_jacobian` /
 `sparse_jac_values`, `evaluate_lagrangian_hessian`). Each of those wraps a
 JAX-compiled kernel but pays Python glue around it: `_current_params` dict

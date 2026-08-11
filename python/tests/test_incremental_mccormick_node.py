@@ -26,7 +26,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
 
 def _int_qcqp():
@@ -65,13 +65,13 @@ def test_incremental_structure_is_sparse_and_patch_matches_dense():
     """
     import numpy as np
     import scipy.sparse as sp
-    from discopt._jax.incremental_mccormick import (
+    from discopt._relax.incremental_mccormick import (
         IncrementalMcCormickLP,
         _affine_square_rows,
         _bilinear_rows,
         _monomial_rows,
     )
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = _int_qcqp()  # (x-3)^2 + (y-2)^2 + x*y : bilinear + affine squares
     inc = IncrementalMcCormickLP(m, classify_nonlinear_terms(m))
@@ -117,7 +117,7 @@ def test_incremental_declined_when_lift_exceeds_nnz_budget(monkeypatch):
     fast path is declined (``_inc is None``) and ``solve_at_node`` uses the cold
     build; declining only forgoes the speedup, never soundness.
     """
-    import discopt._jax.incremental_mccormick as inc
+    import discopt._relax.incremental_mccormick as inc
 
     m = _int_qcqp()
     lb = np.array([float(v.lb) for v in m._variables], dtype=np.float64)
@@ -165,7 +165,7 @@ def test_validate_catches_negative_box_sign_flip_mutation(monkeypatch):
     Reverting the box set to ``lb>=0``-only makes this assertion fail (verified
     manually during C-21): the mutation then slips through undetected.
     """
-    import discopt._jax.incremental_mccormick as ic
+    import discopt._relax.incremental_mccormick as ic
 
     # Sanity: the unmutated engine engages on this model.
     assert MccormickLPRelaxer(_span_bilinear())._inc is not None
@@ -258,7 +258,7 @@ def test_incremental_infeasible_node_pruned_without_cold_rebuild(monkeypatch):
     fast = MccormickLPRelaxer(m)
     assert fast._inc is not None
 
-    import discopt._jax.mccormick_lp as mc
+    import discopt._relax.mccormick_lp as mc
 
     calls = {"n": 0}
     _orig = mc.build_milp_relaxation
@@ -358,10 +358,10 @@ def test_incremental_solve_bound_matches_cold_builder_with_constant():
     """Same invariant one level down, at ``IncrementalMcCormickLP.solve`` itself:
     its bound is the relaxation objective (``c·x + obj_offset``), the scale
     ``MilpRelaxationModel.solve`` reports."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = _const_qcqp(-100.0)
     lb, ub = np.array([1.0, 1.0]), np.array([4.0, 4.0])

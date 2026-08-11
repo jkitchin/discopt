@@ -15,8 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from discopt._jax.canonical_expr import canonicalize, is_affine
-from discopt._jax.claim_audit import audit_build
+from discopt._relax.canonical_expr import canonicalize, is_affine
+from discopt._relax.claim_audit import audit_build
 from discopt.modeling.core import from_nl
 
 # slow: builds every corpus relaxation (some — e.g. st_e36 — take 100s+), so this

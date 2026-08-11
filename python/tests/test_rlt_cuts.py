@@ -9,7 +9,7 @@ the moment values can be set exactly.
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.rlt_cuts import rlt_constraint_bound_cut
+from discopt._relax.rlt_cuts import rlt_constraint_bound_cut
 
 # 2 original variables (cols 0,1); squares X_00,X_11 and product X_01 lifted.
 _INFO = {

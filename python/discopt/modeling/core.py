@@ -930,7 +930,7 @@ class CustomCall(Expression):
     Consequences (enforced by the solver and the export/relaxation layers):
 
     - If the opaque body traces soundly through discopt's reduced-space McCormick
-      type (``MCBox`` -- arithmetic ``+ - * / **`` and the ``discopt._jax.mcbox``
+      type (``MCBox`` -- arithmetic ``+ - * / **`` and the ``discopt._relax.mcbox``
       intrinsic namespace), a **continuous** model is now solved **globally with a
       certificate** via the reduced-space engine, branching only on the original
       degrees of freedom while the callable's internal intermediates stay hidden
@@ -1817,14 +1817,14 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     the comparison operators that build every constraint in the supported DSL fold
     the offset into ``body``. Most of the tree honours that invariant by simply not
     looking at ``rhs``: **26 modules read ``Constraint.body`` and never read
-    ``.rhs``**, among them the whole relaxation stack (``_jax/dag_compiler``,
+    ``.rhs``**, among them the whole relaxation stack (``_relax/dag_compiler``,
     ``relaxation_compiler``, ``milp_relaxation``, ``mccormick_subgradient``,
     ``term_classifier``, ``nonlinear_bound_tightening``, ``dependent_vars``,
     ``implied_integer``, the convexity certificate, ``bilevel/kkt``, Benders, RO).
 
     A handful of *other* consumers do honour it — ``validation/feasibility``
     (``signed = body - rhs``), the ``.nl`` and GAMS exporters,
-    ``problem_classifier``, ``_jax/obbt``, and the Rust ``ConstraintRepr`` (114
+    ``problem_classifier``, ``_relax/obbt``, and the Rust ``ConstraintRepr`` (114
     references across the presolve crate). (Issue #909 also listed the LP and MPS
     exporters here; **measured, that is false** — both rebuild the row's
     right-hand side from the *body* alone and silently drop a non-zero ``rhs``, so
@@ -1986,11 +1986,20 @@ class SolveResult:
     mip_count : int
         Number of MIP/MILP solves performed by the algorithm, when tracked.
     rust_time : float
-        Time spent in the Rust backend (B&B tree management).
-    jax_time : float
-        Time spent in JAX (NLP evaluations, autodiff).
+        Time spent in native Rust — the discopt core (B&B tree, simplex, presolve)
+        **and** POUNCE. Together with ``python_time`` this partitions ``wall_time``.
     python_time : float
-        Time spent in Python orchestration.
+        Time spent in interpreted Python, including time inside the JAX library.
+        Together with ``rust_time`` this partitions ``wall_time``.
+    jax_time : float
+        Time inside the JAX evaluator. **A SUBSET of** ``python_time``, not a peer
+        of it: measured, ~96% of JAX time on the solve path is interpreted-Python
+        dispatch/tracing rather than native XLA (heatexch_gen3: 13.34 s Python vs
+        0.56 s XLA). Treating this as disjoint from ``python_time`` — as the
+        pre-#921 accounting did — makes the split irreconcilable.
+    pounce_time : float
+        Time inside POUNCE (NLP/LP/QP subsolves). **A SUBSET of** ``rust_time``;
+        POUNCE is Rust.
     root_bound : float or None
         Strongest rigorous dual bound proved at the root box, in the reported
         objective sense. None if no root relaxation was built.
@@ -2030,10 +2039,24 @@ class SolveResult:
     node_count: int = 0
     mip_count: int = 0
 
-    # Layer profiling
+    # Layer profiling.
+    #
+    # ``rust_time`` and ``python_time`` are DISJOINT and partition ``wall_time``:
+    # native Rust (discopt core + POUNCE) versus interpreted Python.
+    #
+    # ``jax_time`` and ``pounce_time`` are diagnostic SUBSETS, not peers:
+    #     jax_time    <= python_time     (JAX is ~96% interpreted Python)
+    #     pounce_time <= rust_time       (POUNCE is Rust)
+    #
+    # The old model made ``jax_time`` a peer of ``python_time`` and derived
+    # ``python_time = wall - rust - jax``. Because JAX time is overwhelmingly
+    # Python time, that double-subtracted and the three fields never reconciled:
+    # measured on tspn08, ``jax_time`` read 18.82 s where cProfile found 0.78 s of
+    # JAX frames and 11.69 s of POUNCE — a bucket that had no home.
     rust_time: float = 0.0
-    jax_time: float = 0.0
     python_time: float = 0.0
+    jax_time: float = 0.0
+    pounce_time: float = 0.0
 
     # Root-node certification instrumentation (Phase 0 / cert:T0.1). These
     # describe the state of the search at the moment the root node is fathomed
@@ -2299,12 +2322,12 @@ class SolveResult:
 
         # Lazy computation: compute sensitivity from existing solution
         if self._sensitivity is None:
-            from discopt._jax.differentiable import _compute_sensitivity_at_solution
+            from discopt._relax.differentiable import _compute_sensitivity_at_solution
 
             self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
 
         # Extract the slice for this parameter
-        from discopt._jax.differentiable import _get_param_slice
+        from discopt._relax.differentiable import _get_param_slice
 
         start, end = _get_param_slice(param, self._model)
         grad_flat = self._sensitivity[start:end]
@@ -3037,6 +3060,8 @@ class Model:
         tol: float = 1e-10,
         max_iter: int = 50,
         name: str = "implicit",
+        formulation: str = "custom_root",
+        bounds=None,
     ) -> Expression:
         """Define a vector ``v`` implicitly by ``residual(u, v) = 0`` (issue #379).
 
@@ -3048,6 +3073,18 @@ class Model:
         rejected. ``u_inputs`` are the model expressions the block depends on
         (the DAG edges into the solve); they are required, not inferred.
 
+        ``formulation="full_space"`` is the alternative lowering: ``v`` becomes a
+        real vector variable and the residuals become real ``== 0`` constraints,
+        so the block is ordinary algebra. That keeps JAX off the solve path (the
+        tape refuses a ``CustomCall``) and keeps a global certificate reachable
+        (a relaxation needs the equations), at the cost of the reduced-space size
+        win. In that mode ``residual`` receives **discopt expressions** and must
+        be written in discopt operators rather than ``jnp.*``. There is no inner
+        Newton solve, so ``x0`` / ``tol`` / ``max_iter`` are *refused* rather
+        than silently dropped -- select a root with ``bounds`` and warm-start
+        through ``solve(initial_solution=...)``.
+        See :func:`discopt.modeling.implicit_full_space`.
+
         See :func:`discopt.modeling.implicit` for parameter details.
 
         Examples
@@ -3056,6 +3093,35 @@ class Model:
         >>> v = m.implicit(lambda U, V: [V[0] ** 2 - U[0]], [u], n_unknowns=1)
         >>> m.minimize((v[0] - 3.0) ** 2)   # v = sqrt(u); optimum at u = 9
         """
+        if formulation == "full_space":
+            from discopt.modeling.implicit import implicit_full_space as _full
+
+            # There is no inner Newton solve in this arm, so these two control
+            # nothing.  Accepting them silently would let a caller tune a knob
+            # that is not connected to anything (CLAUDE.md §3: no dead flags).
+            for _k, _v, _default in (("tol", tol, 1e-10), ("max_iter", max_iter, 50)):
+                if _v != _default:
+                    raise ValueError(
+                        f"{_k}= does not apply with formulation='full_space': the "
+                        "residuals become ordinary equality constraints and are "
+                        "solved by the outer solver, not by an inner Newton "
+                        "iteration. Use solve() tolerances instead."
+                    )
+            return _full(self, residual, u_inputs, n_unknowns, x0, bounds=bounds, name=name)
+        if formulation != "custom_root":
+            raise ValueError(
+                f"formulation must be 'custom_root' or 'full_space', got {formulation!r}"
+            )
+        if bounds is not None:
+            # Not a silent no-op: the opaque node has no column to put a box on,
+            # so honouring `bounds` here would mean emitting inequality
+            # constraints on the node output -- a different model than the caller
+            # asked for.  Refuse rather than guess (CLAUDE.md §3).
+            raise ValueError(
+                "bounds= is only supported with formulation='full_space'; the "
+                "custom_root node has no variable to bound. Add explicit "
+                "constraints on the returned node if you need them."
+            )
         from discopt.modeling.implicit import implicit as _implicit
 
         return _implicit(residual, u_inputs, n_unknowns, x0, tol=tol, max_iter=max_iter, name=name)
@@ -3278,7 +3344,7 @@ class Model:
         if isinstance(base, Variable):
             return base.name
         try:
-            from discopt._jax.gdp_reformulate import _collect_variables
+            from discopt._relax.gdp_reformulate import _collect_variables
 
             names = list(_collect_variables(var).keys())
         except Exception:
@@ -3704,7 +3770,7 @@ class Model:
         default (huge) bounds when either enclosure is non-finite or cannot be
         computed; presolve/FBBT tighten from there. Always sound.
         """
-        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._relax.convexity.interval_eval import evaluate_interval
 
         los: list[float] = []
         his: list[float] = []
@@ -4185,9 +4251,12 @@ class Model:
             If True and the objective is a non-negative-weighted sum of squares
             (e.g. ``dm.sum((C @ S - D) ** 2)`` or an explicit
             ``Σ (resid_i) ** 2``), use the Gauss-Newton objective Hessian
-            ``2 Jᵀ J`` of the residuals instead of the dense ``jax.hessian``.
-            This sidesteps the super-linear second-derivative XLA compile that
-            can dominate least-squares solves (issue #98). The Gauss-Newton
+            ``2 Jᵀ J`` of the residuals instead of the exact second derivative.
+            This sidesteps the super-linear second-derivative compile that can
+            dominate least-squares solves (issue #98). Supported on both NLP
+            evaluator backends: the JAX arm differentiates a residual function,
+            the default tape arm reads ``∂r/∂x`` from an auxiliary POUNCE tape
+            whose constraint rows are the residuals. The Gauss-Newton
             Hessian is always PSD and exact at a zero-residual solution, but
             drops the ``Σ rᵢ ∇²rᵢ`` curvature term, so it changes the Newton
             step (iteration path) without changing the KKT point converged to.
@@ -4325,7 +4394,7 @@ class Model:
             if _ck_res is not None:
                 return _ck_res
 
-        from discopt._jax.deadline import deadline_scope
+        from discopt._relax.deadline import deadline_scope
         from discopt.solver import solve_model
 
         # Attach the interactive B&B debugger if requested. The fire-sites in
@@ -4379,10 +4448,20 @@ class Model:
             if self._num_builder_constraint_rows() > 0:
                 self._materialize_builder_linear_rows()
             try:
-                from discopt._jax.nlp_evaluator import cached_evaluator
+                # Routed through the backend dispatcher, not straight to
+                # ``cached_evaluator``: that import pulls jax at module scope, so
+                # calling it here imported JAX on every nonlinear solve even when
+                # the tape backend was selected (#75). The jax import stays inside
+                # the fallback so it happens only when the tape is not used.
+                from discopt._tape_nlp_evaluator import build_evaluator
+
+                def _jax_evaluator():
+                    from discopt._relax.nlp_evaluator import cached_evaluator
+
+                    return cached_evaluator(self)
 
                 _verify_snap = (
-                    cached_evaluator(self),
+                    build_evaluator(self, _jax_evaluator),
                     [v.name for v in self._variables],
                 )
             except Exception as _snap_exc:  # pragma: no cover - defensive
@@ -4424,7 +4503,7 @@ class Model:
             and self._constraints
         ):
             try:
-                from discopt._jax.lp_spatial_bb import _is_in_scope
+                from discopt._relax.lp_spatial_bb import _is_in_scope
 
                 # #860: the engine now also serves mixed-integer and MAXIMIZE models,
                 # but whether the DEFAULT path should hand them 35% of its budget is a
@@ -4540,7 +4619,7 @@ class Model:
         # panelled at.
         if _fb_reserve > 1.0 and result.objective is None:
             try:
-                from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+                from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 
                 # Fresh process-global deadline: the primary's scope has expired, and
                 # the JAX-compiled LP loops poll it.
@@ -4656,7 +4735,7 @@ class Model:
             try:
                 import numpy as _np
 
-                from discopt._jax.primal_heuristics import _check_constraint_feasibility
+                from discopt._relax.primal_heuristics import _check_constraint_feasibility
 
                 _snap_ev, _snap_names = _verify_snap
                 _flat = _np.concatenate(
@@ -5574,7 +5653,7 @@ def model_from_repr(rep, name: str) -> Model:
     Complementarity relations are **not** reconstructed here — they live
     outside ``ModelRepr`` and are threaded separately by :func:`from_nl`.
     """
-    from discopt._jax.nl_reconstruction import reconstruct_dag
+    from discopt._relax.nl_reconstruction import reconstruct_dag
 
     m = Model(name)
 
@@ -5654,7 +5733,7 @@ def from_nl(path: str) -> Model:
     """
     import os
 
-    from discopt._jax.nl_reconstruction import reconstruct_complementarities
+    from discopt._relax.nl_reconstruction import reconstruct_complementarities
     from discopt._rust import parse_nl_file
 
     nl_repr = parse_nl_file(path)

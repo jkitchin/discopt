@@ -13,7 +13,7 @@ unnormalized row means:
   Benders, RO). ``dag_compiler.compile_constraint`` is the seam: it compiles
   ``constraint.body`` and drops ``rhs`` on the floor.
 * ``validation/feasibility`` (``signed = body - rhs``), the ``.nl`` and GAMS
-  exporters, ``problem_classifier``, ``_jax/obbt`` and the Rust ``ConstraintRepr``
+  exporters, ``problem_classifier``, ``_relax/obbt`` and the Rust ``ConstraintRepr``
   (114 references in the presolve crate) all **do** honour it.
 
   *Correction (CLAUDE.md §11).* Issue #909 and the first write-up of this file

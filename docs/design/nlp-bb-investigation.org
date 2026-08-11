@@ -59,7 +59,7 @@ exports batches of pending nodes with their bounds and parent solutions via
 pruning/fathoming/branching in =process_evaluated()=. All of this works
 unchanged for NLP-BB.
 
-*** Batch NLP Solving (=python/discopt/_jax/ipm.py=)
+*** Batch NLP Solving (=python/discopt/_relax/ipm.py=)
 
 The =solve_nlp_batch()= function uses =jax.vmap= to solve multiple NLPs in a
 single fused XLA kernel. The existing =_solve_batch_ipm()= orchestrator in
@@ -75,7 +75,7 @@ already pipes warm-starts to the batch IPM solver. For NLP-BB on convex
 problems, warm-starting from the parent NLP solution is particularly effective
 because the child NLP differs from the parent only in one tightened bound.
 
-*** Convexity Detection (=python/discopt/_jax/convexity.py=)
+*** Convexity Detection (=python/discopt/_relax/convexity.py=)
 
 The =classify_model()= function walks the expression DAG and classifies
 curvature using standard composition rules (convex, concave, affine, unknown).
@@ -83,7 +83,7 @@ It is already called in =solver.py:1155-1158= to set =_model_is_convex=, which
 controls multistart strategy and lower bound computation. NLP-BB uses this as a
 gate to determine whether gap certification is possible.
 
-*** NLP Evaluator (=python/discopt/_jax/nlp_evaluator.py=)
+*** NLP Evaluator (=python/discopt/_relax/nlp_evaluator.py=)
 
 The =NLPEvaluator= compiles the model's objective, gradient, Hessian,
 constraints, and Jacobian to JIT'd JAX functions. It provides the callback
@@ -339,9 +339,9 @@ No changes to Rust code, JAX evaluator, or IPM solver.
 |---------------------------------------------------+-------------------------------------------------------|
 | =crates/discopt-core/src/bnb/tree_manager.rs=     | TreeManager, export/import/process cycle               |
 | =crates/discopt-core/src/bnb/branching.rs=        | create_children (already fixes binaries via bounds)    |
-| =python/discopt/_jax/ipm.py=                      | solve_nlp_batch (vmap'd batch IPM)                     |
-| =python/discopt/_jax/nlp_evaluator.py=            | NLPEvaluator (JIT'd obj/grad/hess/cons/jac)           |
-| =python/discopt/_jax/convexity.py=                | classify_model for convexity gate                      |
+| =python/discopt/_relax/ipm.py=                      | solve_nlp_batch (vmap'd batch IPM)                     |
+| =python/discopt/_relax/nlp_evaluator.py=            | NLPEvaluator (JIT'd obj/grad/hess/cons/jac)           |
+| =python/discopt/_relax/convexity.py=                | classify_model for convexity gate                      |
 
 * Future Extensions
 

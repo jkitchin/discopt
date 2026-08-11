@@ -28,13 +28,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.implied_integer import detect_implied_integers  # noqa: E402
-from discopt._jax.integer_product_reform import (  # noqa: E402
+from discopt._relax.implied_integer import detect_implied_integers  # noqa: E402
+from discopt._relax.integer_product_reform import (  # noqa: E402
     extend_initial_point,
     has_reformulation_work,
     reformulate_integer_bilinear,
 )
-from discopt._jax.term_classifier import classify_nonlinear_terms  # noqa: E402
+from discopt._relax.term_classifier import classify_nonlinear_terms  # noqa: E402
 from discopt.modeling.core import (  # noqa: E402
     BinaryOp,
     Constant,

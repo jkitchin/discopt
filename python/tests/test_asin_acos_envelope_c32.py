@@ -16,7 +16,7 @@ crossings on the JAX backend.
 
 import numpy as np
 import pytest
-from discopt._jax import mccormick as jm
+from discopt._relax import mccormick as jm
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]
 

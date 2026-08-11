@@ -17,8 +17,8 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 # Frozen pre-atom (flag-off) bound for the [0.1,1]^2 entropy sum — the decoupled
 # bilinear floor. Pins that flag-off behavior is unchanged by this PR.

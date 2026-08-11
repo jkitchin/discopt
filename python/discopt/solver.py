@@ -23,12 +23,13 @@ import numpy as np
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.problem_classifier import dense_A as _dense_A
-from discopt._jax.problem_classifier import dense_Q as _dense_Q
+from discopt import _timing
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.problem_classifier import dense_A as _dense_A
+from discopt._relax.problem_classifier import dense_Q as _dense_Q
 
 if TYPE_CHECKING:
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
@@ -100,7 +101,7 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     branching-order metadata only — it never enters a bound or feasibility test,
     so it cannot affect soundness.
     """
-    from discopt._jax.term_classifier import _get_flat_index, classify_nonlinear_terms
+    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
     from discopt.modeling.core import (
         BinaryOp,
         Constant,
@@ -199,7 +200,7 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
     only** — it never enters a bound or feasibility test, so it cannot affect
     soundness. Returns an empty set when the structure is absent.
     """
-    from discopt._jax.term_classifier import _get_flat_index, classify_nonlinear_terms
+    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
     from discopt.modeling.core import (
         BinaryOp,
         Constant,
@@ -909,10 +910,11 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     backend = None
     xr = None
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
         from discopt.solvers.nlp_backend import get_nlp_solver
 
-        ev = NLPEvaluator(model)
+        # Via the dispatcher (#75): a direct NLPEvaluator(...) both bypasses the
+        # selected backend and imports jax unconditionally.
+        ev = _make_evaluator(model)
         backend = get_nlp_solver("auto")
         r = backend(
             ev,
@@ -935,7 +937,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             base[i] = float(np.round(0.5 * (lb[i] + ub[i])))
 
     try:
-        from discopt._jax.primal_heuristics import subnlp
+        from discopt._relax.primal_heuristics import subnlp
 
         if len(free_int) <= _NATIVE_SEED_MAX_FREE_INTEGERS:
             # Per-free-integer candidate values: the two integers bracketing this
@@ -987,7 +989,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
 
     if not int_pos and time.perf_counter() < deadline:
         try:
-            from discopt._jax.primal_heuristics import continuous_multistart
+            from discopt._relax.primal_heuristics import continuous_multistart
 
             cand = continuous_multistart(
                 model,
@@ -1096,7 +1098,7 @@ def _try_native_spatial_kernel(
     _native_rust_s = 0.0
     try:
         from discopt import _rust
-        from discopt._jax.spatial_producer import build_spatial_kernel_spec
+        from discopt._relax.spatial_producer import build_spatial_kernel_spec
 
         _t_phase = time.perf_counter()
         spec = build_spatial_kernel_spec(
@@ -1170,7 +1172,8 @@ def _try_native_spatial_kernel(
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
         _t_phase = time.perf_counter()
-        res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
+        with _timing.charge("rust"):
+            res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
         _native_rust_s += time.perf_counter() - _t_phase
         res.update(meta)
     except Exception as exc:  # pragma: no cover - defensive
@@ -1412,7 +1415,7 @@ def _rlt_root_gain(model: "Model") -> Optional[float]:
     try:
         import numpy as _np
 
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         lb = _np.concatenate(
             [_np.atleast_1d(_np.asarray(v.lb, float) * _np.ones(v.size)) for v in model._variables]
@@ -1489,7 +1492,7 @@ def _rlt_sparse_admit(model: "Model", n_vars: int) -> bool:
     if n_vars > int(tun.rlt_sparse_max_vars):
         return False
     try:
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         terms = classify_nonlinear_terms(model)
         n_terms = (
@@ -1631,6 +1634,18 @@ class _AugmentedEvaluator:
         return self._ev.n_variables
 
     @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74).
+
+        This class enumerates its members explicitly rather than delegating via
+        ``__getattr__`` (unlike ``_BoundOverrideEvaluator``), so an attribute
+        added to the evaluators does NOT reach ``_charge_evaluator`` through it.
+        Without this property a cut-augmented node NLP would fall to the
+        "undeclared" arm and lose its callbacks from the profile.
+        """
+        return self._ev.timing_bucket
+
+    @property
     def variable_bounds(self):
         return self._ev.variable_bounds
 
@@ -1670,47 +1685,46 @@ class _AugmentedEvaluator:
         cut_bounds = [(-1e20, 0.0)] * self._n_cuts
         return list(original_bounds) + cut_bounds
 
-    def get_augmented_jax_bounds(self, g_l_jax, g_u_jax):
-        """Return JAX constraint bound arrays extended with cut bounds."""
-        import jax.numpy as jnp
-
-        if self._n_cuts == 0:
-            return g_l_jax, g_u_jax
-        cut_gl = jnp.full(self._n_cuts, -1e20, dtype=jnp.float64)
-        cut_gu = jnp.zeros(self._n_cuts, dtype=jnp.float64)
-        if g_l_jax is not None:
-            new_gl = jnp.concatenate([g_l_jax, cut_gl])
-            new_gu = jnp.concatenate([g_u_jax, cut_gu])
-        else:
-            new_gl = cut_gl
-            new_gu = cut_gu
-        return new_gl, new_gu
-
     @property
     def _obj_fn(self):
         return self._ev._obj_fn
 
     @property
     def _cons_fn(self):
+        """Augmented constraint callable, built with numpy rather than ``jnp``.
+
+        This wrapper is constructed on a live solve path (the cut-augmented node
+        NLP below) and may wrap a *tape* evaluator, which is JAX-free. The
+        previous implementation did ``import jax.numpy`` unconditionally here, so
+        merely *reading* this property pulled in 210 JAX modules and returned a
+        ``jaxlib`` array on an otherwise JAX-free solve. Nothing in-tree reads it
+        today, which is the only reason #75's acceptance test never caught it --
+        and "no consumer today" is one attribute access away from being false.
+
+        numpy is the correct module regardless: every consumer of an
+        ``_AugmentedEvaluator`` drives it through the ``evaluate_*`` methods with
+        concrete arrays, and the cut rows are dense float64 either way. A JAX
+        evaluator's own ``_cons_fn`` still returns a JAX array, and
+        ``np.concatenate`` accepts one -- this composes with both backends
+        without importing either.
+        """
         if self._n_cuts == 0:
             return self._ev._cons_fn
 
-        import jax.numpy as jnp
-
         orig_cons_fn = self._ev._cons_fn
-        A_jax = jnp.array(self._A, dtype=jnp.float64)
-        b_jax = jnp.array(self._b, dtype=jnp.float64)
+        A = np.asarray(self._A, dtype=np.float64)
+        b = np.asarray(self._b, dtype=np.float64)
 
         if orig_cons_fn is not None:
 
             def augmented_con(x):
-                orig = orig_cons_fn(x)
-                cut_vals = A_jax @ x - b_jax
-                return jnp.concatenate([orig, cut_vals])
+                orig = np.asarray(orig_cons_fn(x), dtype=np.float64)
+                cut_vals = A @ np.asarray(x, dtype=np.float64) - b
+                return np.concatenate([orig, cut_vals])
         else:
 
             def augmented_con(x):
-                return A_jax @ x - b_jax
+                return A @ np.asarray(x, dtype=np.float64) - b
 
         return augmented_con
 
@@ -1737,21 +1751,35 @@ def _evaluator_fingerprint(model: Model) -> tuple:
     Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
     here for the existing importers (e.g. ``solvers.nlp_native``).
     """
-    from discopt._jax.nlp_evaluator import evaluator_fingerprint
+    from discopt._evaluator_cache import evaluator_fingerprint
 
     return evaluator_fingerprint(model)
 
 
 def _make_evaluator(model: Model):
-    """Create or reuse a cached NLPEvaluator for the model.
+    """Create or reuse a cached NLP evaluator for the model.
 
-    Delegates to the canonical :func:`nlp_evaluator.cached_evaluator` so the B&B
-    loop, the primal heuristics, and the POUNCE node solves all share one cache
-    (and one set of compiled callables) instead of each rebuilding the evaluator.
+    The single funnel for the B&B loop, the primal heuristics, and the POUNCE
+    node solves, so they share one cache (and one set of compiled callables)
+    instead of each rebuilding the evaluator.
+
+    By default (#75, graduated in ``a2fb90d2``) this returns the JAX-free
+    tape-backed evaluator when the model is representable, and the JAX one
+    otherwise; ``DISCOPT_NLP_EVAL=jax`` forces the JAX evaluator. The
+    ``cached_evaluator`` import is INSIDE the fallback lambda on purpose: it
+    imports jax at module scope, so importing it eagerly here would put JAX in
+    ``sys.modules`` on every nonlinear solve and defeat the entire point of the
+    tape backend. Default is unchanged — anything other than ``tape`` takes the
+    JAX path, and the tape is bound-CHANGING until the §5 panel says otherwise.
     """
-    from discopt._jax.nlp_evaluator import cached_evaluator
+    from discopt._tape_nlp_evaluator import build_evaluator
 
-    return cached_evaluator(model)
+    def _jax_evaluator():
+        from discopt._relax.nlp_evaluator import cached_evaluator
+
+        return cached_evaluator(model)
+
+    return build_evaluator(model, _jax_evaluator)
 
 
 def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
@@ -1812,7 +1840,7 @@ def _alphabb_node_box(model, node_lb, node_ub):
     so the interval Hessian is enclosed over *this node's* box rather than the
     root box.
     """
-    from discopt._jax.convexity.interval import Interval
+    from discopt._relax.convexity.interval import Interval
 
     box = {}
     offset = 0
@@ -1888,7 +1916,7 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     # convexity, so we ABSTAIN rather than emit a guessed (possibly invalid)
     # bound. Building the enclosure over the node box (not the root box) also
     # tightens alpha as B&B subdivides.
-    from discopt._jax.alphabb import rigorous_alpha
+    from discopt._alphabb_rigorous import rigorous_alpha
 
     try:
         box = _alphabb_node_box(model, node_lb, node_ub)
@@ -2016,7 +2044,7 @@ def _objective_is_convex_quadratic(
     if model._objective is None or n_vars == 0:
         return False
     try:
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         t = classify_nonlinear_terms(model)
         # Reject anything above degree two anywhere in the model. ``monomial`` maps
@@ -2046,7 +2074,7 @@ def _objective_is_convex_quadratic(
         # count is a model-wide upper bound on the objective's quadratic nnz —
         # conservative, so over-estimating only abstains (sound).
         if remaining_budget is not None:
-            from discopt._jax.nlp_evaluator import estimate_dense_obj_hessian_compile_s
+            from discopt._hessian_cost_model import estimate_dense_obj_hessian_compile_s
 
             _obj_quad_nnz = len(t.bilinear) + sum(1 for _, deg in _monos if int(deg) == 2)
             _compile_est = estimate_dense_obj_hessian_compile_s(_obj_quad_nnz)
@@ -2196,8 +2224,8 @@ def _compute_interval_bound(model, node_lb, node_ub, negate):
     if model._objective is None:
         return -np.inf
     try:
-        from discopt._jax.convexity.interval import Interval
-        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._relax.convexity.interval import Interval
+        from discopt._relax.convexity.interval_eval import evaluate_interval
 
         box = {}
         offset = 0
@@ -2297,7 +2325,7 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
 # The absolute tolerance the NLP-BB exit gate (#954) holds a returned incumbent
 # to: the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), the same
 # figure ``_matrix_solution_feasible`` enforces on the matrix paths (#952) and
-# ``_jax.primal_heuristics._check_constraint_feasibility`` enforces when a primal
+# ``_relax.primal_heuristics._check_constraint_feasibility`` enforces when a primal
 # heuristic accepts an incumbent. Deliberately NOT the 1e-4 that this module's
 # local ``_check_constraint_feasibility`` defaults to; see the gate's call site.
 _NLPBB_EXIT_ABS_TOL = 1e-6
@@ -2504,7 +2532,7 @@ def _structural_linear_row_mask(model, sizes, m):
     Returns ``None`` if the per-constraint row expansion cannot be aligned with
     ``m`` (caller then keeps the purely numeric classification).
     """
-    from discopt._jax.gdp_reformulate import _is_linear
+    from discopt._relax.gdp_reformulate import _is_linear
 
     flags: list[bool] = []
     k = 0
@@ -2784,7 +2812,7 @@ def _apply_nonlinear_tightening_with_status(
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """Apply opportunistic nonlinear bound tightening without aborting node processing."""
     try:
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         # #875: this was the ONE nonlinear-tightening entry point with no budget. The
         # other three all pass a deadline — the root declared-box pass, the
@@ -3300,7 +3328,7 @@ def _invoke_pre_import_callbacks(
     own non-rigorous-sentinel sweep, so the caller must account for these
     rejections separately.
     """
-    from discopt._jax.cutting_planes import LinearCut
+    from discopt._relax.cutting_planes import LinearCut
     from discopt.callbacks import CallbackContext, cut_result_to_dense
 
     n_rejected = 0
@@ -3447,7 +3475,7 @@ def _screen_heuristic_incumbent(
     ``solve_model``) so they tighten subsequent relaxations, exactly as on the
     batch path.
     """
-    from discopt._jax.cutting_planes import LinearCut
+    from discopt._relax.cutting_planes import LinearCut
     from discopt.callbacks import CallbackContext, cut_result_to_dense
 
     x = np.asarray(x, dtype=np.float64)
@@ -3843,7 +3871,7 @@ def _extend_budget_for_incumbent(
     # Left stale, both read as already expired for the whole extension — the exact
     # failure mode that made the #844 fallback silently degrade to its cold path.
     model._solve_deadline = float(t_start) + extended
-    from discopt._jax.deadline import get_deadline, set_deadline
+    from discopt._relax.deadline import get_deadline, set_deadline
 
     if get_deadline() is not None:
         set_deadline(extended - float(elapsed))
@@ -3950,7 +3978,7 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
     """
     raw_lb, raw_ub = flat_variable_bounds(model)
     try:
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         return tighten_nonlinear_bounds(model, raw_lb, raw_ub, deadline=deadline)
     except Exception as exc:
@@ -4050,7 +4078,7 @@ def _model_contains_custom_call(model: Model) -> bool:
             if isinstance(expr, CustomCall):
                 return True
             # Generic child traversal mirroring the DAG node fields used
-            # elsewhere (e.g. discopt._jax.cutting_planes): BinaryOp/MatMul ->
+            # elsewhere (e.g. discopt._relax.cutting_planes): BinaryOp/MatMul ->
             # left/right, UnaryOp/SumExpression -> operand,
             # FunctionCall/CustomCall -> args, SumOverExpression -> terms,
             # IndexExpression -> base.
@@ -4112,7 +4140,7 @@ def _custom_call_reduced_admissible(reduced_model: Model, n_orig: int) -> bool:
     NOT reduced-relaxable, so the caller keeps the existing local-NLP-only path. Any
     other status means the relaxation builds → the global reduced-space solve is valid."""
     try:
-        from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound as _probe
+        from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound as _probe
 
         lb, ub = _flat_var_box(reduced_model)
         if lb.size < n_orig:
@@ -4206,7 +4234,7 @@ def _classify_model_convexity(
     if cached is not None:
         return cast("tuple[bool, bool, list[bool] | None]", cached)
 
-    from discopt._jax.convexity.rules import ConvexityBudgetExceeded
+    from discopt._relax.convexity.rules import ConvexityBudgetExceeded
 
     # Default cap (15 s) bounds classification even when called outside a budgeted
     # solve_model (e.g. on a model produced by factorable reformulation).
@@ -4217,7 +4245,7 @@ def _classify_model_convexity(
         deadline = solve_deadline if deadline is None else min(deadline, float(solve_deadline))
     result: tuple[bool, bool, list[bool] | None]
     try:
-        from discopt._jax.convexity import classify_model as _classify_convexity
+        from discopt._relax.convexity import classify_model as _classify_convexity
 
         # use_certificate=True enables the sound interval-Hessian fallback
         # for constraints/objective the syntactic walker leaves unproven.
@@ -4337,7 +4365,7 @@ def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
     ``_psd_cuts`` / ``_rlt_cuts`` flags; purely a performance choice — every cut
     family is sound, so this never affects correctness.
     """
-    from discopt._jax.milp_relaxation import _any_linear_constraint_form
+    from discopt._relax.milp_relaxation import _any_linear_constraint_form
 
     try:
         n = sum(v.size for v in model._variables)
@@ -4462,12 +4490,12 @@ def _root_relaxation_lower_bound(
     MINIMIZE objective; defensively returns ``None`` on any failure so it can
     never make a previously-bounded solve worse.
     """
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import (
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import (
         build_milp_relaxation,
         sanitize_relaxation_for_conditioning,
     )
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     # Issue #654 checkpoint poll. This routine computes several INDEPENDENT bound
     # candidates (plain / separated / PSD / RLT) and returns the tightest; each is
@@ -4610,8 +4638,8 @@ def _root_relaxation_lower_bound(
         psd_bound: Optional[float] = None
         if psd_cuts and not _fb_stop(_have):
             try:
-                from discopt._jax.model_utils import binary_flat_cols
-                from discopt._jax.psd_cuts import psd_strengthen_relaxation_bound
+                from discopt._relax.model_utils import binary_flat_cols
+                from discopt._relax.psd_cuts import psd_strengthen_relaxation_bound
 
                 # Binary variables have moment diagonal X_ii = x_i, so the moment
                 # separator can form cliques over pure products of distinct binaries
@@ -4639,8 +4667,8 @@ def _root_relaxation_lower_bound(
         _tun = _tuning()
         if getattr(_tun, "rlt1_root_bound", False) and not _fb_stop(_have):
             try:
-                from discopt._jax.model_utils import binary_flat_cols as _bfc
-                from discopt._jax.rlt import rlt1_lower_bound
+                from discopt._relax.model_utils import binary_flat_cols as _bfc
+                from discopt._relax.rlt import rlt1_lower_bound
 
                 _rb, _nrows = rlt1_lower_bound(
                     model,
@@ -4665,8 +4693,8 @@ def _root_relaxation_lower_bound(
         rlt_lag_bound: Optional[float] = None
         if getattr(_tun, "rlt1_lagrangian", False) and not _fb_stop(_have):
             try:
-                from discopt._jax.model_utils import binary_flat_cols as _bfc
-                from discopt._jax.rlt import rlt1_lagrangian_lower_bound
+                from discopt._relax.model_utils import binary_flat_cols as _bfc
+                from discopt._relax.rlt import rlt1_lagrangian_lower_bound
 
                 _lb, _nc = rlt1_lagrangian_lower_bound(
                     model,
@@ -4695,8 +4723,8 @@ def _root_relaxation_lower_bound(
         shor_bound: Optional[float] = None
         if getattr(_tun, "shor_sdp_root_bound", False) and not _fb_stop(_have):
             try:
-                from discopt._jax.model_utils import binary_flat_cols as _bfc
-                from discopt._jax.shor_sdp import shor_sdp_lower_bound
+                from discopt._relax.model_utils import binary_flat_cols as _bfc
+                from discopt._relax.shor_sdp import shor_sdp_lower_bound
 
                 _sb, _sdim = shor_sdp_lower_bound(
                     model,
@@ -4757,7 +4785,7 @@ def _root_relaxation_lower_bound(
         sep_bound: Optional[float] = None
         if not _fb_stop(_have):
             try:
-                from discopt._jax.mccormick_lp import MccormickLPRelaxer
+                from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
                 # Rule 1 vs rule 2, applied to the SOLVE budget and not just to
                 # whether the phase starts. With no candidate in hand this is the
@@ -4866,8 +4894,8 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 
     @functools.wraps(fn)
     def wrapper(model, *args, **kwargs):
-        from discopt._jax.convexity.rules import _run_with_deep_recursion
-        from discopt._jax.factorable_reform import _max_expr_node_count
+        from discopt._relax.convexity.rules import _run_with_deep_recursion
+        from discopt._relax.factorable_reform import _max_expr_node_count
 
         try:
             depth = _max_expr_node_count(model)
@@ -5009,6 +5037,61 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
     return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
 
 
+def _stamp_layer_timing(fn: _F) -> _F:
+    """Stamp the layer profile onto whatever ``SolveResult`` the solve produced.
+
+    ``solve_model`` builds a ``SolveResult`` at ~18 sites across the class-dispatch
+    paths. Threading counters through all of them is what produced the pre-#921
+    accounting bugs — several sites simply forwarded stale totals, and one phase
+    timer spanned ~745 lines and charged the Rust simplex to JAX. Stamping once,
+    here, means every path is attributed by construction and a new return site
+    cannot silently regress the profile.
+
+    The buckets come from :mod:`discopt._timing`, which measures at FFI
+    boundaries. ``rust`` and ``python`` partition the wall; ``pounce`` and ``jax``
+    are subsets of those two respectively (see ``SolveResult``).
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        before = _timing.snapshot()
+        started = time.perf_counter()
+        result = fn(*args, **kwargs)
+        elapsed = time.perf_counter() - started
+        # ``stream=True`` yields an iterator of SolveUpdate, not a SolveResult;
+        # leave anything that is not a SolveResult untouched rather than guessing.
+        if not isinstance(result, SolveResult):
+            return result
+        spent = _timing.since(before)
+        wall = result.wall_time if result.wall_time else elapsed
+
+        # Clamp the measured native time to the wall it was measured inside.
+        #
+        # Not defensive padding — it closes a real intermittent hole. ``wall`` is
+        # ``result.wall_time``, which an inner path sets, while the boundary
+        # counters accumulate across everything this call did. ``Model.solve`` can
+        # run ``solve_model`` more than once (the #844 no-incumbent fallback), so
+        # the counters can legitimately exceed the wall the *returned* result
+        # reports. Without the clamp, ``python_time`` floors at 0 while
+        # ``rust_time`` keeps the overflow and the partition invariant breaks —
+        # observed as a ~1-in-N flake in ``test_buckets_partition_the_wall``.
+        #
+        # Clamping keeps rust + python == wall exactly. It can under-report Rust
+        # on a multi-solve call, which is the right way to be wrong here: a bucket
+        # that quietly exceeds its own wall is the class of nonsense this whole
+        # change exists to remove.
+        native = min(spent["rust"] + spent["pounce"], wall)
+        result.rust_time = native
+        result.pounce_time = min(spent["pounce"], native)
+        # Everything that is not native Rust is interpreted Python.
+        result.python_time = max(0.0, wall - native)
+        result.jax_time = min(spent["jax"], result.python_time)
+        return result
+
+    return cast(_F, wrapper)
+
+
+@_stamp_layer_timing
 @_scoped_deep_recursion
 @_scoped_tuning
 @_debug_outermost_solve
@@ -5491,7 +5574,7 @@ def solve_model(
     # The syntactic convexity recognizers memoize the declared-box arrays on the
     # model; invalidate that cache in lockstep with the classification cache so a
     # post-presolve re-classification with tightened bounds recomputes them.
-    from discopt._jax.convexity.patterns import clear_declared_box_cache
+    from discopt._relax.convexity.patterns import clear_declared_box_cache
 
     clear_declared_box_cache(model)
     # The box-independent uniform-relaxation analysis (canonical DAG, DCP verdicts,
@@ -5502,7 +5585,7 @@ def solve_model(
     # the re-solve (issue #742). Reset it here so each solve rebuilds against the
     # current parameter values; within a solve it is still built once and reused
     # across all B&B nodes.
-    from discopt._jax.uniform_relax import clear_analysis_cache
+    from discopt._relax.uniform_relax import clear_analysis_cache
 
     clear_analysis_cache(model)
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
@@ -5545,7 +5628,7 @@ def solve_model(
     # is opt-in; what is not shipped by default is a measured loss.
     if kwargs.get("lp_spatial", False):
         try:
-            from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+            from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
             from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
 
             _lps = solve_lp_spatial_bb(
@@ -5589,7 +5672,7 @@ def solve_model(
         _struct_size = sum(v.size for v in model._variables) + len(model._constraints)
         if _struct_size <= _STRUCTURE_CUTS_MAX_SIZE:
             try:
-                from discopt._jax.symbolic.cut_recognizer import recognize_and_inject
+                from discopt._relax.symbolic.cut_recognizer import recognize_and_inject
 
                 _n_struct_cuts = recognize_and_inject(model)
                 if _n_struct_cuts:
@@ -5612,7 +5695,7 @@ def solve_model(
     # failure is swallowed — the injector can never break a solve.
     if model._objective is not None:
         try:
-            from discopt._jax.convexity.g_convex_inject import (
+            from discopt._relax.convexity.g_convex_inject import (
                 g_convex_cuts_enabled,
                 inject_g_convex_cuts,
             )
@@ -5776,7 +5859,7 @@ def solve_model(
                 stacklevel=2,
             )
 
-        from discopt._jax.gdp_reformulate import reformulate_gdp
+        from discopt._relax.gdp_reformulate import reformulate_gdp
 
         model = reformulate_gdp(model, method=resolved_gdp_method)
 
@@ -5871,7 +5954,7 @@ def solve_model(
         if "rel_gap" not in amp_kwargs:
             amp_kwargs["rel_gap"] = gap_tolerance
 
-        from discopt._jax.gdp_reformulate import reformulate_gdp
+        from discopt._relax.gdp_reformulate import reformulate_gdp
 
         model = reformulate_gdp(
             model,
@@ -6078,7 +6161,7 @@ def solve_model(
         and not skip_convex_check
         and os.environ.get("DISCOPT_SGO", "0").strip().lower() in ("1", "true", "yes", "on")
     ):
-        from discopt._jax.convexity.signomial_global import (
+        from discopt._relax.convexity.signomial_global import (
             classify_signomial_global,
             solve_signomial_global,
         )
@@ -6160,7 +6243,7 @@ def solve_model(
     if gdp_method == "oa":
         import warnings
 
-        from discopt._jax.gdp_reformulate import reformulate_gdp
+        from discopt._relax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
         from discopt.solvers.mip_nlp_options import (
             FP_OPTION_KEYS,
@@ -6240,7 +6323,7 @@ def solve_model(
     _captured_gams_initial_values = getattr(model, "_gams_initial_values", None)
 
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
-    from discopt._jax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.gdp_reformulate import reformulate_gdp
 
     model = reformulate_gdp(model, method=gdp_method)
 
@@ -6257,7 +6340,7 @@ def solve_model(
     # objective be detected as convex and certify on the convex fast path. The
     # rewrites are exact and convexity-preserving, so they run unconditionally
     # and return the model unchanged when nothing matches.
-    from discopt._jax.factorable_reform import canonicalize_entropy
+    from discopt._relax.factorable_reform import canonicalize_entropy
 
     model = canonicalize_entropy(model)
 
@@ -6274,7 +6357,7 @@ def solve_model(
     # general and never alters the optimum. Skipped when streaming B&B callbacks
     # are attached so node/incumbent indices stay aligned with the user's model.
     if not _has_bb_callbacks:
-        from discopt._jax.objective_epigraph import relax_objective_defining_equality
+        from discopt._relax.objective_epigraph import relax_objective_defining_equality
 
         model, _epi_changed = relax_objective_defining_equality(model)
         if _epi_changed:
@@ -6289,7 +6372,7 @@ def solve_model(
     # provably-nonconvex models only, preserving the convex fast path for the
     # rest. The cheap structural scan runs first so only models that actually
     # have liftable terms pay for convexity detection.
-    from discopt._jax.factorable_reform import (
+    from discopt._relax.factorable_reform import (
         factorable_reformulate,
         has_factorable_work,
     )
@@ -6327,7 +6410,7 @@ def solve_model(
     # variables the relaxation already handles analytically (e.g. x*exp(x) over a
     # free x) are left untouched. Sound: the reduction only shrinks the box.
     try:
-        from discopt._jax.nonlinear_bound_tightening import (
+        from discopt._relax.nonlinear_bound_tightening import (
             FunctionDomainBoundRule,
             PeriodicVariableBoundRule,
             tighten_nonlinear_bounds,
@@ -6382,7 +6465,7 @@ def solve_model(
     # a completeness-preserving fallback, so an empty or imperfect set is safe.
     _dependent_var_names: set = set()
     try:
-        from discopt._jax.dependent_vars import find_functionally_dependent_names
+        from discopt._relax.dependent_vars import find_functionally_dependent_names
 
         _dependent_var_names = find_functionally_dependent_names(model)
     except Exception as _dep_exc:  # pragma: no cover - defensive
@@ -6402,7 +6485,7 @@ def solve_model(
     # pass abstains (returns the model unchanged) on anything it cannot
     # linearize exactly, so it is a no-op everywhere else.
     try:
-        from discopt._jax.binary_multilinear_reform import (
+        from discopt._relax.binary_multilinear_reform import (
             has_binary_multilinear_work,
             reformulate_binary_multilinear,
         )
@@ -6410,8 +6493,8 @@ def solve_model(
         if has_binary_multilinear_work(model):
             _bml = reformulate_binary_multilinear(model)
             if _bml is not model:
-                from discopt._jax.problem_classifier import ProblemClass, classify_problem
-                from discopt._jax.term_classifier import classify_nonlinear_terms
+                from discopt._relax.problem_classifier import ProblemClass, classify_problem
+                from discopt._relax.term_classifier import classify_nonlinear_terms
 
                 # Same adoption guard as the integer-bilinear reform below:
                 # adopt ONLY a genuinely pure MILP, confirmed by BOTH the
@@ -6462,7 +6545,7 @@ def solve_model(
                     # re-validates the seed and recomputes its objective, so a
                     # bad point is dropped, never trusted (the dual bound and
                     # the certified optimum are unaffected either way).
-                    from discopt._jax.binary_multilinear_reform import (
+                    from discopt._relax.binary_multilinear_reform import (
                         extend_initial_point,
                         heuristic_incumbent,
                     )
@@ -6566,10 +6649,10 @@ def solve_model(
     _did_multilinear_reform = False
     try:
         if _tuning().integer_multilinear_reform:
-            from discopt._jax.integer_product_reform import (
+            from discopt._relax.integer_product_reform import (
                 extend_initial_point as _iml_extend,
             )
-            from discopt._jax.integer_product_reform import (
+            from discopt._relax.integer_product_reform import (
                 has_integer_multilinear_reformulation_work,
                 reformulate_integer_multilinear,
             )
@@ -6578,8 +6661,8 @@ def solve_model(
                 _iml_n0 = sum(v.size for v in model._variables)
                 _iml = reformulate_integer_multilinear(model)
                 if _iml is not model:
-                    from discopt._jax.problem_classifier import ProblemClass, classify_problem
-                    from discopt._jax.term_classifier import classify_nonlinear_terms
+                    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+                    from discopt._relax.term_classifier import classify_nonlinear_terms
 
                     # Does the reform eliminate *all* nonlinearity (pure MILP)? Then
                     # route to the MILP engine as the bilinear pass does; otherwise
@@ -6658,10 +6741,10 @@ def solve_model(
                                 pass
 
                             try:
-                                from discopt._jax.disjunctive_config_bound import (
+                                from discopt._relax.disjunctive_config_bound import (
                                     compute_disjunctive_config_bound,
                                 )
-                                from discopt._jax.model_utils import (
+                                from discopt._relax.model_utils import (
                                     flat_variable_bounds as _dcb_flat,
                                 )
 
@@ -6728,7 +6811,7 @@ def solve_model(
     # MIR cuts). Value-preserving and gated to integer-bilinear models, so it is a
     # no-op everywhere else.
     try:
-        from discopt._jax.integer_product_reform import (
+        from discopt._relax.integer_product_reform import (
             has_nonconvex_integer_bilinear,
             reformulate_integer_bilinear,
         )
@@ -6750,8 +6833,8 @@ def solve_model(
             # the spatial path — now merely carrying the extra big-M variables for
             # no benefit — so the reformulation is discarded and the original model
             # is solved unchanged. This keeps the pass a strict improvement.
-            from discopt._jax.problem_classifier import ProblemClass, classify_problem
-            from discopt._jax.term_classifier import classify_nonlinear_terms
+            from discopt._relax.problem_classifier import ProblemClass, classify_problem
+            from discopt._relax.term_classifier import classify_nonlinear_terms
 
             # Require the reformulation to be a *genuinely* pure MILP: classify_problem
             # is largely extract_lp_data-based and can report MILP while nonlinear
@@ -6806,7 +6889,7 @@ def solve_model(
                 # recomputes its objective, so a bad point is dropped, never
                 # trusted (the dual bound and certified optimum are unaffected).
                 if initial_point is not None:
-                    from discopt._jax.integer_product_reform import (
+                    from discopt._relax.integer_product_reform import (
                         extend_initial_point as _ipx_extend,
                     )
 
@@ -6845,14 +6928,14 @@ def solve_model(
     # polynomial reformulation, then FBBT for bound propagation.
     # Tightened bounds are pushed back into the Python `model` so that
     # the relaxation compiler / B&B initialisation see them. See
-    # discopt._jax.presolve_pipeline for the sequencing rationale.
+    # discopt._relax.presolve_pipeline for the sequencing rationale.
     # Skipped if the budget is already blown (e.g. a large-model reformulation
     # above overran ``time_limit``): presolve only tightens bounds, so declining
     # it leaves a looser-but-valid box and lets the wall track ``time_limit``
     # (#654). ``propagate_bounds_to_model`` is a no-op when skipped.
     if _model_repr is not None and presolve and not _deadline_exhausted():
         try:
-            from discopt._jax.presolve_pipeline import (
+            from discopt._relax.presolve_pipeline import (
                 propagate_bounds_to_model,
                 run_root_presolve,
             )
@@ -6921,7 +7004,7 @@ def solve_model(
     # it only tightens bounds, so declining it leaves a valid looser box.
     if presolve and presolve_reverse_ad and not _deadline_exhausted():
         try:
-            from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
+            from discopt._relax.presolve_pipeline import run_reverse_ad_tightening
 
             n_rad = run_reverse_ad_tightening(model)
             if n_rad > 0:
@@ -6936,11 +7019,11 @@ def solve_model(
     # once the budget is blown (#654): purely diagnostic, safe to omit.
     if eigenvalue_root_bound and not _deadline_exhausted():
         try:
-            from discopt._jax.convexity.eigenvalue_arith import (
+            from discopt._relax.convexity.eigenvalue_arith import (
                 QuadraticForm,
                 quadratic_form_bound,
             )
-            from discopt._jax.problem_classifier import (
+            from discopt._relax.problem_classifier import (
                 ProblemClass,
                 classify_problem,
                 extract_qp_data,
@@ -6971,7 +7054,7 @@ def solve_model(
     _relax_mode = "standard"
     if use_learned_relaxations:
         try:
-            from discopt._jax.learned_relaxations import load_pretrained_registry
+            from discopt._relax.learned_relaxations import load_pretrained_registry
 
             _learned_registry = load_pretrained_registry()
             if len(_learned_registry) > 0:
@@ -7037,7 +7120,7 @@ def solve_model(
                     "integer/binary variables. Global branch-and-bound needs a valid "
                     "node relaxation, which a non-MCBox-relaxable opaque callable cannot "
                     "provide. Express the body with MCBox-compatible ops (arithmetic + "
-                    "the discopt._jax.mcbox intrinsic namespace), rebuild it from dm.* "
+                    "the discopt._relax.mcbox intrinsic namespace), rebuild it from dm.* "
                     "primitives (see dm.udf), or remove the integer/binary variables."
                 )
             logger.info(
@@ -7168,7 +7251,7 @@ def solve_model(
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
     try:
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         problem_class = classify_problem(model)
     except Exception as e:
@@ -7246,10 +7329,12 @@ def solve_model(
     # re-verified downstream before injection, so bound/certificate are untouched.
     if _trivial_primal_enabled() and initial_point is None:
         try:
-            from discopt._jax.nlp_evaluator import cached_evaluator
-            from discopt._jax.primal_heuristics import _check_constraint_feasibility as _tp_cc
+            from discopt._relax.primal_heuristics import _check_constraint_feasibility as _tp_cc
 
-            _tp_ev = cached_evaluator(model)
+            # Via the dispatcher so the tape backend is honoured (#75); the jax
+            # import lives in the fallback. ``primal_heuristics`` above is a
+            # separate, still-JAX dependency of this block — see the module note.
+            _tp_ev = _make_evaluator(model)
             _tp_lb, _tp_ub = (np.asarray(b, dtype=np.float64) for b in _tp_ev.variable_bounds)
             _tp_lo = np.clip(_tp_lb, -_SPC, _SPC)
             _tp_hi = np.clip(_tp_ub, -_SPC, _SPC)
@@ -7461,7 +7546,7 @@ def solve_model(
         if result.status == "optimal":
             return result
         # The convex NLP may fail to certify for two reasons handled here.
-        from discopt._jax.factorable_reform import has_clearable_denominator
+        from discopt._relax.factorable_reform import has_clearable_denominator
 
         if _model_contains_nonsmooth_node(model):
             # (1) Non-smooth objective/constraints (abs/min/max): a smooth
@@ -7691,7 +7776,7 @@ def solve_model(
     _obbt_has_nonlinear = False
     if not _obbt_has_continuous:
         try:
-            from discopt._jax.term_classifier import classify_nonlinear_terms as _cnt
+            from discopt._relax.term_classifier import classify_nonlinear_terms as _cnt
 
             _ot = _cnt(model)
             _obbt_has_nonlinear = bool(
@@ -7729,7 +7814,7 @@ def solve_model(
         # OBBT wall time falls into python_time (computed as the remainder at
         # the end of the solve), so no separate timer is tracked here.
         try:
-            from discopt._jax.obbt import obbt_tighten_root
+            from discopt._relax.obbt import obbt_tighten_root
 
             _obbt_budget = min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())
 
@@ -7746,7 +7831,7 @@ def solve_model(
             _obbt_min_impr: Optional[float] = None
             if _obbt_iterate_root_enabled():
                 try:
-                    from discopt._jax.term_classifier import (
+                    from discopt._relax.term_classifier import (
                         classify_nonlinear_terms as _cnt_it,
                     )
 
@@ -7971,7 +8056,7 @@ def solve_model(
     _constraint_senses = None
     _cut_pool = None
     if cutting_planes:
-        from discopt._jax.cutting_planes import (
+        from discopt._relax.cutting_planes import (
             CutPool,
             detect_bilinear_terms,
             generate_cuts_at_node,
@@ -7984,7 +8069,7 @@ def solve_model(
 
     # --- Lazy constraint callback requires a cut pool ---
     if lazy_constraints is not None and _cut_pool is None:
-        from discopt._jax.cutting_planes import CutPool
+        from discopt._relax.cutting_planes import CutPool
 
         _cut_pool = CutPool(max_cuts=500)
 
@@ -8023,7 +8108,7 @@ def solve_model(
     # refresh below (the root mask is then used verbatim).
     _refresh_mask: Any = None
     try:
-        from discopt._jax.convexity import refresh_convex_mask as _refresh_mask_import
+        from discopt._relax.convexity import refresh_convex_mask as _refresh_mask_import
 
         _refresh_mask = _refresh_mask_import
     except Exception as exc:  # noqa: BLE001 - the root mask is then used verbatim
@@ -8276,7 +8361,7 @@ def solve_model(
             _mc_mode = "none"
 
     if _mc_mode == "lp" and model._objective is not None:
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         # Resolve the high-level ``rlt`` switch into the two concrete RLT levers:
         # build-time level-1 RLT (``rlt_level1``, which tightens the root bound)
@@ -8360,11 +8445,11 @@ def solve_model(
                 # exactly-enumerable achievable rational set is the measured
                 # unlock — see docs/dev/integer-ratio-partition-2026-07-16.md).
                 try:
-                    from discopt._jax.integer_ratio import (
+                    from discopt._relax.integer_ratio import (
                         IntegerRatioPartitioner,
                         detect_integer_ratio_specs,
                     )
-                    from discopt._jax.integer_ratio import (
+                    from discopt._relax.integer_ratio import (
                         enabled as _integer_ratio_enabled,
                     )
 
@@ -8462,7 +8547,7 @@ def solve_model(
                             }
                             _dep_cols_set.difference_update(_zsf_cols)
                         if _dependent_var_names:
-                            from discopt._jax.dependent_vars import (
+                            from discopt._relax.dependent_vars import (
                                 dependent_columns_for_model,
                             )
 
@@ -8815,8 +8900,8 @@ def solve_model(
         _mc_mode = "none"
 
     if _mc_mode == "nlp" and model._objective is not None:
-        from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
-        from discopt._jax.relaxation_compiler import (
+        from discopt._relax.batch_evaluator import BatchRelaxationEvaluator
+        from discopt._relax.relaxation_compiler import (
             compile_constraint_relaxation,
             compile_objective_relaxation,
         )
@@ -8911,7 +8996,7 @@ def solve_model(
         _ir_partitioner = None
     if _ir_partitioner is not None:
         try:
-            from discopt._jax.primal_heuristics import subnlp as _ir_subnlp
+            from discopt._relax.primal_heuristics import subnlp as _ir_subnlp
 
             _ir_budget = max(1.0, min(5.0, 0.05 * time_limit))
             _ir_lb_c = np.maximum(lb, -1e3)
@@ -9286,7 +9371,7 @@ def solve_model(
     _pn_obbt_spent = 0.0
     _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
     if _per_node_obbt_enabled:
-        from discopt._jax.obbt import obbt_tighten_root
+        from discopt._relax.obbt import obbt_tighten_root
 
         logger.debug(
             "per-node OBBT enabled (n_vars=%d, dependent=%d, budget=%.1fs, top_k=%s)",
@@ -9322,7 +9407,7 @@ def solve_model(
     _node_reduce_fn: Any = None
     if _phase2_dbbt_enabled:
         try:
-            from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
+            from discopt._relax.node_reduce import reduce_node as _node_reduce_fn
 
             logger.debug("per-node DBBT enabled (Phase 2, #764)")
         except Exception as _nr_exc:  # pragma: no cover - defensive
@@ -9383,10 +9468,10 @@ def solve_model(
     _reduced_bound_fn: Any = None
     if _reduced_space_active:
         try:
-            from discopt._jax.mccormick_subgradient import (
+            from discopt._relax.mccormick_subgradient import (
                 UnsupportedRelaxation as _RSUnsupported,
             )
-            from discopt._jax.mccormick_subgradient import (
+            from discopt._relax.mccormick_subgradient import (
                 reduced_mccormick_lp_bound as _reduced_bound_fn,
             )
 
@@ -9988,7 +10073,7 @@ def solve_model(
                         and (iteration == 0 or iteration % _mc_nlp_period == 0)
                     )
                     if _use_mc_nlp:
-                        from discopt._jax.mccormick_nlp import solve_mccormick_batch
+                        from discopt._relax.mccormick_nlp import solve_mccormick_batch
 
                         assert _mc_obj_relax_fn is not None
                         mc_lbs = np.asarray(
@@ -10331,7 +10416,7 @@ def solve_model(
                                 iteration == 0 or iteration % _mc_nlp_period == 0
                             )
                             if _use_mc_nlp_serial:
-                                from discopt._jax.mccormick_nlp import (
+                                from discopt._relax.mccormick_nlp import (
                                     solve_mccormick_relaxation_nlp,
                                 )
 
@@ -10879,7 +10964,7 @@ def solve_model(
                     best_root_idx = i
             if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
                 try:
-                    from discopt._jax.primal_heuristics import feasibility_pump
+                    from discopt._relax.primal_heuristics import feasibility_pump
 
                     _t_fp = time.perf_counter()
                     fp_sol = feasibility_pump(
@@ -10926,7 +11011,7 @@ def solve_model(
                     and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
                     try:
-                        from discopt._jax.primal_heuristics import feasibility_pump
+                        from discopt._relax.primal_heuristics import feasibility_pump
 
                         _t_relax = time.perf_counter()
                         _relax_opts = dict(opts)
@@ -11006,7 +11091,7 @@ def solve_model(
                 # targets the heavier standalone-strength components below.
                 if not _model_is_convex and best_root_idx is not None:
                     try:
-                        from discopt._jax.primal_heuristics import integer_local_search
+                        from discopt._relax.primal_heuristics import integer_local_search
 
                         ils = integer_local_search(
                             model,
@@ -11048,7 +11133,7 @@ def solve_model(
                     and _root_heur_nlp_entry_ok(evaluator)
                 ):
                     try:
-                        from discopt._jax.primal_heuristics import fractional_diving
+                        from discopt._relax.primal_heuristics import fractional_diving
 
                         _t_dive = time.perf_counter()
                         dv = fractional_diving(
@@ -11094,7 +11179,7 @@ def solve_model(
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
                 try:
-                    from discopt._jax.primal_heuristics import continuous_multistart
+                    from discopt._relax.primal_heuristics import continuous_multistart
 
                     _cms_inc = tree.incumbent()
                     _cms_inc_obj = (
@@ -11145,7 +11230,7 @@ def solve_model(
             # heuristic, so skipping is sound and never touches the dual bound).
             and _root_heur_nlp_entry_ok(evaluator)
         ):
-            from discopt._jax.primal_heuristics import subnlp as _subnlp
+            from discopt._relax.primal_heuristics import subnlp as _subnlp
 
             # Root only: seed one subnlp from the modeler's GAMS-provided start
             # (parsed into model._gams_initial_values). For nonconvex models the
@@ -11313,7 +11398,7 @@ def solve_model(
             _enum_inc0 = tree.incumbent()
             _enum_had_inc = _enum_inc0 is not None and np.isfinite(_enum_inc0[1])
             _enum_obj0 = float(_enum_inc0[1]) if _enum_had_inc else np.inf
-            from discopt._jax.primal_heuristics import enumerate_binary_seeds_subnlp
+            from discopt._relax.primal_heuristics import enumerate_binary_seeds_subnlp
 
             # Seed the enumeration from the best root relaxation point when one
             # produced a usable bound; otherwise fall back to the bound midpoint.
@@ -11386,7 +11471,7 @@ def solve_model(
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
                 _last_box_inc_obj = float(_inc_box[1])
-                from discopt._jax.primal_heuristics import integer_box_search
+                from discopt._relax.primal_heuristics import integer_box_search
 
                 _box_budget = min(4.0, max(_DEADLINE_NODE_FLOOR_S, _deadline - time.perf_counter()))
                 try:
@@ -11477,7 +11562,7 @@ def solve_model(
                 ):
                     _lns_dive_calls += 1
                     try:
-                        from discopt._jax.primal_heuristics import fractional_diving
+                        from discopt._relax.primal_heuristics import fractional_diving
 
                         _t_ndive = time.perf_counter()
                         _dv = fractional_diving(
@@ -11514,7 +11599,7 @@ def solve_model(
                     _rins_obj0 = float(_lns_inc[1])
                     _rins_improved = False
                     try:
-                        from discopt._jax.primal_heuristics import rins
+                        from discopt._relax.primal_heuristics import rins
 
                         _ri = rins(
                             model,
@@ -11555,7 +11640,7 @@ def solve_model(
                 ):
                     _swap_improved = False
                     try:
-                        from discopt._jax.primal_heuristics import one_hot_swap_search
+                        from discopt._relax.primal_heuristics import one_hot_swap_search
 
                         _sw = one_hot_swap_search(
                             model,
@@ -11595,7 +11680,7 @@ def solve_model(
                     _lb_obj0 = float(_lns_inc[1])
                     _lb_improved = False
                     try:
-                        from discopt._jax.primal_heuristics import local_branching
+                        from discopt._relax.primal_heuristics import local_branching
 
                         _lb = local_branching(
                             model,
@@ -11817,7 +11902,7 @@ def solve_model(
                 inc_sol, inc_obj = incumbent_info
                 if inc_obj < _SENTINEL_THRESHOLD:
                     try:
-                        from discopt._jax.obbt import obbt_tighten_root
+                        from discopt._relax.obbt import obbt_tighten_root
 
                         # Tighten against the McCormick *relaxation* (not just the
                         # model's linear rows) with the incumbent as a cutoff. This
@@ -11979,7 +12064,7 @@ def solve_model(
             and model._objective is not None
         ):
             try:
-                from discopt._jax.root_reduce import run_root_fixpoint
+                from discopt._relax.root_reduce import run_root_fixpoint
 
                 _rf_inc = tree.incumbent()
                 _rf_cutoff = (
@@ -13187,7 +13272,7 @@ def _solve_continuous(
     # the path carries no valid dual bound when it is not "optimal", so refusing
     # here can never loosen a bound below truth (soundness is untouched).
     if x_dict is not None and nlp_result.x is not None:
-        from discopt._jax.primal_heuristics import (
+        from discopt._relax.primal_heuristics import (
             _check_constraint_feasibility as _cc_feas_verify,
         )
 
@@ -13261,7 +13346,7 @@ def _solve_nlp_bb(
     For nonconvex problems the NLP objective is NOT a valid lower bound;
     the solver runs in heuristic mode and reports gap_certified=False.
     """
-    from discopt._jax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.gdp_reformulate import reformulate_gdp
     from discopt.modeling.core import ObjectiveSense
 
     model_before_gdp = model
@@ -13285,7 +13370,7 @@ def _solve_nlp_bb(
         _model_is_convex = bool(precomputed_is_convex)
     else:
         try:
-            from discopt._jax.convexity import classify_model as _classify_model
+            from discopt._relax.convexity import classify_model as _classify_model
 
             _model_is_convex, _ = _classify_model(model, use_certificate=True)
         except Exception:
@@ -13903,7 +13988,7 @@ def _solve_nlp_bb(
                         float(tree.incumbent()[1]) if tree.incumbent() is not None else float("inf")
                     )
                     try:
-                        from discopt._jax.primal_heuristics import rens as _rens_heuristic
+                        from discopt._relax.primal_heuristics import rens as _rens_heuristic
 
                         _rens_budget = max(
                             0.5,
@@ -13958,7 +14043,7 @@ def _solve_nlp_bb(
                 # --- Feasibility pump (fallback when RENS does not apply) ---
                 if not _root_incumbent:
                     try:
-                        from discopt._jax.primal_heuristics import feasibility_pump
+                        from discopt._relax.primal_heuristics import feasibility_pump
 
                         fp_sol = feasibility_pump(
                             model,
@@ -13995,7 +14080,7 @@ def _solve_nlp_bb(
                 # and gap certification are untouched.
                 if not _root_incumbent and (time.perf_counter() - t_start) < time_limit:
                     try:
-                        from discopt._jax.primal_heuristics import fractional_diving
+                        from discopt._relax.primal_heuristics import fractional_diving
 
                         dv = fractional_diving(
                             model,
@@ -14164,7 +14249,7 @@ def _solve_nlp_bb(
                         _rins_obj0 = float(_lns_inc[1])
                         _rins_improved = False
                         try:
-                            from discopt._jax.primal_heuristics import rins
+                            from discopt._relax.primal_heuristics import rins
 
                             _ri = rins(
                                 model,
@@ -14206,7 +14291,7 @@ def _solve_nlp_bb(
                         _lb_obj0 = float(_lns_inc[1])
                         _lb_improved = False
                         try:
-                            from discopt._jax.primal_heuristics import local_branching
+                            from discopt._relax.primal_heuristics import local_branching
 
                             _lb = local_branching(
                                 model,
@@ -15033,12 +15118,13 @@ def _solve_batch_pounce(
     trusted = np.ones(n_batch, dtype=bool)
 
     try:
-        results = pounce.solve_nlp_batch(
-            problems,
-            x0s=x0s,
-            options=batch_opts,
-            share_structure=True,
-        )
+        with _timing.charge("pounce"):
+            results = pounce.solve_nlp_batch(
+                problems,
+                x0s=x0s,
+                options=batch_opts,
+                share_structure=True,
+            )
     except Exception as e:
         # Whole-batch failure: fall back to per-node serial solves so one bad
         # instance can't sink the iteration (single warm start per node).
@@ -15747,7 +15833,7 @@ def _solve_lp_matrix(
     threshold is ``1e20``; Gurobi, whose infinity is ``1e30``) — discarding *its*
     verdict would throw away a certificate about the box actually declared.
     """
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
 
@@ -15897,48 +15983,57 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
-    """Solve a QP with discopt's own engines — POUNCE, then the JAX QP IPM.
+    """Solve a QP with POUNCE, or report an error. There is no second engine.
 
     HiGHS-free by design (issue #359 / pure-Rust goal): a continuous QP is solved
-    by POUNCE (the pure-Rust Ipopt port), and a POUNCE failure or a non-converged
-    solve degrades to discopt's JAX QP interior-point method — never to HiGHS. The
-    POUNCE engine handles pure-continuous QPs only; MIQPs return ``None`` from it
-    and route to the self-hosted B&B path. ``prefer_pounce`` is retained for
-    call-site compatibility but no longer selects between backends (there is only
-    one default backend now).
+    by POUNCE (the pure-Rust Ipopt port), never by HiGHS. The POUNCE engine
+    handles pure-continuous QPs only; MIQPs return ``None`` from it and route to
+    the self-hosted B&B path. ``prefer_pounce`` is retained for call-site
+    compatibility but no longer selects between backends (there is only one
+    backend).
 
     Soundness: QP duals/reduced costs are reported, never consumed for bound
     tightening (OBBT/DBBT read the LP oracles), so the only hazard is a drifted
     objective on an unconverged solve (#145). ``_solve_qp_matrix`` guards it — the
     returned point is re-checked for primal feasibility and for a stationary KKT
-    residual, degrading to the next engine (the JAX IPM) on failure.
+    residual, and a point failing either check is refused.
 
-    No-rescue tracking: with HiGHS gone the JAX IPM is a weak last resort (it can
-    return ``iteration_limit`` even on easy QPs). A POUNCE non-result is therefore
-    logged at WARNING with the marker ``qp-pounce-no-result`` so we can measure how
-    often the HiGHS-free path has no working engine and decide later whether a
-    pure-Rust drift-rescue is warranted (issue #359).
+    Why the JAX QP IPM rescue was removed rather than ported: it did not degrade
+    gracefully, it degraded *past the guard*. ``_solve_qp_matrix`` rejects a POUNCE
+    point that fails feasibility or KKT stationarity; ``_solve_qp_jax`` then
+    re-solved the same QP and reported ``status="optimal"`` with ``bound=obj_val``,
+    ``gap=0`` and ``convex_fast_path=True`` on nothing but its own internal
+    convergence flag — no feasibility check, no stationarity check. So the one
+    situation that could reach it was exactly the situation where a verified
+    engine's answer had just been thrown out, and it answered with an unverified
+    certificate. Under the §1 rule that the solver's product is its certificate,
+    that is worse than having no rescue at all.
+
+    The independence argument for keeping a second implementation does not survive
+    either: ``pounce-solver`` is a hard dependency (``pyproject.toml`` core
+    ``dependencies``, not an extra), so the "POUNCE is not installed" arm was
+    unreachable in any supported install.
+
+    A POUNCE non-result is still logged at WARNING with the marker
+    ``qp-pounce-no-result`` (issue #359) — now as the error explanation rather than
+    as fallback telemetry.
     """
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
     if result is not None:
         return result
-    from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
-
-    if POUNCE_AVAILABLE:
-        logger.warning(
-            "HiGHS-free QP [qp-pounce-no-result]: POUNCE was available but returned "
-            "no usable result (solve failure or feasibility/convergence guard "
-            "rejection); falling back to the JAX QP IPM last resort, which has no "
-            "robust rescue. Track how often this fires (issue #359)."
-        )
-    else:
-        logger.warning(
-            "HiGHS-free QP [qp-pounce-unavailable]: pounce-solver is not installed, "
-            "so the QP path has no primary engine and will use the JAX QP IPM last "
-            "resort. Install pounce-solver for a working QP solver."
-        )
-    return _solve_qp_jax(model, t_start)
+    logger.error(
+        "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
+        "(solve failure, or the feasibility/KKT-stationarity guard rejected its "
+        "point). Reporting an error rather than an unverified answer: the removed "
+        "JAX QP IPM rescue issued status='optimal' with a bound and a zero gap "
+        "without checking either condition (issue #359)."
+    )
+    return SolveResult(
+        status="error",
+        wall_time=time.perf_counter() - t_start,
+        node_count=0,
+    )
 
 
 def _solve_qp_pounce(
@@ -16031,7 +16126,7 @@ def _solve_qcp_gurobi(
     options: Optional[dict] = None,
 ) -> SolveResult:
     """Solve a QCP/QCQP/MIQCP/MIQCQP using the explicit Gurobi backend."""
-    from discopt._jax.problem_classifier import extract_qcp_data
+    from discopt._relax.problem_classifier import extract_qcp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
     from discopt.solvers.gurobi import solve_qcp as _gurobi_solve_qcp
@@ -16160,7 +16255,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     The per-row test is ``|viol_i| <= tol + rtol*scale_i`` where the row scale
     ``scale_i = sum_j |A_ij|*|x_j|`` is the row's additive term magnitude — the
     same combined absolute/relative convention as
-    :func:`discopt._jax.primal_heuristics._check_constraint_feasibility`
+    :func:`discopt._relax.primal_heuristics._check_constraint_feasibility`
     (discopt's authoritative incumbent-feasibility check). The earlier ``tol *
     (1 + max|x|)`` scaling used a SINGLE global scale — the largest variable
     across ALL rows — which on a large-RHS row inflated the tolerance far past
@@ -16283,7 +16378,7 @@ def _solve_qp_matrix(
     optional Gurobi wrapper): same signature, same ``QPResult`` with
     HiGHS-convention duals.
     """
-    from discopt._jax.problem_classifier import extract_qp_data
+    from discopt._relax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
 
@@ -16472,7 +16567,7 @@ def _solve_milp_gurobi(
     options: Optional[dict] = None,
 ) -> SolveResult:
     """Solve a MILP using the explicit Gurobi backend."""
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
     from discopt.solvers.gurobi import solve_milp as _gurobi_solve_milp
@@ -16589,60 +16684,6 @@ def _solve_milp_gurobi(
             node_count=result.node_count,
         )
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
-
-
-def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
-    """Solve a QP using the pure-JAX QP IPM."""
-    from discopt._jax.problem_classifier import extract_qp_data
-    from discopt._jax.qp_ipm import qp_ipm_solve
-
-    t_jax_start = time.perf_counter()
-    qp_data = extract_qp_data(model)
-    state = qp_ipm_solve(
-        cast(Any, _dense_Q(qp_data.Q)),
-        qp_data.c,
-        cast(Any, _dense_A(qp_data.A_eq)),
-        qp_data.b_eq,
-        qp_data.x_l,
-        qp_data.x_u,
-    )
-    jax_time = time.perf_counter() - t_jax_start
-    wall_time = time.perf_counter() - t_start
-
-    from discopt.modeling.core import ObjectiveSense
-
-    n_orig = sum(v.size for v in model._variables)
-    x_flat = np.asarray(state.x[:n_orig])
-    obj_val = float(state.obj) + qp_data.obj_const
-
-    # Negate objective back for maximization (QP solver always minimizes)
-    assert model._objective is not None
-    if model._objective.sense == ObjectiveSense.MAXIMIZE:
-        obj_val = -obj_val
-
-    conv = int(state.converged)
-    if conv in (1, 2):
-        status = "optimal"
-    elif conv == 3:
-        status = "iteration_limit"
-    else:
-        status = "error"
-
-    sr = SolveResult(
-        status=status,
-        objective=obj_val,
-        bound=obj_val if status == "optimal" else None,
-        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
-        x=_unpack_solution(model, x_flat),
-        wall_time=wall_time,
-        node_count=0,
-        rust_time=0.0,
-        jax_time=jax_time,
-        python_time=wall_time - jax_time,
-    )
-    # QP dispatch only reaches this function for detected convex QPs.
-    sr.convex_fast_path = True
-    return sr
 
 
 def _pounce_recover_node_bound(
@@ -17528,7 +17569,7 @@ def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     cannot both be 1. Best-effort: returns ``[]`` if the bridge/pass is
     unavailable."""
     try:
-        from discopt._jax.presolve_pipeline import run_root_presolve
+        from discopt._relax.presolve_pipeline import run_root_presolve
         from discopt._rust import model_to_repr
 
         repr_ = model_to_repr(model, getattr(model, "_builder", None))
@@ -17614,7 +17655,7 @@ def _root_cover_cut_loop(
     count dict (``cover_clique``/``gomory``/``mir``/``aggregation``) for
     instrumentation. A no-op when there are no binary-knapsack rows, clique
     edges, or integer variables."""
-    from discopt._jax.cover_cuts import (
+    from discopt._relax.cover_cuts import (
         has_binary_knapsack_rows,
         separate_clique_cuts,
         separate_cover_cuts,
@@ -17646,7 +17687,7 @@ def _root_cover_cut_loop(
         # (Phase 2): cover/clique cuts separate a vertex sharply but the
         # interior analytic center weakly. Separation stays valid regardless,
         # so a failed crossover only costs cut effectiveness, never soundness.
-        from discopt._jax.crossover import crossover_to_vertex
+        from discopt._relax.crossover import crossover_to_vertex
 
         try:
             x_vertex = crossover_to_vertex(
@@ -17866,8 +17907,8 @@ def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> O
     if obj is None or obj.sense != _Sense.MINIMIZE:
         return None
     try:
-        from discopt._jax.integer_product_reform import extend_initial_point
-        from discopt._jax.primal_heuristics import one_hot_swap_search
+        from discopt._relax.integer_product_reform import extend_initial_point
+        from discopt._relax.primal_heuristics import one_hot_swap_search
 
         sw = one_hot_swap_search(
             src,
@@ -17900,7 +17941,7 @@ def _solve_milp_simplex(
     Returns ``None`` to defer to the default path when the binding is unavailable,
     the model has no constraints, or the returned point fails the feasibility
     gate. Pure-MILP only; MINLP/MIQP keep the POUNCE/IPM path."""
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
 
     try:
@@ -17916,7 +17957,7 @@ def _solve_milp_simplex(
     # by the dropped nonlinear constraints, were reported as a false global
     # ``unbounded`` at the root. Defer any model carrying nonlinear terms to the
     # spatial / NLP path (which keeps those constraints).
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     _nl = classify_nonlinear_terms(model)
     if (
@@ -18271,7 +18312,7 @@ def _solve_milp_bb(
     hot per-node solve changes.
     """
 
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
 
     rust_time = 0.0
     jax_time = 0.0
@@ -18408,11 +18449,11 @@ def _solve_milp_bb(
     # general MILP whose model-space point is shorter than ``n_vars`` is skipped.
     if initial_point is not None:
         try:
-            from discopt._jax.nlp_evaluator import cached_evaluator
-            from discopt._jax.primal_heuristics import (
+            from discopt._relax.primal_heuristics import (
                 _check_constraint_feasibility as _ip_cc,
             )
 
+            cached_evaluator = _make_evaluator  # #75: honour the selected backend
             _ip_x = np.asarray(initial_point, dtype=np.float64)
             _ip_int_ok = all(
                 not np.any(np.abs(_ip_x[o : o + s] - np.round(_ip_x[o : o + s])) > 1e-5)
@@ -19055,7 +19096,7 @@ def _solve_miqp_bb(
     through POUNCE instead of the Rust simplex; either way the solve is
     HiGHS-free (HiGHS was removed, issue #356).
     """
-    from discopt._jax.problem_classifier import extract_qp_data
+    from discopt._relax.problem_classifier import extract_qp_data
 
     rust_time = 0.0
     jax_time = 0.0

@@ -40,8 +40,8 @@ sys.path.insert(0, str(_REPO / "python"))
 
 
 def census() -> dict:
-    from discopt._jax.canonical_expr import canonicalize, is_affine
-    from discopt._jax.claim_audit import audit_build
+    from discopt._relax.canonical_expr import canonicalize, is_affine
+    from discopt._relax.claim_audit import audit_build
     from discopt.modeling.core import from_nl
 
     totals = {"claims": 0, "covered": 0, "opaque": 0, "affine": 0, "missed": 0}

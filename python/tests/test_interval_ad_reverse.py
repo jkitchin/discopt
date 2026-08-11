@@ -1,4 +1,4 @@
-"""Tests for ``discopt._jax.convexity.interval_ad_reverse`` (M9 of issue #51).
+"""Tests for ``discopt._relax.convexity.interval_ad_reverse`` (M9 of issue #51).
 
 Acceptance criteria from issue #51:
 
@@ -15,12 +15,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.convexity.interval_ad_reverse import (
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.convexity.interval_ad_reverse import (
     reverse_propagate,
     tighten_box,
 )
-from discopt._jax.convexity.interval_eval import evaluate_interval
+from discopt._relax.convexity.interval_eval import evaluate_interval
 
 N_SAMPLES = 10_000
 

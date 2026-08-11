@@ -12,8 +12,8 @@ import sys
 import numpy as np
 
 import discopt.solvers.nlp_pounce as nlp_pounce
-from discopt._jax.convexity import classify_oa_cut_convexity
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.convexity import classify_oa_cut_convexity
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.decomposition.benders import solve_benders
 from discopt.decomposition.benders.gbd import _box_min_linear
 from discopt.decomposition.structure import flat_bounds

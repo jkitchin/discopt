@@ -1,6 +1,6 @@
 """Tests for the TM2014 multivariate McCormick composition rules.
 
-Validates the rules in ``python/discopt/_jax/multivariate_mccormick.py`` against
+Validates the rules in ``python/discopt/_relax/multivariate_mccormick.py`` against
 the M1 acceptance criteria in issue #51:
 
 - **Soundness**: every composition rule produces ``cv <= f(g(x)) <= cc`` on
@@ -30,7 +30,7 @@ import jax.nn as jnn
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.mccormick import (
+from discopt._relax.mccormick import (
     relax_abs,
     relax_atan,
     relax_exp,
@@ -44,7 +44,7 @@ from discopt._jax.mccormick import (
     relax_square,
     relax_tanh,
 )
-from discopt._jax.multivariate_mccormick import (
+from discopt._relax.multivariate_mccormick import (
     compose_abs,
     compose_atan,
     compose_even_pow,

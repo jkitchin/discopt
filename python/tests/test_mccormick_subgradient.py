@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.mccormick_subgradient import (
+from discopt._relax.mccormick_subgradient import (
     UnsupportedRelaxation,
     build_reduced_relaxation,
     reduced_mccormick_lp_bound,

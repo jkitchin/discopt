@@ -33,7 +33,7 @@ _DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib")
 def test_fractional_power_negative_exponent_orders_bounds():
     """A negative fractional power induces a *decreasing* map, so the aux box must
     be ordered ``[min(lo**p, hi**p), max(...)]`` — never the inverted raw pair."""
-    from discopt._jax.factorable_reform import _Lifter
+    from discopt._relax.factorable_reform import _Lifter
 
     m = dm.Model("frac")
     base = m.continuous("base", lb=1e-4, ub=0.8334)
@@ -48,7 +48,7 @@ def test_fractional_power_negative_exponent_orders_bounds():
 
 def test_fractional_power_positive_exponent_still_correct():
     """The common ``p > 0`` (increasing) case is unchanged: ``[lo**p, hi**p]``."""
-    from discopt._jax.factorable_reform import _Lifter
+    from discopt._relax.factorable_reform import _Lifter
 
     m = dm.Model("frac_pos")
     base = m.continuous("base", lb=1.0, ub=2.667)

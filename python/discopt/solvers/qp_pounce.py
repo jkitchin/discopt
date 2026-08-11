@@ -33,6 +33,7 @@ from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 import scipy.sparse as sp
 
+from discopt import _timing
 from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
     _FINITE_BOUND_THRESHOLD,
@@ -266,7 +267,8 @@ def solve_qp_kkt(
         except (TypeError, ValueError, RuntimeError):
             pass
 
-    x, info = problem.solve(x0)
+    with _timing.charge("pounce"):
+        x, info = problem.solve(x0)
     # The differentiable QP layer linearizes the KKT system here, so a
     # non-converged solve would yield silently wrong gradients. Fail loudly.
     status_code = info.get("status", -100)
@@ -321,7 +323,8 @@ def _solve_qp_core(
             pass
 
     t0 = time.perf_counter()
-    x, info = problem.solve(x0)
+    with _timing.charge("pounce"):
+        x, info = problem.solve(x0)
     wall_time = time.perf_counter() - t0
 
     status = _LP_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)

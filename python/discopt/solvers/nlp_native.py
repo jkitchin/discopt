@@ -120,7 +120,7 @@ def _writer_permutation(model) -> tuple[str, np.ndarray]:
     final flat-variable list and the evaluator's declaration-order offsets so
     bounds/solutions can be mapped both ways exactly.
     """
-    from discopt._jax.dag_compiler import _compute_var_offset
+    from discopt._relax.dag_compiler import _compute_var_offset
     from discopt.export.nl import _NLWriter
 
     writer = _NLWriter(model)

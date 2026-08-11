@@ -12,14 +12,21 @@ Maps NLPEvaluator callbacks to cyipopt.Problem interface:
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Constraint, Model
 from discopt.solvers import NLPResult, SolveStatus
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # #75: module-scope import pulled jax onto every solve via nlp_pounce ->
+    # nlp_backend. Annotation-only at runtime.
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
 # Ipopt status code mapping
 # See: https://coin-or.github.io/Ipopt/IpReturnCodes_8inc.html
@@ -53,6 +60,39 @@ _IPOPT_STATUS_MAP: dict[int, SolveStatus] = {
 }
 
 
+def _charge_evaluator(method):
+    """Charge a derivative callback's time to the evaluator's own layer.
+
+    This adapter is the *only* path from the NLP subsolver (POUNCE or cyipopt,
+    both native) back into the Python evaluator, so it is the correct seam for
+    attribution. Without it, the callbacks run inside ``charge("pounce")`` and
+    POUNCE's bucket absorbs the derivative cost — the same kind of cross-layer
+    inflation the layer profile exists to expose.
+
+    The bucket is read from the evaluator (``timing_bucket``) rather than fixed
+    here. It used to be hardcoded ``"jax"`` on the premise that "today's
+    evaluator is JAX-backed"; #75's tape evaluator made that false, and because
+    ``charge`` records *self* time the error was two-sided — a JAX-free tape
+    solve reported fabricated ``jax_time`` **and** an equally understated
+    ``pounce_time``, i.e. both halves of the rust/python partition were wrong on
+    the very measurement that judges the JAX removal. Measured before this
+    change on a bilinear MINLP: ``jax_time = 0.00217 s`` with
+    ``"jax" not in sys.modules``.
+    """
+    import functools
+
+    from discopt import _timing
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if self._bucket is None:
+            return method(self, *args, **kwargs)
+        with _timing.charge(self._bucket):
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class _IpoptCallbacks:
     """Adapter mapping NLPEvaluator methods to cyipopt.Problem callbacks."""
 
@@ -63,16 +103,35 @@ class _IpoptCallbacks:
         self._use_sparse = (
             hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
         )
+        # Resolve once per solve, not once per callback. An evaluator that does
+        # not declare its layer gets charged to *nothing* rather than to a
+        # guessed bucket: an unknown backend's time then stays with the enclosing
+        # region, which is merely coarse, whereas guessing invents a number about
+        # a library that may never have been loaded. The in-tree evaluators both
+        # declare one (the proxies in ``solver.py`` forward it), so the warning
+        # below fires only for a duck-typed evaluator from outside the package.
+        self._bucket = getattr(evaluator, "timing_bucket", None)
+        if self._bucket is None:
+            logger.warning(
+                "Evaluator %s declares no `timing_bucket`; its derivative-callback "
+                "time will be left with the enclosing solver region and the layer "
+                "profile will over-report that layer [timing-bucket-unknown].",
+                type(evaluator).__name__,
+            )
 
+    @_charge_evaluator
     def objective(self, x: np.ndarray) -> float:
         return self._ev.evaluate_objective(x)
 
+    @_charge_evaluator
     def gradient(self, x: np.ndarray) -> np.ndarray:
         return self._ev.evaluate_gradient(x)
 
+    @_charge_evaluator
     def constraints(self, x: np.ndarray) -> np.ndarray:
         return self._ev.evaluate_constraints(x)
 
+    @_charge_evaluator
     def jacobian(self, x: np.ndarray) -> np.ndarray:
         if self._use_sparse:
             return self._ev.evaluate_jacobian_values(x)
@@ -80,6 +139,7 @@ class _IpoptCallbacks:
         jac = self._ev.evaluate_jacobian(x)
         return jac.flatten()
 
+    @_charge_evaluator
     def jacobianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         if self._use_sparse:
             return self._ev.jacobian_structure()
@@ -87,6 +147,7 @@ class _IpoptCallbacks:
         rows, cols = np.meshgrid(np.arange(self._m), np.arange(self._n), indexing="ij")
         return (rows.flatten(), cols.flatten())
 
+    @_charge_evaluator
     def hessian(self, x: np.ndarray, lagrange: np.ndarray, obj_factor: float) -> np.ndarray:
         if self._use_sparse:
             return self._ev.evaluate_hessian_values(x, obj_factor, lagrange)
@@ -100,6 +161,7 @@ class _IpoptCallbacks:
         rows, cols = self.hessianstructure()
         return h[rows, cols]
 
+    @_charge_evaluator
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         if self._use_sparse:
             return self._ev.hessian_structure()
@@ -269,7 +331,9 @@ def solve_nlp_from_model(
     Returns:
         NLPResult with solution.
     """
-    evaluator = NLPEvaluator(model)
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    evaluator = make_evaluator(model)
 
     if x0 is None:
         lb, ub = evaluator.variable_bounds

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.convexity.interval_eval import evaluate_interval
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.convexity.interval_eval import evaluate_interval
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import FunctionCall, Model
 
 SAMPLES = 48

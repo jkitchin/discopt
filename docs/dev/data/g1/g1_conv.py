@@ -8,7 +8,7 @@ def bench(fn,N=30000,warm=100):
     return (time.perf_counter_ns()-t0)/N/1e3
 def main():
     import jax, jax.numpy as jnp
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
     m=from_nl(NL); ev=nev.cached_evaluator(m); n=ev.n_variables
     rng=np.random.default_rng(3); lb,ub=ev.variable_bounds

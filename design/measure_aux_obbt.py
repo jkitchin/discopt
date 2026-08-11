@@ -8,7 +8,7 @@ cheap measurement: *how much would the aux columns tighten if OBBT ran on them?*
 
 This script builds the McCormick relaxation of each vendored ``.nl`` instance,
 runs OBBT over the aux columns only (via
-:func:`discopt._jax.obbt.measure_discarded_aux_tightening`), and prints the
+:func:`discopt._relax.obbt.measure_discarded_aux_tightening`), and prints the
 per-instance discarded tightening plus an aggregate verdict. It touches nothing
 on the solve path — it is a pure diagnostic.
 
@@ -30,8 +30,8 @@ import time
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.obbt import measure_discarded_aux_tightening
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.obbt import measure_discarded_aux_tightening
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "..", "python", "tests", "data", "minlplib_nl")
 

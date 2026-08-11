@@ -5,7 +5,7 @@ import numpy as np
 
 os.environ["DISCOPT_FBBT_BEFORE_ROOT_PROBE"] = sys.argv[2] if len(sys.argv) > 2 else "0"
 import discopt.modeling as dm
-from discopt._jax import mccormick_lp as M
+from discopt._relax import mccormick_lp as M
 
 NL = os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/")
 name = sys.argv[1]

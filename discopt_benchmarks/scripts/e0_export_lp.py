@@ -80,8 +80,8 @@ def std_form(a_le, b_le, a_eq, b_eq, c_struct, lo_struct, up_struct):
 def export_convex(name, out):
     """OA-converged root LP + #781 cut loop -> standard form."""
     import discopt.modeling as dm
-    from discopt._jax.gdp_reformulate import reformulate_gdp
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt._rust import model_to_repr
     from discopt.modeling.core import ObjectiveSense, VarType
     from discopt.solvers import _root_cuts as rc
@@ -96,8 +96,8 @@ def export_convex(name, out):
     root = rc._RootLP(m, ev, lb, ub, is_int, is_bin, sense_max)
 
     # OA convergence + the #781 cut loop (same components as generate_root_cuts)
-    from discopt._jax.cmir_cuts import separate_cmir
-    from discopt._jax.cover_cuts import separate_cover_cuts
+    from discopt._relax.cmir_cuts import separate_cmir
+    from discopt._relax.cover_cuts import separate_cover_cuts
 
     cuts_a, cuts_b = [], []
     pool = rc._CutPool()
@@ -165,7 +165,7 @@ def export_spatial(name, out):
     """McCormick node LP over the FBBT root box, from the production relaxer."""
     import discopt.modeling as dm
     import scipy.sparse as sp
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
     from discopt._rust import model_to_repr
     from discopt.modeling.core import VarType
 
@@ -175,7 +175,7 @@ def export_spatial(name, out):
     rel = MccormickLPRelaxer(m)
     # Build the node LP the way the relaxer does (uniform factorable engine),
     # over the FBBT box — the base lifted relaxation a kernel node re-solves.
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     mm, _varmap = build_milp_relaxation(m, rel._terms, rel._disc, bound_override=(lb, ub))
     c_struct = np.asarray(mm._c, float).ravel()

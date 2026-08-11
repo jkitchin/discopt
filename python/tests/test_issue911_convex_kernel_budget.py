@@ -132,7 +132,7 @@ def test_flag_off_is_exact_on_the_fallback_reserve_path_too(monkeypatch):
     """The #844 reserve now takes 35% of the REMAINING budget, not of the stated
     limit. With the flag off the remainder IS the stated limit, so the primary budget
     must come out bit-identical to the pre-#911 ``time_limit - 0.35*time_limit``."""
-    from discopt._jax.lp_spatial_bb import _is_in_scope
+    from discopt._relax.lp_spatial_bb import _is_in_scope
     from discopt.modeling.core import _lp_spatial_fallback_enabled
 
     # Non-vacuity: if the reserve is not actually carved out here, this test would

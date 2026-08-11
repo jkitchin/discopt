@@ -21,7 +21,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt  # noqa: E402
-from discopt._jax.deadline import deadline_scope  # noqa: E402
+from discopt._relax.deadline import deadline_scope  # noqa: E402
 from discopt.modeling.core import from_nl  # noqa: E402
 from discopt.solver import solve_model  # noqa: E402
 
@@ -51,11 +51,11 @@ if arm == "warm":
 
     _wrap(MS, "solve_lp_warm_std")
 elif arm == "usq":
-    import discopt._jax.mccormick_lp as M
+    import discopt._relax.mccormick_lp as M
 
     _wrap(M.MccormickLPRelaxer, "_separate_univariate_square")
 elif arm == "relax":
-    import discopt._jax.milp_relaxation as MR
+    import discopt._relax.milp_relaxation as MR
 
     _wrap(MR.MilpRelaxationModel, "solve")
 elif arm != "plain":

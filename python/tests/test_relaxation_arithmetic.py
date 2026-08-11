@@ -26,7 +26,7 @@ import discopt
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.relaxation_compiler import compile_objective_relaxation
+from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
 
 def _eval_at(fn, x_val, n_vars):

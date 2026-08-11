@@ -37,7 +37,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
 
 pytestmark = [pytest.mark.smoke, pytest.mark.requires_pounce]

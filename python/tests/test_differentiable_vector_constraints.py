@@ -22,7 +22,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
-from discopt._jax.differentiable import differentiable_solve  # noqa: E402
+from discopt._relax.differentiable import differentiable_solve  # noqa: E402
 
 
 def _mixed_shape_model(pv: float):
@@ -101,7 +101,7 @@ def test_l3_mixed_shape_gradient_matches_finite_difference():
     (`differentiable_solve_l3` / `implicit_differentiate`) — same #324 bug, same
     fix. Guard it too: vector constraints must not crash and the gradient must
     match a finite difference."""
-    from discopt._jax.differentiable import differentiable_solve_l3
+    from discopt._relax.differentiable import differentiable_solve_l3
 
     def obj_star(pv: float) -> float:
         m, _ = _mixed_shape_model(pv)

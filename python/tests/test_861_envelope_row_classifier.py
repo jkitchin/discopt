@@ -38,8 +38,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 _CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "minlplib")
 
@@ -141,8 +141,8 @@ def test_native_producer_declines_rather_than_dropping_a_model_row():
     """``spatial_producer`` must not claim a lifted model row as a BlfTerm
     envelope — claiming it drops the constraint from every node LP. It now
     declines (returns None) so the caller keeps the trusted Python path."""
-    from discopt._jax.spatial_producer import build_spatial_kernel_spec
-    from discopt._jax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.spatial_producer import build_spatial_kernel_spec
+    from discopt._relax.uniform_relax import build_uniform_relaxation
 
     m = _product_with_model_bound()
     n = len(m._variables)

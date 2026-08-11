@@ -57,7 +57,7 @@ has moved far, spot-check before relying on them.
   bounds**, never operand cv/cc pairs at coincident points.
 - **The v1 reduced-space evaluator exists** on branch `feat/572-mccormick-subgrad`
   (worktree `/Users/jkitchin/projects/discopt-572`, 3 commits `c6b89351`, `7a4916f8`,
-  `e0a56204`): `python/discopt/_jax/mccormick_subgradient.py` with
+  `e0a56204`): `python/discopt/_relax/mccormick_subgradient.py` with
   `_RNode(cv, cc, lo, hi, affine)`, `build_reduced_relaxation(model, lb, ub) ->
   ReducedRelaxation(obj_under, con_feas, negate, n)`,
   `reduced_mccormick_lp_bound(model, lb, ub, max_rounds, tol) -> ReducedBound`
@@ -69,12 +69,12 @@ has moved far, spot-check before relying on them.
   validity, convexity, subgradient-support, Kelley convergence/infeasible/unsupported,
   maximize sense). Known limitation: **eager JAX, ~12–23 s per 15 Kelley rounds** on
   nvs19/24 — unusable per-node without jit.
-- **Envelope kernels to reuse:** `python/discopt/_jax/mccormick.py` —
+- **Envelope kernels to reuse:** `python/discopt/_relax/mccormick.py` —
   `relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub)` (exact hull; C-24 non-finite-bounds
   guard returns `(-inf, +inf)`), `relax_pow(x, lb, ub, n)` (even convex; odd 3-regime
   with `jnp.where`), `relax_square`, `relax_exp/log/...`, `_secant`.
   **Tsoukalas–Mitsos composition rules exist:**
-  `python/discopt/_jax/multivariate_mccormick.py::_COMPOSITION_RULES` — 11 univariate
+  `python/discopt/_relax/multivariate_mccormick.py::_COMPOSITION_RULES` — 11 univariate
   ops (`exp log log2 log10 sqrt softplus abs tanh atan sigmoid sinh`), each a
   `compose_*(cv_g, cc_g, g_lb, g_ub) -> (cv, cc)` mid-rule implementation.
 - **AST:** `discopt.modeling.core` — `Constant`, `Parameter`, `Variable`,
@@ -95,12 +95,12 @@ has moved far, spot-check before relying on them.
   `sparsity.py`, `objective_epigraph.py`, `solver.py`.
 - **Solver mode switch:** `solver.py` `_mc_mode ∈ {"auto","lp","nlp","none"}`
   (≈ line 4591+); the default global path is `MccormickLPRelaxer`
-  (`_jax/mccormick_lp.py`, lifted aux columns, in-house Rust simplex backend,
+  (`_relax/mccormick_lp.py`, lifted aux columns, in-house Rust simplex backend,
   incremental fast path `IncrementalMcCormickLP`, root cut pool). Tuning-knob house
   pattern: `solver_tuning.py` dataclass fields via `_env_flag("DISCOPT_…", default=…)`
   with a docstring naming the env var.
 - **In-house LP warm start:** `MilpRelaxationModel.solve(backend="simplex")`
-  (`_jax/milp_relaxation.py`) warm-starts the Rust dual simplex when **columns are
+  (`_relax/milp_relaxation.py`) warm-starts the Rust dual simplex when **columns are
   unchanged and rows only grow** — exactly the Kelley-loop shape (`_solve_lp_warm`,
   equilibrated retry, then cold fallback). P2 should ride this, not scipy.
 - **DBBT is NOT a gap** — `python/discopt/tightening.py` implements FBBT/DBBT/OBBT;
@@ -172,7 +172,7 @@ tracing. Record the entry-experiment numbers in §7 either way.
 
 ### P0.2 — the real module
 
-**Deliverable:** `python/discopt/_jax/mcbox.py` —
+**Deliverable:** `python/discopt/_relax/mcbox.py` —
 
 ```python
 @jax.tree_util.register_pytree_node_class
@@ -194,7 +194,7 @@ def relax_through(fn: Callable, x, lb, ub) -> MCBox:
 class UnsupportedMcboxOp(Exception): ...   # sound-or-refuse, same contract as v1
 ```
 
-plus a function namespace `discopt._jax.mcbox.ops` (or methods) for `exp`, `log`,
+plus a function namespace `discopt._relax.mcbox.ops` (or methods) for `exp`, `log`,
 `sqrt`, `abs`, `tanh`, `atan`, `sigmoid`, `softplus`, `sinh`, `log2`, `log10` —
 each implemented by calling the existing `_COMPOSITION_RULES` kernel for values and
 adding the rule-based subgradient (the mid-rule's median selection is a `clip`;
@@ -408,7 +408,7 @@ remainder enclosure; kill if the enclosure blows up on the motivating model).
 | Stage | Status | Evidence / notes |
 |---|---|---|
 | P0.1 entry experiment | **PASS (2026-07-11)** | `f=x·exp(y)−x·y` on `[0,2]×[0,1.5]`: bracket valid (cv−f ≤ −2e-5, f−cc ≤ −1.6e-4); subgradient support **0/200** cv & cc violations (rule-based, no convexity guard); jit + vmap-over-1000-boxes at **2.61×** plain-f cost (≤3× gate). **Design refinement adopted:** `lo/hi` are DYNAMIC traced leaves (not aux_data) → jit compiles once, vmaps over per-node boxes; interval-sign selections via `jnp.where`. Scratch: `scratchpad/p0_1_mcbox.py`. GO. |
-| P0.2 MCBox module | **DONE (2026-07-11)** | `feat/mcbox-p0` commit `5d7fdf4f`: `_jax/mcbox.py` (MCBox pytree, arithmetic + bilinear + sign-agnostic repeated-mult powers + exp/log/log2/log10/sqrt/softplus/abs), `test_mcbox.py` **22/22**. **Finding (binding for P1.1):** the kernel-chain subgradient is valid **exactly for provably-convex envelopes** — the S-shaped ops (tanh/atan/sigmoid/sinh) have a non-convex cv over a sign-spanning box, so they *refuse* in P0.2 and move to P1.1 (per-regime subgradient selection). Powers are sound via repeated bilinear multiplication for all n≥1 and all signs (looser than the tight monomial hull → P1.3). Not merged (library-only; PR pending). |
+| P0.2 MCBox module | **DONE (2026-07-11)** | `feat/mcbox-p0` commit `5d7fdf4f`: `_relax/mcbox.py` (MCBox pytree, arithmetic + bilinear + sign-agnostic repeated-mult powers + exp/log/log2/log10/sqrt/softplus/abs), `test_mcbox.py` **22/22**. **Finding (binding for P1.1):** the kernel-chain subgradient is valid **exactly for provably-convex envelopes** — the S-shaped ops (tanh/atan/sigmoid/sinh) have a non-convex cv over a sign-spanning box, so they *refuse* in P0.2 and move to P1.1 (per-regime subgradient selection). Powers are sound via repeated bilinear multiplication for all n≥1 and all signs (looser than the tight monomial hull → P1.3). Not merged (library-only; PR pending). |
 | P0.3 v1 port | **DONE — PR #575 (2026-07-11)** | `mccormick_subgradient.py` reimplemented on MCBox (`_to_mcbox` AST interpreter); 14/14. **Strictly more capable:** 12 core v1 tests unchanged (regression floor); 2 v1 refusal tests flipped to soundness (x**3 spanning, exp(x)*x now relax soundly). P0.2 (`5d7fdf4f`) merged in **#574**; density-route #557 fix merged in **#573**. |
 | P1.1 S-shaped ops | **DONE — PR #576 (2026-07-11)** | tanh/atan/sigmoid/sinh in MCBox: kernel-chain (tight) on non-spanning boxes, sound constant-envelope fallback (`jnp.where`, loose) on spanning boxes — jit/vmap-able. Diagnostic confirmed the sigmoidal cv is convex non-spanning, non-convex spanning (issue #51). test_mcbox 27/27. **P1.1b** follow-up: tight tangent envelope for the spanning case. P0.3 merged in **#575**. |
 | P1.2 division | **PARTIAL — reciprocal-of-affine only; non-affine lift FALSIFIED (2026-07-18)** | **The P1.2 follow-up (a validated non-affine reciprocal subgradient to lift the refusal) was attempted and FALSIFIED.** Hypothesis: the `clip_inner` box-face fix (2026-07-18) that repaired the intrinsic-envelope subgradients would also fix the non-affine reciprocal (the nvs22 witness was a box-face iterate). Entry experiment: corner-inclusive subgradient-support fuzz on `x/(y·z)` over **300 random wide boxes** (denominator/base magnitudes up to ~40, matching nvs22's ~42 scale). **Result: still UNSOUND — worst cv-subgradient violation 1.1e3, worst cc 73 (≈10% relative on values ~660), while the bracket stays valid (2e-13).** So the clip fix repairs the boundary case only; the non-affine reciprocal's *subgradient* is genuinely invalid on wide boxes, independent of the box-face tie. The `_to_mcbox` non-affine-denominator refusal and the CustomCall `strict_division` guard **STAND** (sound-or-refuse, CLAUDE.md §1 — a safety guard added after a real false-optimal is not weakened without a validated construction). A genuine lift needs a new, validated non-affine reciprocal envelope+subgradient (open research), not the clip fix. Original entry: | PR #577 added `x/y` via sign-definite reciprocal (mid-rule clamp; no-info bracket when denom crosses 0); sound for `1/(affine)`. **Correction (P2.3, nvs22):** the general **non-affine-denominator** case (`(A·x6)/((x2·x3)·(Σ-sq))`) produces an INVALID `cc` subgradient (numeric witness in §7 P2.3). `_to_mcbox` now REFUSES division by a non-affine denominator (sound-or-refuse); reciprocal-of-affine and non-affine *products* remain sound. FOLLOW-UP: a validated non-affine reciprocal subgradient to lift the refusal. test_mcbox 30/30, `min x/y`=exact 1/3 still hold. |

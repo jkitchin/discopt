@@ -12,7 +12,7 @@ import pytest
 
 cyipopt = pytest.importorskip("cyipopt")
 
-from discopt._jax.primal_heuristics import (  # noqa: E402
+from discopt._relax.primal_heuristics import (  # noqa: E402
     MultiStartNLP,
     MultiStartResult,
     _generate_starts,

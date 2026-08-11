@@ -62,9 +62,9 @@ def _build_relaxation_for_test(
     ubs: list[float] | None = None,
     n_init: int = 2,
 ):
-    from discopt._jax.discretization import initialize_partitions
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import initialize_partitions
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     terms = classify_nonlinear_terms(model)
     state = initialize_partitions(part_vars or [], lb=lbs or [], ub=ubs or [], n_init=n_init)
@@ -185,7 +185,7 @@ def test_amp_integration_tier_selects_memory_heavy_marker():
 
 def test_embedding_map_single_partition_uses_no_selector_bits():
     """One SOS2 interval does not need an embedded binary selector."""
-    from discopt._jax.embedding import EmbeddingMap, build_embedding_map
+    from discopt._relax.embedding import EmbeddingMap, build_embedding_map
 
     embedding = build_embedding_map(2, encoding="gray")
 
@@ -311,7 +311,7 @@ def test_amp_normalizes_initial_point_length_and_bounds():
 
 def test_weymouth_like_squares_extend_builtin_partition_selection():
     """Coupled square constraints should add monomial vars without changing classifier output."""
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.solvers import amp as amp_mod
 
     m = Model("weymouth_like_candidates")
@@ -352,7 +352,7 @@ def test_self_product_difference_classifies_cross_term():
     relaxation bound to a trivial value (kall_congruentcircles_* never certified).
     The expandable-product gate must route such models to the Python classifier.
     """
-    from discopt._jax.term_classifier import (
+    from discopt._relax.term_classifier import (
         _contains_expandable_square,
         classify_nonlinear_terms,
     )
@@ -408,7 +408,7 @@ def test_partitioned_square_secants_tighten_circle_superlevel_bound():
 
 def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
     """Affine-square constraints should stay in the AMP MILP relaxation."""
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = _make_shifted_square_infeasible()
     terms = classify_nonlinear_terms(m)
@@ -433,7 +433,7 @@ def test_issue90_unbounded_square_constraint_linearizes_with_lifted_aux(caplog):
     m.minimize(y**2 + z**3)
     m.subject_to(x**2 <= y**2 + z**2)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level("WARNING", logger="discopt._relax.milp_relaxation"):
         milp_model, varmap = _build_relaxation_for_test(m)
         result = milp_model.solve()
 
@@ -454,7 +454,7 @@ def test_negated_constant_product_classifies_as_bilinear_both_paths():
     whole term is rejected and the constraint is silently dropped from the MILP
     relaxation, leaving a uselessly loose bound (st_e40 regression).
     """
-    from discopt._jax.term_classifier import (
+    from discopt._relax.term_classifier import (
         _classify_nonlinear_terms_python,
         _classify_nonlinear_terms_rust,
         classify_nonlinear_terms,
@@ -913,7 +913,7 @@ def test_solve_amp_validates_public_options_before_solve():
 
 def test_solve_amp_convex_model_delegates_to_continuous_solver(monkeypatch):
     """Convex pure-continuous models should use the single-NLP fast path."""
-    import discopt._jax.convexity as convexity_mod
+    import discopt._relax.convexity as convexity_mod
     import discopt.solver as solver_mod
     from discopt.solvers import amp as amp_mod
 
@@ -1007,7 +1007,7 @@ def test_entropy_objective_linearizes_with_sound_bound(caplog):
     univariate relaxer, so the objective fell back to a feasibility objective
     and no bound could be certified.
     """
-    from discopt._jax.factorable_reform import canonicalize_entropy
+    from discopt._relax.factorable_reform import canonicalize_entropy
 
     m = Model("entropy_obj")
     x = m.continuous("x", lb=0.05, ub=2.0)
@@ -1129,7 +1129,7 @@ def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
 
 
 def test_tan_range_rejects_near_asymptote_endpoints():
-    from discopt._jax.operator_relaxations import tan_range as _tan_range
+    from discopt._relax.operator_relaxations import tan_range as _tan_range
 
     near_asymptote = np.pi / 2.0 - 5e-4
 
@@ -1181,9 +1181,9 @@ def test_mixed_curvature_tan_relaxation_respects_fixed_argument():
 
 def test_disaggregated_piecewise_bilinear_big_m_keeps_negative_endpoint_feasible():
     """Inactive piecewise McCormick rows need enough slack on negative intervals."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     z_value = 2.85671038
     z_bound = float(np.sqrt(10.0))
@@ -1289,7 +1289,7 @@ def test_mixed_curvature_affine_trig_uses_piecewise_relaxation(objective, old_ra
 
 def test_trig_piecewise_relaxation_skips_huge_argument_span():
     """Very wide trig spans should use range bounds, not many piecewise rows."""
-    from discopt._jax.milp_relaxation import _MAX_TRIG_PIECEWISE_SPAN
+    from discopt._relax.milp_relaxation import _MAX_TRIG_PIECEWISE_SPAN
 
     span = 2.0 * _MAX_TRIG_PIECEWISE_SPAN
     m = Model("trig_huge_span_guard")
@@ -1468,7 +1468,7 @@ def test_x_exp_minlptests_objective_uses_separable_lower_bound(integer_y, caplog
     z = m.continuous("z", lb=1.0)
     m.minimize(x * dm.exp(x) + dm.cos(y) + z**3 - z**2)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level("WARNING", logger="discopt._relax.milp_relaxation"):
         milp_model, varmap = _build_relaxation_for_test(m)
         result = milp_model.solve()
 
@@ -1632,9 +1632,9 @@ def test_solve_model_reformulates_if_else_before_amp(monkeypatch):
 
 def test_amp_custom_partition_hooks_run_inside_amp(monkeypatch):
     """AMP should expose callable selection, scaling, and refinement hooks."""
-    import discopt._jax.discretization as disc_mod
-    from discopt._jax.discretization import add_adaptive_partition
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.discretization as disc_mod
+    from discopt._relax.discretization import add_adaptive_partition
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     selection_stages = []
@@ -1712,8 +1712,8 @@ def test_amp_custom_partition_hooks_run_inside_amp(monkeypatch):
 
 def test_amp_adaptive_keeps_monomial_fallback_partitions(monkeypatch):
     """Built-in adaptive selection must not erase monomial-only partitions."""
-    import discopt._jax.discretization as disc_mod
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.discretization as disc_mod
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     refined_var_sets = []
@@ -1767,8 +1767,8 @@ def test_amp_adaptive_keeps_monomial_fallback_partitions(monkeypatch):
 @pytest.mark.memory_heavy
 def test_amp_adaptive_refines_weymouth_like_monomials(monkeypatch):
     """Adaptive selection should keep square-balance variables when products also exist."""
-    import discopt._jax.discretization as disc_mod
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.discretization as disc_mod
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     refined_var_sets = []
@@ -1822,8 +1822,8 @@ def test_amp_adaptive_refines_weymouth_like_monomials(monkeypatch):
 
 def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
     """Alpine-style mode 2 should use LP OBBT when no feasible incumbent exists."""
-    import discopt._jax.obbt as obbt_mod
-    from discopt._jax.obbt import ObbtResult
+    import discopt._relax.obbt as obbt_mod
+    from discopt._relax.obbt import ObbtResult
     from discopt.solvers import amp as amp_mod
 
     m = Model("partitioned_obbt_fallback")
@@ -1881,7 +1881,7 @@ def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
 
 def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
     """A feasible initial point should seed the partition-aware OBBT path."""
-    from discopt._jax.obbt import ObbtResult
+    from discopt._relax.obbt import ObbtResult
     from discopt.solvers import amp as amp_mod
 
     m = Model("partitioned_obbt_incumbent")
@@ -1957,7 +1957,7 @@ def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
 
 def test_partitioned_obbt_applies_scaling_update_before_custom_refinement(monkeypatch):
     """Partitioned OBBT should honor the scaling hook before custom refinement."""
-    import discopt._jax.milp_relaxation as milp_mod
+    import discopt._relax.milp_relaxation as milp_mod
     from discopt.solvers import amp as amp_mod
 
     m = _make_obbt_demo()
@@ -2038,8 +2038,8 @@ def test_partitioned_obbt_applies_scaling_update_before_custom_refinement(monkey
 
 def test_partitioned_presolve_obbt_runs_on_bilinear_demo():
     """The real partition-aware OBBT path should solve bounded MILP subproblems."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.solvers import amp as amp_mod
 
     m = _make_obbt_demo()
@@ -2081,9 +2081,9 @@ def test_partitioned_presolve_obbt_maximize_cutoff_uses_relaxation_objective_spa
 ):
     """Maximization incumbents should be converted to the relaxation minimization space."""
     import scipy.sparse as sp
-    from discopt._jax.milp_relaxation import MilpRelaxationModel, MilpRelaxationResult
-    from discopt._jax.nlp_evaluator import NLPEvaluator
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.milp_relaxation import MilpRelaxationModel, MilpRelaxationResult
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.solvers import amp as amp_mod
 
     m = _make_obbt_demo()
@@ -2130,7 +2130,7 @@ def test_partitioned_presolve_obbt_maximize_cutoff_uses_relaxation_objective_spa
 
 def test_amp_accepts_feasible_start_as_incumbent(monkeypatch):
     """A feasible model start should survive when proof search fails immediately."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     m = Model("amp_start_incumbent")
@@ -2189,8 +2189,8 @@ def test_amp_rejects_nonfinite_direct_initial_point(bad_value):
 @pytest.mark.memory_heavy
 def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
     """A finite start with NaN objective is not a valid AMP incumbent."""
-    import discopt._jax.nlp_evaluator as nlp_eval
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.nlp_evaluator as nlp_eval
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     m = Model("amp_nan_objective_start")
@@ -2472,8 +2472,8 @@ def test_best_nlp_candidate_rejects_noninteger_nlp_return(monkeypatch):
 
 def test_amp_uses_nonlinear_tightened_partition_bounds(monkeypatch):
     """AMP should initialize partitions from the tightened nonlinear box."""
-    import discopt._jax.discretization as disc_mod
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.discretization as disc_mod
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     captured = {}
@@ -2532,7 +2532,7 @@ def test_nonlinear_tightening_reports_issue_28_contradictions(
     expected_reason,
 ):
     """Issue #28 contradictions should return an explicit infeasible status."""
-    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
     m = Model(f"issue_28_{kind}_contradiction")
     x = m.continuous("x", lb=lb, ub=ub)
@@ -2556,7 +2556,7 @@ def test_nonlinear_tightening_reports_issue_28_contradictions(
 
 
 def test_reciprocal_argument_interval_uses_explicit_infeasible_sentinel():
-    from discopt._jax import nonlinear_bound_tightening as nbt
+    from discopt._relax import nonlinear_bound_tightening as nbt
 
     interval = nbt.ReciprocalBoundsRule._argument_interval_for_leq(
         numerator=1.0,
@@ -2571,7 +2571,7 @@ def test_reciprocal_argument_interval_uses_explicit_infeasible_sentinel():
 def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
     """Unchanged infinite bounds should not warn while counting tightened entries."""
 
-    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
     m = Model("infinite_bound_counting")
     x = m.continuous("x", lb=0.0, ub=np.inf)
@@ -2593,8 +2593,8 @@ def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
 
 def test_square_difference_tightens_weymouth_like_upstream_pressure():
     """Rows like f^2 = C*(p_from^2 - p_to^2) imply a lower bound on p_from."""
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
     m = Model("weymouth_bound_tightening")
     f = m.continuous("f", lb=6.0, ub=20.0)
@@ -2623,11 +2623,11 @@ def test_gas_square_difference_tightening_strengthens_root_relaxation():
     above (rule fired + exact tightened bound), so the coverage jobs keep that
     guarantee directly.
     """
-    from discopt._jax.discretization import initialize_partitions
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import initialize_partitions
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
     from discopt.solvers import amp as amp_mod
 
@@ -2677,7 +2677,7 @@ def test_gas_square_difference_tightening_strengthens_root_relaxation():
 
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
     """OA recovery should retry with the oldest half of cuts removed."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     call_sizes = []
@@ -2713,7 +2713,7 @@ def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
         status = "infeasible" if size >= 4 else "optimal"
         return FakeMilpModel(status), {"dummy": True}
 
-    monkeypatch.setattr("discopt._jax.milp_relaxation.build_milp_relaxation", fake_build)
+    monkeypatch.setattr("discopt._relax.milp_relaxation.build_milp_relaxation", fake_build)
 
     result, _, kept_cuts, mip_count = amp_mod._solve_milp_with_oa_recovery(
         model=None,
@@ -2736,10 +2736,10 @@ def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
 
 def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     """Evaluator OA cuts should receive the per-constraint convexity filter."""
-    import discopt._jax.convexity as convexity_mod
-    import discopt._jax.cutting_planes as cutting_planes
-    from discopt._jax.convexity.rules import OACutConvexity
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.convexity as convexity_mod
+    import discopt._relax.cutting_planes as cutting_planes
+    from discopt._relax.convexity.rules import OACutConvexity
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     recorded_masks = []
@@ -2809,8 +2809,8 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
 
 def test_amp_oa_classification_uses_tightened_bounds_for_reciprocal_rows(monkeypatch):
     """Root bound tightening should feed OA convexity classification."""
-    import discopt._jax.cutting_planes as cutting_planes
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.cutting_planes as cutting_planes
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     recorded_masks = []
@@ -2909,9 +2909,9 @@ def _issue91_minlptests_model(group: str, problem_id: str) -> Model:
 
 
 def _issue91_oa_mask_and_skip_reasons(model: Model) -> tuple[list[bool], list[str | None]]:
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
     from discopt.modeling.core import VarType
     from discopt.solvers import amp as amp_mod
     from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
@@ -3056,10 +3056,10 @@ def test_issue91_minlptests_oa_rows_are_cut_or_explained(
 
 def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
     """The indefinite quadratic row should get a relaxed OA cut, not direct OA."""
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = Model("issue_63_quadratic_cut")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -3103,9 +3103,9 @@ def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
 
 def test_alphabb_quadratic_oa_skips_nonquadratic_row():
     """Nonquadratic rows must not be accepted by local Hessian coincidence."""
-    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = Model("nonquadratic_alphabb_skip")
     x = m.continuous("x", lb=-1.0, ub=1.0)
@@ -3128,7 +3128,7 @@ def test_alphabb_quadratic_oa_skips_nonquadratic_row():
 
 def test_alphabb_quadratic_oa_uses_row_col_hessian_support(monkeypatch):
     """Column-only Hessian scans miss nonsymmetric fragments; row/col union must cut."""
-    import discopt._jax.cutting_planes as cp
+    import discopt._relax.cutting_planes as cp
 
     class FakeEvaluator:
         n_constraints = 1
@@ -3179,7 +3179,7 @@ def test_objective_cutoff_odd_power_tightening_uses_signed_monotonic_root():
 
 def test_objective_cutoff_negative_odd_power_interval_preserves_feasible_points():
     """A positive cutoff on x**3 over a negative interval must not trim the left side."""
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.solvers import amp as amp_mod
 
     m = Model("odd_power_cutoff_counterexample")
@@ -3251,7 +3251,7 @@ def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
     expected_obbt_calls,
 ):
     """The alpha-BB cutoff OBBT pass has its own switch."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     calls = []
@@ -3310,7 +3310,7 @@ def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
 
 def test_run_cutoff_obbt_returns_without_time_after_deadline(monkeypatch):
     """Expired AMP deadlines must not be converted into a fresh OBBT budget."""
-    from discopt._jax import milp_relaxation as milp_relaxation_mod
+    from discopt._relax import milp_relaxation as milp_relaxation_mod
     from discopt.solvers import amp as amp_mod
 
     build_calls = []
@@ -3368,7 +3368,7 @@ def test_run_cutoff_obbt_returns_without_time_after_deadline(monkeypatch):
 @pytest.mark.memory_heavy
 def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch):
     """The default alpha-BB prerequisite pass must honor the global AMP deadline."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     cutoff_obbt_calls = []
@@ -3443,10 +3443,10 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
 @pytest.mark.memory_heavy
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.solvers import amp as amp_mod
     from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 
@@ -3509,8 +3509,8 @@ def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
 @pytest.mark.memory_heavy
 def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch):
     """Internal cutoff/FBBT bounds must not leak back to the caller's model."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.solvers import amp as amp_mod
 
     monkeypatch.setattr(
@@ -3563,8 +3563,8 @@ def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch
 @pytest.mark.memory_heavy
 def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch):
     """Propagated callback errors must still restore temporary AMP bounds."""
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.solvers import amp as amp_mod
 
     monkeypatch.setattr(
@@ -3621,9 +3621,9 @@ def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch
 @pytest.mark.memory_heavy
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
-    import discopt._jax.cutting_planes as cutting_planes
-    from discopt._jax.cutting_planes import OACutGenerationReport
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.cutting_planes as cutting_planes
+    from discopt._relax.cutting_planes import OACutGenerationReport
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     captured_cuts = []
@@ -3687,9 +3687,9 @@ def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
 @pytest.mark.memory_heavy
 def test_amp_keeps_direct_oa_when_alphabb_generation_fails(monkeypatch):
     """Alpha-BB failures should not suppress already generated convex OA cuts."""
-    import discopt._jax.cutting_planes as cutting_planes
-    from discopt._jax.cutting_planes import LinearCut
-    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    import discopt._relax.cutting_planes as cutting_planes
+    from discopt._relax.cutting_planes import LinearCut
+    from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
     captured_cuts = []
@@ -3822,7 +3822,7 @@ def test_small_integer_domain_fallback_enumerates_complete_domain(monkeypatch):
 @pytest.mark.memory_heavy
 def test_obbt_presolve_tightens_bilinear_demo_bounds():
     """OBBT should shrink the initial [0, 10]^2 box to the linear hull x + y = 1."""
-    from discopt._jax.obbt import run_obbt
+    from discopt._relax.obbt import run_obbt
 
     result = run_obbt(_make_obbt_demo())
 

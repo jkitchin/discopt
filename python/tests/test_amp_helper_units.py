@@ -19,7 +19,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.discretization import DiscretizationState
+from discopt._relax.discretization import DiscretizationState
 from discopt.modeling.core import Model, VarType
 from discopt.solvers.amp import (
     _check_integer_feasible,

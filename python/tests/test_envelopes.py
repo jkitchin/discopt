@@ -14,7 +14,7 @@ class TestRelaxSinTight:
 
     def test_soundness_concave_regime(self):
         """sin on [0.2, 2.5] (concave regime): cv <= sin(x) <= cc."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         lb, ub = 0.2, 2.5
         xs = jnp.linspace(lb, ub, 50)
@@ -25,7 +25,7 @@ class TestRelaxSinTight:
 
     def test_soundness_convex_regime(self):
         """sin on [3.5, 5.5] (convex regime): cv <= sin(x) <= cc."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         lb, ub = 3.5, 5.5
         xs = jnp.linspace(lb, ub, 50)
@@ -36,7 +36,7 @@ class TestRelaxSinTight:
 
     def test_soundness_mixed_regime(self):
         """sin on [1.0, 4.0] (mixed concave/convex): cv <= sin(x) <= cc."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         lb, ub = 1.0, 4.0
         xs = jnp.linspace(lb, ub, 50)
@@ -47,7 +47,7 @@ class TestRelaxSinTight:
 
     def test_soundness_wide_interval(self):
         """sin on [0, 7] (> 2*pi): should return [-1, 1]."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         lb, ub = 0.0, 7.0
         x = jnp.float64(3.0)
@@ -57,7 +57,7 @@ class TestRelaxSinTight:
 
     def test_soundness_random(self):
         """Random soundness check with many x values."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         key = jax.random.PRNGKey(42)
         for _ in range(20):
@@ -73,7 +73,7 @@ class TestRelaxSinTight:
 
     def test_jit_compatible(self):
         """relax_sin_tight works under jax.jit."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         @jax.jit
         def f(x):
@@ -84,7 +84,7 @@ class TestRelaxSinTight:
 
     def test_vmap_compatible(self):
         """relax_sin_tight works under jax.vmap."""
-        from discopt._jax.envelopes import relax_sin_tight
+        from discopt._relax.envelopes import relax_sin_tight
 
         xs = jnp.linspace(0.5, 2.5, 10)
         lbs = jnp.full(10, 0.5)
@@ -99,7 +99,7 @@ class TestRelaxCosTight:
 
     def test_soundness(self):
         """cos on [0.5, 2.5]: cv <= cos(x) <= cc."""
-        from discopt._jax.envelopes import relax_cos_tight
+        from discopt._relax.envelopes import relax_cos_tight
 
         lb, ub = 0.5, 2.5
         xs = jnp.linspace(lb, ub, 50)
@@ -110,7 +110,7 @@ class TestRelaxCosTight:
 
     def test_soundness_negative_range(self):
         """cos on [-2, -0.5]: cv <= cos(x) <= cc."""
-        from discopt._jax.envelopes import relax_cos_tight
+        from discopt._relax.envelopes import relax_cos_tight
 
         lb, ub = -2.0, -0.5
         xs = jnp.linspace(lb, ub, 30)
@@ -125,7 +125,7 @@ class TestRelaxSignomialMulti:
 
     def test_soundness_2var(self):
         """x^0.5 * y^1.5 on positive domain."""
-        from discopt._jax.envelopes import relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial_multi
 
         xs = jnp.array([2.0, 3.0])
         lbs = jnp.array([1.0, 1.0])
@@ -139,7 +139,7 @@ class TestRelaxSignomialMulti:
 
     def test_soundness_3var(self):
         """x^0.3 * y^0.4 * z^0.3 on positive domain."""
-        from discopt._jax.envelopes import relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial_multi
 
         xs = jnp.array([2.0, 3.0, 4.0])
         lbs = jnp.array([1.0, 1.0, 1.0])
@@ -153,7 +153,7 @@ class TestRelaxSignomialMulti:
 
     def test_negative_exponents(self):
         """x^{-0.5} * y^{1.0} on positive domain."""
-        from discopt._jax.envelopes import relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial_multi
 
         xs = jnp.array([2.0, 3.0])
         lbs = jnp.array([0.5, 1.0])
@@ -167,7 +167,7 @@ class TestRelaxSignomialMulti:
 
     def test_reduces_to_univariate(self):
         """Single variable x^0.5 matches relax_signomial."""
-        from discopt._jax.envelopes import relax_signomial, relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial, relax_signomial_multi
 
         x = jnp.float64(3.0)
         lb, ub = jnp.float64(1.0), jnp.float64(5.0)
@@ -185,7 +185,7 @@ class TestRelaxSignomialMulti:
 
     def test_jit_compatible(self):
         """relax_signomial_multi works under jax.jit."""
-        from discopt._jax.envelopes import relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial_multi
 
         @jax.jit
         def f(xs, lbs, ubs, exps):
@@ -201,7 +201,7 @@ class TestRelaxSignomialMulti:
 
     def test_vmap_compatible(self):
         """relax_signomial_multi works under jax.vmap over batch dim."""
-        from discopt._jax.envelopes import relax_signomial_multi
+        from discopt._relax.envelopes import relax_signomial_multi
 
         batch_xs = jnp.array([[2.0, 3.0], [3.0, 4.0], [1.5, 2.5]])
         lbs = jnp.array([1.0, 1.0])
@@ -232,22 +232,22 @@ class TestRelaxAsinh:
     """Tests for relax_asinh."""
 
     def test_soundness_positive(self):
-        from discopt._jax.envelopes import relax_asinh
+        from discopt._relax.envelopes import relax_asinh
 
         _check_soundness(relax_asinh, jnp.arcsinh, 0.5, 5.0)
 
     def test_soundness_negative(self):
-        from discopt._jax.envelopes import relax_asinh
+        from discopt._relax.envelopes import relax_asinh
 
         _check_soundness(relax_asinh, jnp.arcsinh, -5.0, -0.5)
 
     def test_soundness_mixed(self):
-        from discopt._jax.envelopes import relax_asinh
+        from discopt._relax.envelopes import relax_asinh
 
         _check_soundness(relax_asinh, jnp.arcsinh, -3.0, 3.0)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_asinh
+        from discopt._relax.envelopes import relax_asinh
 
         lb, ub = 1.0, 4.0
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -257,7 +257,7 @@ class TestRelaxAsinh:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_asinh
+        from discopt._relax.envelopes import relax_asinh
 
         f = jax.jit(lambda x: relax_asinh(x, 0.0, 3.0))
         cv, cc = f(jnp.float64(1.5))
@@ -268,17 +268,17 @@ class TestRelaxAcosh:
     """Tests for relax_acosh."""
 
     def test_soundness(self):
-        from discopt._jax.envelopes import relax_acosh
+        from discopt._relax.envelopes import relax_acosh
 
         _check_soundness(relax_acosh, jnp.arccosh, 1.0, 5.0)
 
     def test_soundness_near_one(self):
-        from discopt._jax.envelopes import relax_acosh
+        from discopt._relax.envelopes import relax_acosh
 
         _check_soundness(relax_acosh, jnp.arccosh, 1.01, 2.0)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_acosh
+        from discopt._relax.envelopes import relax_acosh
 
         lb, ub = 1.5, 4.0
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -288,7 +288,7 @@ class TestRelaxAcosh:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_acosh
+        from discopt._relax.envelopes import relax_acosh
 
         f = jax.jit(lambda x: relax_acosh(x, 1.0, 5.0))
         cv, cc = f(jnp.float64(2.0))
@@ -299,22 +299,22 @@ class TestRelaxAtanh:
     """Tests for relax_atanh."""
 
     def test_soundness_positive(self):
-        from discopt._jax.envelopes import relax_atanh
+        from discopt._relax.envelopes import relax_atanh
 
         _check_soundness(relax_atanh, jnp.arctanh, 0.1, 0.9)
 
     def test_soundness_negative(self):
-        from discopt._jax.envelopes import relax_atanh
+        from discopt._relax.envelopes import relax_atanh
 
         _check_soundness(relax_atanh, jnp.arctanh, -0.9, -0.1)
 
     def test_soundness_mixed(self):
-        from discopt._jax.envelopes import relax_atanh
+        from discopt._relax.envelopes import relax_atanh
 
         _check_soundness(relax_atanh, jnp.arctanh, -0.5, 0.5)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_atanh
+        from discopt._relax.envelopes import relax_atanh
 
         lb, ub = 0.1, 0.8
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -324,7 +324,7 @@ class TestRelaxAtanh:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_atanh
+        from discopt._relax.envelopes import relax_atanh
 
         f = jax.jit(lambda x: relax_atanh(x, -0.5, 0.5))
         cv, cc = f(jnp.float64(0.2))
@@ -335,22 +335,22 @@ class TestRelaxErf:
     """Tests for relax_erf."""
 
     def test_soundness_positive(self):
-        from discopt._jax.envelopes import relax_erf
+        from discopt._relax.envelopes import relax_erf
 
         _check_soundness(relax_erf, jax_erf, 0.0, 3.0)
 
     def test_soundness_negative(self):
-        from discopt._jax.envelopes import relax_erf
+        from discopt._relax.envelopes import relax_erf
 
         _check_soundness(relax_erf, jax_erf, -3.0, 0.0)
 
     def test_soundness_mixed(self):
-        from discopt._jax.envelopes import relax_erf
+        from discopt._relax.envelopes import relax_erf
 
         _check_soundness(relax_erf, jax_erf, -2.0, 2.0)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_erf
+        from discopt._relax.envelopes import relax_erf
 
         lb, ub = -1.0, 1.0
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -360,7 +360,7 @@ class TestRelaxErf:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_erf
+        from discopt._relax.envelopes import relax_erf
 
         f = jax.jit(lambda x: relax_erf(x, -2.0, 2.0))
         cv, cc = f(jnp.float64(0.5))
@@ -371,17 +371,17 @@ class TestRelaxLog1p:
     """Tests for relax_log1p."""
 
     def test_soundness(self):
-        from discopt._jax.envelopes import relax_log1p
+        from discopt._relax.envelopes import relax_log1p
 
         _check_soundness(relax_log1p, jnp.log1p, 0.0, 5.0)
 
     def test_soundness_near_minus_one(self):
-        from discopt._jax.envelopes import relax_log1p
+        from discopt._relax.envelopes import relax_log1p
 
         _check_soundness(relax_log1p, jnp.log1p, -0.5, 2.0)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_log1p
+        from discopt._relax.envelopes import relax_log1p
 
         lb, ub = 0.0, 4.0
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -391,7 +391,7 @@ class TestRelaxLog1p:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_log1p
+        from discopt._relax.envelopes import relax_log1p
 
         f = jax.jit(lambda x: relax_log1p(x, 0.0, 3.0))
         cv, cc = f(jnp.float64(1.0))
@@ -402,7 +402,7 @@ class TestRelaxReciprocal:
     """Tests for relax_reciprocal."""
 
     def test_soundness_positive(self):
-        from discopt._jax.envelopes import relax_reciprocal
+        from discopt._relax.envelopes import relax_reciprocal
 
         def recip(x):
             return 1.0 / x
@@ -410,7 +410,7 @@ class TestRelaxReciprocal:
         _check_soundness(relax_reciprocal, recip, 0.5, 5.0)
 
     def test_soundness_negative(self):
-        from discopt._jax.envelopes import relax_reciprocal
+        from discopt._relax.envelopes import relax_reciprocal
 
         def recip(x):
             return 1.0 / x
@@ -418,7 +418,7 @@ class TestRelaxReciprocal:
         _check_soundness(relax_reciprocal, recip, -5.0, -0.5)
 
     def test_endpoints(self):
-        from discopt._jax.envelopes import relax_reciprocal
+        from discopt._relax.envelopes import relax_reciprocal
 
         lb, ub = 1.0, 4.0
         for x in [jnp.float64(lb), jnp.float64(ub)]:
@@ -428,7 +428,7 @@ class TestRelaxReciprocal:
             np.testing.assert_allclose(float(cc), float(f_val), atol=1e-10)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_reciprocal
+        from discopt._relax.envelopes import relax_reciprocal
 
         f = jax.jit(lambda x: relax_reciprocal(x, 0.5, 3.0))
         cv, cc = f(jnp.float64(1.5))

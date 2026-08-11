@@ -40,7 +40,7 @@ The two dot products below run in plain float64 (not directed-rounding interval
 arithmetic), so a margin proportional to the operands' magnitude is subtracted to
 dominate their rounding error and keep the returned bound a *rigorous*
 under-estimate (and the Farkas test a rigorous proof). Mirrors the constant in
-:func:`discopt._jax.obbt._ns_safe_lp_lower_bound`."""
+:func:`discopt._relax.obbt._ns_safe_lp_lower_bound`."""
 
 _INF = 1e20  # discopt's effective-infinity sentinel for free variable bounds.
 

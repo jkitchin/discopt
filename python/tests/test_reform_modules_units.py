@@ -1,8 +1,8 @@
 """Unit tests for the two reformulation passes (#87 coverage restoration).
 
-Covers ``discopt._jax.binary_multilinear_reform`` (Fortet/Glover exact
+Covers ``discopt._relax.binary_multilinear_reform`` (Fortet/Glover exact
 linearization of pure-binary multilinear models, issue #187) and
-``discopt._jax.gdp_reformulate`` (big-M / hull / mbigm GDP lowering).
+``discopt._relax.gdp_reformulate`` (big-M / hull / mbigm GDP lowering).
 
 Every test asserts a *semantic property* of the documented behavior rather
 than replaying implementation details:
@@ -34,8 +34,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax import binary_multilinear_reform as B
-from discopt._jax import gdp_reformulate as G
+from discopt._relax import binary_multilinear_reform as B
+from discopt._relax import gdp_reformulate as G
 from discopt.modeling.core import (
     BinaryOp,
     Constant,

@@ -154,7 +154,7 @@ def test_flag_on_optimum_and_bound_sound(monkeypatch, sense):
 
 def test_generate_root_cuts_direct_sound(monkeypatch):
     """Direct call: LP bound must be a valid dual bound (>= opt for max)."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     _flag(monkeypatch, True)
     m = _build_convex_minlp("max")

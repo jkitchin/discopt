@@ -17,7 +17,7 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._jax.cover_cuts import separate_clique_cuts
+from discopt._relax.cover_cuts import separate_clique_cuts
 
 
 class TestSeparation:

@@ -1,10 +1,10 @@
 """Theorem-style tests for the SymPy envelope-derivation engine (Phase 1).
 
-These validate :mod:`discopt._jax.symbolic` against the same discipline as the
+These validate :mod:`discopt._relax.symbolic` against the same discipline as the
 hand-written relaxations: every derived envelope must be *sound*
 (``cv <= f <= cc``), correctly *curved* (``cv`` convex, ``cc`` concave), and —
 for the McCormick-exact convex/concave atoms — must reproduce the existing
-``discopt._jax.mccormick`` primitives bit-for-bit.
+``discopt._relax.mccormick`` primitives bit-for-bit.
 
 The engine itself imports SymPy (a design-time ``[sympy]`` extra); the whole
 module is skipped if SymPy is unavailable.
@@ -19,13 +19,13 @@ jax.config.update("jax_enable_x64", True)
 
 sp = pytest.importorskip("sympy")
 
-from discopt._jax.symbolic import (  # noqa: E402
+from discopt._relax.symbolic import (  # noqa: E402
     Curvature,
     derive_envelope,
     lambdify_envelope,
     verify_envelope,
 )
-from discopt._jax.symbolic.envelope_deriver import (  # noqa: E402
+from discopt._relax.symbolic.envelope_deriver import (  # noqa: E402
     EnvelopeDerivationError,
 )
 
@@ -110,7 +110,7 @@ def test_envelope_is_sound_and_correctly_curved(expr, domain):
     ],
 )
 def test_matches_handwritten_mccormick(expr, mc_name, domain):
-    from discopt._jax import mccormick
+    from discopt._relax import mccormick
 
     mc_fn = getattr(mccormick, mc_name)
     sym_fn = lambdify_envelope(derive_envelope(expr, X))

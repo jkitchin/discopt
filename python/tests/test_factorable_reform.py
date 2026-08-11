@@ -21,13 +21,13 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.factorable_reform import (
+from discopt._relax.factorable_reform import (
     _should_lift_call_arg,
     canonicalize_entropy,
     factorable_reformulate,
     has_factorable_work,
 )
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import FunctionCall, Variable
 
 pytestmark = [pytest.mark.claim_boundary]
@@ -396,8 +396,8 @@ def test_lifter_expression_dedups_by_structure_not_identity():
     deterministically fails under ``id()`` keying — two distinct objects have
     distinct ids and would each allocate their own aux instead of deduping.
     """
-    from discopt._jax.factorable_reform import _Lifter
-    from discopt._jax.term_classifier import distribute_products
+    from discopt._relax.factorable_reform import _Lifter
+    from discopt._relax.term_classifier import distribute_products
     from discopt.modeling.core import BinaryOp, Constant
 
     m = dm.Model("dedup")
@@ -736,7 +736,7 @@ def test_separable_entropy_objective_certifies():
 def _obj_values_match(m_before, m_after, lo=0.01, hi=2.0, n=200, seed=0):
     """The two objectives must evaluate identically over a random positive box."""
     import numpy as np
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     f0 = compile_expression(m_before._objective.expression, m_before)
     f1 = compile_expression(m_after._objective.expression, m_after)
@@ -912,8 +912,8 @@ def test_centropy_domain_guard_rejects_nonpositive_denominator():
 def test_centropy_curvature_rule(name, x_lb, y_lb, expect_convex):
     """``centropy`` is detected jointly CONVEX only on a provable ``x≥0, y>0``
     box with affine arguments; otherwise the rule soundly abstains (UNKNOWN)."""
-    from discopt._jax.convexity import classify_expr
-    from discopt._jax.convexity.lattice import Curvature
+    from discopt._relax.convexity import classify_expr
+    from discopt._relax.convexity.lattice import Curvature
 
     m = dm.Model(name)
     x = m.continuous("x", lb=x_lb, ub=1.0)
@@ -1027,7 +1027,7 @@ def test_tda_lift_is_exact_identity_feasible_sampling(monkeypatch):
     that could exclude a feasible point.
     """
     import numpy as np
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "1")
     m, _xs, math = _squared_log_model()
@@ -1148,7 +1148,7 @@ def _solve_aux_body(body, values, model):
     """Given an aux-defining body ``t - g(x) == 0`` and a dict of base-var values,
     return (t_name, g_value) by evaluating g at the base values."""
     import numpy as np
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
     from discopt.modeling.core import BinaryOp
 
     # body is ``t - g(x)`` (a subtraction with t the aux on the left leaf).

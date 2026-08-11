@@ -52,7 +52,7 @@ def test_filter_drops_wide_rows_and_keeps_normal_ones(sparse):
     """The helper drops exactly the float64-intractable rows (ratio > 1e6 or a
     coefficient outside [1e-8, 1e8]), preserves normal and empty rows, and keeps
     the container kind."""
-    from discopt._jax.milp_relaxation import _filter_unresolvable_rows
+    from discopt._relax.milp_relaxation import _filter_unresolvable_rows
 
     a = np.array(
         [
@@ -79,7 +79,7 @@ def test_filter_drops_wide_rows_and_keeps_normal_ones(sparse):
 
 def test_filter_noop_on_well_conditioned_matrix():
     """A relaxation with no wide rows is untouched (byte-identical object data)."""
-    from discopt._jax.milp_relaxation import _filter_unresolvable_rows
+    from discopt._relax.milp_relaxation import _filter_unresolvable_rows
 
     a = np.array([[1.0, -2.0], [3.5, 0.25]])
     b = np.array([1.0, 2.0])

@@ -9,15 +9,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from discopt._jax.claim_audit import (
+from discopt._relax.claim_audit import (
     AuditReport,
     audit_build,
     fingerprint_model,
     relaxation_fingerprint,
 )
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import from_nl
 
 pytestmark = [pytest.mark.claim_boundary]

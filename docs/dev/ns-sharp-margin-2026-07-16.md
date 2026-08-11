@@ -94,7 +94,7 @@ the follow-up, same class as #287/#281).
 
 ## 6. Not done here
 
-- `discopt._jax.obbt._ns_safe_lp_lower_bound` mirrors the flat-margin constant
+- `discopt._relax.obbt._ns_safe_lp_lower_bound` mirrors the flat-margin constant
   and keeps it — OBBT bounds are per-variable-box, not objective certificates,
   and the 1e-9-relative slack there costs box width, not certification. Sharing
   the sharp evaluator is a possible later cleanup with its own neutrality test.

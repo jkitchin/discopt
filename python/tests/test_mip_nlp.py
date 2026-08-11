@@ -1764,7 +1764,7 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
 
 
 def test_model_solve_mip_nlp_path_runs_entropy_canonicalization(monkeypatch):
-    import discopt._jax.factorable_reform as reform_module
+    import discopt._relax.factorable_reform as reform_module
     import discopt.solvers.oa as oa_module
 
     real_canonicalize_entropy = reform_module.canonicalize_entropy
@@ -2413,7 +2413,7 @@ def test_mip_nlp_shot_reformulation_controls_validate_targeted_models(
 
 def test_mip_nlp_shot_objective_epigraph_reforms_before_oa_and_stays_convex(monkeypatch):
     import discopt.solvers.oa as oa_module
-    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._relax.convexity import classify_oa_cut_convexity
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
     calls = {}
@@ -4979,7 +4979,7 @@ _MINDTPY_REGULARIZATION_MODES = [
 
 def test_mip_nlp_mindtpy_eight_process_convex_flag_controls_oa_guarantee():
     """Verify convex flag selection controls eight-process OA certification."""
-    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._relax.convexity import classify_oa_cut_convexity
 
     convex = _mindtpy_eight_process_flowsheet("mindtpy_eight_process_convex", convex=True)
     equality = _mindtpy_eight_process_flowsheet("mindtpy_eight_process_eq", convex=False)

@@ -23,13 +23,13 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.mcbox import (  # noqa: E402
+from discopt._relax.mcbox import (  # noqa: E402
     MCBox,
     UnsupportedMcboxOp,
     mcbox_leaves,
     strict_division,
 )
-from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound  # noqa: E402
+from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 

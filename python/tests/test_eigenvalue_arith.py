@@ -1,4 +1,4 @@
-"""Tests for ``discopt._jax.convexity.eigenvalue_arith`` (M6 of issue #51).
+"""Tests for ``discopt._relax.convexity.eigenvalue_arith`` (M6 of issue #51).
 
 Acceptance criteria from issue #51:
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax.convexity.eigenvalue_arith import (
+from discopt._relax.convexity.eigenvalue_arith import (
     QuadraticForm,
     interval_ad_quadratic_bound,
     quadratic_form_bound,

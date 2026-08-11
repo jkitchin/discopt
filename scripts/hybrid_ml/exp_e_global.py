@@ -58,7 +58,7 @@ loc = solve_nlp_from_model(m, x0=x0, options={"max_iter": 3000, "tol": 1e-8})
 print(f"local : {loc.status.name}  obj={loc.objective:.6e}")
 
 # global attempt on a fresh model, warm-started with the local solution
-from discopt._jax.dag_compiler import _compute_var_offset  # noqa: E402
+from discopt._relax.dag_compiler import _compute_var_offset  # noqa: E402
 
 
 def value_of(var, x, model):

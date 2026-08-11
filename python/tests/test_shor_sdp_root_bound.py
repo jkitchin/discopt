@@ -27,18 +27,18 @@ import itertools
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import (
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import (
     build_milp_relaxation,
     sanitize_relaxation_for_conditioning,
 )
-from discopt._jax.model_utils import binary_flat_cols, flat_variable_bounds
-from discopt._jax.shor_sdp import (
+from discopt._relax.model_utils import binary_flat_cols, flat_variable_bounds
+from discopt._relax.shor_sdp import (
     build_shor_sdp,
     shor_sdp_lower_bound,
     shor_sdp_safe_dual_bound,
 )
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 _HAS_SCS = True
 try:  # pragma: no cover - environment probe
@@ -106,7 +106,7 @@ def _built(model):
 
 def _mccormick_lp_bound(relax):
     """Continuous McCormick LP root bound via the exact oracle (the loose baseline)."""
-    from discopt._jax.obbt import get_exact_lp_solver
+    from discopt._relax.obbt import get_exact_lp_solver
 
     _lp = get_exact_lp_solver()
     res = _lp(

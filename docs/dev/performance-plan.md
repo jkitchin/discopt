@@ -1244,7 +1244,7 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > at this size, and hda re-evaluates the Jacobian only a handful of times (FBBT's
 > two-point linearity test). Do not re-try density-aware Jacobian routing as an
 > hda root-speedup lever. Reproduction: `/tmp` experiment mirrored in the #671
-> session; the routing gate lives at `python/discopt/_jax/nlp_evaluator.py:783`.
+> session; the routing gate lives at `python/discopt/_relax/nlp_evaluator.py:783`.
 >
 > **Re-scope.** Meaningful hda root speedup requires the *hard* levers, not a Python
 > micro-fix: (a) faster/robust simplex on the ill-conditioned McCormick relaxation
@@ -1443,7 +1443,7 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > `_solve_lp_warm_equilibrated` / `solve_lp_warm_std` took no deadline and
 > `lp_bindings.rs` hardcoded `SimplexOptions { deadline: None }` — while the MILP
 > route (`solve_milp_csc_py(time_limit_s=…)`) wired it up and the dual/primal pivot
-> loops already poll it every 256 pivots. ~13 call sites in `_jax/mccormick_lp.py`
+> loops already poll it every 256 pivots. ~13 call sites in `_relax/mccormick_lp.py`
 > plus `lp_spatial_bb.py` and `integer_ratio.py` compute a per-LP budget and pass it
 > here, so the drop was general.
 >
@@ -1469,7 +1469,7 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > **The blocker is precise.** Honouring the deadline costs a *bound*, not just time.
 > `_time_limit_result` does return a sound Neumaier–Shcherbina floor when the yielded
 > simplex leaves a usable dual, but it never reaches the reported bound: the consumer
-> in `_jax/mccormick_lp.py:758,903` adopts a node bound only from a
+> in `_relax/mccormick_lp.py:758,903` adopts a node bound only from a
 > `status == "optimal"` result. Teaching it to accept a rigorous safe bound from a
 > non-optimal node would change the verdict — sound by weak duality, but it touches
 > the bound-adoption logic certification rests on, so: own change, own panel.
@@ -1503,7 +1503,7 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 >
 > 1. `MilpRelaxationModel._stash_deadline_bound` banks the NS floor of a yielded LP
 >    (ungated — #517's flag guards a *numerically broken* dual, a different concern).
-> 2. `_jax/mccormick_lp.py` adopts a finite bound from a `status == "time_limit"`
+> 2. `_relax/mccormick_lp.py` adopts a finite bound from a `status == "time_limit"`
 >    node result, the same shape as the existing #517 branch beside it.
 > 3. **The actual blocker, in Rust.** `primal.rs` exported its `y = B⁻ᵀc_B` dual
 >    candidate on a `Numerical` exit but kept an EMPTY dual on `IterLimit`, on the
@@ -1979,7 +1979,7 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > so a guard applied to one and not the other — or computed from different
 > intermediates — silently drops the incremental fast path to `ok=False`. The guard
 > is therefore a pure function of quantities all three engines hold, computed once in
-> `_jax/outward_rounding.py` and mirrored term-for-term in Rust. Verified: monomial
+> `_relax/outward_rounding.py` and mirrored term-for-term in Rust. Verified: monomial
 > and bilinear rows are BIT-IDENTICAL across the two Python engines, and the
 > pre-existing affine-square divergence is unchanged (1265 mismatches, worst |delta|
 > 1.133e-01, identical with the guard on and off). The invariant now holds on the

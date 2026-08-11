@@ -28,13 +28,13 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not HAS_EQUINOX, reason="equinox/optax not installed")
 
 if HAS_EQUINOX:
-    from discopt._jax.icnn import (
+    from discopt._relax.icnn import (
         create_icnn,
         enforce_nonneg,
         icnn_pair_create,
         verify_convexity,
     )
-    from discopt._jax.learned_relaxations import (
+    from discopt._relax.learned_relaxations import (
         LearnedRelaxationRegistry,
         create_learned_relaxation,
         load_pretrained_registry,
@@ -153,7 +153,7 @@ class TestLearnedRelaxation:
     @pytest.fixture
     def trained_exp(self):
         """Lightly trained exp relaxation for testing."""
-        from discopt._jax.icnn_trainer import train_relaxation
+        from discopt._relax.icnn_trainer import train_relaxation
 
         return train_relaxation("exp", n_epochs=50, batch_size=256, n_boxes=1000, points_per_box=5)
 
@@ -295,7 +295,7 @@ class TestTrainingPipeline:
 
     def test_training_reduces_loss(self):
         """Loss decreases over epochs."""
-        from discopt._jax.icnn_trainer import (
+        from discopt._relax.icnn_trainer import (
             _compute_predictions,
             generate_training_data,
             relaxation_loss,
@@ -327,7 +327,7 @@ class TestTrainingPipeline:
 
     def test_trained_model_sound(self):
         """Post-training soundness on held-out data (with runtime enforcement)."""
-        from discopt._jax.icnn_trainer import train_relaxation
+        from discopt._relax.icnn_trainer import train_relaxation
 
         trained = train_relaxation(
             "log", n_epochs=50, batch_size=256, n_boxes=500, points_per_box=5
@@ -345,7 +345,7 @@ class TestTrainingPipeline:
 
     def test_data_generation_coverage(self):
         """Training data covers the domain uniformly."""
-        from discopt._jax.icnn_trainer import generate_training_data
+        from discopt._relax.icnn_trainer import generate_training_data
 
         data = generate_training_data("exp", n_boxes=1000, points_per_box=10)
         n_total = 1000 * 10
@@ -367,7 +367,7 @@ class TestTrainingPipeline:
 
     def test_data_generation_bilinear(self):
         """Bilinear training data has correct shape and soundness."""
-        from discopt._jax.icnn_trainer import generate_training_data
+        from discopt._relax.icnn_trainer import generate_training_data
 
         data = generate_training_data("bilinear", n_boxes=500, points_per_box=5)
         n_total = 500 * 5
@@ -413,7 +413,7 @@ class TestTrainingPipeline:
         With lightweight training (200 epochs, 5k boxes) we target >= 5%
         gap reduction. Full training (500 epochs, 50k boxes) achieves >= 30%.
         """
-        from discopt._jax.icnn_trainer import compute_gap_reduction, train_relaxation
+        from discopt._relax.icnn_trainer import compute_gap_reduction, train_relaxation
 
         trained = train_relaxation(
             "exp", n_epochs=200, batch_size=512, n_boxes=5000, points_per_box=10
@@ -423,7 +423,7 @@ class TestTrainingPipeline:
 
     def test_relaxation_loss_components(self):
         """Loss function penalizes soundness violations heavily."""
-        from discopt._jax.icnn_trainer import relaxation_loss
+        from discopt._relax.icnn_trainer import relaxation_loss
 
         f_x = jnp.array([1.0, 2.0, 3.0])
         mc_cv = jnp.array([0.5, 1.5, 2.5])
@@ -470,7 +470,7 @@ class TestIntegration:
 
     def test_compiler_learned_mode(self):
         """compile_relaxation(mode='learned') works with a registry."""
-        from discopt._jax.relaxation_compiler import compile_relaxation
+        from discopt._relax.relaxation_compiler import compile_relaxation
 
         model = self._make_test_model()
         lr = create_learned_relaxation(jax.random.PRNGKey(0), "exp")
@@ -493,7 +493,7 @@ class TestIntegration:
 
     def test_compiler_learned_bilinear(self):
         """compile_relaxation(mode='learned') handles bilinear x*y."""
-        from discopt._jax.relaxation_compiler import compile_relaxation
+        from discopt._relax.relaxation_compiler import compile_relaxation
 
         model = self._make_bilinear_model()
         lr = create_learned_relaxation(jax.random.PRNGKey(0), "bilinear")
@@ -517,7 +517,7 @@ class TestIntegration:
     def test_compiler_fallback(self):
         """Unknown ops fall through to standard McCormick in learned mode."""
         import discopt.modeling.core as dm
-        from discopt._jax.relaxation_compiler import compile_relaxation
+        from discopt._relax.relaxation_compiler import compile_relaxation
 
         model = dm.Model()
         x = model.continuous("x", lb=0.1, ub=5.0)
@@ -544,7 +544,7 @@ class TestIntegration:
 
     def test_no_regression_standard_mode(self):
         """mode='standard' produces identical results to default."""
-        from discopt._jax.relaxation_compiler import compile_relaxation
+        from discopt._relax.relaxation_compiler import compile_relaxation
 
         model = self._make_test_model()
 

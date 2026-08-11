@@ -35,7 +35,7 @@ _FORMER_FALLBACKS = [
 
 
 def _engine_bound(model):
-    from discopt._jax.uniform_relax import build_uniform_relaxation, relaxation_report
+    from discopt._relax.uniform_relax import build_uniform_relaxation, relaxation_report
 
     rep = relaxation_report(model)
     rel = build_uniform_relaxation(model)
@@ -49,8 +49,8 @@ def _engine_bound(model):
 def _federation_bound(model):
     import logging
 
-    from discopt._jax import milp_relaxation as milp
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax import milp_relaxation as milp
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     class _Cap(logging.Handler):
         def __init__(self):
@@ -62,7 +62,7 @@ def _federation_bound(model):
 
     milp._warned_messages.clear()
     cap = _Cap()
-    logger = logging.getLogger("discopt._jax.milp_relaxation")
+    logger = logging.getLogger("discopt._relax.milp_relaxation")
     prev = logger.level
     logger.addHandler(cap)
     logger.setLevel(logging.WARNING)
@@ -89,9 +89,9 @@ def _sample_soundness(model, rel, n=1000, seed=0):
     satisfies every row AND the aux interval floor at that point. Returns
     ``(max_violation, n_checked)``; a positive violation is an UNSOUND cut.
     """
-    from discopt._jax import uniform_relax as ur
-    from discopt._jax.canonical_expr import canonicalize
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax import uniform_relax as ur
+    from discopt._relax.canonical_expr import canonicalize
+    from discopt._relax.model_utils import flat_variable_bounds
 
     flat_lb, flat_ub = flat_variable_bounds(model)
     dag = canonicalize(model)
@@ -143,8 +143,8 @@ def _sample_soundness(model, rel, n=1000, seed=0):
 
 def _eval_expr_at(expr, model, xv):
     """Evaluate a scalar modeling expression at flat point ``xv``."""
-    from discopt._jax.convexity.interval import Interval
-    from discopt._jax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     box = {}
     off = 0

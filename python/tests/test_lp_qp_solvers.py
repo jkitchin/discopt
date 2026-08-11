@@ -16,6 +16,7 @@ from __future__ import annotations
 import discopt.modeling as dm
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 # ---------------------------------------------------------------
@@ -28,7 +29,7 @@ class TestProblemClassifier:
 
     def test_lp_detection(self):
         """Linear obj + linear constraints + continuous = LP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("lp_test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -38,7 +39,7 @@ class TestProblemClassifier:
 
     def test_qp_detection(self):
         """Quadratic obj + linear constraints + continuous = QP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qp_test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -48,7 +49,7 @@ class TestProblemClassifier:
 
     def test_milp_detection(self):
         """Linear obj + linear constraints + integer = MILP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("milp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -59,7 +60,7 @@ class TestProblemClassifier:
 
     def test_miqp_detection(self):
         """Quadratic obj + linear constraints + integer = MIQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -70,7 +71,7 @@ class TestProblemClassifier:
 
     def test_qcp_detection(self):
         """Linear obj + quadratic constraints + continuous = QCP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qcp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -80,7 +81,7 @@ class TestProblemClassifier:
 
     def test_qcqp_detection(self):
         """Quadratic obj + quadratic constraints + continuous = QCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qcqp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -90,7 +91,7 @@ class TestProblemClassifier:
 
     def test_miqcp_detection(self):
         """Linear obj + quadratic constraints + integer = MIQCP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqcp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -101,7 +102,7 @@ class TestProblemClassifier:
 
     def test_miqcqp_detection(self):
         """Quadratic obj + quadratic constraints + integer = MIQCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqcqp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -112,7 +113,7 @@ class TestProblemClassifier:
 
     def test_nlp_detection(self):
         """Nonlinear constraints + continuous = NLP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("nlp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -123,7 +124,7 @@ class TestProblemClassifier:
 
     def test_minlp_detection(self):
         """Quadratic constraints with integers classify as MIQCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("minlp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -143,7 +144,7 @@ class TestLPExtraction:
 
     def test_simple_lp(self):
         """Extract standard form from simple LP."""
-        from discopt._jax.problem_classifier import extract_lp_data
+        from discopt._relax.problem_classifier import extract_lp_data
 
         m = dm.Model("test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -156,7 +157,7 @@ class TestLPExtraction:
 
     def test_qp_extraction(self):
         """Extract QP standard form."""
-        from discopt._jax.problem_classifier import extract_qp_data
+        from discopt._relax.problem_classifier import extract_qp_data
 
         m = dm.Model("test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -170,7 +171,7 @@ class TestLPExtraction:
 
     def test_qcp_extraction(self):
         """Extract QCP data with linear and quadratic rows preserved."""
-        from discopt._jax.problem_classifier import extract_qcp_data
+        from discopt._relax.problem_classifier import extract_qcp_data
 
         m = dm.Model("test_qcp")
         x = m.continuous("x", shape=(2,), lb=-2, ub=2)
@@ -201,7 +202,7 @@ class TestQPIPM:
 
     def test_simple_qp(self):
         """min 0.5(x^2+y^2) s.t. x+y=1, x,y>=0 -> x=y=0.5, obj=0.25."""
-        from discopt._jax.qp_ipm import qp_ipm_solve
+        from discopt.solvers.qp_pounce import solve_qp_kkt
 
         Q = jnp.eye(2)  # 0.5 x'Ix = 0.5(x^2+y^2)
         c = jnp.zeros(2)
@@ -210,15 +211,21 @@ class TestQPIPM:
         x_l = jnp.array([0.0, 0.0])
         x_u = jnp.full(2, 1e20)
 
-        state = qp_ipm_solve(Q, c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.obj, 0.25, atol=1e-4)
-        assert jnp.allclose(state.x[0], 0.5, atol=1e-2)
-        assert jnp.allclose(state.x[1], 0.5, atol=1e-2)
+        obj, x, *_ = solve_qp_kkt(
+            np.asarray(Q),
+            np.asarray(c),
+            np.asarray(A),
+            np.asarray(b),
+            np.asarray(x_l),
+            np.asarray(x_u),
+        )
+        assert jnp.allclose(obj, 0.25, atol=1e-4)
+        assert jnp.allclose(x[0], 0.5, atol=1e-2)
+        assert jnp.allclose(x[1], 0.5, atol=1e-2)
 
     def test_qp_with_linear_term(self):
         """min 0.5(x^2+y^2) + 3x s.t. x+y=2, x,y>=0."""
-        from discopt._jax.qp_ipm import qp_ipm_solve
+        from discopt.solvers.qp_pounce import solve_qp_kkt
 
         Q = jnp.eye(2)
         c = jnp.array([3.0, 0.0])
@@ -227,18 +234,24 @@ class TestQPIPM:
         x_l = jnp.array([0.0, 0.0])
         x_u = jnp.full(2, 1e20)
 
-        state = qp_ipm_solve(Q, c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
+        obj, x, *_ = solve_qp_kkt(
+            np.asarray(Q),
+            np.asarray(c),
+            np.asarray(A),
+            np.asarray(b),
+            np.asarray(x_l),
+            np.asarray(x_u),
+        )
         # Lagrangian: 0.5(x^2+y^2)+3x+λ(x+y-2)
         # KKT: x+3+λ=0, y+λ=0, x+y=2 → x+3=-y → 2x+3=2 → x=-0.5 (but x>=0)
         # Bound active at x=0 → y=2, obj = 0.5*4 = 2
-        assert jnp.allclose(state.x[0], 0.0, atol=1e-2)
-        assert jnp.allclose(state.x[1], 2.0, atol=1e-2)
-        assert jnp.allclose(state.obj, 2.0, atol=1e-3)
+        assert jnp.allclose(x[0], 0.0, atol=1e-2)
+        assert jnp.allclose(x[1], 2.0, atol=1e-2)
+        assert jnp.allclose(obj, 2.0, atol=1e-3)
 
     def test_qp_unconstrained(self):
         """min 0.5(x-1)^2 + 0.5(y-2)^2 with bounds [0,5]."""
-        from discopt._jax.qp_ipm import qp_ipm_solve
+        from discopt.solvers.qp_pounce import solve_qp_kkt
 
         # 0.5(x-1)^2 + 0.5(y-2)^2 = 0.5(x^2-2x+1) + 0.5(y^2-4y+4)
         # = 0.5 x'Ix + [-1,-2]'x + 2.5
@@ -249,14 +262,20 @@ class TestQPIPM:
         x_l = jnp.array([0.0, 0.0])
         x_u = jnp.array([5.0, 5.0])
 
-        state = qp_ipm_solve(Q, c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.x[0], 1.0, atol=1e-2)
-        assert jnp.allclose(state.x[1], 2.0, atol=1e-2)
+        obj, x, *_ = solve_qp_kkt(
+            np.asarray(Q),
+            np.asarray(c),
+            np.asarray(A),
+            np.asarray(b),
+            np.asarray(x_l),
+            np.asarray(x_u),
+        )
+        assert jnp.allclose(x[0], 1.0, atol=1e-2)
+        assert jnp.allclose(x[1], 2.0, atol=1e-2)
 
     def test_qp_bound_constrained(self):
         """min x^2 + y^2 with 1<=x<=5, 1<=y<=5 -> x=y=1, obj=1."""
-        from discopt._jax.qp_ipm import qp_ipm_solve
+        from discopt.solvers.qp_pounce import solve_qp_kkt
 
         Q = 2.0 * jnp.eye(2)  # 0.5*2 = 1 coefficient
         c = jnp.zeros(2)
@@ -265,9 +284,15 @@ class TestQPIPM:
         x_l = jnp.array([1.0, 1.0])
         x_u = jnp.array([5.0, 5.0])
 
-        state = qp_ipm_solve(Q, c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.obj, 2.0, atol=1e-3)  # 0.5*2*(1+1) = 2
+        obj, x, *_ = solve_qp_kkt(
+            np.asarray(Q),
+            np.asarray(c),
+            np.asarray(A),
+            np.asarray(b),
+            np.asarray(x_l),
+            np.asarray(x_u),
+        )
+        assert jnp.allclose(obj, 2.0, atol=1e-3)  # 0.5*2*(1+1) = 2
 
 
 # ---------------------------------------------------------------
@@ -280,7 +305,7 @@ class TestLPDifferentiability:
 
     def test_grad_wrt_c(self):
         """d(obj*)/dc_i = x*_i for LP at optimality."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         # min -x - 2y s.t. x+y=3, 0<=x<=2, 0<=y<=2 -> x*=1, y*=2
         c = jnp.array([-1.0, -2.0])
@@ -296,7 +321,7 @@ class TestLPDifferentiability:
 
     def test_grad_wrt_b(self):
         """d(obj*)/db_i = y*_i (dual variable) for LP."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         # Well-bounded LP: min -x - 2y s.t. x+y=3, 0<=x<=2, 0<=y<=2
         c = jnp.array([-1.0, -2.0])
@@ -321,7 +346,7 @@ class TestLPDifferentiability:
 
     def test_grad_finite_diff(self):
         """jax.grad matches central finite differences for LP."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         c = jnp.array([-1.0, -2.0])
         A = jnp.array([[1.0, 1.0]])
@@ -354,7 +379,7 @@ class TestQPDifferentiability:
 
     def test_grad_wrt_c_qp(self):
         """jax.grad through QP solve w.r.t. c should match finite differences."""
-        from discopt._jax.differentiable_qp import qp_solve_grad
+        from discopt._relax.differentiable_qp import qp_solve_grad
 
         Q = jnp.eye(2)
         c = jnp.array([0.0, 0.0])
@@ -492,7 +517,7 @@ class TestUnifiedDiffSolve:
 
     def test_lp_diff_solve(self):
         """differentiable_solve on LP returns correct result."""
-        from discopt._jax.differentiable_solve import differentiable_solve
+        from discopt._relax.differentiable_solve import differentiable_solve
 
         m = dm.Model("lp")
         x = m.continuous("x", lb=0, ub=10)
@@ -506,7 +531,7 @@ class TestUnifiedDiffSolve:
 
     def test_qp_diff_solve(self):
         """differentiable_solve on QP returns correct result."""
-        from discopt._jax.differentiable_solve import differentiable_solve
+        from discopt._relax.differentiable_solve import differentiable_solve
 
         m = dm.Model("qp")
         x = m.continuous("x", lb=-5, ub=5)
@@ -519,8 +544,8 @@ class TestUnifiedDiffSolve:
 
     def test_problem_class_reported(self):
         """differentiable_solve should report the detected problem class."""
-        from discopt._jax.differentiable_solve import differentiable_solve
-        from discopt._jax.problem_classifier import ProblemClass
+        from discopt._relax.differentiable_solve import differentiable_solve
+        from discopt._relax.problem_classifier import ProblemClass
 
         m = dm.Model("lp")
         x = m.continuous("x", lb=0, ub=10)
@@ -535,27 +560,15 @@ class TestUnifiedDiffSolve:
 # ---------------------------------------------------------------
 
 
-class TestBatchSolve:
-    """Test batch LP/QP solving via vmap."""
-
-    def test_qp_batch(self):
-        """Batch QP solve with varying bounds."""
-        from discopt._jax.qp_ipm import qp_ipm_solve_batch
-
-        Q = jnp.eye(2)
-        c = jnp.zeros(2)
-        A = jnp.array([[1.0, 1.0]])
-        b = jnp.array([1.0])
-
-        xl_batch = jnp.array(
-            [
-                [0.0, 0.0],
-                [0.3, 0.0],
-            ]
-        )
-        xu_batch = jnp.full((2, 2), 1e20)
-
-        states = qp_ipm_solve_batch(Q, c, A, b, xl_batch, xu_batch)
-        assert jnp.all(states.converged > 0)
-        # First instance: x=y=0.5, obj=0.25
-        assert jnp.allclose(states.obj[0], 0.25, atol=1e-3)
+# ``test_qp_batch`` was removed with ``_relax/qp_ipm.py``. It exercised
+# ``qp_ipm_solve_batch``, the vmap-batched JAX QP IPM, which had no caller
+# anywhere in ``python/discopt/`` -- verified by grep before deletion, and
+# corroborated by the sibling defect it had been masking: the MIQP code-3
+# recovery test in ``test_p1_milp_bb_soundness.py`` monkeypatched that same
+# batched entry point and was measured at 0 invocations, i.e. it asserted
+# nothing. MIQP node relaxations solve on POUNCE
+# (``_pounce_qp_relaxation_nodes``), which is where that test now points.
+#
+# Deliberately not ported to ``solve_qp_kkt``: there is no batched POUNCE
+# entry point, so a port would be a new capability with no consumer rather
+# than preserved coverage.

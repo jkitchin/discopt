@@ -33,7 +33,7 @@ validated and trace-visible rather than silently ignored.
 
 | SHOT reformulation mode | SHOT-profile control | discopt equivalent or status |
 | --- | --- | --- |
-| Objective epigraph for nonlinear minimization objectives | `objective_epigraph` | Active when the structural objective-defining-equality proof in `discopt._jax.objective_epigraph` applies; otherwise safely abstains. OA masters already use internal objective epigraph columns for convex nonlinear objectives. |
+| Objective epigraph for nonlinear minimization objectives | `objective_epigraph` | Active when the structural objective-defining-equality proof in `discopt._relax.objective_epigraph` applies; otherwise safely abstains. OA masters already use internal objective epigraph columns for convex nonlinear objectives. |
 | Objective anti-epigraph for nonlinear maximization objectives | `anti_epigraph` | Active through the same objective-defining-equality pass for maximization models when the anti-epigraph inequality is convex. |
 | Nonlinear expression partitioning | `nonlinear_partitioning` | Maps to the AMP/piecewise-McCormick partitioning stack (`solver="amp"` / GOA AMP path). MultiTree relaxation phases now trace when relaxed master candidates are introduced. |
 | Quadratic partitioning | `quadratic_partitioning` | Current relaxation infrastructure supports quadratic and edge-concave relaxations; SHOT-style policy is validated and traced while direct quadratic routing handles supported convex quadratic classes. |

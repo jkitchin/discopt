@@ -112,7 +112,7 @@ def run(args: argparse.Namespace) -> dict:
     # throttling shows few calls relative to nodes. ``ils_calls`` is the
     # VOLUME-1-capped integer local search.
     try:
-        import discopt._jax.primal_heuristics as ph
+        import discopt._relax.primal_heuristics as ph
 
         _heur_names = {
             "ils_calls": "integer_local_search",
@@ -139,7 +139,7 @@ def run(args: argparse.Namespace) -> dict:
 
     # alphaBB rigorous alpha
     try:
-        import discopt._jax.alphabb as ab
+        import discopt._relax.alphabb as ab
 
         _orig_alpha = ab.rigorous_alpha
 
@@ -173,7 +173,7 @@ def run(args: argparse.Namespace) -> dict:
     # tags an aux (that is the fire signal).
     c["zerospan_lift_fired"] = False
     try:
-        import discopt._jax.factorable_reform as fr
+        import discopt._relax.factorable_reform as fr
 
         _orig_reform = fr.factorable_reformulate
 
@@ -193,7 +193,7 @@ def run(args: argparse.Namespace) -> dict:
 
     # PSD separator
     try:
-        import discopt._jax.mccormick_lp as mlp
+        import discopt._relax.mccormick_lp as mlp
 
         if hasattr(mlp.MccormickLPRelaxer, "_separate_psd"):
             _orig_psd = mlp.MccormickLPRelaxer._separate_psd

@@ -79,8 +79,8 @@ def probe_instance(inst: str, solve_tl: float = 20.0) -> dict:
 
 
 def probe_model(model, inst, lb, ub, solve_tl: float = 20.0) -> dict:
-    from discopt._jax import uniform_relax as ur
-    from discopt._jax.milp_relaxation import MilpRelaxationModel
+    from discopt._relax import uniform_relax as ur
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
 
     # --- 1. instrument add_row with timestamps, run ONE uninterrupted build -----
     row_stamps: list[float] = []

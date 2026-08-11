@@ -41,7 +41,7 @@ This deletes, from the per-node hot loop, the entire
 ## 2. The one real correctness risk: variable / constraint ordering
 
 `node_lb`/`node_ub` and the warm start are indexed in the **JAX evaluator's flat variable
-order** (`_jax/nlp_evaluator.py`, flattened model vars). The native `NlProblem` is indexed in
+order** (`_relax/nlp_evaluator.py`, flattened model vars). The native `NlProblem` is indexed in
 the **`.nl` column order**. For Stage 1/2 (solving an instance that *originated* from an `.nl`)
 these are the same parse, but this must be **proven at runtime, never assumed**: a silent
 permutation would corrupt every node bound and still "look like" a solve.

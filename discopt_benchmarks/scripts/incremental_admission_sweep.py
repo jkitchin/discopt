@@ -73,8 +73,8 @@ def bucket(reason: str | None) -> str:
 
 def measure(path: str) -> dict:
     """Build the structure for one instance; return its result row."""
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import from_nl
 
     t0 = time.perf_counter()

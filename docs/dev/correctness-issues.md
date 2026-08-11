@@ -124,7 +124,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
-| C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_jax/convexity/interval.py:171`); lost tightening, not unsound | fixed |
+| C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_relax/convexity/interval.py:171`); lost tightening, not unsound | fixed |
 | C-37 | P2 | solver.py callback API | `CallbackContext.best_bound` surfaced the raw tree `global_lower_bound` with no sense-negation and no taint gate → **over-reported** the certified global bound on a non-rigorously-fathomed tree (nvs05: callback 5.32 vs the rigorous `SolveResult.bound` 1.35) and reported a wrong-signed bound for MAXIMIZE; API-surface soundness (the reported `SolveResult.bound` was already correct) | fixed (A1) |
 
 ---
@@ -138,7 +138,7 @@ renumbers later `Variable.index` down by one; the survivor's correct bounds are
 written into the new model's `VarInfo` at `:249-250`); emptiness latched at
 `orchestrator.rs:158-159` (`any_empty` → `TerminationReason::Infeasible`).
 **Reachability:** `run_root_presolve(..., aggregate=True)` is the default
-(`python/discopt/_jax/presolve_pipeline.py:45,95-96`) — this runs on every solve.
+(`python/discopt/_relax/presolve_pipeline.py:45,95-96`) — this runs on every solve.
 
 **Mechanism:** after aggregation shrinks the model, `resync_bounds_after_rewrite`
 intersects `ctx.bounds[i]` (OLD variable i's interval) with new variable i's
@@ -652,7 +652,7 @@ via `solve_milp`. Gates: `cargo test -p discopt-core` 390 passed / 0 failed;
 
 ## C-19 (P1, FIXED) — `relax_tan` classifies pole-straddling intervals as a single convex/concave branch → secant across a pole
 
-**Area:** `python/discopt/_jax/mccormick.py:393-436`. Centers on the nearest
+**Area:** `python/discopt/_relax/mccormick.py:393-436`. Centers on the nearest
 inflection `center = round(mid/π)·π` and classifies via `lb ≥ center` /
 `ub ≤ center`, never checking that `[lb,ub]` lies within one continuous branch
 `(kπ−π/2, kπ+π/2)`. Wired into the compiler at `relaxation_compiler.py:981` —
@@ -687,7 +687,7 @@ no-information envelope `(−inf,+inf)` — whenever an endpoint reaches or cros
 pole (`pole_free = (lb > center−π/2) & (ub < center+π/2)`). Pole-free boxes keep
 the tight branch envelope. Also hardened `_secant` so the degenerate `lb==ub`
 branch never evaluates `0/0` (was only guarded *after* the division). Applied to
-BOTH backends — the JAX `_jax/mccormick.py` (in scope) and the ported
+BOTH backends — the JAX `_relax/mccormick.py` (in scope) and the ported
 `_numpy/mccormick.py` (the NM-4 twin noted in the 2026-07-03 reconciliation) — so
 the class is closed on both. **After:** every pole-straddling box abstains (no
 finite crossing envelope); all pole-free branches (incl. k=±1 at `[3.3,4.6]`,
@@ -996,7 +996,7 @@ instance + 2 more header-shape variants; standing gates pass.
 
 ## C-10 (P2) — LP-spatial GMI cuts appended without the rhs safety margin every other path uses
 
-**Area:** `python/discopt/_jax/lp_spatial_bb.py:131-134` (`_separate_node_cuts`
+**Area:** `python/discopt/_relax/lp_spatial_bb.py:131-134` (`_separate_node_cuts`
 appends raw Rust GMI coeffs/rhs). Contract in `gomory.rs:31`: validity holds "up
 to machine precision"; a caller-side rhs margin absorbs the remainder. All other
 consumers add `~1e-7·(1+|row|₁)` (`solver.py:10099`, `cmir_cuts.py:91`); this path
@@ -1055,7 +1055,7 @@ violated); standing gates pass.
 
 ## C-18 (P1) — `mccormick_bounds="midpoint"` returns the underestimator's *value at the midpoint*, which is not a lower bound
 
-**Area:** `python/discopt/_jax/mccormick_nlp.py:57-64` (`evaluate_midpoint_bound`:
+**Area:** `python/discopt/_relax/mccormick_nlp.py:57-64` (`evaluate_midpoint_bound`:
 `cv, cc = obj_relax_fn(mid, mid, lb, ub); return float(cv)`); the compiled leaf
 returns point values (`relaxation_compiler.py:409-410`), so the result is
 `u(mid)`, not `min_box u`. Consumed at `solver.py:5213-5224` → `convex_lb` → for
@@ -1184,7 +1184,7 @@ existing fbbt_fp tests green; standing gates pass.
 
 ## C-21 (P2) — Incremental-McCormick soundness gate validates only on nonnegative boxes
 
-**Area:** `python/discopt/_jax/incremental_mccormick.py:171-186` (`_validate`):
+**Area:** `python/discopt/_relax/incremental_mccormick.py:171-186` (`_validate`):
 every validation box has `lb ≥ 0` (`lb=0` boxes at `:173`, `lb=arange(n)` at
 `:176`), while real nodes carry negative/zero-spanning bounds. The audit verified
 the current closed forms ARE sound on negative and zero-spanning boxes and that
@@ -1243,7 +1243,7 @@ pass.
 
 ## C-15 (P2) — `run_obbt` (model-linear variant) tightens bounds to the raw LP vertex without the safe-bound clamp
 
-**Area:** `python/discopt/_jax/obbt.py:667-701` (`run_obbt`: `lb[var_idx] =
+**Area:** `python/discopt/_relax/obbt.py:667-701` (`run_obbt`: `lb[var_idx] =
 result.objective` gated only by `+1e-8`). Contrast with the hardened
 `run_obbt_on_relaxation` (`:895-950`), which clamps the vertex to the
 Neumaier–Shcherbina safe bound `g(y)` whenever the vertex is optimistic, with a
@@ -1468,7 +1468,7 @@ operator …")` (loud refusal, per CLAUDE.md §3 — mirrors the C-6 "no silent
 transformation" pattern). Placed on the `Expression` base so every node type
 (Variable/BinaryOp/UnaryOp/IndexExpression/…) inherits it. Confirmed no internal
 code depends on `Expression`-level `!=` (all `!=` hits across `modeling/` and
-`_jax/` operate on scalars/str/enums/ndarrays, none on Expression objects).
+`_relax/` operate on scalars/str/enums/ndarrays, none on Expression objects).
 `__hash__` unaffected — defining `__ne__` (unlike `__eq__`) does not null
 `__hash__`; `Variable.__hash__` still works and a Variable remains dict/set-usable.
 Repro after: all four `!=` forms raise `TypeError`; `==` still returns a
@@ -1526,7 +1526,7 @@ product range and is never NaN; standing gates pass.
 
 ## C-23 (P1, FIXED) — `relax_div` produces an invalid convex underestimator for nonlinear denominators (ESCALATED from P3)
 
-**Area:** `python/discopt/_jax/mccormick.py:119-135` (`relax_div`), wired at
+**Area:** `python/discopt/_relax/mccormick.py:119-135` (`relax_div`), wired at
 `relaxation_compiler.py:719-726`. Also `:102-116` (`_relax_reciprocal` sets
 `cv=1/y, cc=secant` on the negative branch — inverted concavity label).
 
@@ -1595,7 +1595,7 @@ never emits `cv>f`; spatial branching shrinks the denominator interval → the
 enclosure tightens. (The by-hand bivariate-McCormick composite was prototyped and
 **rejected** — brute-force truth sampling showed it still crossed by up to +11, so
 it was not shipped; the enclosure is provably sound to machine-epsilon.) Applied to
-BOTH `_jax/mccormick.py` (in scope) and the ported `_numpy/mccormick.py`. Also
+BOTH `_relax/mccormick.py` (in scope) and the ported `_numpy/mccormick.py`. Also
 hardened `_secant` against `0/0` on the degenerate branch. **After:** every listed
 nonlinear-denominator case is sound to ≤3.6e-15 (`cv≤f≤cc`); the `1/(x*y)` repro
 flips from `cv=1.334>1.0` to sound; controls stay exactly tight; point-denominator
@@ -1614,7 +1614,7 @@ passed / 0 failed; ruff + format clean; mypy clean on the changed modules. PR:
 
 ## C-24 (P3) — Secant construction produces NaN on infinite bounds; soundness leans on downstream filters
 
-**Area:** `python/discopt/_jax/mccormick.py:23-33` (`_secant` divides by
+**Area:** `python/discopt/_relax/mccormick.py:23-33` (`_secant` divides by
 `ub − lb`; `ub=+∞` → `inf/inf = NaN`); bilinear cv/cc hit `inf − inf`. Today the
 NaN/inf filters in `mccormick_nlp.py:96-136, 276-283` and the LP relaxer's
 finiteness checks absorb it; any future consumer using `cc` unguarded gets an
@@ -1932,7 +1932,7 @@ single-leaf 0-d `squeeze()` crash via `value.reshape(len(feature), -1)`.)
 ## C-29 (P0) — Vector-body constraint collapses to one summed row (DEFAULT path)
 
 **Origin:** Fable solver-core-extraction review (CORE-1) and modeling review (M1).
-**Area:** `python/discopt/_jax/problem_classifier.py:224-226`
+**Area:** `python/discopt/_relax/problem_classifier.py:224-226`
 (`_extract_linear_coefficients`, the "Array variable treated as sum" branch) and
 `:614` (`_extract_constraints_algebraic` appends exactly one row per `Constraint`
 object). The quadratic walker `_extract_quadratic_coefficients` (`:372` region) has
@@ -1991,7 +1991,7 @@ Rust FBBT bug, out of scope), adversarial 10 passed, ruff clean. PR #___.
 ## C-30 (P0) — Maximize sense lost on `sum(const·var)` bodies
 
 **Origin:** Fable solver-core-extraction review (CORE-2) and ro review (ADJ-1).
-**Area:** `python/discopt/_jax/problem_classifier.py:259,569`
+**Area:** `python/discopt/_relax/problem_classifier.py:259,569`
 (`_extract_linear_coefficients` → `_eval_const` calls `float(v.item())` on a size-2
 array and raises `ValueError`, not `_NotLinearError`), plus the fallback that catches
 it and drops the objective sense.
@@ -2139,7 +2139,7 @@ oracle.
 
 **Origin:** Fable numpy-mccormick review (NM-1). **This audit's McCormick pass
 (C-18/19/23/24) missed it.**
-**Area:** `python/discopt/_jax/mccormick.py:474-524` (LIVE) and the numpy port
+**Area:** `python/discopt/_relax/mccormick.py:474-524` (LIVE) and the numpy port
 `python/discopt/_numpy/mccormick.py:210-241`. `arcsin''(x)=x(1−x²)^{−3/2}`, so arcsin
 is **convex on [0,1]** and concave on [−1,0] (acos mirrored); the code sets
 `is_concave = lb≥0` — treating the convex region as concave — and swaps cv/cc. The
@@ -2178,7 +2178,7 @@ true=0.523599`. Root cause: `relax_asin` was a copy of the `tanh` layout
 (concave-on-positive) and `relax_acos` a copy of the `sinh` layout
 (convex-on-positive) — exactly swapped, since `asin''(x)=x(1−x²)^{−3/2}` makes asin
 **convex on [0,1]** / concave on [−1,0] and acos the mirror. Fix (both
-`_jax/mccormick.py` and `_numpy/mccormick.py`): set `is_convex = lb>=0` for asin
+`_relax/mccormick.py` and `_numpy/mccormick.py`): set `is_convex = lb>=0` for asin
 (mirror `sinh`) and `is_concave = lb>=0` for acos (mirror `tanh`), with the
 straddling case3 split at the inflection x=0 (positive convex/concave branch uses
 f(x)/sec, negative branch reversed); corrected the wrong docstrings. No safety guard
@@ -2285,7 +2285,7 @@ models that were already convex; standing gates pass.
 ## C-34 (P0) — Even-power bound over a zero-straddling base uses endpoint-only bounds (DEFAULT path)
 
 **Origin:** solver-core review (FR-1).
-**Area:** `python/discopt/_jax/gdp_reformulate.py:493-506` (the `**` arm of
+**Area:** `python/discopt/_relax/gdp_reformulate.py:493-506` (the `**` arm of
 `_bound_expression`). Feeds the aux box at `factorable_reform.py:254` and the
 denominator-clearing path at `:707`.
 **Reachability:** DEFAULT reformulation path for any model with an even power `p≥4`
@@ -2529,7 +2529,7 @@ From the LP/dual-bound audit:
 
 ## C-36 (P3, FIXED) — Python `interval_mul` yields NaN on 0·∞ (separate path from C-22)
 
-**Area:** `python/discopt/_jax/convexity/interval.py` (≈ line 171).
+**Area:** `python/discopt/_relax/convexity/interval.py` (≈ line 171).
 **Class:** same `0·∞ → NaN` interval-arithmetic defect as C-22, but a **distinct
 code path**: C-22 fixed the *Rust* FBBT `interval_mul`
 (`crates/discopt-core/src/presolve/fbbt.rs`); this is the independent *Python*

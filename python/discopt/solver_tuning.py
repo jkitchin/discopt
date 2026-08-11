@@ -1133,7 +1133,7 @@ class SolverTuning:
     # benefit 24% / regression 18% on the held-out N=20 arm — regressed ex5_3_3,
     # spring, qapw) — sound but not helpful, so it is removed rather than left in
     # default-OFF limbo. Removing the default-OFF gated branch (and its
-    # ``discopt._jax.node_reduce`` module) is byte-identical to the shipped
+    # ``discopt._relax.node_reduce`` module) is byte-identical to the shipped
     # default path (which never entered it).
 
     def __post_init__(self) -> None:

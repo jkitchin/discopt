@@ -24,10 +24,10 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 

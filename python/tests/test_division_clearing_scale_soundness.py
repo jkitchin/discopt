@@ -79,7 +79,7 @@ def test_nonconvex_small_denominator_no_false_optimal():
 @pytest.mark.correctness
 def test_cleared_constraint_certifies_true_optimum():
     """Forcing the reformulation certifies the true optimum with a valid bound."""
-    from discopt._jax.factorable_reform import factorable_reformulate
+    from discopt._relax.factorable_reform import factorable_reformulate
 
     m = factorable_reformulate(_st_e17_core())
     r = m.solve(time_limit=60, gap_tolerance=1e-4)
@@ -98,7 +98,7 @@ def test_returned_point_satisfies_original_constraint():
     satisfied the *cleared* constraint within tolerance but violated the
     original division constraint by ~6.0.
     """
-    from discopt._jax.factorable_reform import factorable_reformulate
+    from discopt._relax.factorable_reform import factorable_reformulate
 
     r = factorable_reformulate(_st_e17_core()).solve(time_limit=60, gap_tolerance=1e-4)
     assert r.x is not None
@@ -116,7 +116,7 @@ def test_large_denominator_clearing_unchanged():
     already certify (gear family, nvs: ``D`` a product of vars with ``lb >= 1``)
     are untouched.
     """
-    from discopt._jax.factorable_reform import _clear_divisions
+    from discopt._relax.factorable_reform import _clear_divisions
 
     m = dm.Model("big_denom")
     x0 = m.continuous("x0", lb=2.0, ub=10.0)

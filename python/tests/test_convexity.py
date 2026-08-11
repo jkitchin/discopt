@@ -2,7 +2,7 @@
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity import (
+from discopt._relax.convexity import (
     Curvature,
     classify_constraint,
     classify_expr,

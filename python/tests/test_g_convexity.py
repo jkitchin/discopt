@@ -24,7 +24,7 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.convexity import (
+from discopt._relax.convexity import (
     Curvature,
     GConvexCertificate,
     certify_convex,
@@ -32,8 +32,8 @@ from discopt._jax.convexity import (
     is_g_convex_pointwise,
     least_convexifying_rho,
 )
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.convexity.interval_ad import interval_hessian
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.convexity.interval_ad import interval_hessian
 from discopt.modeling.core import Model
 
 # ──────────────────────────────────────────────────────────────────────

@@ -192,20 +192,23 @@ def solve_lp(
     _warm_kw: dict[str, Any] = {}
     if max_iter is not None:
         _warm_kw["max_iter"] = int(max_iter)
-    status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
-        np.ascontiguousarray(c_std),
-        m,
-        n + m,
-        np.ascontiguousarray(a_std.indptr, dtype=np.int64),
-        np.ascontiguousarray(a_std.indices, dtype=np.int64),
-        np.ascontiguousarray(a_std.data, dtype=np.float64),
-        np.ascontiguousarray(b_vec),
-        np.ascontiguousarray(lb_std),
-        np.ascontiguousarray(ub_std),
-        None,  # no warm basis (cold solve)
-        None,
-        **_warm_kw,
-    )
+    from discopt import _timing
+
+    with _timing.charge("rust"):
+        status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
+            np.ascontiguousarray(c_std),
+            m,
+            n + m,
+            np.ascontiguousarray(a_std.indptr, dtype=np.int64),
+            np.ascontiguousarray(a_std.indices, dtype=np.int64),
+            np.ascontiguousarray(a_std.data, dtype=np.float64),
+            np.ascontiguousarray(b_vec),
+            np.ascontiguousarray(lb_std),
+            np.ascontiguousarray(ub_std),
+            None,  # no warm basis (cold solve)
+            None,
+            **_warm_kw,
+        )
 
     status_map = {
         "optimal": SolveStatus.OPTIMAL,

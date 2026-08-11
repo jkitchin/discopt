@@ -18,8 +18,8 @@ import pytest
 
 pytest.importorskip("pounce")
 
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
-from discopt._jax.primal_heuristics import (  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.primal_heuristics import (  # noqa: E402
     _get_integer_mask,
     _is_integer_feasible,
     diving,

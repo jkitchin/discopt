@@ -24,8 +24,8 @@ from itertools import combinations_with_replacement
 from typing import Callable, Optional
 
 import numpy as np
-from discopt._jax.cutting_planes import LinearCut
-from discopt._jax.rlt_cuts import rlt_constraint_bound_cut, rlt_quadratic_bound_cut_row
+from discopt._relax.cutting_planes import LinearCut
+from discopt._relax.rlt_cuts import rlt_constraint_bound_cut, rlt_quadratic_bound_cut_row
 
 Constraint = tuple[dict[int, float], float]  # (a: col -> coeff, b) meaning a^T x <= b
 Bound = tuple[float, float]

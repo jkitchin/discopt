@@ -10,6 +10,48 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **All 62 documentation notebooks re-executed** (`docs`). Their committed
+  outputs dated from 2026-04-25 and `docs/_config.yml` has
+  `execute_notebooks: "off"`, so nothing had re-run them in three and a half
+  months. All 62 execute cleanly. Across 372 paired objective/bound comparisons
+  no objective moved by more than 1e-4 relative; the diff is dominated by
+  wall-clock numbers. Three visible improvements: the "POUNCE LP returned an
+  infeasible point labeled optimal" fallback no longer fires anywhere (it
+  appeared six times across three notebooks), `tutorial_milp` now reports a real
+  gap where it printed `Gap: None`, and the debugger's `iter_start` checkpoint
+  now carries a root bound instead of `-inf`.
+
+  The sweep also surfaced #981: `tutorial_dae`'s parameter-estimation cell had
+  been running 493 s to report `feasible`, because collocation models get a dual
+  bound of exactly 0.0 and the relative gap can never close. That cell now
+  passes an explicit `time_limit` and says so, and its prose was corrected —
+  it still described `least_squares` as matching measurements to the nearest
+  node, which stopped being true in #101.
+
+- **`discopt._jax` is now `discopt._relax`** (`refactor`). The package was named
+  for JAX when JAX built the relaxations. It no longer does: the 128 modules
+  under it are numpy, and JAX does not enter `sys.modules` at any point during a
+  solve. A package whose name describes none of its contents is a standing
+  source of wrong conclusions — anyone grepping for JAX on the solve path found
+  1818 import lines and could reasonably believe it was still there.
+
+  `_relax` names what the modules actually are: McCormick/alphaBB envelopes,
+  cutting planes, factorable reformulation, convexity detection, the DAG
+  compiler and the relaxation compiler.
+
+  The rewrite was restricted to the exact tokens `discopt._jax` and
+  `discopt/_jax`, so identifiers that merely look similar (`t_jax_start`,
+  `self._eval_jax`, `eval_jaxpr`, and the many `test_*_jax_free_*` names) are
+  untouched. All 126 submodules import under the new name; `discopt._jax` now
+  raises `ModuleNotFoundError` rather than resolving to a shim, so a stale
+  reference fails loudly instead of silently working. A new
+  `python/tests/test_relax_package_name.py` guards against reintroduction —
+  every other branch still spells it `discopt._jax`, and a merge that brings one
+  of those lines back would otherwise only surface on whichever test happened to
+  touch that module.
+
 ### Fixed
 
 - **The benchmark layer profile could not report a measured zero** (`fix`). Both
@@ -691,7 +733,7 @@ The release procedure that produces these entries is documented in
   to `w = 0` while the equivalent `m.subject_to(w >= 5.0)` solved to `w = 5`. The
   cause is a split in the tree over what an unnormalized row means: **26 modules
   read `Constraint.body` and never read `.rhs`** — the entire relaxation/branching
-  stack, whose seam is `_jax/dag_compiler.compile_constraint` — while
+  stack, whose seam is `_relax/dag_compiler.compile_constraint` — while
   `validation/feasibility` computes `signed = body - rhs`. The row was therefore
   *solved* as `body sense 0` but *verified* as `body - rhs sense 0`, so the solver
   returned a point its own verifier called feasible and the user called wrong.
@@ -1053,8 +1095,8 @@ The release procedure that produces these entries is documented in
   real strong branching — is not the lever for the slow tail (bound/
   range-reduction limited), so a learned imitation of strong branching cannot
   pay off there and would fail the net-positive graduation gate. Removed
-  `_jax/gnn_policy.py`, `_jax/gnn_branching.py`, `_jax/problem_graph.py`
-  (`INTEGRALITY_TOL` moved into `_jax/strong_branching.py`), the
+  `_relax/gnn_policy.py`, `_relax/gnn_branching.py`, `_relax/problem_graph.py`
+  (`INTEGRALITY_TOL` moved into `_relax/strong_branching.py`), the
   `branching_policy` parameter from `Model.solve()`/`solve_model()`/the CLI
   (it had exactly one functional value), and the `gnn_branching` notebook.
   The `gnn`/`learned` extras remain — equinox/optax still power the ICNN
@@ -1138,7 +1180,7 @@ The release procedure that produces these entries is documented in
   `compile_response_function`, `extract_x_flat`, `flatten_params`,
   `param_total_size`, `variable_total_size`, `variable_slices`. The in-tree
   DOE module and `discopt.estimate` now consume this API instead of reaching
-  into `discopt._jax` internals.
+  into `discopt._relax` internals.
 - **Generic CLI plugin subcommands** (`feat(cli)`, #389). External packages
   can register subcommands via the `"discopt.cli"` entry-point group (name =
   subcommand; value = module exposing `add_subparser(subparsers)` and
@@ -1362,7 +1404,7 @@ The release procedure that produces these entries is documented in
   purely linear FBBT misses, then rebuilds the relaxation on the tightened box.
   This lifts `ex1252`'s structurally-zero node bound off 0 (a branched node goes
   `bound 0 → ~18987`, sound) so the B&B can certify optimality. Implemented in
-  `discopt._jax.mccormick_lp` (vectorised over the sparse matrix); pinned
+  `discopt._relax.mccormick_lp` (vectorised over the sparse matrix); pinned
   multilinear factors are un-pinned by a hair so the build keeps the term at
   full arity and never drops `objective_bound_valid`. Sound by construction —
   only valid rows tighten, and the un-pin only enlarges the box. Regression
@@ -1374,7 +1416,7 @@ The release procedure that produces these entries is documented in
   on ex1252's boundary sub-boxes. HiGHS stalls on it (a 452×96 LP hits its time
   limit; the per-node soundness re-verifications then dominate the solve) while
   the pure-Rust simplex, which equilibrates internally, solves it in ~0.03s.
-  `equilibrate_relaxation_lp` (`discopt._jax.milp_relaxation`) applies
+  `equilibrate_relaxation_lp` (`discopt._relax.milp_relaxation`) applies
   geometric-mean (Ruiz) row/column scaling, snapped to powers of two, before the
   external (HiGHS/POUNCE) backend solve when the spread exceeds 1e6 — turning
   previously timing-out boundary boxes into ~3-4s converged solves (e.g. the
@@ -1431,7 +1473,7 @@ The release procedure that produces these entries is documented in
 - **BREAKING: the JAX LP interior-point method is retired** (`refactor(lp)!`,
   #368, #371, #373). The MILP/MINLP node LP relaxations and the standalone LP
   path now use the pure-Rust simplex (degrading to POUNCE); `nlp_solver` governs
-  only the NLP subproblem solver. `discopt._jax.lp_ipm` was deleted. This
+  only the NLP subproblem solver. `discopt._relax.lp_ipm` was deleted. This
   completes retirement of the LP fallback chain (`Rust simplex → HiGHS → POUNCE
   → JAX-IPM`).
 - **HiGHS removed from the LP/MILP path** (`feat(solvers)`, #356) and the QP path
@@ -1580,9 +1622,9 @@ This release skips the never-tagged `0.2.6` and folds its draft entries into `0.
 - **Jupyter Book docs build with zero warnings**. Cleaned up RST-formatting issues in module docstrings for `benchmarks/problems/gas_network_minlp.py`, `modeling/core.py`, `ro/formulations/box.py`, `solvers/qp_highs.py`, `solvers/sipopt.py`, `doe/discrimination.py`, `doe/discrimination_sequential.py`, `doe/selection.py`, `mo/indicators.py`, `mo/scalarization.py`, `mo/utils.py`, and `solvers/amp.py`; suppressed autoapi import-resolution warnings for the compiled `discopt._rust` extension; escaped `**kwargs` parameter entries to keep Sphinx from parsing the leading `**` as inline strong.
 - **HiGHS LP/QP false optimality on wide bounds**: `solvers/qp_highs.py` and `solvers/lp_highs.py` now clip any bound with magnitude `>= 1e15` to `highspy.kHighsInf` before passing to HiGHS. Bounds like discopt's default `+/-9.999e19` fall just below HiGHS's internal infinity threshold (`1e20`) and caused HiGHS to return false-optimal solutions on convex QPs with unbounded variables.
 - **Single-solve starting point**: `_solve_continuous` now clips the default starting point to `+/-10` (respecting actual bounds) instead of the previous `+/-100`, preventing ipopt from exploding on exp/log NLPs with one-sided large bounds.
-- **Stationary-point starting point**: Fully unbounded variables (`|lb| > 1e15` and `|ub| > 1e15`) now start at `0.5` instead of the midpoint of `0`. Zero is a stationary point of periodic functions (sin, cos) and even functions generally; starting at `0.5` lets first-order NLP methods pick a descent direction and escape local maxima of the objective. Same fix applied in `_jax/differentiable.py::_safe_x0`.
+- **Stationary-point starting point**: Fully unbounded variables (`|lb| > 1e15` and `|ub| > 1e15`) now start at `0.5` instead of the midpoint of `0`. Zero is a stationary point of periodic functions (sin, cos) and even functions generally; starting at `0.5` lets first-order NLP methods pick a descent direction and escape local maxima of the objective. Same fix applied in `_relax/differentiable.py::_safe_x0`.
 - `_solve_qp_highs` and `_solve_qp_jax` now set `SolveResult.convex_fast_path = True` when solving a detected convex QP directly, matching the semantics of the convex NLP fast path.
-- **Cutting planes with bilinear terms (#35)**: `_jax/cutting_planes.py::generate_rlt_cuts` no longer emits unsound inequalities when a bilinear term has no auxiliary `w_index`. The old no-auxiliary branch produced cuts purely in the original variable space that were not valid relaxations of the product (e.g. with `x, y in [0.1, 5]` it emitted `0.1*x + 0.1*y <= 0.01`, excluding every feasible point). Since `detect_bilinear_terms` always returns `w_index=None`, every RLT cut fed into `_AugmentedEvaluator` made the NLP infeasible at every B&B node, so no incumbent could be accepted on mixed convex/nonconvex MINLPs when `cutting_planes=True`. The function now returns `[]` in that case. Fixed in `383985e`.
+- **Cutting planes with bilinear terms (#35)**: `_relax/cutting_planes.py::generate_rlt_cuts` no longer emits unsound inequalities when a bilinear term has no auxiliary `w_index`. The old no-auxiliary branch produced cuts purely in the original variable space that were not valid relaxations of the product (e.g. with `x, y in [0.1, 5]` it emitted `0.1*x + 0.1*y <= 0.01`, excluding every feasible point). Since `detect_bilinear_terms` always returns `w_index=None`, every RLT cut fed into `_AugmentedEvaluator` made the NLP infeasible at every B&B node, so no incumbent could be accepted on mixed convex/nonconvex MINLPs when `cutting_planes=True`. The function now returns `[]` in that case. Fixed in `383985e`.
 - `fix(estimate)`: `discopt.estimate` now uses all array observations in residuals and Fisher information, instead of dropping all but the first row.
 - `fix(ci)`: cleared a clippy `collapsible_match` and repaired the T24 `vmap` path after the MILP rerouting change.
 

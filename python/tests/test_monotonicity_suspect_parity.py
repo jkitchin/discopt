@@ -4,7 +4,7 @@ This is the monotonicity counterpart to ``test_convexity_suspect_parity.py``.
 SUSPECT (``cog-suspect``) reports a per-expression ``Monotonicity`` verdict
 (Ceccon, Siirola, Misener, 2020) on the *raw* body -- increasing / decreasing /
 constant / unknown. discopt now exposes a comparable verdict via
-:func:`discopt._jax.monotonicity.classify_monotonicity`. Both run over a single
+:func:`discopt._relax.monotonicity.classify_monotonicity`. Both run over a single
 shared corpus and are compared item-by-item.
 
 A key asymmetry, established when this suite was built, shapes what is asserted:
@@ -126,7 +126,7 @@ def _compare(discopt_token: str, suspect_token: str) -> dict:
 def _classify_all() -> dict[str, dict]:
     """discopt vs golden monotonicity verdicts, keyed ``<instance>::<item>``."""
     from corpus import INSTANCES
-    from discopt._jax.monotonicity import classify_monotonicity
+    from discopt._relax.monotonicity import classify_monotonicity
     from render_discopt import build_discopt_items
 
     golden = json.loads(_GOLDEN.read_text())["verdicts"]
@@ -193,7 +193,7 @@ def test_discopt_monotonicity_is_sound() -> None:
     reference to SUSPECT -- the core soundness guarantee for the new API.
     """
     from corpus import INSTANCES, item_asts
-    from discopt._jax.monotonicity import classify_monotonicity
+    from discopt._relax.monotonicity import classify_monotonicity
     from render_discopt import build_discopt_items
 
     violations = []

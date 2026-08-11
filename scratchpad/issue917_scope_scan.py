@@ -12,7 +12,7 @@ if the probe evaluated nothing.
 import sys
 from pathlib import Path
 
-from discopt._jax.lp_spatial_bb import _is_in_scope
+from discopt._relax.lp_spatial_bb import _is_in_scope
 from discopt.modeling.core import from_nl
 
 CORPUS = Path(__file__).resolve().parents[1] / "python/tests/data/minlplib_nl"

@@ -55,7 +55,7 @@ def main():
     os.makedirs(RESULTS, exist_ok=True)
     model = load()
     lb0, ub0 = root_box(model)
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     relaxer = MccormickLPRelaxer(model)
 

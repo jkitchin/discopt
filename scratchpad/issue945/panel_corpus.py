@@ -84,7 +84,7 @@ def _counting_solve_nlp(*args, **kwargs):
 NLPP.solve_nlp = _counting_solve_nlp
 # The callers import `solve_nlp` lazily inside functions, so patching the module
 # attribute is enough; but solver.py's batch path reads the options directly.
-import discopt._jax.primal_heuristics as PH  # noqa: E402
+import discopt._relax.primal_heuristics as PH  # noqa: E402
 import discopt.solver as SOLVER  # noqa: E402
 import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
 import discopt.solvers.oa as OA  # noqa: E402

@@ -28,10 +28,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.disjunctive_config_bound import compute_disjunctive_config_bound
-from discopt._jax.integer_product_reform import reformulate_integer_multilinear
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.disjunctive_config_bound import compute_disjunctive_config_bound
+from discopt._relax.integer_product_reform import reformulate_integer_multilinear
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
 
 pytestmark = [pytest.mark.relaxation, pytest.mark.correctness]
 

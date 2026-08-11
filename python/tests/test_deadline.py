@@ -13,7 +13,7 @@ import time
 import jax
 import jax.numpy as jnp
 import pytest
-from discopt._jax.deadline import (
+from discopt._relax.deadline import (
     clear_deadline,
     deadline_exceeded,
     deadline_exceeded_jax,

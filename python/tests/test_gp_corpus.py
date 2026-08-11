@@ -3,7 +3,7 @@
 These tests characterise the GP subsystem end to end:
 
 * :func:`discopt.gp.is_log_convex` — the **log-space** convexity verdict, kept
-  separate from :func:`discopt._jax.convexity.classify_model` (the **x-space**
+  separate from :func:`discopt._relax.convexity.classify_model` (the **x-space**
   verdict). A genuine GP is convex only under ``y = log x``, so the two
   disagree: ``is_log_convex`` is ``True`` while x-space ``classify_model`` is
   ``False``. This separation is a soundness requirement — folding log-convexity
@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import pytest
-from discopt._jax.convexity import classify_model
+from discopt._relax.convexity import classify_model
 from discopt.gp import classify_gp, is_log_convex, solve_gp
 from discopt.modeling.core import Model
 

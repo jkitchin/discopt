@@ -28,7 +28,7 @@ def reachability():
     os.environ["DISCOPT_CMIR_AGGREGATION"] = "1"
     from discopt.modeling.core import from_nl
     import discopt.solver as S
-    from discopt._jax import cmir_cuts, cutting_planes as CP
+    from discopt._relax import cmir_cuts, cutting_planes as CP
 
     counts: dict[str, int] = {}
 

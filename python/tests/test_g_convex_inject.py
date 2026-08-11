@@ -15,11 +15,11 @@ import discopt.modeling as dm
 import jax
 import jax.numpy as jnp
 import numpy as np
-from discopt._jax.convexity.g_convex_inject import (
+from discopt._relax.convexity.g_convex_inject import (
     g_convex_cuts_enabled,
     inject_g_convex_cuts,
 )
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Model
 
 

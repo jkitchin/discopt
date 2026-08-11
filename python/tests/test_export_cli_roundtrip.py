@@ -29,8 +29,8 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.export.nl import _NLWriter
 from discopt.modeling.core import (
     BinaryOp,

@@ -75,7 +75,7 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity import classify_model
+from discopt._relax.convexity import classify_model
 
 _DATA_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 

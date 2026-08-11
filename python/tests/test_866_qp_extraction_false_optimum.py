@@ -42,7 +42,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.problem_classifier import extract_qp_data  # noqa: E402
+from discopt._relax.problem_classifier import extract_qp_data  # noqa: E402
 
 
 def _model(ub: float):

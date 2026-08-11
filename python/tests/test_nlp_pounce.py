@@ -17,7 +17,7 @@ import pytest
 
 pounce = pytest.importorskip("pounce")
 
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.modeling import examples  # noqa: E402
 from discopt.modeling.core import Model  # noqa: E402
 from discopt.solvers import NLPResult, SolveStatus  # noqa: E402

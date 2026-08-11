@@ -1,5 +1,5 @@
 """
-Tests for the parametric response compiler (_jax/parametric.py).
+Tests for the parametric response compiler (_relax/parametric.py).
 
 Test classes:
   - TestCompileResponseFunction: response compilation and evaluation
@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.parametric import (
+from discopt._relax.parametric import (
     compile_response_function,
     extract_x_flat,
     flatten_params,

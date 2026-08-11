@@ -26,8 +26,8 @@ import numpy as np
 import pytest
 from discopt import Model
 from discopt import modeling as dm
-from discopt._jax import ellipsoidal_arith as ea
-from discopt._jax.polyhedral_oa import outer_approximation
+from discopt._relax import ellipsoidal_arith as ea
+from discopt._relax.polyhedral_oa import outer_approximation
 
 jax.config.update("jax_enable_x64", True)
 

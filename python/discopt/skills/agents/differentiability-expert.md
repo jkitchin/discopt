@@ -24,7 +24,7 @@ You are an expert on discopt's differentiable-solving stack — the machinery th
 ```python
 import jax.numpy as jnp
 import discopt.modeling as dm
-from discopt._jax.differentiable import differentiable_solve, differentiable_solve_l3
+from discopt._relax.differentiable import differentiable_solve, differentiable_solve_l3
 
 m = dm.Model("...")
 x = m.continuous("x", lb=-10, ub=10)
@@ -51,9 +51,9 @@ g = result.gradient(p)                     # lazy; same as envelope theorem
 - **Level 3** (implicit diff): requires strict complementarity at the active set. If degeneracy is suspected, discopt's `find_active_set` emits a warning and the Jacobian may be nonsensical.
 
 ### Key files
-- `python/discopt/_jax/differentiable.py` — `differentiable_solve`, `differentiable_solve_l3`, `DiffSolveResult`, `DiffSolveResultL3`, `implicit_differentiate`, `find_active_set`, `SensitivityInfo`.
-- `python/discopt/_jax/differentiable_lp.py`, `differentiable_qp.py`, `differentiable_solve.py` — specializations for LP and QP cones.
-- `python/discopt/_jax/parametric.py` — `extract_x_flat`, parameter vector plumbing.
+- `python/discopt/_relax/differentiable.py` — `differentiable_solve`, `differentiable_solve_l3`, `DiffSolveResult`, `DiffSolveResultL3`, `implicit_differentiate`, `find_active_set`, `SensitivityInfo`.
+- `python/discopt/_relax/differentiable_lp.py`, `differentiable_qp.py`, `differentiable_solve.py` — specializations for LP and QP cones.
+- `python/discopt/_relax/parametric.py` — `extract_x_flat`, parameter vector plumbing.
 - `python/discopt/modeling/core.py`:
   - `Parameter` class (line 772+) — the mutable expression node.
   - `SolveResult.gradient(param)` (line 957+) — envelope-theorem entry point.
@@ -100,7 +100,6 @@ The custom VJP is defined via `_make_jax_differentiable_solve` so `jax.grad` / `
 ## When to Defer
 
 - **"Compute the envelope-theorem gradient of a DoE objective"** → `doe-expert` (uses this machinery internally).
-- **"JAX IPM internals"** → `jax-ipm-expert`.
 - **"Restoration-phase issues prevent convergence to the KKT point"** → `ipopt-expert`.
 - **"Add a new parametric reformulation"** → `modeling-expert`.
-- **"Differentiable LP solver internals"** → `highs-expert` (if via HiGHS) or `jax-ipm-expert` (if via JAX IPM).
+- **"Differentiable LP/QP solver internals"** → the forward solve is POUNCE's KKT solve (`solvers/lp_pounce.py`, `solvers/qp_pounce.py`); the derivative is the `custom_jvp` implicit-KKT rule in `_relax/differentiable_lp.py` / `_relax/differentiable_qp.py`.

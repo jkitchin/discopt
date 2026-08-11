@@ -2,7 +2,7 @@
 
 This module is the stable contract external plugins (discopt-doe, ...) build
 on, so these tests pin the public names, the flat-vector layout, and the
-differentiability guarantees — independently of the ``_jax`` internals that
+differentiability guarantees — independently of the ``_relax`` internals that
 implement them (covered in ``test_parametric.py``).
 """
 

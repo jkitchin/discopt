@@ -11,7 +11,7 @@ actually shipped; the corrections below take precedence over the body text:
   for the differentiable and relaxation paths.
 - **The JAX IPM is removed, not retained.** Statements that `ipm.py`'s
   `ipm_solve` core is *kept* for the McCormick-NLP path (§12) are obsolete:
-  `_jax/ipm.py` and the entire JAX interior-point stack have been **deleted**;
+  `_relax/ipm.py` and the entire JAX interior-point stack have been **deleted**;
   the McCormick-NLP relaxation and all NLP node solves run on POUNCE.
 - **`pounce-solver` is a core dependency.** The `[pounce]`-only-install framing
   (§9 and elsewhere) is superseded — `pounce-solver` is now a hard core
@@ -100,12 +100,12 @@ consumers (by call-site density):
 | `solver.py` | LP/QP/MILP dispatch (`_solve_lp`, `_solve_qp`, MILP hand-off) |
 | `solvers/lp_highs.py`, `solvers/milp_highs.py` | The wrappers themselves (`qp_highs.py` removed, #359) |
 | `solvers/oa.py`, `solvers/gdpopt_loa.py` | MILP master problems for OA / GDP-LOA |
-| `_jax/obbt.py` | LP engine for optimality-based bound tightening |
-| `_jax/mccormick_lp.py`, `_jax/milp_relaxation.py` | McCormick-LP relaxation mode |
-| `_jax/partition_selection.py` | Partition-point LPs (piecewise McCormick) |
+| `_relax/obbt.py` | LP engine for optimality-based bound tightening |
+| `_relax/mccormick_lp.py`, `_relax/milp_relaxation.py` | McCormick-LP relaxation mode |
+| `_relax/partition_selection.py` | Partition-point LPs (piecewise McCormick) |
 | `doe/design.py`, `doe/fractional.py`, `doe/screening.py` | MILP-based optimal design |
 | `ro/formulations/polyhedral.py` | Polyhedral uncertainty subproblems |
-| `_jax/convexity/linear_context.py`, `_jax/gdp_reformulate.py`, `export/`, `cli.py`, `constants.py` | Minor / incidental |
+| `_relax/convexity/linear_context.py`, `_relax/gdp_reformulate.py`, `export/`, `cli.py`, `constants.py` | Minor / incidental |
 
 All of these must migrate to either POUNCE (continuous) or the self-hosted
 integer solver (Phase 1+) before `highspy` leaves the dependency list.
@@ -119,7 +119,7 @@ Two in-house engines, one dispatch seam:
 | Engine | Role |
 |---|---|
 | **POUNCE** (Rust) | The workhorse. All production LP/QP/NLP relaxation solves, single and CPU-batch. The only third-party-visible numerical solver. |
-| **JAX LP/QP IPM** (`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) | The differentiable LP/QP path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. The general **NLP** JAX IPM (`_jax/ipm.py`) has been deleted (see the header note and §12); NLP relaxations run on POUNCE. |
+| **JAX** (`_relax/differentiable_lp.py`, `differentiable_qp.py`, `pounce_layer.py`) | Differentiation only — no solving. The forward solve for the differentiable LP/QP path is POUNCE's KKT solve (`solve_lp_kkt` / `solve_qp_kkt`); JAX supplies the `custom_jvp` implicit-KKT derivative rule (T22/T23) on top of it. Every pure-JAX IPM kernel is now deleted: `_relax/ipm.py` and `lp_ipm.py` (#370), `qp_ipm.py` (#75). |
 
 The existing seam `python/discopt/solvers/nlp_backend.py` extends to cover
 LP and QP dispatch, so no call site knows which engine is in use.
@@ -461,7 +461,7 @@ competitive performance) lives in Phases 2–3.
 
 ### Phase 3 — Cut & heuristic suite (started)
 
-- **Knapsack cover cuts — DONE.** `_jax/cover_cuts.py` separates valid cover
+- **Knapsack cover cuts — DONE.** `_relax/cover_cuts.py` separates valid cover
   inequalities `sum_{j in C} x_j <= |C|-1` from binary-knapsack rows; a root
   cut loop (`_root_cover_cut_loop`) solves the root LP, separates violated
   covers, and augments the standard-form `lp_data` with each cut as a row +
@@ -490,7 +490,7 @@ competitive performance) lives in Phases 2–3.
   that front-loads pruning / reduced-cost fixing (complements the
   near-integral snap purification). Optimum preserved, node count never
   worsened. (`test_root_dive.py`)
-- **IPM→vertex crossover — DONE (Python/numpy).** `_jax/crossover.py`
+- **IPM→vertex crossover — DONE (Python/numpy).** `_relax/crossover.py`
   (`crossover_to_vertex`) pushes an interior LP optimum to a vertex of the
   optimal face: it repeatedly moves along a null-space direction supported on
   the *free* variables with `A d = 0` and `c^T d = 0` (SVD-based, so both
@@ -508,7 +508,7 @@ competitive performance) lives in Phases 2–3.
   prerequisite for Gomory/MIR) remains future work. (`test_crossover.py`)
 - **Heuristics + conflict analysis — DONE (since superseded the list below).**
   RINS, diving (fractional/objective), local branching, and a feasibility pump
-  ship in `_jax/primal_heuristics.py`; conflict analysis (no-good / FBBT-seeded
+  ship in `_relax/primal_heuristics.py`; conflict analysis (no-good / FBBT-seeded
   conflict cuts) ships in `conflict.py`. These were listed as open here in an
   earlier draft.
 - **Open (Phase 2 keystone, Rust):** the Rust crossover port with *basis*
@@ -526,7 +526,7 @@ shared seam and falls back to whichever backend is importable.
   HiGHS-first by default and POUNCE-first in POUNCE-only mode, falling back to
   whichever is importable (raises only if neither is). Tested incl. a
   simulated HiGHS-absent install.
-- **OBBT — DONE.** `_jax/obbt.py` (`run_obbt`, `run_obbt_on_relaxation`) now
+- **OBBT — DONE.** `_relax/obbt.py` (`run_obbt`, `run_obbt_on_relaxation`) now
   goes through the selector with a `prefer_pounce` param, threaded from the
   spatial-B&B OBBT call site (`nlp_solver="pounce"`). Verified it tightens
   identically across backends and works with HiGHS absent.
@@ -586,7 +586,7 @@ shared seam and falls back to whichever backend is importable.
 ### Phase 2 — Crossover + root cut generation (compete I)
 
 - **Primal crossover (interior → vertex) — DONE in Python.**
-  `_jax/crossover.py`; null-space push preserving objective and feasibility,
+  `_relax/crossover.py`; null-space push preserving objective and feasibility,
   wired into the root cut loop so cover/clique cuts bite from IPM solves
   (symmetric knapsack 21 → 1 nodes). See the Phase 3 (started) section for
   details.
@@ -626,7 +626,8 @@ shared seam and falls back to whichever backend is importable.
     taking the standard-form LP as zero-copy numpy (C-contiguous `A`). The
     Python B&B can now call the Rust crossover and consume the basis.
     `test_rust_crossover.py` drives the real pipeline (`extract_lp_data` →
-    `lp_ipm_solve` interior optimum → Rust crossover → basis): objective and
+    interior optimum → Rust crossover → basis; the forward solve was
+    `lp_ipm_solve` when this landed and is POUNCE's `solve_lp_kkt` since #370): objective and
     feasibility preserved and lands on a vertex; matches the numpy reference's
     *properties* (both reach a valid vertex, tie-breaking aside); the recovered
     basis is valid (reconstructs the vertex); and it reproduces HiGHS's
@@ -776,7 +777,7 @@ shared seam and falls back to whichever backend is importable.
     cheap there too.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
-  (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
+  (`python/discopt/_relax/cutting_planes.py`; cap/aging/dedup already there).
   Cuts are added to the formulation and the tree resumes batch IPM solving
   — explicitly **not** a per-node cut-and-resolve loop.
 - Side benefit: the recovered vertex yields clean fractional branching
@@ -799,7 +800,7 @@ shared seam and falls back to whichever backend is importable.
 - OA / GDP-LOA masters (`oa.py`, `gdpopt_loa.py`) → the self-hosted integer
   solver. This closes the convex-MINLP loop (single-tree LP/NLP-BB becomes
   natural here) without HiGHS.
-- `_jax/obbt.py` → POUNCE LP. McCormick-LP mode (`mccormick_lp.py`,
+- `_relax/obbt.py` → POUNCE LP. McCormick-LP mode (`mccormick_lp.py`,
   `milp_relaxation.py`), `partition_selection.py`, DOE optimal design, RO
   polyhedral subproblems, `export`/`cli` incidentals.
 - **Packaging — already done; no removal needed.** `highspy` was never a
@@ -961,7 +962,7 @@ Ipopt that POUNCE ports; Pirnay et al. 2012 {cite-key: Pirnay2012} for sIPOPT
 sensitivity; Amos & Kolter 2017 {cite-key: Amos2017} for OptNet-style implicit
 LP/QP differentiation).
 
-`_jax/pounce_layer.py` wraps POUNCE as a differentiable JAX layer: the forward
+`_relax/pounce_layer.py` wraps POUNCE as a differentiable JAX layer: the forward
 solve runs on the host via `jax.pure_callback`, and a `jax.custom_vjp` backward
 solves the KKT adjoint assembled from JAX-compiled model derivatives (reusing the
 `sipopt.py` machinery). The differentiable LP/QP layers (`differentiable_lp.py` /
@@ -971,17 +972,22 @@ being an analytic-center point — keeps the sensitivity system nonsingular (unl
 degenerate simplex vertex). The OA/GDP/AMP NLP subproblems and the differentiable
 test suite were repointed off the JAX IPM (and off cyipopt) onto POUNCE.
 
-**Retirement status.** The general **NLP** JAX IPM (`_jax/ipm.py` and its
+**Retirement status.** The general **NLP** JAX IPM (`_relax/ipm.py` and its
 `ipm_solve` core) is **deleted**, not merely demoted: `mccormick_nlp.py` now
 solves each McCormick relaxation through POUNCE (`_solve_relaxation_with_pounce`),
 so the NLP interior-point stack has no remaining consumer. JAX remains the
 indispensable **autodiff substrate** (model Hessians/Jacobians/∂p, McCormick
-envelopes, the custom_vjp adjoint solves), and the **LP/QP** IPM kernels
-(`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) survive solely to provide the differentiable
-LP/QP relaxation-gradient path (`differentiable_solve.py`) — they are no longer a
-production node-solve engine. (Earlier drafts of this section claimed the
-`ipm_solve` core was kept to fuse the McCormick-NLP relaxation on GPU/vmap; that
-was superseded when the relaxation moved to POUNCE.)
+envelopes, the custom_vjp adjoint solves) — but it no longer *solves* anything.
+The **LP/QP** IPM kernels are gone too: `_relax/lp_ipm.py` with #370, `_relax/qp_ipm.py`
+with #75. The differentiable LP/QP path (`differentiable_solve.py`) now takes its
+forward point from POUNCE (`solve_lp_kkt` / `solve_qp_kkt`) and gets its gradient
+from the `custom_jvp` implicit-KKT rule, which is where differentiability always
+actually came from — differentiating a solution map needs the KKT system at the
+solution and a linear solve, not a solver written in JAX. (Earlier drafts of this
+section claimed the `ipm_solve` core was kept to fuse the McCormick-NLP relaxation
+on GPU/vmap; that was superseded when the relaxation moved to POUNCE. Later drafts
+claimed the LP/QP kernels survive for the differentiable path; that was superseded
+by #370 and #75.)
 
 ## 13. All-Rust spatial-B&B relaxation (in progress)
 

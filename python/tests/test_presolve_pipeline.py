@@ -2,7 +2,7 @@
 
 Verifies that the Rust-side passes ``eliminate_variables`` (M10) and
 ``reformulate_polynomial`` (M4 + M5) of issue #51 are correctly
-sequenced by ``discopt._jax.presolve_pipeline.run_root_presolve`` and
+sequenced by ``discopt._relax.presolve_pipeline.run_root_presolve`` and
 that tightened bounds are propagated back into the Python ``Model``
 object so that ``Model.solve()`` can use them.
 """
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import discopt
 import numpy as np
 import pytest
-from discopt._jax.presolve_pipeline import (
+from discopt._relax.presolve_pipeline import (
     propagate_bounds_to_model,
     run_reverse_ad_tightening,
     run_root_presolve,

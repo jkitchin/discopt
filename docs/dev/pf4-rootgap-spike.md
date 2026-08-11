@@ -144,11 +144,11 @@ plausibly gain a proof **or materially tighten a class**"):
    as the item's entry experiment before flipping default-ON.
 
 ### What the full PF4 item would build
-1. **`python/discopt/_jax/term_classifier.py`** — recognise the logarithmic-mean /
+1. **`python/discopt/_relax/term_classifier.py`** — recognise the logarithmic-mean /
    LMTD pattern `(a−b)/log(a/(ε+b))` (and its `log`-of-ratio siblings) into a new
    `log_mean` term category (alongside `ratio_of_products`), so the builder can see
    it instead of dumping it in the un-relaxed `general_nl` bucket.
-2. **`python/discopt/_jax/milp_relaxation.py`** — for each `log_mean` term, lift the
+2. **`python/discopt/_relax/milp_relaxation.py`** — for each `log_mean` term, lift the
    output column `w` and emit: the AM over-estimator `w ≤ (a+b)/2`; the GM **secant**
    under-estimator (McCormick(a·b) → concave-secant sqrt); optionally tangent-plane
    over-estimators of the concave LMTD for extra tightness. All rows outward-rounded.

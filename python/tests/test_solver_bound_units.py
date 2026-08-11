@@ -16,8 +16,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.cutting_planes import CutPool, LinearCut
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.cutting_planes import CutPool, LinearCut
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
 from discopt.solver import (
     _AugmentedEvaluator,
@@ -78,15 +78,33 @@ def test_augmented_evaluator_appends_normalized_cuts():
     assert len(bounds) == 3
     assert bounds[-1] == (-1e20, 0.0)
 
-    import jax.numpy as jnp
+    # `get_augmented_jax_bounds` used to be asserted here. It was deleted: it had
+    # no consumer anywhere in the package, and it built JAX arrays inside a
+    # wrapper that is constructed on a live (possibly tape-backed, JAX-free)
+    # solve path. `get_augmented_constraint_bounds` above is the live equivalent.
 
-    gl, gu = aug.get_augmented_jax_bounds(jnp.array([0.0]), jnp.array([np.inf]))
-    assert gl.shape == (3,) and float(gu[-1]) == 0.0
     # Lagrangian Hessian ignores the (linear) cut rows.
     lam = np.array([0.3, 0.1, 0.2])
     h = aug.evaluate_lagrangian_hessian(x, 1.0, lam)
     h_ref = ev.evaluate_lagrangian_hessian(x, 1.0, lam[:1])
     np.testing.assert_allclose(np.asarray(h), np.asarray(h_ref))
+
+
+def test_augmented_evaluator_forwards_the_timing_layer():
+    """The cut proxy must forward ``timing_bucket`` (issue #74).
+
+    ``_AugmentedEvaluator`` enumerates its members explicitly instead of
+    delegating through ``__getattr__``, so an attribute added to the evaluators
+    does not reach ``_charge_evaluator`` through it. Without the forward, a
+    cut-augmented node NLP silently drops its derivative callbacks from the layer
+    profile — no error, just a wrong number.
+    """
+    m = _constrained_model()
+    ev = NLPEvaluator(m)
+    pool = CutPool()
+    pool.add(LinearCut(coeffs=np.array([1.0, 1.0]), rhs=3.0, sense="<="))
+    for proxy in (_AugmentedEvaluator(ev, pool), _AugmentedEvaluator(ev, CutPool())):
+        assert proxy.timing_bucket == ev.timing_bucket == "jax"
 
 
 def test_augmented_evaluator_with_empty_pool_is_passthrough():
@@ -98,8 +116,7 @@ def test_augmented_evaluator_with_empty_pool_is_passthrough():
     np.testing.assert_allclose(
         np.asarray(aug.evaluate_constraints(x)), np.asarray(ev.evaluate_constraints(x))
     )
-    gl, gu = aug.get_augmented_jax_bounds(None, None)
-    assert gl is None and gu is None
+    assert aug.get_augmented_constraint_bounds(None) is None
 
 
 def test_compute_interval_bound_soundness():

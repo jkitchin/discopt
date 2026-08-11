@@ -89,6 +89,7 @@ from discopt.modeling.core import (
 )
 from discopt.modeling.implicit import (
     implicit,
+    implicit_full_space,
 )
 from discopt.modeling.indexed import (
     IndexedConstraint,
@@ -133,6 +134,7 @@ __all__ = [
     "udf",
     "custom",
     "implicit",
+    "implicit_full_space",
     "CustomCall",
     "sum",
     "prod",

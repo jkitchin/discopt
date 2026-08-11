@@ -82,7 +82,7 @@ Every task below traces to one of these findings. Line numbers are as of commit
 | A5 | GBD: **no feasibility cuts** — infeasible recourse handled only by no-good cuts on an all-binary master (exponential), else `NotImplementedError` mid-solve. | `benders/gbd.py:387-398, 422-427, 453-457` |
 | A6 | Advisor never proposes **OA** for convex MINLP although OA cuts dominate GBD cuts (Duran & Grossmann 1986) and `solvers/oa.py` exists. GBD hardcoded `cut_strength=0.6` vs Benders 0.9; no OA candidate. | `advisor/candidates.py:98-130`, `advisor/scoring.py:122-134` |
 | A7 | `MethodKind.INDEPENDENT_BLOCKS` falls back to **monolithic** `model.solve()`; the parallel layer (`ThreadPoolComm`, `SchedulingGraph`, `map_subproblems`) has **no caller** in any solve path. | `ir/reformulation.py:92-98` |
-| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_jax/`. | `benders/gbd.py:44-56` |
+| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_relax/`. | `benders/gbd.py:44-56` |
 
 ### Scalability / engineering (S)
 
@@ -423,8 +423,8 @@ matches `Model.solve()`'s optimum.
 
 Experiment only (see contract §0.7). On one nonconvex two-stage instance from the
 adversarial suite: build a convex relaxation of the recourse via the existing
-factorable/McCormick machinery (`_jax/factorable_reform.py`,
-`_jax/relaxation_compiler.py`), run GBD against the *relaxed* recourse to get a
+factorable/McCormick machinery (`_relax/factorable_reform.py`,
+`_relax/relaxation_compiler.py`), run GBD against the *relaxed* recourse to get a
 rigorous lower bound (Li–Tomasgard–Barton 2011 structure: relaxed cuts bound the
 true value function from below), and compare that bound with the AMP global
 solver's root bound. Record in §7: bound quality, wall time, and integration cost.

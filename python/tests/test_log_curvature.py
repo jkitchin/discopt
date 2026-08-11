@@ -4,7 +4,7 @@ import pytest
 
 sp = pytest.importorskip("sympy")  # design-time [sympy] extra; skip if absent
 
-from discopt._jax.symbolic.log_curvature import (  # noqa: E402
+from discopt._relax.symbolic.log_curvature import (  # noqa: E402
     is_monomial,
     is_posynomial,
     log_curvature,

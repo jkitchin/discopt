@@ -1,0 +1,293 @@
+"""
+Variable Selection for AMP (Adaptive Multivariate Partitioning).
+
+Implements two strategies from JOGO 2018 for choosing which variables to partition:
+
+1. max_cover: Partition ALL variables appearing in any nonlinear term.
+   Gives the tightest relaxation but introduces more binary variables in the MILP.
+
+2. min_vertex_cover: Find the MINIMUM set of variables such that every nonlinear
+   term contains at least one selected variable.  Solved as a small MILP.
+   Reduces the number of binary variables introduced, keeping the relaxation MILP
+   tractable for large problems.
+
+3. auto: Use max_cover when ≤15 candidates, otherwise min_vertex_cover.
+
+Theory:
+  Nagarajan et al., JOGO 2018 (Section 3.2):
+  "We use a greedy max-cover heuristic or a minimum vertex cover on the interaction
+   graph to decide which variables to discretize."
+"""
+
+from __future__ import annotations
+
+from discopt._relax.term_classifier import NonlinearTerms
+
+
+def _all_terms(terms: NonlinearTerms) -> list[tuple[int, ...]]:
+    """Flatten nonlinear terms into covering tuples for vertex-cover selection.
+
+    Each tuple lists the variables whose partitioning would tighten the relaxation
+    of that term.  The minimum-cover code later filters these tuples through
+    ``terms.partition_candidates``, so monomial tuples only matter when the
+    caller has explicitly made monomials partition candidates.
+    """
+    all_t: list[tuple[int, ...]] = []
+    all_t.extend(terms.bilinear)
+    all_t.extend(terms.trilinear)
+    all_t.extend(terms.multilinear)
+    for var_idx, _n in terms.monomial:
+        all_t.append((var_idx,))
+    for var_idx, _exp in terms.fractional_power:
+        all_t.append((var_idx,))
+    for lin_idx, (fp_base, _exp) in terms.bilinear_with_fp:
+        # Record each endpoint as its own 1-element covering tuple so the vertex
+        # cover is forced to partition BOTH the linear factor and the fractional-
+        # power base.  Piecewise McCormick on x * y^p tightens substantially when
+        # both ends are partitioned, which a 2-element covering tuple would not
+        # require.
+        all_t.append((lin_idx,))
+        all_t.append((fp_base,))
+    return all_t
+
+
+def _max_cover(terms: NonlinearTerms) -> list[int]:
+    """Return all partition candidates (max-cover strategy)."""
+    return list(terms.partition_candidates)
+
+
+def _min_vertex_cover(terms: NonlinearTerms) -> list[int]:
+    """Minimum vertex cover of the term-variable interaction graph.
+
+    Formulation (integer program):
+        min  sum(y_v for v in candidates)
+        s.t. sum(y_v for v in term) >= 1   for each nonlinear term
+             y_v in {0, 1}
+
+    Solved using HiGHS (via highspy or discopt's MILP wrapper).
+    Falls back to max_cover if HiGHS is not available.
+    """
+    all_t = _all_terms(terms)
+    candidates = list(terms.partition_candidates)
+
+    # Trivial cases
+    if not candidates:
+        return []
+    if not all_t:
+        return []
+    if len(candidates) <= 2:
+        # With ≤2 variables, max_cover and min_vertex_cover are the same
+        return candidates
+
+    try:
+        return _solve_vertex_cover_milp(candidates, all_t)
+    except Exception:
+        greedy = _greedy_vertex_cover(candidates, all_t)
+        return greedy if greedy else candidates
+
+
+def _weighted_min_vertex_cover(
+    terms: NonlinearTerms,
+    distance: dict[int, float],
+) -> list[int]:
+    """Weighted minimum vertex cover using Alpine-style incumbent distance scores."""
+    all_t = _all_terms(terms)
+    candidates = list(terms.partition_candidates)
+
+    if not candidates or not all_t:
+        return []
+    if len(candidates) <= 2:
+        return candidates
+
+    try:
+        return _solve_vertex_cover_milp(candidates, all_t, weights=distance)
+    except Exception:
+        greedy = _greedy_vertex_cover(candidates, all_t, weights=distance)
+        return greedy if greedy else candidates
+
+
+def _solve_vertex_cover_milp(
+    candidates: list[int],
+    terms: list[tuple[int, ...]],
+    weights: dict[int, float] | None = None,
+) -> list[int]:
+    """Solve the minimum vertex cover as a MILP through the backend selector.
+
+    Variables: y_v ∈ {0,1} for each candidate v
+    Objective: min sum(y_v)
+    Constraints: for each term t: sum(y_v for v in t ∩ candidates) >= 1
+
+    Routed through ``get_milp_solver`` so it runs on HiGHS or the POUNCE
+    self-hosted B&B — whichever is installed — and falls back to a greedy
+    cover if neither is available or the MILP does not solve to optimality.
+    """
+    import numpy as np
+
+    n = len(candidates)
+    var_to_col = {v: i for i, v in enumerate(candidates)}
+
+    # Build constraint matrix: one row per term
+    valid_terms = [t for t in terms if any(v in var_to_col for v in t)]
+    m_rows = len(valid_terms)
+
+    if m_rows == 0:
+        return []
+
+    # Coefficients for the covering constraints: A @ y >= 1
+    A = np.zeros((m_rows, n), dtype=np.float64)
+    for row_idx, term in enumerate(valid_terms):
+        for v in term:
+            if v in var_to_col:
+                A[row_idx, var_to_col[v]] = 1.0
+
+    # Objective: minimize sum(y) or a weighted cover objective.
+    c: np.ndarray
+    if weights is None:
+        c = np.ones(n, dtype=np.float64)
+    else:
+        positive = [
+            abs(float(weights.get(v, 0.0)))
+            for v in candidates
+            if abs(float(weights.get(v, 0.0))) > 0.0
+        ]
+        heavy = 1.0 if not positive else 1.0 / min(positive)
+        c = np.array(
+            [
+                (heavy if abs(float(weights.get(v, 0.0))) <= 1e-6 else 1.0 / abs(float(weights[v])))
+                for v in candidates
+            ],
+            dtype=np.float64,
+        )
+
+    # Convert A >= 1 to standard form: -A @ y <= -1
+    A_le = -A
+    b_le = -np.ones(m_rows, dtype=np.float64)
+
+    def _greedy_fallback() -> list[int]:
+        greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
+        return greedy if greedy else list(dict.fromkeys(candidates))
+
+    # Solve the covering MILP through the backend selector so it runs on either
+    # HiGHS or POUNCE (the self-hosted B&B) — whichever is installed.
+    try:
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        solve_milp = get_milp_solver()
+    except ImportError:
+        return _greedy_fallback()
+
+    result = solve_milp(
+        c=c,
+        A_ub=A_le,
+        b_ub=b_le,
+        integrality=np.ones(n, dtype=np.float64),
+        bounds=[(0.0, 1.0)] * n,
+        time_limit=30.0,
+    )
+    if result.status != SolveStatus.OPTIMAL or result.x is None:
+        return _greedy_fallback()
+
+    y = np.asarray(result.x[:n], dtype=np.float64)
+    selected = [candidates[i] for i in range(n) if y[i] > 0.5]
+    selected_set = set(selected)
+
+    # Verify coverage (fall back to greedy if something went wrong).
+    for term in valid_terms:
+        if not any(v in selected_set for v in term):
+            return _greedy_fallback()
+
+    return selected
+
+
+def _greedy_vertex_cover(
+    candidates: list[int],
+    terms: list[tuple[int, ...]],
+    weights: dict[int, float] | None = None,
+) -> list[int]:
+    """Greedy vertex cover: repeatedly pick the variable covering the most uncovered terms.
+
+    O(n * m) but good approximation for small instances.
+    """
+    selected = []
+    term_set = [set(t) for t in terms]
+    n_terms = len(term_set)
+    uncovered = set(range(n_terms))
+
+    while uncovered:
+        # Find variable with most coverage
+        best_var = None
+        best_score = -1.0
+        for v in candidates:
+            if v in selected:
+                continue
+            count = sum(1 for idx in uncovered if v in term_set[idx])
+            if count <= 0:
+                continue
+
+            if weights is None:
+                score = float(count)
+            else:
+                dist = abs(float(weights.get(v, 0.0)))
+                weight = max(dist, 1e-6)
+                score = float(count) * weight
+
+            if score > best_score:
+                best_score = score
+                best_var = v
+        if best_var is None or best_score <= 0.0:
+            break
+        selected.append(best_var)
+        newly_covered = {idx for idx in uncovered if best_var in term_set[idx]}
+        uncovered -= newly_covered
+
+    return selected
+
+
+def pick_partition_vars(
+    terms: NonlinearTerms,
+    method: str = "auto",
+    distance: dict[int, float] | None = None,
+) -> list[int]:
+    """Select variables to partition for the AMP relaxation.
+
+    Parameters
+    ----------
+    terms : NonlinearTerms
+        Output of classify_nonlinear_terms(model).
+    method : str, default "auto"
+        Variable selection strategy:
+        - ``"max_cover"``: all variables appearing in any nonlinear term.
+        - ``"min_vertex_cover"``: minimum set covering all terms (MILP-based).
+        - ``"auto"``: max_cover if ≤15 candidates, else min_vertex_cover.
+        - ``"adaptive_vertex_cover"``: Alpine-style weighted cover using incumbent
+          distances when available, else falls back to ``"auto"``.
+
+    Returns
+    -------
+    list[int]
+        Flat variable indices selected for partitioning. Guaranteed to cover
+        every bilinear and trilinear term (i.e., each term has ≥1 selected var).
+    """
+    if not terms.partition_candidates:
+        return []
+
+    if method == "max_cover":
+        return _max_cover(terms)
+    elif method == "min_vertex_cover":
+        return _min_vertex_cover(terms)
+    elif method == "auto":
+        if len(terms.partition_candidates) <= 15:
+            return _max_cover(terms)
+        else:
+            return _min_vertex_cover(terms)
+    elif method == "adaptive_vertex_cover":
+        if len(terms.partition_candidates) <= 15 or not distance:
+            return _max_cover(terms)
+        return _weighted_min_vertex_cover(terms, distance)
+    else:
+        raise ValueError(
+            f"Unknown variable selection method: {method!r}. "
+            "Choose from 'max_cover', 'min_vertex_cover', 'auto', "
+            "'adaptive_vertex_cover'."
+        )

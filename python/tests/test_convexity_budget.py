@@ -21,7 +21,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import discopt.solver as S
 import pytest
-from discopt._jax.convexity.rules import ConvexityBudgetExceeded, classify_model
+from discopt._relax.convexity.rules import ConvexityBudgetExceeded, classify_model
 
 
 def _qp(n: int = 4) -> dm.Model:
@@ -53,7 +53,7 @@ def test_classification_is_memoized_per_solve():
     m._convexity_classification_cache = None
     m._convexity_time_budget = 5.0
 
-    import discopt._jax.convexity as cvx
+    import discopt._relax.convexity as cvx
 
     calls = {"n": 0}
     orig = cvx.classify_model

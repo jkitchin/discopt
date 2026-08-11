@@ -419,8 +419,8 @@ def generate_root_cuts(
     """
     import time as _time
 
-    from discopt._jax.cmir_cuts import separate_cmir
-    from discopt._jax.cover_cuts import separate_cover_cuts
+    from discopt._relax.cmir_cuts import separate_cmir
+    from discopt._relax.cover_cuts import separate_cover_cuts
     from discopt.modeling.core import ObjectiveSense
 
     sense_max = model._objective.sense == ObjectiveSense.MAXIMIZE

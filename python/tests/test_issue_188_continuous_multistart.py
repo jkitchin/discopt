@@ -98,7 +98,7 @@ def _build_c51() -> "dm.Model":
 
 def test_continuous_multistart_reaches_global_basin_unit():
     """The heuristic itself must find the c51 global row basin (fast, no B&B)."""
-    from discopt._jax.primal_heuristics import continuous_multistart
+    from discopt._relax.primal_heuristics import continuous_multistart
 
     model = _build_c51()
     result = continuous_multistart(model, n_starts=32, seed=42)
@@ -117,7 +117,7 @@ def test_continuous_multistart_reaches_global_basin_unit():
 def test_continuous_multistart_noops_on_integer_models():
     """Scope guard: integer models keep their own heuristic arsenal; the
     continuous multistart must decline them untried."""
-    from discopt._jax.primal_heuristics import continuous_multistart
+    from discopt._relax.primal_heuristics import continuous_multistart
 
     m = dm.Model(name="int_scope_guard")
     x = m.continuous("x", lb=0.0, ub=4.0)

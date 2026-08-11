@@ -13,7 +13,7 @@ crash.
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.nonlinear_bound_tightening import (
+from discopt._relax.nonlinear_bound_tightening import (
     build_flat_variable_metadata,
     tighten_nonlinear_bounds,
 )
@@ -107,7 +107,7 @@ def test_convexity_struct_hash_survives_sliced_subscripts():
     surrogate must be hashable element-wise (a bare ``np.asarray`` of it builds
     an object array whose ``tolist()`` smuggles the slice back in).
     """
-    from discopt._jax.convexity.rules import _hash_index, _struct_hash
+    from discopt._relax.convexity.rules import _hash_index, _struct_hash
 
     m, x, _ = _dae_like_model()
     key = _hash_index((slice(1, None), 0))

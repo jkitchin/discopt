@@ -122,7 +122,7 @@ with many intermediate operations and tight variable bounds.
 ** Implementation in discopt
 
 discopt implements McCormick relaxations in the JAX backend
-(=python/discopt/_jax/mccormick_nlp.py=). The expression DAG is compiled into JAX
+(=python/discopt/_relax/mccormick_nlp.py=). The expression DAG is compiled into JAX
 operations that propagate interval bounds and McCormick relaxation values
 simultaneously. JAX's automatic differentiation then provides exact gradients of
 the relaxation with respect to the original variables, enabling efficient

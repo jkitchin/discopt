@@ -98,7 +98,7 @@ def _model_is_linear(model: Model) -> bool:
     Used to route between classical Benders (linear recourse LP) and Generalized
     Benders (convex-NLP recourse).
     """
-    from discopt._jax.gdp_reformulate import _is_linear
+    from discopt._relax.gdp_reformulate import _is_linear
     from discopt.modeling.core import Constraint
 
     for c in model._constraints:

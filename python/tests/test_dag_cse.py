@@ -14,7 +14,7 @@ import pytest
 jax = pytest.importorskip("jax")
 import discopt.modeling as dm  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from discopt._jax.dag_compiler import compile_expression  # noqa: E402
+from discopt._relax.dag_compiler import compile_expression  # noqa: E402
 
 
 def _shared_dag(depth):

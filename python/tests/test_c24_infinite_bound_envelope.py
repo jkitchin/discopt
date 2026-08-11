@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax import mccormick as mc
+from discopt._relax import mccormick as mc
 
 
 def _finite_and_brackets(cv, cc, fx):

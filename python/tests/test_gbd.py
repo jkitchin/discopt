@@ -154,7 +154,7 @@ def test_project_mu_sign_convention():
     ``mu >= 0`` for ``<=`` rows (cl=-inf, cu=0), ``mu <= 0`` for ``>=`` rows
     (cl=0, cu=+inf), and unchanged (free) for equalities (cl=cu=0)."""
     import numpy as _np
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     m = dm.Model("signs")

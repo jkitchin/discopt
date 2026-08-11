@@ -181,7 +181,7 @@ H-LOG + H-UNI, to size LR-2's necessity.
 **Blocked by:** LR-0 GO. **Flag:** `DISCOPT_LOG_MONOMIAL` (default OFF —
 bound-changing, parent-plan §0.4 regime 2).
 
-Build in `python/discopt/_jax/` alongside the existing envelope machinery:
+Build in `python/discopt/_relax/` alongside the existing envelope machinery:
 
 1. **Detection** — in the factorable reform / term classifier, recognize
    monomial terms `∏ xᵢ^{aᵢ}` (reuse `_try_extract_signomial_factors`, which

@@ -26,12 +26,12 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.integer_product_reform import (
+from discopt._relax.integer_product_reform import (
     extend_initial_point,
     reformulate_integer_bilinear,
 )
-from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _check_constraint_feasibility
+from discopt._relax.nlp_evaluator import cached_evaluator
+from discopt._relax.primal_heuristics import _check_constraint_feasibility
 from discopt.solver import _one_hot_swap_reseed
 
 # A weighted K4 where the balanced split {0,1}|{2,3} costs 2 but {0,2}|{1,3} costs

@@ -109,7 +109,7 @@ def test_even_power_straddle_bound_includes_interior_min(p, expected):
     """C-34/FR-1: for an even power over a base straddling 0, the interval
     bound must include the interior minimum at 0. Endpoint-only bounds omit
     it, under-approximating the range → invalid aux box → false optimum."""
-    from discopt._jax.gdp_reformulate import _bound_expression
+    from discopt._relax.gdp_reformulate import _bound_expression
 
     m = dm.Model()
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -128,7 +128,7 @@ def test_even_power_straddle_bound_includes_interior_min(p, expected):
 def test_power_bound_non_straddling_and_odd_unchanged(lb, ub, p, expected):
     """The fix must not perturb one-signed even powers or odd powers, which
     are monotone on the interval and correctly bounded by their endpoints."""
-    from discopt._jax.gdp_reformulate import _bound_expression
+    from discopt._relax.gdp_reformulate import _bound_expression
 
     m = dm.Model()
     x = m.continuous("x", lb=lb, ub=ub)

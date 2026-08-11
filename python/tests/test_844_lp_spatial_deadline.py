@@ -37,7 +37,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.lp_spatial_bb import _is_in_scope, solve_lp_spatial_bb  # noqa: E402
+from discopt._relax.lp_spatial_bb import _is_in_scope, solve_lp_spatial_bb  # noqa: E402
 
 
 def _integer_model(n: int = 12) -> dm.Model:
@@ -89,8 +89,8 @@ def _no_incremental_model(n: int = 8) -> dm.Model:
 
 def _declines_incremental(model) -> tuple[bool, str]:
     """``(declined, reason)`` for ``model``'s incremental structure."""
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     inc = IncrementalMcCormickLP(model, classify_nonlinear_terms(model), deadline=None)
     return (not inc.ok), (inc.decline_reason or "")
@@ -139,8 +139,8 @@ def test_expired_ambient_deadline_does_not_disable_the_incremental_structure():
     tln5 at a 21 s budget: ``ok=False`` gave 5 nodes in 43.8 s (2.08x, slowest node
     42.4 s) where ``ok=True`` gives 13158 nodes in 21.0 s (1.00x, slowest node 0.04 s).
     """
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = _incremental_model(6)
     terms = classify_nonlinear_terms(m)
@@ -163,7 +163,7 @@ def test_engine_does_not_degrade_after_a_previous_solve(monkeypatch):
     small enough for a unit test is *also* hard enough for the cold path's slowness to
     show up in a node count, so a throughput assertion here would pass vacuously.
     """
-    import discopt._jax.incremental_mccormick as im
+    import discopt._relax.incremental_mccormick as im
 
     built: list[bool] = []
     real = im.IncrementalMcCormickLP

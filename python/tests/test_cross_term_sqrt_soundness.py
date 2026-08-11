@@ -40,9 +40,9 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.model_utils import flat_variable_bounds
 from discopt.solver import _extract_variable_info
 from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 

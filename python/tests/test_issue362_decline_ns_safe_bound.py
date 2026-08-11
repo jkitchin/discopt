@@ -66,7 +66,7 @@ def _load_decline_lp():
 
 
 def _solve_decline_lp():
-    from discopt._jax.milp_relaxation import MilpRelaxationModel
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
 
     c, A, b, bounds, off = _load_decline_lp()
     milp = MilpRelaxationModel(c, A, b, bounds, obj_offset=off)

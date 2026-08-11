@@ -86,41 +86,70 @@ def test_native_kernel_time_is_charged_to_rust_not_python(monkeypatch):
 
 
 @pytest.mark.smoke
-def test_native_kernel_seed_time_is_charged_to_jax(monkeypatch):
-    """The seed phase (NLP relaxation + sub-NLPs + verification) is JAX work.
+def test_native_kernel_seed_time_is_attributed(monkeypatch):
+    """The seed phase must appear in the profile — in *some* bucket, never dropped.
 
-    On nvs19 it was the single largest cost in the solve — 12 s of a 20 s wall — and
-    it was reported as zero.
+    Supersedes ``test_native_kernel_seed_time_is_charged_to_jax`` (#902), whose
+    premise — "the seed phase is JAX work" — measurement contradicted. The seed
+    runs an NLP relaxation plus sub-NLPs; the *optimization* is POUNCE's Rust IPM
+    and JAX only supplies derivative callbacks. Charging the whole phase to
+    ``jax_time`` was an instance of the very bug #902 set out to fix: a bucket
+    inflated by another layer's work. Measured corpus-wide, that phase-level
+    attribution reported 0.14-1.09 s of ``jax_time`` on nine instances where
+    ``jax`` never entered ``sys.modules`` at all.
+
+    #902's real guarantee is preserved and asserted below: the phase's time is
+    accounted for, and the buckets still partition the wall. Here the seed is
+    replaced by a bare ``time.sleep`` — interpreted Python, not POUNCE and not
+    JAX — so it must land in ``python_time``. With the *real* seed it splits
+    across ``pounce_time`` and ``jax_time`` per :mod:`discopt._timing`.
     """
     calls = {"seed": 0, "native": 0}
     result = _instrumented_native_solve(monkeypatch, calls=calls)
 
     assert calls["seed"] == 1, f"the seed phase never ran (calls={calls})"
-    assert result.jax_time >= _SEED_SLEEP_S, (
-        f"jax_time={result.jax_time!r} excludes the seed phase (slept {_SEED_SLEEP_S}s inside it)"
+    # The stubbed seed is a pure-Python sleep, so it belongs to python_time.
+    assert result.python_time >= _SEED_SLEEP_S, (
+        f"python_time={result.python_time!r} excludes the seed phase "
+        f"(slept {_SEED_SLEEP_S}s of pure Python inside it)"
+    )
+    # And it must not have been mis-charged to a native bucket.
+    assert result.pounce_time < _SEED_SLEEP_S, (
+        f"pounce_time={result.pounce_time!r} absorbed a pure-Python sleep"
     )
 
 
 @pytest.mark.smoke
 def test_native_kernel_time_split_is_consistent(monkeypatch):
-    """``python_time`` stays the residual of the split, and no bucket goes negative.
+    """``rust_time`` and ``python_time`` partition the wall; subsets stay inside.
 
-    Adding time to two of the three buckets is only an improvement if the third is
-    re-derived from them; leaving ``python_time`` computed from the stale totals
-    would double-count the kernel's wall.
+    The old identity asserted here was ``python_time == wall - rust - jax``, which
+    treated ``jax_time`` as a *peer* of ``python_time``. It is not: ~96 % of JAX's
+    cost on the solve path is interpreted Python (measured on heatexch_gen3 as
+    13.34 s Python vs 0.56 s native XLA), so that formula subtracted Python time
+    twice and the fields could never reconcile.
+
+    The model asserted now:
+      * ``rust_time`` + ``python_time`` == ``wall_time``  (disjoint, exhaustive)
+      * ``pounce_time`` <= ``rust_time``                  (POUNCE is Rust)
+      * ``jax_time``    <= ``python_time``                (JAX time is Python time)
     """
     calls = {"seed": 0, "native": 0}
     result = _instrumented_native_solve(monkeypatch, calls=calls)
 
     assert calls["native"] == 1 and calls["seed"] == 1
-    assert result.rust_time >= 0.0
-    assert result.jax_time >= 0.0
-    assert result.python_time >= 0.0, (
-        f"python_time={result.python_time!r} went negative — the rust/jax buckets "
-        f"double-count (wall={result.wall_time!r})"
+    for field in ("rust_time", "python_time", "jax_time", "pounce_time"):
+        assert getattr(result, field) >= 0.0, f"{field}={getattr(result, field)!r} went negative"
+
+    assert result.rust_time + result.python_time == pytest.approx(result.wall_time, abs=1e-6), (
+        f"rust_time={result.rust_time!r} + python_time={result.python_time!r} does not "
+        f"partition wall_time={result.wall_time!r}"
     )
-    assert result.python_time == pytest.approx(
-        result.wall_time - result.rust_time - result.jax_time, abs=1e-9
+    assert result.pounce_time <= result.rust_time + 1e-9, (
+        f"pounce_time={result.pounce_time!r} exceeds rust_time={result.rust_time!r}; "
+        "POUNCE is Rust and must be a subset"
     )
-    # And the accounted work cannot exceed the wall it was measured inside.
-    assert result.rust_time + result.jax_time <= result.wall_time + 1e-9
+    assert result.jax_time <= result.python_time + 1e-9, (
+        f"jax_time={result.jax_time!r} exceeds python_time={result.python_time!r}; "
+        "JAX time is Python time and must be a subset"
+    )

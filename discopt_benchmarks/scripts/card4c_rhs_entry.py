@@ -7,7 +7,7 @@ through supported construction: every producer in the tree normalizes the offset
 into ``body`` and leaves ``rhs == 0.0``, exactly as ``Constraint``'s own docstring
 declares ("always 0.0 in normalized form").
 
-**Why it matters.** ``_jax/dag_compiler.compile_constraint`` compiles
+**Why it matters.** ``_relax/dag_compiler.compile_constraint`` compiles
 ``constraint.body`` and discards ``rhs``; ``validation/feasibility`` honours it
 (``signed = body - rhs``). If H-RHS holds, the divergence is unreachable except by
 out-of-contract construction and the correct fix is a LOUD REFUSAL at the model

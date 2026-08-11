@@ -23,7 +23,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax import binary_multilinear_reform as B
+from discopt._relax import binary_multilinear_reform as B
 
 pytestmark = pytest.mark.relaxation
 
@@ -258,8 +258,8 @@ def test_binary_square_in_constraint_collapses_to_linear():
     m.minimize(b[0] * b[1] * b[2] - 2 * b[0] - x)
     m2 = B.reformulate_binary_multilinear(m)
     assert m2 is not m
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     nl = classify_nonlinear_terms(m2)
     assert not (nl.bilinear or nl.trilinear or nl.multilinear or nl.monomial or nl.general_nl)
@@ -342,7 +342,7 @@ def test_from_nl_round_trip_fires_and_certifies(tmp_path):
 
 def _flat_point_satisfies_model(m2, x):
     """Every constraint row of the reformed model holds at the extended point."""
-    from discopt._jax.binary_multilinear_reform import _ExpandCtx
+    from discopt._relax.binary_multilinear_reform import _ExpandCtx
 
     offs = {}
     off = 0
@@ -469,7 +469,7 @@ def test_binary_valued_integer_recognized_in_model_to_sympy():
     """{0,1}-bounded INTEGER columns count as binary in the symbolic
     recognizer layer too (issue #187 correction 1)."""
     pytest.importorskip("sympy")
-    from discopt._jax.symbolic.cut_recognizer import model_to_sympy
+    from discopt._relax.symbolic.cut_recognizer import model_to_sympy
 
     m = Model()
     bi = m.integer("bi", lb=0, ub=1)

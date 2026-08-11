@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _check_constraint_feasibility
+from discopt._relax.nlp_evaluator import cached_evaluator
+from discopt._relax.primal_heuristics import _check_constraint_feasibility
 from discopt.modeling.core import ObjectiveSense, from_nl
 
 _DATA = "python/tests/data/minlplib_nl"

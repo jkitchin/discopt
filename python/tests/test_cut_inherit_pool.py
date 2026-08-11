@@ -106,8 +106,8 @@ def _lifted_point(x: np.ndarray, varmap: dict, n_total: int) -> np.ndarray | Non
 
 def _root_pool_and_varmap():
     """Capture the root cut pool on the dense integer QP, plus the lifted layout."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     model = _build_dense_int_qp()
     relaxer = MccormickLPRelaxer(model, psd_cuts=True)
@@ -156,8 +156,8 @@ def test_box_dependent_child_rows_would_be_invalid_and_are_excluded():
     they must never be inherited. Demonstrate the hazard, then assert the shipped
     root pool contains no such row and the flag-ON solve still certifies the true
     optimum that naive child-row inheritance would have cut off."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     model = _build_dense_int_qp()
     relaxer = MccormickLPRelaxer(model, psd_cuts=True)

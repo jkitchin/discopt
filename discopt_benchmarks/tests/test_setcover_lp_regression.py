@@ -50,7 +50,7 @@ def _gen_setcover(ncol: int, nrow: int, seed: int, per_col: int = 6):
 
 def _solve_engine(model, time_limit_s: float):
     """Call the Rust MILP engine directly (no Python budget cap), like the bench."""
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
     from discopt.solver import _extract_variable_info
 
     lp = extract_lp_data(model)

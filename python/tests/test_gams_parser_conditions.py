@@ -17,7 +17,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.gams_parser import parse_gams
 
 pytestmark = pytest.mark.unit

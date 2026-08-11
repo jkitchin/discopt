@@ -168,7 +168,7 @@ class TestIncrementalFarkasPath:
     @staticmethod
     def _inc():
         import discopt.modeling as dm
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         # Small all-integer QCQP (bilinear + square) — in the incremental scope.
         m = dm.Model("iqcqp")
@@ -231,9 +231,9 @@ class TestColdPathCertificates:
     def test_milp_solve_surfaces_safe_bound_on_finite_box(self):
         # A finite-box lifted LP: the simplex pure-LP path must surface a rigorous
         # safe bound (<= the reported optimum) through MilpRelaxationModel.solve.
-        from discopt._jax.discretization import DiscretizationState
-        from discopt._jax.milp_relaxation import build_milp_relaxation
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.discretization import DiscretizationState
+        from discopt._relax.milp_relaxation import build_milp_relaxation
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         m = self._model()
         terms = classify_nonlinear_terms(m)
@@ -250,7 +250,7 @@ class TestColdPathCertificates:
     def test_cold_node_bound_is_sound_lower_bound(self):
         # Cold path (incremental forced off): the reported lower bound must be a
         # valid lower bound (<= the true integer optimum 4.0) — never too high.
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         relaxer = MccormickLPRelaxer(self._model())
         relaxer._inc = None  # force the cold build + cold solve_at_node path
@@ -263,7 +263,7 @@ class TestColdPathCertificates:
         # A free bilinear variable makes the McCormick relaxation unbounded; the
         # cold path must NOT fabricate a finite lower bound (it declines/branches).
         import discopt.modeling as dm
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         m = dm.Model("bil")
         x = m.continuous("x", lb=-2.0, ub=2.0)

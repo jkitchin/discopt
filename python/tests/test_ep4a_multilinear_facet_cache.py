@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax import multilinear_separation as ms
-from discopt._jax.multilinear_separation import (
+from discopt._relax import multilinear_separation as ms
+from discopt._relax.multilinear_separation import (
     _separate_multilinear_envelope_uncached,
     separate_multilinear_envelope,
 )

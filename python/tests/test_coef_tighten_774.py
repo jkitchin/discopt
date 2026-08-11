@@ -64,7 +64,7 @@ def _consumer_rows(model: Model):
     downstream. Assert the normalized-form invariant instead of honoring a
     nonzero rhs — a nonzero rhs IS the #772 bug.
     """
-    from discopt._jax.problem_classifier import (
+    from discopt._relax.problem_classifier import (
         _extract_linear_coefficients,
         _NotLinearError,
     )
@@ -295,7 +295,7 @@ def test_evaluator_cache_invalidated(monkeypatch):
     """Stale compiled evaluators must not survive the rewrite (identity-keyed
     fingerprint): #770 mutated Constraint objects in place, so evaluators built
     before the tightening kept serving the un-tightened rows."""
-    from discopt._jax.nlp_evaluator import cached_evaluator
+    from discopt._relax.nlp_evaluator import cached_evaluator
 
     _flag(monkeypatch, True)
     m = _build_fixed_charge()
@@ -351,8 +351,8 @@ def test_syn05hfsg_rhs_invariant_and_no_false_primal(monkeypatch):
         f"super-optimal incumbent {r.objective} > opt {OPT_SYN05HFSG} (false primal)"
     )
     # Independently verify the incumbent against a pristine parse.
-    from discopt._jax.nlp_evaluator import cached_evaluator
-    from discopt._jax.primal_heuristics import _check_constraint_feasibility
+    from discopt._relax.nlp_evaluator import cached_evaluator
+    from discopt._relax.primal_heuristics import _check_constraint_feasibility
 
     pm = dm.from_nl(str(nl))
     flat = np.concatenate(
@@ -375,8 +375,8 @@ def test_772_named_regression(monkeypatch, name, opt):
     if not nl.exists():
         pytest.skip("benchmark corpus not available")
     import discopt.modeling as dm
-    from discopt._jax.nlp_evaluator import cached_evaluator
-    from discopt._jax.primal_heuristics import _check_constraint_feasibility
+    from discopt._relax.nlp_evaluator import cached_evaluator
+    from discopt._relax.primal_heuristics import _check_constraint_feasibility
 
     _flag(monkeypatch, True)
     r = dm.from_nl(str(nl)).solve(time_limit=60, verify_incumbent=False)

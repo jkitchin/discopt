@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.integer_ratio import (
+from discopt._relax.integer_ratio import (
     IntegerRatioPartitioner,
     detect_integer_ratio_specs,
 )
@@ -151,7 +151,7 @@ def test_integer_infeasible_box_abstains():
 
 def test_default_on_and_opt_out(monkeypatch):
     """Graduated default-ON; ``=0`` restores the legacy path."""
-    from discopt._jax.integer_ratio import enabled
+    from discopt._relax.integer_ratio import enabled
 
     monkeypatch.delenv("DISCOPT_INTEGER_RATIO_PARTITION", raising=False)
     assert enabled()
@@ -191,7 +191,7 @@ def test_gear4_flag_on_certifies_with_fewer_nodes(monkeypatch):
 
 
 def test_factor_assignments_two_columns():
-    from discopt._jax.integer_ratio import _factor_assignments
+    from discopt._relax.integer_ratio import _factor_assignments
 
     ilo = np.array([12.0, 12.0])
     ihi = np.array([60.0, 60.0])
@@ -203,7 +203,7 @@ def test_factor_assignments_two_columns():
 
 
 def test_factor_assignments_repeated_column_exact_power():
-    from discopt._jax.integer_ratio import _factor_assignments
+    from discopt._relax.integer_ratio import _factor_assignments
 
     ilo = np.array([2.0])
     ihi = np.array([9.0])

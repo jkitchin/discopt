@@ -312,9 +312,9 @@ def _solve_lifted(milp):
 
 def run_instance(name: str) -> dict:
     import discopt.modeling as dm
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     row: dict = {"instance": name, "opt": OPT.get(name)}
     t0 = time.monotonic()

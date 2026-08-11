@@ -18,9 +18,9 @@ os.environ.setdefault("DISCOPT_CONVEX_KERNEL", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
-from discopt._jax.gdp_reformulate import reformulate_gdp  # noqa: E402
-from discopt._jax.model_utils import flat_variable_bounds  # noqa: E402
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.gdp_reformulate import reformulate_gdp  # noqa: E402
+from discopt._relax.model_utils import flat_variable_bounds  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.solvers import _convex_kernel as ck  # noqa: E402
 
 _FUNC_NP = {

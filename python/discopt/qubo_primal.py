@@ -118,7 +118,7 @@ def qubo_local_search(
     # is the autodiff last resort, reached only if both the algebraic walk and
     # the Rust evaluator fail. Q may be scipy-sparse on a wide model (#863) —
     # never ``np.asarray`` it; the search below handles both forms.
-    from discopt._jax.problem_classifier import (
+    from discopt._relax.problem_classifier import (
         ProblemClass,
         classify_problem,
         extract_qp_data,

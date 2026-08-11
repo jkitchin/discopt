@@ -1,7 +1,7 @@
 """M11 regression: polyhedral OA wrapper on benchmark-style univariate
 subexpressions.
 
-The wrapper (``discopt._jax.polyhedral_oa``) is not yet wired into the
+The wrapper (``discopt._relax.polyhedral_oa``) is not yet wired into the
 LP relaxation compiler — that integration ships alongside the M2/M3
 kernel integration as a follow-up. This regression exercises the
 wrapper's three currently-supported arithmetics on subexpressions
@@ -28,7 +28,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax import polyhedral_oa as oa
+from discopt._relax import polyhedral_oa as oa
 
 N_REGRESSION_SAMPLES = 10_000
 

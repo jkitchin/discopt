@@ -33,7 +33,7 @@ No test anywhere called `model.solve()` on a `BilevelProblem`. Running one:
 
 **Root cause.** KKT multipliers have no a-priori upper bound, so `kkt.build_kkt`
 creates them at discopt's `ub≈9.999e19` unbounded sentinel. `_compute_big_m`
-(`_jax/gdp_reformulate.py`, the GDP-1/#413 contract) treated that sentinel as a
+(`_relax/gdp_reformulate.py`, the GDP-1/#413 contract) treated that sentinel as a
 *finite, valid* big-M (`np.isfinite(9.999e19)` is True) → `M≈1e20`. That `M` is
 numerically vacuous: `M · integrality_tol = 1e20 · 1e-5 = 1e15`, so the disjunction
 selector binary rounds to "integer" while the big-M term stays huge, and

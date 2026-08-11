@@ -22,11 +22,11 @@ All tests here fail (TypeError / AttributeError) on the pre-#966 tree.
 
 import time
 
-import discopt._jax.mccormick_lp as mc_mod
+import discopt._relax.mccormick_lp as mc_mod
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
 
 def _bilinear_model() -> Model:
@@ -40,7 +40,7 @@ def _bilinear_model() -> Model:
 
 
 def _box(model):
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
 
     return flat_variable_bounds(model)
 
@@ -110,7 +110,7 @@ def test_round_deadline_caps_internal_deadline(monkeypatch):
     again. With ``round_deadline`` in the (near) past, every internal solve
     must be granted only the deadline floor.
     """
-    import discopt._jax.milp_relaxation as mr_mod
+    import discopt._relax.milp_relaxation as mr_mod
 
     granted: list = []
     orig = mr_mod.MilpRelaxationModel.solve
@@ -178,7 +178,7 @@ def _gate_on():
 
 
 def _batch_args(model, n_batch=2):
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     ev = NLPEvaluator(model)
     lb, ub = _box(model)
@@ -255,7 +255,8 @@ def test_hess_gate_multistart_site_differential(monkeypatch):
     entry; flag OFF launches it (the vacuity control, CLAUDE.md §6)."""
     import discopt.solver as solver_mod
     from discopt import solver_tuning
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator
     from discopt.solver import solve_model
 
     calls = {"n": 0}
@@ -266,12 +267,20 @@ def test_hess_gate_multistart_site_differential(monkeypatch):
         return orig_ms(*a, **kw)
 
     monkeypatch.setattr(solver_mod, "_solve_root_node_multistart", spy_ms)
-    monkeypatch.setattr(NLPEvaluator, "hessian_compile_estimate_s", lambda self: 1e9)
+    # Patch BOTH evaluator backends. The gate (solver.py, ``_est_fn``) reads the
+    # estimate off whichever evaluator is live, so pinning only the JAX class
+    # made this test backend-specific: once #75 graduated the tape evaluator to
+    # default-ON, ``_base_ev`` became a ``TapeNLPEvaluator``, the patch never
+    # applied, the gate read the real (tiny) estimate and correctly launched the
+    # multistart — a green-on-JAX/red-on-tape test, not a gate defect. Patching
+    # both keeps the assertion about the *gate* rather than about the backend.
+    for _ev_cls in (NLPEvaluator, TapeNLPEvaluator):
+        monkeypatch.setattr(_ev_cls, "hessian_compile_estimate_s", lambda self: 1e9)
 
     # Force the no-relaxer route (the heatexch_gen3 class): relaxer setup
     # failure falls back to _mc_lp_relaxer=None, whose iteration-0 bound/primal
     # source is exactly the gated root multistart.
-    import discopt._jax.mccormick_lp as mc_mod2
+    import discopt._relax.mccormick_lp as mc_mod2
 
     def _no_relaxer(*a, **kw):
         raise RuntimeError("test: relaxer disabled to force the multistart site")

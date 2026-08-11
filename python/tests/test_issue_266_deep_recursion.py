@@ -25,7 +25,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.convexity.rules import (  # noqa: E402
+from discopt._relax.convexity.rules import (  # noqa: E402
     _recursion_headroom_need,
     _run_with_deep_recursion,
     classify_model,
@@ -105,7 +105,7 @@ def test_classify_deep_graph_does_not_raise(monkeypatch):
     """
     import sys
 
-    from discopt._jax.convexity import rules
+    from discopt._relax.convexity import rules
 
     monkeypatch.setattr(rules, "_DEEP_RECURSION_SIZE_GATE", 50)
     n = 600  # expression depth ~600
@@ -130,7 +130,7 @@ def test_quadratic_fallback_runs_once_per_maximal_region(monkeypatch):
     """
     import sys
 
-    from discopt._jax.convexity import patterns
+    from discopt._relax.convexity import patterns
 
     calls = {"n": 0}
     real = patterns.quadratic_curvature

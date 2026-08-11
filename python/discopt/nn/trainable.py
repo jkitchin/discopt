@@ -554,7 +554,7 @@ def train(
     """Train a hybrid model with a single **local** NLP solve.
 
     This is a thin convenience wrapper: it validates the warm start, builds an
-    :class:`~discopt._jax.nlp_evaluator.NLPEvaluator` (with the Gauss-Newton
+    :class:`~discopt._relax.nlp_evaluator.NLPEvaluator` (with the Gauss-Newton
     Hessian approximation when the objective is a sum of squares — the common
     case for data fitting), and calls the local NLP backend directly. It does
     **not** route through :meth:`Model.solve`, which would attempt global
@@ -584,7 +584,7 @@ def train(
     NLPResult
         The local solve result; ``.x`` is the trained point.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.warm_start import validate_initial_solution
 
     if backend == "auto":

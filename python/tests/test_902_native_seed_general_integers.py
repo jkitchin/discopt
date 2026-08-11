@@ -202,20 +202,32 @@ def test_verify_point_reuses_a_cached_evaluator(monkeypatch):
     Asserted by construction count rather than by wall time: a timing assertion here
     would be a load-sensitive flake (CLAUDE.md section 9), while "how many evaluators
     did we build" is exactly the quantity that regressed.
+
+    #75: counted on **both** backends. This probe used to hook only
+    ``NLPEvaluator.__init__``; once the tape graduated to default ON that counter
+    stayed at 0 and the ``after_first >= 1`` guard fired — the §6 guard doing its
+    job, since a probe that counts constructions on the backend nobody is using
+    would otherwise have reported "0 rebuilds" as a pass forever.
     """
-    from discopt._jax import nlp_evaluator as NE
+    from discopt import _tape_nlp_evaluator as TE
+    from discopt._relax import nlp_evaluator as NE
 
     m = _wide_integer_model()
     x_ok = np.array([7.0, 12.0])
 
     builds = {"n": 0}
-    real_init = NE.NLPEvaluator.__init__
 
-    def counting_init(self, *a, **kw):
-        builds["n"] += 1
-        return real_init(self, *a, **kw)
+    def _count(cls):
+        real_init = cls.__init__
 
-    monkeypatch.setattr(NE.NLPEvaluator, "__init__", counting_init)
+        def counting_init(self, *a, **kw):
+            builds["n"] += 1
+            return real_init(self, *a, **kw)
+
+        monkeypatch.setattr(cls, "__init__", counting_init)
+
+    _count(NE.NLPEvaluator)
+    _count(TE.TapeNLPEvaluator)
 
     ok, _ = S._native_kernel_verify_point(m, x_ok)
     assert ok is True

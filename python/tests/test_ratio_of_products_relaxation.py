@@ -31,8 +31,8 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.term_classifier import (
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.term_classifier import (
     classify_nonlinear_terms,
     extract_ratio_of_products,
 )
@@ -173,7 +173,7 @@ def test_relaxation_declines_sign_indefinite_denominator():
 def test_gear4_relaxation_retains_constraint_and_is_exact_at_optimum():
     """gear4's quotient constraint is retained by the relaxation and the pinned
     node reproduces the true global optimum 1.6434 (issue #185 acceptance #1)."""
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
 
     m = from_nl(str(_DATA / "gear4.nl"))
     relaxer = MccormickLPRelaxer(m)

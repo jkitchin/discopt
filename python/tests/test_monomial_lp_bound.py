@@ -43,7 +43,7 @@ _CERTIFY_CASES = [
 @pytest.mark.correctness
 def test_relaxer_gate_includes_monomial_and_fractional_power():
     """The LP relaxer must engage for purely univariate-power nonconvexity."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     # st_e13: a monomial-only nonconvex model (no product term at all).
     m = dm.from_nl(str(_DATA / "st_e13.nl"))

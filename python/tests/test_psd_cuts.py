@@ -1,4 +1,4 @@
-"""Tests for PSD / eigenvalue cuts (discopt._jax.psd_cuts).
+"""Tests for PSD / eigenvalue cuts (discopt._relax.psd_cuts).
 
 The correctness-critical property of a relaxation cut is **validity**: it must be
 satisfied by every feasible point, i.e. it never removes a feasible solution (or
@@ -15,7 +15,7 @@ any true point ``X = x xᵀ`` we have ``M = [1; x][1; x]ᵀ ⪰ 0``. These tests
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.psd_cuts import moment_matrix, psd_cut_from_submatrix
+from discopt._relax.psd_cuts import moment_matrix, psd_cut_from_submatrix
 
 
 def _eval(cut, z: np.ndarray) -> float:

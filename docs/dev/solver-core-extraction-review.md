@@ -1,13 +1,13 @@
 # Solver Core — Algebraic Extraction Review (the recurring P0)
 
 **Date:** 2026-07-03
-**Scope:** `python/discopt/_jax/problem_classifier.py` — specifically the algebraic
+**Scope:** `python/discopt/_relax/problem_classifier.py` — specifically the algebraic
 LP/QP extraction path (`_extract_linear_coefficients`,
 `_extract_quadratic_coefficients`, `_extract_constraints_algebraic`,
 `extract_lp_data`, `extract_qp_data`) that classifies and lowers models on the
 fast solve path. This is a **targeted** review of the extraction layer three
 prior module reviews already pointed at (modeling-review M1, ro-review ADJ-1),
-not a review of the whole 55k-line `_jax/` tree.
+not a review of the whole 55k-line `_relax/` tree.
 **Method:** Traced the walkers by hand and reproduced every claim end-to-end
 against the installed package.
 
@@ -130,7 +130,7 @@ they should not be assumed sound on the strength of the module reviews done so f
   path routing, dual recovery (`:8385`+), root certification instrumentation. The
   GP auto-path and the examiner's dual conventions were touched tangentially in the
   gp/validation reviews; the B&B correctness core was not.
-- **`_jax/` relaxation layer** (~55k lines) — McCormick/factorable relaxations,
+- **`_relax/` relaxation layer** (~55k lines) — McCormick/factorable relaxations,
   convexity certification, FBBT, cutting planes, RLT, the NLP evaluators. This is
   where global-optimality *soundness* actually lives (a loose relaxation that is
   still valid only costs speed; an **unsound** relaxation cuts the optimum). It

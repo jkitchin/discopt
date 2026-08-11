@@ -24,14 +24,14 @@ import math
 
 import numpy as np
 import pytest
-from discopt._jax.convexity.signomial import (
+from discopt._relax.convexity.signomial import (
     SignomialForm,
     is_signomial,
     signomial_box_lower_bound,
     signomial_dc_terms,
     signomial_relaxation,
 )
-from discopt._jax.symbolic.signed_signomial import signed_signomial_dc_envelope
+from discopt._relax.symbolic.signed_signomial import signed_signomial_dc_envelope
 from discopt.gp import classify_gp, is_log_convex, solve_gp
 from discopt.modeling.core import Model
 

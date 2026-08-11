@@ -73,7 +73,7 @@ a certification lever, and it is **not** worth shipping against this class. **KI
 - `Model.solve(time_limit=30)` per instance, defaults, one process each. FBBT via the
   public `discopt.tightening.fbbt_box(model, max_iter=50)`. Node-engine attribution by
   monkeypatch-counting `_compute_alphabb_bound` / `_compute_interval_bound`; per-node
-  OBBT engagement by counting `discopt._jax.obbt.obbt_tighten_root`; probe outcomes by
+  OBBT engagement by counting `discopt._relax.obbt.obbt_tighten_root`; probe outcomes by
   calling `MccormickLPRelaxer.solve_at_node` directly on the raw and FBBT boxes.
 - Deterministic metrics (bounds, node counts, probe status, var ranges) drive the
   verdict; wall times are indicative (shared machine, flag-graduation agent co-resident).

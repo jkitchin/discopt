@@ -12,7 +12,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.lp_spatial_bb import _separate_node_cuts, solve_lp_spatial_bb  # noqa: E402
+from discopt._relax.lp_spatial_bb import _separate_node_cuts, solve_lp_spatial_bb  # noqa: E402
 
 _DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib")
 _DATA_NL = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl")
@@ -22,8 +22,8 @@ def _assemble_node_lp(ux=6, uy=5, uz=4):
     """Build a small all-integer bilinear node LP that drives the incremental
     McCormick path (``inc.ok``) and yields at least one GMI cut. Returns
     ``(inc, A, b, bounds, x, ncol)`` for the root box."""
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = dm.Model("c10")
     a = m.integer("a", lb=0, ub=ux)
@@ -53,8 +53,8 @@ def _raw_gmi_cuts(inc, A, b, bounds, x, ncol):
     """Reproduce the *unmargined* GMI cuts exactly as ``_separate_node_cuts``'s
     GMI branch derives them (crossover vertex -> Rust GMI -> negate to <=), so a
     test can assert the emitted cut carries the safety margin the raw cut lacks."""
-    from discopt._jax.crossover import crossover_to_vertex
-    from discopt._jax.problem_classifier import LPData
+    from discopt._relax.crossover import crossover_to_vertex
+    from discopt._relax.problem_classifier import LPData
     from discopt.solver import _separate_gomory_cuts
 
     m_rows = A.shape[0]

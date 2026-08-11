@@ -20,7 +20,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax import problem_classifier as pc  # noqa: E402
+from discopt._relax import problem_classifier as pc  # noqa: E402
 from discopt_benchmarks.perf.measure import count_xla_compiles  # noqa: E402
 from discopt_benchmarks.perf.panel import DATA_DIR  # noqa: E402
 

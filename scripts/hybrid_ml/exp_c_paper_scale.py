@@ -9,7 +9,7 @@ import time
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.dae import ContinuousSet, DAEBuilder
 from discopt.modeling import Model
 from discopt.solvers.nlp_pounce import solve_nlp
@@ -89,7 +89,7 @@ print(
 )
 
 # assess: recovered rate law + honest resimulation per trajectory
-from discopt._jax.dag_compiler import _compute_var_offset  # noqa: E402
+from discopt._relax.dag_compiler import _compute_var_offset  # noqa: E402
 
 
 def value_of(var, x):

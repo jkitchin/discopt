@@ -11,7 +11,7 @@ Measured on nvs24 (``scratchpad/nvs24_arm.py``,
 ``scratchpad/nvs24_profile_evidence.txt``): ``solve(time_limit=0.202)`` reached
 ``_solve_lp_warm`` and ran **47.03 s** — one ``DualPivotLoop`` 59 494 degenerate dual
 pivots deep, Bland's rule never activated — turning a 3.9 s solve budget into 53 s
-(13.5x). ~13 call sites in ``_jax/mccormick_lp.py`` plus ``lp_spatial_bb.py`` and
+(13.5x). ~13 call sites in ``_relax/mccormick_lp.py`` plus ``lp_spatial_bb.py`` and
 ``integer_ratio.py`` compute a per-LP budget and pass it here, so the drop was
 general rather than an nvs24 quirk.
 
@@ -29,7 +29,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from discopt._jax.milp_relaxation import (  # noqa: E402
+from discopt._relax.milp_relaxation import (  # noqa: E402
     MilpRelaxationModel,
     _lp_warm_deadline_enabled,
 )

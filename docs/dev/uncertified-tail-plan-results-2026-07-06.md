@@ -366,7 +366,7 @@ not a lift failure.)
 
 ### Implementation (flagged, default OFF)
 
-`python/discopt/_jax/factorable_reform.py`:
+`python/discopt/_relax/factorable_reform.py`:
 - `_lift_loose_products_enabled()` — env flag `DISCOPT_LIFT_LOOSE_PRODUCTS`
   (default `"0"`).
 - `_liftable_call_power_base()` — the structural matcher (`call ** int≥2`,

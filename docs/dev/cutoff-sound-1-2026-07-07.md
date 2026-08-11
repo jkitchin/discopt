@@ -110,7 +110,7 @@ Localization lead (for C-38): the **root McCormick LP bound is valid** (`-1e-9`,
 over-tightens a node box on the non-overlap `(xi−xj)²+(yi−yj)² ≥ (ri+rj)²`
 structure, removing the region containing the 2.5409 optimum, so the surviving
 nodes' bounds exceed the true optimum). Core layer, flags OFF — `crates/discopt-core`
-presolve/FBBT or the spatial-branch node reduction, not `_jax/{root,node}_reduce.py`.
+presolve/FBBT or the spatial-branch node reduction, not `_relax/{root,node}_reduce.py`.
 
 ## Part 2 — Bucket classification
 

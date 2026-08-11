@@ -20,9 +20,9 @@ import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt._jax.sparse_jacobian import make_sparse_jac_fn, sparse_jacobian_jvp
-from discopt._jax.sparsity import (
+from discopt._relax.nlp_evaluator import NLPEvaluator
+from discopt._relax.sparse_jacobian import make_sparse_jac_fn, sparse_jacobian_jvp
+from discopt._relax.sparsity import (
     SparsityPattern,
     compute_coloring,
     detect_and_color,

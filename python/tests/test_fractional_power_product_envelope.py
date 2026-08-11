@@ -68,7 +68,7 @@ def test_lift_is_value_preserving():
     relaxation of an *equivalent* model). Checked numerically against the lifted
     model's defining equalities at random feasible points."""
     import numpy as np
-    from discopt._jax import factorable_reform as fr
+    from discopt._relax import factorable_reform as fr
     from discopt.modeling.core import (
         BinaryOp,
         Constant,

@@ -241,42 +241,42 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "contract",
     ),
     (
-        "_jax/deadline.py",
+        "_relax/deadline.py",
         "_deadline_monotonic = time.monotonic() + max(0.0, float(seconds_from_now))",
         "contract",
     ),
     (
-        "_jax/lp_spatial_bb.py",
+        "_relax/lp_spatial_bb.py",
         "deadline=time.perf_counter() + _obbt_budget,",
         "residual",
     ),
     (
-        "_jax/lp_spatial_bb.py",
+        "_relax/lp_spatial_bb.py",
         "if (time.perf_counter() - t0) >= time_limit:",
         "contract",
     ),
     (
-        "_jax/lp_spatial_bb.py",
+        "_relax/lp_spatial_bb.py",
         "if (time.perf_counter() - t0) >= time_limit or nodes >= max_nodes:",
         "contract",
     ),
     (
-        "_jax/mccormick_lp.py",
+        "_relax/mccormick_lp.py",
         "deadline = time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S",
         "residual",
     ),
     (
-        "_jax/mccormick_lp.py",
+        "_relax/mccormick_lp.py",
         "_deadline = None if time_limit is None else time.perf_counter() + time_limit",
         "contract",
     ),
     (
-        "_jax/mccormick_lp.py",
+        "_relax/mccormick_lp.py",
         "and (time.perf_counter() - _psd_t0) > _gate_budget * _base_solve_wall",
         "residual",
     ),
     (
-        "_jax/obbt.py",
+        "_relax/obbt.py",
         "deadline = time.perf_counter() + total_time_limit "
         "if total_time_limit is not None else None",
         "contract",
@@ -286,32 +286,32 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     # means to test instead of racing the machine). Same three gates, same
     # categories — only the spelling of the clock read changed.
     (
-        "_jax/primal_heuristics.py",
+        "_relax/primal_heuristics.py",
         "_wall = _now() + max(0.0, time_budget)",
         "legacy",
     ),
     (
-        "_jax/primal_heuristics.py",
+        "_relax/primal_heuristics.py",
         "slice_deadline = _now() + max(0.0, float(submip_time_limit))",
         "contract",
     ),
     (
-        "_jax/primal_heuristics.py",
+        "_relax/primal_heuristics.py",
         "t_end = _now() + max(0.0, float(time_budget))",
         "legacy",
     ),
     (
-        "_jax/root_reduce.py",
+        "_relax/root_reduce.py",
         "obbt_deadline = None if obbt_budget is None else time.perf_counter() + obbt_budget",
         "residual",
     ),
     (
-        "_jax/presolve/orchestrator.py",
+        "_relax/presolve/orchestrator.py",
         "if time_limit_ms > 0 and (time.monotonic() - started) * 1000.0 >= time_limit_ms:",
         "contract",
     ),
     (
-        "_jax/convexity/signomial_global.py",
+        "_relax/convexity/signomial_global.py",
         "if time_limit is not None and (time.perf_counter() - t0) > time_limit:",
         "contract",
     ),
@@ -379,7 +379,7 @@ def test_the_converted_layer_stays_converted():
     offenders = sorted(
         (p, s)
         for (p, s), c in _CATEGORY.items()
-        if p == "_jax/primal_heuristics.py" and c == "residual"
+        if p == "_relax/primal_heuristics.py" and c == "residual"
     )
     assert not offenders, (
         "a converted primal heuristic grew a component-local wall budget again:\n"

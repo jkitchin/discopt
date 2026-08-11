@@ -28,8 +28,8 @@ from typing import Callable, Optional, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.relaxation_compiler import compile_relaxation
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.relaxation_compiler import compile_relaxation
 from discopt.modeling.core import Model
 
 # Tolerances mirror conftest numerical policy (abs=1e-6); we use a slightly
@@ -240,7 +240,7 @@ def assert_convexity(
     *over*-claim convex or concave (UNKNOWN/AFFINE are acceptable; a wrong
     CONVEX/CONCAVE is a soundness failure).
     """
-    from discopt._jax.convexity import Curvature, classify_expr
+    from discopt._relax.convexity import Curvature, classify_expr
 
     m = Model("harness")
     handles = [m.continuous(f"x{i}", lb=lo, ub=hi) for i, (lo, hi) in enumerate(bounds)]

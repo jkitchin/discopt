@@ -37,8 +37,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax.mcbox import MCBox  # noqa: E402
-from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound  # noqa: E402
+from discopt._relax.mcbox import MCBox  # noqa: E402
+from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound  # noqa: E402
 
 # ------------------------------------------------------------------ flowsheet data
 A = [0.8, 0.6, 0.5]  # per-unit rate coefficients (k_i = a_i * T_i)

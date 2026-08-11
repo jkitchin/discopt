@@ -5,7 +5,7 @@ newly reachable instances get a verified incumbent). The default-path fallback r
 for the newly in-scope class stays behind `DISCOPT_LP_SPATIAL_MIXED`, **default OFF**:
 its graduation panel is cert-clean but not net-positive (§4, Panel B).*
 
-The LP-per-node spatial engine (`_jax/lp_spatial_bb.py`) was gated to **pure-integer,
+The LP-per-node spatial engine (`_relax/lp_spatial_bb.py`) was gated to **pure-integer,
 MINIMIZE** models. Issue #860 records the consequence: three instances named in #844
 (`rsyn0805m04hfsg`, `gastrans582_*`, `gastrans040`) return no incumbent and cannot
 even be *offered* to the engine, so no primal heuristic inside it can help.

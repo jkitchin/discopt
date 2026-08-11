@@ -46,11 +46,11 @@ os.environ["DISCOPT_COEF_TIGHTEN"] = "1"  # corrected Stage 1 (#780) — the bas
 
 import highspy
 import numpy as np
-from discopt._jax.cmir_cuts import separate_cmir
-from discopt._jax.cover_cuts import separate_cover_cuts
-from discopt._jax.gdp_reformulate import reformulate_gdp
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.cmir_cuts import separate_cmir
+from discopt._relax.cover_cuts import separate_cover_cuts
+from discopt._relax.gdp_reformulate import reformulate_gdp
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import VarType, from_nl
 
 SNAP = os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/")

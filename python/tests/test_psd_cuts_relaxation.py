@@ -16,9 +16,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling.core as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.psd_cuts import (
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.psd_cuts import (
     psd_strengthen_relaxation_bound,
     separate_psd_cuts_on_relaxation,
 )
@@ -112,7 +112,7 @@ def test_binary_products_get_moment_cuts_via_diagonal_shortcut():
     x=(.5,.5,.5), X_ij=0, whose 4x4 moment matrix has eigenvalue -1/4. The k=3 moment
     cut is violated there and tightens the bound, staying valid (<= 1).
     """
-    from discopt._jax.model_utils import binary_flat_cols
+    from discopt._relax.model_utils import binary_flat_cols
 
     m = dm.Model("tri")
     x = [m.integer(f"x{i}", lb=0, ub=1) for i in range(3)]

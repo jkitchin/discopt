@@ -68,9 +68,9 @@ def _row_value(d, x):
 
 def _nl_decomps(model):
     """Re-run the producer's row loop: [(row_index, sign, _Decomp)] for nonlinear rows."""
-    from discopt._jax.gdp_reformulate import reformulate_gdp
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = reformulate_gdp(model, method="big-m")
     lb, ub = flat_variable_bounds(m)

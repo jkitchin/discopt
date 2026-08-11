@@ -1,7 +1,7 @@
-diff --git a/python/discopt/_jax/incremental_mccormick.py b/python/discopt/_jax/incremental_mccormick.py
+diff --git a/python/discopt/_relax/incremental_mccormick.py b/python/discopt/_relax/incremental_mccormick.py
 index 6173490..4caec2c 100644
---- a/python/discopt/_jax/incremental_mccormick.py
-+++ b/python/discopt/_jax/incremental_mccormick.py
+--- a/python/discopt/_relax/incremental_mccormick.py
++++ b/python/discopt/_relax/incremental_mccormick.py
 @@ -65,6 +65,41 @@ def _square_aux_bounds(li, ui):
      return 0.0, max(li * li, ui * ui)
  

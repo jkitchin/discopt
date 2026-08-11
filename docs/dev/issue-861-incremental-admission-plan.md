@@ -454,7 +454,7 @@ Append one entry per landed task (§0.1 recovers loop state from here).
 
 ### T1 + T2 — `decline_reason` + admission sweep meter + baseline — PR #893
 
-* **Landed:** `python/discopt/_jax/incremental_mccormick.py` stores
+* **Landed:** `python/discopt/_relax/incremental_mccormick.py` stores
   `decline_reason` (set on the exception path *and* on both non-raising
   deadline guards, which were the paths most likely to read as “no reason”);
   new meter `discopt_benchmarks/scripts/incremental_admission_sweep.py`;

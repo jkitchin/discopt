@@ -17,7 +17,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.primal_heuristics as PH  # noqa: E402
+import discopt._relax.primal_heuristics as PH  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import discopt.solver as S  # noqa: E402
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity.posynomial import (
+from discopt._relax.convexity.posynomial import (
     Monomial,
     PosynomialForm,
     is_monomial,

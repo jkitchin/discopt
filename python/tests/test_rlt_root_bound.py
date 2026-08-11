@@ -17,19 +17,19 @@ import itertools
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import (
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import (
     build_milp_relaxation,
     sanitize_relaxation_for_conditioning,
 )
-from discopt._jax.model_utils import binary_flat_cols, flat_variable_bounds
-from discopt._jax.rlt import (
+from discopt._relax.model_utils import binary_flat_cols, flat_variable_bounds
+from discopt._relax.rlt import (
     build_rlt1_lp,
     build_rlt1_split,
     rlt1_lagrangian_lower_bound,
     rlt1_lower_bound,
 )
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 
 def _synthetic_qap(n: int, seed: int):
@@ -95,7 +95,7 @@ def _built(model):
 
 def _mccormick_lp_bound(relax):
     """Continuous McCormick LP root bound via the exact oracle (the loose baseline)."""
-    from discopt._jax.obbt import get_exact_lp_solver
+    from discopt._relax.obbt import get_exact_lp_solver
 
     _lp = get_exact_lp_solver()
     res = _lp(
@@ -181,7 +181,7 @@ def test_rlt1_exclusion_presolve_is_bound_neutral(n, seed, monkeypatch):
     identically-zero pair columns / trivial RLT rows, so it must leave the LP
     optimum **exactly** unchanged while shrinking the system. Compares the presolved
     build against a full build (presolve monkeypatched off)."""
-    import discopt._jax.rlt as rlt_mod
+    import discopt._relax.rlt as rlt_mod
 
     model, opt, _ = _synthetic_qap(n, seed)
     relax, info = _built(model)
@@ -213,7 +213,7 @@ def test_rlt1_bound_is_the_ns_safe_value_not_the_raw_vertex():
     few ulp *above* the true minimum and, surfaced as a lower bound, prune the
     optimum. Locks the mechanism: reverting to ``res.objective`` would break this.
     """
-    from discopt._jax.obbt import _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
+    from discopt._relax.obbt import _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
 
     model, opt, _ = _synthetic_qap(4, 0)
     relax, info = _built(model)

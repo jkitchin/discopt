@@ -29,7 +29,7 @@ import time
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.term_classifier import _compute_var_offset, classify_nonlinear_terms
+from discopt._relax.term_classifier import _compute_var_offset, classify_nonlinear_terms
 
 
 def _naive_offset(var, model) -> int:

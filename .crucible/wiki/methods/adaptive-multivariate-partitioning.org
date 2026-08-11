@@ -78,7 +78,7 @@ Not every nonlinear term benefits equally from partitioning:
   workflow; use standard envelopes.
 
 The discopt implementation classifies each expression-DAG node and
-routes it appropriately --- see ~_jax/term_classifier.py~.
+routes it appropriately --- see ~_relax/term_classifier.py~.
 
 ** Soundness and Termination
 
@@ -127,10 +127,10 @@ citep:nagarajan-2019 and the pooling/blending problems in Alpine.
   ~Model~ / ~Variable~ / constraint API.
 - Integrates with discopt's presolve (FBBT/OBBT at root) and shares the
   NLP subproblem backends (Ipopt default).
-- MILP relaxation construction lives in ~_jax/milp_relaxation.py~;
-  partition management in ~_jax/discretization.py~ and
-  ~_jax/partition_selection.py~; term classification in
-  ~_jax/term_classifier.py~.
+- MILP relaxation construction lives in ~_relax/milp_relaxation.py~;
+  partition management in ~_relax/discretization.py~ and
+  ~_relax/partition_selection.py~; term classification in
+  ~_relax/term_classifier.py~.
 - Not currently exposed via the auto-dispatch in ~Model.solve()~ --- it
   is a user-selected solver. Future: ~Model.solve(solver="amp")~.
 

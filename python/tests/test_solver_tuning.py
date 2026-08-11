@@ -159,7 +159,7 @@ def test_set_and_reset_current_round_trip():
 # functional: the relaxer read sites consult current(), not os.environ
 # --------------------------------------------------------------------------- #
 def test_relaxer_reads_published_tuning():
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     m = dm.Model("r")
     x = m.continuous("x", lb=-1.0, ub=2.0)
@@ -190,7 +190,7 @@ def test_psd_cost_gate_is_sound_and_bound_valid():
     cut a feasible point or push the dual bound above the true optimum. On a small
     indefinite QCQP (PSD auto-fires) the gated solve must reach the same certified
     optimum, with the dual bound never crossing it."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     def _build():
         m = dm.Model("qcqp")
@@ -242,7 +242,7 @@ def test_ils_cap_read_site_consults_published_tuning():
     solve cap from ``solver_tuning.current().ils_solve_cap`` — the published tuning,
     not a module-frozen env read. Default ON (mult 2); ``ils_solve_cap=0`` is the
     uncapped escape hatch."""
-    import discopt._jax.primal_heuristics as ph  # noqa: F401  (import wiring smoke)
+    import discopt._relax.primal_heuristics as ph  # noqa: F401  (import wiring smoke)
 
     assert current().ils_solve_cap == 2  # default ON
     token = set_current(SolverTuning(ils_solve_cap=0))

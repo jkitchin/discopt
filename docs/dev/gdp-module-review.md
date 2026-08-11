@@ -2,10 +2,10 @@
 
 **Date:** 2026-07-05
 **Scope:** the disjunctive-programming / GDP reformulation path —
-`python/discopt/_jax/gdp_reformulate.py` (big-M / MBigM / hull reformulation of
+`python/discopt/_relax/gdp_reformulate.py` (big-M / MBigM / hull reformulation of
 disjunctions, indicators, SOS, and propositional-logic constraints),
 `python/discopt/solvers/gdpopt_loa.py` (logic-based outer approximation),
-`python/discopt/_jax/gdp_advisor.py` (big-M-vs-hull advisor), and the GDP-relevant
+`python/discopt/_relax/gdp_advisor.py` (big-M-vs-hull advisor), and the GDP-relevant
 parts of the modeling layer (`_DisjunctiveConstraint` / `_IndicatorConstraint` /
 `_SOSConstraint` / `_LogicalConstraint`, `either_or` / `if_then` / `sos1` / logic).
 `decomposition/ir/reformulation.py` was inspected and is out of GDP scope (it wraps

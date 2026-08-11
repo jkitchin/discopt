@@ -14,7 +14,7 @@ import pytest
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp  # noqa: E402
-from discopt._jax.dag_compiler import compile_expression_params  # noqa: E402
+from discopt._relax.dag_compiler import compile_expression_params  # noqa: E402
 from discopt.modeling.core import Constant, Model  # noqa: E402
 from discopt.stochastic import (  # noqa: E402
     CVaR,

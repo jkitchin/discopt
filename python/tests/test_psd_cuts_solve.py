@@ -70,10 +70,10 @@ def test_psd_closes_plain_mccormick_root_gap():
     cuts capture 2-variable minors; genuinely 3-way moment coupling would need
     dense k>=3 cuts, a documented follow-on.)
     """
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.psd_cuts import psd_strengthen_relaxation_bound
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.psd_cuts import psd_strengthen_relaxation_bound
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = dm.Model("indef2")
     x = m.continuous("x", shape=(2,), lb=0, ub=1)

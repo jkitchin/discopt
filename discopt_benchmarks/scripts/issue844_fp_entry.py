@@ -10,7 +10,7 @@ a mechanism validated on a synthetic proxy can be a no-op on the real class).
 Q1  What primal constructors does discopt have TODAY? Answered by reading source, not
     by this script; the script records the one fact that decides reachability — the
     scope gate of the engine that already hosts an LP-based objective pump
-    (``_jax/lp_spatial_bb.py``'s ``feasibility_pump``, Fischetti-Glover-Lodi).
+    (``_relax/lp_spatial_bb.py``'s ``feasibility_pump``, Fischetti-Glover-Lodi).
 
 Q2  Is there a fractional LP solution to pump at all? A pump alternates between the
     relaxation and a rounding; if the root McCormick LP never solves, the pump has
@@ -75,7 +75,7 @@ import discopt
 # CLAUDE.md section 8: prove WHICH code is loaded before measuring anything with it.
 repo = sys.argv[3]
 assert discopt.__file__.startswith(repo), discopt.__file__
-from discopt._jax import lp_spatial_bb as LSB
+from discopt._relax import lp_spatial_bb as LSB
 assert LSB.__file__.startswith(repo), LSB.__file__
 # Positive marker unique to the version under test: the LP objective pump this
 # experiment is about is a closure inside the engine, so assert its docstring text.
@@ -86,8 +86,8 @@ assert hasattr(LSB, "_relax_bound"), "marker absent: _relax_bound"
 
 import discopt.modeling as dm
 from discopt.modeling.core import ObjectiveSense, VarType
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 inst, budget = sys.argv[1], float(sys.argv[2])
 out = {"instance": inst, "asserts": 0}
@@ -144,7 +144,7 @@ if r is None and out["inf_box"]:
     # (lp_spatial_bb.py:492) precisely so the relaxation gets a valid bound.
     s = time.perf_counter()
     try:
-        from discopt._jax.obbt import obbt_tighten_root
+        from discopt._relax.obbt import obbt_tighten_root
         rr = obbt_tighten_root(m, lb, ub, rounds=5,
                                deadline=time.perf_counter() + budget / 3.0,
                                time_limit_per_lp=0.5)
@@ -223,7 +223,7 @@ repo = sys.argv[3]
 assert discopt.__file__.startswith(repo), discopt.__file__
 import discopt.modeling as dm
 from discopt.modeling.core import ObjectiveSense
-from discopt._jax import lp_spatial_bb as LSB
+from discopt._relax import lp_spatial_bb as LSB
 _src = open(LSB.__file__).read()
 assert "Objective feasibility pump (Fischetti-Glover-Lodi)" in _src, "pump marker absent"
 

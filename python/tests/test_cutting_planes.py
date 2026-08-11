@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.cutting_planes import (
+from discopt._relax.cutting_planes import (
     BilinearTerm,
     CutPool,
     LinearCut,
@@ -262,7 +262,7 @@ class TestOACutsFromEvaluator:
 
     def _make_model_and_evaluator(self):
         """Build a simple model: min x0^2 + x1^2 s.t. x0 + x1 >= 1."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("test_oa")
@@ -314,7 +314,7 @@ class TestOACutsFromEvaluator:
 
     def test_convex_mask_filters_nonconvex_constraints(self):
         """The convex mask should suppress OA cuts for nonconvex constraint rows."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("test_oa_mask")
@@ -337,7 +337,7 @@ class TestOACutsFromEvaluator:
 
     def test_report_records_nonconvex_mask_skip_reason(self):
         """The report exposes why direct evaluator OA skipped a row."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("test_oa_report")
@@ -364,7 +364,7 @@ class TestOASeparation:
     """Test that OA separation returns only violated cuts."""
 
     def _make_evaluator(self):
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("test_sep")
@@ -389,7 +389,7 @@ class TestOASeparation:
 
     def test_convex_mask_skips_nonconvex_violations(self):
         """Separation should ignore violated rows that are marked nonconvex."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("test_sep_mask")
@@ -567,7 +567,7 @@ class TestCombinedCutGeneration:
     """Test the combined OA + RLT cut generator for the solver loop."""
 
     def _make_convex_model_and_evaluator(self):
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("convex")
@@ -577,7 +577,7 @@ class TestCombinedCutGeneration:
         return m, NLPEvaluator(m)
 
     def _make_bilinear_model_and_evaluator(self):
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("bilinear")
@@ -921,7 +921,7 @@ class TestAugmentedEvaluator:
     """Test the _AugmentedEvaluator wrapper for injecting cuts into NLP."""
 
     def _make_evaluator_and_pool(self):
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Model
 
         m = Model("augtest")
@@ -993,16 +993,19 @@ class TestAugmentedEvaluator:
         assert new_bounds[1] == (-1e20, 0.0)
         assert new_bounds[2] == (-1e20, 0.0)
 
-    def test_augmented_jax_constraint_fn(self):
+    def test_augmented_constraint_fn(self):
         from discopt.solver import _AugmentedEvaluator
 
         evaluator, pool = self._make_evaluator_and_pool()
         aug = _AugmentedEvaluator(evaluator, pool)
         cons_fn = aug._cons_fn
         assert cons_fn is not None
-        x_jax = jnp.array([2.0, 1.0])
-        result = cons_fn(x_jax)
+        # Accepts a JAX array (a JAX evaluator's own _cons_fn returns one) but
+        # must produce numpy: this wrapper is built on a live solve path that may
+        # be tape-backed and JAX-free. See test_75_jax_free_solve_path.
+        result = cons_fn(jnp.array([2.0, 1.0]))
         assert result.shape == (3,)
+        assert isinstance(result, np.ndarray), f"augmented _cons_fn returned {type(result)}"
 
     def test_empty_pool_passthrough(self):
         from discopt.solver import _AugmentedEvaluator

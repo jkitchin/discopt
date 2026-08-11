@@ -59,7 +59,7 @@ status = "declines"
 note = "discopt produces no dual bound today (sound decline, bound=None); recorded so a future periodic envelope can be regression-checked to bound <= -3.7625."
 
 # ── LP-node engine scope (issue #862) — the vendored pure-integer MINIMIZE
-# instances the LP-per-node spatial engine (``_jax/lp_spatial_bb.py``) serves, and
+# instances the LP-per-node spatial engine (``_relax/lp_spatial_bb.py``) serves, and
 # therefore the corpus on which the #844 fallback's *incumbent quality* is scored by
 # ``discopt_benchmarks/scripts/issue844_primal_quality_panel.py``.
 #

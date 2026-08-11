@@ -78,7 +78,7 @@ def _f(x):
 
 
 def solve_one(name: str, budget: float) -> dict:
-    from discopt._jax.convexity import classify_model
+    from discopt._relax.convexity import classify_model
     from discopt.modeling.core import ObjectiveSense, from_nl
 
     rec: dict = {"instance": name, "budget": budget}

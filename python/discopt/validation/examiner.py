@@ -147,11 +147,11 @@ def examine(
         _LogicalConstraint,
     )
     if any(isinstance(c, _gdp_types) for c in model._constraints):
-        from discopt._jax.gdp_reformulate import reformulate_gdp
+        from discopt._relax.gdp_reformulate import reformulate_gdp
 
         model = reformulate_gdp(model)
 
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     parts: list[np.ndarray] = []
     is_integer_mask: list[bool] = []

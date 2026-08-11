@@ -1,7 +1,7 @@
 """Head-to-head cross-check: discopt's interval bounds vs. SUSPECT's FBBT.
 
 SUSPECT propagates interval bounds for every expression; discopt has its own
-interval evaluator (:func:`discopt._jax.convexity.interval_eval.evaluate_interval`).
+interval evaluator (:func:`discopt._relax.convexity.interval_eval.evaluate_interval`).
 This suite cross-checks the two enclosures of the *same raw body* over one
 shared corpus.
 
@@ -91,7 +91,7 @@ def _hi(x) -> float:
 
 
 def _discopt_interval(body, model) -> tuple[float, float]:
-    from discopt._jax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     iv = evaluate_interval(body, model)
     return float(np.asarray(iv.lo).ravel()[0]), float(np.asarray(iv.hi).ravel()[0])

@@ -114,8 +114,8 @@ def test_pr_optimal_value(instance: ProblemInstance) -> None:
 
 def test_pr_subset_keeps_small_nonconvex_minlp() -> None:
     """Guard the issue #43 coverage contract for the PR-fast subset."""
-    from discopt._jax.convexity import classify_model
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.convexity import classify_model
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     instance_names = {inst.name for inst in PR_INSTANCES}
     assert "binary_cubic_minlp" in instance_names

@@ -145,7 +145,7 @@ def test_860_mixed_flag_defaults_to_off_and_gates_the_reserve(monkeypatch):
     substantive assertion, that ``mixed=False`` declines a mixed model, is unchanged
     and is now also what the default does.
     """
-    from discopt._jax.lp_spatial_bb import _is_in_scope
+    from discopt._relax.lp_spatial_bb import _is_in_scope
     from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
 
     monkeypatch.delenv("DISCOPT_LP_SPATIAL_MIXED", raising=False)

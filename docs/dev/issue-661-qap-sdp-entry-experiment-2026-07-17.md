@@ -122,7 +122,7 @@ raw numbers in `qap_shor_sdp_summary_2026-07-17.json`, `qap_shor_plain.json`,
 
 ## Production integration (2026-07-18)
 
-The conditional GO above landed as `python/discopt/_jax/shor_sdp.py`:
+The conditional GO above landed as `python/discopt/_relax/shor_sdp.py`:
 
 - **Strong Shor only** (PSD moment matrix + `diag(X)=x` + model rows +
   lifted-equality RLT + McCormick box on X + gangster), assembled generally from

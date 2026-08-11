@@ -11,7 +11,7 @@ def bench(fn, N=20000, warm=50):
 
 def main():
     import jax, jax.numpy as jnp
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
     m=from_nl(NL); ev=nev.cached_evaluator(m); n=ev.n_variables
     ev._ensure_coo_cache()

@@ -12,7 +12,7 @@ from typing import cast
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import (
     Constraint,
     Model,
@@ -58,13 +58,13 @@ def solve_gdpopt_loa(
     t_start = time.perf_counter()
 
     # 1. Reformulate GDP to standard MINLP via big-M
-    from discopt._jax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.gdp_reformulate import reformulate_gdp
 
     reformulated = reformulate_gdp(model, method="big-m")
 
     # 2. Build NLP evaluator for the reformulated model
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     evaluator = NLPEvaluator(reformulated)
     oa_convexity = classify_oa_cut_convexity(reformulated)
@@ -93,7 +93,7 @@ def solve_gdpopt_loa(
     linear_senses = []
     nonlinear_indices = []
 
-    from discopt._jax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
 
     for k, c in enumerate(reformulated._constraints):
         if not isinstance(c, Constraint):
@@ -594,7 +594,7 @@ def _add_oa_cuts(
     objective_is_convex,
 ):
     """Generate OA cuts at x_star and append to cut lists."""
-    from discopt._jax.cutting_planes import (
+    from discopt._relax.cutting_planes import (
         generate_oa_cuts_from_evaluator,
         generate_objective_oa_cut,
     )

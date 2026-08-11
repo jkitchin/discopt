@@ -40,7 +40,7 @@ from discopt.modeling.core import BinaryOp, Constant, UnaryOp, sqrt
 
 def test_eval_constant_expr_folds_negated_literals():
     """A variable-free factor must fold to its value, not reach bilinear decomp."""
-    from discopt._jax.milp_relaxation import _eval_constant_expr
+    from discopt._relax.milp_relaxation import _eval_constant_expr
 
     # neg(2.5) folds to -2.5 (the exact case that broke the linearizer: a
     # ``(-2.5)`` literal parses as the unary negation of a Constant).
@@ -53,7 +53,7 @@ def test_eval_constant_expr_folds_negated_literals():
 
 def test_eval_constant_expr_returns_none_for_variable_terms():
     """The folder must never mis-fold an expression that depends on a variable."""
-    from discopt._jax.milp_relaxation import _eval_constant_expr
+    from discopt._relax.milp_relaxation import _eval_constant_expr
 
     m = dm.Model("t")
     x = m.continuous("x", lb=0, ub=10)
@@ -73,7 +73,7 @@ def test_decompose_product_folds_composite_constant_factor():
     the whole constraint. The fold is exact and variable-free, so it only ever
     lets a product be relaxed that was previously discarded.
     """
-    from discopt._jax.milp_relaxation import _decompose_product, _get_flat_index
+    from discopt._relax.milp_relaxation import _decompose_product, _get_flat_index
 
     m = dm.Model("gear")
     i1 = m.integer("i1", lb=12, ub=60)

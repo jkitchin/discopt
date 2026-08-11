@@ -31,8 +31,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
-from discopt._jax.obbt import obbt_tighten_root
+from discopt._relax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+from discopt._relax.obbt import obbt_tighten_root
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
 from discopt.solvers.lp_backend import get_exact_dual_lp_solver, get_exact_lp_solver

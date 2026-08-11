@@ -17,7 +17,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.problem_classifier import (
+from discopt._relax.problem_classifier import (
     ProblemClass,
     classify_problem,
     extract_lp_data,
@@ -93,7 +93,7 @@ def test_lp_extraction_reproduces_objective(extract):
     data = extract(m)
     c = np.asarray(data.c, dtype=np.float64)
     rng = np.random.RandomState(0)
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     ev = NLPEvaluator(m)
     for _ in range(5):
@@ -127,7 +127,7 @@ def test_qp_extraction_reproduces_objective(extract):
     data = extract(m)
     Q = np.asarray(data.Q, dtype=np.float64)
     c = np.asarray(data.c, dtype=np.float64)
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     ev = NLPEvaluator(m)
     rng = np.random.RandomState(1)
@@ -146,7 +146,7 @@ def test_qp_extraction_array_variables_and_matmul():
     data = extract_qp_data(m)
     Q = np.asarray(data.Q, dtype=np.float64)[:3, :3]
     c = np.asarray(data.c, dtype=np.float64)[:3]
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     ev = NLPEvaluator(m)
     rng = np.random.RandomState(2)

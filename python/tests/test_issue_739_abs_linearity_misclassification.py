@@ -28,7 +28,7 @@ from discopt.modeling.core import Model
 
 @pytest.mark.smoke
 def test_abs_objective_not_classified_lp():
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     m = Model("absmin")
     x = m.continuous("x", lb=-1.0, ub=2.0)
@@ -38,7 +38,7 @@ def test_abs_objective_not_classified_lp():
 
 @pytest.mark.smoke
 def test_abs_constraint_not_classified_lp():
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     m = Model("abscon")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -50,7 +50,7 @@ def test_abs_constraint_not_classified_lp():
 @pytest.mark.smoke
 def test_abs_nested_in_linear_sum_not_classified_lp_or_qp():
     """abs buried in an otherwise linear/quadratic body still poisons the degree."""
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     m = Model("absnested")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -76,7 +76,7 @@ def test_abs_objective_rust_repr_not_linear():
 @pytest.mark.smoke
 def test_plain_linear_model_still_classified_lp():
     """Control: the abs refusal must not over-reach onto genuinely linear models."""
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     m = Model("lin")
     x = m.continuous("x", lb=-1.0, ub=2.0)

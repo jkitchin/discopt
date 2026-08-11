@@ -31,7 +31,7 @@ import discopt.solver as SOLVER  # noqa: E402
 import discopt.solvers.gdpopt_loa as LOA  # noqa: E402
 import discopt.solvers.nlp_pounce as NLPP  # noqa: E402
 import discopt.solvers.oa as OA  # noqa: E402
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 from discopt.solvers import pounce_option_defaults  # noqa: E402
 

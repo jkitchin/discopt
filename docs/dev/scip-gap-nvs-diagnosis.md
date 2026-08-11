@@ -109,7 +109,7 @@ in seconds, not microsecond LP throughput.
 
 ## Step 3 findings (cuts on the McCormick LP) — measured
 
-Step 1 landed (`_jax/lp_spatial_bb.py`); Step 3 (cuts) was investigated next because
+Step 1 landed (`_relax/lp_spatial_bb.py`); Step 3 (cuts) was investigated next because
 the SCIP ablation showed cuts are the *closing* lever (70 vs 6,796 nodes). Two
 concrete discoveries on nvs17, both data-backed:
 

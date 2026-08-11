@@ -3,7 +3,7 @@
 **Date:** 2026-07-06
 **Status:** measured + prototype cut shipped behind a **default-OFF** env flag
 (`DISCOPT_ILS_SOLVE_CAP`). One production edit
-(`python/discopt/_jax/primal_heuristics.py`), one reusable script
+(`python/discopt/_relax/primal_heuristics.py`), one reusable script
 (`discopt_benchmarks/scripts/nlp_solve_volume.py`).
 **Scope:** the confirmed lever behind "discopt is seconds where BARON is
 sub-second" — the **volume** of POUNCE NLP subsolves. PYPROF-1 (#528,
@@ -283,5 +283,5 @@ cuttable, and cut here.)
   hit-rate profiler (monkeypatch of `nlp_pounce.solve_nlp` with stack-walk
   bucketing and per-source incumbent-improvement hit rate). Reusable on any
   `.nl` instance.
-- `python/discopt/_jax/primal_heuristics.py` — the `DISCOPT_ILS_SOLVE_CAP`
+- `python/discopt/_relax/primal_heuristics.py` — the `DISCOPT_ILS_SOLVE_CAP`
   (default-OFF) sub-NLP solve cap inside `integer_local_search._objective_improve`.

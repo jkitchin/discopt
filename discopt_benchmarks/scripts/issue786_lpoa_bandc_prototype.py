@@ -48,8 +48,8 @@ os.environ["DISCOPT_COEF_TIGHTEN"] = "1"
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from discopt._jax.cmir_cuts import separate_cmir  # noqa: E402
-from discopt._jax.cover_cuts import separate_cover_cuts  # noqa: E402
+from discopt._relax.cmir_cuts import separate_cmir  # noqa: E402
+from discopt._relax.cover_cuts import separate_cover_cuts  # noqa: E402
 from issue781_cutmgmt_probe import (  # noqa: E402
     PANEL,
     CutPool,

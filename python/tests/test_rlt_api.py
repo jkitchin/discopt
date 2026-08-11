@@ -24,8 +24,8 @@ from _rlt_audit import (
     generate_quadratic_bound_factor_cuts,
     standard_lifted_info_quadratic,
 )
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.milp_relaxation import build_milp_relaxation
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.milp_relaxation import build_milp_relaxation
 
 
 def _qcqp_with_linear_constraint() -> dm.Model:

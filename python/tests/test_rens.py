@@ -18,7 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.primal_heuristics import rens  # noqa: E402
+from discopt._relax.primal_heuristics import rens  # noqa: E402
 
 
 def _miqp():

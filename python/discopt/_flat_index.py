@@ -12,7 +12,7 @@ in-range slot, so the relaxation was simply built for a bilinear pair that does
 not exist in the model — an invalid relaxation that cut off the true optimum and
 was then reported as ``optimal`` with ``gap_certified=True``.
 
-The layout this module inverts is fixed by ``_jax/dag_compiler.py``, which
+The layout this module inverts is fixed by ``_relax/dag_compiler.py``, which
 materializes a shaped variable as ``x_flat[off : off + size].reshape(shape)`` in
 C (row-major) order and then applies ``a[index]``. For a full-rank all-integer
 index that composition is exactly ``x_flat[off + ravel_multi_index(idx, shape)]``,

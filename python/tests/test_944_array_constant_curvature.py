@@ -55,16 +55,16 @@ import discopt  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.convexity import classify_model  # noqa: E402
-from discopt._jax.convexity.lattice import Curvature  # noqa: E402
-from discopt._jax.convexity.rules import classify_expr  # noqa: E402
-from discopt._jax.nlp_evaluator import cached_evaluator  # noqa: E402
+from discopt._relax.convexity import classify_model  # noqa: E402
+from discopt._relax.convexity.lattice import Curvature  # noqa: E402
+from discopt._relax.convexity.rules import classify_expr  # noqa: E402
+from discopt._relax.nlp_evaluator import cached_evaluator  # noqa: E402
 from discopt._rust import model_to_repr  # noqa: E402
 
 # Load gate (CLAUDE.md §8): assert both the file under test and a marker unique
 # to this version, so a stale install cannot pass this file vacuously.
 assert "discopt" in discopt.__file__, discopt.__file__
-from discopt._jax.convexity import rules as _rules  # noqa: E402
+from discopt._relax.convexity import rules as _rules  # noqa: E402
 
 assert hasattr(_rules, "_const_scale_sign"), (
     f"loaded a discopt without the #944 array-constant curvature rule: {_rules.__file__}"
@@ -281,7 +281,7 @@ class TestNegativeIndexReachesTheRepr:
 
     def test_classification_survives_a_negative_index(self):
         """A negative index must not demote a QP to ``NLP`` (the silent degradation)."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qp_neg")
         x = m.continuous("x", shape=(3,), lb=-5, ub=5)

@@ -115,7 +115,7 @@ class TestGDPoptLOA:
     def test_nonconvex_objective_skips_objective_oa_cuts(self, monkeypatch):
         """LOA must not generate objective OA cuts for a nonconvex objective."""
         import discopt.modeling as dm
-        from discopt._jax import cutting_planes
+        from discopt._relax import cutting_planes
 
         calls = []
         real_generate = cutting_planes.generate_objective_oa_cut

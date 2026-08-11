@@ -202,7 +202,7 @@ class TestNumericalConsistency:
         implementation differences, and precision loss in transfer.
         """
         # from discopt._rust import evaluate_expression_rust
-        # from discopt._jax import evaluate_expression_jax
+        # from discopt._relax import evaluate_expression_jax
         #
         # # Test on a known expression: x0*exp(x1) + sin(x0*x1)
         # x = np.array([1.5, -0.7])
@@ -224,7 +224,7 @@ class TestNumericalConsistency:
         This property is the soundness guarantee of the entire solver.
         """
         # from hypothesis import given, strategies as st
-        # from discopt._jax import evaluate_relaxation, evaluate_original
+        # from discopt._relax import evaluate_relaxation, evaluate_original
         #
         # lb, ub = random_bounds(n=5, seed=42)
         # # Sample 1000 random points within bounds

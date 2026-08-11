@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from discopt._jax.symbolic.gp_hull import monomial_log_envelope
+from discopt._relax.symbolic.gp_hull import monomial_log_envelope
 
 pytestmark = pytest.mark.relaxation
 

@@ -32,7 +32,7 @@ four links:
    The cut is NOT the bug.
 2. **Appending that one row makes the cold node solve fail numerically.**
    At the root node solve, `solve_at_node`
-   (`python/discopt/_jax/mccormick_lp.py:877`, pre-fix) appends the row and the
+   (`python/discopt/_relax/mccormick_lp.py:877`, pre-fix) appends the row and the
    warm-simplex integer-aware relaxation solve flips from `optimal 1.10` to an
    **uncertified `infeasible`** (or `iteration_limit`, depending on warm
    state) — the C-38 numerical-false-infeasible class, triggered here by the

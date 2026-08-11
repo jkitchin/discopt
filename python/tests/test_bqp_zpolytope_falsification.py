@@ -22,8 +22,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax import binary_multilinear_reform as B
-from discopt._jax.problem_classifier import extract_lp_data
+from discopt._relax import binary_multilinear_reform as B
+from discopt._relax.problem_classifier import extract_lp_data
 
 pytestmark = pytest.mark.relaxation
 

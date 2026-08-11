@@ -1045,7 +1045,7 @@ class TestConstraintFeasibilityCheck:
     def test_feasibility_check_helper(self):
         """Unit test for _check_constraint_feasibility."""
         import numpy as np
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.solver import _check_constraint_feasibility
 
         # The modeling API normalizes x + y >= 3 to 3 - x - y <= 0,

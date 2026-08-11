@@ -134,11 +134,11 @@ conflicts):
 
 | task | files touched | overlaps |
 |---|---|---|
-| G1 | `_jax/nlp_evaluator.py`, POUNCE call sites (`solver.py` ~10620–10640 `_IpoptCallbacks`/`pounce.Problem`) | none with G2–G5 |
+| G1 | `_relax/nlp_evaluator.py`, POUNCE call sites (`solver.py` ~10620–10640 `_IpoptCallbacks`/`pounce.Problem`) | none with G2–G5 |
 | G2 | `solver_tuning.py:325` (one default) + docs/tests | `solver.py` untouched |
-| G3 | `solver.py` routing predicate + OBBT gate (~4681), `_jax/lp_spatial_bb.py` | different `solver.py` region from G2's flag |
+| G3 | `solver.py` routing predicate + OBBT gate (~4681), `_relax/lp_spatial_bb.py` | different `solver.py` region from G2's flag |
 | G4 | `discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py` only | none (measurement) |
-| G5 | `_jax/uniform_relax.py` (specific atom classes), diagnosis scripts | none |
+| G5 | `_relax/uniform_relax.py` (specific atom classes), diagnosis scripts | none |
 
 **Behavioral stacking** (each is net-positive alone; combined benefits stack
 but **sub-additively where two tasks touch the same family** — do not sum the
@@ -181,7 +181,7 @@ nvs05-class measurement (§1.3) with **byte-identical bounds and node counts**
 `_value`/`__float__`) ≈ 5.4s of 20s wall on nvs05 alone; per-node gap 90×.
 
 **Code anchors.**
-- `python/discopt/_jax/nlp_evaluator.py` — `class NLPEvaluator` (line ~188):
+- `python/discopt/_relax/nlp_evaluator.py` — `class NLPEvaluator` (line ~188):
   `evaluate_objective` (:499), `evaluate_gradient` (:503),
   `evaluate_constraints` (:511), `_evaluate_dense_jacobian` (:517),
   `evaluate_lagrangian_hessian` (:488), `_current_params` (:480). Each wraps a
@@ -292,7 +292,7 @@ cuts). Route in-scope models to the existing LP-node engine by default.
 TX4 row in `tenx-plan.md` §3 (planned, never executed — verdict blank).
 
 **Code anchors.**
-- Engine exists opt-in: `python/discopt/_jax/lp_spatial_bb.py` (incremental
+- Engine exists opt-in: `python/discopt/_relax/lp_spatial_bb.py` (incremental
   warm LP, node cuts, GMI with safety margin — its C-10 tests were un-deferred
   in #636's review and pass). Opt-in wiring per PR #290.
 - OBBT gate: `solver.py:4681` — `_obbt_has_continuous = any(v.var_type ==
@@ -397,7 +397,7 @@ relaxation is *correctly* unbounded); bchoco06 has **no finite dual bound at
 1. **bchoco06 unbounded-relaxation hole:** which atom class of which
    constraint leaves the root LP unbounded, and why (instrument
    `build_uniform_relaxation`'s per-atom envelope emission — the `audit_build`
-   ownership report in `_jax/claim_audit.py` gives per-atom columns; find the
+   ownership report in `_relax/claim_audit.py` gives per-atom columns; find the
    free column with objective/constraint stake). Kill: hole is structural à la
    LMTD with no sound finite bound → document and close.
 2. **heatexch pole-excluded sub-boxes:** branch once by hand on the `a=ε+b`

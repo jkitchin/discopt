@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from discopt._jax.nl_reconstruction import reconstruct_dag
+from discopt._relax.nl_reconstruction import reconstruct_dag
 from discopt._rust import parse_nl_string
 from discopt.modeling.core import (
     BinaryOp,
@@ -337,7 +337,7 @@ class TestRoundTripEval:
     def _eval_jax(self, nl_str, x_vals):
         """Compile and evaluate the reconstructed objective via JAX."""
         import jax.numpy as jnp
-        from discopt._jax.dag_compiler import compile_objective
+        from discopt._relax.dag_compiler import compile_objective
 
         nl_repr = parse_nl_string(nl_str)
         m = _make_model_from_nl(nl_repr)
@@ -504,7 +504,7 @@ class TestFromNlIntegration:
 
         try:
             import discopt.modeling as dm
-            from discopt._jax.dag_compiler import compile_objective
+            from discopt._relax.dag_compiler import compile_objective
 
             model = dm.from_nl(path)
             f = compile_objective(model)
@@ -525,7 +525,7 @@ class TestFromNlIntegration:
 
         try:
             import discopt.modeling as dm
-            from discopt._jax.nlp_evaluator import NLPEvaluator
+            from discopt._relax.nlp_evaluator import NLPEvaluator
 
             model = dm.from_nl(path)
             evaluator = NLPEvaluator(model)
@@ -550,7 +550,7 @@ class TestFromNlIntegration:
 
         try:
             import discopt.modeling as dm
-            from discopt._jax.dag_compiler import compile_objective
+            from discopt._relax.dag_compiler import compile_objective
 
             model = dm.from_nl(path)
             f = compile_objective(model)

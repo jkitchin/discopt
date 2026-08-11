@@ -13,7 +13,7 @@ jax.config.update("jax_enable_x64", True)
 
 sp = pytest.importorskip("sympy")
 
-from discopt._jax.symbolic.constraint_cuts import (  # noqa: E402
+from discopt._relax.symbolic.constraint_cuts import (  # noqa: E402
     eliminate_chain_coupling,
     power_term_underestimator,
     verify_cut,

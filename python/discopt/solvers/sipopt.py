@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solvers.nlp_pounce import solve_nlp
 
 

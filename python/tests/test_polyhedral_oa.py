@@ -1,4 +1,4 @@
-"""Tests for ``discopt._jax.polyhedral_oa`` (M11 of issue #51).
+"""Tests for ``discopt._relax.polyhedral_oa`` (M11 of issue #51).
 
 Acceptance criteria:
 
@@ -20,8 +20,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax import polyhedral_oa as oa
-from discopt._jax.cutting_planes import LinearCut
+from discopt._relax import polyhedral_oa as oa
+from discopt._relax.cutting_planes import LinearCut
 
 N_SAMPLES = 10_000
 TOL = 1e-9

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax.convexity.eigenvalue import (
+from discopt._relax.convexity.eigenvalue import (
     gershgorin_lambda_max,
     gershgorin_lambda_min,
     psd_2x2_sufficient,
 )
-from discopt._jax.convexity.interval import Interval
+from discopt._relax.convexity.interval import Interval
 
 
 def _sample_symmetric(H: Interval, n_samples: int, seed: int) -> np.ndarray:

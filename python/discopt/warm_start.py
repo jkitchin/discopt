@@ -248,7 +248,7 @@ def check_feasibility(
 
     # Constraint feasibility (requires evaluator)
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.modeling.core import Constraint
 
         evaluator = NLPEvaluator(model)

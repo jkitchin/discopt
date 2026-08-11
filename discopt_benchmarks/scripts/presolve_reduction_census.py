@@ -15,7 +15,7 @@ import sys
 import time
 
 import discopt.modeling as dm
-from discopt._jax.problem_classifier import (
+from discopt._relax.problem_classifier import (
     _extract_linear_coefficients_sparse,
     _NotLinearError,
 )

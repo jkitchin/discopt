@@ -15,7 +15,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nonlinear_bound_tightening import (
+from discopt._relax.nonlinear_bound_tightening import (
     PeriodicVariableBoundRule,
     build_flat_variable_metadata,
 )

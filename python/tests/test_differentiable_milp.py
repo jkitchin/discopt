@@ -19,7 +19,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.differentiable import differentiable_solve
+from discopt._relax.differentiable import differentiable_solve
 
 
 def _fd_obj_gradient(make_model, p0, eps=1e-5):
@@ -145,7 +145,7 @@ def test_milp_objective_layer_composes_under_jax_grad():
     """make_milp_objective_layer is differentiable inside a jax.grad pipeline."""
     import jax
     import jax.numpy as jnp
-    from discopt._jax.pounce_layer import make_milp_objective_layer
+    from discopt._relax.pounce_layer import make_milp_objective_layer
 
     m, p = _milp_fixed_charge(0.5)
     layer = make_milp_objective_layer(m, [p])

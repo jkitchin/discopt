@@ -92,7 +92,7 @@ def max_violation(model, x_dict) -> float | None:
     below the true optimum (issue #940/#945). Without this number a valid GBD
     bound looks 'unsound' against an infeasible reference.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.decomposition.structure import flat_bounds
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 

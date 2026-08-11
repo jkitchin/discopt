@@ -143,8 +143,8 @@ def _diff_bounds_one(name: str, children: int, do_sample: bool) -> dict:
     """Root + child-box relaxation bounds via the in-house Rust simplex, plus an
     optional feasible-point soundness sample. Runs INSIDE a worker subprocess so
     the caller's env config is read fresh."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.modeling.core import ObjectiveSense, from_nl
     from engine_perf_probe import _child_boxes  # reuse the fixed bisection schedule
 

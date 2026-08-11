@@ -31,9 +31,9 @@ from typing import Any, Callable, Optional, Sequence, TypedDict, cast
 
 import numpy as np
 
-from discopt._jax.milp_relaxation import _normalize_convhull_formulation
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.nonlinear_bound_tightening import (
+from discopt._relax.milp_relaxation import _normalize_convhull_formulation
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.nonlinear_bound_tightening import (
     is_effectively_finite,
     tighten_nonlinear_bounds,
 )
@@ -974,7 +974,7 @@ def _solve_milp_with_oa_recovery(
     milp_solver: str = "auto",
 ):
     """Retry MILP solves after dropping the oldest half of OA cuts on infeasibility."""
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     active_oa_cuts = list(oa_cuts or [])
     max_retries = max(1, len(active_oa_cuts).bit_length() + 1)
@@ -1023,7 +1023,7 @@ def _solve_milp_with_oa_recovery(
 def _check_constraints(x: np.ndarray, model: Model, tol: float = 1e-4) -> bool:
     """Return True if all constraints are satisfied at x."""
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
         evaluator = NLPEvaluator(model)
@@ -1341,8 +1341,8 @@ def _direct_oa_skip_reasons(
     flat_ub: np.ndarray,
 ) -> list[str | None]:
     """Explain why each constraint row is excluded from direct tangent OA."""
-    from discopt._jax.convexity.rules import Curvature, classify_expr
-    from discopt._jax.cutting_planes import _quadratic_polynomial
+    from discopt._relax.convexity.rules import Curvature, classify_expr
+    from discopt._relax.cutting_planes import _quadratic_polynomial
 
     reasons: list[str | None] = []
     var_index_cache: dict[int, frozenset[int]] = {}
@@ -1680,14 +1680,14 @@ def _run_partitioned_obbt(
     milp_solver: str = "auto",
 ):
     """Run incumbent-seeded OBBT on AMP's partition-aware MILP relaxation."""
-    from discopt._jax.discretization import (
+    from discopt._relax.discretization import (
         DiscretizationState,
         add_adaptive_partition,
         initialize_partitions,
     )
-    from discopt._jax.milp_relaxation import MilpRelaxationModel, build_milp_relaxation
-    from discopt._jax.obbt import ObbtResult
-    from discopt._jax.partition_selection import pick_partition_vars
+    from discopt._relax.milp_relaxation import MilpRelaxationModel, build_milp_relaxation
+    from discopt._relax.obbt import ObbtResult
+    from discopt._relax.partition_selection import pick_partition_vars
 
     n_orig = len(flat_lb)
     part_vars = _select_partition_vars_with_hook(
@@ -1913,7 +1913,7 @@ def _run_amp_presolve_bound_tightening(
     milp_solver: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, Any]:
     """Run the configured AMP presolve OBBT mode and return tightened bounds."""
-    from discopt._jax.obbt import run_obbt
+    from discopt._relax.obbt import run_obbt
 
     algo = _normalize_presolve_bt_algo(presolve_bt_algo)
     n_orig = len(flat_lb)
@@ -2062,8 +2062,8 @@ def _run_cutoff_obbt(
         return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
 
     try:
-        from discopt._jax.milp_relaxation import build_milp_relaxation
-        from discopt._jax.obbt import run_obbt_on_relaxation
+        from discopt._relax.milp_relaxation import build_milp_relaxation
+        from discopt._relax.obbt import run_obbt_on_relaxation
 
         cutoff_relax, _ = build_milp_relaxation(
             model,
@@ -2296,16 +2296,16 @@ def _solve_amp_impl(
     """
     t_start = time.perf_counter()
 
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.discretization import (
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.discretization import (
         add_adaptive_partition,
         add_uniform_partition,
         check_partition_convergence,
         initialize_partitions,
     )
-    from discopt._jax.nlp_evaluator import NLPEvaluator
-    from discopt._jax.partition_selection import pick_partition_vars
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.partition_selection import pick_partition_vars
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     assert model._objective is not None
@@ -2348,7 +2348,7 @@ def _solve_amp_impl(
 
     if pure_continuous and not skip_convex_check:
         try:
-            from discopt._jax.convexity import classify_model as _classify_convexity
+            from discopt._relax.convexity import classify_model as _classify_convexity
             from discopt.solver import _solve_continuous
 
             is_convex, _ = _classify_convexity(model, use_certificate=True)
@@ -2573,9 +2573,9 @@ def _solve_amp_impl(
     # tightens variables whose width is large enough to plausibly matter.
     if obbt_at_root and apply_partitioning:
         try:
-            from discopt._jax.discretization import DiscretizationState
-            from discopt._jax.milp_relaxation import build_milp_relaxation
-            from discopt._jax.obbt import run_obbt_on_relaxation
+            from discopt._relax.discretization import DiscretizationState
+            from discopt._relax.milp_relaxation import build_milp_relaxation
+            from discopt._relax.obbt import run_obbt_on_relaxation
 
             _empty_disc = DiscretizationState(
                 scaling_factor=partition_scaling_factor,
@@ -2648,7 +2648,7 @@ def _solve_amp_impl(
             abs_width_tol=disc_abs_width_tol,
         )
     else:
-        from discopt._jax.discretization import DiscretizationState
+        from discopt._relax.discretization import DiscretizationState
 
         disc_state = DiscretizationState(
             scaling_factor=partition_scaling_factor,
@@ -2717,7 +2717,7 @@ def _solve_amp_impl(
 
         appended = 0
         try:
-            from discopt._jax.cutting_planes import (
+            from discopt._relax.cutting_planes import (
                 generate_alphabb_quadratic_oa_cuts_from_evaluator,
                 generate_oa_cuts_from_evaluator_report,
             )

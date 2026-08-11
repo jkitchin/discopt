@@ -99,7 +99,7 @@ print(f"status      : {res.status}  iters={res.iterations}  wall={res.wall_time:
 print(f"objective   : {res.objective:.6e}")
 
 # ---------------------------------------------------------------- assess
-from discopt._jax.dag_compiler import _compute_var_offset  # noqa: E402
+from discopt._relax.dag_compiler import _compute_var_offset  # noqa: E402
 
 
 def value_of(var, x):

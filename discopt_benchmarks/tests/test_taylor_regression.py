@@ -1,6 +1,6 @@
 """M3 regression: Taylor model bounds on benchmark-style subexpressions.
 
-The Taylor model kernel (``discopt._jax.taylor_model``) is not yet wired
+The Taylor model kernel (``discopt._relax.taylor_model``) is not yet wired
 into the LP relaxation compiler — that integration ships alongside the
 Chebyshev model integration as a follow-up. This regression exercises the
 kernel directly on subexpressions drawn from typical benchmark problems
@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax import chebyshev_model as cm
-from discopt._jax import taylor_model as tm
+from discopt._relax import chebyshev_model as cm
+from discopt._relax import taylor_model as tm
 
 N_REGRESSION_SAMPLES = 10_000
 

@@ -17,8 +17,8 @@ import warnings
 
 import numpy as np
 import pytest
-from discopt._jax.convexity import interval as iv
-from discopt._jax.convexity.interval import Interval
+from discopt._relax.convexity import interval as iv
+from discopt._relax.convexity.interval import Interval
 
 pytestmark = pytest.mark.unit
 

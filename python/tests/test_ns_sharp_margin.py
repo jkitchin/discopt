@@ -166,7 +166,7 @@ def test_gear4_piece_bound_clears_certification_threshold():
     # optimum (1.64326) — the flat margin left it at 1.64314. Regression for
     # the #309 root-solve mechanism.
     import discopt.modeling as dm
-    from discopt._jax.integer_ratio import (
+    from discopt._relax.integer_ratio import (
         IntegerRatioPartitioner,
         detect_integer_ratio_specs,
     )

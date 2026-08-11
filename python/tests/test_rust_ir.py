@@ -231,7 +231,7 @@ class TestStructureDetection:
 
 class TestAmpTermClassification:
     def test_rust_classifier_matches_python_terms_and_incidence(self):
-        from discopt._jax.term_classifier import (
+        from discopt._relax.term_classifier import (
             _classify_nonlinear_terms_python,
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,
@@ -252,7 +252,7 @@ class TestAmpTermClassification:
         assert rust_terms.partition_candidates == [0, 1, 2, 3]
 
     def test_rust_classifier_flattens_multidimensional_indices(self):
-        from discopt._jax.term_classifier import (
+        from discopt._relax.term_classifier import (
             _classify_nonlinear_terms_python,
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,
@@ -275,7 +275,7 @@ class TestAmpTermClassification:
         assert rust_terms.term_incidence[7] == {0}
 
     def test_python_fallback_flattens_multidimensional_indices(self):
-        from discopt._jax.term_classifier import (
+        from discopt._relax.term_classifier import (
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,
         )
@@ -292,7 +292,7 @@ class TestAmpTermClassification:
         assert terms.general_nl
 
     def test_repeated_factor_product_does_not_double_classify_subproducts(self):
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         m = dm.Model("amp_terms_repeated_factor")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -305,7 +305,7 @@ class TestAmpTermClassification:
         assert terms.bilinear == []
 
     def test_public_classifier_falls_back_for_general_nonlinear_objects(self):
-        from discopt._jax.term_classifier import (
+        from discopt._relax.term_classifier import (
             _classify_nonlinear_terms_python,
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,

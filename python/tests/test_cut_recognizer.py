@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 pytest.importorskip("sympy")
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax.symbolic import cut_recognizer as R  # noqa: E402
+from discopt._relax.symbolic import cut_recognizer as R  # noqa: E402
 
 pytestmark = pytest.mark.relaxation
 

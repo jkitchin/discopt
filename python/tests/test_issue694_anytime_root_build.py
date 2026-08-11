@@ -41,7 +41,7 @@ def _root_box(model):
 def test_build_deadline_none_is_byte_identical():
     """OFF path: ``build_deadline=None`` builds the full relaxation — same row count,
     not truncated, identical LP bound. This is the opt-out / bound-neutrality guard."""
-    from discopt._jax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import from_nl
 
     model = from_nl(os.path.join(_CORPUS, "casctanks.nl"))
@@ -68,7 +68,7 @@ def test_truncated_build_is_valid_and_weaker():
     """A build truncated at a past deadline drops constraint rows and is a valid
     WEAKER relaxation: fewer rows, marked truncated, and its LP min ≤ the full
     build's LP min (dropping rows only enlarges the feasible set — never falsified)."""
-    from discopt._jax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import from_nl
 
     model = from_nl(os.path.join(_CORPUS, "hda.nl"))
@@ -100,7 +100,7 @@ def test_truncated_build_is_valid_and_weaker():
 def test_partial_build_never_exceeds_full_across_deciles():
     """The anytime curve is monotone-sound: for a mid-build deadline, the partial
     relaxation's bound (if finite) is a valid lower bound ≤ the full build's."""
-    from discopt._jax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import from_nl
 
     model = from_nl(os.path.join(_CORPUS, "heatexch_gen1.nl"))

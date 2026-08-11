@@ -28,7 +28,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np  # noqa: E402
-from discopt._jax.term_classifier import classify_nonlinear_terms  # noqa: E402
+from discopt._relax.term_classifier import classify_nonlinear_terms  # noqa: E402
 from discopt._rust import model_to_repr  # noqa: E402
 from issue801_root_probe import (  # noqa: E402
     OBJ_VAR,

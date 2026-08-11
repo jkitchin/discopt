@@ -138,7 +138,7 @@ def gen_knapsack(n, kdim, seed):
 # Solvers
 # --------------------------------------------------------------------------- #
 def _lp_data(model):
-    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data
     from discopt.solver import _extract_variable_info
 
     lp = extract_lp_data(model)
@@ -152,7 +152,7 @@ def solve_discopt_engine(model, capture_profile=False):
     """Call the Rust MILP engine directly (no Python budget cap)."""
     from discopt._rust import solve_milp_py
 
-    from discopt._jax.problem_classifier import dense_A
+    from discopt._relax.problem_classifier import dense_A
 
     lp, n_orig, int_idx = _lp_data(model)
     A = np.ascontiguousarray(dense_A(lp.A_eq))
@@ -202,7 +202,7 @@ def solve_highs_lp(model):
         return None
     import scipy.sparse as sp
 
-    from discopt._jax.problem_classifier import dense_A
+    from discopt._relax.problem_classifier import dense_A
 
     lp, _, _ = _lp_data(model)
     A = sp.csr_matrix(dense_A(lp.A_eq))

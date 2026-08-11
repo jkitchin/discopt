@@ -210,7 +210,7 @@ def sweep_lps():
 
 def corpus_lps():
     """Every ``.nl`` in the in-repo corpus that classifies as an LP."""
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
     from discopt.modeling import from_nl
 
     out = []

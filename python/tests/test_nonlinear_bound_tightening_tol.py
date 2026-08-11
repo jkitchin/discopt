@@ -15,7 +15,7 @@ platforms (unlike the end-to-end solve, which only tripped on Linux numerics).
 
 from __future__ import annotations
 
-from discopt._jax.nonlinear_bound_tightening import (
+from discopt._relax.nonlinear_bound_tightening import (
     _EMPTY_INTERVAL_FEAS_TOL,
     _tighten_univariate_quadratic_interval,
 )

@@ -23,7 +23,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 import discopt  # noqa: E402
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.modeling.core import from_nl  # noqa: E402
 
 assert "/home/user/discopt/python/discopt/" in discopt.__file__, discopt.__file__

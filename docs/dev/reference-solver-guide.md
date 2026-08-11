@@ -171,28 +171,28 @@ All discopt evidence is `file:symbol` in this repo; solver evidence in §1.
 
 | Component | Reference relies on | discopt state | Evidence (discopt) |
 |---|---|---|---|
-| **FBBT** (feasibility bound tightening) | BARON `TDo`, SCIP per-node | **HAS** (default-on, root + per-node) | `crates/discopt-core/src/presolve/fbbt.rs`, `passes.rs:FbbtPass` (default); `_jax/mccormick_lp.py` lifted FBBT; per-node in `solver.py` reduce loop |
-| **OBBT** (optimality bound tightening) | BARON `OBTTDo`, SCIP root-scheduled {cite:p}`Gleixner2017` | **PARTIAL** (class-gated: needs MC-LP relaxer + dependent vars + `n_vars ≤ _PER_NODE_OBBT_MAX_VARS`) | `_jax/obbt.py:obbt_tighten_root`; `solver.py` per-node gate (~5290–5330); Rust `presolve/obbt.rs` **not yet orchestrator-wrapped** (`passes.rs` note: "OBBT … integration deferred") |
+| **FBBT** (feasibility bound tightening) | BARON `TDo`, SCIP per-node | **HAS** (default-on, root + per-node) | `crates/discopt-core/src/presolve/fbbt.rs`, `passes.rs:FbbtPass` (default); `_relax/mccormick_lp.py` lifted FBBT; per-node in `solver.py` reduce loop |
+| **OBBT** (optimality bound tightening) | BARON `OBTTDo`, SCIP root-scheduled {cite:p}`Gleixner2017` | **PARTIAL** (class-gated: needs MC-LP relaxer + dependent vars + `n_vars ≤ _PER_NODE_OBBT_MAX_VARS`) | `_relax/obbt.py:obbt_tighten_root`; `solver.py` per-node gate (~5290–5330); Rust `presolve/obbt.rs` **not yet orchestrator-wrapped** (`passes.rs` note: "OBBT … integration deferred") |
 | **DBBT / marginals** (reduced-cost range reduction) | BARON `MDo` {cite:p}`Ryoo1996` | **HAS** (Rust kernel + Python root/per-node) | `crates/discopt-core/src/presolve/duality.rs:reduced_cost_fixing`; `solver.py:_root_reduced_cost_fixing` / `_reduced_cost_fixing` |
 | **Probing** | BARON `PDo`, SCIP presolve | **HAS** (default-on, deadline-bounded) | `crates/discopt-core/src/presolve/probing.rs`; `passes.rs:ProbingPass` |
 | **Branch-and-reduce loop (reduce every node)** | BARON core {cite:p}`Ryoo1996` | **PARTIAL** (root fixpoint via presolve orchestrator; per-node reduce is inline Python, not a first-class loop) | `presolve/orchestrator.rs` fixpoint (`~84–136`); per-node FBBT/OBBT inline in `solver.py` B&B loop; `root_fixpoint` flag in flight (BR-1/#78) |
-| **Auxiliary-variable lifted relaxation (AVM)** | BARON, SCIP default | **HAS** (this *is* discopt's default node engine) | `_jax/mccormick_lp.py` ("bilinears lifted to aux columns"); `solver.py` `_mc_mode="lp"` on nonconvex+objective |
-| **RLT / exact multilinear hull** | BARON, SCIP 8 | **HAS** (auto / class-gated) | `_jax/rlt_cuts.py`; `solver.py` `rlt` param ("auto") |
-| **Expression-level convexity detection (nlhdlr-style)** | SCIP 8 nlhdlrs {cite:p}`Bestuzheva2023` | **PARTIAL/WEAK** (convexity module + α-BB/PSD/SOC exist, but no single dispatcher that picks the tightest handler per subexpression) | `_jax/convexity/`, `alphabb.py`, `psd_cuts.py`, `soc_cuts.py`; problem-level classifier `problem_classifier.py` (not per-expression) |
-| **Reduced-space McCormick (no aux lifting)** | MAiNGO signature (not BARON/SCIP) | **PARTIAL** (exists, not default) | `_jax/multivariate_mccormick.py`, `mccormick_nlp.py`; **F3 falsified as a root-bound tightener** |
-| **Integer / MIR / c-MIR cuts** | HiGHS + SCIP full CG family | **PARTIAL/WEAK** (root-only; c-MIR default-OFF, net-negative on integer-product roots) | `crates/discopt-core/src/lp/mir.rs`, `_jax/cmir_cuts.py`; `solver.py` c-MIR default-off (#587 NO-GO) |
+| **Auxiliary-variable lifted relaxation (AVM)** | BARON, SCIP default | **HAS** (this *is* discopt's default node engine) | `_relax/mccormick_lp.py` ("bilinears lifted to aux columns"); `solver.py` `_mc_mode="lp"` on nonconvex+objective |
+| **RLT / exact multilinear hull** | BARON, SCIP 8 | **HAS** (auto / class-gated) | `_relax/rlt_cuts.py`; `solver.py` `rlt` param ("auto") |
+| **Expression-level convexity detection (nlhdlr-style)** | SCIP 8 nlhdlrs {cite:p}`Bestuzheva2023` | **PARTIAL/WEAK** (convexity module + α-BB/PSD/SOC exist, but no single dispatcher that picks the tightest handler per subexpression) | `_relax/convexity/`, `alphabb.py`, `psd_cuts.py`, `soc_cuts.py`; problem-level classifier `problem_classifier.py` (not per-expression) |
+| **Reduced-space McCormick (no aux lifting)** | MAiNGO signature (not BARON/SCIP) | **PARTIAL** (exists, not default) | `_relax/multivariate_mccormick.py`, `mccormick_nlp.py`; **F3 falsified as a root-bound tightener** |
+| **Integer / MIR / c-MIR cuts** | HiGHS + SCIP full CG family | **PARTIAL/WEAK** (root-only; c-MIR default-OFF, net-negative on integer-product roots) | `crates/discopt-core/src/lp/mir.rs`, `_relax/cmir_cuts.py`; `solver.py` c-MIR default-off (#587 NO-GO) |
 | **Gomory (GMI)** | HiGHS/SCIP | **PARTIAL** (POUNCE-gated, off by default) | `crates/discopt-core/src/lp/gomory.rs`; `solver.py` GMI gate |
-| **Cover cuts** | HiGHS/SCIP | **PARTIAL** (root only) | `crates/discopt-core/src/lp/cover.rs`, `_jax/cover_cuts.py` |
+| **Cover cuts** | HiGHS/SCIP | **PARTIAL** (root only) | `crates/discopt-core/src/lp/cover.rs`, `_relax/cover_cuts.py` |
 | **Cut separation *loop*** (rounds + re-solve + filtering) | SCIP separation loop {cite:p}`Bestuzheva2023` | **WEAK** (cuts added mostly at root as a pool, not an efficacy/orthogonality-filtered multi-round loop) | root cut assembly in `solver.py`; no per-node round loop |
 | **Dual simplex — steepest-edge pricing** | HiGHS {cite:p}`Huangfu2018` | **PARTIAL** (dual **Devex** — a steepest-edge *approximation* — present since #178; exact DSE tried under `DISCOPT_DUAL_DSE` and **KILLED** — F11/#99: regresses the #606 pathology 2.5× wall, RefacCap 3.4×) | `dual.rs` `gamma` Devex weights + Goldfarb–Reid update (`select_leaving`); exact DSE `recompute_dse_weights` flag-gated default-OFF |
 | **Dual simplex — bound-flipping ratio test** | HiGHS {cite:p}`Huangfu2018` | **HAS** (long-step BFRT since #178) | `dual.rs` `build_candidates` + the breakpoint-flipping loop in `run_dual` |
 | **Hypersparse FTRAN/BTRAN + FT update** | HiGHS {cite:p}`Huangfu2018` | **PARTIAL** (sparse LU + product-form update via `feral`; iterative refinement opt-in) | `simplex/linsolve.rs` (`SparseLu`, `update`, `ftran_refined`) |
 | **Dense-LU fallback route for wide bases** | (discopt-specific fix for the AVM dense-column pathology) | **PARTIAL** (flag `DISCOPT_LU_DENSITY_ROUTE`, default-OFF; blocked from graduating) | `simplex/linsolve.rs:188–195` `density_route_enabled`; A-2/#85 retry work in flight |
 | **Presolve reduction library** | HiGHS/SCIP {cite:p}`Achterberg2020` | **HAS** (aggregate, coeff-strengthen, implied-bounds, eliminate, cliques, symmetry, redundancy) | `crates/discopt-core/src/presolve/*.rs` via `orchestrator.rs` |
-| **Reliability / pseudocost branching** | HiGHS/SCIP {cite:p}`Achterberg2005` | **WEAK** (most-fractional among priority vars; strong-branching exists but no pseudocost accumulation) | `solver.py:_select_priority_branch_var`; `_jax/strong_branching.py` |
-| **Primal heuristic portfolio (FJ, RENS/RINS, FP)** | HiGHS {cite:p}`Achterberg2020` | **PARTIAL** (multi-start NLP + a feasibility-pump-style rounding; no feasibility jump / RINS / RENS) | `_jax/primal_heuristics.py:MultiStartNLP`; `pounce_layer.py` |
-| **Finite-bound inference from constraints** | BARON (infers from constraints) | **HAS** (LP-based bootstrap + equality propagation) | `_jax/obbt.py:bootstrap_finite_bounds` (~1597), wired into `obbt_tighten_root` |
-| **Rigorous certificate / safe dual bounds** | all three (Neumaier–Shcherbina style) | **HAS** | `_jax/obbt.py` safe-bound handling; `_numeric.py:is_effectively_finite` |
+| **Reliability / pseudocost branching** | HiGHS/SCIP {cite:p}`Achterberg2005` | **WEAK** (most-fractional among priority vars; strong-branching exists but no pseudocost accumulation) | `solver.py:_select_priority_branch_var`; `_relax/strong_branching.py` |
+| **Primal heuristic portfolio (FJ, RENS/RINS, FP)** | HiGHS {cite:p}`Achterberg2020` | **PARTIAL** (multi-start NLP + a feasibility-pump-style rounding; no feasibility jump / RINS / RENS) | `_relax/primal_heuristics.py:MultiStartNLP`; `pounce_layer.py` |
+| **Finite-bound inference from constraints** | BARON (infers from constraints) | **HAS** (LP-based bootstrap + equality propagation) | `_relax/obbt.py:bootstrap_finite_bounds` (~1597), wired into `obbt_tighten_root` |
+| **Rigorous certificate / safe dual bounds** | all three (Neumaier–Shcherbina style) | **HAS** | `_relax/obbt.py` safe-bound handling; `_numeric.py:is_effectively_finite` |
 
 **Honest read.** discopt already *has* the branch-and-reduce menu (FBBT, DBBT,
 probing, OBBT, bootstrap bound inference) — the range-reduction poll is largely
@@ -344,17 +344,17 @@ bounds are necessary but not sufficient (`1/x` on `[0,1]`).
 **What discopt already does (and it maps cleanly onto BARON).**
 - Default box for an unbounded continuous variable is `[-9.999e19, 9.999e19]`
   (`python/discopt/modeling/core.py`), with `EFFECTIVE_INF = 1e19` and
-  `is_effectively_finite` (`_jax/_numeric.py`); the McCormick relaxation numeric
-  cap is `_RELAX_NUMERIC_CAP = 1e10` (`_jax/milp_relaxation.py`).
+  `is_effectively_finite` (`_relax/_numeric.py`); the McCormick relaxation numeric
+  cap is `_RELAX_NUMERIC_CAP = 1e10` (`_relax/milp_relaxation.py`).
 - **discopt has BARON's "infer bounds from constraints" step already:**
-  `bootstrap_finite_bounds` (`_jax/obbt.py:~1597`) minimizes/maximizes each
+  `bootstrap_finite_bounds` (`_relax/obbt.py:~1597`) minimizes/maximizes each
   unbounded variable over the **linear feasible region** with an exact LP solver
   (sound: only shrinks the box), wired into `obbt_tighten_root` with a two-round
   fixpoint interleaved with `propagate_equality_defined_bounds` to unlock bounds
   through equality-defined intermediates (divisions, logs).
 - When a **nonlinear-participating** variable stays `≥ _RELAX_NUMERIC_CAP`, the
   incremental McCormick path is refused and it routes to a cold rebuild + HiGHS
-  unboundedness cross-check (`_jax/mccormick_lp.py:~429`), degrading soundly to
+  unboundedness cross-check (`_relax/mccormick_lp.py:~429`), degrading soundly to
   `status="feasible", gap_certified=False` — **the same behavior BARON exhibits**
   (a feasible point, no global claim).
 

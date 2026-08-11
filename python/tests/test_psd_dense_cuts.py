@@ -10,7 +10,7 @@ point).
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.psd_cuts import (
+from discopt._relax.psd_cuts import (
     _lifted_cliques,
     separate_psd_cuts_on_relaxation,
 )

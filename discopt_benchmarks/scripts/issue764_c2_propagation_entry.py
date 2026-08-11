@@ -69,7 +69,7 @@ def _capture_presolved():
 
 def _structure(model, lb, ub):
     """Producer spec -> plain lists (fixed rows, products, sqrts, integrality, box)."""
-    from discopt._jax.spatial_producer import build_spatial_kernel_spec
+    from discopt._relax.spatial_producer import build_spatial_kernel_spec
 
     spec = build_spatial_kernel_spec(model, bounds=(lb, ub))
     assert spec is not None, "producer must accept tanksize at the presolved box"
@@ -266,7 +266,7 @@ def propagate(lo, hi, fixed, blf, sqrts, integ, obj_col, cutoff, rounds=15):
 
 def run_arm(tag, use_propagation, model, structure, log):
     n_cols, fixed, blf, sqrts, integ, glo, ghi, obj_col = structure
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     relaxer = MccormickLPRelaxer(model)
     n_orig = len(model._variables)

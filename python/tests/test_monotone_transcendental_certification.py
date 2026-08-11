@@ -141,7 +141,7 @@ def test_monotone_atom_curvature_classified(name, func, lb, ub, expected):
     interval evaluator produced an unbounded enclosure and the lattice had no
     profile). It must now prove the correct sign-restricted curvature.
     """
-    from discopt._jax.convexity import Curvature, classify_expr
+    from discopt._relax.convexity import Curvature, classify_expr
 
     m = dm.Model()
     x = m.continuous("x", lb=lb, ub=ub)
@@ -165,8 +165,8 @@ def test_monotone_atom_curvature_classified(name, func, lb, ub, expected):
 )
 def test_monotone_interval_enclosure_is_sound(fn, npf, lb, ub):
     """The interval enclosure soundly contains the true image of the box."""
-    from discopt._jax.convexity import interval as iv
-    from discopt._jax.convexity.interval import Interval
+    from discopt._relax.convexity import interval as iv
+    from discopt._relax.convexity.interval import Interval
 
     enc = getattr(iv, fn)(Interval.from_bounds(lb, ub))
     samples = npf(np.linspace(lb, ub, 200))
@@ -177,8 +177,8 @@ def test_monotone_interval_enclosure_is_sound(fn, npf, lb, ub):
 @pytest.mark.correctness
 def test_out_of_domain_interval_abstains():
     """Out-of-domain / asymptote endpoints collapse to a conservative ±inf."""
-    from discopt._jax.convexity import interval as iv
-    from discopt._jax.convexity.interval import Interval
+    from discopt._relax.convexity import interval as iv
+    from discopt._relax.convexity.interval import Interval
 
     # asin below its domain -> unbounded lower endpoint (sound abstention).
     assert not np.isfinite(iv.asin(Interval.from_bounds(-2.0, 0.5)).lo)

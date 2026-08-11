@@ -165,7 +165,7 @@ cert-gap-plan §14 "T2.1-revisit RESULTS / VERDICT (2026-07-06)".
 - **Unlock:** R1's decision rule, recorded in cert-gap-plan §14 under a
   "T2.1-revisit RESULTS" block. Do not start before that block exists.
 - **Spec:** cert-gap-plan §14 **T2.3** (root fixpoint loop —
-  `_jax/root_reduce.py::run_root_fixpoint`, integration at end of iteration 0
+  `_relax/root_reduce.py::run_root_fixpoint`, integration at end of iteration 0
   post-root-heuristics, flags `root_fixpoint`/`DISCOPT_ROOT_FIXPOINT`
   default-OFF), **T2.4** (per-node `reduce_node()` — (a) expose
   `dual`/`col_status`/`safe_bound` on `MccormickLPResult` [bound-neutral
