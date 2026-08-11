@@ -12,6 +12,24 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **All 62 documentation notebooks re-executed** (`docs`). Their committed
+  outputs dated from 2026-04-25 and `docs/_config.yml` has
+  `execute_notebooks: "off"`, so nothing had re-run them in three and a half
+  months. All 62 execute cleanly. Across 372 paired objective/bound comparisons
+  no objective moved by more than 1e-4 relative; the diff is dominated by
+  wall-clock numbers. Three visible improvements: the "POUNCE LP returned an
+  infeasible point labeled optimal" fallback no longer fires anywhere (it
+  appeared six times across three notebooks), `tutorial_milp` now reports a real
+  gap where it printed `Gap: None`, and the debugger's `iter_start` checkpoint
+  now carries a root bound instead of `-inf`.
+
+  The sweep also surfaced #981: `tutorial_dae`'s parameter-estimation cell had
+  been running 493 s to report `feasible`, because collocation models get a dual
+  bound of exactly 0.0 and the relative gap can never close. That cell now
+  passes an explicit `time_limit` and says so, and its prose was corrected —
+  it still described `least_squares` as matching measurements to the nearest
+  node, which stopped being true in #101.
+
 - **`discopt._jax` is now `discopt._relax`** (`refactor`). The package was named
   for JAX when JAX built the relaxations. It no longer does: the 128 modules
   under it are numpy, and JAX does not enter `sys.modules` at any point during a
