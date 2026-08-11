@@ -433,7 +433,27 @@ def _lp_warm_deadline_enabled() -> bool:
       (contvar 500.6 s, bchoco08 80.9 s; the OFF arm has its own pre-existing
       class, heatexch_gen3 200.5 s in the same rep set).
 
-    Net-positive therefore FAILS: the sign flips with budget, which is not
+    **Update 2026-08-11: the compounding this flag hit at the round level is
+    fixed.** The coupled panel (performance-plan §14b) failed ``CERT_CLEAN`` on one
+    item — contvar's bound going ``183632.766 -> None`` with this flag AND
+    ``DISCOPT_NODE_ROUND_BUDGET`` on — and attributed it to the *interaction*, not
+    to either flag alone. The mechanism is now measured directly: hand
+    ``solve_at_node`` a round grant that is already spent and **16 of 114 cells of
+    the binding subset return no bound at all** where the same box under an
+    unclamped round certifies one, in BOTH arms of this flag
+    (``scratchpad/issue928_round_cut_short_entry.py``) — the deadline-truncated
+    build leaves a 0-row relaxation that solves to LP optimality and that every
+    certification route then declines. In every one of those cells the relaxation
+    still carried a valid finite box-interval objective floor, equal to the
+    unclamped control bound on 4 of the 5 instances
+    (``scratchpad/issue928_floor_inventory.py``). ``_solve_at_node_impl`` now
+    reports that floor — the round-level analogue of what this flag's own
+    ``_stash_deadline_bound`` does for an LP — and takes the tighter of it and any
+    banked dual; the #966 round-admission check no longer declines the ROOT round,
+    which holds no parent bound to fall back on.
+
+    Net-positive therefore FAILED at the time of writing: the sign flips with
+    budget, which is not
     "measurably helpful broadly" (the ``DISCOPT_CUT_INHERIT`` rule). The residual
     is measurably NOT this seam any more: per-LP deadline violations are zero
     across every probe, and on contvar the ON arm spends 2.8 s in 30 relaxation
