@@ -272,8 +272,11 @@ def solve_gbd(
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     t0 = time.time()
-    prefer_pounce = nlp_solver == "pounce"
-    milp = get_milp_solver(prefer_pounce=prefer_pounce)
+    # #977: the GBD master is a linear MILP -> exact-vertex simplex, never routed by
+    # ``nlp_solver`` (which selects the *NLP recourse* engine). See the companion
+    # comment in ``benders/solver.py`` for the measurement; ``get_milp_solver`` still
+    # falls back to POUNCE when the Rust simplex binding is unavailable.
+    milp = get_milp_solver(backend="simplex")
 
     if structure is None:
         structure = detect_decomposition(model)

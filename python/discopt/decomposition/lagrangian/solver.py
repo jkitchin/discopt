@@ -120,7 +120,12 @@ def solve_lagrangian(
         )
     t0 = time.time()
 
-    milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
+    # #977: the Lagrangian subproblem/Kelley master are linear MILPs -> exact-vertex
+    # simplex, never routed by ``prefer_pounce`` (which selects the *NLP* engine).
+    # The subproblem optimum is what makes the reported Lagrangian dual bound
+    # rigorous; an interior-point engine returns an analytic-centre objective that
+    # can drift off that optimum. See ``benders/solver.py`` for the measurement.
+    milp = get_milp_solver(backend="simplex")
     lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
     # The level-bundle projection is a small QP; fall back to Kelley if no QP
     # backend is installed (T2.1).

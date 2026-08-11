@@ -198,7 +198,22 @@ def solve_benders(
     # with POUNCE's interior-point (analytic-centre) duals and an inexact primal,
     # with no HiGHS dependency. Whichever LP backend is installed is used.
     dual_lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
-    milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
+    # #977: the master is a *linear* MILP, so it is pinned to the exact-vertex
+    # simplex B&B and NOT routed by ``prefer_pounce``. ``prefer_pounce`` comes from
+    # ``nlp_solver``, which selects the engine for the *recourse* subproblem; reusing
+    # it here sent the master to the POUNCE-IPM-backed B&B, whose returned points are
+    # interior, not vertices. Measured on the master rows the engine was handed
+    # (identical arrays in and out, so cut-construction error cancels exactly): the
+    # IPM path leaves residuals up to 5.9e-06 — six times the repo's declared
+    # ``abs=1e-6`` — where the simplex is exact to ~1e-14 on the same input. Two
+    # consequences, both fixed by this line: the master could hand back a point
+    # violating its own optimality cut (the #952 exit gate then correctly refuses it,
+    # which is how #977 surfaced), and the master objective — which *is* the Benders
+    # lower ``bound`` — was an analytic-centre value that drifted above the incumbent
+    # it certifies, breaking ``bound <= incumbent``. ``get_milp_solver`` still falls
+    # back to POUNCE when the Rust simplex binding is unavailable, so POUNCE-only
+    # installs keep working.
+    milp = get_milp_solver(backend="simplex")
 
     if structure is None:
         structure = detect_decomposition(model)

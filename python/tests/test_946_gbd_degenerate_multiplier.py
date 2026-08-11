@@ -207,6 +207,20 @@ def test_nonbinary_first_stage_explains_the_lost_certificate(exact_recourse_boun
     run now certifies (pinned by the companion test below). Capping is what keeps
     this test about the *explanation* rather than about a stall that has since
     been fixed — the assertion below would otherwise pass vacuously or not at all.
+
+    #977 note: this used to assert ``r.objective == approx(-1.0)`` — that a single
+    iteration already lands on the optimum. That held only by an arbitrary
+    tie-break. The whole cost here is nonlinear and lives in the recourse, so the
+    first master solve has a **zero objective** (measured: ``master_obj = 0.0``
+    under both engines) and *every* feasible first-stage point is optimal for it.
+    The old POUNCE-IPM-backed master happened to return ``y = 1`` — the eventual
+    optimum — while the exact-vertex simplex #977 pins the master to returns
+    ``y = 0``; both are optima of that master. One iteration is not enough to reach
+    ``-1`` and must not be asserted to be. What *is* invariant is that the run
+    brackets the true optimum, so that is what is asserted now: the bound never
+    rises above -1 and the incumbent never falls below it. The full-budget
+    companion below still pins the optimum itself, and still reaches it in <= 10
+    recourse solves.
     """
     with caplog.at_level(logging.WARNING, logger="discopt.decomposition.benders.gbd"):
         r = solve_benders(_nonbinary_degenerate_model(), time_limit=60, max_iterations=1)
@@ -218,9 +232,16 @@ def test_nonbinary_first_stage_explains_the_lost_certificate(exact_recourse_boun
     assert r.status == "iteration_limit", (
         f"expected the uncertified exit at max_iterations=1, got {r.status!r}"
     )
-    # Sound, just uncertified: the bound never exceeds the true optimum (-1).
+    # Sound, just uncertified: the run brackets the true optimum (-1) from both
+    # sides. The bound never rises above it...
     assert r.bound is None or r.bound <= -1.0 + 1e-6
-    assert r.objective == pytest.approx(-1.0, abs=1e-3)
+    # ...and the incumbent, being a genuinely feasible point, never falls below it.
+    # (Its *distance* from -1 after one iteration is the tie-break artifact
+    # described above, so it is deliberately not pinned.)
+    assert r.objective is not None
+    assert r.objective >= -1.0 - 1e-6, (
+        f"incumbent {r.objective!r} beats the true optimum -1.0: not a feasible point"
+    )
     text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "degenerate" in text, f"no explanation logged; got: {text!r}"
 

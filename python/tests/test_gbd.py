@@ -476,3 +476,90 @@ def test_c2_master_only_nonlinear_nonbinary_rejected():
     m.subject_to(x + z >= 1)
     with pytest.raises(NotImplementedError, match="master-only nonlinear"):
         solve_benders(m, time_limit=30)
+
+
+@pytest.mark.correctness
+def test_gbd_master_satisfies_its_own_cuts_at_scale():
+    """#977: the GBD master must return points that satisfy the rows it was handed.
+
+    The master's ``A_ub`` is its own rows stacked with the accumulated optimality
+    cuts, so a positive residual there is the master violating its own cut. The
+    residual below is recomputed from the *same* arrays passed into ``milp()``, so
+    any error in the cut coefficients cancels exactly — whatever this measures was
+    manufactured by the master solve, not by cut construction. That is the
+    measurement that distinguished the two candidate root causes in #977.
+
+    The regression: the master was routed by ``prefer_pounce`` (derived from
+    ``nlp_solver``, which selects the *recourse* engine) to the POUNCE-IPM-backed
+    B&B, whose points are interior rather than vertices. On this instance that left
+    a 5.92e-06 residual — six times the repo's declared ``abs=1e-6`` — and drove the
+    reported ``bound`` above the incumbent it certifies. Both assertions below fail
+    on the pre-fix routing and hold on the exact-vertex simplex.
+
+    Scale is 1000 (>= 100) because the effect is scale-proportional: the same
+    relative error only crosses a fixed absolute threshold once the data is large.
+    """
+    import discopt.solvers.lp_backend as lp_backend
+
+    real_get_milp_solver = lp_backend.get_milp_solver
+    worst = -np.inf
+    rows_compared = 0
+
+    def instrumented(prefer_pounce=False, backend="auto"):
+        inner = real_get_milp_solver(prefer_pounce=prefer_pounce, backend=backend)
+
+        def wrapper(c, A_ub=None, b_ub=None, **kwargs):
+            nonlocal worst, rows_compared
+            res = inner(c, A_ub=A_ub, b_ub=b_ub, **kwargs)
+            if res.x is not None and A_ub is not None and b_ub is not None and len(b_ub):
+                A = np.asarray(A_ub, dtype=float)
+                b = np.asarray(b_ub, dtype=float)
+                x = np.asarray(res.x, dtype=float)[: A.shape[1]]
+                rows_compared += len(b)
+                worst = max(worst, float((A @ x - b).max()))
+            return res
+
+        return wrapper
+
+    # The instance is pinned by seed; drawing it the same way the soundness fuzz
+    # does keeps it a member of the class the fuzz samples rather than a special case.
+    rng = np.random.default_rng(90059)
+    ny = int(rng.integers(2, 5))
+    nx = int(rng.integers(2, 5))
+    scale = 10.0 ** rng.integers(2, 5)
+    assert scale >= 100.0
+    m = dm.Model("gbd_scale")
+    y = m.binary("y", shape=(ny,))
+    x = m.continuous("x", shape=(nx,), lb=0, ub=5)
+    m.first_stage(y)
+    a = rng.uniform(0.2, 2.0, nx) * scale
+    sh = rng.uniform(0, 3, nx)
+    cy = rng.uniform(-1, 4, ny) * scale
+    m.minimize(
+        sum(float(a[j]) * (x[j] - float(sh[j])) ** 2 for j in range(nx))
+        + sum(float(cy[i]) * y[i] for i in range(ny))
+    )
+    sy = sum(y[i] for i in range(ny))
+    m.subject_to(sum(x[j] for j in range(nx)) == float(rng.uniform(0, 3)) * sy)
+
+    lp_backend.get_milp_solver = instrumented
+    try:
+        r = solve_benders(m, time_limit=30)
+    finally:
+        lp_backend.get_milp_solver = real_get_milp_solver
+
+    # Prove the probe fired (CLAUDE.md measurement discipline): a silent zero-row
+    # traversal would make the residual assertion below vacuously true.
+    assert rows_compared > 0, "no master row was ever compared; the probe measured nothing"
+    assert worst > -np.inf
+
+    assert worst <= 1e-6, (
+        f"GBD master returned a point violating its own rows by {worst:.6e}, "
+        f"past the declared abs=1e-6 (over {rows_compared} rows compared)"
+    )
+    # The master objective *is* the Benders lower bound, so an inexact master
+    # breaks the certificate invariant as well as the row residual.
+    assert r.objective is not None and r.bound is not None
+    assert r.bound <= r.objective + 1e-9 * (1 + abs(r.objective)), (
+        f"certificate invariant broken: bound {r.bound!r} > incumbent {r.objective!r}"
+    )
