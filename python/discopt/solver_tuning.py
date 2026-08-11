@@ -1072,7 +1072,13 @@ class SolverTuning:
       (an EMA over this solve's builds) in **yield mode** instead of a full
       round: no per-node separation chain, and the cold build truncated at the
       grant, so the round banks the weaker-but-valid bound and the LP vertex it
-      can afford rather than nothing.
+      can afford rather than nothing — **except in the ROOT batch, which always
+      runs a full round** (#928 rule 1). The root has no parent bound, so a
+      weakened round there leaves the whole tree with no bound source; that is
+      the ``bound=None`` collapse the first coupled graduation panel measured on
+      contvar (7 → 287 nodes, nothing ever certified). The same rule already
+      governs the root-relaxation fallback's ``_fb_stop``: a phase is optional
+      tightening only once some valid bound is in hand.
 
     Yield mode replaced an outright *decline* (the first cut of this flag, and
     the measured cause of the coupled panel's bound ledger: casctanks
@@ -1087,9 +1093,13 @@ class SolverTuning:
     Sound by construction: build truncation and skipped separation only drop
     rows/cuts (weaker, never falsified — the ``_objective_bound_valid`` gate
     catches an un-bounded cost column), deadline-cut LP solves already bank the
-    Neumaier-Shcherbina floor, and a yielded round that banks nothing leaves its
-    node OPEN at ``-inf`` (floored at the proved parent bound) rather than
-    fathomed-without-proof on the failure sentinel — see
+    Neumaier-Shcherbina floor, and a round that IS cut short no longer returns
+    nothing: it reports the rigorous box-interval objective floor of the
+    (possibly truncated) relaxation it built — measured, a spent round grant lost
+    the bound outright on 16 of 114 cells of the binding subset before that
+    (#928, see ``_solve_at_node_impl``). Should even that floor be unavailable, a
+    yielded round leaves its node OPEN at ``-inf`` (floored at the proved parent
+    bound) rather than fathomed-without-proof on the failure sentinel — see
     ``solver._yield_keeps_node_open``. Default off pending the §5 corpus-wide
     differential panel (cert-clean AND net-positive); graduation is coupled to
     the #928 ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""

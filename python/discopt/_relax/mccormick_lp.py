@@ -1726,6 +1726,44 @@ class MccormickLPRelaxer:
                 "treating as inconclusive (no fathom) to avoid a false-infeasible prune"
             )
             return MccormickLPResult(status="numerical")
+        # #928: the rigorous floor a round CUT SHORT still owns. A round is cut
+        # short when its cold build stopped on a deadline (``_build_truncated`` —
+        # the #966 ``round_deadline`` or the #694/#832 root-build flags) or when
+        # its LP yielded on one (``time_limit`` — ``DISCOPT_LP_WARM_DEADLINE``).
+        # In that state the relaxation is weaker, so every certification route
+        # below can decline and the node used to return NOTHING — measured on the
+        # in-repo binding subset with a spent round grant, 16 of 114 cells returned
+        # ``uncertified``/no bound where the same box with an unclamped round
+        # certifies one (``scratchpad/issue928_round_cut_short_entry.py``), and in
+        # every one of them the truncated build (0 rows) still carried a valid
+        # finite ``_objective_floor`` equal to the control bound on 4 of 5
+        # instances: bchoco06/07/08 -1.0 (control -0.99999), tls2 0.0 (control
+        # 0.0), hda -172201.82 (``scratchpad/issue928_floor_inventory.py``).
+        #
+        # SOUNDNESS: ``_objective_floor`` is the box-interval lower bound of the
+        # (minimize-equivalent) objective over this build's COLUMN box, computed
+        # from the cost-column bounds alone — independent of which constraint rows
+        # were emitted. Dropping rows only enlarges the feasible set, and the LP
+        # feasible region is a subset of the column box, so the floor is <= this
+        # node's true optimum however truncated the build was. It is the identical
+        # quantity, with the identical argument, that the ``unbounded`` branch
+        # below already reports. ``_objective_bound_valid`` gates it: False marks
+        # an un-relaxable / under-constrained objective or the #248 garbage-wide
+        # floor, where reporting the value would anchor the tree on a bound that
+        # never certifies (that is the "sound but harmful" trade §14b measured).
+        #
+        # Default path untouched by construction: with the shipped flags neither
+        # ``_build_truncated`` (no build deadline is ever set) nor a ``time_limit``
+        # status (``node_bound_mode="lp"`` makes every node solve a pure LP, and
+        # only ``DISCOPT_LP_WARM_DEADLINE`` produces that status there) can occur,
+        # so ``_cut_short_floor`` is None and nothing below fires.
+        _cut_short_floor: Optional[float] = None
+        if bool(getattr(milp, "_build_truncated", False)) or res.status == "time_limit":
+            if milp._objective_bound_valid:
+                _floor_v = getattr(milp, "_objective_floor", None)
+                if _floor_v is not None and np.isfinite(_floor_v):
+                    _cut_short_floor = float(_floor_v)
+
         if res.status != "optimal" or res.x is None:
             # Objective-floor fallback (issue #640 Bucket 2, nvs22). The conditioning
             # clamp above widens a free non-cost column to true +/-inf, which can make
@@ -1755,8 +1793,19 @@ class MccormickLPRelaxer:
             # which is the wrong trade (CLAUDE.md §1). Reachable only with
             # ``DISCOPT_LP_WARM_DEADLINE`` on: nothing else produces a ``time_limit``
             # node result, so the default path is untouched.
-            if res.status == "time_limit" and res.bound is not None and np.isfinite(res.bound):
-                return MccormickLPResult(status="optimal", lower_bound=float(res.bound))
+            #
+            # #928: the banked dual floor and the round's box floor are BOTH valid
+            # lower bounds on this node, so report the tighter one. They are not
+            # ordered a priori: ``g(y)`` for a partial dual can sit *below* the box
+            # floor — measured, the hda node LP banked exactly ``g(0) = -141697``,
+            # the box floor itself, at every deadline fraction (§14a) — while a dual
+            # that got further is tighter. ``max`` of two valid floors is valid.
+            if res.status == "time_limit":
+                _tl_cands = [
+                    b for b in (res.bound, _cut_short_floor) if b is not None and np.isfinite(b)
+                ]
+                if _tl_cands:
+                    return MccormickLPResult(status="optimal", lower_bound=float(max(_tl_cands)))
             # #517 (flag-gated): the node LP broke down numerically but the in-house
             # simplex's own dual yielded a rigorous Neumaier–Shcherbina safe lower
             # bound (``milp.solve`` attached it to ``res.bound``). It is valid for ANY
@@ -1769,6 +1818,11 @@ class MccormickLPRelaxer:
                 and np.isfinite(res.bound)
             ):
                 return MccormickLPResult(status="optimal", lower_bound=float(res.bound))
+            # #928: a cut-short round reports its rigorous box floor rather than
+            # nothing. Last, so it can never displace a tighter certified/banked
+            # bound above — only fill the gap where the round had none.
+            if _cut_short_floor is not None:
+                return MccormickLPResult(status="optimal", lower_bound=_cut_short_floor)
             return MccormickLPResult(status=_no_bound_status(res.status))
 
         def _certify(r) -> Optional[float]:
@@ -1829,6 +1883,15 @@ class MccormickLPRelaxer:
             # contract violation that read as a solved node with no bound. Report
             # the decline as its own non-fathoming status instead; every caller
             # gates on ``lower_bound``, so this only fixes the label, not behavior.
+            #
+            # #928: unless the round was cut short and still owns a rigorous box
+            # floor — this is the exit the measurement above actually lands in (all
+            # 16 lost cells reported ``uncertified``: a 0-row truncated relaxation
+            # solves to LP optimality, and every certification route then declines
+            # it for want of a safe bound). Reporting the floor is sound (see
+            # ``_cut_short_floor``) and is the whole point of the round having run.
+            if _cut_short_floor is not None:
+                return MccormickLPResult(status="optimal", lower_bound=_cut_short_floor)
             return MccormickLPResult(status=_no_bound_status(res.status))
         x_orig = np.asarray(x_source.x)[: self._n_orig].copy()
         _out = MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)

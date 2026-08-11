@@ -10200,9 +10200,23 @@ def solve_model(
                     # grant, valid weaker bound + vertex for a fraction of the
                     # cost (same cell, yield mode: bound 1.353, incumbent 8.73
                     # recovered, 45 nodes). Sound — dropped rows only enlarge the
-                    # relaxed set.
+                    # relaxed set, and #928's cut-short floor then reports the
+                    # relaxation's rigorous box floor for the truncated build.
+                    #
+                    # #928 rule 1: the ROOT batch runs a FULL round, never a
+                    # yielded one. A branched node always carries its parent's
+                    # bound (the Rust import floors every node at it), so a
+                    # weaker round there forgoes tightening only; the root has no
+                    # parent, and the whole tree's bound descends from it — which
+                    # is the collapse the coupled panel measured (contvar: the
+                    # root probe sets a build EMA larger than what is left of the
+                    # grant, the root round is degraded, and the search spends its
+                    # budget on cheap uncertified nodes for a final
+                    # ``bound=None``). Same rule ``_fb_stop`` already applies in
+                    # the root-relaxation fallback: a phase is optional tightening
+                    # only once some valid bound has landed.
                     _yield_round = False
-                    if _round_budget_enabled:
+                    if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
                         _yield_round = _exp_build is not None and _node_remaining < _exp_build
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
@@ -10586,8 +10600,15 @@ def solve_model(
                     # a grant that is merely too short for a full round YIELDS
                     # instead of skipping, so it still banks a valid weaker bound
                     # and an LP point (see the batch-path note above).
+                    # #928 rule 1 (see the batch path): the ROOT batch holds no
+                    # parent bound, so its round is neither skipped nor yielded —
+                    # both would leave the tree with no bound source at all. A
+                    # root round entered on a spent grant still runs, truncates
+                    # its build and reports the relaxation's rigorous box floor,
+                    # which is strictly more than the nothing a declined root
+                    # leaves behind.
                     _serial_remaining = _deadline - time.perf_counter()
-                    if _round_budget_enabled:
+                    if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()
                         _round_blocked = _serial_remaining <= 0.0
                         _serial_yield_round = not _round_blocked and (
