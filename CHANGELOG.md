@@ -10,6 +10,92 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`feral` 0.14 → 0.15.1 and `pounce-solver` `>=0.9` → `>=0.10`**
+  (`chore(deps)`). Two pins that move together: POUNCE 0.10.0's own workspace
+  pins feral 0.15.1, so holding both here keeps a single LU implementation
+  behind the simplex node engine and the NLP evaluator rather than two.
+
+  feral 0.15.0 is a **breaking** release, but only in its diagnostic API
+  (`SupernodeTiming` `us` → `ns`, `BucketStats::sum_us`/`avg_us` → `*_ns`,
+  `ProfileReport::loop_us` → `loop_ns`). discopt consumes only the LU layer —
+  `SparseLu`/`DenseLu`/`SparseColMatrix`/`SparseLuSymbolic`/`LuParams`/
+  `RefactorCause`/`FeralError` in `linsolve.rs` — and none of the multifrontal
+  or profiler surface, so no discopt source changes. What it does buy the node
+  engine: the packed BLAS-3 trailing update is now an explicit pulp SIMD kernel
+  (upstream reports byte-exact output at every SIMD width, pinned by golden
+  bit-digests), and four tuning-knob `env::var` lookups leave the per-panel
+  dispatch path for a `OnceLock`. That second one is per-front *fixed* cost, so
+  it lands hardest on many-small-front bases — the per-node simplex regime.
+
+  POUNCE 0.10.0 carries #477/#478 (`NlProblem` is sendable), so on an
+  in-contract install the tape evaluator shares one problem and the per-thread
+  fallback no longer runs. The fallback is **retained**, not deleted: the
+  capability is probed rather than inferred from a version string, and a build
+  whose probe says "not sendable" must still solve.
+  `test_75_tape_nlp_evaluator.py` keeps it covered by forcing the probe false.
+
+  **Verified bound-neutral (CLAUDE.md §5).** 49-instance cert panel, both arms
+  built on one machine from the same source and told apart by the `feral-<ver>`
+  string cargo bakes into the `_rust` extension: **49/49 rows bit-identical in
+  status, `node_count` and `objective`**. A same-build repeat ran first as the
+  determinism control — also 49/49 bit-identical — so node equality is a real
+  gate here and not an artifact of a panel that never varies. Also green:
+  `cargo test -p discopt-core` (597+4+1), `pytest -m smoke` (943 passed, 1
+  skipped, 2 xpassed), the adversarial suite (10 passed), and
+  `pytest -m requires_pounce` (127 passed, 1 skipped) apart from one failure
+  reproduced identically on the pre-bump control (see below).
+
+  Note on method: the arms were diffed against *each other*, not against
+  `docs/dev/data/cert-baseline.jsonl`, because at the time that reference was
+  stale (18 violations on an *unmodified* tree). It has since been regenerated
+  in this same series — see the next entry — so a future re-run of this check
+  can use the committed reference directly.
+
+- **`docs/dev/data/cert-baseline.jsonl` regenerated, 49 → 52 rows**
+  (`chore(cert)`). The §0.2.5 bound-neutrality reference had drifted out of
+  reproducibility against its own tree: `check_cert_neutrality.py` on an
+  *unmodified* checkout reported **18 violations** — objective drift past
+  `_OBJ_TOL` (`cvxnonsep_nsig30` 1.5e-6, `cvxnonsep_psig40r` 2.9e-6, `m3`
+  5.9e-7) and node swings (`nvs13` 23 → 637, `dispatch` 3 → 23, `tls2`
+  343 → 255, `tspn05` 51 → 39). All 49 still certified `optimal`, so this was a
+  drifted reference and not a soundness bug — but it left the neutrality guard
+  unable to detect a real regression while still reading as a guard, which is
+  worse than having none.
+
+  Regenerated with `gen_cert_baseline.py --time-limit 60`; the generator's
+  determinism filter still gates admission (3 solves per instance, bit-identical
+  `node_count` and `objective`, certifying within 0.6 of budget), so the
+  reference is reproducible by construction. 56 panel rows, `incorrect_count`
+  **0** against 58 oracles, **52 admitted** (`nvs05`, `nvs17`, `tanksize` newly
+  qualify; nothing previously present was dropped), 4 excluded as non-optimal
+  (`carton7`/`hda` time-limited 3/3, `casctanks`/`ex1252` feasible-not-optimal
+  3/3). **Acceptance:** `check_cert_neutrality.py` against the fresh file
+  returns NEUTRAL, 52/52, exit 0. Nothing in `.github/workflows/` consumes this
+  file — it is a local guard, also used by `graduation_gate.py`.
+
+  The `_KNOWN_PERF_GATED` exemption for `nvs17` is left in place though its
+  rationale ("~45s/60s wall") is now stale — it certifies in 15.7s. The
+  exemption only relaxes node-count strictness while soundness is still checked;
+  tightening it is a separate change needing its own measurement.
+
+- **#966's three coupled flags stay default-OFF** — graduation panel scored and
+  **failed both §5 bars**. `DISCOPT_LP_WARM_DEADLINE`,
+  `DISCOPT_NODE_ROUND_BUDGET` and `DISCOPT_HESS_COMPILE_GATE` were measured over
+  2 budgets × 3 reps × 19 instances (artifacts and scorer committed under
+  `discopt_benchmarks/`). *Cert-clean* fails on one certification regression
+  (`nvs05`, bench20 rep2): at a 20s budget that instance sits on its own
+  certification deadline — the fresh baseline puts it at 20.5s — and base
+  certifies it 1/3 while the candidate certifies 0/3. *Net-positive* fails
+  because the benefit is budget-dependent: overrun drops −5.00 ± 0.61 s at a 15s
+  budget but only −0.17 ± 0.72 s at 20s, where the mean is inside its own rep
+  spread and the sign flips between reps; node totals rise slightly at both
+  budgets and `cert_gains` is 0 in all six reps. Bounds are net favorable (28
+  tighter vs 12 looser) and objectives 7 better / 0 worse, so this is *not
+  broadly helpful* rather than harmful — the `DISCOPT_CUT_INHERIT` shape, and
+  per §5 such a flag stays OFF with the measurement recorded.
+
 ### Fixed
 
 - **Vectorized models silently got no relaxation at all** (#981). A `Constraint`
