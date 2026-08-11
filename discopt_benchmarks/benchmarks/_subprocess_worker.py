@@ -44,7 +44,7 @@ def _solve(
     options: dict,
 ) -> dict:
     """Run model.solve and return a SolveResult-shaped dict."""
-    from benchmarks.metrics import SolveResult, SolveStatus
+    from benchmarks.metrics import SolveResult, SolveStatus, time_fraction
     import discopt.modeling as dm
 
     start = time.monotonic()
@@ -88,10 +88,14 @@ def _solve(
     }
     bench_status = status_map.get(getattr(result, "status", "unknown"), SolveStatus.UNKNOWN)
 
+    # `time_fraction` rather than truthiness: a measured 0.0 must survive as 0.0.
+    # See its docstring -- this worker had the same collapse as the in-process
+    # runner, so the defect reproduced under --subprocess too.
     wt = result.wall_time if getattr(result, "wall_time", 0) > 0 else 1e-10
-    rust_frac = (result.rust_time / wt) if getattr(result, "rust_time", None) else None
-    jax_frac = (result.jax_time / wt) if getattr(result, "jax_time", None) else None
-    py_frac = (result.python_time / wt) if getattr(result, "python_time", None) else None
+    rust_frac = time_fraction(getattr(result, "rust_time", None), wt)
+    jax_frac = time_fraction(getattr(result, "jax_time", None), wt)
+    py_frac = time_fraction(getattr(result, "python_time", None), wt)
+    pounce_frac = time_fraction(getattr(result, "pounce_time", None), wt)
 
     return SolveResult(
         instance=instance,
@@ -104,6 +108,7 @@ def _solve(
         rust_time_fraction=rust_frac,
         jax_time_fraction=jax_frac,
         python_time_fraction=py_frac,
+        pounce_time_fraction=pounce_frac,
     ).to_dict()
 
 
