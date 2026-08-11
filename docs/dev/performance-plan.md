@@ -1993,6 +1993,15 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > yields only on non-root nodes so §14d's rule-1 root exemption governs both. The
 > panel numbers below therefore understate the merged tree, and the §5 verdict for
 > the merged code needs its own panel run: see the residual note at the end.
+>
+> **§14d does not subsume this entry, measured on the merged base.** Re-running the
+> A/B there (nvs05 @ 20 s, forced-admission regime) with §14d's cut-short floor
+> present: base 3.5425 / incumbent 8.7320 / 39 nodes, **skip 0.6323 / 6.3870 / 77**,
+> **yield 3.5067 / 8.7320 / 59** (38 yields counted). The floor rescues a round that
+> RUNS and is cut short; it can do nothing for a round that never runs, which is why
+> the skip arm still loses the bound and the incumbent on the merged tree.
+> Flag-OFF bound-neutrality was re-verified against the merged base as well
+> (13/13 byte-identical, markers both ways).
 
 > **FALSIFIED (H1): the cheap tier is the incremental fast path.** A round the grant
 > cannot afford could fall back to `_try_incremental_node` (patch + warm start, ~ms).
