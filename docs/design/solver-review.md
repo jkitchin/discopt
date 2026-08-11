@@ -81,7 +81,7 @@ Classification: `python/discopt/_relax/problem_classifier.py` (`ProblemClass`
 |---|---|---|---|
 | **AMP** | `solver="amp"` (`solver.py:2036`) | Adaptive multivariate-partitioning global MINLP (discopt's own) | MILP relaxation (HiGHS/POUNCE) + POUNCE NLP sub-solves |
 | **GP** | `solver="gp"` or auto-detect | Geometric programming via log-space convex reformulation | single POUNCE NLP |
-| **OA / GDP-LOA** | `gdp_method="oa"`/`"loa"` | Outer approximation for convex MINLP / disjunctive | MILP master (HiGHS/POUNCE) + POUNCE NLP |
+| **OA / GDP-LOA** | `solver="mip-nlp", mip_nlp_method="oa"` / `gdp_method="loa"` | Outer approximation for convex MINLP / disjunctive | MILP master (HiGHS/POUNCE) + POUNCE NLP |
 | **DAE, RO, MO, NN** | modules `dae/ ro/ mo/ nn/` | Reformulate the `Model`, then call `Model.solve()` | whatever the resulting class dispatches to |
 | **MPEC** | `discopt.mpec.solve_mpec` | Scholtes regularization | POUNCE NLP |
 

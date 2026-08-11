@@ -44,6 +44,26 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`tutorial_oa` documented an API that no longer selects OA** (`docs`). Every
+  solve cell used `gdp_method="oa"`, which was deprecated in favour of
+  `solver="mip-nlp", mip_nlp_method="oa"`: it now emits a `DeprecationWarning`
+  and is reinterpreted as `gdp_method="big-m"`, a *GDP reformulation*. So the
+  notebook ran spatial branch & bound throughout — its "Comparing OA with Branch
+  & Bound" cell was comparing B&B against B&B, and its ECP cell never entered ECP
+  mode. All five solve cells now use the current spelling, with a note explaining
+  that `gdp_method=` and `solver=` are orthogonal axes.
+
+  Two further corrections. The primary example (`example_simple_minlp`) closes
+  the gap on its first master/subproblem pair, so it illustrates nothing about
+  the alternation; the notebook now also builds `synthes1` (Duran & Grossmann
+  1986, test problem 1), which gives a genuine four-iteration loop, and prints
+  the per-iteration `mip_nlp_trace` — LB 1.411895 → 6.009759 against UB 7.092732
+  → 6.009759 — plus the OA/ECP counter contrast (OA: 4 masters, 4 NLPs, 35 cuts;
+  ECP: 8 masters, 0 NLPs, 20 cuts). The Limitations section claimed single-tree
+  LP/NLP B&B and level-method regularization were "not yet implemented"; both
+  exist (`mip_nlp_method="lp_nlp_bb"`, which needs `milp_solver="gurobi"`, and
+  `add_regularization`/`level_coef`), and the section now says so.
+
 - **All 62 documentation notebooks re-executed** (`docs`). Their committed
   outputs dated from 2026-04-25 and `docs/_config.yml` has
   `execute_notebooks: "off"`, so nothing had re-run them in three and a half
@@ -146,6 +166,22 @@ The release procedure that produces these entries is documented in
   Tests: `test_932_native_base_thread_sharing.py`.
 
 ### Added
+
+- **`docs/notebooks/tutorial_gbd.ipynb`** — a tutorial for Generalized Benders
+  Decomposition (`docs`). `solve_gbd` had shipped with no notebook of its own;
+  `tutorial_benders` covers only the classical linear-recourse case. The new
+  notebook derives the Lagrangian cut, then runs the master/subproblem loop by
+  hand on a model whose value function and multiplier are closed form
+  (`v(y) = (3 - 2y₁ - y₂)₊²`, `μ = 2(3 - 2y₁ - y₂)₊`), so the mechanics are
+  visible without a solver in the loop — it converges in two iterations, LB
+  4 → 5 against UB 9 → 5, and `solve_gbd` reproduces the same optimum. A
+  capacity-expansion model with convex-quadratic congestion cost then shows the
+  three entry points (`solve_gbd`, `solve_benders` dispatch, and
+  `Model.solve(decomposition="benders")`) and a GBD/OA/spatial-B&B comparison, all
+  three agreeing on 20.8000. Covers the dominance hierarchy `z_OA ≥ z_GBD ≥ z_LP`
+  (Grossmann 2002), the convexity requirement for a rigorous bound, and the #946
+  degenerate-recourse failure mode with its integer L-shaped fallback (Laporte &
+  Louveaux 1993). New BibTeX entries: `Grossmann2002`, `Laporte1993`.
 
 - **Anytime dual bound: root seeding + one unified report** (`fix`, #933).
   27% of a 200-instance MINLPLib sweep reported **no dual bound at all** at
