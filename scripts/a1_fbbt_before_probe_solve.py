@@ -33,7 +33,7 @@ def main():
     # The root probe is the first solve_at_node call on the relaxer object during
     # setup; we record every call's status and note the first one as the probe.
     try:
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         _orig_solve = MccormickLPRelaxer.solve_at_node
 
@@ -53,7 +53,7 @@ def main():
 
     # Tap root OBBT engagement (per-node OBBT / root fixpoint uses obbt_tighten_root).
     try:
-        import discopt._jax.obbt as OBBT
+        import discopt._relax.obbt as OBBT
 
         _orig_obbt = OBBT.obbt_tighten_root
 

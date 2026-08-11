@@ -1,4 +1,4 @@
-"""Tests for ``discopt._jax.chebyshev_model`` (M2 of issue #51).
+"""Tests for ``discopt._relax.chebyshev_model`` (M2 of issue #51).
 
 Covers the M2 acceptance criteria:
 - Polynomial-plus-remainder enclosure contains the true function range on a
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax import chebyshev_model as cm
+from discopt._relax import chebyshev_model as cm
 
 N_SAMPLES = 10_000
 TOL = 1e-9

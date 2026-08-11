@@ -95,7 +95,7 @@ if _expect is not None:
     )
 
 _ils_stats = {"calls": 0, "evals": 0, "solves": 0, "stopped_on": None, "wall_s": 0.0}
-import discopt._jax.primal_heuristics as _ph
+import discopt._relax.primal_heuristics as _ph
 from discopt._work_budget import WorkBudget as _WB
 
 _orig_ils_fn = _ph.integer_local_search

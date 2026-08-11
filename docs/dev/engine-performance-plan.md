@@ -143,7 +143,7 @@ canonical DAG, reconstructed expressions, DCP verdicts, compiled
 certificates. This is maintainer lever 1 + the certificate half of lever 2, and
 the largest measured per-node component (~15 of 38 ms/node in-container).
 
-**Scope.** `python/discopt/_jax/uniform_relax.py` only.
+**Scope.** `python/discopt/_relax/uniform_relax.py` only.
 - Add a `_ModelAnalysisCache` stored on the model object
   (`model.__dict__["_uniform_relax_analysis"]`; Model has no `__slots__`).
   Guard staleness with a token `(len(model._variables),
@@ -217,7 +217,7 @@ O(n) probes each paying a **full engine build for the same box** (hda 52.5 s
 root / 7 nodes). An OBBT probe minimizes/maximizes a single variable over the
 SAME relaxation — only the objective vector differs.
 
-**Scope.** `python/discopt/_jax/obbt.py` + its call path in
+**Scope.** `python/discopt/_relax/obbt.py` + its call path in
 `mccormick_lp.py` (`_tighten_node_bounds_with_status`). Build the relaxation
 **once per (node box, OBBT round)**, then per probe: swap the LP objective
 (`c` vector) in place (or on a light clone), solve, restore. Warm-start
@@ -286,8 +286,8 @@ the speculative complexity §0.3 forbids.
 refresh + warm-started Rust simplex, not a Python rebuild. Today
 `IncrementalMcCormickLP.ok == False` on every engine-shaped model.
 
-**Scope.** `python/discopt/_jax/uniform_relax.py` (emit a patch table),
-`python/discopt/_jax/incremental_mccormick.py` (consume it),
+**Scope.** `python/discopt/_relax/uniform_relax.py` (emit a patch table),
+`python/discopt/_relax/incremental_mccormick.py` (consume it),
 `mccormick_lp.py` `_try_incremental_node` (unchanged contract).
 - During the engine build, record per row a descriptor
   `(family, cnode_id, aux_col, support_cols)` for every **box-dependent** row
@@ -389,7 +389,7 @@ regime, a follow-up.
 facet LPs / 10 nodes (11 ms/node) in `_separate_multilinear` →
 `multilinear_separation.py::_solve_envelope`.
 
-**Scope.** `python/discopt/_jax/multilinear_separation.py`. Cache facets per
+**Scope.** `python/discopt/_relax/multilinear_separation.py`. Cache facets per
 `(sorted var cols, support-box bytes)` in a capped module dict — the facet set
 is a pure function of the atom and its box. For arity ≤ 3, add the closed-form
 facets (standard trilinear hull formulae) guarded by an equality check against

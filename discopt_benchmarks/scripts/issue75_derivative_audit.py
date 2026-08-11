@@ -3,7 +3,7 @@
 Why this exists alongside the two older probes. `issue75_rewrite_hardening_probe`
 (values/gradients) and `issue75_second_order_probe` (Hessians) both score the tape
 against JAX. That was the right criterion while JAX was strictly the more accurate
-arm -- the tape's job was to reproduce `_jax/dag_compiler.py`. It stopped being the
+arm -- the tape's job was to reproduce `_relax/dag_compiler.py`. It stopped being the
 right criterion once the tape overtook JAX in the exponential tails: JAX's
 `sigmoid'(40)` returns 0.0 against a true 4.248e-18, and a JAX-relative probe
 scores the tape's CORRECT 4.248e-18 as a defect. Those two probes now report
@@ -283,7 +283,7 @@ def make_evaluator(backend, n, build):
     m.subject_to(sum(vs) <= 1e309)  # linear: contributes no curvature
 
     def _jax_factory():
-        from discopt._jax.nlp_evaluator import cached_evaluator
+        from discopt._relax.nlp_evaluator import cached_evaluator
 
         return cached_evaluator(m)
 

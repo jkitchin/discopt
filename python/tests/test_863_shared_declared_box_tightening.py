@@ -26,11 +26,11 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from pathlib import Path  # noqa: E402
 
-import discopt._jax.nonlinear_bound_tightening as nbt  # noqa: E402
+import discopt._relax.nonlinear_bound_tightening as nbt  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.model_utils import flat_variable_bounds  # noqa: E402
+from discopt._relax.model_utils import flat_variable_bounds  # noqa: E402
 from discopt.solver import (  # noqa: E402
     _check_finite_bounds,
     _declared_box_tightening,

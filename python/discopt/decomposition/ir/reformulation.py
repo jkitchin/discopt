@@ -254,7 +254,7 @@ def build_decomposition(model, candidate: Candidate) -> DecomposedModel:
     # convex (else it is not applied as an exact method).
     if method in (MethodKind.GENERALIZED_BENDERS, MethodKind.OUTER_APPROXIMATION):
         try:
-            from discopt._jax.convexity import classify_oa_cut_convexity
+            from discopt._relax.convexity import classify_oa_cut_convexity
 
             conv = classify_oa_cut_convexity(model)
             is_convex = conv.objective_is_convex and all(conv.constraint_mask)

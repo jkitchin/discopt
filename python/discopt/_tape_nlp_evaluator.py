@@ -1,6 +1,6 @@
 """A JAX-free NLP evaluator backed by POUNCE's Rust AD tape (issue #75, Stage 3).
 
-``_jax/nlp_evaluator.py`` is the single trigger that imports JAX on *every*
+``_relax/nlp_evaluator.py`` is the single trigger that imports JAX on *every*
 nonlinear solve — measured across 27 operator-diverse corpus instances, the first
 jax import is always ``nlp_evaluator.py:22``. This module supplies the same
 quantities (``f``, ``grad f``, ``g``, ``J``, and the Lagrangian Hessian, dense and
@@ -178,7 +178,7 @@ def _nlproblem_is_thread_safe() -> bool:
 
 
 class TapeNLPEvaluator:
-    """Tape-backed drop-in for :class:`discopt._jax.nlp_evaluator.NLPEvaluator`.
+    """Tape-backed drop-in for :class:`discopt._relax.nlp_evaluator.NLPEvaluator`.
 
     Exposes the same surface the solver, ``nlp_ipopt``, ``oa`` and ``amp``
     consume. Conventions match the JAX evaluator exactly, because the callers
@@ -329,7 +329,7 @@ class TapeNLPEvaluator:
             )
             return None
 
-        from discopt._jax.least_squares import extract_residuals
+        from discopt._relax.least_squares import extract_residuals
 
         objective = self._model._objective
         assert objective is not None  # refused in __init__
@@ -696,14 +696,14 @@ def make_evaluator(model: "Model") -> Any:
     """The cached evaluator for ``model`` under the selected backend.
 
     THE canonical entry point. The ``cached_evaluator`` import is inside the
-    fallback on purpose: ``_jax/nlp_evaluator`` imports jax at module scope, so
+    fallback on purpose: ``_relax/nlp_evaluator`` imports jax at module scope, so
     importing it eagerly puts JAX in ``sys.modules`` on every nonlinear solve and
     defeats the tape backend entirely (#75). Callers must not reach past this to
     ``cached_evaluator`` — that is what kept JAX on the path after Stage 3.
     """
 
     def _jax_evaluator() -> Any:
-        from discopt._jax.nlp_evaluator import cached_evaluator
+        from discopt._relax.nlp_evaluator import cached_evaluator
 
         return cached_evaluator(model)
 

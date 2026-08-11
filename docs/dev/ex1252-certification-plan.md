@@ -173,7 +173,7 @@ counts *before* continuous/spatial dimensions collapses the shallow-node floor.
    cannot Farkas-certify that emptiness (ill-conditioning) — an engine-hardening
    item to fold into Stage 1's scope if it recurs on feasible boxes.
 2. *(DONE 2026-07-18)* The root **disjunctive-bound pass**
-   (`discopt/_jax/disjunctive_config_bound.py`, flag
+   (`discopt/_relax/disjunctive_config_bound.py`, flag
    `DISCOPT_DISJUNCTIVE_CONFIG_BOUND`, default-OFF): enumerate the reform's
    indicator patterns, bound each configuration box by **FBBT → OBBT → LP**
    (the per-box FBBT closes the `numerical` leaves in ~4 ms), best-first

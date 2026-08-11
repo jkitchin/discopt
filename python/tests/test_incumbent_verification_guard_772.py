@@ -18,8 +18,8 @@ import discopt.modeling as dm
 import discopt.solver as solver_mod
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _check_constraint_feasibility
+from discopt._relax.nlp_evaluator import cached_evaluator
+from discopt._relax.primal_heuristics import _check_constraint_feasibility
 from discopt.modeling.core import SolveResult
 
 _DATA = "python/tests/data/minlplib_nl"

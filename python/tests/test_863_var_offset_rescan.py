@@ -48,17 +48,17 @@ import time
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.convexity.linear_context as linear_context  # noqa: E402
+import discopt._relax.convexity.linear_context as linear_context  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import discopt.solvers.amp as amp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.problem_classifier import (  # noqa: E402
+from discopt._relax.problem_classifier import (  # noqa: E402
     _compute_var_offset,
     dense_A,
     extract_lp_data,
 )
-from discopt._jax.sparsity import _var_offset  # noqa: E402
+from discopt._relax.sparsity import _var_offset  # noqa: E402
 
 # Every module-level copy of the offset helper. `obbt` has four more as nested
 # closures, which are the same one-line delegation but not reachable from here.

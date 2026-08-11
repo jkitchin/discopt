@@ -831,7 +831,7 @@ def test_model_solve_gurobi_dispatches_miqcqp(monkeypatch):
 def test_gurobi_milp_maximize_time_limit_maps_dual_bound(monkeypatch):
     _install_fake_rust_classifier(monkeypatch, "milp")
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_max_milp_bound_mapping")
     y = m.integer("y", lb=0, ub=10)
@@ -870,7 +870,7 @@ def test_gurobi_milp_maximize_time_limit_maps_dual_bound(monkeypatch):
 
 def test_gurobi_qp_maximize_constant_maps_objective(monkeypatch):
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_max_qp_objective_mapping")
     x = m.continuous("x", lb=0, ub=2)
@@ -911,7 +911,7 @@ def test_gurobi_qp_maximize_constant_maps_objective(monkeypatch):
 
 def test_gurobi_miqp_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_max_miqp_bound_mapping")
     y = m.integer("y", lb=0, ub=2)
@@ -952,7 +952,7 @@ def test_gurobi_miqp_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
 
 def test_gurobi_qcp_maximize_maps_objective(monkeypatch):
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_max_qcp_objective_mapping")
     x = m.continuous("x", lb=-2, ub=2)
@@ -1002,7 +1002,7 @@ def test_gurobi_qcp_maximize_maps_objective(monkeypatch):
 
 def test_gurobi_qcp_maximize_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_max_qcp_time_limit_mapping")
     x = m.continuous("x", lb=-2, ub=2)
@@ -1063,7 +1063,7 @@ def test_gurobi_qcp_maximize_time_limit_maps_incumbent_bound_and_gap(monkeypatch
 )
 def test_gurobi_qcp_no_incumbent_status_mapping(monkeypatch, backend_status, public_status):
     import discopt.solver as solver
-    from discopt._jax import problem_classifier
+    from discopt._relax import problem_classifier
 
     m = dm.Model("gurobi_qcp_no_incumbent_status_mapping")
     x = m.continuous("x", lb=-2, ub=2)

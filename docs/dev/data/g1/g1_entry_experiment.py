@@ -29,7 +29,7 @@ TIME_LIMIT = 20.0
 
 def _census_solve():
     """Instrument NLPEvaluator methods, run one nvs05 solve, return census."""
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
 
     Ev = nev.NLPEvaluator
@@ -148,7 +148,7 @@ def _fused_prototype_probe():
     import jax
     import jax.numpy as jnp
 
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
 
     model = from_nl(NL_PATH)

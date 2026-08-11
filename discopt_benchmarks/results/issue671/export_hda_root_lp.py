@@ -18,9 +18,9 @@ import numpy as np
 import scipy.sparse as sp
 
 import discopt.modeling as dm
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.mccormick_lp import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.mccormick_lp import classify_nonlinear_terms
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HDA = os.path.join(

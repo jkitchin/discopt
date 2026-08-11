@@ -319,7 +319,7 @@ PSD (≈60% of wall, 8 rounds × every node) *starves the tree search*. The corr
 general signal is PSD's **wall-share**, not its bound-delta.
 
 **Implementation (general, sound, adaptive).** `_separate_psd` gains a cost-aware
-gate (`_jax/mccormick_lp.py`, flag `psd_cost_gate` / `DISCOPT_PSD_COST_GATE`,
+gate (`_relax/mccormick_lp.py`, flag `psd_cost_gate` / `DISCOPT_PSD_COST_GATE`,
 default OFF):
 1. **Per-node wall budget:** measure the first cut re-solve's wall
    (`base_solve_wall`); stop the PSD loop once cumulative PSD wall this node exceeds
@@ -375,6 +375,6 @@ per-node wall budget. §4's "pair univariate-square under the same gate" is
 PSD-only.
 
 **Artifacts:** `python/discopt/solver_tuning.py` (`psd_cost_gate*` fields),
-`python/discopt/_jax/mccormick_lp.py::_separate_psd` (the gated loop),
+`python/discopt/_relax/mccormick_lp.py::_separate_psd` (the gated loop),
 `python/tests/test_solver_tuning.py` (defaults/env/validation + soundness
 regression test).

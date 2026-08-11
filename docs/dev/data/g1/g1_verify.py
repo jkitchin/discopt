@@ -15,7 +15,7 @@ import sys
 
 
 def _disable_fusion():
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
 
     orig_init = nev.NLPEvaluator.__init__
 

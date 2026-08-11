@@ -8,7 +8,7 @@ feasible recourse from an infeasible one at a fixed first-stage point.
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.decomposition.benders._feasibility import (
     FeasibilityPhaseEvaluator,
     certify_recourse_feasibility,

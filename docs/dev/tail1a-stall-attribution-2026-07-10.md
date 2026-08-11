@@ -34,7 +34,7 @@ near-tight on nvs05/tanksize at t ≤ 0.11 s — the campaign's target profile.
 ## Findings (dependencies, not builds)
 
 1. **nvs09 — operator-class fix already implemented (TD-A), do not rebuild.**
-   `DISCOPT_LIFT_LOOSE_PRODUCTS` (`_jax/factorable_reform.py`) lifts `t == g(x)`
+   `DISCOPT_LIFT_LOOSE_PRODUCTS` (`_relax/factorable_reform.py`) lifts `t == g(x)`
    for an integer power of a transcendental call and rewrites `g(x)**n` as the
    monomial `t**n` the pipeline relaxes exactly. Reproduced this run:
 

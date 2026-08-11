@@ -8,7 +8,7 @@ while separating a point outside it.
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.soc_cuts import soc_gradient_cut
+from discopt._relax.soc_cuts import soc_gradient_cut
 
 
 def _layout(k: int):

@@ -20,7 +20,7 @@ points** and **reports feasible models as infeasible** — and it chains into
 |---|----------|-----------|---------|
 | TG-1 | **P0 soundness** | `tightening.py:116-120` + `crates/…/fbbt.rs:1204-1208` | FBBT collapses each array-variable **block to element-0's bounds**, then stamps that interval onto **every** element. On heterogeneous per-element bounds it **cuts feasible points** and can report a **feasible model as infeasible** [CONFIRMED, both manifestations re-run] |
 | CF-1 | **P0 (chained)** | `conflict.py:81-85` | Uses `fbbt_box(...).infeasible` as its infeasibility oracle, so TG-1 makes it emit **invalid no-good cuts** that remove feasible assignments [CONFIRMED end-to-end] |
-| MR-1 | P1 (suspected) | `_jax/milp_relaxation.py:4338-4380` | `_fbbt_argument_box` consumes the same `fbbt_box` result to build univariate relaxation envelopes on the rescue path; trusting an unsound box means the envelope can cut feasible points in a real certified solve [SUSPECTED — trigger-specific, not full-solve-reproduced, but the trusted input is provably unsound] |
+| MR-1 | P1 (suspected) | `_relax/milp_relaxation.py:4338-4380` | `_fbbt_argument_box` consumes the same `fbbt_box` result to build univariate relaxation envelopes on the rescue path; trusting an unsound box means the envelope can cut feasible points in a real certified solve [SUSPECTED — trigger-specific, not full-solve-reproduced, but the trusted input is provably unsound] |
 
 Verified **correct** (with evidence):
 
@@ -109,7 +109,7 @@ other `.first()`/`.flat[0]`/`treat-block-as-scalar` sites on array variables.
 
 **✅ Sweep done (X-2 residual, #413).** The requested sweep found two more
 real block-as-scalar-on-bounds sites (both fixed): `export/gams.py` dropped
-heterogeneous array bounds entirely (EX-4), and `_jax/gdp_reformulate.py`'s
+heterogeneous array bounds entirely (EX-4), and `_relax/gdp_reformulate.py`'s
 LP-optimum big-M (`_compute_big_m_lp`) seeded the LP box from element 0's bounds
 and stamped them onto every element — a too-small big-M that cuts feasible points
 of the inactive disjunct (opt-in `mbigm`/auto GDP path). All other `.flat[0]`/

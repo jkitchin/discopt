@@ -133,7 +133,7 @@ def build_dense_qubo(n: int, seed: int):
 
 
 def brute_force_max(model) -> float:
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     ev = NLPEvaluator(model)
     n = ev.n_variables

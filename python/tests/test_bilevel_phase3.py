@@ -8,7 +8,7 @@ global solve went uncaught. This file closes that gap and pins the audit fix:
   multipliers are unbounded (the common case) — a sentinel-sized big-M is
   numerically vacuous and would certify a follower-infeasible point (a false
   optimum). This is the regression for the shared GDP big-M fix
-  (``_jax/gdp_reformulate._BIGM_SENTINEL``).
+  (``_relax/gdp_reformulate._BIGM_SENTINEL``).
 * The ``strong_duality`` reduction (a single bilinear equality, no big-M) **solves**
   a linear bilevel to the true optimistic optimum, and the returned follower ``y``
   is genuinely the follower's argmin at the returned leader ``x`` (scipy oracle).

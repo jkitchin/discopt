@@ -4,7 +4,7 @@
 **Issue:** #309 (gear4-class ratio-of-integer-products: certifies but node-heavy)
 **Feature flag:** `DISCOPT_INTEGER_RATIO_PARTITION` (**default ON since 2026-07-16**, `=0` opts out; was default-OFF — bound-changing
 per CLAUDE.md verification regime 2; graduated on the passing differential panel, §5b)
-**Code:** `python/discopt/_jax/integer_ratio.py` (partitioner),
+**Code:** `python/discopt/_relax/integer_ratio.py` (partitioner),
 `uniform_relax.py` (`ratio_map` registration), `mccormick_lp.py`
 (`solve_at_node` max-combine hook), `solver.py` (flag-gated wiring).
 

@@ -76,7 +76,7 @@ def complementarity(f: Expression, g: Expression, name: Optional[str] = None) ->
 
 def _elem_shape(model: Model, expr: Expression) -> tuple[int, ...]:
     """Static element shape of ``expr`` (``()`` for a scalar) via interval eval."""
-    from discopt._jax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     iv = evaluate_interval(expr, model)
     return tuple(int(d) for d in np.asarray(iv.lo).shape)
@@ -89,7 +89,7 @@ def _aux_upper_bound(model: Model, expr: Expression) -> float:
     enclosure is non-finite so the SOS1→big-M lowering can raise its clear
     "add a finite upper bound" error instead of silently fabricating a huge M.
     """
-    from discopt._jax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     try:
         hi = float(np.max(np.asarray(evaluate_interval(expr, model).hi)))
@@ -222,7 +222,7 @@ def _gdp_operand(model: Model, expr: Expression, tag: str, side: str) -> Express
     Linear expressions are used directly; nonlinear bodies are lifted to a
     scalar auxiliary variable with finite interval bounds.
     """
-    from discopt._jax.gdp_reformulate import _is_linear
+    from discopt._relax.gdp_reformulate import _is_linear
 
     if _is_linear(expr):
         return expr
@@ -335,7 +335,7 @@ def solve_mpec(
         raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', or 'gdp'")
 
     # Scholtes regularization homotopy via local NLP solves.
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.solvers.nlp_backend import get_nlp_solver
 
     t = model.parameter("_mpec_t", value=t0)

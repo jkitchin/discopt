@@ -1,6 +1,6 @@
 """Evaluator fingerprinting and the per-model LRU, with no JAX import.
 
-Lives outside ``_jax/`` deliberately. ``_jax/nlp_evaluator.py`` imports jax at
+Lives outside ``_relax/`` deliberately. ``_relax/nlp_evaluator.py`` imports jax at
 module scope, so anything that must run *before* the choice of evaluator backend
 — which is exactly this — cannot live there without pulling JAX in and defeating
 the point of having a JAX-free backend at all (issue #75).

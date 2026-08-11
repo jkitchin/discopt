@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.dag_compiler import (
+from discopt._relax.dag_compiler import (
     compile_constraint,
     compile_expression,
     compile_objective,

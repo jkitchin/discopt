@@ -159,7 +159,7 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
    the solve. Smoke-tested end-to-end from Python.
 
    **Python producer — DONE for bounded models (2026-07-19).**
-   `python/discopt/_jax/spatial_producer.py` reads the uniform factorable relaxation: structure on a
+   `python/discopt/_relax/spatial_producer.py` reads the uniform factorable relaxation: structure on a
    probe box (clean 4-row envelopes), finite bounds on the real box; envelope rows = a term's
    `{operands, aux}` support, everything else box-independent fixed rows; covers bilinear / monomial
    / affine-square / **sqrt**. Validated end-to-end (producer → PyO3 → kernel) against known optima

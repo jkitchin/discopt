@@ -39,19 +39,19 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.convexity import classify_model  # noqa: E402
-from discopt._jax.convexity.certificate import (  # noqa: E402
+from discopt._relax.convexity import classify_model  # noqa: E402
+from discopt._relax.convexity.certificate import (  # noqa: E402
     certify_quadratic_objective_convex,
 )
-from discopt._jax.convexity.interval_ad import interval_hessian  # noqa: E402
-from discopt._jax.nlp_evaluator import cached_evaluator  # noqa: E402
-from discopt._jax.problem_classifier import (  # noqa: E402
+from discopt._relax.convexity.interval_ad import interval_hessian  # noqa: E402
+from discopt._relax.nlp_evaluator import cached_evaluator  # noqa: E402
+from discopt._relax.problem_classifier import (  # noqa: E402
     ProblemClass,
     classify_problem,
     dense_Q,
     extract_qp_data,
 )
-from discopt._jax.quadratic_form import extract_quadratic  # noqa: E402
+from discopt._relax.quadratic_form import extract_quadratic  # noqa: E402
 
 # Tolerance for "the extracted form reproduces the body". The extraction is
 # exact-or-abstain, so the only slack here is float64 summation order.
@@ -180,7 +180,7 @@ def test_interval_hessian_abstains_deliberately_on_array_leaves():
 @pytest.mark.unit
 def test_certify_convex_abstains_instead_of_raising():
     """``certify_convex`` must return ``None``, not propagate."""
-    from discopt._jax.convexity import certify_convex
+    from discopt._relax.convexity import certify_convex
 
     m = _allocation_qp()
     assert certify_convex(m._objective.expression, m) is None
@@ -364,7 +364,7 @@ def test_non_qp_models_are_refused(factory):
 def test_oversized_model_abstains():
     """The route declines above its size cap rather than spend seconds in
     ``eigvalsh`` inside the solver's dispatch budget. Abstaining is sound."""
-    from discopt._jax.convexity import certificate as cert_mod
+    from discopt._relax.convexity import certificate as cert_mod
 
     m = _allocation_qp()
     prior = cert_mod._QP_EXACT_CONVEXITY_MAX_N

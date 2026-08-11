@@ -120,7 +120,7 @@ def extract_linear(model: Model) -> LinearModel:
     Raises ``NotImplementedError`` for nonlinear constraints/objectives or
     non-algebraic constraints (SOS, indicator, ...).
     """
-    from discopt._jax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
 
     n = sum(v.size for v in model._variables)
 

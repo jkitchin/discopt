@@ -97,8 +97,8 @@ def sample_boxes(lb, ub, is_int, count, seed=12345):
 
 
 def run_instance(name, n_boxes):
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import VarType, from_nl
 
     path = os.path.join(_CORPUS, f"{name}.nl")

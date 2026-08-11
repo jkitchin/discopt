@@ -127,7 +127,7 @@ McCormick inner oracle (`DISCOPT_SPARSE_LARGE_LP`) and a **target-free** step ru
 
 ## 5. Implementation — done (behind `DISCOPT_RLT1_LAGRANGIAN`, default off)
 
-1. `build_rlt1_split` (`python/discopt/_jax/rlt.py`) returns `RLT1Split`
+1. `build_rlt1_split` (`python/discopt/_relax/rlt.py`) returns `RLT1Split`
    `(c, A_in, b_in, C, offset, …)` — the inner McCormick polytope `P_McC` and the
    coupling `C z = 0` as first-class matrices, sharing the eligibility gate,
    exclusion presolve, pair lift, and objective with `build_rlt1_lp`.

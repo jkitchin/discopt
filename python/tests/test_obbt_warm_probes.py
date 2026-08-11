@@ -23,19 +23,19 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.obbt as obbt_mod
+import discopt._relax.obbt as obbt_mod
 import numpy as np
 import pytest
-from discopt._jax.obbt import _PersistentProbeLP, run_obbt_on_relaxation
+from discopt._relax.obbt import _PersistentProbeLP, run_obbt_on_relaxation
 from discopt.modeling.core import Model
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
 def _build_relaxation(model: Model):
-    from discopt._jax.discretization import initialize_partitions
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import initialize_partitions
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     terms = classify_nonlinear_terms(model)
     state = initialize_partitions([], lb=[], ub=[], n_init=2)

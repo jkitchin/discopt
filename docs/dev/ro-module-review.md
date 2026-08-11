@@ -71,7 +71,7 @@ wrong bound in the global solver.
 | RO-6 | P1 | `_common.py` (documented) | `np.sign(np.sum(value))` collapses constant **vectors** to one scalar sign — mixed-sign coefficient vectors get the wrong bound per-component (documented in ROADMAP, but ships silent) |
 | RO-7 | P1 | `box.py`, `polyhedral.py`, `affine_policy.py` | Arbitrary caps silently restrict the model: `t_ub = max|bound|+1` on abs-value auxiliaries, `lam_ub = Σ|b|+100` on LP duals, `|Y_j| ≤ ub−lb` on ADR policy columns — each can cut the true optimum on non-unit-scaled problems with no warning |
 | RO-8 | P2 | box/ellipsoidal paths | Equality constraints containing uncertain parameters are "robustified" by substitution/penalty — semantically meaningless for continuous uncertainty; should refuse loudly |
-| ADJ-1 | **P0 (adjacent, solver layer)** | extraction layer (`_jax/problem_classifier.py` neighborhood) | `maximize` + a `dm.sum(c * x) <= b` constraint returns the **wrong certified optimum (0 instead of 4)**; `minimize(−·)`, scalar, MatMul, and `sum(x)` forms are all correct. Discovered while controlling RO-2; same layer as modeling-review M1 [CONFIRMED, minimal repro in §5] |
+| ADJ-1 | **P0 (adjacent, solver layer)** | extraction layer (`_relax/problem_classifier.py` neighborhood) | `maximize` + a `dm.sum(c * x) <= b` constraint returns the **wrong certified optimum (0 instead of 4)**; `minimize(−·)`, scalar, MatMul, and `sum(x)` forms are all correct. Discovered while controlling RO-2; same layer as modeling-review M1 [CONFIRMED, minimal repro in §5] |
 
 Checked and found **correct**:
 
@@ -192,7 +192,7 @@ for small-δ uncertainty legitimately exceeds the recourse range). Each cap, whe
 binding, silently cuts the feasible/policy space: over-conservative results with no
 diagnostic. Fix: derive bounds from the actual expressions where cheap (interval
 evaluation of `coeff(x)` — the machinery exists in
-`_jax.convexity.interval_eval`), else leave unbounded and let the solver's
+`_relax.convexity.interval_eval`), else leave unbounded and let the solver's
 large-bound warning fire; if a cap is kept, check it at the solution (`t` or `λ`
 within 1e-6 of its cap ⇒ warn loudly).
 
@@ -261,7 +261,7 @@ Shape isolation: `x[0]+x[1] <= 4`, `c @ x <= 4`, and `dm.sum(x) <= 4` all solve
 correctly under maximize; only the `SumExpression(c * x)` body shape fails — and
 `minimize(-dm.sum(x))` with the same constraint is correct, so it is a
 sense-handling defect on whatever extraction path that body shape selects. Same
-layer as modeling-review **M1** (`_jax/problem_classifier.py` extraction); fold
+layer as modeling-review **M1** (`_relax/problem_classifier.py` extraction); fold
 this repro into the M1 fix's regression suite. Until M1/ADJ-1 land, RO test results
 involving vectorized bodies + maximize are not trustworthy evidence of RO-layer
 correctness.
@@ -342,7 +342,7 @@ tests; run `pytest python/tests/test_robust*.py test_affine_decision_rule.py`,
 | RO-4 | Refuse `/`, `**`, non-monotone `FunctionCall` over uncertain params; monotone table for `exp/log/sqrt` |
 | RO-5 | Replace `_eval_constant_expr` with a `compile_expression` call (raise if variables present); delete the silent-zero fallback |
 | RO-6 | Mixed-sign constant × uncertain param: correct per-component handling via the RO-1 extraction machinery (or warn until it lands); remove the ROADMAP caveat once fixed |
-| RO-7 | Replace the three magnitude caps with interval-derived bounds (`_jax.convexity.interval_eval`) or unbounded+solver-warning; add at-cap detection warnings; scale-stress regression test (coefficients ×1e4) |
+| RO-7 | Replace the three magnitude caps with interval-derived bounds (`_relax.convexity.interval_eval`) or unbounded+solver-warning; add at-cap detection warnings; scale-stress regression test (coefficients ×1e4) |
 | RO-8/9 | Refuse uncertain equalities; add the sequential mixed-set test |
 
 ### Phase 3 — SOTA direction (design doc + entry experiment first)

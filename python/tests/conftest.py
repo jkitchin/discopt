@@ -142,7 +142,7 @@ def _clear_multilinear_facet_cache():
     unaffected, since that recurrence is within a single test.
     """
     try:
-        from discopt._jax import multilinear_separation
+        from discopt._relax import multilinear_separation
 
         multilinear_separation._FACET_CACHE.clear()
     except Exception:

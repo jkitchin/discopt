@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.convexity.patterns import (
+from discopt._relax.convexity.patterns import (
     _DECLARED_BOX_CACHE_ATTR,
     _box_bounds,
     _total_scalar_variables,

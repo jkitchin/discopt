@@ -197,7 +197,7 @@ valid gate. jit's true cost is run-to-run nondeterminism (tls2 2.449↔2.1), whi
 still disqualifies it, but for the correct reason.
 
 **Completeness — every instance of the class, classified.** An exhaustive sweep
-of `python/discopt/_jax` for both signatures (`itertools.product` box-vertex
+of `python/discopt/_relax` for both signatures (`itertools.product` box-vertex
 enumeration; `eval_jaxpr`/interpreted per-call eval):
 - **`2ⁿ`-vertex hull LP** (the F1 pathology — duplicate columns → degenerate
   simplex): exactly two sites, `multilinear_separation` + `edge_concave`, **both

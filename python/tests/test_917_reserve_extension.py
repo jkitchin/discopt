@@ -29,7 +29,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.deadline import deadline_scope, get_deadline  # noqa: E402
+from discopt._relax.deadline import deadline_scope, get_deadline  # noqa: E402
 from discopt.constants import SENTINEL_THRESHOLD  # noqa: E402
 from discopt.modeling.core import _lp_spatial_reserve_extension_enabled  # noqa: E402
 from discopt.solver import (  # noqa: E402

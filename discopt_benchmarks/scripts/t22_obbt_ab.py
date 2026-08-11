@@ -1,7 +1,7 @@
 """cert:T2.2 A/B differential harness — persistent+warm OBBT vs cold-seam OBBT.
 
 Verifies the bound-neutrality of the persistent per-sweep OBBT LP + warm-started
-probes (T2.2 (a)+(b), in ``discopt/_jax/obbt.py``): within a sweep the std-form
+probes (T2.2 (a)+(b), in ``discopt/_relax/obbt.py``): within a sweep the std-form
 CSC is assembled once and each probe warm-starts from the previous probe's
 optimal basis. Because probes differ only in the objective over a (weakly)
 shrinking box, the warm basis is usually still primal-feasible and the Rust
@@ -28,19 +28,19 @@ import os.path as osp
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.obbt as obbt_mod
+import discopt._relax.obbt as obbt_mod
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.obbt import run_obbt_on_relaxation
+from discopt._relax.obbt import run_obbt_on_relaxation
 from discopt.modeling.core import Model
 
 _SNAP = osp.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl")
 
 
 def _build_relaxation(model: Model):
-    from discopt._jax.discretization import initialize_partitions
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import initialize_partitions
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     terms = classify_nonlinear_terms(model)
     state = initialize_partitions([], lb=[], ub=[], n_init=2)

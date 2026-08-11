@@ -1,5 +1,5 @@
 """Regression tests for C-29 and C-30 (false certified answers on the DEFAULT
-linear-body classify/extract path in ``discopt._jax.problem_classifier``).
+linear-body classify/extract path in ``discopt._relax.problem_classifier``).
 
 Both bugs certified a *wrong* answer on ``m.solve()`` with no flags:
 
@@ -28,7 +28,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax import problem_classifier as pc
+from discopt._relax import problem_classifier as pc
 
 
 @pytest.mark.smoke

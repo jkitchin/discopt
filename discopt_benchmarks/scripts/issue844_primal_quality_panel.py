@@ -107,7 +107,7 @@ def _in_scope(path: str) -> bool:
     because it measured less (CLAUDE.md §3, and the #864 sweep of silent swallows).
     """
     try:
-        from discopt._jax.lp_spatial_bb import _is_in_scope
+        from discopt._relax.lp_spatial_bb import _is_in_scope
         from discopt.modeling.core import from_nl
 
         return bool(_is_in_scope(from_nl(path)))

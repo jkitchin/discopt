@@ -94,7 +94,7 @@ python/discopt/stochastic/
 ```
 
 Mirrors `ro/`'s flat, builder-pattern shape. No new external deps (decomposition and
-`_jax` are core).
+`_relax` are core).
 
 ---
 

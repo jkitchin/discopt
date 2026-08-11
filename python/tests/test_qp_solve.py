@@ -167,7 +167,7 @@ class TestDispatchRouting:
     """Confirm QP/MIQP problems are classified to the QP path, not NLP."""
 
     def test_qp_classified_correctly(self):
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("dispatch_qp")
         x = m.continuous("x", lb=0, ub=10)
@@ -177,7 +177,7 @@ class TestDispatchRouting:
         assert classify_problem(m) == ProblemClass.QP
 
     def test_miqp_classified_correctly(self):
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("dispatch_miqp")
         x = m.continuous("x", lb=0, ub=10)

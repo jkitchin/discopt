@@ -16,9 +16,9 @@ Auditing the tree, **FBBT and OBBT were already wired at B&B nodes** and only
 
 | P3 leg | Pre-existing state | This workstream |
 |---|---|---|
-| **FBBT** at nodes | LIVE — `bnb/in_tree_presolve.rs` (`fbbt_with_cutoff`, depth-strided) + `_jax/node_reduce.py` cutoff-FBBT (cert:T2.4b) | reused; now also folds probing |
-| **OBBT** at nodes | LIVE — per-node OBBT (`_jax/obbt.py obbt_tighten_root`, structural/dependent-var gate) + free DBBT / integer RC-fixing in `reduce_node` | untouched (Python LP interface, correct owner) |
-| **Probing** | ROOT-ONLY — `presolve/probing.rs::probe_binary_vars` via the presolve pipeline (`_jax/presolve_pipeline.py`, binaries only) | **NEW: per-node probing kernel + wiring** |
+| **FBBT** at nodes | LIVE — `bnb/in_tree_presolve.rs` (`fbbt_with_cutoff`, depth-strided) + `_relax/node_reduce.py` cutoff-FBBT (cert:T2.4b) | reused; now also folds probing |
+| **OBBT** at nodes | LIVE — per-node OBBT (`_relax/obbt.py obbt_tighten_root`, structural/dependent-var gate) + free DBBT / integer RC-fixing in `reduce_node` | untouched (Python LP interface, correct owner) |
+| **Probing** | ROOT-ONLY — `presolve/probing.rs::probe_binary_vars` via the presolve pipeline (`_relax/presolve_pipeline.py`, binaries only) | **NEW: per-node probing kernel + wiring** |
 
 So the concrete P3 gap closed here is **per-node probing** (the missing triad
 leg), plus a unified public branch-and-reduce entry point.

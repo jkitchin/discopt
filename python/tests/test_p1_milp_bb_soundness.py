@@ -53,7 +53,7 @@ class TestControlsCertify:
 # ---------------------------------------------------------------------------
 # Force a non-KKT (code-3) relaxation: gap must not be certified
 # ---------------------------------------------------------------------------
-# ``_Code3State``/``_force_code3`` were removed with ``_jax/qp_ipm.py``: they
+# ``_Code3State``/``_force_code3`` were removed with ``_relax/qp_ipm.py``: they
 # relabelled a JAX IPM state as max-iter, and both remaining users now patch the
 # live POUNCE node path (``_pounce_qp_relaxation_nodes``) instead.
 
@@ -70,7 +70,7 @@ class TestNonKKTRecoveredByPounce:
     def test_miqp_batch_non_kkt_recovered(self, monkeypatch):
         # Patches the live POUNCE node path, mirroring the decertify test below.
         #
-        # This test used to `_force_code3` on `discopt._jax.qp_ipm.qp_ipm_solve_batch`
+        # This test used to `_force_code3` on `discopt._relax.qp_ipm.qp_ipm_solve_batch`
         # and was VACUOUS: MIQP node relaxations moved to POUNCE, so nothing called
         # that entry point. Measured before the fix -- wrapping it with a counter and
         # running this exact solve gave 0 invocations, and the solve returned

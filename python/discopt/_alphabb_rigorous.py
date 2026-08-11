@@ -1,13 +1,13 @@
 """Rigorous per-variable alphaBB parameters, with no JAX import.
 
-Split out of ``_jax/alphabb`` because it never needed JAX: it works entirely from
+Split out of ``_relax/alphabb`` because it never needed JAX: it works entirely from
 ``convexity.interval_ad``'s sound interval Hessian and numpy. While it lived in
 that module, ``solver.py``'s per-node alphaBB bound imported it and thereby
 dragged the whole JAX stack onto an otherwise JAX-free solve (#75) -- measured on
 ex14_1_9, oaer and tspn08, the last three corpus instances still loading JAX
 after Stages 2 and 3.
 
-The rest of ``_jax/alphabb`` (the sampled ``estimate_alpha``, the
+The rest of ``_relax/alphabb`` (the sampled ``estimate_alpha``, the
 under/overestimators, and ``compile_alphabb_relaxation``) genuinely uses JAX and
 stays there.
 """
@@ -44,7 +44,7 @@ def rigorous_alpha(expr, model, box=None):
     """
     import numpy as np
 
-    from discopt._jax.convexity.interval_ad import interval_hessian
+    from discopt._relax.convexity.interval_ad import interval_hessian
 
     iad = interval_hessian(expr, model, box)
     h_lo = np.asarray(iad.hess.lo, dtype=float)

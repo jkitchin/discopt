@@ -67,7 +67,7 @@ class TestSeparatorTightening:
     def test_node_bound_tightens_on_certifying_box(self, monkeypatch):
         # On a tight sub-box that certifies G-convex, the flag-ON node LP bound
         # must be >= the flag-OFF bound (a valid tightening) and both must solve.
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
         m = Model("t")
         x = m.continuous("x", lb=1.0, ub=2.0)

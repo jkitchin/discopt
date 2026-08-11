@@ -10,7 +10,7 @@ heterogeneous per-element bounds:
 1. ``export/gams.py`` — heterogeneous array bounds were emitted *only when
    uniform*, so a model with distinct per-element bounds exported with **no
    bounds at all** (EX-4). GAMS then solves a different model than discopt.
-2. ``_jax/gdp_reformulate.py:_compute_big_m_lp`` — the LP-optimum big-M read
+2. ``_relax/gdp_reformulate.py:_compute_big_m_lp`` — the LP-optimum big-M read
    element 0's bounds and stamped them onto every element, so a too-tight
    element-0 upper bound produced a **too-small big-M** that cuts feasible
    points of the inactive disjunct (the exact unsoundness the "exact oracle
@@ -121,7 +121,7 @@ def test_gdp_bigm_lp_uses_per_element_bounds():
     the LP came back with M ~= 1 — a too-small big-M that cuts feasible points of
     the inactive disjunct. Post-fix M ~= 10 (matching the sound interval path).
     """
-    import discopt._jax.gdp_reformulate as g
+    import discopt._relax.gdp_reformulate as g
     from discopt import Model
     from discopt.modeling.core import Constraint
 
@@ -153,7 +153,7 @@ def test_gdp_bigm_lp_uses_per_element_bounds():
 
 def test_gdp_bigm_lp_heterogeneous_fixture(heterogeneous_array_bounds):
     """The shared fixture's block must not collapse in the LP big-M path."""
-    import discopt._jax.gdp_reformulate as g
+    import discopt._relax.gdp_reformulate as g
     from discopt.modeling.core import Constraint
 
     try:

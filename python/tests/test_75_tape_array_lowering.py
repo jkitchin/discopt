@@ -22,7 +22,7 @@ What these tests pin, in order of what would hurt most if it broke:
   MANY rows, and the tape's rows must be the JAX arm's rows *in the same order*,
   or the two backends' duals, row maps and feasibility reports refer to different
   constraints (#908's failure mode, from the other side);
-* **numerical agreement** with ``_jax/dag_compiler`` on value and Jacobian;
+* **numerical agreement** with ``_relax/dag_compiler`` on value and Jacobian;
 * **the reductions are n-ary, not chains** — a ``+`` chain of depth N is not
   merely slow, POUNCE refuses past ``NlExpr.max_depth`` with a ``ValueError``
   that ``try_compile`` does not catch, so it escapes the JAX fallback entirely;
@@ -113,7 +113,7 @@ def test_array_form_matches_jax_value_and_jacobian(name):
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     m, x, Y, s = _array_model()
     expr = ARRAY_CASES[name](x, Y, s)
@@ -152,7 +152,7 @@ def test_array_constraint_body_fans_out_into_rows_in_jax_order():
     while every count still matched.
     """
     pytest.importorskip("jax")
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt._tape_nlp_evaluator import try_build
 
     def build(name):

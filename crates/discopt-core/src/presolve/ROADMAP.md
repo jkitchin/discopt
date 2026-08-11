@@ -136,13 +136,13 @@ another, and do not have a unified budget.
 
 | Module                                | Capability                                        |
 |---------------------------------------|---------------------------------------------------|
-| `_jax/convexity/`                     | Convexity certificates (interval AD, Gershgorin)  |
-| `_jax/term_classifier.py`             | Term-level structure detection                    |
-| `_jax/problem_classifier.py`          | Top-level problem classification                  |
-| `_jax/sparsity.py`, `sparse_*`        | Sparsity exploitation                             |
-| `_jax/scaling.py`                     | Numerical scaling                                 |
-| `_jax/gdp_reformulate.py`             | GDP big-M / hull reformulation                    |
-| `_jax/obbt.py`                        | Python-side OBBT (LP-driven via JAX relaxations)  |
+| `_relax/convexity/`                     | Convexity certificates (interval AD, Gershgorin)  |
+| `_relax/term_classifier.py`             | Term-level structure detection                    |
+| `_relax/problem_classifier.py`          | Top-level problem classification                  |
+| `_relax/sparsity.py`, `sparse_*`        | Sparsity exploitation                             |
+| `_relax/scaling.py`                     | Numerical scaling                                 |
+| `_relax/gdp_reformulate.py`             | GDP big-M / hull reformulation                    |
+| `_relax/obbt.py`                        | Python-side OBBT (LP-driven via JAX relaxations)  |
 
 Python preprocessing logic exists but is dispatched ad-hoc from the solver,
 not orchestrated as a pipeline.
@@ -220,7 +220,7 @@ inside the orchestrator's fixed-point loop. Python passes call back into the
 Rust IR through PyO3 with the same `PresolveDelta` contract.
 
 **Where.** `crates/discopt-python/` PyO3 bindings; Python entry points in
-`python/discopt/_jax/presolve/` (new package).
+`python/discopt/_relax/presolve/` (new package).
 
 **Dependencies.** A1, A2.
 
@@ -256,7 +256,7 @@ Mirror of `presolve/fbbt.rs` on the JAX relaxation DAG. Lets Python-side
 relaxations participate in bound tightening directly, without bouncing
 through Rust.
 
-**Where.** Extend `python/discopt/_jax/convexity/interval_ad.py`.
+**Where.** Extend `python/discopt/_relax/convexity/interval_ad.py`.
 
 **References.**
 - Schichl & Neumaier (2005), *Interval analysis on directed acyclic graphs for global optimization*, J. Global Optim. 33.
@@ -358,7 +358,7 @@ constraints into forms whose convex hull is tractable (e.g., epigraph
 substitution, exp-cone form for log-sum-exp, second-order-cone reformulation
 of quadratics with PSD structure).
 
-**Where.** New `python/discopt/_jax/presolve/convex_reform.py`, consuming
+**Where.** New `python/discopt/_relax/presolve/convex_reform.py`, consuming
 `convexity/`.
 
 **References.**
@@ -412,7 +412,7 @@ with branching in `bnb/`.
 Detect block-separable structure in the objective/constraints. Enables
 parallel relaxation evaluation and decomposition methods.
 
-**Where.** `python/discopt/_jax/presolve/separability.py` (new).
+**Where.** `python/discopt/_relax/presolve/separability.py` (new).
 
 **Dependencies.** A3.
 
@@ -447,12 +447,12 @@ package (A3).
 
 #### E1. Presolve-time row/column equilibration (S)
 
-Lift `_jax/scaling.py` into a presolve pass that produces a single scaling
+Lift `_relax/scaling.py` into a presolve pass that produces a single scaling
 applied consistently to LP, NLP, and IPM relaxations. Currently each solver
 does its own scaling; that's wasted work and a source of inconsistency.
 
 **Where.** `crates/discopt-core/src/presolve/scaling.rs` (new), with Python
-mirror in `_jax/presolve/`.
+mirror in `_relax/presolve/`.
 
 **References.**
 - Curtis & Reid (1972), *On the automatic scaling of matrices for Gaussian elimination*.
@@ -475,7 +475,7 @@ fixing). Cheap once an OBBT pass has run.
 
 #### F1. Big-M vs. hull reformulation as a presolve choice (M)
 
-`_jax/gdp_reformulate.py` exists but the choice between big-M and hull (and
+`_relax/gdp_reformulate.py` exists but the choice between big-M and hull (and
 when to disaggregate) is currently fixed by the user. Make it a presolve
 decision driven by problem structure: tightness of big-M, cost of
 hull-reformulation auxiliaries, density of the disjunction.

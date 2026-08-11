@@ -25,7 +25,7 @@ and the divergences.
   relaxations from McCormick's factorable composition rules citep:mccormick1976 and
   the multivariate generalization citep:tsoukalas2014. discopt implements the exact
   Tsoukalas–Mitsos 2014 tightened composition rule in
-  =python/discopt/_jax/multivariate_mccormick.py=; MAiNGO implements it in MC++.
+  =python/discopt/_relax/multivariate_mccormick.py=; MAiNGO implements it in MC++.
 - **Spatial branch-and-bound with a rigorous certificate.** Both target a proven
   global optimum (dual bound ≤ incumbent), not just a good feasible point.
 - **OBBT + DBBT + FBBT range reduction** at nodes.
@@ -43,7 +43,7 @@ branch-and-bound tree branches only on the degrees of freedom, and intermediate
 quantities are hidden inside functions that return relaxations.
 
 discopt's **default** global path does the opposite. In
-=python/discopt/_jax/mccormick_lp.py= — whose own docstring reads "bilinears lifted
+=python/discopt/_relax/mccormick_lp.py= — whose own docstring reads "bilinears lifted
 to aux columns" — nonlinear terms are lifted into auxiliary LP columns, building a
 polyhedral relaxation in an *extended* variable space, exactly the
 [[file:../methods/auxiliary-variable-reformulation.org][auxiliary-variable method]] used by [[file:../concepts/baron-solver.org][BARON]], [[file:../concepts/couenne-solver.org][Couenne]], and [[file:../concepts/scip-solver.org][SCIP]]. So on its default
@@ -84,7 +84,7 @@ differently:
 | Dimension | MAiNGO | discopt |
 |-----------+--------+---------|
 | Core language | C++ | Rust core + Python orchestration |
-| Relaxation math | MC++ (McCormick + subgradients) | JAX DAG compiler (=_jax/=), autodiff |
+| Relaxation math | MC++ (McCormick + subgradients) | JAX DAG compiler (=_relax/=), autodiff |
 | Default variable space | reduced / original (no aux vars) | lifted / auxiliary-variable LP |
 | Node LP solver | CPLEX or CLP | in-house Rust dual simplex |
 | Interval arithmetic | FILIB++ | Rust FBBT / interval in =discopt-core= |

@@ -26,9 +26,9 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax import uniform_relax as ur
-from discopt._jax.milp_relaxation import _flat_variable_types
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax import uniform_relax as ur
+from discopt._relax.milp_relaxation import _flat_variable_types
+from discopt._relax.model_utils import flat_variable_bounds
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import e1_refresh as ref  # noqa: E402

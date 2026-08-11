@@ -16,7 +16,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling.core as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
 from discopt.solver import _AUTO_CUTS_MAX_VARS, _apply_auto_cut_policy
 
 

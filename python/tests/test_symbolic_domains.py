@@ -10,9 +10,9 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from discopt._jax.symbolic import registry  # noqa: E402
-from discopt._jax.symbolic.domains import chemeng, power  # noqa: E402
-from discopt._jax.symbolic.verification import verify_envelope  # noqa: E402
+from discopt._relax.symbolic import registry  # noqa: E402
+from discopt._relax.symbolic.domains import chemeng, power  # noqa: E402
+from discopt._relax.symbolic.verification import verify_envelope  # noqa: E402
 
 pytestmark = pytest.mark.relaxation
 
@@ -99,8 +99,8 @@ def test_engine_rejects_globally_periodic_sin():
     """
     pytest.importorskip("sympy")
     import sympy as sp
-    from discopt._jax.symbolic import derive_envelope
-    from discopt._jax.symbolic.envelope_deriver import EnvelopeDerivationError
+    from discopt._relax.symbolic import derive_envelope
+    from discopt._relax.symbolic.envelope_deriver import EnvelopeDerivationError
 
     x = sp.Symbol("x", real=True)
     with pytest.raises(EnvelopeDerivationError):
@@ -116,11 +116,11 @@ def test_sin_angle_matches_engine_construction_on_single_inflection_proxy():
     """
     pytest.importorskip("sympy")
     import sympy as sp
-    from discopt._jax.symbolic import derive_envelope, lambdify_envelope
+    from discopt._relax.symbolic import derive_envelope, lambdify_envelope
 
     x = sp.Symbol("x", real=True)
     sym = jax.jit(lambdify_envelope(derive_envelope(sp.tanh(x), x)))
-    from discopt._jax.symbolic import runtime
+    from discopt._relax.symbolic import runtime
 
     hand = jax.jit(
         lambda t, lb, ub: runtime.single_inflection_envelope(
@@ -157,7 +157,7 @@ def test_compiler_routes_xlogx_pattern():
     routed result matches the standalone ``xlogx_relax`` closure."""
     import discopt.modeling as M
     import numpy as np
-    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt._relax.relaxation_compiler import compile_relaxation
     from discopt.modeling.core import Model
 
     m = Model("entropy")
@@ -184,7 +184,7 @@ def test_compiler_xlogx_detector_no_misfire():
     """The x*log(x) detector fires only on a bare variable times log of the SAME
     variable — not on different variables, squares, or other transcendentals."""
     import discopt.modeling as M
-    from discopt._jax.relaxation_compiler import _try_extract_xlogx
+    from discopt._relax.relaxation_compiler import _try_extract_xlogx
     from discopt.modeling.core import Model
 
     m = Model("t")
@@ -206,7 +206,7 @@ def test_compiler_routes_monod_pattern():
     """The compiler detects x/(K+x) on a nonneg-domain variable and routes it to
     the dedicated concave envelope; sound, and matches the standalone closure."""
     import numpy as np
-    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt._relax.relaxation_compiler import compile_relaxation
     from discopt.modeling.core import Model
 
     m = Model("monod")
@@ -228,7 +228,7 @@ def test_compiler_routes_monod_pattern():
 
 
 def test_monod_detector_guards_and_no_misfire():
-    from discopt._jax.relaxation_compiler import _try_extract_monod
+    from discopt._relax.relaxation_compiler import _try_extract_monod
     from discopt.modeling.core import Model
 
     m = Model("t")
@@ -250,7 +250,7 @@ def test_compiler_routes_arrhenius_pattern():
     to the dedicated single-inflection envelope; sound across the inflection."""
     import discopt.modeling as M
     import numpy as np
-    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt._relax.relaxation_compiler import compile_relaxation
     from discopt.modeling.core import Model
 
     # c = 800 -> inflection at T = c/2 = 400, inside [300, 600] (straddling).
@@ -274,7 +274,7 @@ def test_compiler_routes_arrhenius_pattern():
 
 def test_arrhenius_detector_guards_and_no_misfire():
     import discopt.modeling as M
-    from discopt._jax.relaxation_compiler import _try_extract_arrhenius
+    from discopt._relax.relaxation_compiler import _try_extract_arrhenius
     from discopt.modeling.core import Model
 
     m = Model("t")

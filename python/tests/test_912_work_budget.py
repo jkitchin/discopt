@@ -186,8 +186,8 @@ def _ils_instance(name="nvs21"):
 def _run_ils(model, *, eval_budget, solve_budget, alpha, time_budget=5.0, deadline=None):
     """Run ILS from the box midpoint under an ``alpha``-scaled clock, returning
     the result and the budget object that gated it."""
-    from discopt._jax import primal_heuristics as ph
-    from discopt._jax.nlp_evaluator import cached_evaluator
+    from discopt._relax import primal_heuristics as ph
+    from discopt._relax.nlp_evaluator import cached_evaluator
 
     ev = cached_evaluator(model)
     lb, ub = ph._get_variable_bounds(model)

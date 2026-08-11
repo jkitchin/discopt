@@ -1,15 +1,15 @@
 """Coverage-driven unit/property tests (#87, final round) for three modules.
 
-* ``discopt._jax.relaxation_compiler`` — envelope containment (``cv <= f <= cc``
+* ``discopt._relax.relaxation_compiler`` — envelope containment (``cv <= f <= cc``
   on sampled boxes) for the atom extractors that the existing envelope suite
   does not reach (signed powers, general ``x**y``, partitioned paths, prod,
   norms, sign, indexed tight dispatches, alphaBB arithmetic, the learned-mode
   bilinear dispatch), plus REJECT branches of the ``_try_extract_*`` helpers
   exercised with near-miss shapes.
-* ``discopt._jax.convexity.patterns`` — every CONVEX/CONCAVE verdict is
+* ``discopt._relax.convexity.patterns`` — every CONVEX/CONCAVE verdict is
   cross-checked against sampled midpoint convexity of the actual function on
   the declared box; near-miss shapes must abstain (``None``).
-* ``discopt._jax.differentiable`` — parametric-compiler values and gradients
+* ``discopt._relax.differentiable`` — parametric-compiler values and gradients
   are checked against hand-computed values and central finite differences;
   solver-facing error paths must raise; L3 accessors are checked against the
   analytic sensitivities of tiny NLPs.
@@ -30,9 +30,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity import Curvature, classify_expr
-from discopt._jax.convexity import patterns as pat
-from discopt._jax.differentiable import (
+from discopt._relax.convexity import Curvature, classify_expr
+from discopt._relax.convexity import patterns as pat
+from discopt._relax.differentiable import (
     DiffSolveResult,
     DiffSolveResultL3,
     _compile_parametric_constraint,
@@ -47,7 +47,7 @@ from discopt._jax.differentiable import (
     differentiable_solve_l3,
     find_active_set,
 )
-from discopt._jax.relaxation_compiler import (
+from discopt._relax.relaxation_compiler import (
     _compile_relax_node,
     _resolve_scalar_var_offset,
     _try_extract_arrhenius,

@@ -16,7 +16,7 @@ You are an expert on the discopt modeling API. You help users write clean, effic
 - **Objective**: `minimize(expr)` / `maximize(expr)` — overwrites the prior objective (single-objective only). Multi-objective is handled by `discopt.mo`.
 - **Constraints**: `m.subject_to(c)` or `m.subject_to(list_of_c, name="block")`. Append-only (no removal or modification once added). Scalar comparisons produce `Constraint`; vectorized produce a `ConstraintBlock`.
 - **Bulk construction**: `m.add_linear_constraints(A, x, sense, b)` — scipy sparse / dense; bypasses Python expressions for 1000+ rows.
-- **Big-M, indicator, disjunctive**: standard MINLP idioms; GDP reformulation machinery in `python/discopt/_jax/gdp_reformulate.py`.
+- **Big-M, indicator, disjunctive**: standard MINLP idioms; GDP reformulation machinery in `python/discopt/_relax/gdp_reformulate.py`.
 - **Bounds hygiene**: defaults are ±9.999e19 which exceed NLP solver safe threshold (~1e15). Model.solve emits `UserWarning` — always supply finite, reasonable bounds.
 
 ## Context: discopt Implementation
@@ -44,8 +44,8 @@ val = result.value(x)   # numpy array
 - `python/discopt/modeling/core.py` — `Model`, `Variable`, `Parameter`, `Expression`, `Constraint`, `Objective`, `SolveResult`. This is the authoritative API surface.
 - `python/discopt/modeling/examples.py` — canonical textbook MINLPs (simple, Haverly pooling, pump network, etc.).
 - `python/discopt/modeling/gams_parser.py` — GAMS `.gms` importer with statement-level support for loops, conditions, sums, semicontinuous, etc.
-- `python/discopt/_jax/dag_compiler.py` — `compile_expression`, `compile_objective`, `compile_constraint`; the JAX lowering.
-- `python/discopt/_jax/gdp_reformulate.py` — GDP (generalized disjunctive programming) reformulation patterns.
+- `python/discopt/_relax/dag_compiler.py` — `compile_expression`, `compile_objective`, `compile_constraint`; the JAX lowering.
+- `python/discopt/_relax/gdp_reformulate.py` — GDP (generalized disjunctive programming) reformulation patterns.
 
 ### Idioms you recommend
 

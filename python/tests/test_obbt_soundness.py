@@ -113,7 +113,7 @@ def test_root_obbt_keeps_optimum_even_when_pounce_requested():
     import time
 
     import numpy as np
-    from discopt._jax.obbt import obbt_tighten_root
+    from discopt._relax.obbt import obbt_tighten_root
 
     m = _build_stiff_ratio_model()
     lb = np.array([v.lb for v in m._variables], dtype=float)

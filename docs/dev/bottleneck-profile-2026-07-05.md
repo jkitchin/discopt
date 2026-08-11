@@ -433,7 +433,7 @@ overwritten:
    flowsheet **super3t** overruns `time_limit=30` at **74 s ungated / 40 s
    gated** — but its residual overrun is **not** a heuristic NLP (an instrumented
    solve makes **zero** `solve_nlp` calls). Its root time is spent in
-   `_jax/term_classifier._compute_var_offset` — the McCormick relaxation
+   `_relax/term_classifier._compute_var_offset` — the McCormick relaxation
    term-classification build, an uninterruptible O(n·terms) pass that predates
    the heuristic phase. This is a **distinct overrun site** outside F4's scope
    (F4 halves it as a side effect but cannot close it); it needs its own

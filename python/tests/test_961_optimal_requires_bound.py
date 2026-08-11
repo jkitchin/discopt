@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer, MccormickLPResult, _no_bound_status
+from discopt._relax.mccormick_lp import MccormickLPRelaxer, MccormickLPResult, _no_bound_status
 from discopt.modeling.core import from_nl
 
 _NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"

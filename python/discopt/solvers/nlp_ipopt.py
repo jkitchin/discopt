@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #75: module-scope import pulled jax onto every solve via nlp_pounce ->
     # nlp_backend. Annotation-only at runtime.
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
 # Ipopt status code mapping
 # See: https://coin-or.github.io/Ipopt/IpReturnCodes_8inc.html

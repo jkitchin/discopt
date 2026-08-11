@@ -45,9 +45,9 @@ _DATA = os.path.join(os.path.dirname(__file__), "..", "python", "tests", "data")
 
 def _root_lp(model, terms, lb, ub, budget):
     """(path, bound, x) at the root box, preferring the incremental patch."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     t0 = time.perf_counter()
     inc = IncrementalMcCormickLP(model, terms, deadline=t0 + budget)
@@ -79,8 +79,8 @@ def _resolve_fixed(model, terms, lo, hi, inc):
     if inc is not None:
         _b, x, _ = inc.solve(lo, hi)
         return x
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     relax, _info = build_milp_relaxation(
         model, terms, DiscretizationState(), bound_override=(lo, hi)
@@ -91,8 +91,8 @@ def _resolve_fixed(model, terms, lo, hi, inc):
 
 
 def probe(path, budget=60.0):
-    from discopt._jax.nlp_evaluator import NLPEvaluator
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import ObjectiveSense, VarType, from_nl
     from discopt.solver import _check_constraint_feasibility, _infer_constraint_bounds
 

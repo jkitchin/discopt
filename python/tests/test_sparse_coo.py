@@ -13,7 +13,7 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator, validate_sparse_values
+from discopt._relax.nlp_evaluator import NLPEvaluator, validate_sparse_values
 
 pytestmark = pytest.mark.unit
 

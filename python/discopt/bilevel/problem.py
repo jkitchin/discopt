@@ -234,7 +234,7 @@ class BilevelProblem:
         entry's enclosure is non-finite (unsupported atom) — so the caller refuses
         rather than assume convexity.
         """
-        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._relax.convexity.interval_eval import evaluate_interval
 
         ys = self.lower_vars
         n = len(ys)

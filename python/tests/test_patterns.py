@@ -11,7 +11,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from discopt._jax.symbolic import patterns as P  # noqa: E402
+from discopt._relax.symbolic import patterns as P  # noqa: E402
 
 pytestmark = pytest.mark.relaxation
 

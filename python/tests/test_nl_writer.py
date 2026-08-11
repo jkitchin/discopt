@@ -676,7 +676,7 @@ class TestNLWriterCollocation:
         random point, and require elementwise agreement.
         """
         import numpy as np
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.export.nl import _NLWriter
 
         m = self._build_dae_model()
@@ -761,7 +761,7 @@ class TestNLWriterDeepNesting:
         faithful). A modest chain length keeps the JAX compiler used as the
         oracle below within its own recursion limit."""
         import numpy as np
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.export.nl import _NLWriter
 
         n = 150

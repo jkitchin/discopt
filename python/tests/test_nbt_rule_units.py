@@ -19,7 +19,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nonlinear_bound_tightening import (
+from discopt._relax.nonlinear_bound_tightening import (
     _inverse_monotone_lower,
     _inverse_monotone_upper,
     _monotone_function_value,
@@ -115,7 +115,7 @@ def test_inverse_monotone_guard_rails():
 
 
 def _tighten(model):
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
 
     flat_lb, flat_ub = flat_variable_bounds(model)
     return flat_lb, flat_ub, tighten_nonlinear_bounds(model, flat_lb, flat_ub)

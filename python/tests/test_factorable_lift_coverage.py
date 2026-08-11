@@ -30,10 +30,10 @@ import math
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax import milp_relaxation as MR
-from discopt._jax.factorable_reform import factorable_reformulate, has_factorable_work
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax import milp_relaxation as MR
+from discopt._relax.factorable_reform import factorable_reformulate, has_factorable_work
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
 
 pytestmark = pytest.mark.slow
 
@@ -53,7 +53,7 @@ def _build_and_probe(build_model):
     """Reform (mirroring the solver) → build relaxation → (dropped, bound, status)."""
     MR._warned_messages.clear()
     catcher = _DropCatcher()
-    lg = logging.getLogger("discopt._jax.milp_relaxation")
+    lg = logging.getLogger("discopt._relax.milp_relaxation")
     prev = lg.level
     lg.setLevel(logging.WARNING)
     lg.addHandler(catcher)

@@ -1,6 +1,6 @@
 """``TapeNLPEvaluator`` must reproduce the JAX ``NLPEvaluator`` it replaces.
 
-Issue #75, Stage 3. ``_jax/nlp_evaluator.py`` is the single trigger that imports
+Issue #75, Stage 3. ``_relax/nlp_evaluator.py`` is the single trigger that imports
 JAX on every nonlinear solve, so replacing it is what makes the solve path
 JAX-free. This pins the properties that decide whether it can:
 
@@ -45,7 +45,7 @@ INSTANCES = ["alan", "ex1221", "ex1225", "gbd", "st_e13", "nvs12", "st_test1"]
 
 
 def _jax_evaluator(model):
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     return NLPEvaluator(model)
 
@@ -484,7 +484,7 @@ def test_gauss_newton_is_supported_not_refused():
 @pytest.mark.unit
 def test_gauss_newton_objective_hessian_matches_jax():
     """``2 JᵀJ`` from the aux tape vs the JAX arm — the entry experiment, pinned."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = _gn_ls_model()
     tape = TapeNLPEvaluator(m)
@@ -506,7 +506,7 @@ def test_gauss_newton_objective_hessian_matches_jax():
 @pytest.mark.unit
 def test_gauss_newton_keeps_exact_constraint_curvature():
     """Only the OBJECTIVE term is approximated; ``Σ λᵢ ∇²gᵢ`` stays exact."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = _gn_ls_model(with_constraint=True)
     tape = TapeNLPEvaluator(m)
@@ -587,7 +587,7 @@ def test_gauss_newton_hessian_is_psd_and_differs_from_exact():
 def test_gauss_newton_declines_to_exact_hessian(reason):
     """When GN does not apply the tape uses the EXACT Hessian, matching the JAX
     arm's rules — so ``DISCOPT_NLP_EVAL`` cannot change which models get it."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = Model()
     x = m.continuous("x", lb=-2, ub=2)

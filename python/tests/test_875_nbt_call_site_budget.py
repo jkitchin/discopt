@@ -49,7 +49,7 @@ def test_call_site_forwards_the_solve_deadline(monkeypatch):
     seen: list[float | None] = []
     real = solver_mod._apply_nonlinear_tightening_with_status
 
-    import discopt._jax.nonlinear_bound_tightening as nbt
+    import discopt._relax.nonlinear_bound_tightening as nbt
 
     orig = nbt.tighten_nonlinear_bounds
 
@@ -84,7 +84,7 @@ def test_absent_solve_deadline_leaves_the_pass_unbounded(monkeypatch):
     make every untimed solve skip tightening entirely.
     """
     seen: list[object] = []
-    import discopt._jax.nonlinear_bound_tightening as nbt
+    import discopt._relax.nonlinear_bound_tightening as nbt
 
     orig = nbt.tighten_nonlinear_bounds
 

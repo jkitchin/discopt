@@ -27,7 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.dag_compiler import (
+from discopt._relax.dag_compiler import (
     _build_param_index,
     _build_tape,
     compile_constraint,

@@ -28,7 +28,7 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import cached_evaluator
+from discopt._relax.nlp_evaluator import cached_evaluator
 
 BENCH = Path(os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl"))
 _JIT1 = BENCH / "jit1.nl"
@@ -50,7 +50,7 @@ def test_828_jit1_solves_on_default_path():
     )
     # and the incumbent is genuinely feasible (never a false primal)
     if r.x is not None:
-        from discopt._jax.primal_heuristics import _check_constraint_feasibility
+        from discopt._relax.primal_heuristics import _check_constraint_feasibility
 
         ev = cached_evaluator(model)
         flat = np.concatenate(

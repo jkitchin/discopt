@@ -32,8 +32,8 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 
@@ -317,7 +317,7 @@ def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
     """
     import numpy as np
     import scipy.sparse as sp
-    from discopt._jax.milp_relaxation import build_milp_relaxation, equilibrate_relaxation_lp
+    from discopt._relax.milp_relaxation import build_milp_relaxation, equilibrate_relaxation_lp
 
     nl = _DATA / "ex1252.nl"
     assert nl.exists(), f"missing {nl}"
@@ -351,7 +351,7 @@ def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
     # with the (fast, equilibrating) Rust simplex and require agreement.
     milp._integrality = None
     raw = milp.solve(backend="simplex")
-    from discopt._jax.milp_relaxation import MilpRelaxationModel
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
 
     scaled = MilpRelaxationModel(
         c=c2,
@@ -383,7 +383,7 @@ def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
     """
     import numpy as np
     import scipy.sparse as sp
-    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.milp_relaxation import build_milp_relaxation
 
     monkeypatch.setenv("DISCOPT_RLT_QUAD", "1")
     nl = _DATA / "nvs17.nl"

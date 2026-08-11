@@ -17,7 +17,7 @@ import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.canonical_expr import (
+from discopt._relax.canonical_expr import (
     CNode,
     atomize,
     canonicalize,
@@ -25,10 +25,10 @@ from discopt._jax.canonical_expr import (
     reconstruct,
     var_support,
 )
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Constant, CustomCall, from_nl
 
 pytestmark = [pytest.mark.claim_boundary]

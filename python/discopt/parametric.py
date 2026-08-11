@@ -60,7 +60,7 @@ def compile_expression(expr: Expression, model: Model) -> Callable:
         Function ``f(x_flat, p_flat) -> jnp.ndarray`` evaluating the
         expression at the given flat vectors.
     """
-    from discopt._jax.differentiable import _compile_parametric_node
+    from discopt._relax.differentiable import _compile_parametric_node
 
     fn: Callable = _compile_parametric_node(expr, model)
     return fn
@@ -91,7 +91,7 @@ def compile_response_function(
     ValueError
         If ``responses`` is empty.
     """
-    from discopt._jax.parametric import compile_response_function as _impl
+    from discopt._relax.parametric import compile_response_function as _impl
 
     return _impl(responses, model)
 
@@ -116,7 +116,7 @@ def extract_x_flat(result, model: Model) -> jnp.ndarray:
     ValueError
         If the result has no solution.
     """
-    from discopt._jax.parametric import extract_x_flat as _impl
+    from discopt._relax.parametric import extract_x_flat as _impl
 
     return _impl(result, model)
 
@@ -137,14 +137,14 @@ def flatten_params(model: Model) -> jnp.ndarray:
     jnp.ndarray
         1-D array of all parameter values in declaration order.
     """
-    from discopt._jax.differentiable import _flatten_params
+    from discopt._relax.differentiable import _flatten_params
 
     return _flatten_params(model)
 
 
 def param_total_size(model: Model) -> int:
     """Total number of scalar parameter values in the model."""
-    from discopt._jax.differentiable import _param_total_size
+    from discopt._relax.differentiable import _param_total_size
 
     return _param_total_size(model)
 

@@ -19,8 +19,8 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.quadratic_form import (
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.quadratic_form import (
     extract_quadratic,
     is_purely_quadratic,
     quadratic_is_nsd,

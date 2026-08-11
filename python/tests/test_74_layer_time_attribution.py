@@ -263,7 +263,7 @@ def test_evaluators_declare_their_timing_layer():
     falls back to charging nothing and the enclosing solver region absorbs the
     callbacks — the pre-#74 inflation, reintroduced quietly.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt._tape_nlp_evaluator import TapeNLPEvaluator
 
     checked = 0

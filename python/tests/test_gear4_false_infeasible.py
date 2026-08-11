@@ -60,7 +60,7 @@ def _contains_division(expr: Expression) -> bool:
 
 def test_has_unbounded_nonlinear_term_unit():
     """The guard flags a nonlinear product with an unbounded factor, not a bounded one."""
-    from discopt._jax.factorable_reform import _has_unbounded_nonlinear_term
+    from discopt._relax.factorable_reform import _has_unbounded_nonlinear_term
 
     m = dm.Model("unit")
     a = m.continuous("a", lb=1.0, ub=10.0)  # bounded
@@ -77,7 +77,7 @@ def test_has_unbounded_nonlinear_term_unit():
 def test_clearing_skipped_for_unbounded_slack_product():
     """``factorable_reformulate`` must keep gear4's quotient, not clear it into an
     unbounded trilinear product."""
-    from discopt._jax.factorable_reform import (
+    from discopt._relax.factorable_reform import (
         _clear_divisions,
         _has_unbounded_nonlinear_term,
         factorable_reformulate,
@@ -166,7 +166,7 @@ def test_nonlinear_term_integers_are_detected_for_spatial_branching():
     columns as nonlinear columns, so the solver registers them for spatial
     branching (the `_nl_int_cols` step in solve_model)."""
 
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
     from discopt.solver import _extract_variable_info
 
     m = dm.Model("int_bilinear")

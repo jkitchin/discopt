@@ -20,7 +20,7 @@ def test_separation_lp_solver_defaults_to_simplex(monkeypatch):
     """Default (flag unset / '1') -> the in-house simplex is the separation LP."""
     import discopt.solvers.lp_pounce as lp_pounce
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax.edge_concave import _separation_lp_solver
+    from discopt._relax.edge_concave import _separation_lp_solver
 
     if not lp_simplex.SIMPLEX_AVAILABLE:
         pytest.skip("in-house simplex binding not built")
@@ -40,7 +40,7 @@ def test_edge_concave_cut_sound_via_simplex_path(monkeypatch):
     """A cut derived through the simplex-backed separator is a valid under/over
     estimator over the whole box (removes no true point)."""
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax.edge_concave import (
+    from discopt._relax.edge_concave import (
         EdgeConcaveQuadratic,
         separate_edge_concave_quadratic,
     )

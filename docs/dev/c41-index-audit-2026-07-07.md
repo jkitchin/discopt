@@ -40,13 +40,13 @@ site paired with a flat bounds array, across both layers.
 | # | Site (file:line) | Mapping kind | Verdict |
 |---|---|---|---|
 | 1 | `python/discopt/solver.py:7438-7495` (Phase-C3 cutoff-FBBT) | `fbbt_lbs[bi]`(block) → `lb[flat]`(flat) | **SAFE** — C-40 fix: guards `fbbt_lbs.shape==(n_vars,) ∧ all(v.size==1)`, builds candidate with `np.maximum/minimum`, commits only crossing-free intersection. |
-| 2 | `python/discopt/_jax/node_reduce.py:_fbbt_on_node` (was 184-204) | `fbbt_lbs[bi]`(block) → `lb[flat]`(flat), fresh builder-mode repr | **SUSPECT → FIXED (real crossed-box/false-infeasible)**. Old guard was only `bi >= shape[0]` (OOB), not alignment; a diverged repr writes the wrong var's bound. Added the `len==len(model._variables)` guard + surfaced the swallowing `except`. |
-| 3 | `python/discopt/_jax/root_reduce.py:_stage_fbbt_with_cutoff` (was 147-169) | identical to #2, root box | **SUSPECT → FIXED (real crossed-box/false-infeasible)**. Same fix. |
+| 2 | `python/discopt/_relax/node_reduce.py:_fbbt_on_node` (was 184-204) | `fbbt_lbs[bi]`(block) → `lb[flat]`(flat), fresh builder-mode repr | **SUSPECT → FIXED (real crossed-box/false-infeasible)**. Old guard was only `bi >= shape[0]` (OOB), not alignment; a diverged repr writes the wrong var's bound. Added the `len==len(model._variables)` guard + surfaced the swallowing `except`. |
+| 3 | `python/discopt/_relax/root_reduce.py:_stage_fbbt_with_cutoff` (was 147-169) | identical to #2, root box | **SUSPECT → FIXED (real crossed-box/false-infeasible)**. Same fix. |
 | 4 | `python/discopt/solvers/_root_presolve.py:_flat_fbbt_bounds:43-59` | `fbbt_lbs[block_idx]`(block) → `tightened_lb[slice]`(flat) | **SAFE** — early-returns when `len(fbbt_lbs) != len(model._variables)`; block→flat via `slice(offset, offset+size)` with running `offset`. |
 | 5 | `python/discopt/tightening.py:fbbt_box:88-127` | `block_lb[i]`(block) → `new_lb[slice(offset,offset+size)]`(flat) | **SAFE** — `n_blocks`, `sizes`, `orig_lb/ub` **all derived from the same `repr_`** (not `model._variables`); self-consistent, running `offset`, no cross-length hazard. |
-| 6 | `python/discopt/_jax/nonlinear_bound_tightening.py` | builds `FlatVariableMetadata` (running offsets); rules index flat arrays by flat indices | **SAFE** — no block-index → flat-array read anywhere (grep: no `fbbt_lbs[bi]`). |
-| 7 | `python/discopt/_jax/mccormick_lp.py` | McCormick envelope compile | **SAFE** — no `fbbt_lbs[bi]`→flat map; no block-index read of a flat array. |
-| 8 | `python/discopt/_jax/node_reduce.py:_is_int_mask` & `root_reduce._is_int_mask` | per-block `for v` with running `k`/flat counter → `is_int[k]` | **SAFE** — flat mask built by a running counter over `v.size`; indexed by `flat`, flat-to-flat. |
+| 6 | `python/discopt/_relax/nonlinear_bound_tightening.py` | builds `FlatVariableMetadata` (running offsets); rules index flat arrays by flat indices | **SAFE** — no block-index → flat-array read anywhere (grep: no `fbbt_lbs[bi]`). |
+| 7 | `python/discopt/_relax/mccormick_lp.py` | McCormick envelope compile | **SAFE** — no `fbbt_lbs[bi]`→flat map; no block-index read of a flat array. |
+| 8 | `python/discopt/_relax/node_reduce.py:_is_int_mask` & `root_reduce._is_int_mask` | per-block `for v` with running `k`/flat counter → `is_int[k]` | **SAFE** — flat mask built by a running counter over `v.size`; indexed by `flat`, flat-to-flat. |
 | 9 | `python/discopt/solvers/_root_presolve.py:tighten_root_bounds_with_fbbt` (int_offsets/int_sizes) | flat offsets from block sizes | **SAFE** — offsets computed from `v.size`; slice-addressed. |
 | 10 | `python/discopt/warm_start.py`, `infeasibility.py`, `conflict.py`, `callbacks.py`, `parametric.py`, `mpec.py` | `enumerate(model._variables)` with running `offset`/`flat` or `zip(model._variables, saved)` | **SAFE** — no block-index used to index a differently-lengthed flat array; each keeps its own running scalar offset or zips 1:1 with a same-length per-block save list. |
 | 11 | `crates/discopt-core/src/presolve/pass.rs:resync_bounds_after_rewrite:101-136` | `bounds` (block-indexed) resync after a model rewrite | **SAFE** — C-16/C-31: `bounds` explicitly one-per-BLOCK; a *shrinking* rewrite rebuilds `bounds` from the new model (never positionally intersects a renumbered vector), a *growing* rewrite intersects only the unchanged prefix. |
@@ -94,7 +94,7 @@ synthetic repro shows the failure it prevents.
 
 ## The fix (general, mirrors C-40)
 
-`python/discopt/_jax/node_reduce.py` and `python/discopt/_jax/root_reduce.py`, one
+`python/discopt/_relax/node_reduce.py` and `python/discopt/_relax/root_reduce.py`, one
 hunk each, no name/shape special-casing:
 
 1. After materializing `fbbt_lbs`/`fbbt_ubs`, **forgo** the tightening unless

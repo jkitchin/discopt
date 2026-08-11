@@ -9,7 +9,7 @@ What went wrong, and why the fix is shaped this way
 ---------------------------------------------------
 
 Both verifiers advanced **one row index per** :class:`~discopt.modeling.core.Constraint`
-**object** while :class:`~discopt._jax.nlp_evaluator.NLPEvaluator` emits **one row
+**object** while :class:`~discopt._relax.nlp_evaluator.NLPEvaluator` emits **one row
 per flat element**. A constraint body may be array-valued — ``x <= 1`` on a
 3-vector is one ``Constraint`` and three rows — so on any model with a vector
 constraint the two streams desynchronise and every check from that point on reads

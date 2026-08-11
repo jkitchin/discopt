@@ -30,7 +30,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax.nlp_evaluator import cached_evaluator, evaluator_fingerprint  # noqa: E402
+from discopt._relax.nlp_evaluator import cached_evaluator, evaluator_fingerprint  # noqa: E402
 
 
 def _model() -> dm.Model:
@@ -95,7 +95,7 @@ def test_make_evaluator_shares_the_cache(monkeypatch):
     checks += 1
 
     # The alias really is the funnel, not a second import of the JAX entry point.
-    import discopt._jax.primal_heuristics as ph
+    import discopt._relax.primal_heuristics as ph
 
     assert ph.cached_evaluator is make_evaluator, (
         "primal_heuristics no longer routes through the #75 funnel; it would pin "
@@ -114,7 +114,7 @@ def test_make_evaluator_shares_the_cache(monkeypatch):
     checks += 1
     # ...and it must actually BE the JAX evaluator, so this arm cannot pass by
     # the tape quietly answering both calls (CLAUDE.md §6: prove the probe fired).
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     assert isinstance(ev_main, NLPEvaluator), type(ev_main)
     checks += 1
@@ -152,7 +152,7 @@ def test_lru_keeps_base_evaluator_across_transient_row():
 def test_cache_is_bounded_by_maxsize():
     """The LRU must not grow without bound when a solve emits an unbounded stream
     of ever-distinct transient sub-solve cuts."""
-    from discopt._jax.nlp_evaluator import _EVALUATOR_CACHE_MAXSIZE
+    from discopt._relax.nlp_evaluator import _EVALUATOR_CACHE_MAXSIZE
 
     m = _model()
     cached_evaluator(m)  # base entry

@@ -284,7 +284,7 @@ def test_cut_augmented_wrapper_over_a_tape_stays_jax_free():
         from discopt import Model
         import discopt.modeling as dm
         from discopt import solver as S
-        from discopt._jax.cutting_planes import CutPool, LinearCut
+        from discopt._relax.cutting_planes import CutPool, LinearCut
         from discopt._tape_nlp_evaluator import try_build
 
         m = Model()
@@ -357,7 +357,7 @@ _QP_FALLBACK_DRIVER = (
 import sys
 import numpy as np
 from discopt import Model
-import discopt._jax.problem_classifier as pc
+import discopt._relax.problem_classifier as pc
 
 # extract_qp_data is a ladder: repr(builder) -> algebraic -> repr(probe) ->
 # autodiff. Only the last rung is under test, so BOTH earlier rungs must refuse
@@ -407,7 +407,7 @@ _QP_AGREEMENT_DRIVER = (
 import sys
 import numpy as np
 from discopt import Model
-import discopt._jax.problem_classifier as pc
+import discopt._relax.problem_classifier as pc
 """
     + _QP_MODEL
     + """
@@ -501,7 +501,7 @@ def test_qp_extraction_tape_matches_jax():
 
 _STRUCTURE_CUT_DRIVER = """
 import sys
-from discopt._jax.symbolic import cut_recognizer as R
+from discopt._relax.symbolic import cut_recognizer as R
 from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
 
 m = build_gas_network_minlp()
@@ -575,7 +575,7 @@ def test_tangent_slope_matches_the_jax_reference():
     Skips without the optional ``sympy`` extra, which no CI lane installs.
     """
     pytest.importorskip("sympy")
-    from discopt._jax.symbolic import cut_recognizer as R
+    from discopt._relax.symbolic import cut_recognizer as R
     from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
 
     cuts = R.recognize_and_derive_cuts(build_gas_network_minlp())
@@ -608,7 +608,7 @@ import logging, sys
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 import discopt._nl_expr_compiler as nlc
 import discopt.modeling as dm
-from discopt._jax import uniform_relax as ur
+from discopt._relax import uniform_relax as ur
 
 refusals = []
 def _refuse(*a, **k):
@@ -711,7 +711,7 @@ m.minimize(b.state_at("z", 1.0) ** 2)
 _VECTOR_SOLVE_DRIVER = (
     """
 import sys
-import discopt._jax.problem_classifier as pc
+import discopt._relax.problem_classifier as pc
 
 _reached = []
 _answered = []
@@ -745,7 +745,7 @@ _VECTOR_AGREEMENT_DRIVER = (
     """
 import sys
 import numpy as np
-import discopt._jax.problem_classifier as pc
+import discopt._relax.problem_classifier as pc
 """
     + _DAE_MODEL
     + """
@@ -833,7 +833,7 @@ _QP_MAXIMIZE_AGREEMENT_DRIVER = """
 import sys
 import numpy as np
 from discopt import Model
-import discopt._jax.problem_classifier as pc
+import discopt._relax.problem_classifier as pc
 
 m = Model()
 x = m.continuous("x", lb=-10.0, ub=10.0)
@@ -895,7 +895,7 @@ def test_lp_tape_rung_declines_a_nonlinear_body():
     first assertion alone.
     """
     import discopt.modeling as dm
-    from discopt._jax import problem_classifier as pc
+    from discopt._relax import problem_classifier as pc
 
     m = dm.Model()
     x = m.continuous("x", lb=-5.0, ub=5.0)

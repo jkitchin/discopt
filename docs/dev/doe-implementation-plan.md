@@ -22,7 +22,7 @@ continuous and has parameters.
 
 **Files to modify:**
 - `python/discopt/modeling/core.py` — `SolveResult.gradient()` implementation
-- `python/discopt/_jax/differentiable.py` — ensure `DiffSolveResult` stores
+- `python/discopt/_relax/differentiable.py` — ensure `DiffSolveResult` stores
   primal solution in a format compatible with `SolveResult`
 
 **Tests (add to `python/tests/test_differentiable.py`):**
@@ -64,7 +64,7 @@ Add a helper that compiles arbitrary model expressions (not just objective/
 constraints) into JAX-differentiable functions of `(x_flat, p_flat)`.
 This is needed to compute dy/dθ for responses that aren't the objective.
 
-**File to create:** `python/discopt/_jax/parametric.py`
+**File to create:** `python/discopt/_relax/parametric.py`
 
 ```python
 def compile_response_function(
@@ -849,7 +849,7 @@ python/discopt/
 │   ├── design.py                  # Phase 3: optimal design
 │   ├── exploration.py             # Phase 3: design space sweep
 │   └── sequential.py              # Phase 4: sequential DoE loop
-├── _jax/
+├── _relax/
 │   ├── parametric.py              # Phase 0: response compiler
 │   └── differentiable.py          # Phase 0: existing, extend
 

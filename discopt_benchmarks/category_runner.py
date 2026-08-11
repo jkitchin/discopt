@@ -303,7 +303,7 @@ class CategoryBenchmarkRunner:
         try:
             model = problem.build_fn()
 
-            from discopt._jax.problem_classifier import (
+            from discopt._relax.problem_classifier import (
                 classify_problem,
             )
 
@@ -317,7 +317,7 @@ class CategoryBenchmarkRunner:
                 )
 
             # Extract LP data
-            from discopt._jax.problem_classifier import (
+            from discopt._relax.problem_classifier import (
                 dense_A,
                 extract_lp_data_algebraic,
             )

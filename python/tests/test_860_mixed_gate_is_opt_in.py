@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.lp_spatial_bb import _is_in_scope
+from discopt._relax.lp_spatial_bb import _is_in_scope
 
 
 def _mixed_minimize():
@@ -89,7 +89,7 @@ def test_mixed_defaults_to_false_so_a_new_call_site_is_conservative():
 
     import inspect
 
-    from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+    from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 
     param = inspect.signature(solve_lp_spatial_bb).parameters["mixed"]
     assert param.default is False, (

@@ -14,7 +14,7 @@ Design notes:
   * NaN is never collapsed into "agreement" (an earlier version of this probe
     scored nan-vs-nan as reldiff 0.0 and hid exactly the failures it was built to
     find -- §6/§7: the instrument must not launder its own blind spot).
-  * The reference for "the true value" is JAX, because `_jax/dag_compiler.py` is
+  * The reference for "the true value" is JAX, because `_relax/dag_compiler.py` is
     the documented authority the tape must reproduce. Where JAX is ALSO
     non-finite that is reported separately rather than scored as a tape defect.
   * No try/except around the evaluations (§7).

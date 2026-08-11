@@ -33,7 +33,7 @@ enforced exactly.
 | Least-squares mismatch at measurement times | `DAEBuilder.least_squares(state, t_data, y_data)` — exact polynomial interpolation via `state_at` | shipped |
 | Large sparse local NLP solve | `solvers.nlp_pounce.solve_nlp_from_model` / `nlp_ipopt` (cyipopt); sparse Jac/Hess | shipped |
 | Warm start | `warm_start.validate_initial_solution` → flat x0 | shipped |
-| Gauss-Newton for sum-of-squares | `_jax/least_squares.py`, `Model.solve(gauss_newton=True)` | shipped, untested on this class |
+| Gauss-Newton for sum-of-squares | `_relax/least_squares.py`, `Model.solve(gauss_newton=True)` | shipped, untested on this class |
 | Trainable-NN convenience layer | — | **gap** |
 | Multi-trajectory / multi-experiment training | — (loop by hand; `estimate.py` is single-shot per model) | **gap** |
 
@@ -253,12 +253,12 @@ subscript is one integer per axis; DAE-transcribed models routinely carry
 slices.* Analysis paths must **abstain** (return None / classify not-linear) on
 non-scalar subscripts, never crash:
 
-- `_jax/nonlinear_bound_tightening.py` `FlatVariableMetadata.scalar_flat_index`
+- `_relax/nonlinear_bound_tightening.py` `FlatVariableMetadata.scalar_flat_index`
   — crashed in AMP presolve (`TypeError: only int indices permitted`).
-- `_jax/convexity/rules.py` `_hash_index` — tuple subscripts containing slices
+- `_relax/convexity/rules.py` `_hash_index` — tuple subscripts containing slices
   produced an unhashable surrogate via the object-array `tolist()` branch.
 - `solvers/amp.py` `_flat_var_index` + three sites in
-  `_jax/problem_classifier.py` — same pattern, same fix shape.
+  `_relax/problem_classifier.py` — same pattern, same fix shape.
 
 Regression tests: `python/tests/test_tightening_sliced_index.py` (fails before
 the fixes, passes after). Suites run: tightening/FBBT files (25 passed), AMP

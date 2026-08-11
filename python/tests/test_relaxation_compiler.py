@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.relaxation_compiler import (
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.relaxation_compiler import (
     compile_constraint_relaxation,
     compile_objective_relaxation,
     compile_relaxation,

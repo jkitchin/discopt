@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import discopt.modeling as dm
-from discopt._jax.gdp_advisor import (
+from discopt._relax.gdp_advisor import (
     GdpAdvice,
     recommend_method,
     recommend_methods,
 )
-from discopt._jax.gdp_reformulate import reformulate_gdp
+from discopt._relax.gdp_reformulate import reformulate_gdp
 
 
 def test_advisor_picks_hull_for_small_linear_disjunction():

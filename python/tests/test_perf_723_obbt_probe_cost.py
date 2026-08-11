@@ -32,7 +32,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import discopt._jax.obbt as obbtmod
+import discopt._relax.obbt as obbtmod
 import numpy as np
 import pytest
 from discopt.modeling.core import from_nl

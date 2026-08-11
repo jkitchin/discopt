@@ -241,7 +241,7 @@ def chat(llm_model: str | None = None, verbose: bool = True):
 
 # Opt-in eager imports (F7, perf-followup-plan §2). The first ``solve()`` in a
 # fresh process lazily loads ~0.4 s of solve-path modules (jax.numpy, scipy
-# sparse/linalg, and the discopt._jax / discopt.solvers relaxation+NLP stack);
+# sparse/linalg, and the discopt._relax / discopt.solvers relaxation+NLP stack);
 # measured lazy-import cumtime 0.41 s (m3) / 0.42 s (nvs13) on the first solve.
 # For batch/CLI/benchmark harnesses that pay import cost once and solve many
 # instances, moving that tax to ``import discopt`` time drops the first-solve
@@ -276,10 +276,10 @@ def _eager_import_solve_path() -> None:
         "scipy.linalg",
         "scipy.sparse.linalg",
         "discopt.solver",
-        "discopt._jax.milp_relaxation",
-        "discopt._jax.primal_heuristics",
-        "discopt._jax.nonlinear_bound_tightening",
-        "discopt._jax.convexity",
+        "discopt._relax.milp_relaxation",
+        "discopt._relax.primal_heuristics",
+        "discopt._relax.nonlinear_bound_tightening",
+        "discopt._relax.convexity",
         "discopt.solvers.nlp_pounce",
         "discopt.solvers.lp_pounce",
         "discopt.solvers.amp",

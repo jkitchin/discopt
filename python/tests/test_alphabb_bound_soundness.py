@@ -40,7 +40,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solver import _compute_alphabb_bound
 
 pytestmark = pytest.mark.smoke
@@ -98,7 +98,7 @@ def test_c17_spike_bound_is_sound(s):
 def test_c17_sampled_alpha_would_have_been_unsound():
     """Documents the bug: the OLD sampled-alpha + center-only gate DOES exceed the
     true box minimum on the spike, so the fix is load-bearing (not vacuous)."""
-    from discopt._jax.alphabb import estimate_alpha
+    from discopt._relax.alphabb import estimate_alpha
 
     B, a, s = 4.0, 1.0, 0.006
     LB, UB = -2.0, 2.0
@@ -112,7 +112,7 @@ def test_c17_sampled_alpha_would_have_been_unsound():
     # The sampled alpha collapses to 0 (spike falls between all sample points)...
     assert float(alpha_sampled[0]) < 1e-8
     # ...and the rigorous alpha needed to convexify the box is enormous & finite.
-    from discopt._jax.alphabb import rigorous_alpha
+    from discopt._relax.alphabb import rigorous_alpha
 
     alpha_rig = np.asarray(rigorous_alpha(expr, m))
     assert np.all(np.isfinite(alpha_rig))

@@ -82,7 +82,7 @@ def _root_lp(model) -> tuple[str, float | None]:
     Any exception now propagates to ``main``'s per-instance handler, which
     records it loudly as an ``error`` row.
     """
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     lb, ub = _root_box(model)
     res = MccormickLPRelaxer(model).solve_at_node(lb, ub)
@@ -109,10 +109,10 @@ def _commit() -> str:
 
 
 def _row(name: str) -> dict:
-    from discopt._jax.claim_audit import relaxation_fingerprint
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.claim_audit import relaxation_fingerprint
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import from_nl
 
     model = from_nl(str(_NL_DIR / f"{name}.nl"))

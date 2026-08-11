@@ -208,7 +208,7 @@ def test_kernel_surrogate_training():
 
 
 def test_freeze_matches_symbolic_and_from_definition_round_trips():
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.warm_start import unflatten_solution, validate_initial_solution
 
     m = Model()
@@ -266,7 +266,7 @@ def test_freeze_matches_symbolic_and_from_definition_round_trips():
 
 @pytest.mark.smoke
 def test_gauss_newton_detector_fires_on_training_objective():
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     def factory(m):
         net = TrainableNetwork(m, [1, 6, 1], activation="tanh", name="rate")

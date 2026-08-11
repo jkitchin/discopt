@@ -210,7 +210,7 @@ def test_verify_point_reuses_a_cached_evaluator(monkeypatch):
     would otherwise have reported "0 rebuilds" as a pass forever.
     """
     from discopt import _tape_nlp_evaluator as TE
-    from discopt._jax import nlp_evaluator as NE
+    from discopt._relax import nlp_evaluator as NE
 
     m = _wide_integer_model()
     x_ok = np.array([7.0, 12.0])

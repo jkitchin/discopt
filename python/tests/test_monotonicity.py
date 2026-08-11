@@ -1,6 +1,6 @@
 """Unit tests for per-expression monotonicity detection.
 
-Exercises :func:`discopt._jax.monotonicity.classify_monotonicity` directly (the
+Exercises :func:`discopt._relax.monotonicity.classify_monotonicity` directly (the
 SUSPECT head-to-head lives in ``test_monotonicity_suspect_parity.py``). The
 contract under test:
 
@@ -14,8 +14,8 @@ contract under test:
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.monotonicity import Monotonicity, classify_monotonicity
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.monotonicity import Monotonicity, classify_monotonicity
 from discopt.modeling.core import Constant, FunctionCall, Model, _wrap
 
 ND = Monotonicity.NONDECREASING

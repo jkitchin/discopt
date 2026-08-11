@@ -1,7 +1,7 @@
 """Tests for the per-expression log-curvature *lattice* (issue #115).
 
 These exercise :func:`discopt.gp.classify_log_curvature`, the DAG-propagating
-log-space analogue of the x-space :class:`~discopt._jax.convexity.Curvature`
+log-space analogue of the x-space :class:`~discopt._relax.convexity.Curvature`
 lattice. Distinct from ``test_log_curvature.py`` (the flat SymPy classifier):
 here the verdict must *compose* through products, ratios, powers, sums and
 max/min on the discopt :class:`Expression` DAG, and stay strictly separate from
@@ -11,8 +11,8 @@ the x-space verdict.
 import discopt.modeling as dm
 import pytest
 from discopt import Model
-from discopt._jax.convexity import Curvature, classify_expr
-from discopt._jax.convexity.log_lattice import (
+from discopt._relax.convexity import Curvature, classify_expr
+from discopt._relax.convexity.log_lattice import (
     LogCurvature,
     classify_log_curvature,
     log_combine_product,

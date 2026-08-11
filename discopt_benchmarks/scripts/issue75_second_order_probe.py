@@ -102,7 +102,7 @@ def make_evaluator(backend, n, build):
     m.subject_to(sum(vs) <= 1e309)
 
     def _jax_factory():
-        from discopt._jax.nlp_evaluator import cached_evaluator
+        from discopt._relax.nlp_evaluator import cached_evaluator
 
         return cached_evaluator(m)
 

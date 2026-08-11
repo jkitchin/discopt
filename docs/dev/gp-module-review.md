@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-03
 **Scope:** `python/discopt/gp/__init__.py` (454 lines), its recognizer
-`python/discopt/_jax/convexity/posynomial.py` (300 lines), and the GP dispatch in
+`python/discopt/_relax/convexity/posynomial.py` (300 lines), and the GP dispatch in
 `python/discopt/solver.py` (explicit `solver="gp"` + the **auto-GP fast path** that
 fires inside every default `Model.solve()`). Tests: `test_gp.py`, `test_gp_corpus.py`,
 `test_gp_hull.py`.
@@ -256,7 +256,7 @@ warning on the explicit path are all things comparable layers commonly get wrong
   approximation, local). Here discopt has a genuinely differentiated opportunity:
   signomials (posynomial − posynomial) are exactly the nonconvex structure a
   *global* solver can handle rigorously, and the repo already ships
-  `monomial_log_envelope` (`_jax/symbolic/gp_hull.py`, soundness-fuzzed) — i.e.
+  `monomial_log_envelope` (`_relax/symbolic/gp_hull.py`, soundness-fuzzed) — i.e.
   the relaxation primitive for exploiting log-structure *inside* B&B exists. A
   "global signomial programming" capability (GP-informed log-space envelopes as
   B&B relaxations, certified — vs. GPkit's heuristic SP loop) would be beyond

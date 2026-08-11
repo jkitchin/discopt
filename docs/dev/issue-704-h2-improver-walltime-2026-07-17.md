@@ -42,7 +42,7 @@ of the budget while the fixed abstract contingent stays unthrottled.
 ## Method
 
 Measure-only. A local scratch harness (`scratchpad/h2_probe.py`, not committed) monkeypatches
-`discopt._jax.primal_heuristics.rins` / `.local_branching` with timing wrappers (the solver
+`discopt._relax.primal_heuristics.rins` / `.local_branching` with timing wrappers (the solver
 imports them at call time inside the node loop, so the module-attribute swap is picked up) and
 uses a `node_callback` to timestamp the first incumbent. Instances loaded with `dm.from_nl`
 from `~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/`, oracle from `minlplib.solu`,

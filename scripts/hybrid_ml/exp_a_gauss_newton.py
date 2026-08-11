@@ -2,7 +2,7 @@
 
 import time
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solvers.nlp_pounce import solve_nlp
 from hybrid_common import build_nn_model
 

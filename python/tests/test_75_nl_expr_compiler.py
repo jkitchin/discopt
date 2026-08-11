@@ -7,7 +7,7 @@ value and gradient of a scalar expression at a point, and the tape supplies both
 
 These tests pin the properties that decide whether it can replace the JAX path:
 
-* **numerical agreement** with ``_jax/dag_compiler`` — the thing being replaced;
+* **numerical agreement** with ``_relax/dag_compiler`` — the thing being replaced;
 * **operator coverage** across discopt's DAG, including the ten operators with no
   native tape opcode that are lowered by rewrite (``abs``, ``sign``, ``log1p``,
   ``log2``, ``sigmoid``, ``softplus``, ``entropy``, ``centropy``, ``prod``,
@@ -30,13 +30,13 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.dag_compiler import compile_expression
 from discopt._nl_expr_compiler import (
     UnsupportedForTape,
     compile_to_nl_array,
     compile_to_nl_expr,
     try_compile,
 )
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Constant, FunctionCall, IndexExpression
 
 pytest.importorskip("pounce")
@@ -53,7 +53,7 @@ def _jax_pair(expr, model):
     """(value_fn, grad_fn) from the JAX path being replaced."""
     import jax
     import jax.numpy as jnp
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     f = compile_expression(expr, model)
     return f, jax.grad(lambda xv: jnp.reshape(f(xv), ()))
@@ -257,7 +257,7 @@ def test_entropy_matches_the_dag_compiler_sign():
 
     Pinned separately from the parametrized differential because the failure is a
     clean factor of -1: it passes every structural check, raises nothing, and is
-    invisible to any corpus sweep. The authority is ``_jax/dag_compiler.py``.
+    invisible to any corpus sweep. The authority is ``_relax/dag_compiler.py``.
     """
     m, x, _y = _model()
     tape = compile_to_nl_expr(FunctionCall("entropy", x), m)
@@ -615,7 +615,7 @@ def test_static_index_matches_jax_value_and_gradient(name):
 
     A wrong slot is the whole risk here: it is silent, it still produces a finite
     value and a plausible gradient, and only a point-for-point comparison against
-    `_jax/dag_compiler` catches it. The gradient half is what pins the slot — the
+    `_relax/dag_compiler` catches it. The gradient half is what pins the slot — the
     value alone is insensitive to a permutation of equal-bounded entries.
     """
     leading, shape, build = INDEX_CASES[name]
@@ -723,7 +723,7 @@ def test_array_index_forms_lower_and_match_jax(name):
     """
     jnp = pytest.importorskip("jax.numpy")
     import jax
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     m, v, w = _index_model()
     expr = ARRAY_INDEX[name](v, w)
@@ -797,7 +797,7 @@ def test_vectorized_collocation_bodies_now_lower_to_rows():
     pytest.importorskip("discopt.dae")
     jnp = pytest.importorskip("jax.numpy")
 
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
     from discopt.dae import ContinuousSet, DAEBuilder
 
     m = Model("second_order_decay")

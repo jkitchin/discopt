@@ -45,8 +45,8 @@ def _loadavg():
 
 def measure(name, rounds, evals_per_round, solves_per_round):
     import discopt
-    from discopt._jax import primal_heuristics as ph
-    from discopt._jax.nlp_evaluator import cached_evaluator
+    from discopt._relax import primal_heuristics as ph
+    from discopt._relax.nlp_evaluator import cached_evaluator
     from discopt.modeling.core import from_nl
     from discopt.solvers.nlp_backend import get_nlp_solver
 

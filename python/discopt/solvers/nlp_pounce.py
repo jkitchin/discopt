@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # ``nlp_backend`` imports this module to probe for POUNCE. It is only ever
     # used as an annotation here (this module has ``from __future__ import
     # annotations``), so it costs nothing at runtime.
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solvers.nlp_ipopt import (
     _IPOPT_STATUS_MAP,
     _infer_constraint_bounds,

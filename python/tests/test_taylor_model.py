@@ -1,4 +1,4 @@
-"""Tests for ``discopt._jax.taylor_model`` (M3 of issue #51).
+"""Tests for ``discopt._relax.taylor_model`` (M3 of issue #51).
 
 Covers the M3 acceptance criteria:
 - Polynomial-plus-remainder enclosure contains the true function range on a
@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax import cutting_planes
-from discopt._jax import taylor_model as tm
+from discopt._relax import cutting_planes
+from discopt._relax import taylor_model as tm
 
 N_SAMPLES = 10_000
 TOL = 1e-9

@@ -308,7 +308,7 @@ class TestCollocationODE:
         NLPEvaluator (which is also what the NLP solver sees).
         """
         import discopt.modeling as dm
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.dae import ContinuousSet, DAEBuilder
 
         m = dm.Model("count")
@@ -1108,7 +1108,7 @@ class TestLeastSquaresInterpolation:
         signal at a node against data taken between nodes (issue #94).
         """
         import discopt.modeling as dm
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.dae import ContinuousSet, DAEBuilder
 
         k_true = 2.0
@@ -1144,7 +1144,7 @@ class TestLeastSquaresInterpolation:
         property), so the two objective constructions are identical there.
         """
         import discopt.modeling as dm
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.dae import ContinuousSet, DAEBuilder
 
         m = dm.Model("onnode")
@@ -1221,7 +1221,7 @@ class TestStateAt:
         the compiled expression (no solver needed).
         """
         import discopt.modeling as dm
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.dae import ContinuousSet, DAEBuilder
 
         m = dm.Model("sa_poly")
@@ -1241,7 +1241,7 @@ class TestStateAt:
     def test_reduces_to_node_value_at_node(self):
         """At a collocation node, state_at returns exactly that node's value."""
         import discopt.modeling as dm
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.dae import ContinuousSet, DAEBuilder
 
         m = dm.Model("sa_node")
@@ -1268,7 +1268,7 @@ class TestStateAt:
     def test_vector_state_component(self):
         """state_at selects the requested component of a vector state."""
         import discopt.modeling as dm
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
         from discopt.dae import ContinuousSet, DAEBuilder
 
         m = dm.Model("sa_vec")

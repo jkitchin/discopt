@@ -184,7 +184,7 @@ def _analyze_structure(model: Model) -> dict:
     # Problem classification attempt
     problem_class = None
     try:
-        from discopt._jax.problem_classifier import classify_problem
+        from discopt._relax.problem_classifier import classify_problem
 
         problem_class = classify_problem(model)
     except Exception as exc:  # noqa: BLE001 - the advisor degrades to an unclassified model

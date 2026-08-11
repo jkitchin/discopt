@@ -97,7 +97,7 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 - Recommendation: highest-value clean win — exact, provable, and avoids the
   full-DAG Jacobian XLA blowup the issue flags. Implement first.
 - **Shipped** as the auto-firing presolve pass
-  `discopt._jax.binary_multilinear_reform` (`solve_model` adopts it under the
+  `discopt._relax.binary_multilinear_reform` (`solve_model` adopts it under the
   pure-MILP guard and routes to the MILP engine): per-monomial Fortet rows for
   the general binary-multilinear case, plus an exact **integer-point secant
   envelope** for objective-pressure squares of integer-valued forms

@@ -43,7 +43,7 @@ from discopt.solvers.mip_nlp_options import (
 )
 
 if TYPE_CHECKING:
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -1176,9 +1176,9 @@ class _DecomposedProblem:
 
 def _decompose_model(model: Model) -> _DecomposedProblem:
     """Separate model into linear/nonlinear constraints, identify integers."""
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.gdp_reformulate import _extract_body_coeffs, _is_linear
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     evaluator = NLPEvaluator(model)
     oa_convexity = classify_oa_cut_convexity(model)
@@ -2179,7 +2179,7 @@ def _add_oa_cuts(
     Objective cuts (when nonlinear) have length n_vars+1, with the last
     element being the -eta epigraph coefficient.
     """
-    from discopt._jax.cutting_planes import (
+    from discopt._relax.cutting_planes import (
         generate_oa_cuts_from_evaluator,
         generate_objective_oa_cut,
     )
@@ -2307,7 +2307,7 @@ def _add_ecp_cuts(
     local_cut_trace: Optional[dict[str, object]] = None,
 ):
     """Generate ECP cuts: OA cuts only for violated constraints at x_master."""
-    from discopt._jax.cutting_planes import (
+    from discopt._relax.cutting_planes import (
         generate_objective_oa_cut,
         separate_oa_cuts,
     )
@@ -2529,7 +2529,7 @@ def _add_esh_cuts(
     hyperplane_selection_factor: float = 1.0,
 ) -> tuple[int, dict[str, object]]:
     """Generate SHOT-style extended supporting hyperplanes with ECP fallback."""
-    from discopt._jax.cutting_planes import (
+    from discopt._relax.cutting_planes import (
         generate_oa_cuts_from_evaluator,
         generate_objective_oa_cut,
     )
@@ -2837,7 +2837,7 @@ def _add_feasibility_cuts(
     For each violated constraint g_k(x) <= 0 at x_feas:
         g_k(x_feas) + nabla g_k(x_feas)^T (x - x_feas) <= 0
     """
-    from discopt._jax.cutting_planes import separate_oa_cuts
+    from discopt._relax.cutting_planes import separate_oa_cuts
 
     if evaluator.n_constraints == 0:
         return
@@ -4479,7 +4479,7 @@ def solve_goa(
             + ". Pass AMP/global-relaxation options supported by solve_goa."
         )
 
-    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._relax.convexity import classify_oa_cut_convexity
 
     oa_convexity = classify_oa_cut_convexity(model)
     if oa_convexity.objective_is_convex and all(oa_convexity.constraint_mask):

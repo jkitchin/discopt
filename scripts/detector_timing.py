@@ -1,7 +1,7 @@
 """Detector-timing benchmark — baseline the Rust-port discussion for issue #38.
 
-discopt's structure detectors in ``python/discopt/_jax/convexity/`` and the new
-``python/discopt/_jax/monotonicity.py`` are pure Python today. A Rust port only
+discopt's structure detectors in ``python/discopt/_relax/convexity/`` and the new
+``python/discopt/_relax/monotonicity.py`` are pure Python today. A Rust port only
 pays off if (a) detection is a measurable share of work and (b) the hot path is
 *interpreter-bound* DAG walking rather than already-vectorised numpy/JAX kernels.
 This script measures both, on two workloads, and prints a cProfile breakdown so
@@ -38,9 +38,9 @@ from typing import Callable
 
 import discopt.modeling as dm
 from discopt import Model
-from discopt._jax.convexity import certify_convex, classify_expr
-from discopt._jax.convexity.interval_eval import evaluate_interval
-from discopt._jax.monotonicity import classify_monotonicity
+from discopt._relax.convexity import certify_convex, classify_expr
+from discopt._relax.convexity.interval_eval import evaluate_interval
+from discopt._relax.monotonicity import classify_monotonicity
 
 _ORACLE_DIR = Path(__file__).resolve().parent / "suspect_oracle"
 if str(_ORACLE_DIR) not in sys.path:

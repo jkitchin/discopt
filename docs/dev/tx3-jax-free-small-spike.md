@@ -2,7 +2,7 @@
 
 Status: **KILL** (2026-07-14). Item: `docs/dev/tenx-plan.md` §3 TX3.
 Companion: `docs/dev/performance-plan.md` Appendix B (the measured floor this item
-targets); F2′ (`python/discopt/_jax/uniform_relax.py:_compiled_analytic`, gated
+targets); F2′ (`python/discopt/_relax/uniform_relax.py:_compiled_analytic`, gated
 `DISCOPT_ANALYTIC_SEPGRAD`) — the jax-free `interval_ad` mechanism TX3 hoped to
 generalize.
 
@@ -14,7 +14,7 @@ the nonlinear solve path even with the relaxation swapped**. `import jax` is the
 *first* operation of both nonlinear entry points — `_make_evaluator(model)` at
 `solver.py:9179` (`_solve_nlp_bb`) and `:8959` (`_solve_continuous`) — and it
 lands there before any relaxation is chosen. `_make_evaluator` →
-`_jax/nlp_evaluator.py`, whose module top does `import jax` (`:19`). The NLP
+`_relax/nlp_evaluator.py`, whose module top does `import jax` (`:19`). The NLP
 evaluator is **not** the relaxation TX3 proposed to swap; it is the foundational
 provider of *point-mode* objective/constraint/gradient/Jacobian callables, woven
 through the entire B&B: constraint-bound inference (`:9183`), warm-start eval
@@ -24,7 +24,7 @@ candidate validation. `interval_ad` produces *interval enclosures*
 (value/grad/Hessian as intervals for a convexity certificate), **not** the
 point-mode f/grad/jac POUNCE needs to run NLP iterations — so it cannot replace
 the evaluator. Additionally the McCormick relaxation itself is jax-based at module
-load (`_jax/relaxation_compiler.py:14`, `_jax/dag_compiler.py:33`, `mccormick_lp.py`
+load (`_relax/relaxation_compiler.py:14`, `_relax/dag_compiler.py:33`, `mccormick_lp.py`
 all `import jax.numpy`). Swapping the root relaxation to `interval_ad` removes
 none of these imports. Per the item's own kill criterion — "`import jax` is
 unavoidable on the nonlinear solve path even with the relaxation swapped (the
@@ -76,7 +76,7 @@ by TX3's mechanism.
 and **nvs03** (integer B&B → `_solve_nlp_bb`): in both, `jax` is absent from
 `sys.modules` after `import discopt` and after `from_nl`, and the **first**
 `import jax` fires at `_make_evaluator` — the opening line of the solve, *before*
-any relaxation. `_jax/nlp_evaluator.py:19`, `relaxation_compiler.py:14`,
+any relaxation. `_relax/nlp_evaluator.py:19`, `relaxation_compiler.py:14`,
 `dag_compiler.py:33` all `import jax` at module scope. The evaluator is threaded
 through the whole loop (`:9183/:9193/…`, POUNCE node NLP, all heuristics), so it
 cannot be elided for the easy-class instances.
@@ -95,12 +95,12 @@ re-implemented off jax — this is an engine rewrite, not a floor tweak:
 
 1. **A jax-free point-mode NLP evaluator** over the model IR (numpy forward/reverse
    AD giving `f`, `grad`, `jac`, and Hessian at points) to replace
-   `_jax/nlp_evaluator.py` + `_jax/dag_compiler.py`. `interval_ad` is *interval*
+   `_relax/nlp_evaluator.py` + `_relax/dag_compiler.py`. `interval_ad` is *interval*
    forward-mode (enclosures), not the scalar point-mode POUNCE requires — related
    but a distinct, larger walker (must match jax's numerics for the byte-level
    gate).
-2. **A jax-free relaxation builder** to replace `_jax/relaxation_compiler.py` /
-   `_jax/mccormick_lp.py` (both `import jax.numpy` at module load).
+2. **A jax-free relaxation builder** to replace `_relax/relaxation_compiler.py` /
+   `_relax/mccormick_lp.py` (both `import jax.numpy` at module load).
 3. **Routing POUNCE + every primal heuristic** (multistart, fpump, diving, RINS,
    local branching, candidate validation) through the numpy evaluator, then
    proving **byte-level bound/node equivalence** to the jax path on the 16

@@ -31,8 +31,8 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 

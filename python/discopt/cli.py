@@ -133,7 +133,7 @@ def _cmd_test(_args):
         errors.append(f"Model build + solve: {e}")
 
     try:
-        from discopt._jax.dag_compiler import compile_objective
+        from discopt._relax.dag_compiler import compile_objective
         from discopt.modeling import Model
 
         m2 = Model("dag_test")

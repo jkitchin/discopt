@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.differentiable import (
+from discopt._relax.differentiable import (
     DiffSolveResult,
     DiffSolveResultL3,
     SensitivityInfo,

@@ -2,7 +2,7 @@
 *unusable probe points*.
 
 Issue #75 (Stage 1 of the JAX-removal work). ``_Builder._compiled_analytic``
-(``_jax/uniform_relax.py``) computes the Kelley separation tangent ``(g(x0),
+(``_relax/uniform_relax.py``) computes the Kelley separation tangent ``(g(x0),
 grad g(x0))`` with no JAX, via forward-mode interval AD over discopt's own
 factorable IR. Before returning the pair it probes once, so that an atom the
 interval-AD table does not cover is caught there rather than silently emitting no
@@ -23,7 +23,7 @@ fallback: coverage went 96.2 % -> **100 %** (187/187 lift-node compilations) onc
 the probe distinguished them, with no change to the first case.
 
 Accepting a covered-but-badly-probed atom is sound: ``_separate_convex``
-(``_jax/mccormick_lp.py``) already drops any cut whose value or gradient is
+(``_relax/mccormick_lp.py``) already drops any cut whose value or gradient is
 non-finite — "a missing cut is always safe" — so a bad point costs a cut, never
 correctness.
 """
@@ -32,8 +32,8 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.convexity.interval import Interval
-from discopt._jax.convexity.interval_ad import interval_hessian
+from discopt._relax.convexity.interval import Interval
+from discopt._relax.convexity.interval_ad import interval_hessian
 
 # Atoms the interval-AD FunctionCall table implements, and atoms it does not.
 _COVERED = ["exp", "log", "sqrt", "sin", "cos", "tan"]
@@ -100,7 +100,7 @@ def test_probe_point_is_finite_for_unbounded_variables(lb, ub):
     rejected as "uncovered" regardless of whether the table supported it — which
     is how ``dispatch`` (``x3`` free) lost its analytic separation gradients.
     """
-    from discopt._jax import uniform_relax as ur
+    from discopt._relax import uniform_relax as ur
 
     m = Model()
     m.continuous("x", lb=lb, ub=ub)
@@ -142,7 +142,7 @@ def test_analytic_sepgrad_solves_a_lifted_model(monkeypatch):
     """
     monkeypatch.setenv("DISCOPT_ANALYTIC_SEPGRAD", "1")
 
-    from discopt._jax import uniform_relax as ur
+    from discopt._relax import uniform_relax as ur
 
     calls = {"n": 0}
     _orig = ur._Builder._compiled_analytic

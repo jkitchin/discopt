@@ -36,8 +36,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 _CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "minlplib")
 

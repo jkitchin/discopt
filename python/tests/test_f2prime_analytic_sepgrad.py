@@ -20,9 +20,9 @@ jax = pytest.importorskip("jax")
 import discopt.modeling as dm  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from discopt import Model  # noqa: E402
-from discopt._jax.convexity.interval import Interval  # noqa: E402
-from discopt._jax.convexity.interval_ad import interval_hessian  # noqa: E402
-from discopt._jax.dag_compiler import compile_expression  # noqa: E402
+from discopt._relax.convexity.interval import Interval  # noqa: E402
+from discopt._relax.convexity.interval_ad import interval_hessian  # noqa: E402
+from discopt._relax.dag_compiler import compile_expression  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 

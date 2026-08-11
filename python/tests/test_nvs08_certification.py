@@ -31,7 +31,7 @@ _OPT = 23.4497
 
 def test_nvs08_reciprocal_classified_as_fractional_power():
     """1/(x0**3*sqrt(x0)) is recognized as the fractional power x0**-3.5."""
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     assert _NL.exists(), f"missing {_NL}"
     terms = classify_nonlinear_terms(dm.from_nl(str(_NL)))

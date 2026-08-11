@@ -20,8 +20,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity.interval_ad import IntervalAD, interval_hessian
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.convexity.interval_ad import IntervalAD, interval_hessian
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Model
 
 SAMPLES = 12

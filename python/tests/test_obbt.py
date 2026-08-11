@@ -8,7 +8,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
-from discopt._jax.obbt import (
+from discopt._relax.obbt import (
     AuxTighteningReport,
     ObbtResult,
     _extract_linear_constraints,
@@ -209,7 +209,7 @@ class TestObbtBasic:
 
     def test_total_time_limit_stops_before_all_variables(self, monkeypatch):
         """The total OBBT deadline should cap the full candidate loop."""
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         m = Model("deadline")
         x = m.continuous("x", lb=0, ub=100, shape=(3,))
@@ -674,8 +674,8 @@ class TestMeasureDiscardedAuxTightening:
 
     def test_full_result_returns_aux_columns(self):
         # full_result=True must expose the aux columns the default path slices off.
-        from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
-        from discopt._jax.obbt import run_obbt_on_relaxation
+        from discopt._relax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+        from discopt._relax.obbt import run_obbt_on_relaxation
 
         m = self._bilinear()
         lb = np.array([0.0, 0.0])
@@ -706,7 +706,7 @@ class TestReverseFbbtFromAux:
     def test_bilinear_hyperbolic_bound(self):
         # w = x*y, y in [2,4], a tightened w <= 6 implies x <= 6/2 = 3 (a bound
         # the linear McCormick rows cannot express). x starts at [0,10].
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0, 2.0, 0.0])  # x, y, w-col placeholder (orig only uses 0,1)
         ub = np.array([10.0, 4.0, 0.0])
@@ -721,7 +721,7 @@ class TestReverseFbbtFromAux:
         assert ub[1] == 4.0
 
     def test_bilinear_skips_zero_straddling_denominator(self):
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([-5.0, -3.0])
         ub = np.array([5.0, 3.0])  # both straddle 0 -> division undefined
@@ -734,7 +734,7 @@ class TestReverseFbbtFromAux:
 
     def test_monomial_square_root_bound(self):
         # w = x**2, x in [0,10], tightened w <= 9 implies x <= 3.
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0])
         ub = np.array([10.0])
@@ -747,7 +747,7 @@ class TestReverseFbbtFromAux:
 
     def test_reverse_fbbt_only_tightens(self):
         # A loose aux bound must never loosen the original box.
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([1.0, 2.0])
         ub = np.array([3.0, 4.0])
@@ -761,7 +761,7 @@ class TestReverseFbbtFromAux:
     def test_trilinear_product_of_others_bound(self):
         # w = x*y*z, y in [2,4], z in [1,2] -> y*z in [2,8]; a tightened w <= 12
         # implies x <= 12/2 = 6 (a hyperbolic bound the linear rows can't express).
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0, 2.0, 1.0])
         ub = np.array([10.0, 4.0, 2.0])
@@ -775,7 +775,7 @@ class TestReverseFbbtFromAux:
     def test_multilinear_product_of_others_bound(self):
         # w = x0*x1*x2*x3, partners in [1,2] -> product-of-others in [1,8];
         # w <= 4 implies x0 <= 4/1 = 4.
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0, 1.0, 1.0, 1.0])
         ub = np.array([10.0, 2.0, 2.0, 2.0])
@@ -788,7 +788,7 @@ class TestReverseFbbtFromAux:
 
     def test_ratio_numerator_and_denominator_bounds(self):
         # w = x / y. y in [2,4], tightened w <= 1 implies x = w*y <= 4.
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0, 2.0])
         ub = np.array([10.0, 4.0])
@@ -801,7 +801,7 @@ class TestReverseFbbtFromAux:
 
     def test_ratio_denominator_tightens(self):
         # w = x / y, x fixed at 4, w in [2,10] implies y = x/w in [0.4, 2].
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([4.0, 0.1])
         ub = np.array([4.0, 5.0])
@@ -817,7 +817,7 @@ class TestReverseFbbtFromAux:
         # Randomized soundness: every (x,y,z) whose product lands in the aux box
         # must remain inside the tightened box (reverse FBBT only removes points
         # that cannot satisfy w = x*y*z for the given aux bounds).
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         rng = np.random.default_rng(0)
         for _ in range(200):
@@ -871,7 +871,7 @@ class TestCascadeReachableAux:
     so restricting the OBBT aux candidate set to it is bound-neutral (#208)."""
 
     def test_bilinear_reachable_when_partner_sign_definite(self):
-        from discopt._jax.obbt import cascade_reachable_aux
+        from discopt._relax.obbt import cascade_reachable_aux
 
         # w = x*y, x in [0,10] straddles 0, y in [2,4] excludes 0. b=w/a needs
         # 0 ∉ [x] (fails) but a=w/b needs 0 ∉ [y] (holds) -> aux reachable.
@@ -881,7 +881,7 @@ class TestCascadeReachableAux:
         assert cascade_reachable_aux(varmap, lb, ub, n_orig=2, n_total=3) == [2]
 
     def test_bilinear_unreachable_when_both_straddle_zero(self):
-        from discopt._jax.obbt import cascade_reachable_aux
+        from discopt._relax.obbt import cascade_reachable_aux
 
         # Both partners straddle 0 -> neither division is defined -> not reachable.
         lb = np.array([-5.0, -3.0])
@@ -890,7 +890,7 @@ class TestCascadeReachableAux:
         assert cascade_reachable_aux(varmap, lb, ub, n_orig=2, n_total=3) == []
 
     def test_monomial_always_reachable(self):
-        from discopt._jax.obbt import cascade_reachable_aux
+        from discopt._relax.obbt import cascade_reachable_aux
 
         # A p>=2 monomial deduces a root box with no divisor -> always reachable,
         # even when the base straddles zero.
@@ -900,7 +900,7 @@ class TestCascadeReachableAux:
         assert cascade_reachable_aux(varmap, lb, ub, n_orig=1, n_total=2) == [1]
 
     def test_ratio_reachable_only_when_a_factor_is_sign_definite(self):
-        from discopt._jax.obbt import cascade_reachable_aux
+        from discopt._relax.obbt import cascade_reachable_aux
 
         # w = x/y. Denominator y in [2,4] excludes 0 -> numerator factor x is
         # reachable (x = w*y). Both original.
@@ -913,7 +913,7 @@ class TestCascadeReachableAux:
         # The predicate must never *under*-include: any aux from which
         # reverse_fbbt_from_aux actually tightens an original MUST be reachable.
         # Cross-check on a randomized varmap of every term family.
-        from discopt._jax.obbt import cascade_reachable_aux, reverse_fbbt_from_aux
+        from discopt._relax.obbt import cascade_reachable_aux, reverse_fbbt_from_aux
 
         rng = np.random.default_rng(7)
         for _ in range(300):
@@ -945,7 +945,7 @@ class TestCascadeReachableAux:
         # budgeted candidate set must return the SAME original box as it would with
         # every aux column probed. We assert the shipped (budgeted) path equals a
         # patched full-probe path on a mixed bilinear+monomial model.
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         m = Model("mix")
         m.continuous("x", lb=0.5, ub=4.0)
@@ -991,9 +991,9 @@ class TestCascadeAuxGraduatedDefault:
         return m
 
     def test_default_on_and_optout_off(self, monkeypatch):
-        import discopt._jax.obbt as obbt_mod
-        from discopt._jax.obbt import RootObbtResult
-        from discopt._jax.root_reduce import _stage_obbt
+        import discopt._relax.obbt as obbt_mod
+        from discopt._relax.obbt import RootObbtResult
+        from discopt._relax.root_reduce import _stage_obbt
 
         captured = {}
 
@@ -1071,7 +1071,7 @@ class TestC15NsSafeClamp:
         return _fake
 
     def test_optimistic_vertex_is_clamped(self, monkeypatch):
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         m = Model("c15")
         m.continuous("x", lb=0.0, ub=10.0)
@@ -1104,7 +1104,7 @@ class TestC15NsSafeClamp:
         with a *free-sign* multiplier — sound and tighter than clamping them.
         LP: min x s.t. x == 2, x ∈ [0, 5] ⇒ true min = 2.
         """
-        from discopt._jax.obbt import _ns_safe_lp_lower_bound
+        from discopt._relax.obbt import _ns_safe_lp_lower_bound
 
         c = np.array([1.0])
         A = np.array([[1.0]])

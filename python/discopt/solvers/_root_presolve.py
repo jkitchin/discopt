@@ -221,7 +221,7 @@ def _extract_row(model: Model, con, n: int):
     slots; ``const`` is the free term. ``None`` when the body is non-linear or
     otherwise not extractable — such rows are left untouched.
     """
-    from discopt._jax.problem_classifier import (  # local import: heavy _jax dep
+    from discopt._relax.problem_classifier import (  # local import: heavy _relax dep
         _extract_linear_coefficients,
         _NotLinearError,
     )
@@ -255,7 +255,7 @@ def _strong_block_bounds(model: Model, time_limit_ms: int) -> tuple[np.ndarray, 
     the solver's own root FBBT tightening reaches only the tree, not this repr).
     """
     try:
-        from discopt._jax.presolve_pipeline import run_root_presolve
+        from discopt._relax.presolve_pipeline import run_root_presolve
         from discopt._rust import model_to_repr
 
         repr0 = model_to_repr(model, getattr(model, "_builder", None))

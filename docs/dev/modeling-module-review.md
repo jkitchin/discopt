@@ -4,7 +4,7 @@
 **Scope:** `python/discopt/modeling/` (`core.py`, `sets.py`, `indexed.py`, `latex.py`,
 `implicit.py`, `gams_parser.py`, `examples.py`, `__init__.py`) and its direct
 consumers where the modeling layer's contracts are enforced (notably
-`python/discopt/_jax/problem_classifier.py`).
+`python/discopt/_relax/problem_classifier.py`).
 **Method:** Full read of `core.py`/`sets.py`/`indexed.py`/`latex.py`/`implicit.py`
 (~4,800 lines) with every suspected defect reproduced end-to-end against the installed
 package; `gams_parser.py`, `examples.py`, and a second pass over `latex.py`/`implicit.py`
@@ -23,7 +23,7 @@ unambiguous from control flow.
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| M1 | **P0 correctness** | `_jax/problem_classifier.py` (contract defined by `modeling/core.py`) | Vector (broadcast) constraints are silently **aggregated into one summed row** on the LP/MILP algebraic extraction path → solver returns an **infeasible point certified "optimal"** [CONFIRMED] |
+| M1 | **P0 correctness** | `_relax/problem_classifier.py` (contract defined by `modeling/core.py`) | Vector (broadcast) constraints are silently **aggregated into one summed row** on the LP/MILP algebraic extraction path → solver returns an **infeasible point certified "optimal"** [CONFIRMED] |
 | M2 | **P0 correctness** | `core.py:3630` (`from_nl`) | Binary variables are re-created with default `[0,1]` bounds, **discarding the parsed `.nl` bounds** — a fixed binary silently un-fixes; affects `from_nl` and the `from_pyomo` round-trip [CONFIRMED] **✅ RESOLVED (X-3, #413): `from_nl` now stamps the parsed lb/ub onto the binary, clamped into `[0,1]`; regression `TestFromNlBinaryBoundsX3` in `test_nl_reconstruction.py`.** |
 | M3 | **P0 correctness** | `core.py` (no ownership check) | Expressions mixing variables from **two different models** are silently accepted; the foreign variable **aliases by flat index** onto a same-index variable of the solved model → silently wrong answer [CONFIRMED] |
 | M4 | P1 | `core.py:157` | `Expression.__eq__` returns a `Constraint`, so `expr in seq` is **always True**, `Constraint == Constraint` is always True, and all non-`Variable` expressions are unhashable [CONFIRMED] |
@@ -59,7 +59,7 @@ huge-bounds `UserWarning` (verified it actually fires).
 implemented correctly by `NLPEvaluator` and by the autodiff LP extractor — is that a
 `Constraint` whose body is array-shaped means **one row per component**. The *algebraic*
 fast-path extractor (`_extract_linear_coefficients`,
-`_jax/problem_classifier.py:219-226`) instead assumes every body is scalar and contains
+`_relax/problem_classifier.py:219-226`) instead assumes every body is scalar and contains
 this branch for a bare array variable:
 
 ```python
@@ -608,7 +608,7 @@ PR. Baseline recorded above. M1 touches the solver's classification layer: its f
 
 | ID | Task | Files | Acceptance criteria |
 |----|------|-------|---------------------|
-| M-1a | Algebraic extractors: raise `_NotLinearError`/`_NotQuadraticError` on any array-shaped node in scalar position (delete the array-as-sum branches) | `_jax/problem_classifier.py:219-226, 372-376` | LP/vector-eq/MILP repros (§2 M1) return true optima with elementwise-feasible points; scalar-loop controls unchanged; full benchmark smoke suite `incorrect_count ≤ 0`; property test: algebraic vs autodiff extraction agree exactly on 100 random affine models (scalar bodies) |
+| M-1a | Algebraic extractors: raise `_NotLinearError`/`_NotQuadraticError` on any array-shaped node in scalar position (delete the array-as-sum branches) | `_relax/problem_classifier.py:219-226, 372-376` | LP/vector-eq/MILP repros (§2 M1) return true optima with elementwise-feasible points; scalar-loop controls unchanged; full benchmark smoke suite `incorrect_count ≤ 0`; property test: algebraic vs autodiff extraction agree exactly on 100 random affine models (scalar bodies) |
 | M-1b | Row-expanding algebraic extraction for array bodies (shape propagation through `+/-/*` and broadcasting) to restore the fast path | same | Extracted `(A,b,c)` bit-identical to autodiff extractor on a vectorized-model panel incl. DAE-style blocks; build-time measurement vs M-1a fallback included in PR |
 | M-2 | `from_nl`: apply parsed bounds to binary variables (intersect with `[0,1]`) | `core.py:3627-3632` | Round-trip repro preserves optimum 11.0; hand-written `.nl` with fixed binary column imports fixed; `from_pyomo` round-trip test with a fixed binary |
 | M-3 | Ownership validation in `Model.validate()`: every Variable/Parameter in objective+constraints must satisfy `node.model is self` | `core.py` (validate; reuse `_find_owning_model`-style walk, extended to CustomCall args and Parameter) | Cross-model repro raises `ValueError` naming `xb` and model `B`; solve-path overhead measured (one DAG walk) |

@@ -115,7 +115,7 @@ def _model_is_nonlinear(model) -> bool:
     default and GBD is only *offered*, never forced).
     """
     try:
-        from discopt._jax.gdp_reformulate import _is_linear
+        from discopt._relax.gdp_reformulate import _is_linear
     except Exception as exc:  # noqa: BLE001 - classical Benders is the safe default
         logger.debug(
             "linearity predicate unavailable, not offering GBD: %s: %s", type(exc).__name__, exc

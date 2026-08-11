@@ -43,7 +43,7 @@ The mapping (verified against the code) is:
 | Primal feasibility `g(x,y) <= 0` | `m.subject_to(g <= 0)` | exists |
 | Dual feasibility `μ >= 0` | `m.continuous(name, lb=0)` | exists |
 | Complementarity `0 <= μ ⊥ −g >= 0` | `discopt.mpec.complementarity` / `solve_mpec` | exists |
-| Convexity check on the lower level | `discopt/_jax/convexity` certifier | exists (reuse) |
+| Convexity check on the lower level | `discopt/_relax/convexity` certifier | exists (reuse) |
 | In-place `.formulate()` builder pattern | `ro.counterpart.RobustCounterpart` | exists (mirror) |
 
 The single missing engine piece is a **symbolic differentiator** that maps an
@@ -106,7 +106,7 @@ python/discopt/bilevel/
 > `build_kkt_system()` — the sound KKT-math construction, separate from the
 > encoding choice in `formulate()`.
 
-Optional dep: none beyond the core (mpec + _jax are already core). Mirrors the flat,
+Optional dep: none beyond the core (mpec + _relax are already core). Mirrors the flat,
 builder-pattern shape of `ro/`.
 
 ---
@@ -223,7 +223,7 @@ follower-*infeasible* point (`gap_certified=True`) because the KKT multipliers a
 unbounded and the GDP big-M treated discopt's ±1e20 unbounded sentinel as a valid
 (but numerically vacuous) `M`, so the complementarity disjunction was never
 enforced. Fixes:
-- **Shared GDP layer** (`_jax/gdp_reformulate.py`): `_compute_big_m` now refuses a
+- **Shared GDP layer** (`_relax/gdp_reformulate.py`): `_compute_big_m` now refuses a
   sentinel-magnitude bound (`|bound| ≥ _BIGM_SENTINEL = 1e15`) as it already did for
   ±inf and as SOS1 / `_compute_big_m_lp` already did — a sentinel `M` is not a
   usable big-M. (Real finite bounds below the sentinel still use the true bound,

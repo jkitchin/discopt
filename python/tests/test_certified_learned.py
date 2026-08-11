@@ -15,12 +15,12 @@ jax.config.update("jax_enable_x64", True)
 
 sp = pytest.importorskip("sympy")
 
-from discopt._jax.symbolic import (  # noqa: E402
+from discopt._relax.symbolic import (  # noqa: E402
     derive_envelope,
     lambdify_envelope,
     verify_envelope,
 )
-from discopt._jax.symbolic.certified_learned import (  # noqa: E402
+from discopt._relax.symbolic.certified_learned import (  # noqa: E402
     certify_relaxation,
 )
 
@@ -110,8 +110,8 @@ def test_clamping_against_f_destroys_convexity():
 def test_learned_adapter_certifies_to_sound():
     """certify_relaxation makes an (untrained) ICNN relaxation sound on fresh boxes."""
     pytest.importorskip("equinox")
-    from discopt._jax.learned_relaxations import create_learned_relaxation
-    from discopt._jax.symbolic.certified_learned import raw_learned_relax_fn
+    from discopt._relax.learned_relaxations import create_learned_relaxation
+    from discopt._relax.symbolic.certified_learned import raw_learned_relax_fn
 
     lr = create_learned_relaxation(jax.random.PRNGKey(0), "square")
     raw_fn = raw_learned_relax_fn(lr)

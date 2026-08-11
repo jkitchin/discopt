@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import discopt._jax.convexity as _cvx
+import discopt._relax.convexity as _cvx
 import numpy as np
 import pytest
 from discopt.modeling.core import from_nl
@@ -73,7 +73,7 @@ def test_convexity_dedup_on_nlp_bb_path(monkeypatch):
 
 def test_interval_mul_zero_times_inf_still_sound():
     """#723 fast-path in Interval.__mul__ keeps the 0*inf NaN convention (C-36)."""
-    from discopt._jax.convexity.interval import Interval
+    from discopt._relax.convexity.interval import Interval
 
     # [0,0] . [-inf, inf] -> [0,0] (not NaN): the 0-factor convention.
     # (up to one ULP of outward rounding on each side).

@@ -15,7 +15,7 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._jax.problem_classifier import extract_lp_data
+from discopt._relax.problem_classifier import extract_lp_data
 from discopt.solver import _root_dive
 
 

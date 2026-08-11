@@ -27,9 +27,9 @@ import logging
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Model
 
 pytestmark = [pytest.mark.claim_boundary]
@@ -162,7 +162,7 @@ def test_single_univariate_constraint_linearizes(caplog):
     x = m.continuous("x", lb=-3.0, ub=3.0)
     m.minimize(x)
     m.subject_to(dm.sin(x) <= 0.5)
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
         relax, _info, _ = _build(m)
     # Engine contract: sin(x) is covered by the uniform engine — the constraint is
     # NOT dropped (no fallback warning) and the built relaxation is non-trivial.
@@ -194,7 +194,7 @@ def test_univariate_product_not_dropped(make_constraint, desc, caplog):
     y = m.continuous("y", lb=0.5, ub=1.5)
     m.minimize(x + y)
     m.subject_to(make_constraint(x, y) <= 5.0)
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
         relax, _info, _ = _build(m)
     omitted = [
         rec.message
@@ -273,7 +273,7 @@ def _inscribedsquare02_model():
 
 def test_inscribedsquare02_constraints_not_dropped(caplog):
     m = _inscribedsquare02_model()
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+    with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
         _build(m)
     omitted = [r.message for r in caplog.records if "omitting constraint" in r.message]
     assert not omitted, f"inscribedsquare02 constraints dropped: {omitted}"

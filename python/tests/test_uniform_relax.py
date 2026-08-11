@@ -22,7 +22,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.uniform_relax import (
+from discopt._relax.uniform_relax import (
     ENVELOPE_LIBRARY,
     build_uniform_relaxation,
     relaxation_report,
@@ -200,11 +200,11 @@ def _sample_no_cut(model, n=400, seed=0, tol=1e-6):
     partial product), so the lifted true point ``(x, w=f(x))`` is exact — and a
     sound outer relaxation must satisfy every row at that point.
     """
-    from discopt._jax import uniform_relax as ur
-    from discopt._jax.canonical_expr import canonicalize
-    from discopt._jax.convexity.interval import Interval
-    from discopt._jax.convexity.interval_eval import evaluate_interval
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax import uniform_relax as ur
+    from discopt._relax.canonical_expr import canonicalize
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.model_utils import flat_variable_bounds
 
     flat_lb, flat_ub = flat_variable_bounds(model)
     dag = canonicalize(model)
@@ -264,7 +264,7 @@ def test_feasible_points_not_cut_multilinear_and_powers(seed):
 # Per-model analysis cache (issue #632 EP1) — bound-neutral byte-identity gate
 # --------------------------------------------------------------------------- #
 def _fp(rel):
-    from discopt._jax.claim_audit import relaxation_fingerprint
+    from discopt._relax.claim_audit import relaxation_fingerprint
 
     return relaxation_fingerprint(rel.model)
 
@@ -274,7 +274,7 @@ def test_ep1_cache_hot_rebuild_is_byte_identical():
     """A second (cache-hot) build of the SAME (model, box) must be byte-identical
     to the first. Guards that reading box-independent analysis through the pinned
     per-model cache never perturbs the emitted relaxation."""
-    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+    from discopt._relax.uniform_relax import _ANALYSIS_ATTR
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -282,7 +282,7 @@ def test_ep1_cache_hot_rebuild_is_byte_identical():
     m.minimize(dm.exp(x * y) + dm.log(x + y) ** 2 + x / y)
     m.subject_to(x * y + dm.sqrt(x + y) <= 6.0)
 
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.model_utils import flat_variable_bounds
 
     lb, ub = flat_variable_bounds(m)
     assert _ANALYSIS_ATTR not in m.__dict__  # cold: no cache yet
@@ -304,7 +304,7 @@ def test_ep1_cache_hot_rebuild_is_byte_identical():
 def test_ep1_staleness_token_new_constraint_invalidates_cache():
     """Adding a constraint must invalidate the cache (staleness token changes) so
     the rebuilt relaxation reflects the new constraint's rows."""
-    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+    from discopt._relax.uniform_relax import _ANALYSIS_ATTR
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -327,7 +327,7 @@ def test_ep1_staleness_token_new_constraint_invalidates_cache():
 def test_ep1_staleness_token_new_objective_invalidates_cache():
     """Replacing the objective must invalidate the cache (id(_objective) changes)
     so a stale objective is never reused — a stale objective would be unsound."""
-    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+    from discopt._relax.uniform_relax import _ANALYSIS_ATTR
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -361,8 +361,8 @@ def test_ep5_traced_eval_fn_byte_identical_and_lazy():
     """
     import jax
     import jax.numpy as jnp
-    from discopt._jax.dag_compiler import compile_expression
-    from discopt._jax.uniform_relax import _TracedEvalFn
+    from discopt._relax.dag_compiler import compile_expression
+    from discopt._relax.uniform_relax import _TracedEvalFn
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -410,8 +410,8 @@ def test_ep5_lift_never_separated_leaves_grad_untraced(monkeypatch):
     """
     monkeypatch.setenv("DISCOPT_SEPGRAD", "jax")
 
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -453,8 +453,8 @@ def test_ep5_never_separated_lift_is_never_invoked_on_either_backend(monkeypatch
     """
     monkeypatch.setenv("DISCOPT_SEPGRAD", sepgrad)
 
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.uniform_relax import build_uniform_relaxation
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)
@@ -498,8 +498,8 @@ def test_ep5_never_separated_lift_bound_is_backend_identical(monkeypatch):
     parametrized runs in a module global makes the comparison vanish whenever a
     ``-k`` filter selects only one arm, which is a §6 silent no-op.
     """
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
     from discopt._tape_nlp_evaluator import pounce_usable
 
     if not pounce_usable():
@@ -541,7 +541,7 @@ def test_ep5_hash_consing_shares_one_compiled_fn():
     appears twice is ONE ``CNode`` object — and the per-model ``_compiled`` cache,
     keyed by ``id(cnode)``, therefore shares a single (lazily-traced) wrapper
     across every structurally identical occurrence. Verify the interning."""
-    from discopt._jax.canonical_expr import canonicalize
+    from discopt._relax.canonical_expr import canonicalize
 
     m = Model()
     x = m.continuous("x", lb=0.5, ub=2.5)

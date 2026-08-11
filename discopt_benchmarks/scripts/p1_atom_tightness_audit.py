@@ -70,12 +70,12 @@ def root_bound(model) -> tuple[str, float | None, bool]:
     capturing the ``build_milp_relaxation`` warning; the module's ``_warn_once``
     dedupe cache is cleared per call so every build is observed.
     """
-    from discopt._jax import milp_relaxation as milp
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax import milp_relaxation as milp
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     milp._warned_messages.clear()
     cap = _CaptureWarnings()
-    logger = logging.getLogger("discopt._jax.milp_relaxation")
+    logger = logging.getLogger("discopt._relax.milp_relaxation")
     prev_level = logger.level
     logger.addHandler(cap)
     logger.setLevel(logging.WARNING)

@@ -53,7 +53,7 @@ AMP benchmark runs can supply Alpine-style custom partition hooks directly to
 `Model.solve`. This keeps heuristic experiments outside solver internals:
 
 ```python
-from discopt._jax.discretization import add_adaptive_partition
+from discopt._relax.discretization import add_adaptive_partition
 
 
 def choose_partition_vars(ctx):

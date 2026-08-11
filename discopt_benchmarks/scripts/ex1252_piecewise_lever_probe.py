@@ -49,10 +49,10 @@ os.environ.setdefault("DISCOPT_INCREMENTAL_MC", "0")
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.integer_product_reform import reformulate_integer_multilinear
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.obbt import obbt_tighten_root
+from discopt._relax.integer_product_reform import reformulate_integer_multilinear
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.obbt import obbt_tighten_root
 
 OPT = 128893.74
 # line-1 selected, lines 2&3 off (indicators, selectors, matching binaries).

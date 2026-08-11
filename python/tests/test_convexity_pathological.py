@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity import Curvature, classify_expr
+from discopt._relax.convexity import Curvature, classify_expr
 from discopt.modeling.core import FunctionCall, Model
 
 # ──────────────────────────────────────────────────────────────────────

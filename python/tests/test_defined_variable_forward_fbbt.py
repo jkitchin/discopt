@@ -24,7 +24,7 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 from discopt.modeling.core import from_nl
 from discopt.solver import _extract_variable_info
 

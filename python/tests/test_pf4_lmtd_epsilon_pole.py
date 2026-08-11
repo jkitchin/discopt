@@ -109,8 +109,8 @@ def test_sign_definite_denominator_gate_is_insufficient_for_am():
 
 def _build_tracked_relaxation(model, box):
     """Build the uniform relaxation with aux->exact-expr tracking (soundness harness)."""
-    from discopt._jax import uniform_relax as ur
-    from discopt._jax.canonical_expr import canonicalize
+    from discopt._relax import uniform_relax as ur
+    from discopt._relax.canonical_expr import canonicalize
 
     flat_lb = np.asarray(box[0], dtype=np.float64)
     flat_ub = np.asarray(box[1], dtype=np.float64)
@@ -123,8 +123,8 @@ def _build_tracked_relaxation(model, box):
 
 
 def _eval_expr(model, expr, xv):
-    from discopt._jax.convexity.interval import Interval
-    from discopt._jax.convexity.interval_eval import evaluate_interval
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     box = {}
     off = 0

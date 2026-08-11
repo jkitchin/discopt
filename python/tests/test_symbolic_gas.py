@@ -13,7 +13,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from discopt._jax.symbolic.domains.gas import weymouth_relax  # noqa: E402
+from discopt._relax.symbolic.domains.gas import weymouth_relax  # noqa: E402
 
 pytestmark = pytest.mark.relaxation
 
@@ -63,7 +63,7 @@ def test_weymouth_convex_concave():
 
 def test_weymouth_tighter_than_bilinear():
     """The dedicated envelope must be no looser than relax_bilinear(f, |f|)."""
-    from discopt._jax.mccormick import relax_abs, relax_bilinear
+    from discopt._relax.mccormick import relax_abs, relax_bilinear
 
     lb, ub = -10.0, 10.0
     xs = jnp.linspace(lb, ub, 101)
@@ -88,7 +88,7 @@ def test_weymouth_tighter_than_bilinear():
 
 def test_handwritten_matches_symbolic():
     pytest.importorskip("sympy")
-    from discopt._jax.symbolic.domains.gas import derive_weymouth_symbolic
+    from discopt._relax.symbolic.domains.gas import derive_weymouth_symbolic
 
     sym_fn = derive_weymouth_symbolic()
     rng = np.random.default_rng(1)
@@ -109,7 +109,7 @@ def test_handwritten_matches_symbolic():
 
 
 def test_compiler_routes_weymouth_pattern():
-    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt._relax.relaxation_compiler import compile_relaxation
     from discopt.modeling.core import Model
 
     m = Model("gas")
@@ -143,7 +143,7 @@ def test_signed_power_panhandle_sound(beta):
     """Panhandle exponents have a transcendental tangent equation; the numeric
     tangent solver in code-gen handles them (no closed form needed)."""
     pytest.importorskip("sympy")
-    from discopt._jax.symbolic.domains.gas import derive_signed_power_symbolic
+    from discopt._relax.symbolic.domains.gas import derive_signed_power_symbolic
 
     fn = derive_signed_power_symbolic(beta)
     lb, ub = -6.0, 9.0
@@ -165,8 +165,8 @@ def test_compiler_routes_signed_power_pattern(beta):
     """The compiler detects ``f * |f|**(beta-1)`` and routes it to the tight
     signed-power envelope end to end; sound over a box straddling 0."""
     import numpy as np
-    from discopt._jax.relaxation_compiler import compile_relaxation
-    from discopt._jax.symbolic.domains.gas import signed_power_relax
+    from discopt._relax.relaxation_compiler import compile_relaxation
+    from discopt._relax.symbolic.domains.gas import signed_power_relax
     from discopt.modeling.core import Model
 
     p = beta - 1.0
@@ -191,7 +191,7 @@ def test_compiler_routes_signed_power_pattern(beta):
 
 
 def test_signed_power_detector_no_misfire():
-    from discopt._jax.relaxation_compiler import _try_extract_signed_power
+    from discopt._relax.relaxation_compiler import _try_extract_signed_power
     from discopt.modeling.core import Model
 
     m = Model("t")

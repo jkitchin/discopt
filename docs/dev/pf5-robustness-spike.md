@@ -63,7 +63,7 @@ unchanged):
   preserves old behavior), but a numeric budget that has already elapsed (`<= 0`
   from `deadline - now`) is floored to `1e-6` so it **trips immediately** rather
   than reading as uncapped.
-- **`python/discopt/_jax/milp_relaxation.py`** — `_solve_lp_warm` /
+- **`python/discopt/_relax/milp_relaxation.py`** — `_solve_lp_warm` /
   `_solve_lp_warm_equilibrated` accept and forward `time_limit`; `solve()` passes
   its `time_limit` into the warm fast path.
 
@@ -174,7 +174,7 @@ contvar go from 49–59 s to ~tl+5 s serially with no certificate regression.
    `solve_lp_batch_py`).
 2. `python/discopt/solvers/milp_simplex.py::solve_lp_warm_std` — `time_limit`
    plumb, with the `None`-vs-expired distinction.
-3. `python/discopt/_jax/milp_relaxation.py` — `_solve_lp_warm` /
+3. `python/discopt/_relax/milp_relaxation.py` — `_solve_lp_warm` /
    `_solve_lp_warm_equilibrated` / `solve` forward `time_limit`.
    Plus a regression test (a warm LP given an already-expired deadline returns
    non-optimal/None and never a bound; a generous deadline == uncapped).

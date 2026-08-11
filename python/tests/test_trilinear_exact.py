@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.envelopes import relax_trilinear, relax_trilinear_exact
+from discopt._relax.envelopes import relax_trilinear, relax_trilinear_exact
 
 # ─────────────────────────────────────────────────────────────────────
 # Soundness — cv ≤ x*y*z ≤ cc on a wide variety of boxes/points
@@ -183,7 +183,7 @@ def test_grad_through_cv():
 
 def _build_xyz_relaxation(x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
     """Build a relaxation callable for f = x*y*z over the given box."""
-    from discopt._jax.relaxation_compiler import _compile_relax_node
+    from discopt._relax.relaxation_compiler import _compile_relax_node
     from discopt.modeling.core import Model
 
     m = Model("trilinear_test")
@@ -242,7 +242,7 @@ def test_compiler_dispatch_meyer_is_opt_in(monkeypatch):
 
 def test_compiler_dispatch_skips_repeated_variables(monkeypatch):
     """x*x*y should NOT route to trilinear-exact (repeated variable)."""
-    from discopt._jax.relaxation_compiler import _try_extract_trilinear_chain
+    from discopt._relax.relaxation_compiler import _try_extract_trilinear_chain
     from discopt.modeling.core import Model
 
     m = Model("repeated")
@@ -254,7 +254,7 @@ def test_compiler_dispatch_skips_repeated_variables(monkeypatch):
 
 def test_compiler_dispatch_three_distinct_vars():
     """x*y*z with three distinct vars matches the trilinear detector."""
-    from discopt._jax.relaxation_compiler import _try_extract_trilinear_chain
+    from discopt._relax.relaxation_compiler import _try_extract_trilinear_chain
     from discopt.modeling.core import Model
 
     m = Model("three_distinct")

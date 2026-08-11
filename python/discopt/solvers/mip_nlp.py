@@ -100,7 +100,7 @@ def _apply_shot_profile_reformulations(
     elif shot_config.anti_epigraph == "off":
         return model
 
-    from discopt._jax.objective_epigraph import relax_objective_defining_equality
+    from discopt._relax.objective_epigraph import relax_objective_defining_equality
 
     reformulated, _changed = relax_objective_defining_equality(model)
     return cast(Model, reformulated)
@@ -540,7 +540,7 @@ def _try_solve_shot_direct_strategy(
         return None, None
 
     import discopt.solver as solver_module
-    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
     backend = _normalize_direct_backend(options)
     requested_hooks = sorted(key for key in _EVENT_HOOK_OPTION_KEYS if options.get(key) is not None)
@@ -672,7 +672,7 @@ def solve_mip_nlp(
 ) -> SolveResult:
     """Solve a MINLP with a MIP-NLP decomposition method."""
     method = _normalize_method(method)
-    from discopt._jax.factorable_reform import canonicalize_entropy
+    from discopt._relax.factorable_reform import canonicalize_entropy
 
     model = canonicalize_entropy(model)
     options: dict[str, Any] = {}

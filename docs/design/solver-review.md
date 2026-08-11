@@ -59,7 +59,7 @@ GAMS at once, built on machinery that already exists (the exporters).
 
 ## 3. Problem-class → engine matrix
 
-Classification: `python/discopt/_jax/problem_classifier.py` (`ProblemClass`
+Classification: `python/discopt/_relax/problem_classifier.py` (`ProblemClass`
 ∈ LP, QP, MILP, MIQP, NLP, MINLP). Dispatch:
 `python/discopt/solver.py:2655-2844`.
 

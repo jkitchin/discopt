@@ -226,12 +226,12 @@ recorded in §7).
 
 Five independent sub-builds, each its own flag + PR; all bound-changing regime
 except (c) which is differential:
-a) **T2.4a node-LP duals.** `MccormickLPResult` (`_jax/mccormick_lp.py` ~:188)
+a) **T2.4a node-LP duals.** `MccormickLPResult` (`_relax/mccormick_lp.py` ~:188)
    exposes status/lower_bound/x only — callers cannot run DBBT/RC-fixing per
    node. Plumb duals/reduced costs through (backend already computes them).
    Wiring-only PR, bound-neutral.
 b) **T2.5 OBBT escalation scoring.** OBBT candidates today = all columns in
-   index order (`_jax/obbt.py` ~:860, no scoring). Implement width×|reduced
+   index order (`_relax/obbt.py` ~:860, no scoring). Implement width×|reduced
    cost| top-k selection (needs (a)); budget-aware escalation per cert-gap-plan
    §14 T2.5 spec.
 c) **T2.2 warm/persistent OBBT probe LPs** — the measured per-node lever

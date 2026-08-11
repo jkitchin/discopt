@@ -65,7 +65,7 @@ def load(path):
 def verify_point(model, x_flat):
     """Independent re-verification: fresh evaluator, fresh constraint bounds.
     Returns (feasible, true_objective) -- the objective in the MODEL's own sense."""
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.solver import _check_constraint_feasibility, _infer_constraint_bounds
     ev = NLPEvaluator(model)
     cl, cu = _infer_constraint_bounds(model, ev)
@@ -85,7 +85,7 @@ for path in sys.argv[2:]:
     out = {"path": path}
     try:
         m, sgn = load(path)
-        from discopt._jax.lp_spatial_bb import _is_in_scope, solve_lp_spatial_bb
+        from discopt._relax.lp_spatial_bb import _is_in_scope, solve_lp_spatial_bb
         out["in_scope"] = bool(_is_in_scope(m))
         out["in_scope_legacy"] = bool(_is_in_scope(m, mixed=False))
         if out["in_scope"]:

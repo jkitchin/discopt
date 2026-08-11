@@ -25,7 +25,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import _remap_pool_rows, column_identities
+from discopt._relax.mccormick_lp import _remap_pool_rows, column_identities
 
 
 def test_column_identities_tags_orig_and_structural_aux():

@@ -1,6 +1,6 @@
 """Hessian first-compile cost model, with no JAX import.
 
-Pure arithmetic over model-size features, split out of ``_jax/nlp_evaluator`` so a
+Pure arithmetic over model-size features, split out of ``_relax/nlp_evaluator`` so a
 caller can consult it without loading JAX. ``solver._objective_is_convex_quadratic``
 imports ``estimate_dense_obj_hessian_compile_s`` on every solve; while it lived in
 the evaluator module that one import pulled the whole JAX stack onto an otherwise

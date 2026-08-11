@@ -53,9 +53,9 @@ def test_monomial_var_product_certifies(instance, optimum):
 @pytest.mark.correctness
 def test_decompose_collapses_repeated_factor_to_monomial_col():
     """x*x*y decomposes to [monomial_aux(x**2), y], not a raw [x, x, y]."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import _decompose_product
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import _decompose_product
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = dm.Model("xxy")
     x = m.continuous("x", lb=1.0, ub=3.0)
@@ -107,8 +107,8 @@ def test_nvs22_objective_term_lifts_to_sound_root_bound():
     MINLPLib optimum 6.0584); full certification is out of scope here because the
     division/sqrt constraints remain un-linearizable.
     """
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.model_utils import flat_variable_bounds
 
     nl = _DATA / "nvs22.nl"
     assert nl.exists(), f"missing {nl}"
@@ -132,10 +132,10 @@ def test_repeated_factor_objective_with_pinned_node_still_linearizes():
     coefficient, collapsing ``x*y*z`` to a bilinear in the two live factors; the
     builder pre-allocates that collapsed bilinear's aux + envelope so the objective
     does not drop with "Bilinear (i,j) not in map" (issue #139)."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = dm.Model("xyz_pinned")
     x = m.continuous("x", lb=1.0, ub=4.0)
@@ -220,8 +220,8 @@ def test_st_e36_extreme_monomial_does_not_false_infeasible():
     omitted (omission only enlarges the feasible region, keeping the dual bound
     valid), so the root LP solves to a finite, sound lower bound instead of a
     false ``infeasible``. The bound must underestimate the known optimum -246."""
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.model_utils import flat_variable_bounds
 
     nl = _DATA / "st_e36.nl"
     assert nl.exists(), f"missing {nl}"

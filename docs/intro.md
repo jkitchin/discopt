@@ -22,13 +22,13 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **Rust backend** (`crates/discopt-core`): Expression IR, Branch & Bound tree (node pool, branching, pruning), .nl file parser, FBBT/presolve (interval arithmetic, probing, Big-M simplification).
 
-**JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (28 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
+**JAX layer** (`python/discopt/_relax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (28 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt {cite:p}`Wachter2006`, HiGHS LP and MILP wrappers with warm-start support (MILP used by the LOA decomposition solver).
 
 **Neural network embedding** (`python/discopt/nn`): embeds trained feedforward networks as algebraic MINLP constraints {cite:p}`Ceccon2022` via full-space (smooth activations), ReLU big-M MILP {cite:p}`Anderson2020`, and reduced-space strategies; interval arithmetic bound propagation; ONNX model import.
 
-**Generalized disjunctive programming** (`python/discopt/_jax/gdp_reformulate.py`): reformulates GDP models — `BooleanVar`, propositional logic operators, `either_or()`, `if_then()` — into standard MINLP via big-M, multiple big-M (LP-tightened), convex hull, or Logic-based Outer Approximation.
+**Generalized disjunctive programming** (`python/discopt/_relax/gdp_reformulate.py`): reformulates GDP models — `BooleanVar`, propositional logic operators, `either_or()`, `if_then()` — into standard MINLP via big-M, multiple big-M (LP-tightened), convex hull, or Logic-based Outer Approximation.
 
 **Orchestrator** (`python/discopt/solver.py`): End-to-end `Model.solve()` connecting all components. At each B&B node: solve continuous NLP relaxation with the interior-point method {cite:p}`Nocedal2006`, prune infeasible nodes, fathom integer-feasible solutions, branch on most fractional variable.
 

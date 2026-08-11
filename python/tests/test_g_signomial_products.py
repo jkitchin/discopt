@@ -17,11 +17,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity.g_products_ratios import (
+from discopt._relax.convexity.g_products_ratios import (
     classify_product_ratio,
     is_product_or_ratio,
 )
-from discopt._jax.symbolic.signed_signomial import (
+from discopt._relax.symbolic.signed_signomial import (
     _posynomial_parts,
     signed_signomial_dc_envelope,
 )

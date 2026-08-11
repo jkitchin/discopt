@@ -13,7 +13,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
 import discopt.modeling as dm
-from discopt._jax.term_classifier import extract_reciprocal_power, extract_single_var_power
+from discopt._relax.term_classifier import extract_reciprocal_power, extract_single_var_power
 
 
 def _model_one_var():

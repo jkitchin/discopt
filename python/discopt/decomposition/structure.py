@@ -91,7 +91,7 @@ def _vars_in(expr, name_to_idx: dict[str, int]) -> list[int]:
     """Flat variable indices referenced by *expr* (deduplicated, ordered)."""
     if expr is None:
         return []
-    from discopt._jax.gdp_reformulate import _collect_variables
+    from discopt._relax.gdp_reformulate import _collect_variables
 
     out: list[int] = []
     for nm in _collect_variables(expr):

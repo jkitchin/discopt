@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import warnings
 
-import discopt._jax.dag_compiler as dag_compiler
+import discopt._relax.dag_compiler as dag_compiler
 import discopt.modeling as dm
 import numpy as np
 import pytest

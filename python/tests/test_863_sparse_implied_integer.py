@@ -30,14 +30,14 @@ from pathlib import Path  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.gdp_reformulate import _is_linear  # noqa: E402
-from discopt._jax.implied_integer import (  # noqa: E402
+from discopt._relax.gdp_reformulate import _is_linear  # noqa: E402
+from discopt._relax.implied_integer import (  # noqa: E402
     _INT_TOL,
     _is_int_value,
     detect_implied_integers,
     mark_implied_integers,
 )
-from discopt._jax.problem_classifier import (  # noqa: E402
+from discopt._relax.problem_classifier import (  # noqa: E402
     _extract_linear_coefficients,
     _NotLinearError,
 )
@@ -239,7 +239,7 @@ def test_no_full_width_row_is_ever_materialised(monkeypatch):
     first and is useless at test scale — the O(n) ``flat``/``is_int`` structures,
     which are unavoidable and unchanged, dominate the peak.
     """
-    import discopt._jax.implied_integer as impl
+    import discopt._relax.implied_integer as impl
 
     calls: list[int] = []
 
@@ -259,7 +259,7 @@ def test_row_support_is_computed_once_not_once_per_fixpoint_round(monkeypatch):
     support with ``np.nonzero`` on EVERY fixpoint round, an O(n) scan per row per
     round. ``_chain_model`` needs three rounds to converge, so a per-round rescan is
     observable: the support of each row must be built exactly once."""
-    import discopt._jax.problem_classifier as pcmod
+    import discopt._relax.problem_classifier as pcmod
 
     model = _chain_model()
     real = pcmod._extract_linear_coefficients_sparse
@@ -271,7 +271,7 @@ def test_row_support_is_computed_once_not_once_per_fixpoint_round(monkeypatch):
 
     monkeypatch.setattr(pcmod, "_extract_linear_coefficients_sparse", _counting)
     # implied_integer imported the symbol directly, so patch it there too.
-    import discopt._jax.implied_integer as impl
+    import discopt._relax.implied_integer as impl
 
     monkeypatch.setattr(impl, "_extract_linear_coefficients_sparse", _counting)
 

@@ -28,8 +28,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
-from discopt._jax.primal_heuristics import (  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.primal_heuristics import (  # noqa: E402
     _local_branching_submip,
     local_branching,
     rins,
@@ -243,7 +243,7 @@ def test_local_branching_enumeration_honors_deadline(monkeypatch):
     import math
     import time
 
-    import discopt._jax.primal_heuristics as ph
+    import discopt._relax.primal_heuristics as ph
 
     n = 12  # exactly at the cap -> the enumeration path (not the sub-MIP)
     m, _ = _knapsack_model(n)

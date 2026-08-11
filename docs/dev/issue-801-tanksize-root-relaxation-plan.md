@@ -227,7 +227,7 @@ A root gain alone does not ship. In order:
 | Instance + oracle | `python/tests/data/minlplib_nl/tanksize.nl`; optimum 1.2686437540 (min), incumbent found at node 0 — pure dual-closure |
 | Probe pattern | `MccormickLPRelaxer.solve_at_node` (root FBBT box, integers relaxed); `DISCOPT_SPARSE_LARGE_LP=1` for lifted LPs |
 | Prior falsification detail | `issue-764-root-relaxation-plan.md` "Candidate mechanisms" (constructions, row counts, injection technique) |
-| Term classifier behavior | naive degree-3 products are dropped (`tri=0`) — expand to clean monomials first (`python/discopt/_jax/term_classifier.py`) |
+| Term classifier behavior | naive degree-3 products are dropped (`tri=0`) — expand to clean monomials first (`python/discopt/_relax/term_classifier.py`) |
 | Shor SDP path (reference for 2b) | `DISCOPT_SHOR_SDP_ROOT_BOUND` wiring in `python/discopt/solver.py` |
 | Marginals for attribution | `MccormickLPResult.reduced_costs` / `row_dual` (#764 Phase 2 step 1, `python/tests/test_phase2_cold_marginals.py`) |
 | Existing #764 scripts | `discopt_benchmarks/scripts/issue764_*.py` (node-cost decomposition, cut attribution) |

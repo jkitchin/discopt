@@ -561,7 +561,7 @@ class TestScreenHeuristicIncumbent:
         assert len(seen) == 1
 
     def test_lazy_cut_blocks_candidate_and_pools_cut(self):
-        from discopt._jax.cutting_planes import CutPool
+        from discopt._relax.cutting_planes import CutPool
         from discopt.solver import _screen_heuristic_incumbent
 
         m = self._model()

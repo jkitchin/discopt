@@ -2,7 +2,7 @@
 
 F7 (perf-followup-plan §2, fixed-tax trims). The first ``solve()`` in a fresh
 process lazily loads ~0.4 s of solve-path modules (scipy sparse/linalg, the
-discopt._jax / discopt.solvers stack; ``jax.numpy`` was in this list until #75
+discopt._relax / discopt.solvers stack; ``jax.numpy`` was in this list until #75
 took JAX off the solve path). Batch/CLI/benchmark
 harnesses that pay import cost once can opt in to move that tax to
 ``import discopt`` time via ``DISCOPT_EAGER_IMPORTS=1``.

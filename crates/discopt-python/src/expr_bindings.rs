@@ -690,7 +690,7 @@ impl PyModelRepr {
     /// `"reduced_cost_fixing"` pass to do anything; otherwise that pass
     /// is a no-op.
     /// Default order matches the historical
-    /// `_jax/presolve_pipeline.py:run_root_presolve` behaviour:
+    /// `_relax/presolve_pipeline.py:run_root_presolve` behaviour:
     /// `["eliminate", "simplify", "fbbt", "probing"]`. Polynomial
     /// reformulation is opt-in (it changes variable indexing).
     ///

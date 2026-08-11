@@ -14,7 +14,7 @@ import math
 
 import numpy as np
 import pytest
-from discopt._jax.convexity.rules import classify_constraint, classify_model
+from discopt._relax.convexity.rules import classify_constraint, classify_model
 from discopt.gp import (
     as_geometric_program,
     classify_gp,

@@ -20,7 +20,7 @@ import pytest
 jax = pytest.importorskip("jax")
 import discopt.modeling as dm  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from discopt._jax.dag_compiler import compile_expression_params  # noqa: E402
+from discopt._relax.dag_compiler import compile_expression_params  # noqa: E402
 from discopt.bilevel.symbolic_diff import diff, grad  # noqa: E402
 from discopt.modeling.core import (  # noqa: E402
     BinaryOp,

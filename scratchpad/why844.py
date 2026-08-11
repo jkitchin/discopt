@@ -6,7 +6,7 @@ os.environ["DISCOPT_LP_SPATIAL_FALLBACK"]="0"
 import warnings; warnings.filterwarnings("ignore")
 import numpy as np
 from discopt.modeling.core import from_nl
-from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb, _is_in_scope
+from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb, _is_in_scope
 BM=os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl")
 NM="tln6"
 

@@ -463,9 +463,9 @@ def build_convex_spec(model, bounds=None) -> Optional[dict]:
 
 
 def _build(model, bounds) -> dict:
-    from discopt._jax.gdp_reformulate import reformulate_gdp
-    from discopt._jax.model_utils import flat_variable_bounds
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.model_utils import flat_variable_bounds
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.modeling.core import VarType
 
     m = reformulate_gdp(model, method="big-m")

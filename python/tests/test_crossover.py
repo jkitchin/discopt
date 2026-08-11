@@ -15,9 +15,9 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._jax.cover_cuts import separate_cover_cuts
-from discopt._jax.crossover import _MAX_CROSSOVER_VARS, _null_direction, crossover_to_vertex
-from discopt._jax.problem_classifier import extract_lp_data
+from discopt._relax.cover_cuts import separate_cover_cuts
+from discopt._relax.crossover import _MAX_CROSSOVER_VARS, _null_direction, crossover_to_vertex
+from discopt._relax.problem_classifier import extract_lp_data
 from discopt.solver import _decompose_eq_slack_form
 
 

@@ -4,9 +4,9 @@ This is the shared prerequisite for taking JAX off the solve path (issue #75).
 Both remaining JAX jobs need the same thing — the value and gradient of a scalar
 expression at a point — and POUNCE's Rust AD tape provides exactly that:
 
-* **separation tangents** (``_jax/uniform_relax.py``) need ``g(x0)`` and
+* **separation tangents** (``_relax/uniform_relax.py``) need ``g(x0)`` and
   ``grad g(x0)`` for the Kelley cutting-plane loop;
-* **NLP subsolve derivatives** (``_jax/nlp_evaluator.py``) need ``f``, ``grad f``,
+* **NLP subsolve derivatives** (``_relax/nlp_evaluator.py``) need ``f``, ``grad f``,
   ``g``, ``J``, and the Lagrangian Hessian.
 
 Previously those were headed for two *different* replacement backends. They no
@@ -47,8 +47,8 @@ scalar indexing O(1) per leaf (issue #654); the general path below is the
 fallback for the forms it cannot name.
 
 The layout identity the array path rests on is the JAX path's own:
-``_jax/dag_compiler`` materializes a variable as ``x_flat[off : off + size]
-.reshape(shape)`` in C order, and ``_jax/nlp_evaluator`` concatenates constraint
+``_relax/dag_compiler`` materializes a variable as ``x_flat[off : off + size]
+.reshape(shape)`` in C order, and ``_relax/nlp_evaluator`` concatenates constraint
 rows as ``jnp.reshape(body, (-1,))`` — also C order. ``np.ndarray.reshape(-1)``
 over the object array reproduces both exactly, so row *k* of a tape-backed
 constraint is row *k* of the JAX-backed one.
@@ -73,7 +73,7 @@ discopt's ``.nl`` writer refuses ``atan2``, ``min``, ``max``, ``erf`` and ``sign
 (``export/nl.py``), several of which the tape *does* differentiate. Building the
 tape expression directly keeps them.
 
-Deliberately NOT under ``_jax/``: nothing here touches JAX.
+Deliberately NOT under ``_relax/``: nothing here touches JAX.
 """
 
 from __future__ import annotations
@@ -224,7 +224,7 @@ def _static_scalar_slot(expr: IndexExpression, model: Model) -> int | None:
     ``x[i]`` / ``y[i, j]`` on a shaped :class:`Variable` names a *single* entry of
     the flat vector, so it lowers to an ordinary scalar tape variable — no array
     machinery required. The identity it rests on is the JAX path's own layout:
-    ``_jax/dag_compiler`` materializes a variable as ``x_flat[off : off + size]
+    ``_relax/dag_compiler`` materializes a variable as ``x_flat[off : off + size]
     .reshape(shape)`` (C order) and then applies ``a[index]``. For a full-rank
     all-integer index that composition is exactly
     ``x_flat[off + ravel_multi_index(index, shape)]``.
@@ -577,7 +577,7 @@ def _abs(E: Any, a: Any) -> Any:
     return E.max(a, -a)
 
 
-#: Argument floor for ``entropy``/``centropy``, matching `_jax/dag_compiler.py`
+#: Argument floor for ``entropy``/``centropy``, matching `_relax/dag_compiler.py`
 #: (``jnp.maximum(x, 1e-300)``). It regularizes the ``x -> 0+`` limit: the true
 #: derivative of ``x*log(x)`` at 0 is ``-inf``, and both backends deliberately
 #: report a large finite number instead so a solver evaluating a box pinned at
@@ -868,7 +868,7 @@ def _lower_function(expr: FunctionCall, E: Any, args: list, budget: _Budget) -> 
         return _map(lambda a: E.max(a, E.const_(0.0)) + _log1p(E, E.exp(-_abs(E, a))), arg0())
     if name == "entropy":
         # x*log(x) -- discopt's DAG semantics, NOT the information-theory
-        # convention -x*log(x). The authority is `_jax/dag_compiler.py`, which
+        # convention -x*log(x). The authority is `_relax/dag_compiler.py`, which
         # this must reproduce bit-for-bit: `lambda x: x * jnp.log(jnp.maximum(x,
         # 1e-300))`. Getting the sign from the name instead of the reference
         # cost a silent factor of -1 (reldiff 2.0) that no corpus instance could

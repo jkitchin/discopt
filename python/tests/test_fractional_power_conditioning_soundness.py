@@ -37,9 +37,9 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.obbt import obbt_tighten_root
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.obbt import obbt_tighten_root
 from discopt.modeling.core import VarType
 from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 

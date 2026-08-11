@@ -102,7 +102,7 @@ def reformed_model_and_names(path: str):
     provably-nonconvex — identical to the live solve path. ``var_names`` labels
     every reformed flat column; the first ``prereform_nvars`` are the originals.
     """
-    from discopt._jax.factorable_reform import (
+    from discopt._relax.factorable_reform import (
         factorable_reformulate,
         has_factorable_work,
     )

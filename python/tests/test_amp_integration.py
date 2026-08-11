@@ -36,7 +36,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.model_utils import flat_variable_bounds
+from discopt._relax.model_utils import flat_variable_bounds
 from discopt.modeling.core import (
     Model,
     SolveResult,
@@ -404,7 +404,7 @@ def _make_alpine_blend029_gl_partition_fixture() -> Model:
 # ===========================================================================
 # Section 1: Nonlinear Term Classifier
 #
-# Module to be created: python/discopt/_jax/term_classifier.py
+# Module to be created: python/discopt/_relax/term_classifier.py
 # Function: classify_nonlinear_terms(model: Model) -> NonlinearTerms
 # ===========================================================================
 
@@ -418,7 +418,7 @@ class TestTermClassifier:
     @pytest.fixture(autouse=True)
     def _import(self):
         """Import the to-be-created module (expected to fail initially)."""
-        from discopt._jax.term_classifier import (  # noqa: F401
+        from discopt._relax.term_classifier import (  # noqa: F401
             NonlinearTerms,
             classify_nonlinear_terms,
         )
@@ -568,7 +568,7 @@ class TestTermClassifier:
 # ===========================================================================
 # Section 2: Variable Selection for AMP Partitioning
 #
-# Module to be created: python/discopt/_jax/partition_selection.py
+# Module to be created: python/discopt/_relax/partition_selection.py
 # Function: pick_partition_vars(terms, method="auto") -> list[int]
 # ===========================================================================
 
@@ -581,8 +581,8 @@ class TestPartitionSelection:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from discopt._jax.partition_selection import pick_partition_vars  # noqa: F401
-        from discopt._jax.term_classifier import NonlinearTerms  # noqa: F401
+        from discopt._relax.partition_selection import pick_partition_vars  # noqa: F401
+        from discopt._relax.term_classifier import NonlinearTerms  # noqa: F401
 
         self.pick = pick_partition_vars
         self.NonlinearTerms = NonlinearTerms
@@ -681,7 +681,7 @@ class TestPartitionSelection:
 
     def test_min_vertex_cover_falls_back_to_greedy_cover(self, monkeypatch):
         """When the MILP cover solve fails, the greedy fallback should still cover all terms."""
-        import discopt._jax.partition_selection as part_sel
+        import discopt._relax.partition_selection as part_sel
 
         terms = self._make_terms(bilinear=[(0, 1), (0, 2), (0, 3), (0, 4)])
         monkeypatch.setattr(
@@ -716,8 +716,8 @@ class TestAlpinePortedPartitionSelection:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from discopt._jax.partition_selection import pick_partition_vars
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.partition_selection import pick_partition_vars
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         self.classify = classify_nonlinear_terms
         self.pick = pick_partition_vars
@@ -784,7 +784,7 @@ class TestAlpinePortedPartitionSelection:
 # ===========================================================================
 # Section 3: Discretization State Management
 #
-# Module to be created: python/discopt/_jax/discretization.py
+# Module to be created: python/discopt/_relax/discretization.py
 # Classes/functions:
 #   DiscretizationState
 #   initialize_partitions(var_indices, lb, ub, n_init=2) -> DiscretizationState
@@ -801,7 +801,7 @@ class TestDiscretizationState:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from discopt._jax.discretization import (  # noqa: F401
+        from discopt._relax.discretization import (  # noqa: F401
             DiscretizationState,
             add_adaptive_partition,
             add_uniform_partition,
@@ -940,7 +940,7 @@ class TestMcCormickSoundness:
     def test_standard_mccormick_bilinear_valid(self):
         """cv ≤ x*y ≤ cc at 500 random points — core soundness test."""
         import jax.numpy as jnp
-        from discopt._jax.mccormick import relax_bilinear
+        from discopt._relax.mccormick import relax_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 1.0, 4.0, 1.0, 4.0
         for _ in range(500):
@@ -961,7 +961,7 @@ class TestMcCormickSoundness:
     def test_piecewise_mccormick_bilinear_valid(self):
         """Piecewise McCormick is still a valid relaxation (cv ≤ x*y ≤ cc)."""
         import jax.numpy as jnp
-        from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
+        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
         for _ in range(300):
@@ -987,8 +987,8 @@ class TestMcCormickSoundness:
         Piecewise must be strictly tighter.
         """
         import jax.numpy as jnp
-        from discopt._jax.mccormick import relax_bilinear
-        from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
+        from discopt._relax.mccormick import relax_bilinear
+        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
         x, y = 5.0, 5.0  # exact midpoint — maximum standard McCormick gap
@@ -1025,7 +1025,7 @@ class TestMcCormickSoundness:
         Theoretical bound: max gap ≤ (domain_width / k)².
         """
         import jax.numpy as jnp
-        from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
+        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
         x, y = 3.0, 7.0
@@ -1052,7 +1052,7 @@ class TestMcCormickSoundness:
         """
         # Same call twice → identical result (no solution context)
         import jax.numpy as jnp
-        from discopt._jax.piecewise_mccormick import _partition_bounds
+        from discopt._relax.piecewise_mccormick import _partition_bounds
 
         lbs1, ubs1 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
         lbs2, ubs2 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
@@ -1066,7 +1066,7 @@ class TestMcCormickSoundness:
 # ===========================================================================
 # Section 5: MILP Relaxation Lower Bound Validity
 #
-# Module to be created: python/discopt/_jax/milp_relaxation.py
+# Module to be created: python/discopt/_relax/milp_relaxation.py
 # Function: build_milp_relaxation(model, terms, disc_state, incumbent) -> (model_obj, varmap)
 #
 # These tests will fail with ImportError until milp_relaxation.py exists.
@@ -1082,9 +1082,9 @@ class TestMilpRelaxation:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from discopt._jax.discretization import initialize_partitions
-        from discopt._jax.milp_relaxation import build_milp_relaxation
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.discretization import initialize_partitions
+        from discopt._relax.milp_relaxation import build_milp_relaxation
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         self.classify = classify_nonlinear_terms
         self.init_partitions = initialize_partitions
@@ -1185,8 +1185,8 @@ class TestMilpRelaxation:
         true min ``x*y = 10`` at ``x=1, y=10``) and it removes no feasible point.
         """
         import scipy.sparse as sp
-        from discopt._jax.discretization import DiscretizationState
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.discretization import DiscretizationState
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         m = Model("piecewise_bounds")
         x = m.continuous("x", lb=1, ub=5)
@@ -1413,7 +1413,7 @@ class TestMilpRelaxation:
 
     def test_embedding_helper_rejects_non_sos2_compatible_encoding(self):
         """Binary counting codes are invalid for SOS2 once adjacency breaks."""
-        from discopt._jax.embedding import build_embedding_map
+        from discopt._relax.embedding import build_embedding_map
 
         with pytest.raises(ValueError, match="only works for exactly 2 partitions"):
             build_embedding_map(5, encoding="binary")
@@ -1435,7 +1435,7 @@ class TestMilpRelaxation:
             )
 
     # #632 cutover: ``test_sos2_embedding_requires_selector_columns`` was deleted.
-    # It monkeypatched ``discopt._jax.milp_relaxation.build_embedding_map`` (removed
+    # It monkeypatched ``discopt._relax.milp_relaxation.build_embedding_map`` (removed
     # with the federation) to force an ``AssertionError`` from the deleted SOS2
     # linking code — a pure defensive-guard snapshot of dead code with no soundness
     # content (nlp1 relaxation soundness is covered by
@@ -1449,9 +1449,9 @@ class TestAmpPhase4Coverage:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from discopt._jax.discretization import initialize_partitions
-        from discopt._jax.milp_relaxation import build_milp_relaxation
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.discretization import initialize_partitions
+        from discopt._relax.milp_relaxation import build_milp_relaxation
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         self.build_milp = build_milp_relaxation
         self.classify = classify_nonlinear_terms
@@ -1616,7 +1616,7 @@ class TestAmpPhase4Coverage:
 
     def test_nlp_005_010_relaxation_keeps_reciprocal_and_negative_power(self, caplog):
         """Issue #62: the root MILP should retain reciprocal and y**(-2) structure."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         instance = MINLPTESTS_NLP_BY_ID["nlp_005_010"]
         m = instance.build_fn()
@@ -1631,7 +1631,7 @@ class TestAmpPhase4Coverage:
             n_init=2,
         )
 
-        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
             milp_model, varmap = self.build_milp(
                 m,
                 terms,
@@ -1708,7 +1708,7 @@ class TestAmpEndToEnd:
         ``convhull_ebd`` kwargs still recovers the nlp1 optimum and rebuilds the
         relaxation across refinement iterations.
         """
-        import discopt._jax.milp_relaxation as milp_mod
+        import discopt._relax.milp_relaxation as milp_mod
 
         orig_build = milp_mod.build_milp_relaxation
         build_calls = []
@@ -1969,7 +1969,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_constraint_check_rejects_eval_failure(self, monkeypatch):
         """Constraint evaluation errors must reject the candidate point."""
-        import discopt._jax.nlp_evaluator as nlp_eval
+        import discopt._relax.nlp_evaluator as nlp_eval
         from discopt.solvers import amp as amp_mod
 
         class BrokenEvaluator:
@@ -2260,7 +2260,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_accepts_feasible_start_as_incumbent(self, monkeypatch):
         """A feasible model start should survive when proof search fails immediately."""
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         m = Model("amp_start_incumbent")
@@ -2316,8 +2316,8 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_does_not_accept_start_with_nonfinite_objective(self, monkeypatch):
         """A finite start with NaN objective is not a valid AMP incumbent."""
-        import discopt._jax.nlp_evaluator as nlp_eval
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        import discopt._relax.nlp_evaluator as nlp_eval
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         m = Model("amp_nan_objective_start")
@@ -2373,7 +2373,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_sum_of_squares_bounds_infers_finite_integer_domain(self):
         """Quadratic norm constraints should clamp otherwise unbounded domains."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_sum_of_squares")
         x = m.continuous("x", lb=-1e20, ub=1e20)
@@ -2394,7 +2394,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_sqrt_sum_of_squares_bounds_infers_finite_box(self):
         """Sqrt norm constraints should clamp otherwise unbounded domains."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_sqrt_sum_of_squares")
         x = m.continuous("x", lb=-1e20, ub=1e20)
@@ -2472,7 +2472,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_separable_quadratic_bounds_infers_finite_box(self):
         """Constraints like x + y^2 <= c should infer finite bounds for both variables."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_separable_quadratic")
         x = m.continuous("x", lb=0.0, ub=1e20)
@@ -2492,7 +2492,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_iterates_linked_quadratic_constraints(self):
         """Linked quadratic inequalities should reach the compact implied box."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_linked_quadratic")
         x = m.continuous("x", lb=-1e20, ub=1e20)
@@ -2515,7 +2515,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_proves_exp_square_cycle_infeasible(self):
         """Issue #33: y=exp(x), x=y^2 should be proven infeasible by tightening."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_exp_square_cycle")
         x = m.continuous("x")
@@ -2539,7 +2539,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_monotone_function_bounds(self):
         """Monotone unary constraints should tighten affine argument domains."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_monotone_functions")
         x = m.continuous("x", lb=-1e20, ub=1e20)
@@ -2564,7 +2564,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_tighten_sign_stable_reciprocal_bounds(self):
         """Reciprocal propagation should only apply on sign-stable denominator boxes."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_reciprocal")
         x = m.continuous("x", lb=0.1, ub=1e20)
@@ -2589,7 +2589,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_nlp_005_010_tightening_enables_negative_power_domain(self):
         """Issue #62: reciprocal reformulation should expose a safe y**(-2) domain."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         instance = MINLPTESTS_NLP_BY_ID["nlp_005_010"]
         m = instance.build_fn()
@@ -2605,7 +2605,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_nonlinear_bound_tightening_reports_quadratic_contradiction(self):
         """A rule proof of infeasibility should be reported explicitly."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         m = Model("bt_quadratic_contradiction")
         x = m.continuous("x", lb=-10.0, ub=10.0)
@@ -2626,7 +2626,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_nonlinear_bound_tightening_reports_monotone_domain_contradiction(self):
         """Domain/range contradictions should not be encoded as invalid boxes."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         sqrt_model = Model("bt_sqrt_contradiction")
         sqrt_x = sqrt_model.continuous("x", lb=0.0, ub=10.0)
@@ -2661,7 +2661,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_nonlinear_bound_tightening_accepts_custom_rules(self):
         """The shared registry should accept external sound rule objects."""
-        from discopt._jax.nonlinear_bound_tightening import (
+        from discopt._relax.nonlinear_bound_tightening import (
             NonlinearBoundTighteningRule,
             tighten_nonlinear_bounds,
         )
@@ -2693,7 +2693,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_minlptests_108_tightens_separable_quadratic_bounds(self):
         """Translated MINLPTests 108 cases should benefit from shared nonlinear tightening."""
-        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+        from discopt._relax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_108_010"]
         m = instance.build_fn()
@@ -2709,7 +2709,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_solver_fbbt_applies_nonlinear_rules_without_linear_constraints(self):
         """The shared nonlinear tightening rules should run through solver FBBT too."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds
 
         m = Model("nonlinear_fbbt_sum_of_squares")
@@ -2735,7 +2735,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_solver_fbbt_applies_monotone_nonlinear_rules(self):
         """Solver FBBT should reuse the shared monotone function tightening rule."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds
 
         m = Model("nonlinear_fbbt_monotone")
@@ -2760,7 +2760,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_solver_fbbt_reports_nonlinear_infeasibility_status(self):
         """The FBBT entry point should expose proven nonlinear infeasibility."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._relax.nlp_evaluator import NLPEvaluator
         from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds_with_status
 
         m = Model("nonlinear_fbbt_contradiction")
@@ -2911,7 +2911,7 @@ class TestCurrentCodeWeaknesses:
         instance = MINLPTESTS_NLP_BY_ID["nlp_004_010"]
         m = instance.build_fn()
 
-        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
             result = m.solve(
                 solver="amp",
                 nlp_solver="ipm",
@@ -2937,7 +2937,7 @@ class TestCurrentCodeWeaknesses:
         instance = MINLPTESTS_NLP_BY_ID[problem_id]
         m = instance.build_fn()
 
-        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        with caplog.at_level(logging.WARNING, logger="discopt._relax.milp_relaxation"):
             result = m.solve(
                 solver="amp",
                 nlp_solver="ipm",
@@ -3146,8 +3146,8 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_uses_nonlinear_tightened_partition_bounds(self, monkeypatch):
         """AMP should initialize partitions from the tightened nonlinear box."""
-        import discopt._jax.discretization as disc_mod
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        import discopt._relax.discretization as disc_mod
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         captured = {}
@@ -3193,7 +3193,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_nonconvex_constraint_oa_cuts_respect_convexity_mask(self, monkeypatch):
         """Nonconvex constraint rows must be excluded from evaluator OA cuts."""
-        from discopt._jax import cutting_planes
+        from discopt._relax import cutting_planes
 
         recorded_masks = []
         # AMP linearizes constraint rows through the *_report variant directly
@@ -3225,7 +3225,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_no_incumbent_after_search_returns_iteration_limit(self, monkeypatch):
         """Exhausting AMP without an incumbent is not a proof of infeasibility."""
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         m = Model("amp_no_incumbent")
@@ -3269,7 +3269,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_first_iteration_milp_error_is_not_reported_as_infeasible(self, monkeypatch):
         """MILP solve errors should surface as errors, not mathematical infeasibility."""
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         m = Model("amp_milp_error")
@@ -3304,7 +3304,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_oa_cut_recovery_drops_oldest_half(self, monkeypatch):
         """OA recovery should retry with the oldest half of cuts removed."""
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         call_sizes = []
@@ -3341,7 +3341,7 @@ class TestCurrentCodeWeaknesses:
             return FakeMilpModel(status), {"dummy": True}
 
         monkeypatch.setattr(
-            "discopt._jax.milp_relaxation.build_milp_relaxation",
+            "discopt._relax.milp_relaxation.build_milp_relaxation",
             fake_build,
         )
 
@@ -3365,7 +3365,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_obbt_presolve_tightens_bilinear_demo_bounds(self):
         """OBBT should shrink the initial [0, 10]^2 box to the linear hull x + y = 1."""
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         result = run_obbt(_make_obbt_demo())
 
@@ -3375,7 +3375,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_obbt_presolve_tightens_inequality_demo_bounds(self):
         """OBBT should also tighten bounds through the A_ub / b_ub extraction path."""
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         result = run_obbt(_make_obbt_ineq_demo())
 
@@ -3385,8 +3385,8 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_presolve_bt_uses_tightened_partition_bounds(self, monkeypatch):
         """AMP should initialize partitions from the OBBT-tightened bounds."""
-        import discopt._jax.discretization as disc_mod
-        from discopt._jax.obbt import ObbtResult
+        import discopt._relax.discretization as disc_mod
+        from discopt._relax.obbt import ObbtResult
         from discopt.solvers import amp as amp_mod
 
         captured = {}
@@ -3412,7 +3412,7 @@ class TestCurrentCodeWeaknesses:
         def stop_after_init(*args, **kwargs):
             raise RuntimeError("stop after initialization")
 
-        monkeypatch.setattr("discopt._jax.obbt.run_obbt", fake_run_obbt)
+        monkeypatch.setattr("discopt._relax.obbt.run_obbt", fake_run_obbt)
         monkeypatch.setattr(disc_mod, "initialize_partitions", spy_initialize)
         monkeypatch.setattr(amp_mod, "_solve_milp_with_oa_recovery", stop_after_init)
 
@@ -3483,7 +3483,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_partition_convergence_without_gap_is_not_certified(self, monkeypatch):
         """Forced partition convergence should still return a non-certified incumbent."""
-        import discopt._jax.discretization as disc_mod
+        import discopt._relax.discretization as disc_mod
 
         monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
 
@@ -3497,7 +3497,7 @@ class TestCurrentCodeWeaknesses:
     def test_amp_time_limit_with_incumbent_returns_feasible(self, monkeypatch):
         """Timing out after finding an incumbent should not hide the feasible point."""
 
-        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
         # The timeout is driven by *state*, not by read ordinal: the clock is
@@ -3575,8 +3575,8 @@ class TestCurrentCodeWeaknesses:
     )
     def test_adaptive_partition_selection_path_runs_inside_amp(self, monkeypatch):
         """AMP should re-pick partition variables when adaptive selection is enabled."""
-        import discopt._jax.discretization as disc_mod
-        import discopt._jax.partition_selection as part_mod
+        import discopt._relax.discretization as disc_mod
+        import discopt._relax.partition_selection as part_mod
 
         adaptive_distances = []
         refined_var_sets = []
@@ -3614,7 +3614,7 @@ class TestCurrentCodeWeaknesses:
 
     def test_uniform_partition_refinement_path_runs_inside_amp(self, monkeypatch):
         """AMP should call the uniform refinement branch when requested."""
-        import discopt._jax.discretization as disc_mod
+        import discopt._relax.discretization as disc_mod
 
         uniform_calls = []
 
@@ -3678,7 +3678,7 @@ class TestCurrentCodeWeaknesses:
 
         If this fails: the function was removed or renamed.
         """
-        from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear  # noqa: F401
+        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear  # noqa: F401
 
         assert callable(piecewise_mccormick_bilinear)
 
@@ -3688,7 +3688,7 @@ class TestCurrentCodeWeaknesses:
         If this fails: OBBT cannot handle nonlinear constraints.
         """
         try:
-            from discopt._jax.obbt import run_obbt
+            from discopt._relax.obbt import run_obbt
 
             m = _make_nlp1()
             # Just check it doesn't crash — bound tightening quality tested separately
@@ -3711,7 +3711,7 @@ class TestCurrentCodeWeaknesses:
     def test_relaxation_compiler_handles_bilinear(self):
         """Relaxation compiler must handle BinaryOp('*', Variable, Variable)."""
         try:
-            from discopt._jax.relaxation_compiler import compile_relaxation
+            from discopt._relax.relaxation_compiler import compile_relaxation
 
             m = _make_nlp1()
             # compile_relaxation(expr, model, partitions, mode)

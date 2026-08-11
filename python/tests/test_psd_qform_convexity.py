@@ -30,8 +30,8 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.convexity.certificate import certify_convex
-from discopt._jax.convexity.lattice import Curvature
+from discopt._relax.convexity.certificate import certify_convex
+from discopt._relax.convexity.lattice import Curvature
 
 
 @pytest.fixture

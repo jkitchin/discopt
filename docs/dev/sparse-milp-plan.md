@@ -238,7 +238,7 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     of *distinct* binaries (the whole QAP objective) never create → **0 cliques → 0 cuts → PSD
     completely inert** on every binary-product model, not just qap. But for a **binary** `x_i`,
     `x_i² = x_i` at every feasible point, so the moment diagonal `X_ii` *is* the original `x_i`
-    column. Fix: `discopt/_jax/model_utils.py::binary_flat_cols` (integer-typed vars on `[0,1]`)
+    column. Fix: `discopt/_relax/model_utils.py::binary_flat_cols` (integer-typed vars on `[0,1]`)
     threaded as `binary_vars` through `_diag_col`→`_moment_blocks_for_set`→`_lifted_cliques`→
     `separate_psd_cuts_on_relaxation`→`psd_strengthen_relaxation_bound`, and wired at both
     callers (`solver.py` root bound, `mccormick_lp.py` per-node). Sound only for binaries
@@ -355,7 +355,7 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     the 352 891 figure is the HiGHS-ipm *gauge* of relaxation strength.
   - **Shipped (§5 bound-changing):** `SolverTuning.rlt1_root_bound` (`DISCOPT_RLT1_ROOT_BOUND`,
     **default off**) + size guard `rlt1_max_pairs` (`DISCOPT_RLT1_MAX_PAIRS`, default 60 000).
-    New module `python/discopt/_jax/rlt.py` (`build_rlt1_lp` / `rlt1_lower_bound`); wired into
+    New module `python/discopt/_relax/rlt.py` (`build_rlt1_lp` / `rlt1_lower_bound`); wired into
     `solver.py::_root_relaxation_lower_bound` as a candidate joined by `max` (only ever raises the
     bound). Distinct from `rlt_cuts.py` (which *separates* targeted constraint×bound-factor cuts
     over already-lifted columns per node — the non-exhaustive half that leaves qap at ~0); this

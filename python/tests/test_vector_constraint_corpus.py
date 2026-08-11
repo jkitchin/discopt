@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solver import _native_kernel_verify_point
 from discopt.solvers._convex_kernel import _incumbent_is_feasible
 from discopt.validation.feasibility import ABS_TOL, verify_point

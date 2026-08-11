@@ -18,8 +18,8 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _detect_one_hot_groups, one_hot_swap_search
+from discopt._relax.nlp_evaluator import cached_evaluator
+from discopt._relax.primal_heuristics import _detect_one_hot_groups, one_hot_swap_search
 
 
 def _partition_model(N, K, per, edges):

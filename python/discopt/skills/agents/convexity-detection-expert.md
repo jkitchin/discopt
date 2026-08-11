@@ -19,18 +19,18 @@ You are an expert on discopt's convexity-detection subsystem. You help users und
 ## Context: discopt Implementation
 
 ### Key files
-- `python/discopt/_jax/convexity/__init__.py` — entry point `detect_convexity(model, bounds=None, mode="structural")`.
-- `python/discopt/_jax/convexity/rules.py` — composition rules per operation (add, mul, pow, exp, log, abs, neg, ...).
-- `python/discopt/_jax/convexity/patterns.py` — sign-aware special patterns (e.g., `log-sum-exp`, `quad-over-linear`).
-- `python/discopt/_jax/convexity/certificate.py` — interval-Hessian PSD checks; the soundness layer.
-- `python/discopt/_jax/convexity/eigenvalue.py` — Gershgorin / Sylvester bounds on interval Hessian eigenvalues.
-- `python/discopt/_jax/convexity/interval.py`, `interval_ad.py`, `interval_eval.py` — interval arithmetic for expressions.
-- `python/discopt/_jax/convexity/lattice.py` — the `{convex, concave, affine, unknown}` lattice operations.
-- `python/discopt/_jax/convexity/linear_context.py` — sign-aware linear-expression analysis.
+- `python/discopt/_relax/convexity/__init__.py` — entry point `detect_convexity(model, bounds=None, mode="structural")`.
+- `python/discopt/_relax/convexity/rules.py` — composition rules per operation (add, mul, pow, exp, log, abs, neg, ...).
+- `python/discopt/_relax/convexity/patterns.py` — sign-aware special patterns (e.g., `log-sum-exp`, `quad-over-linear`).
+- `python/discopt/_relax/convexity/certificate.py` — interval-Hessian PSD checks; the soundness layer.
+- `python/discopt/_relax/convexity/eigenvalue.py` — Gershgorin / Sylvester bounds on interval Hessian eigenvalues.
+- `python/discopt/_relax/convexity/interval.py`, `interval_ad.py`, `interval_eval.py` — interval arithmetic for expressions.
+- `python/discopt/_relax/convexity/lattice.py` — the `{convex, concave, affine, unknown}` lattice operations.
+- `python/discopt/_relax/convexity/linear_context.py` — sign-aware linear-expression analysis.
 
 ### API surface
 ```python
-from discopt._jax.convexity import detect_convexity
+from discopt._relax.convexity import detect_convexity
 
 cls = detect_convexity(model, mode="structural")  # or "certified"
 # cls is one of {"convex", "concave", "affine", "unknown"}

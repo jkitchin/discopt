@@ -15,10 +15,10 @@ The bound stays uncertified.
 
 from __future__ import annotations
 
-import discopt._jax.milp_relaxation as MR
+import discopt._relax.milp_relaxation as MR
 import discopt.modeling as dm
 import pytest
-from discopt._jax.milp_relaxation import MilpRelaxationResult
+from discopt._relax.milp_relaxation import MilpRelaxationResult
 
 
 @pytest.fixture

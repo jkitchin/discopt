@@ -18,7 +18,7 @@ _rust = pytest.importorskip("discopt._rust")
 if not hasattr(_rust, "solve_spatial_tree_py"):
     pytest.skip("native spatial kernel binding not built", allow_module_level=True)
 
-from discopt._jax.spatial_producer import (  # noqa: E402
+from discopt._relax.spatial_producer import (  # noqa: E402
     build_spatial_kernel_spec,
     solve_with_native_kernel,
 )

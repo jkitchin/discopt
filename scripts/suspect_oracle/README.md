@@ -9,9 +9,9 @@ three axes SUSPECT reports:
 
 | Axis | discopt API | Live test |
 |------|-------------|-----------|
-| **Convexity** | `discopt._jax.convexity.classify_expr` | [`test_convexity_suspect_parity.py`](../../python/tests/test_convexity_suspect_parity.py) |
-| **Monotonicity** | `discopt._jax.monotonicity.classify_monotonicity` | [`test_monotonicity_suspect_parity.py`](../../python/tests/test_monotonicity_suspect_parity.py) |
-| **Interval bounds (FBBT)** | `discopt._jax.convexity.interval_eval.evaluate_interval` | [`test_fbbt_bounds_suspect_parity.py`](../../python/tests/test_fbbt_bounds_suspect_parity.py) |
+| **Convexity** | `discopt._relax.convexity.classify_expr` | [`test_convexity_suspect_parity.py`](../../python/tests/test_convexity_suspect_parity.py) |
+| **Monotonicity** | `discopt._relax.monotonicity.classify_monotonicity` | [`test_monotonicity_suspect_parity.py`](../../python/tests/test_monotonicity_suspect_parity.py) |
+| **Interval bounds (FBBT)** | `discopt._relax.convexity.interval_eval.evaluate_interval` | [`test_fbbt_bounds_suspect_parity.py`](../../python/tests/test_fbbt_bounds_suspect_parity.py) |
 
 A key asymmetry, established when the monotonicity / bounds axes were added,
 shapes what each test asserts:

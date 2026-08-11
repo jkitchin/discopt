@@ -18,7 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt  # noqa: E402
 import discopt.solvers.milp_simplex as MS  # noqa: E402
-from discopt._jax.deadline import deadline_scope  # noqa: E402
+from discopt._relax.deadline import deadline_scope  # noqa: E402
 from discopt.modeling.core import from_nl  # noqa: E402
 from discopt.solver import solve_model  # noqa: E402
 

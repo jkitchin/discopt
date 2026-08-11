@@ -17,7 +17,7 @@ bilinear-of-nonlinear product
     w = f(x) * y ,   handled compositionally as  u = f(x)  then  envelope(u * y).
 
 discopt's compositional-McCormick envelope is exact on the box boundary but
-loose in the interior; the superposition family (:mod:`discopt._jax.superposition`)
+loose in the interior; the superposition family (:mod:`discopt._relax.superposition`)
 adds rigorous interior-reference cuts that close that interior gap.
 
 This regression asserts the three M8 acceptance properties on
@@ -41,8 +41,8 @@ import numpy as np
 import pytest
 from discopt import Model
 from discopt import modeling as dm
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.superposition import (
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.superposition import (
     BilinearNonlinearTerm,
     bilinear_nonlinear_cuts,
     mccormick_references,

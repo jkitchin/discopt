@@ -264,9 +264,9 @@ def solve_gbd(
         With a rigorous lower ``bound`` when the model is convex; ``bound=None``
         otherwise (heuristic mode).
     """
-    from discopt._jax.convexity import classify_oa_cut_convexity
-    from discopt._jax.gdp_reformulate import _extract_body_coeffs, _is_linear
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.convexity import classify_oa_cut_convexity
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.modeling.core import Constraint
     from discopt.solvers.lp_backend import get_milp_solver
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
@@ -351,7 +351,7 @@ def solve_gbd(
             # constraint would silently degrade to a per-point feasibility check
             # (one no-good cut at a time, or a mid-solve error). Reject it up
             # front (C2) — the module docstring documents this restriction.
-            from discopt._jax.gdp_reformulate import _collect_variables
+            from discopt._relax.gdp_reformulate import _collect_variables
 
             support_names = set(_collect_variables(c.body))
             complicating_names = set(structure.complicating_vars)

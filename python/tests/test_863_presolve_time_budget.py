@@ -266,7 +266,7 @@ def test_an_infinite_time_limit_reaches_the_fbbt_call_as_unlimited(monkeypatch):
 
 def test_full_root_presolve_respects_its_budget():
     """The pipeline as ``solve_model`` invokes it, with every default pass on."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     t = time.perf_counter()
     _repr, stats = run_root_presolve(

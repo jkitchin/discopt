@@ -9,7 +9,7 @@ nodes the root-level certificate could not reach.
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.convexity import (
+from discopt._relax.convexity import (
     Curvature,
     certify_convex,
     classify_expr,

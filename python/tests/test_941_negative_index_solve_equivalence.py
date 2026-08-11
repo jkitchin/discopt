@@ -105,7 +105,7 @@ def test_negative_index_bilinear_is_actually_seen_by_the_structure_layer():
     Without this, the solve-level tests above could pass for the wrong reason —
     a model whose nonconvexity is never detected has nothing to get wrong.
     """
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     model = _geom(-1)
     terms = classify_nonlinear_terms(model)

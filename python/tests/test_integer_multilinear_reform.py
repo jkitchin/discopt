@@ -26,7 +26,7 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.integer_product_reform import (
+from discopt._relax.integer_product_reform import (
     extend_initial_point,
     has_integer_multilinear_reformulation_work,
     reformulate_integer_multilinear,
@@ -116,7 +116,7 @@ def test_ex1252_reform_eliminates_integer_multilinear_terms():
     the integer-multilinear objective terms are gone. The residual nonlinearity is
     the genuine *continuous* cubic cost rows, which the pass correctly leaves for
     the spatial relaxation."""
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = dm.from_nl(str(_DATA / "ex1252.nl"))
     assert has_integer_multilinear_reformulation_work(m)

@@ -20,7 +20,7 @@ Run `PYTHONPATH=.../python JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`, `time_limit=30 s
 The `coverage_map.py` that existed pre-task (from #528) targeted capabilities that
 **do not exist on `origin/main`**: `run_root_fixpoint`, `reduce_node`,
 `DISCOPT_ROOT_FIXPOINT`, `DISCOPT_NODE_REDUCE`, `DISCOPT_PSD_COST_GATE` — there are
-no `root_reduce`/`node_reduce` modules in `python/discopt/_jax/`, and none of those
+no `root_reduce`/`node_reduce` modules in `python/discopt/_relax/`, and none of those
 symbols appear in `solver.py`. Those were parked R2/PSD-cost-gate capabilities from
 an earlier campaign that were never merged in that form. Running the stale map
 would report every capability as "0 calls / wrap error" — a false dark reading.

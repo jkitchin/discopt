@@ -72,7 +72,7 @@ rigorously. **GO** (kill criterion — still-feasible/tainted at 180 s — not m
 
 ## Shipped fix (this PR)
 
-`MilpRelaxationModel.solve` (`_jax/milp_relaxation.py`): on an `optimal`
+`MilpRelaxationModel.solve` (`_relax/milp_relaxation.py`): on an `optimal`
 generic-path solve, surface the stashed NS bound as the result's
 `safe_bound` — same flag as #517 (`DISCOPT_NODE_NUMERICAL_DUAL_BOUND`,
 default **OFF**, bound-changing regime), since it is the same mechanism (NS

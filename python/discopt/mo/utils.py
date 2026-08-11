@@ -75,7 +75,7 @@ def evaluate_expression(expr, model, x_dict: dict[str, np.ndarray]) -> float:
        (via :func:`objective_evaluator`) to compile each objective once and
        reuse it, which is what the sweep helpers do (MO5).
     """
-    from discopt._jax.dag_compiler import compile_expression
+    from discopt._relax.dag_compiler import compile_expression
 
     fn = compile_expression(expr, model)
     x_flat = _flatten_solution(model, x_dict)
@@ -91,7 +91,7 @@ class ObjectiveEvaluator:
     times per anchor, for the payoff table — a full recompile each time of
     expressions that never change (MO5). This helper compiles each objective's
     *parameter-agnostic* callable once (via
-    :func:`~discopt._jax.dag_compiler.compile_expression_params`) and evaluates
+    :func:`~discopt._relax.dag_compiler.compile_expression_params`) and evaluates
     it against the model's *current* parameter snapshot on each call.
 
     The result is numerically identical to :func:`evaluate_expression`:
@@ -108,7 +108,7 @@ class ObjectiveEvaluator:
     """
 
     def __init__(self, model, objectives: list) -> None:
-        from discopt._jax.dag_compiler import _build_param_index, compile_expression_params
+        from discopt._relax.dag_compiler import _build_param_index, compile_expression_params
 
         self._model = model
         self._objectives = list(objectives)
@@ -118,7 +118,7 @@ class ObjectiveEvaluator:
         self._by_id = {id(e): fn for e, fn in zip(self._objectives, self._fns)}
 
     def _snapshot(self) -> tuple:
-        from discopt._jax.dag_compiler import _snapshot_params
+        from discopt._relax.dag_compiler import _snapshot_params
 
         return _snapshot_params(self._model)
 

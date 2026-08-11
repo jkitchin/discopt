@@ -29,7 +29,7 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.qubo_primal import is_qubo, qubo_local_search
 
 # The corpus lives canonically in Dropbox; measurement machines keep a local mirror

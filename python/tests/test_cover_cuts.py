@@ -15,7 +15,7 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._jax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+from discopt._relax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
 
 
 # ---------------------------------------------------------------------------

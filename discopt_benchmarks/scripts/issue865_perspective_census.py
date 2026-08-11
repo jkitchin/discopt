@@ -119,7 +119,7 @@ def reason(model):
 
 
 def main(paths):
-    from discopt._jax.gdp_reformulate import reformulate_gdp
+    from discopt._relax.gdp_reformulate import reformulate_gdp
 
     rows = []
     for p in paths:

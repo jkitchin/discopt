@@ -36,9 +36,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax import milp_relaxation as MR
-from discopt._jax.factorable_reform import canonicalize_entropy
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax import milp_relaxation as MR
+from discopt._relax.factorable_reform import canonicalize_entropy
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
 pytestmark = [pytest.mark.claim_boundary]
 
@@ -133,7 +133,7 @@ def test_centropy_negative_domain_is_not_claimed():
     """Soundness gate: ``centropy`` requires ``x ≥ 0`` for its convexity licence.
     A box that leaves the first argument possibly negative must NOT be lifted as
     convex (``classify_expr`` abstains), so the relaxation stays sound."""
-    from discopt._jax.convexity import Curvature, classify_expr
+    from discopt._relax.convexity import Curvature, classify_expr
     from discopt.modeling.core import FunctionCall
 
     m = dm.Model("negdom")
@@ -151,7 +151,7 @@ def test_centropy_nonaffine_argument_is_not_claimed():
     pre-filter ``_should_claim_composite_multivar``; the soundness invariant is
     the same and is asserted here through the kept ``classify_expr`` API, mirroring
     test_centropy_negative_domain_is_not_claimed.)"""
-    from discopt._jax.convexity import Curvature, classify_expr
+    from discopt._relax.convexity import Curvature, classify_expr
     from discopt.modeling.core import FunctionCall
 
     m = dm.Model("nonaffine")

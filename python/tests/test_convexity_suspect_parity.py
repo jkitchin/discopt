@@ -90,7 +90,7 @@ def _classify_all() -> dict[str, dict]:
     ``contradiction``.
     """
     from corpus import INSTANCES  # local import: path set above
-    from discopt._jax.convexity import Curvature, classify_expr
+    from discopt._relax.convexity import Curvature, classify_expr
     from discopt.modeling.core import ObjectiveSense
     from render_discopt import build_discopt
 

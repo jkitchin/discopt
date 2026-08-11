@@ -35,7 +35,7 @@ import time
 
 import numpy as np
 from discopt import Model
-from discopt._jax.convexity.signomial_global import (
+from discopt._relax.convexity.signomial_global import (
     _cert_min_linear,
     _constrained_node_bound,
     _obbt_tighten,

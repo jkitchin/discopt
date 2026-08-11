@@ -16,7 +16,7 @@ wins — record the falsification").
 ## 0. Verdict
 
 **PYFIX-1 as scoped is rejected.** The task premised that
-`python/discopt/_jax/nonlinear_bound_tightening.py` (the per-node FBBT DAG
+`python/discopt/_relax/nonlinear_bound_tightening.py` (the per-node FBBT DAG
 walker) was ~40–60 % of fac2/m3 wall, and asked to cache/route its traversal.
 That premise is **wrong**: the NBT walker is **~0 % of real wall**. Its large
 cProfile *tottime* is a cProfile-per-call-overhead artifact on cheap,
@@ -25,7 +25,7 @@ high-call-count functions. PYPROF-1's 200 Hz leaf-frame sampler
 measurements agree.
 
 Re-targeting to PYPROF-1's stated #1 lever — the per-IPM-iteration Python
-**NLP-callback bridge** (`_jax/nlp_evaluator.py` + `solvers/nlp_ipopt.py`) —
+**NLP-callback bridge** (`_relax/nlp_evaluator.py` + `solvers/nlp_ipopt.py`) —
 and measuring it directly showed that the bridge's large *sampled* share
 (24–31 % of m3/fac2) is **81–93 % genuine JAX kernel dispatch + XLA execute**
 (which runs natively *under* the Python `evaluate_*` frame, so the sampler
@@ -75,7 +75,7 @@ doing so buys ~0 wall, so it is not worth the byte-identity risk.)
 
 ## 2. The NLP-callback bridge is ~93 % genuine JAX dispatch, ~2 % removable
 
-PYPROF-1's #1 lever is the per-IPM-iteration bridge in `_jax/nlp_evaluator.py`.
+PYPROF-1's #1 lever is the per-IPM-iteration bridge in `_relax/nlp_evaluator.py`.
 Direct micro-measurement of each callback (20 k warm calls, m3/fac2):
 
 **Objective** (`float(self._obj_fn_jit(x, params))`):

@@ -64,7 +64,7 @@ def _build(pval):
 
 class TestNLPLayer:
     def test_forward(self):
-        from discopt._jax.pounce_layer import make_nlp_layer
+        from discopt._relax.pounce_layer import make_nlp_layer
 
         m, p = _build(0.3)
         layer = make_nlp_layer(m, [p])
@@ -74,7 +74,7 @@ class TestNLPLayer:
         assert np.allclose(np.asarray(x), [0.65, 0.35], atol=1e-5)
 
     def test_dx_dp_matches_sipopt(self):
-        from discopt._jax.pounce_layer import make_nlp_layer
+        from discopt._relax.pounce_layer import make_nlp_layer
         from discopt.solvers.sipopt import pounce_sensitivity
 
         m, p = _build(0.3)
@@ -84,7 +84,7 @@ class TestNLPLayer:
         assert np.allclose(dxdp.ravel(), sens.dx_dp.ravel(), atol=1e-4, rtol=1e-3)
 
     def test_dobj_dp_matches_fd(self):
-        from discopt._jax.pounce_layer import make_nlp_layer
+        from discopt._relax.pounce_layer import make_nlp_layer
 
         m, p = _build(0.3)
         layer = make_nlp_layer(m, [p])
@@ -100,7 +100,7 @@ class TestNLPLayer:
         assert abs(dobj - fd) < 1e-4
 
     def test_jit_and_vmap(self):
-        from discopt._jax.pounce_layer import make_nlp_layer
+        from discopt._relax.pounce_layer import make_nlp_layer
 
         m, p = _build(0.3)
         layer = make_nlp_layer(m, [p])

@@ -20,8 +20,8 @@ if not hasattr(rust, "crossover_to_vertex_py"):  # older prebuilt extension
     pytest.skip("Rust crossover bindings not built", allow_module_level=True)
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax.crossover import crossover_to_vertex as np_crossover  # noqa: E402
-from discopt._jax.problem_classifier import extract_lp_data  # noqa: E402
+from discopt._relax.crossover import crossover_to_vertex as np_crossover  # noqa: E402
+from discopt._relax.problem_classifier import extract_lp_data  # noqa: E402
 
 
 def _sym_knapsack():

@@ -16,14 +16,14 @@ from __future__ import annotations
 import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
-from discopt._jax.convexity import Curvature
-from discopt._jax.convexity.g_convex_cut import (
+from discopt._relax.convexity import Curvature
+from discopt._relax.convexity.g_convex_cut import (
     g_concave_overestimator_cut,
     g_convex_supporting_cut,
 )
-from discopt._jax.convexity.g_convexity import certify_g_convex
-from discopt._jax.convexity.g_prop9 import transformation_adds_value
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.convexity.g_convexity import certify_g_convex
+from discopt._relax.convexity.g_prop9 import transformation_adds_value
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Model
 
 # ──────────────────────────────────────────────────────────────────────

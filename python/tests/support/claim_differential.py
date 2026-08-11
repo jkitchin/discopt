@@ -56,10 +56,10 @@ def current_row(name: str) -> dict:
     """Build ``name`` now and produce a row in the baseline schema."""
     import numpy as np
     import scipy.sparse as sp
-    from discopt._jax.claim_audit import relaxation_fingerprint
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.claim_audit import relaxation_fingerprint
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import from_nl
 
     model = from_nl(str(_NL_DIR / f"{name}.nl"))
@@ -166,7 +166,7 @@ def current_root_lp_probe(name: str) -> RootLpProbe:
     optimum recorded in the reported sense.
     """
     import numpy as np
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
     from discopt.modeling.core import ObjectiveSense, from_nl
 
     model = from_nl(str(_NL_DIR / f"{name}.nl"))

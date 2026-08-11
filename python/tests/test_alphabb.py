@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import jax
 import jax.numpy as jnp
-from discopt._jax.alphabb import (
+from discopt._relax.alphabb import (
     _eigenvalue_method,
     _gershgorin_method,
     alphabb_overestimator,

@@ -49,7 +49,7 @@ def _collect_constraint_cliques(model) -> tuple[list[str], list[list[int]]]:
     canonical incidence both the advisor graphs and ``detect_decomposition``
     consume.
     """
-    from discopt._jax.gdp_reformulate import _collect_variables
+    from discopt._relax.gdp_reformulate import _collect_variables
 
     var_names = [v.name for v in model._variables]
     name_to_idx = {nm: i for i, nm in enumerate(var_names)}

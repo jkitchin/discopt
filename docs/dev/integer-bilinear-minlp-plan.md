@@ -98,7 +98,7 @@ before P1.
 
 ## P1 — Provably-sound implied-integer detection
 
-**Spec.** New presolve pass `python/discopt/_jax/implied_integer.py`:
+**Spec.** New presolve pass `python/discopt/_relax/implied_integer.py`:
 `detect_implied_integers(model) -> set[(var_index, elem)]` returning only
 variables that are **provably** integer at every feasible point.
 

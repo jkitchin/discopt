@@ -30,11 +30,11 @@ first test closes that gap.
 
 from __future__ import annotations
 
-import discopt._jax.nlp_evaluator as nev
+import discopt._relax.nlp_evaluator as nev
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import (
+from discopt._relax.nlp_evaluator import (
     NLPEvaluator,
     _dense_hessian_fwd_over_fwd_peak_bytes,
 )

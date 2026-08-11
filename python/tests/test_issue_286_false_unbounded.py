@@ -85,7 +85,7 @@ def test_milp_simplex_defers_on_power_of_sum():
     simplex engine accepted the model and certified a WRONG 'optimal' on the
     linear projection, which silently drops the power. The term classifier must
     now flag it and the engine must defer."""
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.solver import _solve_milp_simplex
 
     m = dm.Model("powsum")
@@ -137,7 +137,7 @@ def test_reformulation_aborts_on_unbounded_factor(ub):
     """An infinite/astronomical other-factor bound makes the big-M vacuous, so the
     reformulation must abort (return the input model unchanged) rather than emit a
     spuriously unbounded MILP (carton7, issue #286)."""
-    from discopt._jax.integer_product_reform import reformulate_integer_bilinear
+    from discopt._relax.integer_product_reform import reformulate_integer_bilinear
 
     m = _int_times_unbounded(ub)
     assert reformulate_integer_bilinear(m) is m
@@ -146,7 +146,7 @@ def test_reformulation_aborts_on_unbounded_factor(ub):
 def test_reformulation_still_fires_on_finite_factor():
     """The guard is not over-broad: a finitely-bounded other factor is still
     reformulated (a new model is returned)."""
-    from discopt._jax.integer_product_reform import reformulate_integer_bilinear
+    from discopt._relax.integer_product_reform import reformulate_integer_bilinear
 
     m = _int_times_unbounded(20.0)
     assert reformulate_integer_bilinear(m) is not m

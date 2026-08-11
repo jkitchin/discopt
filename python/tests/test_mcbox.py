@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax import mcbox as mc
-from discopt._jax.mcbox import UnsupportedMcboxOp, relax_through
+from discopt._relax import mcbox as mc
+from discopt._relax.mcbox import UnsupportedMcboxOp, relax_through
 
 jax.config.update("jax_enable_x64", True)
 RNG = np.random.default_rng(0)

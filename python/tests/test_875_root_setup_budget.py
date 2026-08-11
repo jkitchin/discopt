@@ -41,21 +41,21 @@ from pathlib import Path  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.milp_relaxation import (  # noqa: E402
+from discopt._relax.milp_relaxation import (  # noqa: E402
     _any_linear_constraint_form,
     _linear_constraint_forms,
     _linearize_affine_expr,
     _linearize_affine_expr_sparse,
 )
-from discopt._jax.model_utils import flat_variable_bounds  # noqa: E402
-from discopt._jax.nonlinear_bound_tightening import (  # noqa: E402
+from discopt._relax.model_utils import flat_variable_bounds  # noqa: E402
+from discopt._relax.nonlinear_bound_tightening import (  # noqa: E402
     DEFAULT_NONLINEAR_BOUND_RULES,
     FunctionDomainBoundRule,
     NonlinearBoundTighteningRule,
     PeriodicVariableBoundRule,
     tighten_nonlinear_bounds,
 )
-from discopt._jax.uniform_relax import _fix_single_var_equalities  # noqa: E402
+from discopt._relax.uniform_relax import _fix_single_var_equalities  # noqa: E402
 from discopt.modeling.core import SolveResult  # noqa: E402
 
 # --------------------------------------------------------------------------
@@ -211,7 +211,7 @@ def test_any_linear_constraint_form_short_circuits(monkeypatch):
     cannot flake on a loaded runner — the failure mode that cost real time on #863
     and briefly on this branch.
     """
-    import discopt._jax.milp_relaxation as mr
+    import discopt._relax.milp_relaxation as mr
 
     calls = []
     real = mr._linearize_affine_expr_sparse
@@ -314,7 +314,7 @@ def test_a_row_scan_that_needs_completeness_is_never_truncated():
     )
     assert FunctionDomainBoundRule.row_scan_is_anytime is True
 
-    from discopt._jax.nonlinear_bound_tightening import _cached_flat_metadata
+    from discopt._relax.nonlinear_bound_tightening import _cached_flat_metadata
 
     def _build(disqualify: bool):
         """``t`` free and used inside ``cos``; optionally ALSO used bare, in the very

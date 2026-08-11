@@ -930,7 +930,7 @@ class CustomCall(Expression):
     Consequences (enforced by the solver and the export/relaxation layers):
 
     - If the opaque body traces soundly through discopt's reduced-space McCormick
-      type (``MCBox`` -- arithmetic ``+ - * / **`` and the ``discopt._jax.mcbox``
+      type (``MCBox`` -- arithmetic ``+ - * / **`` and the ``discopt._relax.mcbox``
       intrinsic namespace), a **continuous** model is now solved **globally with a
       certificate** via the reduced-space engine, branching only on the original
       degrees of freedom while the callable's internal intermediates stay hidden
@@ -1817,14 +1817,14 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     the comparison operators that build every constraint in the supported DSL fold
     the offset into ``body``. Most of the tree honours that invariant by simply not
     looking at ``rhs``: **26 modules read ``Constraint.body`` and never read
-    ``.rhs``**, among them the whole relaxation stack (``_jax/dag_compiler``,
+    ``.rhs``**, among them the whole relaxation stack (``_relax/dag_compiler``,
     ``relaxation_compiler``, ``milp_relaxation``, ``mccormick_subgradient``,
     ``term_classifier``, ``nonlinear_bound_tightening``, ``dependent_vars``,
     ``implied_integer``, the convexity certificate, ``bilevel/kkt``, Benders, RO).
 
     A handful of *other* consumers do honour it — ``validation/feasibility``
     (``signed = body - rhs``), the ``.nl`` and GAMS exporters,
-    ``problem_classifier``, ``_jax/obbt``, and the Rust ``ConstraintRepr`` (114
+    ``problem_classifier``, ``_relax/obbt``, and the Rust ``ConstraintRepr`` (114
     references across the presolve crate). (Issue #909 also listed the LP and MPS
     exporters here; **measured, that is false** — both rebuild the row's
     right-hand side from the *body* alone and silently drop a non-zero ``rhs``, so
@@ -2322,12 +2322,12 @@ class SolveResult:
 
         # Lazy computation: compute sensitivity from existing solution
         if self._sensitivity is None:
-            from discopt._jax.differentiable import _compute_sensitivity_at_solution
+            from discopt._relax.differentiable import _compute_sensitivity_at_solution
 
             self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
 
         # Extract the slice for this parameter
-        from discopt._jax.differentiable import _get_param_slice
+        from discopt._relax.differentiable import _get_param_slice
 
         start, end = _get_param_slice(param, self._model)
         grad_flat = self._sensitivity[start:end]
@@ -3344,7 +3344,7 @@ class Model:
         if isinstance(base, Variable):
             return base.name
         try:
-            from discopt._jax.gdp_reformulate import _collect_variables
+            from discopt._relax.gdp_reformulate import _collect_variables
 
             names = list(_collect_variables(var).keys())
         except Exception:
@@ -3770,7 +3770,7 @@ class Model:
         default (huge) bounds when either enclosure is non-finite or cannot be
         computed; presolve/FBBT tighten from there. Always sound.
         """
-        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._relax.convexity.interval_eval import evaluate_interval
 
         los: list[float] = []
         his: list[float] = []
@@ -4394,7 +4394,7 @@ class Model:
             if _ck_res is not None:
                 return _ck_res
 
-        from discopt._jax.deadline import deadline_scope
+        from discopt._relax.deadline import deadline_scope
         from discopt.solver import solve_model
 
         # Attach the interactive B&B debugger if requested. The fire-sites in
@@ -4456,7 +4456,7 @@ class Model:
                 from discopt._tape_nlp_evaluator import build_evaluator
 
                 def _jax_evaluator():
-                    from discopt._jax.nlp_evaluator import cached_evaluator
+                    from discopt._relax.nlp_evaluator import cached_evaluator
 
                     return cached_evaluator(self)
 
@@ -4503,7 +4503,7 @@ class Model:
             and self._constraints
         ):
             try:
-                from discopt._jax.lp_spatial_bb import _is_in_scope
+                from discopt._relax.lp_spatial_bb import _is_in_scope
 
                 # #860: the engine now also serves mixed-integer and MAXIMIZE models,
                 # but whether the DEFAULT path should hand them 35% of its budget is a
@@ -4619,7 +4619,7 @@ class Model:
         # panelled at.
         if _fb_reserve > 1.0 and result.objective is None:
             try:
-                from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+                from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 
                 # Fresh process-global deadline: the primary's scope has expired, and
                 # the JAX-compiled LP loops poll it.
@@ -4735,7 +4735,7 @@ class Model:
             try:
                 import numpy as _np
 
-                from discopt._jax.primal_heuristics import _check_constraint_feasibility
+                from discopt._relax.primal_heuristics import _check_constraint_feasibility
 
                 _snap_ev, _snap_names = _verify_snap
                 _flat = _np.concatenate(
@@ -5653,7 +5653,7 @@ def model_from_repr(rep, name: str) -> Model:
     Complementarity relations are **not** reconstructed here — they live
     outside ``ModelRepr`` and are threaded separately by :func:`from_nl`.
     """
-    from discopt._jax.nl_reconstruction import reconstruct_dag
+    from discopt._relax.nl_reconstruction import reconstruct_dag
 
     m = Model(name)
 
@@ -5733,7 +5733,7 @@ def from_nl(path: str) -> Model:
     """
     import os
 
-    from discopt._jax.nl_reconstruction import reconstruct_complementarities
+    from discopt._relax.nl_reconstruction import reconstruct_complementarities
     from discopt._rust import parse_nl_file
 
     nl_repr = parse_nl_file(path)

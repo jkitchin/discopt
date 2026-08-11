@@ -16,8 +16,8 @@ import json
 import sys
 import time
 
-from discopt._jax.deadline import deadline_scope
-from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+from discopt._relax.deadline import deadline_scope
+from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 from discopt.modeling.core import ObjectiveSense, from_nl
 from discopt.solver import solve_model
 

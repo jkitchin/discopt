@@ -272,10 +272,10 @@ consumer paths exist, and Stage C.1 must pick one:
   such cuts as extra **linear constraints** to the node NLP via the existing `_AugmentedEvaluator`
   (`solver.py:717`), which already wraps an evaluator with a `CutPool`'s `to_constraint_arrays()`.
   This reuses `generate_oa_cuts_from_evaluator` / `generate_objective_oa_cut`
-  (`_jax/cutting_planes.py:271`,`:613`) against the `NLPEvaluator` that `_solve_nlp_bb` already
+  (`_relax/cutting_planes.py:271`,`:613`) against the `NLPEvaluator` that `_solve_nlp_bb` already
   builds (`_make_evaluator`, `:10902`). **Lowest-risk lever: no new LP, no relaxer, cuts are
   globally valid by convexity.**
-- **(b) Root LP relaxation.** Build a `MccormickLPRelaxer` (`_jax/mccormick_lp.py:353`) or a big-M
+- **(b) Root LP relaxation.** Build a `MccormickLPRelaxer` (`_relax/mccormick_lp.py:353`) or a big-M
   MILP root LP, separate a root cut pool once (MIR/cover/GMI via `milp_driver.rs` /
   `_root_cover_cut_loop` at `solver.py:14570`, or `separate_cmir`), and adopt the tighter root
   dual bound as `_root_pool_bound` (the adoption path the spatial route already uses at
@@ -286,7 +286,7 @@ experiment scored **purely on root bound vs `=opt=`** before any wiring into the
 
 ### What already exists to build on (do not rebuild)
 
-- **OA cut generators + `CutPool`:** `python/discopt/_jax/cutting_planes.py` — `CutPool` (`:893`),
+- **OA cut generators + `CutPool`:** `python/discopt/_relax/cutting_planes.py` — `CutPool` (`:893`),
   `generate_oa_cuts_from_evaluator` (`:271`), `generate_objective_oa_cut` (`:613`),
   `generate_alphabb_quadratic_oa_cuts_from_evaluator` (`:535`), `LinearCut` (`:36`). The multitree
   `solve_oa` (`python/discopt/solvers/oa.py`, `_add_oa_cuts:2145`, `_add_ecp_cuts:2278`) drives
@@ -298,11 +298,11 @@ experiment scored **purely on root bound vs `=opt=`** before any wiring into the
 - **MIR / GMI / cover (Rust LP path):** `crates/discopt-core/src/lp/{mir,gomory,aggregation,
   cover,cut_select}.rs` + Python `_root_cover_cut_loop` (`solver.py:14570`, separates Gomory
   `:14680`, single-row MIR `:14688`, aggregation c-MIR `:14704` gated `DISCOPT_CMIR_AGGREGATION`,
-  cover/clique `:14717`) and `separate_cmir` (`_jax/cmir_cuts.py:95`). All wired to the
+  cover/clique `:14717`) and `separate_cmir` (`_relax/cmir_cuts.py:95`). All wired to the
   **MILP/spatial** cutting LP, **not** `_solve_nlp_bb`. **C-4** (fixed) is the binding soundness
   lesson: an integer-MIR cut with a fractional integer lower bound is invalid — reuse the fixed
   path, do not re-derive. Relevant only under consumer path (b).
-- **Knapsack cover cuts:** `python/discopt/_jax/cover_cuts.py`, Rust `lp/cover.rs`.
+- **Knapsack cover cuts:** `python/discopt/_relax/cover_cuts.py`, Rust `lp/cover.rs`.
 - **Flow-cover cuts: DO NOT EXIST anywhere in the tree.** The one genuinely new cut family the
   campaign may need. If added, it must pass `assert_cut_valid` and carry its own differential test.
 
@@ -486,13 +486,13 @@ editing — earlier diagnosis comments cite a stale layout, e.g. "`:10027`"/"`:9
 | `_AugmentedEvaluator` (feed cuts into a node NLP) | `python/discopt/solver.py:717` |
 | spatial root cut-pool capture + adoption | `python/discopt/solver.py:6790–6935`, `_root_pool_bound` `:6838` |
 | Python MILP root cut loop (Gomory/MIR/c-MIR/cover) | `python/discopt/solver.py:14570` (`_root_cover_cut_loop`) |
-| root OBBT to convergence | `python/discopt/_jax/obbt.py` (`obbt_tighten_root`) |
-| OA cut generators + `CutPool` | `python/discopt/_jax/cutting_planes.py` (`CutPool:893`, `generate_oa_cuts_from_evaluator:271`, `generate_objective_oa_cut:613`) |
+| root OBBT to convergence | `python/discopt/_relax/obbt.py` (`obbt_tighten_root`) |
+| OA cut generators + `CutPool` | `python/discopt/_relax/cutting_planes.py` (`CutPool:893`, `generate_oa_cuts_from_evaluator:271`, `generate_objective_oa_cut:613`) |
 | OA multitree driver (reuse generators, do not auto-route) | `python/discopt/solvers/oa.py` (`_add_oa_cuts:2145`, `_add_ecp_cuts:2278`) |
-| McCormick LP relaxer + incremental rows | `python/discopt/_jax/mccormick_lp.py:353` (ctor), `solve_at_node:900` |
-| c-MIR / aggregation separator | `python/discopt/_jax/cmir_cuts.py:95` |
+| McCormick LP relaxer + incremental rows | `python/discopt/_relax/mccormick_lp.py:353` (ctor), `solve_at_node:900` |
+| c-MIR / aggregation separator | `python/discopt/_relax/cmir_cuts.py:95` |
 | MIR / GMI / cover / cut-select (Rust LP path) | `crates/discopt-core/src/lp/{mir,gomory,cover,aggregation,cut_select}.rs`, `bnb/milp_driver.rs` |
-| knapsack cover cuts (Python) | `python/discopt/_jax/cover_cuts.py` |
+| knapsack cover cuts (Python) | `python/discopt/_relax/cover_cuts.py` |
 | cut-validity harness (mandatory) | `discopt_benchmarks/utils/soundness.py` (`assert_cut_valid`) |
 | graduation flag tri-state | `python/discopt/solver_tuning.py` (`SolverTuning`, cf. `DISCOPT_CUT_INHERIT`) |
 | graduation-panel template | `discopt_benchmarks/scripts/gp_minlp_graduation_panel.py` |

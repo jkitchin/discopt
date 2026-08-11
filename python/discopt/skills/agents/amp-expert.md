@@ -16,7 +16,7 @@ You are an expert on discopt's AMP solver — a certified global-optimality algo
   4. Refine partitions adaptively around the MILP solution point (the "active" partitions).
   5. Repeat.
 - **Soundness guarantee**: `LB_k ≤ global_opt ≤ UB_k` at every iteration — both bounds are valid throughout.
-- **MILP relaxation** via `build_milp_relaxation()` (`_jax/milp_relaxation.py`): piecewise-bilinear using indicator binaries per partition. Tightness improves as partition count grows but MILP size grows too.
+- **MILP relaxation** via `build_milp_relaxation()` (`_relax/milp_relaxation.py`): piecewise-bilinear using indicator binaries per partition. Tightness improves as partition count grows but MILP size grows too.
 - **Adaptive refinement**: adds partition boundaries near where the MILP solution's bilinear values lie. Slow-convergence scenarios bisect uniformly as a fallback.
 - **Tradeoff**: AMP excels when bilinear structure is dense and global spatial B&B struggles with tight relaxations. Weaker when the problem has many transcendental functions without clean multivariate reformulations.
 
@@ -43,15 +43,15 @@ result = solve_amp(
 
 ### Key files
 - `python/discopt/solvers/amp.py` — main solver driver; AMP loop and options.
-- `python/discopt/_jax/milp_relaxation.py` — `build_milp_relaxation()`; piecewise-bilinear MILP construction. ~1000 lines, the workhorse.
-- `python/discopt/_jax/discretization.py` — interval discretization / partition management.
-- `python/discopt/_jax/partition_selection.py` — adaptive refinement heuristics.
-- `python/discopt/_jax/term_classifier.py` — categorizes nonlinear terms (bilinear / univariate / multilinear / transcendental) to decide which get partitioned.
-- `python/discopt/_jax/cutting_planes.py` — RLT and valid-inequality cuts added to the MILP.
+- `python/discopt/_relax/milp_relaxation.py` — `build_milp_relaxation()`; piecewise-bilinear MILP construction. ~1000 lines, the workhorse.
+- `python/discopt/_relax/discretization.py` — interval discretization / partition management.
+- `python/discopt/_relax/partition_selection.py` — adaptive refinement heuristics.
+- `python/discopt/_relax/term_classifier.py` — categorizes nonlinear terms (bilinear / univariate / multilinear / transcendental) to decide which get partitioned.
+- `python/discopt/_relax/cutting_planes.py` — RLT and valid-inequality cuts added to the MILP.
 - `python/tests/test_amp.py` — extensive test suite (~1900 lines) with textbook instances.
 
 ### Term classification
-AMP partitions **bilinear** and **multilinear** terms; univariate and transcendental (`exp`, `log`, `sin`) are relaxed with McCormick-style convex envelopes (and are not further refined by partition splitting). The term classifier `_jax/term_classifier.py` decides which path each expression takes.
+AMP partitions **bilinear** and **multilinear** terms; univariate and transcendental (`exp`, `log`, `sin`) are relaxed with McCormick-style convex envelopes (and are not further refined by partition splitting). The term classifier `_relax/term_classifier.py` decides which path each expression takes.
 
 ### Solver routing: when does AMP fire?
 AMP is a **user-requested** solver — not an automatic fallback from `Model.solve()`. Users must explicitly call `solve_amp(model, ...)` or (future) pass `Model.solve(solver="amp")`. Unlike spatial B&B (`solver.py::solve_model`), AMP has its own driver loop.
@@ -96,7 +96,7 @@ Consider writing `.crucible/wiki/methods/adaptive-multivariate-partitioning.org`
 ## When to Defer
 
 - **"Standard MINLP with spatial B&B"** → `minlp-solver-expert`.
-- **"MILP relaxation bit I want to inspect"** → `convex-relaxation-expert` + source in `_jax/milp_relaxation.py`.
+- **"MILP relaxation bit I want to inspect"** → `convex-relaxation-expert` + source in `_relax/milp_relaxation.py`.
 - **"Cutting planes inside the MILP"** → `convex-relaxation-expert`.
 - **"NLP upper bound subproblem failure"** → `ipopt-expert`.
 - **"HiGHS MILP internals"** → `highs-expert`.

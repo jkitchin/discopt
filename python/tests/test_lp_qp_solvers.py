@@ -29,7 +29,7 @@ class TestProblemClassifier:
 
     def test_lp_detection(self):
         """Linear obj + linear constraints + continuous = LP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("lp_test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -39,7 +39,7 @@ class TestProblemClassifier:
 
     def test_qp_detection(self):
         """Quadratic obj + linear constraints + continuous = QP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qp_test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -49,7 +49,7 @@ class TestProblemClassifier:
 
     def test_milp_detection(self):
         """Linear obj + linear constraints + integer = MILP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("milp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -60,7 +60,7 @@ class TestProblemClassifier:
 
     def test_miqp_detection(self):
         """Quadratic obj + linear constraints + integer = MIQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -71,7 +71,7 @@ class TestProblemClassifier:
 
     def test_qcp_detection(self):
         """Linear obj + quadratic constraints + continuous = QCP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qcp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -81,7 +81,7 @@ class TestProblemClassifier:
 
     def test_qcqp_detection(self):
         """Quadratic obj + quadratic constraints + continuous = QCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("qcqp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -91,7 +91,7 @@ class TestProblemClassifier:
 
     def test_miqcp_detection(self):
         """Linear obj + quadratic constraints + integer = MIQCP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqcp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -102,7 +102,7 @@ class TestProblemClassifier:
 
     def test_miqcqp_detection(self):
         """Quadratic obj + quadratic constraints + integer = MIQCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("miqcqp_test")
         x = m.continuous("x", lb=-2, ub=2)
@@ -113,7 +113,7 @@ class TestProblemClassifier:
 
     def test_nlp_detection(self):
         """Nonlinear constraints + continuous = NLP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("nlp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -124,7 +124,7 @@ class TestProblemClassifier:
 
     def test_minlp_detection(self):
         """Quadratic constraints with integers classify as MIQCQP."""
-        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+        from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("minlp_test")
         x = m.continuous("x", lb=0, ub=10)
@@ -144,7 +144,7 @@ class TestLPExtraction:
 
     def test_simple_lp(self):
         """Extract standard form from simple LP."""
-        from discopt._jax.problem_classifier import extract_lp_data
+        from discopt._relax.problem_classifier import extract_lp_data
 
         m = dm.Model("test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -157,7 +157,7 @@ class TestLPExtraction:
 
     def test_qp_extraction(self):
         """Extract QP standard form."""
-        from discopt._jax.problem_classifier import extract_qp_data
+        from discopt._relax.problem_classifier import extract_qp_data
 
         m = dm.Model("test")
         x = m.continuous("x", shape=(2,), lb=0, ub=10)
@@ -171,7 +171,7 @@ class TestLPExtraction:
 
     def test_qcp_extraction(self):
         """Extract QCP data with linear and quadratic rows preserved."""
-        from discopt._jax.problem_classifier import extract_qcp_data
+        from discopt._relax.problem_classifier import extract_qcp_data
 
         m = dm.Model("test_qcp")
         x = m.continuous("x", shape=(2,), lb=-2, ub=2)
@@ -305,7 +305,7 @@ class TestLPDifferentiability:
 
     def test_grad_wrt_c(self):
         """d(obj*)/dc_i = x*_i for LP at optimality."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         # min -x - 2y s.t. x+y=3, 0<=x<=2, 0<=y<=2 -> x*=1, y*=2
         c = jnp.array([-1.0, -2.0])
@@ -321,7 +321,7 @@ class TestLPDifferentiability:
 
     def test_grad_wrt_b(self):
         """d(obj*)/db_i = y*_i (dual variable) for LP."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         # Well-bounded LP: min -x - 2y s.t. x+y=3, 0<=x<=2, 0<=y<=2
         c = jnp.array([-1.0, -2.0])
@@ -346,7 +346,7 @@ class TestLPDifferentiability:
 
     def test_grad_finite_diff(self):
         """jax.grad matches central finite differences for LP."""
-        from discopt._jax.differentiable_lp import lp_solve_grad
+        from discopt._relax.differentiable_lp import lp_solve_grad
 
         c = jnp.array([-1.0, -2.0])
         A = jnp.array([[1.0, 1.0]])
@@ -379,7 +379,7 @@ class TestQPDifferentiability:
 
     def test_grad_wrt_c_qp(self):
         """jax.grad through QP solve w.r.t. c should match finite differences."""
-        from discopt._jax.differentiable_qp import qp_solve_grad
+        from discopt._relax.differentiable_qp import qp_solve_grad
 
         Q = jnp.eye(2)
         c = jnp.array([0.0, 0.0])
@@ -517,7 +517,7 @@ class TestUnifiedDiffSolve:
 
     def test_lp_diff_solve(self):
         """differentiable_solve on LP returns correct result."""
-        from discopt._jax.differentiable_solve import differentiable_solve
+        from discopt._relax.differentiable_solve import differentiable_solve
 
         m = dm.Model("lp")
         x = m.continuous("x", lb=0, ub=10)
@@ -531,7 +531,7 @@ class TestUnifiedDiffSolve:
 
     def test_qp_diff_solve(self):
         """differentiable_solve on QP returns correct result."""
-        from discopt._jax.differentiable_solve import differentiable_solve
+        from discopt._relax.differentiable_solve import differentiable_solve
 
         m = dm.Model("qp")
         x = m.continuous("x", lb=-5, ub=5)
@@ -544,8 +544,8 @@ class TestUnifiedDiffSolve:
 
     def test_problem_class_reported(self):
         """differentiable_solve should report the detected problem class."""
-        from discopt._jax.differentiable_solve import differentiable_solve
-        from discopt._jax.problem_classifier import ProblemClass
+        from discopt._relax.differentiable_solve import differentiable_solve
+        from discopt._relax.problem_classifier import ProblemClass
 
         m = dm.Model("lp")
         x = m.continuous("x", lb=0, ub=10)
@@ -560,7 +560,7 @@ class TestUnifiedDiffSolve:
 # ---------------------------------------------------------------
 
 
-# ``test_qp_batch`` was removed with ``_jax/qp_ipm.py``. It exercised
+# ``test_qp_batch`` was removed with ``_relax/qp_ipm.py``. It exercised
 # ``qp_ipm_solve_batch``, the vmap-batched JAX QP IPM, which had no caller
 # anywhere in ``python/discopt/`` -- verified by grep before deletion, and
 # corroborated by the sibling defect it had been masking: the MIQP code-3

@@ -30,7 +30,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
+from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.solvers import nlp_native as N  # noqa: E402
 
 # `slow`, not `unit`: these build a POUNCE native base directly, which creates a

@@ -14,14 +14,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.batch_evaluator import (
+from discopt._relax.batch_evaluator import (
     BatchRelaxationEvaluator,
     batch_evaluator_from_constraint,
     batch_evaluator_from_expression,
     batch_evaluator_from_objective,
 )
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.relaxation_compiler import compile_relaxation
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.relaxation_compiler import compile_relaxation
 from discopt.modeling import examples
 from discopt.modeling.core import Model
 

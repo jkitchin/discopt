@@ -58,9 +58,9 @@ import traceback
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.obbt import obbt_tighten_root
-from discopt._jax.presolve_pipeline import (
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.obbt import obbt_tighten_root
+from discopt._relax.presolve_pipeline import (
     propagate_bounds_to_model,
     run_root_presolve,
 )

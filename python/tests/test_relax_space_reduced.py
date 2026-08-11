@@ -111,7 +111,7 @@ def test_reduced_bound_no_false_infeasible_nvs22():
     by ~1.7e5. The sound-or-refuse fix refuses division by a non-affine denominator
     (``UnsupportedRelaxation`` -> status ``unsupported`` -> the solver falls back to
     lifted for this class). So this box must NOT come back ``infeasible``."""
-    from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound
+    from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound
 
     m = dm.from_nl(_NVS22)
     # x* is the (lifted-)certified global optimum; a box of half-width ~1 around it.
@@ -154,7 +154,7 @@ def test_reduced_refuses_non_affine_division():
     """Sound-or-refuse unit test (class-level, not instance-keyed): division by a
     NON-affine denominator is refused by the reduced-space builder, while division by
     an AFFINE denominator is accepted. This is the general rule that fixes nvs22."""
-    from discopt._jax.mccormick_subgradient import (
+    from discopt._relax.mccormick_subgradient import (
         UnsupportedRelaxation,
         build_reduced_relaxation,
     )

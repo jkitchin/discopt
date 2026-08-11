@@ -18,8 +18,8 @@ import os
 import discopt.modeling as dm
 import pytest
 from discopt import Model
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 # Flag-off bound for x*exp(x) on [-1,1]. #640 Bucket 1: the recovered separable
 # objective floor now recognizes ``x*exp(x) >= -1/e`` and closes this single-term

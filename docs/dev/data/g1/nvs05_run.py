@@ -1,6 +1,6 @@
 import json, sys, time
 def dis():
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     oi=nev.NLPEvaluator.__init__
     def p(self,*a,**k):
         oi(self,*a,**k); self._fused_fc_jit=None; self._gj_fusable_cache=False

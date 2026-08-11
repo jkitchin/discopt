@@ -17,19 +17,19 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-from discopt._jax.envelopes import (
+from discopt._relax.envelopes import (
     relax_fractional,
     relax_signomial,
     relax_trilinear,
 )
-from discopt._jax.mccormick import (
+from discopt._relax.mccormick import (
     relax_bilinear,
     relax_exp,
     relax_log,
     relax_sqrt,
     relax_square,
 )
-from discopt._jax.piecewise_mccormick import (
+from discopt._relax.piecewise_mccormick import (
     _adaptive_partition_bounds,
     _partition_bounds,
     piecewise_mccormick_bilinear,
@@ -623,7 +623,7 @@ class TestPowerIntEnvelope:
         ids=["x2", "x3_mixed", "x4"],
     )
     def test_soundness(self, lb, ub, n, tol):
-        from discopt._jax.envelopes import relax_power_int
+        from discopt._relax.envelopes import relax_power_int
 
         x = jnp.linspace(lb, ub, 50)
         cv, cc = jax.vmap(lambda xi: relax_power_int(xi, lb, ub, n))(x)
@@ -632,7 +632,7 @@ class TestPowerIntEnvelope:
         assert jnp.all(cc >= true_val - tol)
 
     def test_jit_compatible(self):
-        from discopt._jax.envelopes import relax_power_int
+        from discopt._relax.envelopes import relax_power_int
 
         f = jax.jit(lambda x: relax_power_int(x, -2.0, 2.0, 3))
         cv, cc = f(jnp.float64(1.0))
@@ -643,7 +643,7 @@ class TestExpBilinearEnvelope:
     """Tests for relax_exp_bilinear."""
 
     def test_soundness(self):
-        from discopt._jax.envelopes import relax_exp_bilinear
+        from discopt._relax.envelopes import relax_exp_bilinear
 
         x = jnp.linspace(-1.0, 2.0, 20)
         y = jnp.linspace(0.5, 3.0, 20)
@@ -657,7 +657,7 @@ class TestLogSumEnvelope:
     """Tests for relax_log_sum."""
 
     def test_soundness(self):
-        from discopt._jax.envelopes import relax_log_sum
+        from discopt._relax.envelopes import relax_log_sum
 
         x = jnp.linspace(1.0, 5.0, 20)
         y = jnp.linspace(1.0, 5.0, 20)

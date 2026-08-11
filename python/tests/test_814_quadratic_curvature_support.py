@@ -15,8 +15,8 @@ quadratics (the case that exercises the support-restriction branch).
 from __future__ import annotations
 
 import discopt.modeling as dm
-from discopt._jax.convexity import Curvature
-from discopt._jax.convexity import patterns as pat
+from discopt._relax.convexity import Curvature
+from discopt._relax.convexity import patterns as pat
 
 
 def _big_model_with_extra_vars(n_extra: int = 60):

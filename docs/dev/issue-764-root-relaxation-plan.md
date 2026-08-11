@@ -305,7 +305,7 @@ anywhere; `tanksize`/`nvs05` are gate probes only.
 ## Phase 2 implementation attempt — the marginals blocker (2026-07-18)
 
 Started building the cheap reduced-cost DBBT lever (item 3): recovered the property-tested
-`node_reduce` module (removed #581, restorable at `f2bfe63^:python/discopt/_jax/node_reduce.py`) —
+`node_reduce` module (removed #581, restorable at `f2bfe63^:python/discopt/_relax/node_reduce.py`) —
 its DBBT math is sound (`d_j > 0 ⇒ x_j ≤ l_j + gap/d_j`, `gap = cutoff − safe_bound ≥ 0`,
 tighten-only, integer endpoints rounded inward). But wiring it revealed a **hard prerequisite that
 also explains the #685 net-negative verdict**:

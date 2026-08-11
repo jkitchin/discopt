@@ -147,7 +147,7 @@ class OuterApproximationGenerator:
         return report.model_is_nonlinear and report.num_integer > 0
 
     def generate(self, model, report: StructureReport) -> list[Candidate]:
-        from discopt._jax.convexity import classify_oa_cut_convexity
+        from discopt._relax.convexity import classify_oa_cut_convexity
 
         try:
             conv = classify_oa_cut_convexity(model)

@@ -124,8 +124,8 @@ experiment may run.
 | T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
 | T2.1 Phase 2 entry experiment (kill criterion) | **REVISITED (2026-07-06) → GO** (supersedes provisional NO-GO) | #408, R1 | Full panel now completes (19/20, loop-median 0.27 s); **no P0 on 51 instances**. (a) still FAILS on the Class-P tail (panel median 7.4%, 2/6 responsive) BUT the R1 OR-rule's generality arm PASSES: out-of-panel responsive 9/29=31% (≥20%). Loop = {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1/S4; budget ≈10% of limit. Scope: broad small-MINLP root closure, NOT the hard tail. See "T2.1-revisit RESULTS / VERDICT (2026-07-06)" block |
 | T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
-| T2.3 root fixpoint loop | **built — flagged default-OFF** (R2) | (this PR) | `_jax/root_reduce.py::run_root_fixpoint` {S2 cutoff-FBBT, S3 cutoff-OBBT}, integrated at end of iteration 0 (solver.py); tighten-only intersection, ≤2 rounds, ≈10% budget; `root_fixpoint`/`DISCOPT_ROOT_FIXPOINT` OFF. No-offtarget gate + cut-pool re-capture opt-in only. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, Δobj 0). Node A/B: wastewater04m2 479→159 (root). See §14 "R2 build-results" |
-| T2.4 per-node `reduce_node()` | **built — flagged default-OFF** (R2) | (this PR) | T2.4a marginals on `MccormickLPResult` (bound-neutral, additive `dual`/`col_status`/`safe_bound`/`reduced_costs`); T2.4b `_jax/node_reduce.py::reduce_node` (cutoff-FBBT + free DBBT z=safe_bound + integer RC-fixing); T2.4c `PyTreeManager.set_node_bounds` feeds child boxes. `node_reduce`/`DISCOPT_NODE_REDUCE` OFF. 200-box property test green. See §14 "R2 build-results" |
+| T2.3 root fixpoint loop | **built — flagged default-OFF** (R2) | (this PR) | `_relax/root_reduce.py::run_root_fixpoint` {S2 cutoff-FBBT, S3 cutoff-OBBT}, integrated at end of iteration 0 (solver.py); tighten-only intersection, ≤2 rounds, ≈10% budget; `root_fixpoint`/`DISCOPT_ROOT_FIXPOINT` OFF. No-offtarget gate + cut-pool re-capture opt-in only. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, Δobj 0). Node A/B: wastewater04m2 479→159 (root). See §14 "R2 build-results" |
+| T2.4 per-node `reduce_node()` | **built — flagged default-OFF** (R2) | (this PR) | T2.4a marginals on `MccormickLPResult` (bound-neutral, additive `dual`/`col_status`/`safe_bound`/`reduced_costs`); T2.4b `_relax/node_reduce.py::reduce_node` (cutoff-FBBT + free DBBT z=safe_bound + integer RC-fixing); T2.4c `PyTreeManager.set_node_bounds` feeds child boxes. `node_reduce`/`DISCOPT_NODE_REDUCE` OFF. 200-box property test green. See §14 "R2 build-results" |
 | T2.5 OBBT escalation policy | **BUILT → KILL** (2026-07-11; mechanism sound, flag-gated default-OFF) | `p2/obbt-topk-scoring` | width×\|RC\| top-k scoring + `DISCOPT_OBBT_TOPK` de-gate: OBBT now RUNS on casctanks (n=500)/ex8_3_13, but bound is flat/WORSE and net wall is negative (kill-crit b). Mechanism kept for a targeted-budget revisit; do NOT flip default. See "T2.5 — RESULTS / VERDICT (2026-07-11)" |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | done — GO on c-MIR **(SUPERSEDED by CUT-1, 2026-07-06 → NO-GO)** | (prior) | SCIP root-bound *proxy* (`scripts/p3_0b_scip_rootbound.py`): median root gap closed discopt 0.0 vs SCIP 1.0 over 8 (graphpart/ex1263/fac). CUT-1 replaced the proxy with a direct injection of SCIP's actual c-MIR cut coefficients into discopt's LP + a real-relaxation measurement; on nvs17/19/24 discopt's *default* root already closes 99.9% (≥ SCIP's cut-root), and injected cuts close ≤1.8%. See §7 "0b RESULTS / VERDICT (2026-07-03)" and "CUT-1 …(2026-07-06)" |
@@ -144,7 +144,7 @@ experiment may run.
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 | Phase D — separation/strong-branch LP → warm in-house simplex (`perf-d1`) | **done — bound-neutral, default-ON** | (this PR) | Re-profile: **POUNCE subsolver is the #1 wall** (nvs17 ~239 cold POUNCE-LP solves / 6.3 s ≈ 40% of wall). Routed edge-concave separation + strong-branch LPs to `lp_simplex.solve_lp` under `DISCOPT_SEPARATION_LP_SIMPLEX` (default ON). Cert-baseline **NEUTRAL** (41/41 exact node_count, Δobj 0, incorrect 0); nvs17 equal-budget 93 nodes both flags. T0.4: 37 cuts / 14,800 checks, no invalid cut. Win: nvs17 POUNCE 848→0, wall 60.3 s (TL) → 38.1 s (optimal), s/node 0.826→0.409 (**2.02×**); nvs13 2.67×. See §8 "Phase D re-profile" |
 | THRU-2b node-LP fast path | **RE-SCOPE (premise falsified); one bound-neutral sub-fix shipped** | (this PR) | THRU-1's "node solved as integer MILP → drop integrality → sub-second" premise is **void on `origin/main`**: integrality is already dropped at every node (`node_bound_mode="lp"` default *and* RLT force the LP path — 13/13 nvs24 node solves have `integrality is None`, 0 integer-MILP solves, even under `DISCOPT_NODE_BOUND_MODE=milp`). The `solve_milp_py` calls THRU-1's cProfile mis-labeled "integer-MILP node solve" are **pure LPs** (`nint=0`) reached through the dense-cold fallback (`milp_relaxation.py:375`) when the warm sparse simplex breaks down `numerical` at iters=0 (factorization failure, not iter-limit) on 2–3 hard lifted LPs. Rare (nvs17/nvs21 0 fallbacks; nvs19 2; nvs24 2–3) and not nvs24's wall lever (that's PSD+square sep, the THRU-1 PSD gate). Shipped: a pure-LP short-circuit in `milp_simplex.solve_milp` — when `int_cols` empty, run the driver with the integer-search machinery OFF (cuts/GMI/heuristics/strong-branch), bound-neutral by construction (nvs24 fallback LP 10.9→5.5 s). Cert-baseline **NEUTRAL** (41/41 node_count exact, |Δobj|=0). Real lever for the fallback = LP presolve on the warm sparse simplex (Rust `lp/simplex`; re-scoped follow-on). See `docs/dev/root-throughput-entry-2026-07-06.md` §7 |
-| THRU-2a cost-aware PSD moment-cut gate | **built — flagged default-OFF; THRU-1 per-round-delta mechanism FALSIFIED, re-derived** | (this PR) | Adaptive gate on the per-node PSD loop in `_jax/mccormick_lp.py::_separate_psd` (`psd_cost_gate`/`DISCOPT_PSD_COST_GATE`, **default OFF**): bound per-node PSD wall to `budget × base_solve_wall` (default 1.0) + diminishing-returns abandon (`tau` 1e-4). **Falsification:** THRU-1 §4's stated mechanism ("skip PSD when its per-round LP delta < τ") is falsified — instrumented deltas are *large* (nvs17 root round-0 +5.9e4; median rel 8e-3), because on box-QCQP PSD is the *only* stage that closes the node-LP McCormick gap (RLT is a no-op with no linear constraints; it adds +0.00 after PSD). PSD is not node-inert — it is **substitutable by branching at lower wall cost**: unbudgeted PSD *starves the search*. Correct general signal = PSD wall-share, not bound-delta. SOUND by construction (dropping cuts only loosens). Gate applies to **PSD only** — extending it to univariate-square over-reached (tspn05 optimal→feasible), reverted. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, |Δobj|=0). Flag-ON panel: nvs17 38.3→**23.6 s (1.6×)** optimal @ −1100.4; **nvs24 root CONVERGES** (⊘/no-incumbent → 23.5 s root, feasible); nvs23 root 18.7→8.0 s (9→69 nodes); nvs19 keeps incumbent −1098.2 (PSD-helps case preserved). No oracle crossings (all dual bounds ≤ oracle). Flag-ON cert panel: 41/41 stay optimal, incorrect 0 (nvs13 19→49 nodes, on-class QCQP, still optimal). See `docs/dev/root-throughput-entry-2026-07-06.md` §8 |
+| THRU-2a cost-aware PSD moment-cut gate | **built — flagged default-OFF; THRU-1 per-round-delta mechanism FALSIFIED, re-derived** | (this PR) | Adaptive gate on the per-node PSD loop in `_relax/mccormick_lp.py::_separate_psd` (`psd_cost_gate`/`DISCOPT_PSD_COST_GATE`, **default OFF**): bound per-node PSD wall to `budget × base_solve_wall` (default 1.0) + diminishing-returns abandon (`tau` 1e-4). **Falsification:** THRU-1 §4's stated mechanism ("skip PSD when its per-round LP delta < τ") is falsified — instrumented deltas are *large* (nvs17 root round-0 +5.9e4; median rel 8e-3), because on box-QCQP PSD is the *only* stage that closes the node-LP McCormick gap (RLT is a no-op with no linear constraints; it adds +0.00 after PSD). PSD is not node-inert — it is **substitutable by branching at lower wall cost**: unbudgeted PSD *starves the search*. Correct general signal = PSD wall-share, not bound-delta. SOUND by construction (dropping cuts only loosens). Gate applies to **PSD only** — extending it to univariate-square over-reached (tspn05 optimal→feasible), reverted. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, |Δobj|=0). Flag-ON panel: nvs17 38.3→**23.6 s (1.6×)** optimal @ −1100.4; **nvs24 root CONVERGES** (⊘/no-incumbent → 23.5 s root, feasible); nvs23 root 18.7→8.0 s (9→69 nodes); nvs19 keeps incumbent −1098.2 (PSD-helps case preserved). No oracle crossings (all dual bounds ≤ oracle). Flag-ON cert panel: 41/41 stay optimal, incorrect 0 (nvs13 19→49 nodes, on-class QCQP, still optimal). See `docs/dev/root-throughput-entry-2026-07-06.md` §8 |
 
 **Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
 
@@ -211,8 +211,8 @@ leverage, plus a structural multiplier:
   they pay a fixed per-node/per-solve tax, not a bigger tree. Extremes: `casctanks`
   5097× slower at **9 nodes**; `st_e38` 272× at **3 nodes**.
 - Root cause is identified in-code: the lifted McCormick LP is **cold-rebuilt from the
-  DAG every node** (`_jax/mccormick_lp.py:310-320` — "~half the spatial-B&B wall
-  clock"; `_jax/incremental_mccormick.py:1-11`). An incremental, warm-started engine
+  DAG every node** (`_relax/mccormick_lp.py:310-320` — "~half the spatial-B&B wall
+  clock"; `_relax/incremental_mccormick.py:1-11`). An incremental, warm-started engine
   **already exists** (`incremental_mccormick.py`, wired at `mccormick_lp.py:561-563`).
   *(Superseded: `mccormick_lp`'s probe was un-gated to `ok`-only for any model by
   cert:T1.3, and `lp_spatial_bb._is_in_scope` was widened to "≥1 integer variable,
@@ -229,7 +229,7 @@ leverage, plus a structural multiplier:
 - Measured root-bound example: nvs17 root McCormick bound −2522 vs the achievable
   convex bound −1106 vs optimum −1100 (`solver.py:4060-4066`).
 - The *components* BARON iterates all exist in discopt — FBBT forward+backward (Rust,
-  incl. `fbbt_with_cutoff`), OBBT + DBBT (`_jax/obbt.py`), probing
+  incl. `fbbt_with_cutoff`), OBBT + DBBT (`_relax/obbt.py`), probing
   (`presolve/probing.rs`), exact multilinear/RLT hulls, edge-concave separation,
   tangent OA on convex-certified rows, α-BB fallback, two convexity-detection tracks —
   but the *orchestration* is thin and heavily gated:
@@ -547,7 +547,7 @@ target; falls back to a fractional column on a fully-lifted all-integer LP), for
 the valid implied aggregate, and applies the **existing** complemented MIR
 (`mir.rs::separate_mir`, PR #415) to it — MIR is reused verbatim, never
 reimplemented. Wired behind `DISCOPT_CMIR_AGGREGATION` (**default-off**) into the
-LP-spatial engine's node-cut separator (`_jax/lp_spatial_bb.py::_separate_node_cuts`)
+LP-spatial engine's node-cut separator (`_relax/lp_spatial_bb.py::_separate_node_cuts`)
 and exposed as `aggregation_mir_cuts_py`.
 
 **Correctness (primary gate) — PASS.** `aggregation_validity_random_systems`:
@@ -1156,7 +1156,7 @@ extraction in the IR, plus the first sound consumer (the PSD-on-Q convexity
 certificate). Two clearly separated correctness regimes, per §3 / CLAUDE.md §5.
 
 **(A) Exact extraction — BOUND-NEUTRAL foundation.**
-`python/discopt/_jax/quadratic_form.py`: `extract_quadratic(expr, n, model) ->
+`python/discopt/_relax/quadratic_form.py`: `extract_quadratic(expr, n, model) ->
 Optional[(Q, c, d)]` returns the symmetric `Q`, linear `c`, constant `d` with
 `expr == xᵀQx + cᵀx + d` **exactly, or `None`** (abstain). It layers on the
 existing trusted polynomial walker `milp_relaxation._expr_to_polynomial`
@@ -1729,8 +1729,8 @@ finish the root relaxation within budget — a legitimate "no root bound" signal
 
 ### Phase 1 tasks
 
-Anchors: `python/discopt/_jax/incremental_mccormick.py` (`IncrementalMcCormickLP`,
-line 68), scope gate `_is_in_scope` (`_jax/lp_spatial_bb.py:50` — currently
+Anchors: `python/discopt/_relax/incremental_mccormick.py` (`IncrementalMcCormickLP`,
+line 68), scope gate `_is_in_scope` (`_relax/lp_spatial_bb.py:50` — currently
 minimize + all-integer), wiring probe `mccormick_lp.py:331`, per-node entry
 `solve_at_node` (`mccormick_lp.py:524`).
 
@@ -2291,7 +2291,7 @@ are accounting artifacts (§1 correction) — measure with the T0.3 timers
 
 **Anchors (verified 2026-07-02 by three recon reports; line numbers current on
 `cert-phase0`).**
-Python — `_jax/obbt.py`: `run_obbt_on_relaxation` :712 (the workhorse; NS-safe
+Python — `_relax/obbt.py`: `run_obbt_on_relaxation` :712 (the workhorse; NS-safe
 vertex clamp :909/:944, `_OBBT_NS_GUARD` :52, conditioning guard
 `_OBBT_COND_LIMIT` :39→`require_ns` :826), `dbbt_on_relaxation` :962 (one LP →
 reduced costs tighten all vars; **no-ops without a finite cutoff**),
@@ -2309,7 +2309,7 @@ general (T1.3) branch :4405-4452, inherited at :5087/:5357; per-node FBBT
 :4865-4874; skipped on the root batch :4855); incumbent-improvement
 `fbbt_with_cutoff` (Phase C3) :6340-6378; Phase C OBBT-on-improvement
 :6301-6338; RC-fixing exists root-only on the MILP path :9974/:10019/:10904.
-`_jax/mccormick_lp.py`: `solve_at_node` :549, separation chain :742-778,
+`_relax/mccormick_lp.py`: `solve_at_node` :549, separation chain :742-778,
 `MccormickLPResult` :188 (**status/lower_bound/x only — no duals exposed to the
 caller**), incremental probe :340/:409.
 Rust — `fbbt_with_cutoff` `presolve/fbbt.rs:1098` (PyO3
@@ -2634,7 +2634,7 @@ that probe.
   ruff clean; `incorrect_count` not regressed.
 
 **T2.3 — Root fixpoint loop (LOCKED until T2.1's table is recorded above).**
-Build: new module `python/discopt/_jax/root_reduce.py` —
+Build: new module `python/discopt/_relax/root_reduce.py` —
 `run_root_fixpoint(model, lb, ub, *, incumbent_cutoff, deadline, tol, stages)
 → RootReduceResult` — deterministic stage order taken from T2.1's include list;
 every stage deadline-aware and tighten-only (intersection, the solver.py:3914
@@ -2691,11 +2691,11 @@ Flag: `node_reduce` config + env, default OFF until T2.6.
   guard); adversarial + smoke; `incorrect = 0`.
 
 **T2.3/T2.4 — R2 build-results (2026-07-06, this PR; flagged default-OFF).**
-Built exactly to the R1 GO spec above: `_jax/root_reduce.py::run_root_fixpoint`
+Built exactly to the R1 GO spec above: `_relax/root_reduce.py::run_root_fixpoint`
 (S2 cutoff-FBBT → S3 cutoff-OBBT, tighten-only intersection, ≤2 rounds, ≈10% of
 the limit budget, S3 keeps its own inner OBBT deadline) integrated at the **end of
 iteration 0** in `solver.py` (after the root heuristics, where the root bound is
-snapshotted); `_jax/node_reduce.py::reduce_node` (T2.4b) on the spatial node-LP
+snapshotted); `_relax/node_reduce.py::reduce_node` (T2.4b) on the spatial node-LP
 path unifying (i) cutoff-FBBT, (ii) **free DBBT from the just-solved node LP's
 reduced costs `d = c − Aᵀy` with `z = safe_bound` — the C-15 rule, never the raw
 LP objective** — zero extra LP solves, (iii) integer RC-fixing (inward rounding,

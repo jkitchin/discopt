@@ -26,7 +26,7 @@ def main():
     import jax
     import jax.numpy as jnp
 
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
 
     model = from_nl(NL_PATH)

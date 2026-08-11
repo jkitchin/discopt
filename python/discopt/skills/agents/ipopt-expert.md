@@ -31,7 +31,7 @@ result = m.solve(nlp_solver="pounce")  # POUNCE (pure-Rust Ipopt port)
 # Direct use (for debugging):
 from discopt.solvers.ipopt_wrapper import solve_ipopt
 r = solve_ipopt(
-    evaluator,            # NLPEvaluator from discopt._jax.nlp_evaluator
+    evaluator,            # NLPEvaluator from discopt._relax.nlp_evaluator
     x0=...,
     options={
         "max_iter": 3000,

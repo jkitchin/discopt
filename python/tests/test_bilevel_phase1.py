@@ -22,7 +22,7 @@ import pytest
 jax = pytest.importorskip("jax")
 scipy_opt = pytest.importorskip("scipy.optimize")
 import jax.numpy as jnp  # noqa: E402
-from discopt._jax.dag_compiler import compile_expression_params  # noqa: E402
+from discopt._relax.dag_compiler import compile_expression_params  # noqa: E402
 from discopt.bilevel import BilevelProblem  # noqa: E402
 from discopt.modeling.core import Model  # noqa: E402
 

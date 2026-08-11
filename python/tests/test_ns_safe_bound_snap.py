@@ -12,7 +12,7 @@ function hand-built duals so the arithmetic is exercised deterministically.
 from __future__ import annotations
 
 import numpy as np
-from discopt._jax.obbt import _ns_safe_lp_lower_bound
+from discopt._relax.obbt import _ns_safe_lp_lower_bound
 
 
 def _problem_with_free_column():

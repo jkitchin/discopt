@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.symbolic.signed_signomial import signed_signomial_dc_envelope
+from discopt._relax.symbolic.signed_signomial import signed_signomial_dc_envelope
 
 jax.config.update("jax_enable_x64", True)
 

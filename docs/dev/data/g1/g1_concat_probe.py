@@ -3,7 +3,7 @@ import numpy as np
 NL="python/tests/data/minlplib_nl/nvs05.nl"
 def main():
     import jax, jax.numpy as jnp
-    import discopt._jax.nlp_evaluator as nev
+    import discopt._relax.nlp_evaluator as nev
     from discopt.modeling.core import from_nl
     m=from_nl(NL); ev=nev.cached_evaluator(m); n=ev.n_variables; mc=ev.n_constraints
     ev._ensure_coo_cache(); jr,jc=ev._jac_rows,ev._jac_cols

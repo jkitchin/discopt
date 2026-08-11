@@ -10,7 +10,7 @@ comparable before/after column.
 Per instance it measures:
 
 * **ctor** — wall time to build the reusable relaxer
-  (:class:`~discopt._jax.mccormick_lp.MccormickLPRelaxer`); this pays the fixed
+  (:class:`~discopt._relax.mccormick_lp.MccormickLPRelaxer`); this pays the fixed
   first-JAX-trace + incremental double-build setup cost.
 * **root** — wall time of the first ``solve_at_node`` over the full model box.
 * **ms/node** — mean wall time of ``solve_at_node`` over ``--children N``
@@ -76,7 +76,7 @@ def _count_builds() -> Iterator[list[int]]:
     and so are covered by the source-module patch. All bindings are restored on
     exit. Pure instrumentation, confined to this process.
     """
-    from discopt._jax import milp_relaxation as _mr
+    from discopt._relax import milp_relaxation as _mr
 
     orig = _mr.build_milp_relaxation
     counter = [0]
@@ -138,8 +138,8 @@ def probe_instance(
     solve_time_limit: float,
     do_profile: bool,
 ) -> dict:
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.modeling.core import from_nl
 
     nl_path = _NL_DIR / f"{name}.nl"

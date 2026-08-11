@@ -36,7 +36,7 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.gdp_reformulate import reformulate_gdp
+from discopt._relax.gdp_reformulate import reformulate_gdp
 
 pytestmark = pytest.mark.smoke
 

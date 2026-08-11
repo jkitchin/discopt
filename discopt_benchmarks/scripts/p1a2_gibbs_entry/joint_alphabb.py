@@ -1,7 +1,7 @@
 import sys, numpy as np
 import discopt.modeling as dm
-from discopt._jax.dag_compiler import compile_expression
-from discopt._jax.alphabb import rigorous_alpha, alphabb_underestimator
+from discopt._relax.dag_compiler import compile_expression
+from discopt._relax.alphabb import rigorous_alpha, alphabb_underestimator
 import jax, jax.numpy as jnp
 from scipy.optimize import minimize
 jax.config.update('jax_platform_name','cpu')

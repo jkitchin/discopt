@@ -1,7 +1,7 @@
 """M6 regression: eigenvalue arithmetic on benchmark-style quadratic
 subexpressions.
 
-The eigenvalue bound provider (``discopt._jax.convexity.eigenvalue_arith``)
+The eigenvalue bound provider (``discopt._relax.convexity.eigenvalue_arith``)
 is not yet wired into the LP relaxation compiler — that integration
 ships alongside the M2/M3 kernel and M11 wrapper integration as a
 follow-up. This regression exercises the kernel directly on quadratic
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax.convexity.eigenvalue_arith import (
+from discopt._relax.convexity.eigenvalue_arith import (
     QuadraticForm,
     interval_ad_quadratic_bound,
     quadratic_form_bound,

@@ -50,12 +50,12 @@ class _CaptureWarnings(logging.Handler):
 
 def root_bound(model) -> tuple[str, float | None, bool]:
     """Return ``(status, lower_bound, objective_fell_back)`` for the root LP."""
-    from discopt._jax import milp_relaxation as milp
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax import milp_relaxation as milp
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     milp._warned_messages.clear()
     cap = _CaptureWarnings()
-    logger = logging.getLogger("discopt._jax.milp_relaxation")
+    logger = logging.getLogger("discopt._relax.milp_relaxation")
     prev_level = logger.level
     logger.addHandler(cap)
     logger.setLevel(logging.WARNING)
@@ -75,7 +75,7 @@ def root_bound(model) -> tuple[str, float | None, bool]:
 
 def atom_kinds(model) -> dict[str, int]:
     """Canonical-DAG atom-kind histogram of the model (objective + constraints)."""
-    from discopt._jax.canonical_expr import atomize, canonicalize
+    from discopt._relax.canonical_expr import atomize, canonicalize
 
     try:
         dag = canonicalize(model)

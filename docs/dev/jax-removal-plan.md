@@ -113,8 +113,8 @@ by reading the code**:
 | site | instances | fix |
 |---|---|---|
 | `validation/feasibility.py:254` | dispatch, nvs13, st_e13, st_testgr3, tanksize | dispatcher (`17b7c08d`) |
-| `_jax/lp_spatial_bb.py:466` | (same) | dispatcher (`17b7c08d`) |
-| `solver.py:1821` → `_jax/alphabb.py:34` | ex14_1_9, oaer, tspn08 | split out (`db40debf`) |
+| `_relax/lp_spatial_bb.py:466` | (same) | dispatcher (`17b7c08d`) |
+| `solver.py:1821` → `_relax/alphabb.py:34` | ex14_1_9, oaer, tspn08 | split out (`db40debf`) |
 
 `rigorous_alpha` is the third case of one pattern: **JAX-free code living in a
 JAX-importing module**, where the import is the entire cost. It needs only
@@ -233,16 +233,16 @@ benefit.
 
 Established by measurement in this investigation:
 
-- Of `_jax/`'s 68,408 LOC, **66% never import jax**; only 14,050 LOC (24 files)
+- Of `_relax/`'s 68,408 LOC, **66% never import jax**; only 14,050 LOC (24 files)
   use a real JAX transform. The package name is a misnomer.
 - JAX is imported **iff the model has ≥1 nonlinear constraint**. A quadratic
   *objective* does not trigger it (LP/MILP/QP/MIQP are JAX-free); integrality is
   irrelevant. 10 of 66 corpus instances never import it.
 - On the solve path JAX does **exactly two jobs**:
-  - **Job 1 — NLP subsolve derivatives** (`_jax/nlp_evaluator.py`): f, ∇f, g, J,
+  - **Job 1 — NLP subsolve derivatives** (`_relax/nlp_evaluator.py`): f, ∇f, g, J,
     ∇²L, HVPs, sparsity. Every solver family funnels through it — spatial B&B,
     AMP (`solvers/amp.py`), and OA (`solvers/oa.py:1562-1564`).
-  - **Job 2 — separation tangents** (`_jax/uniform_relax.py:813-820`): `g(x₀)` and
+  - **Job 2 — separation tangents** (`_relax/uniform_relax.py:813-820`): `g(x₀)` and
     `∇g(x₀)` for the Kelley cutting-plane loop on composite convex lifts.
 - **jit is unavailable on Job 2 by design.** `uniform_relax.py:441`: XLA fusion
   reorders floats (drift ~7e-15), and the Kelley loop is path-dependent, so that
@@ -256,8 +256,8 @@ Both replacements already exist in-tree. The goal is to reach **zero `import jax
 reachable from `Model.solve()` and no `jax.jit` on that path**, while keeping the
 post-solve differentiable-optimization features on JAX.
 
-**Out of scope — these stay on JAX:** `_jax/differentiable*.py`,
-`_jax/pounce_layer.py`, `_jax/parametric.py`, `parametric.py`, `_jax/icnn*.py`,
+**Out of scope — these stay on JAX:** `_relax/differentiable*.py`,
+`_relax/pounce_layer.py`, `_relax/parametric.py`, `parametric.py`, `_relax/icnn*.py`,
 `modeling/implicit.py`.
 
 ---
@@ -499,7 +499,7 @@ recorded below rather than quietly edited, per CLAUDE.md §11.
 4. ~~**Job 4's QP rescue**~~ — **removed, not replaced.** The premise ("pounce
    failed") was backwards: the rescue ran only when the feasibility/KKT-stationarity
    guard had just *rejected* pounce's point, and it then issued `status="optimal"`
-   with a bound and `gap=0` on its own convergence flag alone. `_jax/qp_ipm.py`
+   with a bound and `gap=0` on its own convergence flag alone. `_relax/qp_ipm.py`
    (661 lines, the last pure-JAX solver in the tree) is deleted and `_solve_qp` now
    refuses loudly.
 
@@ -521,9 +521,9 @@ tape *does* support. **The clean route is a direct tape-builder binding, not ric
 **Why first:** the replacement is already written and coverage is ~100%. **NOT
 bound-neutral** — see correction 1 above; it takes the §5 panel like Place 2.
 
-`_jax/uniform_relax.py:827` `_compiled_analytic` already computes
+`_relax/uniform_relax.py:827` `_compiled_analytic` already computes
 `(value_fn, grad_fn)` with no JAX, via forward-mode interval AD over discopt's own
-factorable IR (`_jax/convexity/interval_ad.py`, zero jax imports), pinning variables
+factorable IR (`_relax/convexity/interval_ad.py`, zero jax imports), pinning variables
 to point intervals. Gated by `DISCOPT_ANALYTIC_SEPGRAD`, currently **unset ⇒ OFF**
 (`uniform_relax.py:805`). It probes at the box midpoint and returns `None` →
 JAX fallback on any uncovered atom.
@@ -622,7 +622,7 @@ elsewhere, and the B&B is path-dependent.
 Both must be answered before any implementation.
 
 **(a) Operator coverage.** discopt's DAG supports ~25 unary functions plus
-`atan2`, `signpower`, `centropy`, `prod` (`_jax/dag_compiler.py:243-288`). Enumerate
+`atan2`, `signpower`, `centropy`, `prod` (`_relax/dag_compiler.py:243-288`). Enumerate
 `nl_tape.rs`'s opcode set and diff. Any discopt operator the tape lacks is either a
 tape addition (pounce repo) or a blocker.
 
@@ -646,7 +646,7 @@ need no changes.
 
 Gate behind `DISCOPT_NLP_EVAL=tape|jax`, default `jax`. Route sparse paths to
 `hessian_sparsity` / `jacobian_structure` instead of
-`_jax/sparse_jacobian.py` / `_jax/sparse_hessian.py`.
+`_relax/sparse_jacobian.py` / `_relax/sparse_hessian.py`.
 
 **Before/after check — derivative agreement, before any solve:**
 - Sample ≥50 points per instance across ≥30 corpus instances spanning operator
@@ -678,7 +678,7 @@ it against. State the predicted direction *before* running, so the run can falsi
 ### Step 2.4 — Graduate and delete
 
 Default to `tape`, keep the `=jax` opt-out for one release, then remove
-`_jax/nlp_evaluator.py`, `_jax/sparse_jacobian.py`, `_jax/sparse_hessian.py`.
+`_relax/nlp_evaluator.py`, `_relax/sparse_jacobian.py`, `_relax/sparse_hessian.py`.
 
 ### Tests after Place 2
 
@@ -691,7 +691,7 @@ cargo test -p discopt-core     # if Rust touched
 
 ---
 
-## Stage 3 — Rename `_jax/` to match what it actually contains
+## Stage 3 — Rename `_relax/` to match what it actually contains
 
 **Why:** the directory name is a historical accident that actively caused errors in
 this investigation. Created 2026-02-07 (`d326f654`, "T4 JAX DAG compiler") holding
@@ -713,9 +713,9 @@ Today 66% of its LOC never imports jax. Its largest residents are
 (2,601), `primal_heuristics.py` (2,153), `gdp_reformulate.py` (1,824) and
 `convexity/` (~10,600) — the guts of a global MINLP solver, not a JAX layer.
 
-`_jax/__init__.py` already documents the strain: JAX is imported lazily via PEP 562
+`_relax/__init__.py` already documents the strain: JAX is imported lazily via PEP 562
 `__getattr__` so that *"importing a JAX-free submodule such as
-`discopt._jax.deadline` no longer drags in `dag_compiler` and the heavy JAX/XLA
+`discopt._relax.deadline` no longer drags in `dag_compiler` and the heavy JAX/XLA
 initialization"* — a workaround for the misnaming.
 
 **Concrete cost incurred:** this naming is why `milp_relaxation.py:2037` delegating
@@ -724,7 +724,7 @@ wrong "the hot path is JAX-free" conclusion; and why AMP/OA look JAX-coupled whe
 only 1 of their 10 `_jax` dependencies touches JAX.
 
 **Change (after Places 1 and 2 land):**
-- `_jax/` → `_relax/` (or `_numeric/`) — the relaxation/presolve/cut/convexity core.
+- `_relax/` → `_relax/` (or `_numeric/`) — the relaxation/presolve/cut/convexity core.
 - Genuinely-JAX post-solve features → `_diff/`: `differentiable*.py`,
   `pounce_layer.py`, `parametric.py`, `icnn*.py`.
 - Drop the PEP 562 lazy-`__getattr__` workaround in `__init__.py` — unnecessary once
@@ -738,7 +738,7 @@ only 1 of their 10 `_jax` dependencies touches JAX.
   `__import__("jax")` does **not** contain the substring `import jax`, so a naive
   grep misses it. The Stage-1/2 acceptance test must catch these — assert on
   `sys.modules` after a solve, never on a source grep.
-- `_jax/symbolic/__init__.py:48` resolves submodules via
+- `_relax/symbolic/__init__.py:48` resolves submodules via
   `importlib.import_module(f"{__name__}.{module}")` off a `_LAZY` dict — a
   string-built module path that a mechanical rename will not update. Audit it
   explicitly.
@@ -815,8 +815,8 @@ The file sets are **disjoint**, so the stages do not conflict:
 | branch | files touched |
 |---|---|
 | `fix/jax-time-attribution` | `solver.py` (accumulators `:6523-6524`, roll-up `:1241-1271`), `discopt_benchmarks/perf/measure.py` |
-| `refactor/analytic-separation-gradients` | `_jax/uniform_relax.py`, `_jax/convexity/interval_ad.py` |
-| `refactor/tape-nlp-evaluator` | new evaluator backend, `_jax/nlp_evaluator.py`, `_jax/sparse_{jacobian,hessian}.py` |
+| `refactor/analytic-separation-gradients` | `_relax/uniform_relax.py`, `_relax/convexity/interval_ad.py` |
+| `refactor/tape-nlp-evaluator` | new evaluator backend, `_relax/nlp_evaluator.py`, `_relax/sparse_{jacobian,hessian}.py` |
 | `refactor/rename-jax-package` | ~1,976 sites across the repo (Stage 3; strictly last) |
 
 **But they are not independent for verification, in three ways:**
@@ -877,11 +877,11 @@ absorbed); buckets partition the wall; bound-neutral on 12 instances.
 
 ## Stage 1 — DAG → `NlExpr` translator (the new shared prerequisite)
 
-The single new component. Mirrors `_jax/dag_compiler.py`'s walk, emitting
+The single new component. Mirrors `_relax/dag_compiler.py`'s walk, emitting
 `pounce.NlExpr` instead of a `jnp` callable.
 
 **Files:** new `python/discopt/_nl_expr_compiler.py` (name TBD; it is not
-JAX-related and must not live under `_jax/`).
+JAX-related and must not live under `_relax/`).
 
 **Operator table** — 20 native, 10 by decomposition, all verified reachable:
 
@@ -933,7 +933,7 @@ bound-changing and stays gated.
 Routing `_compiled` was not sufficient, and none of these were visible by
 reading the separation code:
 
-* `solvers/nlp_pounce.py`, `solvers/nlp_ipopt.py`, `_jax/primal_heuristics.py`
+* `solvers/nlp_pounce.py`, `solvers/nlp_ipopt.py`, `_relax/primal_heuristics.py`
   imported `NLPEvaluator` at **module scope**. `nlp_backend` imports
   `nlp_pounce` to probe for POUNCE, so this pulled JAX on every solve regardless
   of backend. All annotation-only → `TYPE_CHECKING`.
@@ -950,9 +950,9 @@ estimate, three type annotations, or two stragglers.
 
 ### Original plan text follows
 
-Replace the `jax.grad` arm of `_Builder._compiled` (`_jax/uniform_relax.py:813-820`)
+Replace the `jax.grad` arm of `_Builder._compiled` (`_relax/uniform_relax.py:813-820`)
 with the translator, delete `_TracedEvalFn` (`:423-475`), and swap the `jnp`
-marshaling at `_jax/mccormick_lp.py:2022` to numpy.
+marshaling at `_relax/mccormick_lp.py:2022` to numpy.
 
 **Bound impact: CHANGING.** §5 differential panel. Reuse
 `scratchpad/stage1_panel.py`, which already implements both bars.
@@ -1208,7 +1208,7 @@ the tape arm never importing jax and the control arm asserted to do so.
 
 ### Original plan text follows
 
-Replace `_jax/nlp_evaluator.py` — the single trigger that imports JAX on *every*
+Replace `_relax/nlp_evaluator.py` — the single trigger that imports JAX on *every*
 nonlinear solve (`:22`, measured across 27 instances). Same protocol, so
 `solvers/nlp_pounce.py:19`, `solvers/oa.py:1562-1564` and `solvers/amp.py:1026`
 need no changes.

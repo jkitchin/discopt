@@ -8,7 +8,7 @@ A *geometric program* (GP) in standard form is::
                 x > 0
 
 where ``f_i`` are posynomials and ``g_j`` are monomials (see
-:mod:`discopt._jax.convexity.posynomial`). A posynomial is not convex in
+:mod:`discopt._relax.convexity.posynomial`). A posynomial is not convex in
 ``x``, but under ``y_j = log(x_j)`` every monomial
 ``c * prod_j x_j^{a_j}`` becomes ``exp(a^T y + log c)``; a posynomial
 becomes a sum of exponentials of affine forms (convex), a monomial
@@ -41,14 +41,14 @@ from typing import Optional
 import numpy as np
 
 import discopt.modeling as dm
-from discopt._jax.convexity.log_lattice import (
+from discopt._relax.convexity.log_lattice import (
     LogCurvature,
     classify_log_curvature,
     log_combine_product,
     log_combine_sum,
     log_negate,
 )
-from discopt._jax.convexity.posynomial import (
+from discopt._relax.convexity.posynomial import (
     Monomial,
     PosynomialForm,
     is_posynomial,
@@ -115,7 +115,7 @@ def _split_signed_monomials(
     positive-coefficient monomials; a term with overall negative sign
     lands in the second list with its coefficient negated to positive.
     """
-    from discopt._jax.convexity.posynomial import _flatten_sum_terms, _parse_monomial
+    from discopt._relax.convexity.posynomial import _flatten_sum_terms, _parse_monomial
 
     terms: list[tuple[float, Expression]] = []
     _flatten_sum_terms(body, 1.0, terms)
@@ -194,7 +194,7 @@ def is_log_convex(model: Model) -> bool:
     monomial becomes ``exp`` of an affine form, a posynomial a convex
     sum-of-exponentials). This is a verdict in **log-space**, kept
     deliberately separate from
-    :func:`discopt._jax.convexity.classify_model`, which reports
+    :func:`discopt._relax.convexity.classify_model`, which reports
     convexity in the **original** ``x``-space.
 
     The distinction matters: a genuine GP is generally *not* convex in

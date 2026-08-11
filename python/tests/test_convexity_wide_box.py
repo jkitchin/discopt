@@ -6,7 +6,7 @@ declared wide — interval-arithmetic certificates lose precision because
 the interval Hessian grows loose (or blows up to ``inf``) before
 eigenvalue bounds can prove PSD. discopt's box-local certificate has
 the same failure mode when used in isolation, but the structural
-pattern recognizers in :mod:`discopt._jax.convexity.patterns` do not
+pattern recognizers in :mod:`discopt._relax.convexity.patterns` do not
 depend on box width and should remain sound regardless of bounds.
 
 These tests assert the intended division of labour:
@@ -34,7 +34,7 @@ import warnings
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity import (
+from discopt._relax.convexity import (
     Curvature,
     certify_convex,
     classify_constraint,
@@ -224,7 +224,7 @@ class TestWideBoxCertificateAbstainsAsDocumented:
     for shapes whose Hessian contains exp/pow/div atoms. The
     quadratic-over-linear shape ``x²/y`` is now certified via a
     structural rank-1 PSD path through the interval-AD walker
-    (see :mod:`discopt._jax.convexity.interval_ad`), so it appears in
+    (see :mod:`discopt._relax.convexity.interval_ad`), so it appears in
     the *positive* :class:`TestWideBoxCertificateProvesConvex` group.
     The remaining abstention pinned here is the exp-perspective
     shape: ``y * exp(x/y)`` overflows ``exp`` on a wide box regardless
@@ -270,7 +270,7 @@ class TestWideBoxCertificateProvesConvex:
     Issue #42: the perspective form ``g²/h`` for affine ``g`` and
     affine strictly-positive ``h`` has an exact rank-1 PSD Hessian
     (see :func:`_rank1_quotient` in
-    :mod:`discopt._jax.convexity.interval_ad`). The certificate
+    :mod:`discopt._relax.convexity.interval_ad`). The certificate
     propagates a :class:`Rank1Factor` through the AD walker and
     consults it as a structural sufficient PSD test, certifying the
     quotient on boxes where Gershgorin's row-sum bound would be too

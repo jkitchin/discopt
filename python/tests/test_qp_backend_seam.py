@@ -178,7 +178,7 @@ class TestQPBackendSeam:
         # The JAX rescue no longer exists to be reached, on any import path.
         assert not hasattr(S, "_solve_qp_jax")
         with pytest.raises(ModuleNotFoundError):
-            importlib.import_module("discopt._jax.qp_ipm")
+            importlib.import_module("discopt._relax.qp_ipm")
 
     def test_convergence_guard_accepts_converged_optimal(self):
         """A small KKT residual (normal converged POUNCE solve) passes the guard

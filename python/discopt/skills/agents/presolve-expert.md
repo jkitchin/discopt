@@ -32,7 +32,7 @@ You are an expert on discopt's presolve and bound-tightening infrastructure. You
 
 ### Key files (Python side)
 - `python/discopt/solver.py::_tighten_node_bounds` — Python hook calling into Rust presolve.
-- `python/discopt/_jax/obbt.py` (if present) — JAX-side OBBT when the LP relaxation is built on the JAX path.
+- `python/discopt/_relax/obbt.py` (if present) — JAX-side OBBT when the LP relaxation is built on the JAX path.
 
 ### How to inspect what presolve did
 discopt currently doesn't expose a full presolve report via the Python API (as of the current version). The Rust side logs pass-by-pass reductions when `RUST_LOG=discopt_core::presolve=debug` is set. Practical tools:
@@ -46,7 +46,7 @@ result = m.solve()
 # final gap / relaxation value at the root node.
 
 # For explicit OBBT probing:
-from discopt._jax.obbt import obbt_tighten   # if exposed
+from discopt._relax.obbt import obbt_tighten   # if exposed
 tight_lb, tight_ub = obbt_tighten(m, iterations=3)
 ```
 

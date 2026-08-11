@@ -201,7 +201,7 @@ worktrees/sessions if desired, but each in its own PR.
 
 - **Evidence** (profile §1.1, §2): `_lns_k_schedule = (2, 5, 10)`
   (solver.py:4999, :7610; consumed at :6617/:8123 →
-  `_jax/primal_heuristics.py:1426 local_branching`). With 12 binaries the
+  `_relax/primal_heuristics.py:1426 local_branching`). With 12 binaries the
   ≤`max_binaries` enumeration branch issues `ΣC(12,r)` full POUNCE sub-NLPs
   — 79 at k=2, 1 586 at k=5 — ignoring its ≤2 s slice
   (`submip_time_limit=_lb_slice`) and never polling the deadline. fac2:
@@ -287,7 +287,7 @@ worktrees/sessions if desired, but each in its own PR.
 ### F3 — Route the multilinear separator's LP re-solves to the warm simplex  (B9; extends #484)
 
 - **Evidence** (profile §1.3): nvs09 — 92.6 % of 60 s inside
-  `_separate_multilinear` (`_jax/mccormick_lp.py:994`, called at :759) →
+  `_separate_multilinear` (`_relax/mccormick_lp.py:994`, called at :759) →
   `lp_pounce._solve_core` (the POUNCE LP IPM). #484's
   `DISCOPT_SEPARATION_LP_SIMPLEX` (default ON) covered edge-concave
   (`edge_concave.py:58`) and strong branching (`solver.py:1748`) only.
@@ -427,7 +427,7 @@ worktrees/sessions if desired, but each in its own PR.
   (e.g. the argument's interval never tightens in FBBT); re-diagnose before
   building anything.
 - **Implementation sketch:** in the relaxation compiler
-  (`python/discopt/_jax/mccormick.py::relax_pow` at :203 and the composite
+  (`python/discopt/_relax/mccormick.py::relax_pow` at :203 and the composite
   path that feeds it), thread the composite argument's interval (already
   computed by interval propagation) into the even-power envelope instead of
   falling back to the variable-box-independent form. Flag:

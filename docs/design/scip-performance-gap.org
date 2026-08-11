@@ -165,7 +165,7 @@ minimal repro shows =log(1 + x)= over a *bounded* =x in [0,5]= relaxes tightly
 (-1.792 = -log 6); the trigger is the *unbounded argument box*, not the affine
 wrapper.)
 
-*Fix* (=_collect_univariate_relaxations= in =_jax/milp_relaxation.py=). When a
+*Fix* (=_collect_univariate_relaxations= in =_relax/milp_relaxation.py=). When a
 univariate operator's argument is out of domain under the raw node box, *retry
 over an FBBT-tightened box* before dropping the constraint, instead of giving up.
 The tightened box is computed lazily (once per build, only when a rescue is

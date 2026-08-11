@@ -10,9 +10,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import scipy.sparse as sp
-from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.discretization import DiscretizationState
+from discopt._relax.milp_relaxation import build_milp_relaxation
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 np.set_printoptions(precision=4, suppress=True, linewidth=140)
 

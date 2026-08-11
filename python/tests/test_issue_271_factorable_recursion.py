@@ -31,7 +31,7 @@ import sys  # noqa: E402
 
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
-from discopt._jax.factorable_reform import (  # noqa: E402
+from discopt._relax.factorable_reform import (  # noqa: E402
     _find_clearable_denominator,
     _max_expr_node_count,
     _recursion_headroom_need,
@@ -139,7 +139,7 @@ def test_factorable_walk_under_lowered_limit(monkeypatch):
     simulate production by lowering the limit and dropping the gate onto a modest
     model — exactly the strategy of ``test_issue_266``'s deep-graph test.
     """
-    from discopt._jax import factorable_reform
+    from discopt._relax import factorable_reform
 
     monkeypatch.setattr(factorable_reform, "_DEEP_RECURSION_SIZE_GATE", 50)
     n = 700

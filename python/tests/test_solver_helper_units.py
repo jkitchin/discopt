@@ -16,7 +16,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.callbacks import CutResult
 from discopt.modeling.core import Model
 from discopt.solver import (

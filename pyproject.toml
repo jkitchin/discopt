@@ -62,7 +62,7 @@ lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
 learned = ["equinox>=0.13.8", "optax>=0.1"]
 # Design-time symbolic envelope/relaxation derivation toolkit
-# (discopt._jax.symbolic). SymPy is used to *derive*, *verify*, and
+# (discopt._relax.symbolic). SymPy is used to *derive*, *verify*, and
 # *code-generate* JAX relaxation closures offline; it is never imported on the
 # solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
@@ -141,15 +141,15 @@ module = "discopt.modeling.core"
 disable_error_code = ["arg-type", "union-attr", "attr-defined"]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.dag_compiler"
+module = "discopt._relax.dag_compiler"
 disable_error_code = "misc"
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.relaxation_compiler"
+module = "discopt._relax.relaxation_compiler"
 disable_error_code = ["misc", "attr-defined"]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.nlp_evaluator"
+module = "discopt._relax.nlp_evaluator"
 disable_error_code = ["misc", "no-any-return", "assignment"]
 
 [[tool.mypy.overrides]]
@@ -161,7 +161,7 @@ module = "discopt.solvers.nlp_pounce"
 disable_error_code = "no-any-return"
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.pounce_layer"
+module = "discopt._relax.pounce_layer"
 disable_error_code = "no-any-return"
 
 [[tool.mypy.overrides]]
@@ -169,15 +169,15 @@ module = "discopt.solver"
 disable_error_code = "attr-defined"
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.differentiable"
+module = "discopt._relax.differentiable"
 disable_error_code = ["misc", "index", "return-value", "no-redef", "no-any-return", "arg-type"]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.obbt"
+module = "discopt._relax.obbt"
 disable_error_code = ["assignment", "no-redef", "arg-type", "index"]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.primal_heuristics"
+module = "discopt._relax.primal_heuristics"
 disable_error_code = ["no-any-return"]
 
 # The convexity-certificate modules use numpy primitives extensively;
@@ -185,7 +185,7 @@ disable_error_code = ["no-any-return"]
 # which pollutes strict typing without affecting runtime correctness.
 # Soundness is guaranteed by the test suite, not the type checker.
 [[tool.mypy.overrides]]
-module = "discopt._jax.convexity.interval"
+module = "discopt._relax.convexity.interval"
 disable_error_code = [
     "no-any-return",
     "arg-type",
@@ -195,7 +195,7 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.convexity.interval_eval"
+module = "discopt._relax.convexity.interval_eval"
 disable_error_code = [
     "no-any-return",
     "arg-type",
@@ -208,7 +208,7 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.convexity.interval_ad"
+module = "discopt._relax.convexity.interval_ad"
 disable_error_code = [
     "no-any-return",
     "arg-type",
@@ -221,11 +221,11 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.convexity.eigenvalue"
+module = "discopt._relax.convexity.eigenvalue"
 disable_error_code = ["arg-type", "assignment", "call-overload"]
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.convexity.certificate"
+module = "discopt._relax.convexity.certificate"
 disable_error_code = ["no-any-return", "arg-type", "call-overload"]
 
 [[tool.mypy.overrides]]

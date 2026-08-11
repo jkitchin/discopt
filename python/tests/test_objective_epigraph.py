@@ -1,6 +1,6 @@
 """Tests for the objective-defining-equality relaxation.
 
-The transform (``discopt._jax.objective_epigraph``) rewrites the SUSPECT
+The transform (``discopt._relax.objective_epigraph``) rewrites the SUSPECT
 "objective constraint" pattern ``min z  s.t.  z = g(x)`` into the binding
 inequality ``z >= g(x)``. The rewrite is exact at the optimum and unlocks
 the convex solve path when ``g`` is convex.
@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.convexity import classify_model
-from discopt._jax.objective_epigraph import (
+from discopt._relax.convexity import classify_model
+from discopt._relax.objective_epigraph import (
     _affine_coeff,
     _occurs,
     relax_objective_defining_equality,

@@ -1,7 +1,7 @@
 # SymPy-driven envelopes & relaxations + certified learned envelopes — design / plan
 
 **Status:** Phases 1–5, 7, 8 implemented and tested
-(`python/discopt/_jax/symbolic/`). Phase 6 (tight multivariate hulls) is the
+(`python/discopt/_relax/symbolic/`). Phase 6 (tight multivariate hulls) is the
 remaining research frontier — scoped below. Branch:
 `claude/sympy-envelopes-relaxations-4d3vwz`.
 
@@ -13,7 +13,7 @@ docs notebook. ~110 tests across `test_symbolic_*`, `test_certified_learned`,
 
 **Goal:** use SymPy as a *design-time* engine to derive, verify, and code-generate
 tight convex/concave envelopes for nonlinear atoms that the hand-written McCormick
-library (`discopt._jax.mccormick`, `_jax.envelopes`) does not yet cover — focused on
+library (`discopt._relax.mccormick`, `_relax.envelopes`) does not yet cover — focused on
 terms from **chemical-engineering, gas-network, and electrical-grid** optimization —
 and to extend this with **certified learned (ML) envelopes** that exploit
 guaranteed-convex / guaranteed-monotone neural networks.
@@ -32,7 +32,7 @@ guaranteed-convex / guaranteed-monotone neural networks.
 ## Architecture
 
 ```
-python/discopt/_jax/symbolic/
+python/discopt/_relax/symbolic/
   envelope_deriver.py   # univariate curvature analysis + envelope synthesis  [DONE]
   runtime.py            # sympy-free JAX envelope assembly (hot path)         [DONE]
   codegen.py            # SymPy -> JAX (x,lb,ub)->(cv,cc) closures             [DONE]
@@ -102,8 +102,8 @@ which is strictly tighter than this compositional bound:
 * Edge-concave / vertex-polyhedral facets for general trilinear and signomial
   terms, generalizing `relax_trilinear_exact`.
 
-Integration surface (existing infra): `_jax/envelopes.py::relax_trilinear_exact`,
-`_jax/edge_concave.py`, `_jax/multivariate_mccormick.py`. The deliverable is a
+Integration surface (existing infra): `_relax/envelopes.py::relax_trilinear_exact`,
+`_relax/edge_concave.py`, `_relax/multivariate_mccormick.py`. The deliverable is a
 `symbolic/structured.py` that derives the facet coefficients symbolically and a
 multivariate extension of the verifier. This is deferred deliberately — a shallow
 re-wrap of compositional McCormick would add no tightness, and an unsound hull
@@ -152,7 +152,7 @@ relaxation; Misener & Floudas). Update `_toc.yml`; rebuild with zero warnings.
 ## Phase 8 — Certified learned (ML) envelopes
 
 **Motivation.** discopt already ships ICNN-based learned relaxations
-(`_jax/icnn.py`, `_jax/learned_relaxations.py`): a pair of Input Convex Neural
+(`_relax/icnn.py`, `_relax/learned_relaxations.py`): a pair of Input Convex Neural
 Networks gives a convex `cv` and concave `cc` *by construction*. The gap to a *valid
 relaxation* is the **bound**: convexity ≠ `cv <= f`.
 
@@ -175,7 +175,7 @@ soundness.
   thermodynamic property models — monotone in T / convex in composition). Embedded
   via `discopt.nn`, relaxed *tightly because of* the guaranteed structure.
 - (c) **Certification layer.** Bound worst-case under/over-estimation with the
-  outward-rounded interval arithmetic in `_jax/convexity/interval.py` + a Lipschitz
+  outward-rounded interval arithmetic in `_relax/convexity/interval.py` + a Lipschitz
   bound, subtract a sound constant margin (preserving convexity), track the gap.
   The same `verify_envelope` gate guards every learned atom before registration.
 

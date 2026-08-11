@@ -26,7 +26,7 @@ former (1)/(2) asymmetries (gaps A and C) are closed. What remains are *tightnes
 
 ## 1. Operator relaxations (arithmetic core)
 
-Source: `python/discopt/_jax/mccormick.py`. Convention: each `relax_*` returns
+Source: `python/discopt/_relax/mccormick.py`. Convention: each `relax_*` returns
 `(cv, cc)` with `cv ≤ f ≤ cc`; convex parts are exact, concave parts use secant lines
 (`_secant`, mccormick.py:23).
 

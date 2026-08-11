@@ -83,7 +83,7 @@ decomposition premise* — full-space training converged in 17 iterations / 37 s
 - One task per PR where practicable; PR titles name the task ID (e.g.
   `feat(nn): HM1.1 TrainableDense/TrainableNetwork`).
 - Do not rebuild what exists: collocation transcription (`discopt.dae`),
-  least-squares detection (`_jax/least_squares.py`), warm-start validation
+  least-squares detection (`_relax/least_squares.py`), warm-start validation
   (`discopt/warm_start.py`), readers (`discopt/nn/readers/`), frozen formulations
   (`discopt/nn/formulations/`). Check `docs/design/relaxation-catalog.md` before
   any HM4 envelope work.

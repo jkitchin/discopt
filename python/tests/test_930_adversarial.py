@@ -15,7 +15,7 @@ not cover:
    lower bound asserts "the optimum is at least 1e20". This is the same
    confusion as #15, where the simplex's mishandling of 1e20-magnitude bounds
    produced a bogus "optimal" *above* the true optimum and certified a
-   suboptimal incumbent (see ``_jax/mccormick_lp.py`` §"issue #15"). Defense in
+   suboptimal incumbent (see ``_relax/mccormick_lp.py`` §"issue #15"). Defense in
    depth: no end-to-end path is known that hands the gate a sentinel today, but
    the gate is the last checkpoint before a number becomes a certificate.
 

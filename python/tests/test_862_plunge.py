@@ -44,7 +44,7 @@ import pathlib
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.lp_spatial_bb import (
+from discopt._relax.lp_spatial_bb import (
     _PLUNGE_MAX_DEPTH,
     _plunge_enabled,
     solve_lp_spatial_bb,

@@ -26,7 +26,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.lp_spatial_bb as lpsb  # noqa: E402
+import discopt._relax.lp_spatial_bb as lpsb  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
 
@@ -66,8 +66,8 @@ def _incremental_model() -> dm.Model:
 
 
 def _structure_builds(model) -> bool:
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     return bool(IncrementalMcCormickLP(model, classify_nonlinear_terms(model), deadline=None).ok)
 
@@ -147,7 +147,7 @@ def test_failed_child_on_the_incremental_path_never_yields_a_false_certificate(m
     ``IncrementalMcCormickLP.solve``. Inject there instead and require the same
     property — no certified verdict over space the engine could not examine.
     """
-    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
 
     truth = lpsb.solve_lp_spatial_bb(_incremental_model(), time_limit=30.0, gap_tolerance=1e-4)
     assert truth is not None and truth.status == "optimal", "control lost its certificate"

@@ -34,8 +34,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.convexity import Curvature, classify_expr
-from discopt._jax.dag_compiler import compile_expression
+from discopt._relax.convexity import Curvature, classify_expr
+from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Expression, FunctionCall, Model
 
 pytestmark = pytest.mark.slow

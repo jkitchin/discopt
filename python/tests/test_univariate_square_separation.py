@@ -30,7 +30,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import discopt
-import discopt._jax.mccormick_lp as mc
+import discopt._relax.mccormick_lp as mc
 import numpy as np
 import pytest
 

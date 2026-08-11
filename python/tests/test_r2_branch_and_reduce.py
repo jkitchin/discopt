@@ -26,8 +26,8 @@ import time
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.root_reduce import run_root_fixpoint
+from discopt._relax.mccormick_lp import MccormickLPRelaxer
+from discopt._relax.root_reduce import run_root_fixpoint
 
 
 def _bilinear_model():
@@ -65,7 +65,7 @@ def test_marginals_do_not_change_bound():
 
 
 # (The reduce_node feasible-point-retention + DBBT tests were removed with the
-# ``DISCOPT_NODE_REDUCE`` flag / ``discopt._jax.node_reduce`` module in #581. The
+# ``DISCOPT_NODE_REDUCE`` flag / ``discopt._relax.node_reduce`` module in #581. The
 # root branch-and-reduce fixpoint below — the GRADUATED ``root_fixpoint`` path —
 # retains its own tighten-only + oracle-soundness coverage.)
 
@@ -198,7 +198,7 @@ class _MisalignedRepr:
 def test_root_reduce_misaligned_repr_forgoes_tightening():
     """C-41: root cutoff-FBBT with a misaligned (short) repr must forgo the
     tightening, not corrupt the root box or report a false infeasible."""
-    import discopt._jax.root_reduce as rr
+    import discopt._relax.root_reduce as rr
     import discopt._rust as _rust
 
     m = _bilinear_model()

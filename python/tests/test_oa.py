@@ -247,7 +247,7 @@ class TestOANonConvex:
     @pytest.mark.slow
     def test_nonconvex_objective_skips_objective_oa_cuts(self, monkeypatch):
         """A nonconvex objective must not produce OA objective cuts or certified bounds."""
-        from discopt._jax import cutting_planes
+        from discopt._relax import cutting_planes
 
         calls = []
         real_generate = cutting_planes.generate_objective_oa_cut

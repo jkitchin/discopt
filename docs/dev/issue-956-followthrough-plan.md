@@ -435,7 +435,7 @@ to a false bound, and six Rust regression tests fail with `=0` to prove it. §1
 governs: *correctness before performance, always.* Shipping the repair off by
 default means #956 is not fixed for anyone who does not know the flag exists. The
 guard is now **default ON** in both engines (`mccormick_patch.rs` and
-`_jax/outward_rounding.py` — they must agree, or `_validate`'s row-set comparison
+`_relax/outward_rounding.py` — they must agree, or `_validate`'s row-set comparison
 drops the incremental path), with `=0` preserved as the opt-out and the legacy
 arithmetic intact behind it.
 

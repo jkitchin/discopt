@@ -129,7 +129,7 @@ If you doubt the result is correct:
 ### G. Crash / exception inside solve
 - Capture the **full** traceback with `--no-daemon` (or in Python, no try/except).
 - Read the deepest discopt frame: `python/discopt/solver.py` (orchestration),
-  `python/discopt/_jax/` (relaxation/NLP eval), `crates/discopt-core/` (Rust IR,
+  `python/discopt/_relax/` (relaxation/NLP eval), `crates/discopt-core/` (Rust IR,
   B&B, .nl parser). Match the error to the layer.
 - Reproduce against a packaged example to isolate model-specific vs solver bugs:
   `discopt.example_simple_minlp()`, `example_transportation()`.

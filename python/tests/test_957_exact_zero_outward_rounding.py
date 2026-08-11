@@ -16,22 +16,22 @@ true value.
 
 import warnings
 
-import discopt._jax.convexity.interval as iv
+import discopt._relax.convexity.interval as iv
 import numpy as np
 import pytest
-from discopt._jax.convexity.eigenvalue import (
+from discopt._relax.convexity.eigenvalue import (
     gershgorin_lambda_max,
     gershgorin_lambda_min,
     psd_2x2_sufficient,
 )
-from discopt._jax.convexity.interval import (
+from discopt._relax.convexity.interval import (
     Interval,
     _round_down,
     _round_down_exact0,
     _round_up,
     _round_up_exact0,
 )
-from discopt._jax.milp_relaxation import (
+from discopt._relax.milp_relaxation import (
     _RELAX_EQUILIBRATE_TRIGGER,
     _SUBNORMAL_FLOOR,
     _coefficient_spread_exceeds,

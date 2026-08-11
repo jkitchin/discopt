@@ -1,9 +1,9 @@
 """Coverage units for the McCormick LP relaxer and OBBT (#87).
 
 Property-driven tests for the under-covered pockets of
-``discopt._jax.mccormick_lp`` (separator loops, cut-pool inheritance /
+``discopt._relax.mccormick_lp`` (separator loops, cut-pool inheritance /
 remapping, incremental infeasibility re-verification, integer-ratio
-partition combining, oversize decline) and ``discopt._jax.obbt``
+partition combining, oversize decline) and ``discopt._relax.obbt``
 (``run_obbt`` cutoff / conditioning branches, ``run_obbt_on_relaxation``
 top-k scoring, DBBT, equality-propagation and LP-bootstrap finitization,
 root OBBT with cutoff, reverse-FBBT integer rounding, and the linear
@@ -27,7 +27,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.mccormick_lp import (
+from discopt._relax.mccormick_lp import (
     MccormickLPRelaxer,
     _pool_has_rows,
     _remap_pool_rows,
@@ -426,7 +426,7 @@ class TestIncrementalAndPoolPaths:
     def test_oversize_lift_declines_with_no_bound(self, monkeypatch):
         # Both the fast path and the cold path must decline (no bound claimed —
         # a decline is sound; a fabricated bound would not be).
-        import discopt._jax.mccormick_lp as mlp
+        import discopt._relax.mccormick_lp as mlp
 
         monkeypatch.setattr(mlp, "_lp_lift_too_large", lambda *a, **k: True)
         fast = MccormickLPRelaxer(_span_bilinear()).solve_at_node(_SPAN_LB, _SPAN_UB)
@@ -556,7 +556,7 @@ class TestRunObbtBranches:
     def test_maximize_cutoff_retains_improving_points(self):
         # max a+b with incumbent 4: the cutoff row is a+b >= 4; every feasible
         # point with objective >= 4 must survive the tightening.
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         m = dm.Model("mx")
         a = m.continuous("a", lb=0, ub=10)
@@ -576,7 +576,7 @@ class TestRunObbtBranches:
     def test_cutoff_is_only_row_when_constraints_nonlinear(self):
         # The bilinear constraint is skipped by the linear extractor, so the
         # cutoff row alone forms A_ub (the A_ub-is-None branch).
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         m = dm.Model("co")
         c = m.continuous("c", lb=0, ub=20)
@@ -592,7 +592,7 @@ class TestRunObbtBranches:
     def test_ill_conditioned_without_ns_abstains(self, monkeypatch):
         # Coefficients above _OBBT_COND_LIMIT with no dual (NS) oracle: OBBT must
         # return the box untouched (abstention is sound; a vertex bound is not).
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: None)
         m = dm.Model("ill")
@@ -608,7 +608,7 @@ class TestRunObbtBranches:
     def test_well_conditioned_without_ns_uses_raw_vertex(self, monkeypatch):
         # No dual oracle but a well-conditioned LP: the raw exact vertex is used
         # and the tightening stays sound (retention of the feasible region).
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: None)
         m = dm.Model("wc")
@@ -652,7 +652,7 @@ def _bge_relaxation():
 @pytest.mark.relaxation
 class TestRelaxationObbtBranches:
     def test_no_exact_oracle_is_sound_noop(self, monkeypatch):
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: None)
         monkeypatch.setattr(obbt_mod, "get_exact_lp_solver", lambda: None)
@@ -671,7 +671,7 @@ class TestRelaxationObbtBranches:
         np.testing.assert_allclose(r2.tightened_ub, [7.0])
 
     def test_require_ns_without_dual_oracle_abstains(self, monkeypatch):
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: None)
         monkeypatch.setattr(obbt_mod, "_OBBT_COND_LIMIT", 1e-3)  # force require_ns
@@ -682,7 +682,7 @@ class TestRelaxationObbtBranches:
         np.testing.assert_allclose(res.tightened_ub, _BGE_UB)
 
     def test_cutoff_and_topk_tighten_soundly(self):
-        from discopt._jax.obbt import run_obbt_on_relaxation
+        from discopt._relax.obbt import run_obbt_on_relaxation
 
         milp, _ = _bge_relaxation()
         res = run_obbt_on_relaxation(milp, 2, incumbent_cutoff=4.5, top_k=1)
@@ -696,7 +696,7 @@ class TestRelaxationObbtBranches:
         assert res.n_lp_solves <= 3
 
     def test_dbbt_reduced_cost_tightening_sound(self, monkeypatch):
-        from discopt._jax.obbt import dbbt_on_relaxation
+        from discopt._relax.obbt import dbbt_on_relaxation
 
         milp, _ = _bge_relaxation()
         res = dbbt_on_relaxation(milp, 2, 4.5)
@@ -707,7 +707,7 @@ class TestRelaxationObbtBranches:
         _assert_retention(feas, _BGE_LB, _BGE_UB, res.tightened_lb, res.tightened_ub)
         # No finite cutoff -> sound no-op; no dual oracle -> sound no-op.
         assert dbbt_on_relaxation(milp, 2, float("inf")).n_lp_solves == 0
-        import discopt._jax.obbt as obbt_mod
+        import discopt._relax.obbt as obbt_mod
 
         monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: None)
         assert obbt_mod.dbbt_on_relaxation(milp, 2, 4.5).n_lp_solves == 0
@@ -718,7 +718,7 @@ class TestRelaxationObbtBranches:
         # Rigorous: every feasible point with objective <= 5 has y = obj - x <= 3.
         from types import SimpleNamespace
 
-        from discopt._jax.obbt import dbbt_on_relaxation
+        from discopt._relax.obbt import dbbt_on_relaxation
 
         rel = SimpleNamespace(
             _bounds=[(0.0, 10.0), (0.0, 10.0)],
@@ -745,7 +745,7 @@ class TestFinitizationAndRootObbt:
     def test_propagate_equality_defined_bounds_finitizes_soundly(self):
         # v == x*y + 2 with x in [1,2], y in [1,3]: the true range of v is [3,8];
         # the pass must finitize v to an enclosing interval and touch nothing else.
-        from discopt._jax.obbt import propagate_equality_defined_bounds
+        from discopt._relax.obbt import propagate_equality_defined_bounds
 
         m = dm.Model("prop")
         x = m.continuous("x", lb=1, ub=2)
@@ -766,7 +766,7 @@ class TestFinitizationAndRootObbt:
             assert new_lb[2] - 1e-9 <= vv <= new_ub[2] + 1e-9
 
     def test_bootstrap_finite_bounds_from_linear_rows(self):
-        from discopt._jax.obbt import bootstrap_finite_bounds
+        from discopt._relax.obbt import bootstrap_finite_bounds
 
         m = dm.Model("boot")
         a = m.continuous("a", lb=0, ub=np.inf)
@@ -790,7 +790,7 @@ class TestFinitizationAndRootObbt:
         # Open-below continuous (c >= -3) and open-above integer (k <= 7):
         # both directions finitize, the integer bound rounds inward, and the
         # true feasible ranges are fully retained.
-        from discopt._jax.obbt import bootstrap_finite_bounds
+        from discopt._relax.obbt import bootstrap_finite_bounds
 
         m = dm.Model("boot2")
         a = m.continuous("a", lb=0, ub=np.inf)
@@ -811,7 +811,7 @@ class TestFinitizationAndRootObbt:
         assert new_ub[2] == 7.0  # integer bound rounded inward to an exact integer
 
     def test_root_obbt_with_cutoff_dbbt_and_min_improvement(self):
-        from discopt._jax.obbt import obbt_tighten_root
+        from discopt._relax.obbt import obbt_tighten_root
 
         res = obbt_tighten_root(
             _bilinear_ge(),
@@ -831,7 +831,7 @@ class TestFinitizationAndRootObbt:
         assert res.lb[1] <= 2.0 <= res.ub[1]
 
     def test_root_obbt_top_k_is_sound(self):
-        from discopt._jax.obbt import obbt_tighten_root
+        from discopt._relax.obbt import obbt_tighten_root
 
         res = obbt_tighten_root(_bilinear_ge(), _BGE_LB.copy(), _BGE_UB.copy(), rounds=2, top_k=1)
         assert not res.infeasible
@@ -848,7 +848,7 @@ class TestFinitizationAndRootObbt:
 class TestReverseFbbtIntRounding:
     def test_monomial_root_bound_rounds_integer_inward(self):
         # w = x**2 with x integer in [0, 10] and w <= 5: x <= floor(sqrt(5)) = 2.
-        from discopt._jax.obbt import reverse_fbbt_from_aux
+        from discopt._relax.obbt import reverse_fbbt_from_aux
 
         lb = np.array([0.0])
         ub = np.array([10.0])
@@ -866,7 +866,7 @@ class TestReverseFbbtIntRounding:
 @pytest.mark.unit
 class TestLinearExtractors:
     def test_constraint_extractor_edge_shapes(self):
-        from discopt._jax.obbt import _extract_linear_constraints
+        from discopt._relax.obbt import _extract_linear_constraints
 
         m = dm.Model("ex")
         x = m.continuous("x", lb=0, ub=10)
@@ -891,7 +891,7 @@ class TestLinearExtractors:
         assert A_eq is None and b_eq is None
 
     def test_objective_extractor_branches(self):
-        from discopt._jax.obbt import _extract_linear_objective
+        from discopt._relax.obbt import _extract_linear_objective
 
         m = dm.Model("obj")
         z = m.continuous("z", shape=(2,), lb=0, ub=10)

@@ -1,8 +1,8 @@
 """Pinned-dim reduction of the vertex-hull separation LPs (#632 perf follow-up).
 
 Branching / FBBT can set ``lb[d] == ub[d]`` exactly (a variable is *pinned*). The
-exact multilinear (:mod:`discopt._jax.multilinear_separation`) and edge-concave
-(:mod:`discopt._jax.edge_concave`) separators enumerate the ``2^n`` box vertices
+exact multilinear (:mod:`discopt._relax.multilinear_separation`) and edge-concave
+(:mod:`discopt._relax.edge_concave`) separators enumerate the ``2^n`` box vertices
 of the term. A pinned dim's coordinate is constant on the box, so it emits
 duplicate vertex columns and a redundant equality row → the vertex-hull LP is
 degenerate → the in-house Rust simplex cycles to its pivot cap and falls back to
@@ -44,7 +44,7 @@ pytestmark = pytest.mark.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 def _ml_full_solve(lb, ub, x_star, maximize):
     """Pre-fix full (pinned-inclusive) vertex-hull solve, for reference."""
-    from discopt._jax.multilinear_separation import _solve_envelope
+    from discopt._relax.multilinear_separation import _solve_envelope
 
     n = lb.shape[0]
     verts = np.array(list(product(*[(float(lb[d]), float(ub[d])) for d in range(n)])))
@@ -54,7 +54,7 @@ def _ml_full_solve(lb, ub, x_star, maximize):
 
 @pytest.mark.parametrize("seed", range(12))
 def test_multilinear_pinned_reduction_contract(seed):
-    from discopt._jax import multilinear_separation as ms
+    from discopt._relax import multilinear_separation as ms
 
     rng = np.random.default_rng(1000 + seed)
     n = int(rng.integers(3, 8))
@@ -95,8 +95,8 @@ def test_multilinear_pinned_reduction_contract(seed):
 # edge_concave
 # ---------------------------------------------------------------------------
 def _ec_full_solve(block, lb, ub, x_star, maximize):
-    from discopt._jax import edge_concave as ec
-    from discopt._jax.edge_concave import _quad_values
+    from discopt._relax import edge_concave as ec
+    from discopt._relax.edge_concave import _quad_values
     from discopt.solvers import SolveStatus
 
     solve_lp = ec._separation_lp_solver()
@@ -121,7 +121,7 @@ def _ec_full_solve(block, lb, ub, x_star, maximize):
 
 @pytest.mark.parametrize("seed", range(12))
 def test_edge_concave_pinned_reduction_contract(seed):
-    from discopt._jax.edge_concave import EdgeConcaveQuadratic, separate_edge_concave_quadratic
+    from discopt._relax.edge_concave import EdgeConcaveQuadratic, separate_edge_concave_quadratic
 
     rng = np.random.default_rng(2000 + seed)
     n = int(rng.integers(3, 6))

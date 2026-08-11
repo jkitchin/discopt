@@ -35,7 +35,7 @@ def main() -> None:
         format="LOG %(relativeCreated)d %(name)s %(message)s",
     )
 
-    import discopt._jax.mccormick_lp as mlp
+    import discopt._relax.mccormick_lp as mlp
     import discopt.solver as ds
     import numpy as np  # noqa: F401
 
@@ -88,7 +88,7 @@ def main() -> None:
     ds._compute_interval_bound = _iv
 
     try:
-        import discopt._jax.mccormick_nlp as mnlp
+        import discopt._relax.mccormick_nlp as mnlp
 
         _orig_mcb = mnlp.solve_mccormick_batch
 
@@ -160,10 +160,10 @@ def main() -> None:
     scipy_contrast = None
     if args.amp_milp:
         from discopt import Model
-        from discopt._jax.discretization import initialize_partitions
-        from discopt._jax.milp_relaxation import build_milp_relaxation
-        from discopt._jax.model_utils import flat_variable_bounds
-        from discopt._jax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.discretization import initialize_partitions
+        from discopt._relax.milp_relaxation import build_milp_relaxation
+        from discopt._relax.model_utils import flat_variable_bounds
+        from discopt._relax.term_classifier import classify_nonlinear_terms
 
         # Alpine examples/MINLPs/multi.jl:multi4N, n=2, exprmode=1 (issue #598).
         m0 = Model("alpine_multi4N_2_1")

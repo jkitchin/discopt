@@ -24,7 +24,7 @@ Two layers of coverage:
 
 import numpy as np
 import pytest
-from discopt._jax import mccormick as jm
+from discopt._relax import mccormick as jm
 from relaxation_harness import build_relaxation, evaluate
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]

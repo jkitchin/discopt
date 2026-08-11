@@ -51,7 +51,7 @@ def _mini_qp_relaxer_and_pool():
     incremental engine disabled so node solves take the COLD path (the C-42
     surface — nvs06/nvs19/nvs24 are cold-path instances)."""
     import discopt.modeling.core as dm
-    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
 
     m = dm.Model("mini_c42")
     x = m.integer("x", shape=(2,), lb=-3, ub=3)
@@ -82,7 +82,7 @@ def test_pool_drop_retry_recovers_the_node_bound(monkeypatch):
     # pool-augmented one) with an uncertified failure; delegate afterwards.
     # This reproduces deterministically what the nvs06 PSD pool row does to the
     # warm simplex numerically.
-    from discopt._jax import milp_relaxation as _mr
+    from discopt._relax import milp_relaxation as _mr
 
     milp_cls = _mr.MilpRelaxationModel
     real_solve = milp_cls.solve
@@ -121,7 +121,7 @@ def test_pool_has_rows_is_sparse_safe():
     infeasible is never re-verified (masking the bug behind a crash rather than
     fixing it). This asserts the helper is sparse-safe and truthful."""
     import scipy.sparse as sp
-    from discopt._jax.mccormick_lp import _pool_has_rows
+    from discopt._relax.mccormick_lp import _pool_has_rows
 
     A = sp.csr_matrix(np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0]]))
     b = np.array([0.5, 0.5])
@@ -150,7 +150,7 @@ def test_pool_infeasible_reverify_recovers_false_fathom(monkeypatch):
     # one) with a *Farkas-certified* infeasible — reproducing what an
     # invalid-on-sub-box pool row does: the pool-augmented polytope certifies empty
     # though the pool-free box is feasible. The pool-free re-solve then delegates.
-    from discopt._jax import milp_relaxation as _mr
+    from discopt._relax import milp_relaxation as _mr
 
     milp_cls = _mr.MilpRelaxationModel
     real_solve = milp_cls.solve
@@ -184,7 +184,7 @@ def test_lazy_reseparation_stride_net_fires():
     """The relaxer-side safety net: every ``_LAZY_RESEP_STRIDE``-th
     skip-eligible node solve runs the full separation pass regardless of the
     driver's governor, so inheritance can never fully starve a class."""
-    from discopt._jax.mccormick_lp import _LAZY_RESEP_STRIDE
+    from discopt._relax.mccormick_lp import _LAZY_RESEP_STRIDE
 
     relaxer, lb, ub, pool = _mini_qp_relaxer_and_pool()
     for _ in range(_LAZY_RESEP_STRIDE):

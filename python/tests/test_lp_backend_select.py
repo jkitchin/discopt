@@ -158,7 +158,7 @@ class TestHighspyConsumersRetired:
         """The vertex-cover MILP in partition selection solves without HiGHS."""
         pytest.importorskip("pounce")
         _without_highs(monkeypatch)
-        from discopt._jax import partition_selection as ps
+        from discopt._relax import partition_selection as ps
 
         # Disable the greedy fallback so any returned cover must come from the
         # MILP — solved via the POUNCE B&B, since HiGHS is unavailable.
@@ -212,7 +212,7 @@ class TestHighspyConsumersRetired:
         if get_exact_lp_solver() is None:
             pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
         import discopt.modeling as dm
-        from discopt._jax.gdp_reformulate import (
+        from discopt._relax.gdp_reformulate import (
             _compute_big_m,
             _compute_big_m_lp,
             _precompute_lp_relaxation,
@@ -268,7 +268,7 @@ class TestObbtRetired:
 
         if get_exact_lp_solver() is None:
             pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         res = run_obbt(self._model(), prefer_pounce=True, time_limit_per_lp=5.0)
         # x is capped at 4 by the constraint; OBBT must discover ub_x <= 4.
@@ -283,7 +283,7 @@ class TestObbtRetired:
 
         if get_exact_lp_solver() is None:
             pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
-        from discopt._jax.obbt import run_obbt
+        from discopt._relax.obbt import run_obbt
 
         rp = run_obbt(self._model(), prefer_pounce=True, time_limit_per_lp=5.0)
         rh = run_obbt(self._model(), prefer_pounce=False, time_limit_per_lp=5.0)

@@ -113,7 +113,7 @@ class VolumeTracker:
 
 def install(tracker: VolumeTracker, sense_min: bool = True):
     """Monkeypatch solve_nlp and the heuristic entry functions."""
-    import discopt._jax.primal_heuristics as ph
+    import discopt._relax.primal_heuristics as ph
     import discopt.solver as solver_mod
     import discopt.solvers.nlp_pounce as npc
 

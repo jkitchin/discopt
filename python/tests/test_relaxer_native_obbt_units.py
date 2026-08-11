@@ -18,7 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
 
 pytestmark = pytest.mark.smoke
@@ -72,7 +72,7 @@ def test_native_base_builds_and_solves_node():
 
 
 def test_bootstrap_finite_bounds_finitizes_open_box():
-    from discopt._jax.obbt import bootstrap_finite_bounds
+    from discopt._relax.obbt import bootstrap_finite_bounds
 
     m = Model("boot")
     x = m.continuous("x")  # open bounds
@@ -97,7 +97,7 @@ def test_bootstrap_finite_bounds_finitizes_open_box():
 
 
 def test_propagate_equality_defined_bounds():
-    from discopt._jax.obbt import propagate_equality_defined_bounds
+    from discopt._relax.obbt import propagate_equality_defined_bounds
 
     m = Model("eqdef")
     x = m.continuous("x", lb=1.0, ub=2.0)
@@ -116,10 +116,10 @@ def test_propagate_equality_defined_bounds():
 
 
 def test_run_obbt_tightens_relaxation_box():
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.obbt import run_obbt_on_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.obbt import run_obbt_on_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     m = Model("obbt")
     x = m.continuous("x", lb=0.0, ub=10.0)

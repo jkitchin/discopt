@@ -36,8 +36,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from discopt._jax import outward_rounding as orr
-from discopt._jax.outward_rounding import (
+from discopt._relax import outward_rounding as orr
+from discopt._relax.outward_rounding import (
     envelope_1d_slack,
     envelope_product_slack,
     outward_slack,
@@ -99,9 +99,9 @@ def test_the_cold_build_keeps_its_negative_zeros_with_the_guard_off(guard):
     """
     from pathlib import Path
 
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
     from discopt.modeling.core import from_nl
 
     guard(False)
@@ -227,9 +227,9 @@ def _build_case(expr_name):
 
 def _worst_envelope_residual(m, point, aux, expr_name):
     """``max(A z - b)`` at the exactly-on-graph lifted point. Positive means cut."""
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     relax, _info = build_milp_relaxation(m, classify_nonlinear_terms(m), DiscretizationState())
     A = relax._A_ub

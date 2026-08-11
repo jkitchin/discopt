@@ -18,7 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt  # noqa: E402
 from discopt import solver as _solver  # noqa: E402
-from discopt._jax import mccormick_lp as _mc  # noqa: E402
+from discopt._relax import mccormick_lp as _mc  # noqa: E402
 from discopt.modeling.core import ObjectiveSense, from_nl  # noqa: E402
 from discopt.solvers import milp_simplex as _ms  # noqa: E402
 

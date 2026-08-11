@@ -106,7 +106,7 @@ def _worst_violation(model: dm.Model, x_dict: dict) -> tuple[float, int]:
     cannot inherit the defect it is checking for. Returns ``(worst, n_checked)``;
     ``n_checked`` is the executed-comparison count (CLAUDE.md §6).
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     x = _flatten(model, x_dict)

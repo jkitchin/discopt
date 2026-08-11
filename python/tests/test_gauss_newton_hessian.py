@@ -19,8 +19,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.least_squares import extract_residuals
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._relax.least_squares import extract_residuals
+from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Constant, Model
 
 # ─────────────────────────────────────────────────────────────

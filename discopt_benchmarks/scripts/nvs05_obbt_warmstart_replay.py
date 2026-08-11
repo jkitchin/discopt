@@ -60,7 +60,7 @@ from __future__ import annotations
 import sys
 import time
 
-import discopt._jax.obbt as obbtmod
+import discopt._relax.obbt as obbtmod
 import discopt.modeling as dm
 import numpy as np
 from discopt._rust import solve_lp_warm_csc_py

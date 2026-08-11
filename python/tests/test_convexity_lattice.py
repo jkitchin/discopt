@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from discopt._jax.convexity.lattice import (
+from discopt._relax.convexity.lattice import (
     AtomProfile,
     Curvature,
     Monotonicity,

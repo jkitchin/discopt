@@ -29,11 +29,11 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.problem_classifier as pc  # noqa: E402
+import discopt._relax.problem_classifier as pc  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from discopt._jax.problem_classifier import (  # noqa: E402
+from discopt._relax.problem_classifier import (  # noqa: E402
     _extract_quadratic_coefficients_from_values,
     _quadratic_row_has_terms,
     dense_Q,

@@ -1142,7 +1142,7 @@ forever. In practice 1–2 iterations suffice; deep iteration is gated.
 ## 12. Interaction with global optimization (Task 10)
 
 Decomposition and global optimization are **mutually reinforcing**, and this is
-where discopt's McCormick/spatial-B&B stack (`python/discopt/_jax/`,
+where discopt's McCormick/spatial-B&B stack (`python/discopt/_relax/`,
 `crates/discopt-core`) makes the advisor especially valuable.
 
 ### 12.1 Decomposition → better relaxations

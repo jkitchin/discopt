@@ -1,6 +1,6 @@
 """M2 regression: Chebyshev model bounds on benchmark-style subexpressions.
 
-The Chebyshev model kernel (``discopt._jax.chebyshev_model``) is not yet
+The Chebyshev model kernel (``discopt._relax.chebyshev_model``) is not yet
 wired into the LP relaxation compiler — that integration is a follow-up
 piece of plumbing. This regression exercises the kernel directly on
 subexpressions drawn from typical benchmark problems and asserts:
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt._jax import chebyshev_model as cm
+from discopt._relax import chebyshev_model as cm
 
 N_REGRESSION_SAMPLES = 10_000
 

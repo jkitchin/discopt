@@ -25,12 +25,12 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.problem_classifier as pc  # noqa: E402
+import discopt._relax.problem_classifier as pc  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from discopt._jax.problem_classifier import (  # noqa: E402
+from discopt._relax.problem_classifier import (  # noqa: E402
     _extract_quadratic_coefficients,
     _extract_quadratic_terms,
     _materialise_Q,
@@ -280,7 +280,7 @@ def test_convexity_pattern_analysis_declines_a_sparse_Q(q_budget):
     """``patterns._quadratic_data`` is unavoidably dense (np.diag, masks, eigvalsh).
     On a sparse Q it must decline — ``None`` is the conservative answer every caller
     already handles — rather than densify 91 GB or smuggle an object array."""
-    from discopt._jax.convexity.patterns import _quadratic_data, quadratic_curvature
+    from discopt._relax.convexity.patterns import _quadratic_data, quadratic_curvature
 
     m = _qp_model(40)
     obj = m._objective.expression

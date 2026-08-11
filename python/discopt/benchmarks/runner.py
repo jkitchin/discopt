@@ -129,7 +129,7 @@ class BenchmarkRunner:
         """
         import jax.numpy as jnp
 
-        from discopt._jax.batch_evaluator import batch_evaluator_from_objective
+        from discopt._relax.batch_evaluator import batch_evaluator_from_objective
 
         evaluator = batch_evaluator_from_objective(model)
         n_vars = evaluator.n_vars

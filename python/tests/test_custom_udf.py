@@ -3,7 +3,7 @@
 A ``dm.custom`` function wraps an arbitrary JAX-traceable callable. discopt can
 autodifferentiate it (so the local NLP path works). Since MAiNGO-parity plan P3.1
 (#713), a **continuous** model whose opaque body traces soundly through the
-reduced-space McCormick type (``MCBox``: arithmetic + the ``discopt._jax.mcbox``
+reduced-space McCormick type (``MCBox``: arithmetic + the ``discopt._relax.mcbox``
 intrinsic namespace) is solved **globally with a certificate**, branching only on
 the original degrees of freedom. A body outside that scope (raw ``jnp`` intrinsics,
 a non-affine hidden division, a non-scalar leaf, an unbounded box) falls back to the
@@ -167,7 +167,7 @@ class TestLocalSolve:
 
 class TestDagCompile:
     def test_compiled_value_and_gradient(self):
-        from discopt._jax.dag_compiler import compile_expression
+        from discopt._relax.dag_compiler import compile_expression
 
         m = Model("grad")
         x = m.continuous("x", shape=(2,), lb=-5, ub=5)
@@ -227,7 +227,7 @@ class TestRefusals:
             to_nl(m)
 
     def test_relaxation_compile_raises(self):
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+        from discopt._relax.relaxation_compiler import compile_objective_relaxation
 
         m = Model("relax")
         x = m.continuous("x", lb=-10, ub=10)

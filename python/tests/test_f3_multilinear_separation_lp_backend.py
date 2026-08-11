@@ -24,7 +24,7 @@ pytestmark = pytest.mark.filterwarnings("ignore")
 
 def test_multilinear_separation_lp_simplex_flag_honored(monkeypatch):
     """The F3 env selector mirrors the edge-concave flag (default ON, '0' off)."""
-    from discopt._jax.multilinear_separation import _separation_lp_simplex_enabled
+    from discopt._relax.multilinear_separation import _separation_lp_simplex_enabled
 
     monkeypatch.delenv("DISCOPT_SEPARATION_LP_SIMPLEX", raising=False)
     assert _separation_lp_simplex_enabled() is True  # default ON
@@ -42,7 +42,7 @@ def test_multilinear_separator_uses_simplex_when_on(monkeypatch):
     POUNCE LP solver is NOT called on a well-conditioned (simplex-converging) LP."""
     import discopt.solvers.lp_pounce as lp_pounce
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax import multilinear_separation as ms
+    from discopt._relax import multilinear_separation as ms
 
     if not lp_simplex.SIMPLEX_AVAILABLE:
         pytest.skip("in-house simplex binding not built")
@@ -82,7 +82,7 @@ def test_multilinear_separator_off_switch_uses_pounce(monkeypatch):
     """Off-switch ('0') restores the POUNCE-IPM path (the simplex is not called)."""
     import discopt.solvers.lp_pounce as lp_pounce
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax import multilinear_separation as ms
+    from discopt._relax import multilinear_separation as ms
 
     monkeypatch.setenv("DISCOPT_SEPARATION_LP_SIMPLEX", "0")
 
@@ -132,7 +132,7 @@ def test_multilinear_cut_sound_on_both_engines(monkeypatch, flag):
     sampling removes no true point. Validity is engine-independent because the
     intercept is recomputed to the exact boundary over the box vertices."""
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax import multilinear_separation as ms
+    from discopt._relax import multilinear_separation as ms
 
     if flag == "1" and not lp_simplex.SIMPLEX_AVAILABLE:
         pytest.skip("in-house simplex binding not built")
@@ -160,7 +160,7 @@ def test_multilinear_capped_simplex_falls_back_to_pounce(monkeypatch):
     never drops a cut the POUNCE path would have found."""
     import discopt.solvers.lp_pounce as lp_pounce
     import discopt.solvers.lp_simplex as lp_simplex
-    from discopt._jax import multilinear_separation as ms
+    from discopt._relax import multilinear_separation as ms
     from discopt.solvers import LPResult, SolveStatus
 
     if not lp_simplex.SIMPLEX_AVAILABLE:

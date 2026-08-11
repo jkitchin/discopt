@@ -55,7 +55,7 @@ _T_UB = 1e8  # finite box on the elastic variable keeps the IPM well-posed
 class FeasibilityPhaseEvaluator:
     """Elastic phase-1 wrapper adding one violation variable ``t``.
 
-    Wraps a base :class:`~discopt._jax.nlp_evaluator.NLPEvaluator` (with the
+    Wraps a base :class:`~discopt._relax.nlp_evaluator.NLPEvaluator` (with the
     master columns already pinned via its variable bounds) and presents the
     epigraph phase-1 problem described in the module docstring. Implements only
     the callback surface the NLP backends use

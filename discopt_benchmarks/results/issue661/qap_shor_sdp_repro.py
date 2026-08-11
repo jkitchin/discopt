@@ -27,12 +27,12 @@ results = {"instance": "qap", "opt": OPT, "best_dual": BEST_DUAL,
 def extract_qap():
     """Load qap.nl and extract (Q, c_lin, offset, A_eq, b_eq, binary_vars)."""
     import discopt.modeling as dm
-    from discopt._jax.milp_relaxation import build_milp_relaxation
-    from discopt._jax.term_classifier import classify_nonlinear_terms
-    from discopt._jax.discretization import DiscretizationState
-    from discopt._jax.rlt import _reconstruct_quadratic_objective
-    from discopt._jax.obbt import _extract_linear_constraints
-    from discopt._jax.model_utils import binary_flat_cols
+    from discopt._relax.milp_relaxation import build_milp_relaxation
+    from discopt._relax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.discretization import DiscretizationState
+    from discopt._relax.rlt import _reconstruct_quadratic_objective
+    from discopt._relax.obbt import _extract_linear_constraints
+    from discopt._relax.model_utils import binary_flat_cols
 
     model = dm.from_nl(NL)
     terms = classify_nonlinear_terms(model)

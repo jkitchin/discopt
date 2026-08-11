@@ -14,7 +14,7 @@ Two things separate this path from #952's:
 * its rows are nonlinear, so the arbiter cannot be ``_matrix_solution_feasible``.
   The gate uses the repo's nonlinear convention instead — ``viol <= tol +
   rtol*term_scale``, ``tol=1e-6``, ``rtol=1e-9`` — the same one
-  ``_jax.primal_heuristics._check_constraint_feasibility`` applies whenever a
+  ``_relax.primal_heuristics._check_constraint_feasibility`` applies whenever a
   primal heuristic accepts an incumbent.
 * the terminal refine re-solve can REPLACE the reported point after every gate
   the search ran, so the check has to be the last thing before the return.
@@ -95,7 +95,7 @@ def _worst_violation(model: dm.Model, x_dict: dict) -> tuple[float, int]:
     cannot inherit the defect it checks for. Returns ``(worst, n_compared)``;
     ``n_compared`` is the executed-comparison count (CLAUDE.md §6).
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     x = np.concatenate(
         [np.asarray(x_dict[v.name], dtype=np.float64).ravel() for v in model._variables]
@@ -251,7 +251,7 @@ def _tight_row_fixture():
     residual. That lands deliberately between the two tolerances under test:
     inside the retired ``feas_tol=1e-4`` and outside the declared ``abs=1e-6``.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = dm.Model("snap954")
     y = m.integer("y", lb=0, ub=5)
@@ -313,7 +313,7 @@ def test_gate_judges_declared_rows_only():
     tight, and they are not rows the user declared, so the gate is limited to the
     leading declared block.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
     m = dm.Model("cutrows954")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -343,8 +343,8 @@ def test_arbiter_agrees_with_the_authoritative_nonlinear_check():
     the tolerance — including the term-scaled regime, where a large-magnitude row
     forgives noise an absolute-only test would reject (the prob07 lesson).
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
-    from discopt._jax.primal_heuristics import _check_constraint_feasibility as authoritative
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.primal_heuristics import _check_constraint_feasibility as authoritative
 
     compared = 0
     for scale in (1.0, 1e3, 1e5):

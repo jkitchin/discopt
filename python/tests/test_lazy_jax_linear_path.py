@@ -3,7 +3,7 @@
 discopt's JAX/XLA stack costs ~0.5-1 s of cold-start init. The LP/QP/MIQP
 default (POUNCE) and the pure-Rust simplex MILP B&B solve with no JAX
 involvement, so they must not pay that tax — the import path is kept JAX-free
-(lazy ``_jax`` package, lazy ``deadline`` jax, JAX-free ``problem_classifier``
+(lazy ``_relax`` package, lazy ``deadline`` jax, JAX-free ``problem_classifier``
 + numpy ``LPData``/``QPData``, and deferred ``solver`` imports).
 
 MIQP is included: its B&B node QP relaxations solve via POUNCE (the pure-Rust

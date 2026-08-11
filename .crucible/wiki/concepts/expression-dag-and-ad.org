@@ -32,7 +32,7 @@ citep:baydin2018.
 
 discopt uses JAX as its AD engine. The modeling API (python/discopt/modeling/)
 constructs an expression DAG via operator overloading on Python objects. The JAX
-DAG compiler (python/discopt/_jax/) transforms this into JAX primitives,
+DAG compiler (python/discopt/_relax/) transforms this into JAX primitives,
 enabling jax.grad for gradients, jax.jacobian for constraint Jacobians, and
 jax.hessian for Hessians. JAX's JIT compilation and XLA backend provide GPU
 acceleration, and jax.vmap enables batched evaluation of gradients across

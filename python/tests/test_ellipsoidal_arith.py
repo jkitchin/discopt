@@ -1,6 +1,6 @@
 """Tests for ellipsoidal arithmetic (M7 of issue #81).
 
-Covers :mod:`discopt._jax.ellipsoidal_arith`:
+Covers :mod:`discopt._relax.ellipsoidal_arith`:
 
 * **Geometry** — the closed-form ellipsoid calculus: support function, exact
   affine image, and trace-minimising Minkowski-sum outer approximation.
@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.ellipsoidal_arith import (
+from discopt._relax.ellipsoidal_arith import (
     Ellipsoid,
     EllipsoidalForm,
     bounding_ellipsoid_of_box,

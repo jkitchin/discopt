@@ -26,7 +26,7 @@ You are working within the `discopt` project, a hybrid MINLP solver combining Ru
 
 ### Key discopt Architecture
 - `python/discopt/modeling/` -- Python modeling API with expression DAG for MINLP formulation
-- `python/discopt/_jax/` -- JAX DAG compiler, McCormick relaxations, NLP evaluator
+- `python/discopt/_relax/` -- JAX DAG compiler, McCormick relaxations, NLP evaluator
 - `python/discopt/solvers/` -- HiGHS LP wrapper, cyipopt NLP wrapper
 - `python/discopt/solver.py` -- Solver orchestrator: end-to-end Model.solve() via B&B
 - `crates/discopt-core/` -- Rust: Expression IR, B&B tree, .nl parser, FBBT/presolve

@@ -21,7 +21,7 @@ variables, ...), do so — `dm.udf` keeps full global-solver support. Reach for
 into external JAX code). A `CustomCall` is opaque, so:
 
 - **If the body traces soundly through `MCBox`** — arithmetic (`+ - * / **`) and the
-  `discopt._jax.mcbox` intrinsic namespace (`exp`, `log`, `sqrt`, fractional powers,
+  `discopt._relax.mcbox` intrinsic namespace (`exp`, `log`, `sqrt`, fractional powers,
   ...) — a **continuous or integer** model is solved **globally with a certificate**,
   branching on the DOF only (the hidden intermediates stay hidden).
 - **Otherwise** (a raw `jnp` intrinsic applied to an argument, a non-affine hidden
@@ -39,7 +39,7 @@ each stage as a `CustomCall`, and chain them:
 ```python
 import jax.numpy as jnp
 import discopt.modeling as dm
-from discopt._jax.mcbox import MCBox
+from discopt._relax.mcbox import MCBox
 
 def mexp(x):
     # dispatch: MCBox for the relaxation, jnp for the local-NLP / value path
@@ -85,7 +85,7 @@ solved as a linear program over the DOF only — no auxiliary columns.
 You can query this reduced-space bound directly:
 
 ```python
-from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound
+from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound
 
 rb = reduced_mccormick_lp_bound(m, [0.2, 0.2], [2.0, 2.0])
 print(rb.status, rb.bound)   # -> optimal  -0.8868 (a valid lower bound)

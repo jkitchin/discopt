@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import jax
 import jax.numpy as jnp
 import pytest
-from discopt._jax.mccormick import (
+from discopt._relax.mccormick import (
     relax_abs,
     relax_add,
     relax_bilinear,

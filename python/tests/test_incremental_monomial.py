@@ -18,12 +18,12 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
-from discopt._jax.incremental_mccormick import (  # noqa: E402
+from discopt._relax.incremental_mccormick import (  # noqa: E402
     IncrementalMcCormickLP,
     _monomial_aux_bounds,
     _monomial_rows,
 )
-from discopt._jax.term_classifier import classify_nonlinear_terms  # noqa: E402
+from discopt._relax.term_classifier import classify_nonlinear_terms  # noqa: E402
 
 
 def _engine(lb, ub, p):

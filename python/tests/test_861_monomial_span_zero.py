@@ -40,9 +40,9 @@ import itertools
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.incremental_mccormick import IncrementalMcCormickLP, _monomial_aux_bounds
-from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
-from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt._relax.incremental_mccormick import IncrementalMcCormickLP, _monomial_aux_bounds
+from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
+from discopt._relax.term_classifier import classify_nonlinear_terms
 
 
 def _monomial_model(p: int, lo: float, hi: float, n: int = 3):
@@ -158,7 +158,7 @@ def test_monomial_aux_bounds_match_interval_pow(p, box):
     ``Interval.__pow__`` — not merely a sound one — or the two paths describe
     different polytopes. Pins the parity so a change to the interval arithmetic
     surfaces here rather than as a silent bound difference."""
-    from discopt._jax.convexity.interval import Interval
+    from discopt._relax.convexity.interval import Interval
 
     lo, hi = box
     ref = Interval.from_bounds(np.array([lo]), np.array([hi])) ** p
@@ -202,7 +202,7 @@ def test_unbounded_box_envelope_matches_the_cold_build_emptiness(p):
     under ``_finite``), leaving the aux interval bound as the entire relaxation. The
     fixed-pattern patch cannot delete rows, so it must fill them with VACUOUS ones —
     which describes the same polytope. Pins that they carry no coefficients at all."""
-    from discopt._jax.incremental_mccormick import _monomial_rows
+    from discopt._relax.incremental_mccormick import _monomial_rows
 
     for box in [(-np.inf, 0.0), (0.0, np.inf), (-np.inf, np.inf), (1.0, np.inf)]:
         rows = _monomial_rows(box[0], box[1], p)

@@ -178,7 +178,7 @@ def test_default_solve_path_does_not_certify_a_super_optimal_incumbent():
 def test_every_primal_heuristic_requests_the_incumbent_options():
     """The whole module is a point producer, so the seed is a module-wide rule.
 
-    Six NLP option sites in ``_jax/primal_heuristics.py`` each built their own
+    Six NLP option sites in ``_relax/primal_heuristics.py`` each built their own
     ``dict(nlp_options)``; one of them (``feasibility_pump``) supplied the
     super-optimal incumbent above. They are routed through one helper so a
     seventh heuristic cannot silently keep Ipopt's default — asserted here rather
@@ -189,7 +189,7 @@ def test_every_primal_heuristic_requests_the_incumbent_options():
     """
     import inspect
 
-    from discopt._jax import primal_heuristics as PH
+    from discopt._relax import primal_heuristics as PH
 
     src = inspect.getsource(PH)
     assert "pounce_incumbent_options()" in inspect.getsource(PH._heuristic_nlp_options)

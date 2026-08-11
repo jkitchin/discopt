@@ -43,9 +43,9 @@ plan task (or one T5 sub-task) per iteration, end to end:
    Never merge a PR whose local gates you have not run, and never merge one whose
    CI has actually gone red.
 3. **Run the task's entry experiment first** if the plan marks it as not yet
-   executed, or if `python/discopt/_jax/incremental_mccormick.py`,
-   `python/discopt/_jax/uniform_relax.py`, or
-   `python/discopt/_jax/spatial_producer.py` changed since the plan's HEAD
+   executed, or if `python/discopt/_relax/incremental_mccormick.py`,
+   `python/discopt/_relax/uniform_relax.py`, or
+   `python/discopt/_relax/spatial_producer.py` changed since the plan's HEAD
    (`bdc104bb`). If the experiment falsifies the task's premise, STOP the task,
    record the falsification in plan §7 and the ledger, comment on issue #861,
    and end the iteration — do not implement against a falsified premise.

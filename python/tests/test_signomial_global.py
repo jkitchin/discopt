@@ -13,8 +13,8 @@ import math
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._jax.convexity.signomial import is_signomial, signomial_dc_terms
-from discopt._jax.convexity.signomial_global import (
+from discopt._relax.convexity.signomial import is_signomial, signomial_dc_terms
+from discopt._relax.convexity.signomial_global import (
     SignomialGlobalStructure,
     _cv_and_grad,
     _node_lower_bound,
@@ -22,7 +22,7 @@ from discopt._jax.convexity.signomial_global import (
     classify_signomial_global,
     solve_signomial_global,
 )
-from discopt._jax.symbolic.signed_signomial import signed_signomial_dc_envelope
+from discopt._relax.symbolic.signed_signomial import signed_signomial_dc_envelope
 
 # ── model builders ────────────────────────────────────────────────────
 
@@ -357,7 +357,7 @@ def test_constrained_solver_integration_flag_gated(monkeypatch):
 def test_constrained_node_bound_underestimates_feasible_samples():
     """A single constrained node's rigorous bound is <= the true objective at
     every TRUE-feasible sampled point in that box (valid relaxation, no cut)."""
-    from discopt._jax.convexity.signomial_global import _constrained_node_bound
+    from discopt._relax.convexity.signomial_global import _constrained_node_bound
 
     m = _constrained_2d()
     struct = classify_signomial_global(m)
@@ -457,7 +457,7 @@ def test_medium_4var_certifies_and_legacy_does_not():
 def test_differential_node_bound_dominates_legacy_on_fixed_boxes():
     """Bound-changing policy: on fixed boxes the tightened node bound is >= the
     legacy bound AND <= the true (sampled) constrained optimum of the box."""
-    from discopt._jax.convexity.signomial_global import _constrained_node_bound
+    from discopt._relax.convexity.signomial_global import _constrained_node_bound
 
     m = _medium_4var()
     struct = classify_signomial_global(m)
@@ -490,7 +490,7 @@ def test_differential_node_bound_dominates_legacy_on_fixed_boxes():
 def test_obbt_never_cuts_retained_feasible_points():
     """Feasible-point sampling for the OBBT device: every sampled TRUE-feasible
     point with objective <= incumbent stays inside the tightened box."""
-    from discopt._jax.convexity.signomial_global import _obbt_tighten
+    from discopt._relax.convexity.signomial_global import _obbt_tighten
 
     m = _medium_4var()
     struct = classify_signomial_global(m)
@@ -514,7 +514,7 @@ def test_obbt_never_cuts_retained_feasible_points():
 def test_interval_min_devices_are_rigorous():
     """The interval floor and the weighted-Lagrangian interval floor
     under-estimate their targets at every sampled point (for any lam >= 0)."""
-    from discopt._jax.convexity.signomial_global import (
+    from discopt._relax.convexity.signomial_global import (
         _cv_and_grad,
         _interval_min,
         _interval_min_weighted,
@@ -580,7 +580,7 @@ def test_exact_convex_pack_preserves_feasible_set_and_is_convex():
     the original body (identical feasible set — divisor is > 0) and its DC
     underestimator equals itself (a convex posynomial-minus-constant, no secant
     looseness)."""
-    from discopt._jax.convexity.signomial_global import (
+    from discopt._relax.convexity.signomial_global import (
         _cv_and_grad,
         _exact_convex_pack,
         _true_value,
@@ -607,7 +607,7 @@ def test_exact_convex_pack_preserves_feasible_set_and_is_convex():
 def test_exact_convex_pack_leaves_multi_negative_rows_alone():
     """A row with ≥2 negative monomials is a genuine DC difference and must be
     left for the secant envelope (transform returns it unchanged)."""
-    from discopt._jax.convexity.signomial_global import _exact_convex_pack
+    from discopt._relax.convexity.signomial_global import _exact_convex_pack
 
     pack = _pack(
         [
@@ -696,7 +696,7 @@ def test_integer_node_bound_underestimates_all_integer_points():
     """The relaxed node bound (integers relaxed to the continuous box) is <= the
     true objective at EVERY integer-feasible point in the box — a valid dual
     bound for the integer problem, never cutting an integer solution."""
-    from discopt._jax.convexity.signomial_global import _constrained_node_bound, _relaxation_packs
+    from discopt._relax.convexity.signomial_global import _constrained_node_bound, _relaxation_packs
 
     m = _small_int_minlp()
     struct = classify_signomial_global(m)

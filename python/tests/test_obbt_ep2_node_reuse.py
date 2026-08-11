@@ -35,11 +35,11 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt._jax.obbt as obbt_mod
+import discopt._relax.obbt as obbt_mod
 import numpy as np
 import pytest
-from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.obbt import obbt_tighten_root
+from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.obbt import obbt_tighten_root
 from discopt.modeling.core import from_nl
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")

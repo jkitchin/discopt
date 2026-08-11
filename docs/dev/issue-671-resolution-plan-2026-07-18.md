@@ -86,14 +86,14 @@ Attempt `git cherry-pick 4ebade5 8de0365 645f7cf` first; expect conflicts in
 cherry-picking or hand-porting, the port consists of exactly four production
 hunks plus tests/docs:
 
-- **`python/discopt/_jax/mccormick_lp.py`** — in `_solve_at_node_impl`, after
+- **`python/discopt/_relax/mccormick_lp.py`** — in `_solve_at_node_impl`, after
   the cold-path solve (and after the C-42 pool-drop re-solve block, currently
   ending near line 1344): if `_tuning().relax_row_filter` and the result is
   neither `optimal` nor Farkas-certified `infeasible`
   (`getattr(res, "farkas_certified", False)` — the attribute exists on `main`,
   `solvers/milp_simplex.py:185`), call `_filter_unresolvable_rows(milp)` and,
   if it dropped rows, re-solve once with the remaining time budget.
-- **`python/discopt/_jax/milp_relaxation.py`** — remove the build-time filter
+- **`python/discopt/_relax/milp_relaxation.py`** — remove the build-time filter
   call at the tail of `build_milp_relaxation` (lines 1955–1959 on `main`);
   keep `_filter_unresolvable_rows` itself (it becomes the solve-layer
   primitive). Add the comment explaining why the filter is NOT applied at

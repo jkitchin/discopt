@@ -56,8 +56,8 @@ def _flush(v: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
-    from discopt._jax.milp_relaxation import MilpRelaxationModel, equilibrate_relaxation_lp
-    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._relax.milp_relaxation import MilpRelaxationModel, equilibrate_relaxation_lp
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt.modeling.core import from_nl
     from discopt.solvers.milp_simplex import solve_lp_warm_std
 

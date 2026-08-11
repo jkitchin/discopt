@@ -5,7 +5,7 @@ Issue #87 (coverage restoration), final round. Targets:
 * ``discopt/solvers/gdpopt_loa.py`` — end-to-end LOA solves on tiny disjunctive
   models with hand-verifiable optima, plus unit tests of the gap/cut/master
   helpers and the rigorous-infeasibility split (C-35).
-* ``discopt/_jax/primal_heuristics.py`` — feasibility of every returned point is
+* ``discopt/_relax/primal_heuristics.py`` — feasibility of every returned point is
   re-verified against the model, and returned objectives are never better than
   the (enumerable) true optimum.
 * ``discopt/modeling/core.py`` — documented validation/error branches raise with
@@ -25,8 +25,8 @@ import types
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax import primal_heuristics as ph
-from discopt._jax.nlp_evaluator import NLPEvaluator, cached_evaluator
+from discopt._relax import primal_heuristics as ph
+from discopt._relax.nlp_evaluator import NLPEvaluator, cached_evaluator
 from discopt.modeling import core
 from discopt.modeling.core import SolveResult
 from discopt.solvers import NLPResult, SolveStatus
@@ -310,7 +310,7 @@ class TestGDPoptLOAHelpers:
 
     def test_add_oa_cuts_flips_ge_cuts(self, monkeypatch):
         """A '>=' OA cut must be negated into the '<=' master form."""
-        from discopt._jax import cutting_planes
+        from discopt._relax import cutting_planes
 
         fake_cuts = [
             types.SimpleNamespace(sense="<=", coeffs=np.array([1.0, 2.0]), rhs=3.0),

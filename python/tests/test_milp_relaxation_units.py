@@ -1,4 +1,4 @@
-"""Unit tests for the pure-logic helpers in ``discopt._jax.milp_relaxation`` (#87).
+"""Unit tests for the pure-logic helpers in ``discopt._relax.milp_relaxation`` (#87).
 
 Focus areas:
   * constant folding and product/polynomial decomposition (the linearizer's
@@ -21,7 +21,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.milp_relaxation import (
+from discopt._relax.milp_relaxation import (
     _affine_var_base,
     _collect_affine_powers,
     _constant_value,
@@ -219,7 +219,7 @@ def test_integer_domain_values():
     m.integer("i", lb=-1, ub=2)
     m.binary("b")
     m.continuous("x", lb=0, ub=1)
-    from discopt._jax.milp_relaxation import _flat_variable_types
+    from discopt._relax.milp_relaxation import _flat_variable_types
 
     types = _flat_variable_types(m)
     lb = np.array([-1.0, -0.5, 0.0])

@@ -7,7 +7,7 @@ constraints, big-M computation, and end-to-end solve correctness.
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt._jax.gdp_reformulate import (
+from discopt._relax.gdp_reformulate import (
     _bound_expression,
     _collect_variables,
     _compute_big_m,

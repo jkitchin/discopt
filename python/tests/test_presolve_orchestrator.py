@@ -126,7 +126,7 @@ def test_unknown_pass_raises():
 
 def test_run_root_presolve_preserves_legacy_keys():
     """Callers that grep for `elimination` / `polynomial` / `fbbt` keep working."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     repr_ = model_to_repr(_singleton_eq_model())
     new_repr, stats = run_root_presolve(repr_, polynomial=False)
@@ -140,7 +140,7 @@ def test_run_root_presolve_preserves_legacy_keys():
 
 
 def test_run_root_presolve_reports_elimination_count():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     repr_ = model_to_repr(_singleton_eq_model())
     _, stats = run_root_presolve(repr_, polynomial=False)
@@ -164,7 +164,7 @@ def test_aggregate_pass_drops_unused_variable():
 
 
 def test_run_root_presolve_aggregate_reports_count():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("agg")
     x = m.continuous("x", lb=-10.0, ub=10.0)
@@ -209,7 +209,7 @@ def test_implied_bounds_pass_tightens_linear_row():
 
 
 def test_run_root_presolve_implied_bounds_reports_count():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("ib2")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -260,7 +260,7 @@ def test_scaling_pass_emits_scale_factors():
 
 
 def test_run_root_presolve_scaling_surfaces_factors():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("scl2")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -292,7 +292,7 @@ def test_clique_pass_extracts_set_packing():
 
 def test_run_root_presolve_cliques_reports_edges():
     """F2: cliques flow through run_root_presolve into stats['cliques']."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("clq2")
     b0 = m.binary("b0")
@@ -337,7 +337,7 @@ def test_reduced_cost_fixing_no_info_is_noop():
 
 def test_run_root_presolve_reduced_cost_reports_count():
     """E2: reduced cost flows through run_root_presolve."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("rcf2")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -352,7 +352,7 @@ def test_run_root_presolve_reduced_cost_reports_count():
 
 
 def test_run_root_presolve_polynomial_reports_aux_vars():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     repr_ = model_to_repr(_toy_quartic_model())
     _, stats = run_root_presolve(repr_, polynomial=True)
@@ -362,7 +362,7 @@ def test_run_root_presolve_polynomial_reports_aux_vars():
 
 def test_run_root_presolve_no_passes_returns_input():
     """Disabling every pass returns the input unchanged with empty stats."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     repr_ = model_to_repr(_toy_quartic_model())
     new_repr, stats = run_root_presolve(
@@ -440,7 +440,7 @@ class _RecordingPass:
         self.calls = 0
 
     def run(self, model_repr):
-        from discopt._jax.presolve.protocol import make_python_delta
+        from discopt._relax.presolve.protocol import make_python_delta
 
         self.calls += 1
         return make_python_delta(self.name, pass_iter=self.calls - 1)
@@ -457,7 +457,7 @@ class _OneShotTighten:
         self.calls = 0
 
     def run(self, model_repr):
-        from discopt._jax.presolve.protocol import make_python_delta
+        from discopt._relax.presolve.protocol import make_python_delta
 
         self.calls += 1
         d = make_python_delta(self.name, pass_iter=self.calls - 1)
@@ -480,7 +480,7 @@ class _RaisingPass:
 def test_a3_python_pass_runs_in_orchestrator_loop():
     repr_ = model_to_repr(_toy_quartic_model())
     rec = _RecordingPass()
-    from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
+    from discopt._relax.presolve.orchestrator import run_orchestrated_presolve
 
     _, stats = run_orchestrated_presolve(
         repr_,
@@ -497,7 +497,7 @@ def test_a3_python_tighten_persists_through_var_ub():
     repr_ = model_to_repr(_toy_quartic_model())
     # block 0 is x with ub=2.0; tighten to 1.0
     tighten = _OneShotTighten(block_idx=0, new_ub=1.0)
-    from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
+    from discopt._relax.presolve.orchestrator import run_orchestrated_presolve
 
     new_repr, stats = run_orchestrated_presolve(
         repr_,
@@ -513,7 +513,7 @@ def test_a3_python_tighten_persists_through_var_ub():
 def test_a3_fixed_point_terminates_when_no_progress():
     repr_ = model_to_repr(_toy_quartic_model())
     rec = _RecordingPass()
-    from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
+    from discopt._relax.presolve.orchestrator import run_orchestrated_presolve
 
     _, stats = run_orchestrated_presolve(
         repr_,
@@ -527,7 +527,7 @@ def test_a3_fixed_point_terminates_when_no_progress():
 
 def test_a3_python_pass_exception_recorded_not_raised():
     repr_ = model_to_repr(_toy_quartic_model())
-    from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
+    from discopt._relax.presolve.orchestrator import run_orchestrated_presolve
 
     _, stats = run_orchestrated_presolve(
         repr_,
@@ -541,7 +541,7 @@ def test_a3_python_pass_exception_recorded_not_raised():
 
 def test_a3_run_root_presolve_dispatches_python_passes():
     """run_root_presolve(python_passes=...) routes through the orchestrator wrapper."""
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     repr_ = model_to_repr(_toy_quartic_model())
     rec = _RecordingPass()
@@ -614,7 +614,7 @@ def test_d3_reduction_constraints_skips_non_sos_polynomials():
 
 
 def test_d3_run_root_presolve_reports_reduction():
-    from discopt._jax.presolve_pipeline import run_root_presolve
+    from discopt._relax.presolve_pipeline import run_root_presolve
 
     m = do.Model("sos")
     x = m.continuous("x", lb=-3.0, ub=3.0)
@@ -651,7 +651,7 @@ def test_d3_reduction_constraints_detects_infeasibility():
 
 def test_d1_convex_reform_pass_marks_convex_inequality():
     """A convex `x^2 + y^2 ≤ 1` constraint should be marked convex."""
-    from discopt._jax.presolve import ConvexReformPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ConvexReformPass, run_orchestrated_presolve
 
     m = do.Model("ball")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -672,7 +672,7 @@ def test_d1_convex_reform_pass_marks_convex_inequality():
 
 def test_d1_convex_reform_pass_skips_nonconvex():
     """`x^2 - y^2 ≤ 1` is indefinite; the certificate must abstain."""
-    from discopt._jax.presolve import ConvexReformPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ConvexReformPass, run_orchestrated_presolve
 
     m = do.Model("indef")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -693,7 +693,7 @@ def test_d1_convex_reform_pass_skips_nonconvex():
 
 def test_d1_convex_reform_pass_terminates_at_fixed_point():
     """A diagnostic pass must NOT cause the orchestrator to loop forever."""
-    from discopt._jax.presolve import ConvexReformPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ConvexReformPass, run_orchestrated_presolve
 
     m = do.Model("ball")
     x = m.continuous("x", lb=-2.0, ub=2.0)
@@ -714,7 +714,7 @@ def test_d1_convex_reform_pass_terminates_at_fixed_point():
 def test_b2_reverse_ad_pass_tightens_bounds():
     """Reverse-AD on `x + y == 5` with `x ∈ [0, 10]`, `y ∈ [3, 4]` should
     tighten `x` to ``[1, 2]`` (since x = 5 - y)."""
-    from discopt._jax.presolve import ReverseADPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ReverseADPass, run_orchestrated_presolve
 
     m = do.Model("revad")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -738,7 +738,7 @@ def test_b2_reverse_ad_pass_tightens_bounds():
 
 def test_b2_reverse_ad_pass_no_constraints_is_noop():
     """A model with only an objective and no constraints: pass returns 0."""
-    from discopt._jax.presolve import ReverseADPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ReverseADPass, run_orchestrated_presolve
 
     m = do.Model("noconstr")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -758,7 +758,7 @@ def test_b2_reverse_ad_pass_no_constraints_is_noop():
 def test_b2_reverse_ad_interleaved_with_fbbt():
     """B2 + FBBT should reach a fixed point with at least as much
     tightening as either alone."""
-    from discopt._jax.presolve import ReverseADPass, run_orchestrated_presolve
+    from discopt._relax.presolve import ReverseADPass, run_orchestrated_presolve
 
     m = do.Model("interleave")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -782,7 +782,7 @@ def test_b2_reverse_ad_interleaved_with_fbbt():
 def test_a3_python_only_works_with_no_rust_passes():
     repr_ = model_to_repr(_toy_quartic_model())
     tighten = _OneShotTighten(block_idx=0, new_ub=1.0)
-    from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
+    from discopt._relax.presolve.orchestrator import run_orchestrated_presolve
 
     new_repr, stats = run_orchestrated_presolve(
         repr_,
@@ -973,7 +973,7 @@ def test_d6_nn_presolve_pass_no_dead_relus_is_clean():
 def test_d5_detects_two_disjoint_blocks():
     """Two independent constraints over disjoint variable sets ⇒ two
     blocks, ``separable`` flag set."""
-    from discopt._jax.presolve import detect_separability
+    from discopt._relax.presolve import detect_separability
 
     m = do.Model("two-block")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -992,7 +992,7 @@ def test_d5_detects_two_disjoint_blocks():
 
 def test_d5_detects_separable_with_constant_objective():
     """No objective coupling ⇒ blocks stay disjoint, ``separable`` true."""
-    from discopt._jax.presolve import detect_separability
+    from discopt._relax.presolve import detect_separability
 
     m = do.Model("sep")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -1018,7 +1018,7 @@ def test_d5_detects_separable_with_constant_objective():
 def test_d5_constraint_block_assignment():
     """Each constraint's block index points to the block containing its
     variables."""
-    from discopt._jax.presolve import detect_separability
+    from discopt._relax.presolve import detect_separability
 
     m = do.Model("idx")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -1036,7 +1036,7 @@ def test_d5_constraint_block_assignment():
 
 def test_d5_detects_single_block_for_chained_constraints():
     """Constraints sharing a variable transitively form one block."""
-    from discopt._jax.presolve import detect_separability
+    from discopt._relax.presolve import detect_separability
 
     m = do.Model("chain")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -1054,7 +1054,7 @@ def test_d5_detects_single_block_for_chained_constraints():
 
 def test_d5_pass_emits_blocks_in_delta():
     """The pass surfaces the partition through the delta dict."""
-    from discopt._jax.presolve import SeparabilityPass
+    from discopt._relax.presolve import SeparabilityPass
 
     m = do.Model("p")
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -1078,7 +1078,7 @@ def test_d5_pass_emits_blocks_in_delta():
 def test_d5_pass_handles_constant_objective_and_no_constraints():
     """A degenerate model with no constraints and a constant objective
     yields one singleton block per declared variable."""
-    from discopt._jax.presolve import SeparabilityPass
+    from discopt._relax.presolve import SeparabilityPass
 
     m = do.Model("empty")
     m.continuous("a", lb=0.0, ub=1.0)
