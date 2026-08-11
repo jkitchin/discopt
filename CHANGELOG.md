@@ -47,18 +47,54 @@ The release procedure that produces these entries is documented in
   `pytest -m requires_pounce` (127 passed, 1 skipped) apart from one failure
   reproduced identically on the pre-bump control (see below).
 
-  Note for anyone re-running this check: do **not** judge it against the
-  committed `docs/dev/data/cert-baseline.jsonl`. That reference is stale against
-  `main` — 18 violations on an *unmodified* tree, including objective drift past
-  `_OBJ_TOL` (`cvxnonsep_nsig30` 1.5e-6) and node swings (`nvs13` 23 → 637). All
-  49 still certify `optimal`, so this is a drifted reference rather than a
-  soundness problem, but it means `check_cert_neutrality.py` cannot presently
-  detect a real regression locally. The weekly graduation-gate lane that runs the
-  same guard reports success on the same commit; that divergence is **not
-  explained** — it is not the pounce version (CI installed 0.9.0, and the local
-  control at 0.9.0 shows the same 18) and was not chased further here. Unrelated
-  to this bump and left as-is; flagged so the next reader does not mistake a
-  stale baseline for a bump regression.
+  Note on method: the arms were diffed against *each other*, not against
+  `docs/dev/data/cert-baseline.jsonl`, because at the time that reference was
+  stale (18 violations on an *unmodified* tree). It has since been regenerated
+  in this same series — see the next entry — so a future re-run of this check
+  can use the committed reference directly.
+
+- **`docs/dev/data/cert-baseline.jsonl` regenerated, 49 → 52 rows**
+  (`chore(cert)`). The §0.2.5 bound-neutrality reference had drifted out of
+  reproducibility against its own tree: `check_cert_neutrality.py` on an
+  *unmodified* checkout reported **18 violations** — objective drift past
+  `_OBJ_TOL` (`cvxnonsep_nsig30` 1.5e-6, `cvxnonsep_psig40r` 2.9e-6, `m3`
+  5.9e-7) and node swings (`nvs13` 23 → 637, `dispatch` 3 → 23, `tls2`
+  343 → 255, `tspn05` 51 → 39). All 49 still certified `optimal`, so this was a
+  drifted reference and not a soundness bug — but it left the neutrality guard
+  unable to detect a real regression while still reading as a guard, which is
+  worse than having none.
+
+  Regenerated with `gen_cert_baseline.py --time-limit 60`; the generator's
+  determinism filter still gates admission (3 solves per instance, bit-identical
+  `node_count` and `objective`, certifying within 0.6 of budget), so the
+  reference is reproducible by construction. 56 panel rows, `incorrect_count`
+  **0** against 58 oracles, **52 admitted** (`nvs05`, `nvs17`, `tanksize` newly
+  qualify; nothing previously present was dropped), 4 excluded as non-optimal
+  (`carton7`/`hda` time-limited 3/3, `casctanks`/`ex1252` feasible-not-optimal
+  3/3). **Acceptance:** `check_cert_neutrality.py` against the fresh file
+  returns NEUTRAL, 52/52, exit 0. Nothing in `.github/workflows/` consumes this
+  file — it is a local guard, also used by `graduation_gate.py`.
+
+  The `_KNOWN_PERF_GATED` exemption for `nvs17` is left in place though its
+  rationale ("~45s/60s wall") is now stale — it certifies in 15.7s. The
+  exemption only relaxes node-count strictness while soundness is still checked;
+  tightening it is a separate change needing its own measurement.
+
+- **#966's three coupled flags stay default-OFF** — graduation panel scored and
+  **failed both §5 bars**. `DISCOPT_LP_WARM_DEADLINE`,
+  `DISCOPT_NODE_ROUND_BUDGET` and `DISCOPT_HESS_COMPILE_GATE` were measured over
+  2 budgets × 3 reps × 19 instances (artifacts and scorer committed under
+  `discopt_benchmarks/`). *Cert-clean* fails on one certification regression
+  (`nvs05`, bench20 rep2): at a 20s budget that instance sits on its own
+  certification deadline — the fresh baseline puts it at 20.5s — and base
+  certifies it 1/3 while the candidate certifies 0/3. *Net-positive* fails
+  because the benefit is budget-dependent: overrun drops −5.00 ± 0.61 s at a 15s
+  budget but only −0.17 ± 0.72 s at 20s, where the mean is inside its own rep
+  spread and the sign flips between reps; node totals rise slightly at both
+  budgets and `cert_gains` is 0 in all six reps. Bounds are net favorable (28
+  tighter vs 12 looser) and objectives 7 better / 0 worse, so this is *not
+  broadly helpful* rather than harmful — the `DISCOPT_CUT_INHERIT` shape, and
+  per §5 such a flag stays OFF with the measurement recorded.
 
 ### Fixed
 
