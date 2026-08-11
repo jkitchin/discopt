@@ -12,6 +12,34 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The benchmark layer profile could not report a measured zero** (`fix`). Both
+  producers of the Rust/JAX/Python time fractions —
+  `benchmarks/runner.py` and `benchmarks/_subprocess_worker.py` — computed the
+  share as `x / wall if x else None`, so a layer measured at exactly `0.0`
+  became `None`. `layer_profiling_summary` filters `None` out, so
+  `mean_jax_fraction` then came back `nan`, which reads as *"this was never
+  instrumented"*.
+
+  This inverted the instrument on the one case it exists for. On the `global50`
+  panel `jax_time_fraction` was `None` on **50 of 50** instances — not because
+  the profile failed, but because JAX genuinely no longer runs on the solve path
+  — and `rust_time_fraction` on 7 of 50 fast instances for the same reason. The
+  field would have read identically if JAX had been running throughout.
+
+  Fractions are now computed by a shared `metrics.time_fraction()` that branches
+  on `is None`, so a measured `0.0` records as `0.0` and `None` is reserved for a
+  solver that does not report the field at all. Verified end-to-end: on `main`
+  the smoke suite now reports a JAX fraction up to 0.93, on the JAX-removal
+  branch it reports 0.0 — two states the old encoding could not tell apart.
+
+  Also adds the missing **`pounce_time_fraction`**. POUNCE is where the NLP cost
+  went once it left JAX (78% of a `tspn08` solve per `discopt._timing`), and the
+  benchmark record had no field for it, so the dominant layer was invisible. It
+  reads `None` until the `_timing`/`pounce_time` work merges, then populates.
+  `layer_profiling_summary` gains `n_profiled` so callers can distinguish
+  "0.0 across 50 runs" from "0 runs reported it", and the generated report
+  renders an unreported layer as `not reported` rather than `nan%`.
+
 - **The POUNCE-native NLP path now requires — and verifies — a cross-thread-safe
   `NlProblem`** (`fix`, #932). #932 reported the pyo3 panic
   `_pounce::nl_problem::PyNlProblem is unsendable, but sent to another thread`

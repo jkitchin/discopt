@@ -219,12 +219,26 @@ def generate_report(
         if not np.isnan(profile["mean_rust_fraction"]):
             lines.append("## Layer Profiling (discopt)")
             lines.append("")
+            # `nan` must not render as "nan%", which reads like a measured
+            # value. It means the layer was not reported at all -- a distinct
+            # statement from a measured 0.0%, and the two must stay legible
+            # apart in the report as well as in the data.
+            def _pct(key: str) -> str:
+                v = profile[key]
+                return "not reported" if np.isnan(v) else f"{v:.1%}"
+
+            n = int(profile.get("n_profiled", 0))
+            lines.append(f"Layers measured on {n} run(s). `rust` + `python` partition the ")
+            lines.append("wall clock; `JAX` is a subset of Python and `POUNCE` a subset of Rust, ")
+            lines.append("so the rows do not sum to 100%.")
+            lines.append("")
             lines.append("| Layer | Mean Time Fraction | Target |")
             lines.append("|-------|-------------------|--------|")
-            lines.append(f"| Rust (tree, LP, sparse LA) | {profile['mean_rust_fraction']:.1%} | — |")
-            lines.append(f"| JAX (relaxations, autodiff, NLP) | {profile['mean_jax_fraction']:.1%} | — |")
-            lines.append(f"| Python orchestration | {profile['mean_python_fraction']:.1%} | <5% |")
-            lines.append(f"| Max Python overhead | {profile['max_python_fraction']:.1%} | <10% |")
+            lines.append(f"| Rust (tree, LP, sparse LA) | {_pct('mean_rust_fraction')} | — |")
+            lines.append(f"| ↳ POUNCE (NLP/LP/QP subsolves) | {_pct('mean_pounce_fraction')} | — |")
+            lines.append(f"| Python orchestration | {_pct('mean_python_fraction')} | <5% |")
+            lines.append(f"| ↳ JAX (relaxations, autodiff) | {_pct('mean_jax_fraction')} | — |")
+            lines.append(f"| Max Python overhead | {_pct('max_python_fraction')} | <10% |")
             lines.append("")
 
     # ── GPU vs CPU ──
