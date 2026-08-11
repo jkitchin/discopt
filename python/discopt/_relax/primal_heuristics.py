@@ -110,6 +110,48 @@ def _heuristic_nlp_options(caller_options: Optional[dict] = None) -> dict:
     return opts
 
 
+# Wall-clock floor/cap for a single heuristic sub-NLP launched against a caller
+# deadline (#966). ``solver.py`` already clamps the root relaxation exactly this
+# way (``max(_DEADLINE_NODE_FLOOR_S, min(3.0, deadline - now))``); these give the
+# primal heuristics the same contract, and ``continuous_multistart`` below has
+# used the ``min(3.0, remaining)`` form since F4.
+#
+# WHY A CAP AND NOT JUST A POLL: the deadline polls in this module gate whether a
+# solve *starts*, never how long it runs, so polling alone bounds the *number* of
+# overshooting solves to one and says nothing about that one's duration. Measured
+# on a 20 s budget, bchoco07/bchoco08/heatexch_gen3 ran 2.4–4.7 s past the
+# deadline in every arm of the #966 panel (all three coupled flags ON and OFF
+# alike, within ~0.5 s of each other — i.e. a default-configuration defect, not a
+# flag effect), and a post-deadline stack sampler put 100 % of its 73 samples
+# inside one ``nlp_pounce.solve_nlp`` call: 91.8 % reached from
+# ``feasibility_pump``, 8.2 % from ``integer_local_search``. An ITERATION cap
+# (``_HEURISTIC_NLP_MAX_ITER``) is not a TIME cap — on the no-relaxation
+# flowsheet class a single IPM iteration carrying an exact Hessian is itself
+# seconds long.
+#
+# NOT A HARD GUARANTEE: POUNCE tests its own ``max_wall_time`` between IPM
+# iterations, so one expensive iteration still overruns it (``diving`` below and
+# ``test_f4_root_budget_gate`` both record the same observation). The cap turns
+# an UNBOUNDED overrun into a roughly one-iteration one; entry gating (F4) and
+# this duration cap are complementary, not alternatives.
+_DEADLINE_NLP_FLOOR_S = 0.1
+_DEADLINE_NLP_CAP_S = 3.0
+
+
+def _deadline_wall_cap(deadline: Optional[float]) -> Optional[float]:
+    """Wall-clock cap for one heuristic sub-NLP, derived from ``deadline``.
+
+    Returns ``None`` when there is no finite deadline, so a caller that never
+    passed one keeps its existing unclamped behaviour bit-for-bit. The floor
+    keeps a just-expired deadline from handing the backend a zero/negative
+    ``max_wall_time`` (whose meaning is backend-defined) — a solve started at the
+    edge gets a small positive slice rather than an undefined one.
+    """
+    if deadline is None or not np.isfinite(deadline):
+        return None
+    return max(_DEADLINE_NLP_FLOOR_S, min(_DEADLINE_NLP_CAP_S, float(deadline) - _now()))
+
+
 # VOLUME-1 (docs/dev/nlp-solve-volume-2026-07-06.md) + ILS-DEFAULT
 # (docs/dev/ils-default-validation-2026-07-06.md): the objective-improvement
 # coordinate descent inside ``integer_local_search`` (``_objective_improve``) is
@@ -195,6 +237,29 @@ def _generate_starts(
 def _is_nlp_feasible(result: NLPResult) -> bool:
     """Check whether an NLP result represents a feasible solution."""
     return result.status in (SolveStatus.OPTIMAL,) and result.x is not None
+
+
+# Statuses ``feasibility_pump`` accepts from its fix-and-solve round.
+#
+# TIME_LIMIT is in the set *because* the pump now caps each projection from the
+# caller's deadline (``_deadline_wall_cap``): a cap whose own time-limited points
+# are then thrown away would trade the overshoot for a lost incumbent, which is
+# not an improvement — it is a different regression. ``nlp_ipopt``'s status map
+# turns Ipopt −5 ``Maximum_WallTime_Exceeded`` into exactly this status, so this
+# is the status a clamped solve actually returns (verified, not assumed).
+#
+# Trusting a non-converged point here is sound ONLY because the pump re-verifies
+# it independently of the status immediately below — ``_is_integer_feasible``
+# after snapping the pinned integers, then ``_check_constraint_feasibility`` on
+# the real constraint bodies — and ``inject_incumbent`` enforces strict
+# improvement on top. That is the same footing on which ``subnlp`` and
+# ``_solve_root_node_multistart`` already accept ITERATION_LIMIT. The status is
+# a hint about convergence, never the feasibility evidence.
+#
+# Deliberately NOT folded into ``_is_nlp_feasible``: that gate is shared with
+# call sites where no such re-verification follows, and widening it there would
+# be weakening a check rather than relocating one.
+_PUMP_ACCEPT_STATUSES = (SolveStatus.OPTIMAL, SolveStatus.TIME_LIMIT)
 
 
 def _is_integer_feasible(
@@ -312,11 +377,13 @@ def feasibility_pump(
         backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
             resolves to ``get_nlp_solver("auto")``
             (POUNCE-preferred, falling back to cyipopt).
-        deadline: Optional ``time.perf_counter()`` wall-clock deadline. When the
-            current time reaches it, the pump stops at the start of the next
-            round and returns the best feasible solution found so far (or None).
-            Keeps a tight global ``time_limit`` from being overrun by the root
-            heuristic's per-round NLP solves.
+        deadline: Optional ``time.perf_counter()`` wall-clock deadline. Bounds the
+            pump two ways: the extra perturbation rounds stop once it has passed,
+            AND each round's NLP solve is capped by ``_deadline_wall_cap`` so a
+            projection already under way cannot run past it unbounded (#966 — the
+            poll alone left a 2.4–4.7 s overrun on a 20 s budget). Returns the
+            best feasible solution found so far (or None). Keeps a tight global
+            ``time_limit`` from being overrun by the root heuristic's NLP solves.
         evaluator: Optional prebuilt :class:`NLPEvaluator` for ``model``. Reusing
             the caller's evaluator avoids rebuilding (and recompiling, ~3s) the
             JAX sparse-Hessian/Jacobian kernels for the same model structure.
@@ -383,8 +450,17 @@ def feasibility_pump(
                     v.lb = fixed.copy()
                     v.ub = fixed.copy()
                 offset += sz
+            solve_opts = dict(opts)
+            _wall_cap = _deadline_wall_cap(deadline)
+            if _wall_cap is not None:
+                # Bound THIS solve, not merely the gap between rounds. The poll at
+                # the top of the loop cannot stop a projection that has already
+                # started, and round 0 is not polled at all — which is how a pump
+                # launched just under the deadline ran seconds past it (#966). An
+                # explicit caller ``max_wall_time`` still wins (setdefault).
+                solve_opts.setdefault("max_wall_time", _wall_cap)
             try:
-                nlp_result = backend(evaluator, x0, options=opts)
+                nlp_result = backend(evaluator, x0, options=solve_opts)
             except BaseException as exc:
                 # Some NLP backends (pounce via PyO3) raise PanicException, which
                 # is not a subclass of Exception; treat any failure as this round
@@ -396,7 +472,7 @@ def feasibility_pump(
                 v.lb = lb_v
                 v.ub = ub_v
 
-        if not _is_nlp_feasible(nlp_result) or nlp_result.x is None:
+        if nlp_result.status not in _PUMP_ACCEPT_STATUSES or nlp_result.x is None:
             continue
 
         x_cand = np.asarray(nlp_result.x).copy()
@@ -902,6 +978,11 @@ def integer_local_search(
                             nlp_options=nlp_options,
                             evaluator=evaluator,
                             feas_tol=feas_tol,
+                            # #966: cap the repair from whichever deadline the
+                            # budget is actually enforcing. ``budget.exhausted()``
+                            # is polled BETWEEN solves, so without this a descent
+                            # step launched just under the wall runs past it.
+                            time_budget=_deadline_wall_cap(budget.deadline),
                         )
                         if cand is None:
                             continue
@@ -942,6 +1023,9 @@ def integer_local_search(
         # coordinate is a finite, usable start.
         mid = np.clip(0.5 * (np.clip(lb, -1e3, 1e3) + np.clip(ub, -1e3, 1e3)), -1e3, 1e3)
         relax_opts = _heuristic_nlp_options(nlp_options)
+        _relax_cap = _deadline_wall_cap(budget.deadline)  # #966
+        if _relax_cap is not None:
+            relax_opts.setdefault("max_wall_time", _relax_cap)
         budget.charge(NLP_SOLVE)
         relax_res = backend(evaluator, mid, options=relax_opts)
         if relax_res is not None and relax_res.x is not None:
@@ -1036,6 +1120,7 @@ def integer_local_search(
             nlp_options=nlp_options,
             evaluator=evaluator,
             feas_tol=feas_tol,
+            time_budget=_deadline_wall_cap(budget.deadline),  # #966
         )
         if repaired is not None:
             x_ok, obj_ok = repaired
@@ -1446,10 +1531,20 @@ def diving(
             # affects the dual bound.
             if deadline is not None and _now() >= deadline:
                 return None
+            dive_opts = dict(opts)
+            _dive_cap = _deadline_wall_cap(deadline)
+            if _dive_cap is not None:
+                # The poll above bounds how many dive steps START, not how long
+                # the one that started runs — which is why the overrun this
+                # comment describes survived the poll (#966). Cap the step too.
+                dive_opts.setdefault("max_wall_time", _dive_cap)
             try:
-                res = backend(evaluator, x_cur, options=opts)
+                res = backend(evaluator, x_cur, options=dive_opts)
             except BaseException:
                 return None
+            # A capped step that hits TIME_LIMIT ends the dive, exactly as the
+            # poll above would have one step later. Sound either way: diving is a
+            # primal heuristic and never touches the dual bound.
             if not _is_nlp_feasible(res):
                 return None
             x = np.asarray(res.x, dtype=np.float64)
