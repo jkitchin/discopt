@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from discopt._flat_index import resolve_scalar_slot
+from discopt._relax.scalarize import scalar_elements
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -987,8 +988,18 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
         _classify_node(distribute_products(model._objective.expression))
 
     # ── Scan constraints ──
+    # Array-valued bodies are expanded element-wise first (#981). A vectorized
+    # product such as ``(-k) * X[:, 1:]`` is ONE expression node standing for a
+    # whole matrix of scalar products; classified whole it matches no scalar
+    # pattern and lands in ``general_nl``, so its variables never become
+    # partition candidates and the spatial machinery sees no bilinear structure
+    # at all. Expanded, each element is an ordinary bilinear term.
     for constraint in model._constraints:
-        _classify_node(distribute_products(constraint.body))
+        rows = scalar_elements(constraint.body)
+        if rows is None:
+            rows = [constraint.body]
+        for body in rows:
+            _classify_node(distribute_products(body))
 
     # ── Build partition_candidates ──
     # Variables that appear in product terms (not just monomials, since x^2 is

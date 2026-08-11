@@ -10,6 +10,38 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vectorized models silently got no relaxation at all** (#981). A `Constraint`
+  body may be array-valued — `k * x - b == 0` on a 3-vector is *one* `Constraint`
+  object standing for *three* scalar rows, the same one-object-many-rows
+  distinction that #908 fixed in the incumbent verifiers. The relaxation engine
+  assumed one scalar row per `Constraint`, so its interval walk hit a numpy array
+  where it expected a float, raised `TypeError: only 0-dimensional arrays can be
+  converted to Python scalars`, and the caller degraded to building *no*
+  relaxation. The dual bound then fell back to the trivial objective floor —
+  exactly `0.0` for a sum of squares — and the relative gap against zero can
+  never close, so no time limit could certify. Sound, but useless: every DAE
+  collocation model, every `nn` layer formulation, and every numpy-style user
+  model was affected.
+
+  `_relax/scalarize.py` is new: `static_shape()` recomputes an expression's shape
+  bottom-up (the cached `_known_shape` is `None` above a matmul, so it cannot be
+  trusted) and `scalar_elements()` rewrites an array-valued body into one scalar
+  expression per flat element. `canonicalize()` now emits one canonical node per
+  scalar row, with a `constraint_index` row map back to the originating
+  `Constraint`; `uniform_relax` and `term_classifier` consume the expansion. An
+  expression the rewrite cannot expand returns `None` and the caller keeps its
+  previous behaviour — never `[]`, which would drop rows silently.
+
+  Measured on `tutorial_dae`'s parameter-estimation cell: `feasible`,
+  `bound=0.0`, 493 s → `optimal`, `bound=0.00155799`, gap 2.1e-07, certified,
+  9.7 s, with the same estimate `k=0.4836`. A vectorized bilinear model now
+  produces the same objective, bound, bilinear terms, and partition candidates as
+  its scalar transcription. Bound-neutral for scalar models by construction: over
+  all 66 in-repo `.nl` instances the canonical DAG is identical object-for-object
+  (`scalar_elements` returns the body itself), pinned by a regression test.
+
 ### Changed
 
 - **All 62 documentation notebooks re-executed** (`docs`). Their committed
@@ -24,9 +56,11 @@ The release procedure that produces these entries is documented in
   now carries a root bound instead of `-inf`.
 
   The sweep also surfaced #981: `tutorial_dae`'s parameter-estimation cell had
-  been running 493 s to report `feasible`, because collocation models get a dual
-  bound of exactly 0.0 and the relative gap can never close. That cell now
-  passes an explicit `time_limit` and says so, and its prose was corrected —
+  been running 493 s to report `feasible`, because collocation models got a dual
+  bound of exactly 0.0 and the relative gap can never close. That cell was
+  capped with an explicit `time_limit` as a stopgap; the cap and the note
+  explaining it are gone now that #981 is fixed and the cell certifies. Its
+  prose was also corrected —
   it still described `least_squares` as matching measurements to the nearest
   node, which stopped being true in #101.
 

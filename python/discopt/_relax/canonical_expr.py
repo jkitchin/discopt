@@ -45,6 +45,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from discopt._relax.scalarize import scalar_elements
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -506,7 +507,20 @@ class CanonicalDAG:
 
     model: Model
     objective: Optional[CNode]
+    #: One node per SCALAR constraint row, not per :class:`Constraint` object: an
+    #: array-valued body (``A @ x == b`` on a 3-vector) contributes one node per
+    #: flat element, matching the NLP evaluator's row convention (#981). Use
+    #: :attr:`constraint_index` to get back to the owning ``Constraint``.
     constraints: tuple[CNode, ...]
+    #: ``constraint_index[r]`` is the position in ``model._constraints`` of the
+    #: ``Constraint`` that row ``r`` came from. Rows of one array-valued
+    #: constraint are contiguous and in row-major (``np.ravel``) order.
+    constraint_index: tuple[int, ...]
+    #: The scalar body expression behind each row. Held for two reasons: it pins
+    #: the freshly built element expressions so their ``id()`` cannot be recycled
+    #: under ``_memo`` (the stale-``id()`` hazard :meth:`cnode_of` documents), and
+    #: it lets callers recover the row's expression without re-scalarizing.
+    constraint_exprs: tuple[Expression, ...]
     _memo: dict[int, CNode]
     _intern: dict[tuple, CNode]
 
@@ -547,16 +561,39 @@ def canonicalize(model: Model) -> CanonicalDAG:
 
     Pure and box-independent. Unsupported nodes become ``opaque`` CNodes wrapping
     the original subexpression (never raises to the caller).
+
+    Array-valued constraint bodies are expanded element-wise first (#981), so the
+    returned DAG carries one node per SCALAR row. Before this, a vectorized body
+    such as ``(-k) * X[:, 1:] == 0`` reached the relaxation builder as a single
+    array-valued node whose interval enclosure is an array — which crashed the
+    build (``only 0-dimensional arrays can be converted to Python scalars``) and
+    cost the model its entire relaxation, collapsing the dual bound to the trivial
+    objective floor. An element that cannot be scalarized statically keeps the
+    whole constraint unexpanded, exactly as before.
     """
     canon = _Canonicalizer(model)
     obj_node: Optional[CNode] = None
     if model._objective is not None:
         obj_node = canon.canon(model._objective.expression)
-    con_nodes = tuple(canon.canon(c.body) for c in model._constraints)
+
+    con_nodes: list[CNode] = []
+    con_index: list[int] = []
+    con_exprs: list[Expression] = []
+    for i, c in enumerate(model._constraints):
+        rows = scalar_elements(c.body)
+        if rows is None:
+            rows = [c.body]  # not statically scalarizable — unchanged behaviour
+        for body in rows:
+            con_nodes.append(canon.canon(body))
+            con_index.append(i)
+            con_exprs.append(body)
+
     return CanonicalDAG(
         model=model,
         objective=obj_node,
-        constraints=con_nodes,
+        constraints=tuple(con_nodes),
+        constraint_index=tuple(con_index),
+        constraint_exprs=tuple(con_exprs),
         _memo=canon._memo,
         _intern=canon._intern,
     )
