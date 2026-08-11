@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
+#: This file's path relative to the repo root, for the git-grep pathspec below.
+_SELF = Path(__file__).resolve().relative_to(_REPO).as_posix()
 
 
 def test_the_old_package_name_is_not_importable():
@@ -45,9 +47,25 @@ def test_no_source_file_references_the_old_name():
     a dated diagnosis *may* keep the old spelling where it is describing the
     tree as it was. Both happen to be clean right now; the exemption is there so
     that keeping the record honest never has to fight this test.
+
+    This file is excluded too, and not as a convenience: it has to write the old
+    name to search for it, so it matches itself. That is also how this test
+    first shipped broken -- it passed locally while still untracked, because
+    ``git grep`` only searches tracked files, and went red the moment it was
+    committed. The exclusion is a pathspec passed to ``git grep`` rather than a
+    filter on the output, so a genuine hit inside this file's *other* lines
+    cannot hide behind it either way.
     """
     proc = subprocess.run(
-        ["git", "grep", "-nE", r"discopt\._jax|discopt/_jax"],
+        [
+            "git",
+            "grep",
+            "-nE",
+            r"discopt\._jax|discopt/_jax",
+            "--",
+            ".",
+            f":!{_SELF}",
+        ],
         cwd=_REPO,
         capture_output=True,
         text=True,
