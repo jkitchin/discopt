@@ -31,6 +31,10 @@ assert hasattr(_ms, "_dual_start_slack_basis"), "#928 marker '_dual_start_slack_
 assert "round_deadline" in _mc.MccormickLPRelaxer.solve_at_node.__code__.co_varnames, (
     "#966 marker 'round_deadline' absent from solve_at_node"
 )
+assert "yield_round" in _mc.MccormickLPRelaxer.solve_at_node.__code__.co_varnames, (
+    "#966 yield-mode marker 'yield_round' absent from solve_at_node — this tree "
+    "predates the fix that makes a short-granted round yield instead of skip"
+)
 
 FLAGS = ("DISCOPT_LP_WARM_DEADLINE", "DISCOPT_NODE_ROUND_BUDGET", "DISCOPT_HESS_COMPILE_GATE")
 for _f in FLAGS:

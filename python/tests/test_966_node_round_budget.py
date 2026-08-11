@@ -159,6 +159,121 @@ def test_flag_default_off():
 
 
 # --------------------------------------------------------------------------- #
+# #966 follow-up — a round that cannot afford its grant YIELDS instead of being
+# declined. The first cut of this flag skipped such a round outright, which
+# banks neither a bound nor an LP point; the point is what the spatial brancher
+# and the primal heuristics consume, so the skip cost the search itself
+# (nvs05 @ 20 s, every round skipped: bound 3.514 -> 0.684, incumbent
+# 8.73 -> 523.69, 29 -> 1 nodes; yielding the same rounds: bound 3.506,
+# incumbent 8.73, 59 nodes — scratchpad/issue966_yield_{vs_decline,fix_ab}.py).
+# --------------------------------------------------------------------------- #
+
+
+def test_yield_round_requires_a_round_deadline():
+    """A yield with no grant to yield to is an unclamped weaker round — refuse."""
+    model = _bilinear_model()
+    relaxer = MccormickLPRelaxer(model)
+    lb, ub = _box(model)
+    with pytest.raises(ValueError, match="requires round_deadline"):
+        relaxer.solve_at_node(lb, ub, time_limit=5.0, yield_round=True)
+
+
+def test_yield_round_truncates_build_and_skips_separation(build_spy, monkeypatch):
+    """Yield mode buys what the grant affords: truncated build, no separation."""
+    model = _bilinear_model()
+    relaxer = MccormickLPRelaxer(model)
+    relaxer._inc = None  # force the cold path (the fast path is cheaper anyway)
+    lb, ub = _box(model)
+
+    separated: list = []
+    orig_impl = MccormickLPRelaxer._solve_at_node_impl
+
+    def spy_impl(self, *args, **kwargs):
+        separated.append(kwargs.get("separate"))
+        return orig_impl(self, *args, **kwargs)
+
+    monkeypatch.setattr(MccormickLPRelaxer, "_solve_at_node_impl", spy_impl)
+
+    rd = time.perf_counter() - 1.0  # a spent grant: the build truncates at once
+    assert relaxer.yield_rounds == 0
+    res = relaxer.solve_at_node(lb, ub, time_limit=5.0, round_deadline=rd, yield_round=True)
+
+    assert relaxer.yield_rounds == 1, "yield mode did not fire (§6: a vacuous pass)"
+    assert build_spy.deadlines and build_spy.deadlines[0] == rd
+    # ``separate`` is switched off INSIDE the impl, so what the impl received is
+    # the caller's request; the observable effect is the yield counter plus the
+    # truncated build above. Assert the caller still asked for separation, so the
+    # skip is attributable to yield mode and not to the call site.
+    assert separated and separated[0] is True
+    assert res.status in ("optimal", "uncertified", "time_limit", "numerical")
+
+
+def test_yield_round_banks_a_sound_bound_and_a_point():
+    """A yielded round's bound is valid (never above the box optimum) and it
+    carries an LP vertex for the brancher — the two things a skipped round
+    banked neither of."""
+    model = _bilinear_model()
+    relaxer = MccormickLPRelaxer(model)
+    relaxer._inc = None
+    lb, ub = _box(model)
+
+    full = relaxer.solve_at_node(lb, ub, time_limit=5.0)
+    yielded = relaxer.solve_at_node(
+        lb,
+        ub,
+        time_limit=5.0,
+        round_deadline=time.perf_counter() - 1.0,
+        yield_round=True,
+    )
+
+    assert full.lower_bound is not None
+    assert yielded.lower_bound is not None, "the yielded round banked no bound"
+    assert yielded.x is not None, "the yielded round banked no point"
+    # Soundness: dropping rows/cuts only enlarges the relaxed set, so the yielded
+    # bound is <= the full round's bound, and both are <= the true box optimum
+    # (min of x*y - 2x + y over [0,4]^2 subject to x+y>=1 is -8 at (4,0)).
+    true_opt = -8.0
+    assert yielded.lower_bound <= full.lower_bound + 1e-9
+    assert yielded.lower_bound <= true_opt + 1e-6
+    assert full.lower_bound <= true_opt + 1e-6
+
+
+def test_yield_round_default_off_leaves_the_path_untouched(build_spy):
+    """No ``yield_round`` -> no yield accounting, no build deadline."""
+    model = _bilinear_model()
+    relaxer = MccormickLPRelaxer(model)
+    relaxer._inc = None
+    lb, ub = _box(model)
+    relaxer.solve_at_node(lb, ub, time_limit=5.0)
+    assert relaxer.yield_rounds == 0
+    assert build_spy.deadlines == [None]
+
+
+def test_yielded_round_without_a_bound_keeps_the_node_open():
+    """A yielded round that banks nothing must not leave the node fathomed
+    without proof — that is what discards the run's certified dual bound."""
+    from discopt.constants import SENTINEL_THRESHOLD
+    from discopt.solver import _nonrigorous_sentinel_fathom, _yield_keeps_node_open
+
+    sentinel = float(SENTINEL_THRESHOLD) * 10.0
+
+    # The certificate consequence this guard exists to prevent.
+    assert _nonrigorous_sentinel_fathom(sentinel, False) is True
+    assert _nonrigorous_sentinel_fathom(-np.inf, False) is False
+
+    lbs = np.array([sentinel, sentinel, 1.5])
+    # Yielded round + failed NLP (the sentinel is still in the slot): keep open.
+    assert _yield_keeps_node_open(True, True, lbs, 0) is True
+    assert lbs[0] == -np.inf
+    # Not a yielded round: untouched (the default path must not move).
+    assert _yield_keeps_node_open(False, True, lbs, 1) is False
+    assert lbs[1] == sentinel
+    # A node that already carries a real bound is never disturbed.
+    assert _yield_keeps_node_open(True, False, lbs, 2) is False
+    assert lbs[2] == 1.5
+
+
+# --------------------------------------------------------------------------- #
 # #966 item 2 — the first-time sparse-Hessian XLA compile entry gate
 # (``DISCOPT_HESS_COMPILE_GATE``). The severe modes (124 s compile against a
 # 20 s budget on heatexch_gen3, caught in flight with faulthandler) enter

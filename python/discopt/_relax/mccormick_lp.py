@@ -454,12 +454,16 @@ class MccormickLPRelaxer:
         self._lazy_skip_ctr: int = 0
         # Measured cold-build cost EMA (#966, ``DISCOPT_NODE_ROUND_BUDGET``): the
         # wall of this relaxer's ``build_milp_relaxation`` calls, exponentially
-        # averaged (alpha 0.5) so the node loop's round-admission check can
-        # decline a round whose grant cannot cover the round's expected non-LP
-        # cost. ``None`` until the first cold build; the incremental fast path
-        # does not update it (its per-node cost is negligible by construction).
+        # averaged (alpha 0.5) so the node loop's round-admission check can tell
+        # a round whose grant covers a full round from one that must yield.
+        # ``None`` until the first cold build; the incremental fast path does not
+        # update it (its per-node cost is negligible by construction).
         # Pure measurement — read via :meth:`expected_build_cost`.
         self._build_wall_ema: Optional[float] = None
+        # Count of rounds run in yield mode (#966). Read by the node loops for
+        # ``solver_stats`` and by the tests to prove the mechanism fired
+        # (CLAUDE.md §6: a gate that never fires must not read as a pass).
+        self.yield_rounds: int = 0
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -947,8 +951,9 @@ class MccormickLPRelaxer:
         """EMA of this relaxer's cold-build wall (#966), ``None`` before any build.
 
         The node loop's round-admission check reads this (under
-        ``DISCOPT_NODE_ROUND_BUDGET``) to decline a round whose remaining grant
-        cannot cover the round's expected non-LP cost.
+        ``DISCOPT_NODE_ROUND_BUDGET``) to decide whether a round's remaining
+        grant can cover a FULL round; a round whose grant falls short is run in
+        yield mode (``yield_round``) rather than skipped.
         """
         return self._build_wall_ema
 
@@ -966,6 +971,7 @@ class MccormickLPRelaxer:
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        yield_round: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -1031,6 +1037,7 @@ class MccormickLPRelaxer:
             skip_pool_separators=skip_pool_separators,
             build_deadline=build_deadline,
             round_deadline=round_deadline,
+            yield_round=yield_round,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
         # regular node solve (not a root pool-capture call, which passes no pool),
@@ -1175,6 +1182,7 @@ class MccormickLPRelaxer:
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        yield_round: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -1184,6 +1192,18 @@ class MccormickLPRelaxer:
         so the round's non-LP cost cannot restart the clock. Passed only by the
         spatial node loops under ``DISCOPT_NODE_ROUND_BUDGET``; every other
         caller's behavior is byte-identical.
+
+        ``yield_round`` (#966) runs the round in **yield mode**: the round's
+        grant cannot cover a full round, so instead of banking nothing the round
+        buys whatever the grant affords — the per-node separation chain is
+        skipped and the cold build is truncated by ``round_deadline`` (the #694
+        anytime mechanism, one whole constraint at a time), leaving a valid but
+        weaker outer relaxation. Dropping cuts and constraint rows only ENLARGES
+        the relaxed feasible set, so the LP optimum is still a valid lower bound
+        on this box — a yielded round is sound, just looser. Requires
+        ``round_deadline`` (the clamp is the whole point); the incremental fast
+        path, when in scope, is cheaper *and* full-strength, so it is still tried
+        first and its result is preferred.
 
         Returns a :class:`MccormickLPResult`. ``lower_bound`` is a valid lower
         bound on the original problem within this box (for minimization).
@@ -1244,6 +1264,20 @@ class MccormickLPRelaxer:
         # is bound-independent (an empty McCormick polytope over a finite box is a
         # rigorous infeasibility proof), so it is always trusted; pooled spatial
         # nodes, which DO inherit cuts, keep the fast path for both verdicts.
+        # #966 yield mode: the round's grant cannot cover a full round, so buy what
+        # it affords instead of banking nothing. Skipping the separation chain and
+        # truncating the build only DROP rows, which enlarges the relaxed feasible
+        # set — the LP optimum stays a valid lower bound on this box (sound, looser).
+        # ``round_deadline`` carries the grant, so a yield without one would be an
+        # unclamped round wearing the yield's weaker relaxation: refuse loudly.
+        if yield_round:
+            if round_deadline is None:
+                raise ValueError(
+                    "solve_at_node(yield_round=True) requires round_deadline: the "
+                    "yield's whole purpose is to fit the round inside its grant"
+                )
+            separate = False
+            self.yield_rounds += 1
         _skip_fast_for_lift = (
             separate
             and self._inc is not None
