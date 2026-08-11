@@ -25,6 +25,7 @@ parts:
       - file: notebooks/tutorial_oa
       - file: mip_nlp
       - file: notebooks/tutorial_benders
+      - file: notebooks/tutorial_gbd
       - file: notebooks/tutorial_lagrangian
       - file: notebooks/decomposition_advisor
       - file: notebooks/amp_global_minlp
