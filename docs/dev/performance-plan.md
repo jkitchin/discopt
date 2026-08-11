@@ -1857,6 +1857,124 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > both printed, and the panel **exits non-zero** when it made zero oracle comparisons
 > (§6) — the state that produced this retraction can no longer report success.
 
+### 14d. #928: the interaction is a round that throws away the floor it holds (2026-08-11)
+
+> §14b's verdict named the residual precisely — "the pair *LP yields on its deadline*
+> x *round yields on its deadline* compounding into a node result that carries no
+> adoptable bound at all; that is the thing to fix before either flag is
+> re-panelled." It is fixed, and the mechanism turned out to be simpler and more
+> general than "an interaction of two clamps".
+>
+> **The corpus cell does not travel, so the mechanism was probed directly.** contvar
+> @ 20 s is wall-clock-shaped: on the container this work ran in, all four arms of
+> the §14b attribution probe return the same bound (171244.81, 3 nodes) and the 287-node
+> collapse does not reproduce at all. Chasing the cell would have measured the
+> container. So instead: hand `solve_at_node` a `round_deadline` that is already
+> spent — the state #966's clamp produces once the cold build has eaten the round's
+> grant — and compare against an unclamped control, over the same 19 binding
+> instances, in both `DISCOPT_LP_WARM_DEADLINE` arms
+> (`scratchpad/issue928_round_cut_short_entry.py`, 114 counted cells).
+>
+> **16 of 114 cells return NO bound** where the control certifies one — bchoco06/07/08
+> (spent and nearly-spent alike), hda, tls2 — and they return it as `uncertified`, not
+> `time_limit`. **Both flag arms are affected identically**, so the loss is not the
+> interaction of the two clamps: it is the *round* clamp alone, and the LP clamp only
+> ever made it more reachable. The truncated build leaves a **0-row** relaxation which
+> solves to LP optimality and which every certification route then declines (no NS safe
+> bound; the conditioning/free-column guards refuse the vertex).
+>
+> **And the floor was in hand the whole time** (`scratchpad/issue928_floor_inventory.py`,
+> 10 counted rounds). Every lost cell's truncated relaxation carries a valid finite
+> `_objective_floor`:
+>
+> | instance | rows built | `_objective_bound_valid` | floor | unclamped control |
+> |---|---|---|---|---|
+> | bchoco06 | 0 / 134 | True | **-1.0** | -0.9999918 |
+> | bchoco07 | 0 / 153 | True | **-1.0** | -1.0000000 |
+> | bchoco08 | 0 / 190 | True | **-1.0** | -1.0000000 |
+> | tls2 | 0 / 24 | True | **0.0** | 0.0 |
+> | hda | 0 / 718 | True | **-172201.82** | -64675.25 |
+>
+> On four of the five the discarded floor is the control bound to within rounding. The
+> fix is therefore not a new bound source — it is *reporting the one already computed*.
+>
+> **Shipped (both inside the opt-in flags' blast radius, no new flag).**
+> 1. `_solve_at_node_impl` reports that box-interval floor whenever the round was cut
+>    short (`_build_truncated`, or an LP that exited `time_limit`) and no route
+>    certified anything, and takes `max(banked deadline dual, box floor)` on a deadline
+>    exit — the two are not ordered a priori, since §14a measured the hda node LP
+>    banking exactly `g(0)`, the box floor itself. Sound: the floor comes from the cost
+>    columns of the same column box the LP is solved over, independent of which rows
+>    were emitted, so it is below the node's true optimum however truncated the build;
+>    `_objective_bound_valid` gates out the un-relaxable and the #248 garbage-wide cases
+>    (a garbage floor would anchor the tree on a bound that never certifies — the
+>    "sound but harmful" trade §14b measured).
+> 2. The #966 round-admission check no longer declines the **ROOT** round. A branched
+>    node always carries its parent's bound, so declining forgoes tightening only; the
+>    root has no parent, and declining it leaves the tree with no bound source at all —
+>    which is exactly the shape of §14b's contvar collapse (7 → 287 nodes, nothing ever
+>    certified, `bound=None`). This is rule 1 of `_fb_stop`, applied where it was
+>    missing: never skip while no valid bound is in hand.
+>
+> **Verification.** Post-fix re-run of the entry experiment: `LOST_BOUND_CELLS` 16 → 0,
+> with a counted bound-vs-control control on every cell. Default-path
+> bound-neutrality with all three flags OFF: **13/13 certifying instances byte-identical**
+> in `node_count`/`objective`/`bound` against the pre-fix tree, marker-gated in both
+> directions (`scratchpad/issue928_round_floor_neutrality.py` — the marker is
+> `_cut_short_floor` in `_solve_at_node_impl.__code__.co_varnames`). Five mechanism
+> tests in `python/tests/test_928_round_cut_short_floor.py` fail on the pre-fix tree
+> and pass after; a sixth pins the default-path decline that must NOT change.
+>
+> **Oracle caveat, stated up front (§14b-qual's rule).** `minlplib.solu` is not
+> reachable from this container — the network policy denies minlplib.org — so the
+> curated `known_optima.toml` covers **1 of the 19** binding instances. The re-panel
+> below therefore adds a **cross-arm primal ceiling**: every arm's verified incumbent
+> bounds the optimum from above, so the best incumbent found by any arm in any rep is a
+> sound ceiling for every other arm's bound on that instance. Both coverages are
+> counted and printed, and a run making zero ceiling comparisons exits non-zero.
+>
+> **Re-panel: the wall verdict flips clean, the bound ledger flips clean, and the one
+> residual is #966's — the flags still do NOT graduate.** 19 binding instances, 20 s,
+> 3 reps, three arms interleaved per instance
+> (`discopt_benchmarks/scripts/issue928_round_floor_panel.py`; raw
+> `discopt_benchmarks/results/issue928_round_floor_binding20.json`;
+> `COMPARISONS_EXECUTED=57`, `CEILING_COMPARISONS_EXECUTED=63`).
+>
+> | metric (cand vs base) | rep1 | rep2 | rep3 |
+> |---|---|---|---|
+> | overrun delta | **−94.4 s** | **−313.5 s** | **−16.7 s** |
+> | total overrun base → cand | 169.4 → 75.0 | 367.4 → 53.9 | 67.2 → 50.5 |
+> | bounds tighter / looser | 8 / 1 | 7 / 2 | 8 / 1 |
+> | bounds lost / gained | 0 / 1 | 0 / 0 | 0 / 0 |
+> | nodes base → cand | 501 → 823 | 615 → 877 | 537 → 851 |
+>
+> * **Net-positive: passes.** The delta is negative in 3/3 reps (mean −141.5, sd 153.9 —
+>   large because rep2's base arm hit a 313 s severe mode, not because the sign is in
+>   doubt) where §14b measured **+325.4/+68.5/+12.7**. The sign flip is gone.
+> * **The bound ledger is now positive, not merely non-negative.** `lost_bound` is empty
+>   in 3/3 — §14b's contvar `183632.766 → None` does not recur — and rep1 *gains* one
+>   (clay0303hfsg `None → −1.23e-05`). The big movers are exactly the cut-short class:
+>   hda `−2.07e13 → −124296.9`, tspn12 `183.33 → 192.92`, beuster `6352.06 → 17698.96`,
+>   heatexch_gen2 `555767.8 → 578091.9`. Against 1–2 looser cells per rep, all tiny
+>   (tspn05 178.1165 → 177.8928, tls2 2.4487 → 2.1000).
+> * **Soundness: 0 violations**, over 63 counted bound-vs-ceiling comparisons plus the
+>   2–3 curated-oracle comparisons per rep, plus the bound-crosses-incumbent and
+>   incumbent-verification arms, which fire on every cell. Coverage is reported, not
+>   assumed.
+> * **`CERT_CLEAN=False` in reps 2 and 3, on one item: tspn12's incumbent.** The base
+>   arm finds 282.24 (bound 183.33); seam and cand find none (bound 192.92). **This is
+>   the seam's, not #928's**: `seam vs base` shows the same loss (rep3 adds tls2) while
+>   `cand vs seam` loses **no** incumbent in any rep. The round budget declines the
+>   rounds whose search trajectory happened to land that incumbent — the same shape as
+>   §14b's casctanks bound collapse, one level over in the metric set.
+>
+> **Verdict: all three flags stay default-OFF.** Bar 1 is a hard gate with no slack and
+> it fails, even though the failing item is a primal one owned by #966 and is paid for
+> by a materially tighter dual bound in the same cells. The thing this issue names —
+> the callee dropping the deadline, and then the round throwing away the floor it
+> holds — is fixed and measured; what remains is #966's round-admission policy losing
+> a primal trajectory, which belongs on that issue.
+
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
 > **The defect (confirmed).** The McCormick row generators in

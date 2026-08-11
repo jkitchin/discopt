@@ -452,6 +452,20 @@ def _lp_warm_deadline_enabled() -> bool:
     banked dual; the #966 round-admission check no longer declines the ROOT round,
     which holds no parent bound to fall back on.
 
+    **The re-panel on that build passes the net-positive bar and still does not
+    graduate** (19 binding instances, 20 s, 3 reps, three arms;
+    ``discopt_benchmarks/results/issue928_round_floor_binding20.json``,
+    performance-plan §14d). ON-OFF overrun is **-94.4 / -313.5 / -16.7 s** — negative
+    in 3/3 where §14b measured +325.4/+68.5/+12.7, so the sign flip is gone — with
+    ``lost_bound`` empty in 3/3 (contvar's ``-> None`` does not recur), one bound
+    GAINED (clay0303hfsg ``None -> -1.23e-05``), 7-8 tighter against 1-2 tiny looser
+    per rep, hda ``-2.07e13 -> -124296.9``, and zero soundness violations over 63
+    counted bound-vs-ceiling comparisons. ``CERT_CLEAN`` is False in 2 of 3 reps on
+    exactly one item — tspn12's incumbent — and that item is the ROUND budget's, not
+    this flag's: ``seam vs base`` loses it too while ``cand vs seam`` loses no
+    incumbent in any rep. Bar 1 has no slack, so all three flags stay OFF pending
+    that #966 residual.
+
     Net-positive therefore FAILED at the time of writing: the sign flips with
     budget, which is not
     "measurably helpful broadly" (the ``DISCOPT_CUT_INHERIT`` rule). The residual

@@ -1768,9 +1768,7 @@ class MccormickLPRelaxer:
             # that got further is tighter. ``max`` of two valid floors is valid.
             if res.status == "time_limit":
                 _tl_cands = [
-                    b
-                    for b in (res.bound, _cut_short_floor)
-                    if b is not None and np.isfinite(b)
+                    b for b in (res.bound, _cut_short_floor) if b is not None and np.isfinite(b)
                 ]
                 if _tl_cands:
                     return MccormickLPResult(status="optimal", lower_bound=float(max(_tl_cands)))

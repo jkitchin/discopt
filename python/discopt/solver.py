@@ -10550,7 +10550,11 @@ def solve_model(
                     # the node stays open on its valid parent bound.
                     # #928 rule 1 (see the batch path): the ROOT batch holds no
                     # parent bound, so its round is never declined — declining it
-                    # leaves the tree with no bound source at all.
+                    # leaves the tree with no bound source at all. That covers the
+                    # past-deadline arm of this check too: a root round entered on
+                    # a spent grant truncates its build and reports the relaxation's
+                    # rigorous box floor, which is strictly more than the nothing a
+                    # declined root leaves behind.
                     _serial_remaining = _deadline - time.perf_counter()
                     if _round_budget_enabled and iteration >= 1:
                         _exp_build = _mc_lp_relaxer.expected_build_cost()

@@ -106,9 +106,7 @@ def ceiling_violations(cells: list[dict], ceilings: dict[str, float]) -> tuple[i
                 continue
             cmps += 1
             over = (
-                rec["bound"] < ceil - 1e-4
-                if rec["sense"] == "max"
-                else rec["bound"] > ceil + 1e-4
+                rec["bound"] < ceil - 1e-4 if rec["sense"] == "max" else rec["bound"] > ceil + 1e-4
             )
             if over:
                 bad.append(f"rep{c['rep']} {c['instance']}:{key}: bound {rec['bound']} vs {ceil}")
@@ -200,7 +198,9 @@ def main() -> int:
         "loadavg_end": [round(x, 2) for x in loadavg()],
         "panel_wall_s": round(time.perf_counter() - t0, 1),
     }
-    Path(args.out).write_text(json.dumps({"summary": summary, "reps": per_rep, "cells": all_cells}, indent=2))
+    Path(args.out).write_text(
+        json.dumps({"summary": summary, "reps": per_rep, "cells": all_cells}, indent=2)
+    )
 
     print()
     print(json.dumps(summary, indent=2))
