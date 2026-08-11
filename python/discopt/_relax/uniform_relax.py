@@ -3330,10 +3330,19 @@ def build_uniform_relaxation(
     # feasible set -> the LP min stays a valid lower bound). The deadline is polled
     # BETWEEN whole constraints (never mid-``rep``), so no partial/invalid row is
     # ever emitted. Default ``None`` -> the whole loop runs, byte-identical.
-    n_constraints = len(model._constraints)
+    #
+    # One row per SCALAR row, not per ``Constraint`` object (#981): an
+    # array-valued body stands for several scalar equations and
+    # ``dag.constraints`` now carries them expanded, with ``constraint_index``
+    # naming the owning ``Constraint`` for the sense/rhs. Emitting one row per
+    # ``Constraint`` here used to hand ``rep`` an array-valued node, whose
+    # interval enclosure is an array — the build raised and the model lost its
+    # relaxation entirely.
+    n_constraints = len(dag.constraints)
     constraints_done = 0
     build_truncated = False
-    for con, cnode in zip(model._constraints, dag.constraints):
+    for src, cnode in zip(dag.constraint_index, dag.constraints):
+        con = model._constraints[src]
         if build_deadline is not None and time.perf_counter() >= build_deadline:
             build_truncated = True
             break
