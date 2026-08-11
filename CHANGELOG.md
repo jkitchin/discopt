@@ -98,6 +98,67 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`solve(time_limit=T)` overran `T` because heuristic sub-NLPs were polled but
+  never capped** (`fix(heuristics)`, contributes to #966). Every deadline guard in
+  `_relax/primal_heuristics.py` gated whether a sub-NLP *starts*; none bounded how
+  long the started solve *runs*. Polling therefore caps the **number** of
+  overshooting solves at one and says nothing about its duration — and
+  `feasibility_pump`'s round 0 was not polled at all. `_HEURISTIC_NLP_MAX_ITER`
+  does not cover this: an iteration cap is not a time cap, and on the
+  no-relaxation flowsheet class a single IPM iteration carrying an exact Hessian
+  is itself seconds long.
+
+  **Attribution (measured, not assumed).** A post-deadline stack sampler put
+  **100 % of its 73 post-deadline samples** inside one `nlp_pounce.solve_nlp`
+  call — 91.8 % reached from `feasibility_pump`, 8.2 % from
+  `integer_local_search`. The overrun reproduced with all three coupled #966 flags
+  ON and OFF alike, within ~0.5 s of each other, which is what makes it a
+  **default-configuration** defect rather than a flag effect. (It is also what was
+  masking the flags' benefit in the #966 graduation panel; the flags themselves
+  remain default-OFF, and #966 stays open.)
+
+  **The fix.** `_deadline_wall_cap()` derives a per-solve `max_wall_time` as
+  `max(0.1, min(3.0, deadline - now))` — the same clamp `solver.py` already
+  applies to the root relaxation — and it is now applied in `feasibility_pump`,
+  `integer_local_search` (both `subnlp` repairs and its relaxation seed) and
+  `diving`, whose own comment already recorded `heatexch_gen3` running "tens of
+  seconds past the deadline" after it gained an entry poll. A caller that passes
+  no deadline gets `None` and is unchanged bit-for-bit; an explicit caller
+  `max_wall_time` still wins.
+
+  `feasibility_pump` now also accepts a `TIME_LIMIT` result: a cap that discards
+  its own truncated points merely trades an overrun for a lost incumbent, which is
+  a different regression, not a fix. The status was **verified, not assumed** —
+  `nlp_ipopt._IPOPT_STATUS_MAP` maps Ipopt −5 `Maximum_WallTime_Exceeded` to
+  exactly this status. This widening is deliberately **not** folded into the
+  shared `_is_nlp_feasible` (used at sites with no re-verification behind it): the
+  pump re-verifies the point independently of its status via
+  `_is_integer_feasible` + `_check_constraint_feasibility`, with `inject_incumbent`
+  enforcing strict improvement — the same footing that already licenses `subnlp`'s
+  `ITERATION_LIMIT`. Two tests pin that soundness: a time-limited but *infeasible*
+  point is still rejected, and `_is_nlp_feasible` itself still refuses
+  `TIME_LIMIT`.
+
+  **Measured.** Interleaved A/B (never blocked), 3 reps, arm asserted inside each
+  child process by a version marker — present for fixed, **absent** for base — so
+  a stale `.pyc` crashes instead of reporting the wrong arm's number:
+  `bchoco07` **+1.65 ± 0.18 s → +0.22 ± 0.04 s**, `bchoco08`
+  **+1.05 ± 0.12 s → +0.25 ± 0.00 s** on a 20 s budget. `heatexch_gen3` overran
+  neither arm in this run (+0.16 s both), so it is neither confirmed nor refuted
+  here. **Bound-neutral (CLAUDE.md §5):** the 52-instance cert panel is
+  **52/52 identical in `node_count`, all 52 `optimal`, max |Δobj| = 0.00e+00**,
+  with a real objective comparison on every row (zero `nan`s). Note the panel
+  shows *no regression* rather than stressing the cap — those instances certify
+  well inside their budgets, so the cap never binds; the binding behaviour is
+  covered by `test_966_heuristic_deadline_wall_cap.py` (7 of its 11 tests fail
+  before the change).
+
+  **Not a hard guarantee**, and recorded as such in the code: POUNCE tests
+  `max_wall_time` between IPM iterations, so one expensive iteration still
+  overruns it (`test_f4_root_budget_gate` records the same observation). This
+  converts an *unbounded* overrun into roughly a one-iteration one; F4's entry
+  gating and this duration cap are complementary, not alternatives.
+
 - **Vectorized models silently got no relaxation at all** (#981). A `Constraint`
   body may be array-valued — `k * x - b == 0` on a 3-vector is *one* `Constraint`
   object standing for *three* scalar rows, the same one-object-many-rows
