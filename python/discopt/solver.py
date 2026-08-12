@@ -7257,7 +7257,28 @@ def solve_model(
                 nlp_solver,
                 initial_point=initial_point,
             )
-            result.gap_certified = False
+            # C-33/SC-1 (#998) applies here a fortiori: an opaque dm.custom body
+            # cannot be inspected at all, so convexity can never be established
+            # for it — the single NLP's objective is a LOCAL optimum only.
+            # `_solve_continuous` sets bound/gap/root_bound/root_gap from the NLP's
+            # own convergence status ("a KKT point was reached"), which on a
+            # nonconvex body is routinely ABOVE the true global minimum, i.e. not a
+            # valid dual bound at all (2-D Ackley on [-25.768, 39.768] stalls at
+            # ~15.06 against a true optimum of 0, reported as bound=15.06, gap=0).
+            # Clearing gap_certified alone is not enough: `result.bound` is read
+            # directly by reports/notebooks/comparison harnesses. Keep the feasible
+            # incumbent (objective, x); strip the fabricated dual bound and gap.
+            # This only ever REMOVES a claim, so it can neither create a false
+            # optimum nor loosen a valid bound. Genuine infeasibility from
+            # `_solve_continuous` is a rigorous nonlinear-tightening / NLP-
+            # infeasibility claim, not a gap, so leave that case alone — same
+            # convention as the convexity-unknown caller below.
+            if result.status != "infeasible":
+                result.gap_certified = False
+                result.bound = None
+                result.root_bound = None
+                result.gap = None
+                result.root_gap = None
             return result
         logger.info(
             "Model contains a dm.custom(...) function that traces soundly through "
