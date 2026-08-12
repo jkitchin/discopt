@@ -5129,6 +5129,16 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "obbt_with_cutoff",
         "alphabb_cutoff_obbt",
         "obbt_time_limit",
+        # DIRECT derivative-free backend (solver="direct")
+        "max_evals",
+        "epsilon",
+        "direct_variant",
+        "divide",
+        "break_ties",
+        "local_refine",
+        "local_refine_after",
+        "local_refine_time_limit",
+        "feasibility_tolerance",
     }
 )
 
@@ -5838,13 +5848,14 @@ def solve_model(
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
     # ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
-    # GP-structured MINLP y-space branch-and-bound), and ``"bb"`` (force classic
-    # branch-and-bound, opting out of the automatic GP fast path). Reject
-    # anything else rather than silently falling through to B&B.
-    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "gp-minlp", "bb"):
+    # GP-structured MINLP y-space branch-and-bound), ``"bb"`` (force classic
+    # branch-and-bound, opting out of the automatic GP fast path), and
+    # ``"direct"`` (derivative-free sampling search — returns NO certificate).
+    # Reject anything else rather than silently falling through to B&B.
+    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "gp-minlp", "bb", "direct"):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'gp-minlp', 'bb'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -5994,6 +6005,73 @@ def solve_model(
             nlp_solver=nlp_solver,
             initial_point=initial_point,
             **mip_nlp_kwargs,
+        )
+
+    # --- DIRECT derivative-free global search (no certificate) ---
+    #
+    # Placed here, in the solver-family dispatch, so it runs BEFORE the
+    # ``CustomCall`` gate further down: a model whose opaque ``dm.custom`` body is
+    # outside the reduced-space MCBox scope otherwise degrades to a single local
+    # NLP (continuous) or raises outright (with integers). Reaching DIRECT is the
+    # whole point of the selector, so it must not be blocked by that gate.
+    if _solver == "direct":
+        import warnings
+
+        from discopt.solvers.direct import solve_direct
+
+        direct_kwargs: dict[str, Any] = {}
+        for key in (
+            "max_evals",
+            "epsilon",
+            "direct_variant",
+            "divide",
+            "break_ties",
+            "local_refine",
+            "local_refine_after",
+            "local_refine_time_limit",
+            "feasibility_tolerance",
+        ):
+            if key in kwargs:
+                direct_kwargs[key] = kwargs.pop(key)
+
+        # Generic solve_model options DIRECT has no way to honour. Warn rather
+        # than accept silently: a user who set gap_tolerance on a method with no
+        # dual bound has a wrong mental model, and saying so is cheaper than
+        # letting them read a meaningless result.
+        _ignored_direct = [
+            name
+            for name, differs in (
+                ("threads", threads != 1),
+                ("partitions", partitions != 0),
+                ("cutting_planes", cutting_planes is not False),
+                ("mccormick_bounds", mccormick_bounds != "auto"),
+                ("nlp_bb", nlp_bb is not None),
+                ("lazy_constraints", lazy_constraints is not None),
+                ("incumbent_callback", incumbent_callback is not None),
+                ("node_callback", node_callback is not None),
+                ("max_nodes", max_nodes != 100_000),
+                ("strategy", strategy != "best_first"),
+                ("gap_tolerance", gap_tolerance != 1e-4),
+            )
+            if differs
+        ]
+        if _ignored_direct:
+            warnings.warn(
+                "solver='direct' ignores "
+                + ", ".join(sorted(_ignored_direct))
+                + ": DIRECT is a derivative-free sampling search with no "
+                "branch-and-bound tree and no dual bound. Its cost control is "
+                "max_evals, and it never reports a gap or a certificate.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        return solve_direct(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            **direct_kwargs,
         )
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
