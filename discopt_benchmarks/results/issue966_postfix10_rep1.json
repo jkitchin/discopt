@@ -1,0 +1,1259 @@
+{
+  "summary": {
+    "instances": 19,
+    "budget": 10.0,
+    "arms": {
+      "base": "all OFF (today's default)",
+      "seam": "#966 ON, #928 OFF",
+      "cand": "all three ON"
+    },
+    "unsound": [],
+    "incumbent_verification_failed": [],
+    "oracle_comparisons_executed": 48,
+    "instances_without_oracle": [
+      "bchoco06",
+      "bchoco07",
+      "bchoco08"
+    ],
+    "pairs": [
+      {
+        "pair": "cand vs base",
+        "cells_over_budget": {
+          "base": 2,
+          "cand": 1
+        },
+        "total_overrun_s": {
+          "base": 5.9,
+          "cand": 4.6
+        },
+        "overrun_delta_s": -1.3,
+        "node_count_total": {
+          "base": 1213,
+          "cand": 1187
+        },
+        "cert_gains": [],
+        "cert_regressions": [],
+        "gained_incumbents": [],
+        "lost_incumbents": [],
+        "better_objective": [
+          "casctanks (9.207583239275191 -> 9.163479050753093)"
+        ],
+        "worse_objective": [],
+        "tighter_bound": [
+          "casctanks (-90.17863668805983 -> -90.17863067603524)",
+          "hda (-20747115955979.49 -> -119286.31279610794)",
+          "tspn12 (193.78291159780647 -> 198.54005869983092)"
+        ],
+        "looser_bound": [
+          "clay0303hfsg (20947.58691220598 -> 19513.272337060793)",
+          "contvar (183632.02121018377 -> 183631.67859121328)",
+          "tspn08 (260.8582882776758 -> 258.4148788508216)"
+        ],
+        "gained_bound": [],
+        "lost_bound": []
+      },
+      {
+        "pair": "cand vs seam",
+        "cells_over_budget": {
+          "seam": 3,
+          "cand": 1
+        },
+        "total_overrun_s": {
+          "seam": 6.1,
+          "cand": 4.6
+        },
+        "overrun_delta_s": -1.6,
+        "node_count_total": {
+          "seam": 1231,
+          "cand": 1187
+        },
+        "cert_gains": [],
+        "cert_regressions": [],
+        "gained_incumbents": [],
+        "lost_incumbents": [],
+        "better_objective": [
+          "casctanks (9.207583239275191 -> 9.163479050753093)",
+          "heatexch_gen1 (160395.9329767184 -> 154895.93297657298)"
+        ],
+        "worse_objective": [],
+        "tighter_bound": [
+          "casctanks (-90.17863668805983 -> -90.17863067603524)",
+          "hda (-20747115955979.49 -> -119286.31279610794)",
+          "tspn12 (198.54001890524776 -> 198.54005869983092)"
+        ],
+        "looser_bound": [
+          "clay0303hfsg (20947.58691220598 -> 19513.272337060793)",
+          "contvar (183632.02121018377 -> 183631.67859121328)",
+          "tspn08 (260.8582882776758 -> 258.4148788508216)"
+        ],
+        "gained_bound": [],
+        "lost_bound": []
+      },
+      {
+        "pair": "seam vs base",
+        "cells_over_budget": {
+          "base": 2,
+          "seam": 3
+        },
+        "total_overrun_s": {
+          "base": 5.9,
+          "seam": 6.1
+        },
+        "overrun_delta_s": 0.3,
+        "node_count_total": {
+          "base": 1213,
+          "seam": 1231
+        },
+        "cert_gains": [],
+        "cert_regressions": [],
+        "gained_incumbents": [],
+        "lost_incumbents": [],
+        "better_objective": [],
+        "worse_objective": [
+          "heatexch_gen1 (154895.93297657272 -> 160395.9329767184)"
+        ],
+        "tighter_bound": [
+          "tspn12 (193.78291159780647 -> 198.54001890524776)"
+        ],
+        "looser_bound": [],
+        "gained_bound": [],
+        "lost_bound": []
+      }
+    ],
+    "solu_oracle": "solu",
+    "panel_wall_s": 559.0,
+    "loadavg_start": [
+      3.41,
+      4.3,
+      3.87
+    ],
+    "loadavg_end": [
+      4.93,
+      4.83,
+      4.26
+    ]
+  },
+  "cells": [
+    {
+      "instance": "4stufen",
+      "budget": 10.0,
+      "reference_optimum": 116329.6706,
+      "base": {
+        "instance": "4stufen",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.184669459005818,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 20712.174649171593,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "4stufen",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.210261375061236,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 20712.174649171593,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "4stufen",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.151512625045143,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 20712.174649171593,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "bchoco06",
+      "budget": 10.0,
+      "reference_optimum": null,
+      "base": {
+        "instance": "bchoco06",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.134102207957767,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.000000044867369,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "bchoco06",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.17870037490502,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.000000044867369,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "bchoco06",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.121892084018327,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.000000044867369,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "bchoco07",
+      "budget": 10.0,
+      "reference_optimum": null,
+      "base": {
+        "instance": "bchoco07",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.175082125002518,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000002496,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "bchoco07",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.172351083019748,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000002496,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "bchoco07",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.18801979208365,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000002496,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "bchoco08",
+      "budget": 10.0,
+      "reference_optimum": null,
+      "base": {
+        "instance": "bchoco08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.22608187503647,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000005076,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "bchoco08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.137649749987759,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000005076,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "bchoco08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 10.125390957924537,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.0000000000005076,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "beuster",
+      "budget": 10.0,
+      "reference_optimum": 116329.6706,
+      "base": {
+        "instance": "beuster",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.250776749919169,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 6352.061283279526,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "beuster",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.623809750075452,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 6352.061283279526,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "beuster",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.257239458034746,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 6352.061283279526,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "casctanks",
+      "budget": 10.0,
+      "reference_optimum": 9.163479388,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.172173000057228,
+        "status": "feasible",
+        "objective": 9.207583239275191,
+        "bound": -90.17863668805983,
+        "gap": 10.793952913007667,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.182229041936807,
+        "status": "feasible",
+        "objective": 9.207583239275191,
+        "bound": -90.17863668805983,
+        "gap": 10.793952913007667,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.191370415966958,
+        "status": "feasible",
+        "objective": 9.163479050753093,
+        "bound": -90.17863067603524,
+        "gap": 10.841090941177411,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "clay0303hfsg",
+      "budget": 10.0,
+      "reference_optimum": 26669.10957,
+      "base": {
+        "instance": "clay0303hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.359338458045386,
+        "status": "feasible",
+        "objective": 26669.10957284283,
+        "bound": 20947.58691220598,
+        "gap": 0.2145374462169175,
+        "gap_certified": false,
+        "node_count": 371,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "clay0303hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.351766958949156,
+        "status": "feasible",
+        "objective": 26669.10957284283,
+        "bound": 20947.58691220598,
+        "gap": 0.2145374462169175,
+        "gap_certified": false,
+        "node_count": 371,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "clay0303hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.236283832928166,
+        "status": "feasible",
+        "objective": 26669.10957284283,
+        "bound": 19513.272337060793,
+        "gap": 0.26831931588255314,
+        "gap_certified": false,
+        "node_count": 363,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "contvar",
+      "budget": 10.0,
+      "reference_optimum": 809149.8272,
+      "base": {
+        "instance": "contvar",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 11.080900500062853,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 183632.02121018377,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "contvar",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.930394334020093,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 183632.02121018377,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "contvar",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.142507917014882,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 183631.67859121328,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "hda",
+      "budget": 10.0,
+      "reference_optimum": -5964.534084,
+      "base": {
+        "instance": "hda",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.337234208011068,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -20747115955979.49,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 1,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "hda",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.334566292003728,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -20747115955979.49,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "hda",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.209977874998003,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -119286.31279610794,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen1",
+      "budget": 10.0,
+      "reference_optimum": 154895.933,
+      "base": {
+        "instance": "heatexch_gen1",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.177872249973007,
+        "status": "feasible",
+        "objective": 154895.93297657272,
+        "bound": 38183.531746014065,
+        "gap": 0.7534891264589294,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "heatexch_gen1",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.207631333032623,
+        "status": "feasible",
+        "objective": 160395.9329767184,
+        "bound": 38183.531746014065,
+        "gap": 0.7619420203655884,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen1",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.1671898328932,
+        "status": "feasible",
+        "objective": 154895.93297657298,
+        "bound": 38183.53174601912,
+        "gap": 0.7534891264588972,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "budget": 10.0,
+      "reference_optimum": 635838.8464,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.257208249997348,
+        "status": "feasible",
+        "objective": 835551.3269328446,
+        "bound": 555767.7902849489,
+        "gap": 0.33484901241786025,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.27202020806726,
+        "status": "feasible",
+        "objective": 835551.3269328446,
+        "bound": 555767.7902849489,
+        "gap": 0.33484901241786025,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.26682125008665,
+        "status": "feasible",
+        "objective": 835551.3269328446,
+        "bound": 555767.7902857282,
+        "gap": 0.3348490124169276,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen3",
+      "budget": 10.0,
+      "reference_optimum": 64843.69761,
+      "base": {
+        "instance": "heatexch_gen3",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 11.432891207979992,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 783.0180646606207,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 7,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "heatexch_gen3",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 11.651464125025086,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 783.0180646606207,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 7,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen3",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 11.6772424580995,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 783.0180646606207,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 7,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "nvs05",
+      "budget": 10.0,
+      "reference_optimum": 5.470934108,
+      "base": {
+        "instance": "nvs05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.175717792008072,
+        "status": "feasible",
+        "objective": 8.731956986640787,
+        "bound": 3.54248656465836,
+        "gap": 0.5943078315573374,
+        "gap_certified": false,
+        "node_count": 69,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "nvs05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.157815374899656,
+        "status": "feasible",
+        "objective": 8.731956986640787,
+        "bound": 3.54248656465836,
+        "gap": 0.5943078315573374,
+        "gap_certified": false,
+        "node_count": 69,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "nvs05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.146733874920756,
+        "status": "feasible",
+        "objective": 8.731956986640787,
+        "bound": 3.54248656465836,
+        "gap": 0.5943078315573374,
+        "gap_certified": false,
+        "node_count": 59,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "budget": 10.0,
+      "reference_optimum": 837.7324009,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 5.055037625017576,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 4.705489792046137,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "max",
+        "wall": 4.719825000036508,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "tls2",
+      "budget": 10.0,
+      "reference_optimum": 5.3,
+      "base": {
+        "instance": "tls2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.067300750059076,
+        "status": "optimal",
+        "objective": 5.2999999999875085,
+        "bound": 5.3,
+        "gap": 0.0,
+        "gap_certified": true,
+        "node_count": 255,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "tls2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.176496375002898,
+        "status": "optimal",
+        "objective": 5.2999999999875085,
+        "bound": 5.3,
+        "gap": 0.0,
+        "gap_certified": true,
+        "node_count": 255,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "tls2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.102004499989562,
+        "status": "optimal",
+        "objective": 5.2999999999875085,
+        "bound": 5.3,
+        "gap": 0.0,
+        "gap_certified": true,
+        "node_count": 255,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "tspn05",
+      "budget": 10.0,
+      "reference_optimum": 191.2552078,
+      "base": {
+        "instance": "tspn05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 2.593310333089903,
+        "status": "optimal",
+        "objective": 191.25520784467096,
+        "bound": 191.25507754683355,
+        "gap": 5.988794952955437e-07,
+        "gap_certified": true,
+        "node_count": 39,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "tspn05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 2.5811721669742838,
+        "status": "optimal",
+        "objective": 191.25520784467096,
+        "bound": 191.25507754683355,
+        "gap": 5.988794952955437e-07,
+        "gap_certified": true,
+        "node_count": 39,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "tspn05",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 2.7581384170334786,
+        "status": "optimal",
+        "objective": 191.2552078446696,
+        "bound": 191.25507754676113,
+        "gap": 5.98879879591202e-07,
+        "gap_certified": true,
+        "node_count": 43,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "tspn08",
+      "budget": 10.0,
+      "reference_optimum": 290.5668539,
+      "base": {
+        "instance": "tspn08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.186485999962315,
+        "status": "feasible",
+        "objective": 290.566853967505,
+        "bound": 260.8582882776758,
+        "gap": 0.10224347782335692,
+        "gap_certified": false,
+        "node_count": 63,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "tspn08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.185072499909438,
+        "status": "feasible",
+        "objective": 290.566853967505,
+        "bound": 260.8582882776758,
+        "gap": 0.10224347782335692,
+        "gap_certified": false,
+        "node_count": 63,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "tspn08",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.16996987501625,
+        "status": "feasible",
+        "objective": 290.5668539675021,
+        "bound": 258.4148788508216,
+        "gap": 0.11065259054040785,
+        "gap_certified": false,
+        "node_count": 29,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "tspn10",
+      "budget": 10.0,
+      "reference_optimum": 225.1260716,
+      "base": {
+        "instance": "tspn10",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.292363708955236,
+        "status": "feasible",
+        "objective": 225.12607170016992,
+        "bound": 167.35910515006418,
+        "gap": 0.25659829674033324,
+        "gap_certified": false,
+        "node_count": 89,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "tspn10",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.225318540935405,
+        "status": "feasible",
+        "objective": 225.12607170016992,
+        "bound": 167.35910515006418,
+        "gap": 0.25659829674033324,
+        "gap_certified": false,
+        "node_count": 89,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "tspn10",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.240970041020773,
+        "status": "feasible",
+        "objective": 225.12607170016952,
+        "bound": 167.3591051500785,
+        "gap": 0.2565982967402683,
+        "gap_certified": false,
+        "node_count": 93,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "tspn12",
+      "budget": 10.0,
+      "reference_optimum": 262.6473957,
+      "base": {
+        "instance": "tspn12",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.364998957957141,
+        "status": "feasible",
+        "objective": 262.647395796328,
+        "bound": 193.78291159780647,
+        "gap": 0.26219366839609953,
+        "gap_certified": false,
+        "node_count": 15,
+        "incumbent_verification_failed": false
+      },
+      "seam": {
+        "instance": "tspn12",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.14521295891609,
+        "status": "feasible",
+        "objective": 262.647395796328,
+        "bound": 198.54001890524776,
+        "gap": 0.244081524953679,
+        "gap_certified": false,
+        "node_count": 31,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "tspn12",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 10.0,
+        "sense": "min",
+        "wall": 10.168848667060956,
+        "status": "feasible",
+        "objective": 262.647395796328,
+        "bound": 198.54005869983092,
+        "gap": 0.2440813734403429,
+        "gap_certified": false,
+        "node_count": 31,
+        "incumbent_verification_failed": false
+      }
+    }
+  ]
+}

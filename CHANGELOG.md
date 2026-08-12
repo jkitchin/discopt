@@ -10,6 +10,53 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Measured (no behaviour change)
+
+- **#966 coupled graduation panel, re-run on top of #990: the three deadline
+  flags do NOT graduate. They stay default-OFF.** 19 instances x 3 arms x 3 reps
+  x 3 budgets (10/15/20 s) = 9 artifacts, 513 solves
+  (`discopt_benchmarks/results/issue966_postfix{10,15,20}_rep{1,2,3}.json`).
+
+  *Bar 1 (cert-clean): PASS.* 9/9 artifacts with 0 unsound, 0 cert_regressions,
+  0 lost_incumbents, 0 lost_bound, 0 incumbent_verification_failed, each over 48
+  executed oracle comparisons (432 total, non-vacuous). The pre-#990 panel failed
+  this on an `nvs05` cert regression, which did not recur.
+
+  *Bar 2 (net-positive): FAIL*, for three reasons, the first decisive:
+
+  1. The gain is confined to two named instances, which CLAUDE.md §2 rejects. At
+     15 s, `hda` + `contvar` account for **107.5%** of the total cand-vs-base
+     overrun reduction — the other 17 instances are net negative (`bchoco07`
+     −0.46 s). At 10 s `contvar` alone is 55.9%.
+  2. #966's own two flags (`DISCOPT_NODE_ROUND_BUDGET`,
+     `DISCOPT_HESS_COMPILE_GATE`) are neutral at 10 s and *worse than base* at
+     15 s (9.43 vs 8.56 s). All of the candidate arm's benefit arrives with
+     #928's `DISCOPT_LP_WARM_DEADLINE`.
+  3. At 20 s the flags are unmeasurable (−0.47 ± 0.96 s, mean inside its own rep
+     spread, sign flip across reps) — consistent with 0/19 instances exhibiting
+     the deficiency at that budget once #990 landed.
+
+  This is the `DISCOPT_CUT_INHERIT` outcome: sound but not helpful.
+
+- **#966 deficiency (2) — coarse global-deadline compliance — is fixed in
+  default behaviour by #990.** Worst single cell as a multiple of its budget,
+  across panel generations: 10.50x (`issue966_yield_binding20`, `heatexch_gen3`
+  ~210 s against 20 s) → 1.37x → 1.23x (pre-#990) → **1.06x** (post-#990), with
+  zero cells above 1.5x since the second generation. The multi-hundred-second
+  blowup class the issue was opened about no longer occurs.
+
+- **The #966 graduation scorer's `cert_gains > 0` conjunct is not a measurement**
+  and is recorded here rather than silently dropped. Across 190 cells in 10
+  artifacts, certification differed between arms in exactly 2 cells — both
+  `nvs05`, both times the flags *losing* it. `nvs05` is the panel's only
+  certification-boundary instance (it certifies only when it closes the gap a
+  hair under budget: walls 19.98 / 20.05 / 19.89 s); the other four certifying
+  instances certify in all three arms every time. The conjunct is therefore a
+  coin flip on one instance, and is stricter than §5, whose net-positive metrics
+  are "node count / wall / bound". It was left in place: relaxing a criterion
+  after seeing it fail is what §5 exists to prevent. Both readings are reported
+  on #966. **The flags fail §5's literal reading too**, on reason 1 above.
+
 ### Changed
 
 - **`feral` 0.14 → 0.15.1 and `pounce-solver` `>=0.9` → `>=0.10`**
