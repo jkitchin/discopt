@@ -1405,6 +1405,277 @@ def enumerate_binary_seeds_subnlp(
     return results
 
 
+def _residual_assignments(
+    residual: list[int], x_relax: np.ndarray, limit: int
+) -> list[tuple[float, ...]]:
+    """Candidate 0/1 fixings for binaries outside every one-hot group.
+
+    Ordered by how much information backs them: three *anchors* first — the
+    relaxation's own nearest rounding, then the two homogeneous fixings (a big-M
+    indicator's "off" and "on" values) — and then the rest by increasing **Hamming
+    distance from an anchor**, one distance wave at a time. Deterministic in every
+    branch: a primal heuristic that varies run to run makes a node-count comparison
+    unreproducible.
+
+    The distance ordering is what makes the list usable, not just complete. Raw
+    ``itertools.product`` order is a *binary counter*, which has nothing to do with
+    plausibility: measured on cstr, every feasible residual assignment sat at index
+    **30 or 31 of 32** — one bit away from all-ones — so a budget that stopped
+    anywhere short of the full enumeration missed all of them, while under this
+    ordering those same fixings land in the first wave after the anchors. The
+    anchors are the informative points on a big-M GDP (an uncovered indicator is
+    usually at a bound), so "near an anchor" is where to spend the budget first.
+
+    Always returns at least one assignment (the empty tuple when there is no
+    residual), so the caller's cross product is never empty.
+    """
+    k = len(residual)
+    if k == 0:
+        return [()]
+
+    nearest = tuple(float(np.clip(np.round(x_relax[j]), 0.0, 1.0)) for j in residual)
+    anchors: list[tuple[float, ...]] = [nearest, (0.0,) * k, (1.0,) * k]
+    out: list[tuple[float, ...]] = []
+    seen: set[tuple[float, ...]] = set()
+    for cand in anchors:
+        if cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+
+    # Wave d: everything exactly d flips from some anchor, anchors in order.
+    for dist in range(1, k + 1):
+        if len(out) >= limit:
+            break
+        for anchor in anchors:
+            for flips in itertools.combinations(range(k), dist):
+                if len(out) >= limit:
+                    break
+                bits = list(anchor)
+                for j in flips:
+                    bits[j] = 1.0 - bits[j]
+                cand = tuple(bits)
+                if cand not in seen:
+                    seen.add(cand)
+                    out.append(cand)
+            if len(out) >= limit:
+                break
+    return out[:limit]
+
+
+def one_hot_config_subnlp(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    max_configs: int = 256,
+    integer_tol: float = 1e-5,
+    deadline: Optional[float] = None,
+) -> list[tuple[np.ndarray, float]]:
+    """Root primal *constructor* for disjunctive (GDP) models: pick one disjunct
+    per disjunction, then solve the fixed-integer sub-NLP.
+
+    Motivation (#823). On a big-M reformulated GDP the indicator binaries are
+    partitioned by ``sum_k y_k == 1`` rows, one per disjunction. Two existing
+    paths both decline this structure:
+
+    * :func:`enumerate_binary_seeds_subnlp` enumerates *all* 0/1 assignments and
+      so self-gates off above ``max_binaries`` (4). Real GDPs carry one indicator
+      per disjunct — measured 6..138 binaries across the GDPlib small set — so the
+      root disjunct cover never runs on this class at all.
+    * Plain :func:`subnlp` rounds each binary independently to nearest. Independent
+      rounding does not respect ``sum_k y_k == 1``: a disjunction whose relaxed
+      indicators read ``(0.4, 0.35, 0.25)`` rounds to *all zeros*, and one reading
+      ``(0.6, 0.55)`` rounds to *two ones*. Either way the fixed sub-NLP is
+      infeasible on a constraint the model states outright, so the heuristic
+      returns nothing and the node contributes no incumbent.
+
+    This constructor instead selects, per group, the indicator with the largest
+    relaxed value (a valid configuration *by construction*), fixes the rest of the
+    group to 0, and solves one sub-NLP. It then tries a bounded number of
+    alternates by flipping the least-confident groups — those with the smallest
+    margin between their best and runner-up indicator — to their runner-up, since
+    those are where the relaxation's preference carries the least information.
+
+    Binaries outside every group are searched too, by
+    :func:`_residual_assignments` — measured, that is what separates a model this
+    helps from one it does not (see that function and the ``max_configs`` note).
+
+    Cost is bounded to ``max_configs`` sub-NLP solves in total across both
+    searches (not ``2**k``), so it scales to the 138-binary models the enumerator
+    skips, and the whole path is additionally deadline-bounded — in practice the
+    deadline, not ``max_configs``, is what stops it.
+
+    ``max_configs`` is deliberately large. Measured on cstr, a fixed-integer
+    sub-NLP here costs **0.018 s** (384 plans in 7 s), and the feasible plans sit
+    at ``ci + ri`` = 17, 23 and 33 in the configuration x residual grid — so a
+    32-solve budget cannot reach them under *any* ordering, and an earlier default
+    of 32 returned nothing on a model where three feasible plans exist (one at the
+    true optimum). A budget too small to reach the answer is not a cheap heuristic,
+    it is a heuristic that does not work.
+
+    Soundness: every returned point comes from :func:`subnlp`, which fixes the
+    integers and then verifies both integer- and constraint-feasibility before
+    returning. This proposes incumbents only; it never touches the dual bound, so
+    it cannot weaken the optimality certificate. Binaries outside any detected
+    group keep their nearest-rounded value from *x_relax* (subnlp's own rule).
+
+    Args:
+        model: The optimization model.
+        x_relax: Relaxation point at the node (drives the per-group argmax).
+        backend: ``solve_nlp(evaluator, x0, options=...)`` callable.
+        nlp_options: Options forwarded to the NLP backend.
+        evaluator: Pre-built evaluator; one is constructed if omitted.
+        max_configs: Maximum number of plans (sub-NLP solves) to try, across
+            both the configuration and residual searches combined.
+        integer_tol: Integrality tolerance forwarded to :func:`subnlp`.
+        deadline: Absolute ``perf_counter`` deadline; the loop stops before
+            starting a configuration that cannot finish inside it.
+
+    Returns:
+        Every feasible ``(x, obj)`` found (possibly empty). The caller injects
+        each as an incumbent candidate, so this is agnostic to objective sense.
+    """
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask):
+        return []
+
+    lb, ub = _get_variable_bounds(model)
+    n_vars = int(int_mask.size)
+    x_relax = np.asarray(x_relax, dtype=np.float64)
+
+    groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    if not groups:
+        return []
+
+    # Per group: the relaxation's preference order, and how strongly it prefers.
+    ranked: list[list[int]] = []
+    margins: list[float] = []
+    for g in groups:
+        order = sorted(g, key=lambda j: -float(x_relax[j]))
+        ranked.append(order)
+        top = float(x_relax[order[0]])
+        second = float(x_relax[order[1]]) if len(order) > 1 else 0.0
+        margins.append(top - second)
+
+    # Least-confident groups first: those are the flips most likely to matter.
+    flip_order = sorted(range(len(groups)), key=lambda gi: margins[gi])
+
+    # Configurations, by increasing number of demotions from the pure argmax and,
+    # within a wave, least-confident groups first. Same principle as the residual
+    # ordering: spend the budget near the informative anchor, outward.
+    #
+    # This has to be a distance enumeration, not a ladder. A cumulative chain
+    # (config k demotes the first k groups of ``flip_order``) reaches |groups|+1 of
+    # the 2**|groups| configurations, and never demotes group g alone unless g is
+    # first in that order. Measured on cstr against the real in-solve relaxation
+    # point, an exhaustive scan of the rank-0/rank-1 space found 6 feasible
+    # configurations — best 3.0620146, the true optimum — at multi-flip positions
+    # (configs 1, 17, 32, 33, 48, 49 of 64). Not one of them lies on the chain.
+    flippable = [gi for gi in flip_order if len(ranked[gi]) >= 2]
+    configs: list[dict[int, int]] = []
+    for dist in range(len(flippable) + 1):
+        if len(configs) >= max_configs:
+            break
+        for combo in itertools.combinations(flippable, dist):
+            if len(configs) >= max_configs:
+                break
+            configs.append({gi: 1 for gi in combo})
+
+    # Binaries that sit outside EVERY disjunction still have to be fixed, and
+    # nearest-rounding them can be invalid on its own. Measured on the GDPlib
+    # small set this is decisive, not a detail: valid disjunct selection alone
+    # gives a feasible sub-NLP on batch_processing (one-hot rows cover 138/138
+    # binaries) but not on cstr (15/20) — and on cstr, searching the 5 uncovered
+    # binaries turns "no point at all" into a feasible 3.13020 against a true
+    # optimum of 3.06201. So the residual gets its own bounded search.
+    covered = {j for g in groups for j in g}
+    residual = [
+        j
+        for j in np.nonzero(int_mask)[0].tolist()
+        if j not in covered and lb[j] >= -1e-9 and ub[j] <= 1.0 + 1e-9
+    ]
+    residual_assigns = _residual_assignments(residual, x_relax, max_configs)
+
+    # A zero-continuous start: inactive disaggregated variables begin at their
+    # feasible 0, leaving only the active disjunct to solve. Same reasoning as
+    # ``enumerate_binary_seeds_subnlp`` — a relaxation point carries the settled
+    # disjunct's values, an ill-conditioned start for any other configuration.
+    cont = ~int_mask
+    zero_start = x_relax.copy()
+    zero_start[cont] = np.clip(0.0, lb, ub)[cont]
+
+    # Interleave the two searches DIAGONALLY, so neither can starve the other.
+    # Concatenating them (all residual variants, then all group demotions) does not
+    # interleave: it merely orders. Measured on cstr — 6 groups, 5 uncovered
+    # binaries — the residual enumeration is 2**5 = 32 assignments, which exactly
+    # fills ``max_configs``, so every slot went to a residual variant of
+    # configuration 0 and NO alternative disjunct configuration was ever tried. With
+    # the relaxation's argmax configuration infeasible there (0/32 feasible), the
+    # search could not reach the demoted configuration that IS feasible at 3.0620146
+    # — the true optimum — and returned nothing.
+    #
+    # Enumerating by increasing ``ci + ri`` keeps the most-informed fixing first
+    # ((0,0) = argmax configuration with the relaxation's own residual rounding) and
+    # thereafter spends the budget on both axes, whatever their relative sizes.
+    plans: list[tuple[int, int]] = []
+    for total in range(len(configs) + len(residual_assigns) - 1):
+        for ci in range(min(total, len(configs) - 1), -1, -1):
+            ri = total - ci
+            if ri < len(residual_assigns):
+                plans.append((ci, ri))
+        if len(plans) >= max_configs:
+            break
+
+    results: list[tuple[np.ndarray, float]] = []
+    attempted = 0
+    stop = "exhausted"
+    for ci, ri in plans[:max_configs]:
+        if deadline is not None and _now() >= deadline:
+            stop = "deadline"
+            break
+        seed = zero_start.copy()
+        choice = configs[ci]
+        for gi, g in enumerate(groups):
+            pick = ranked[gi][choice.get(gi, 0)]
+            for j in g:
+                seed[j] = 0.0
+            seed[pick] = 1.0
+        for j, v in zip(residual, residual_assigns[ri]):
+            seed[j] = v
+        budget = None if deadline is None else max(0.0, deadline - _now())
+        if budget is not None and budget <= 0.0:
+            stop = "deadline"
+            break
+        attempted += 1
+        found = subnlp(
+            model,
+            seed,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            integer_tol=integer_tol,
+            time_budget=budget,
+        )
+        if found is not None:
+            results.append(found)
+    # An empty return has several distinct causes — no sub-NLP was even started,
+    # the deadline cut the search short, or every fixing was genuinely infeasible.
+    # Reporting the count and the stop reason is what makes those distinguishable
+    # after the fact; without it "found nothing" is unfalsifiable (CLAUDE.md §6).
+    logger.debug(
+        "one_hot_config_subnlp: %d group(s), %d residual binaries, %d/%d sub-NLP(s) "
+        "attempted (%s), %d feasible",
+        len(groups),
+        len(residual),
+        attempted,
+        len(plans[:max_configs]),
+        stop,
+        len(results),
+    )
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Improvement heuristics: diving, RINS, local branching
 #
@@ -2099,20 +2370,22 @@ def local_branching(
     return best
 
 
-def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:
-    """Detect disjoint, equal-size one-hot groups (``sum of binaries == 1``).
+def _scan_one_hot_rows(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:
+    """Scan for disjoint ``sum(binaries) == 1`` rows, of any sizes.
 
-    Scans the model's ``==`` constraints for the assignment / set-partition
-    pattern ``sum_k x[i,k] == 1`` (each *item* i assigned to exactly one *slot*
-    k). A row qualifies only when its affine form is ``sum(x_g) - 1`` with unit
-    coefficients over an all-binary support; per-slot cardinality/balance rows
-    (``sum == c`` with ``c != 1``) are naturally excluded (their constant is
-    ``-c``). Overlapping or unequal-size groups are rejected — the swap move pairs
-    members by sorted position, which is only well defined for a clean partition
-    into equal-size groups.
+    This is the raw structural scan shared by two consumers with *different*
+    requirements:
 
-    Returns the list of groups (each a sorted list of flat binary indices, one
-    entry per slot), or ``[]`` when no such structure is present.
+    * :func:`_detect_one_hot_groups` (the #280 swap move) additionally demands at
+      least two groups, all of equal size — the swap pairs members by sorted
+      position, which is only well defined for a clean equal-size partition.
+    * :func:`one_hot_config_subnlp` (disjunct selection) has no such need: picking
+      one indicator per disjunction is well defined for groups of any sizes, and
+      for a single group. Requiring equal sizes there would discard exactly the
+      GDP models whose disjunctions have differing numbers of disjuncts.
+
+    Returns the disjoint groups in scan order (each a sorted list of flat binary
+    indices), or ``[]`` when the model has no such rows.
     """
     from discopt._relax.milp_relaxation import _linearize_affine_expr_sparse
 
@@ -2146,6 +2419,25 @@ def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -
             continue  # overlapping groups: not a clean partition
         seen.update(g)
         groups.append(sorted(g))
+    return groups
+
+
+def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:
+    """Detect disjoint, equal-size one-hot groups (``sum of binaries == 1``).
+
+    Scans the model's ``==`` constraints for the assignment / set-partition
+    pattern ``sum_k x[i,k] == 1`` (each *item* i assigned to exactly one *slot*
+    k). A row qualifies only when its affine form is ``sum(x_g) - 1`` with unit
+    coefficients over an all-binary support; per-slot cardinality/balance rows
+    (``sum == c`` with ``c != 1``) are naturally excluded (their constant is
+    ``-c``). Overlapping or unequal-size groups are rejected — the swap move pairs
+    members by sorted position, which is only well defined for a clean partition
+    into equal-size groups.
+
+    Returns the list of groups (each a sorted list of flat binary indices, one
+    entry per slot), or ``[]`` when no such structure is present.
+    """
+    groups = _scan_one_hot_rows(model, binary_mask, n_vars)
 
     if len(groups) < 2:
         return []

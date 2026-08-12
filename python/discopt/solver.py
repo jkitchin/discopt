@@ -439,6 +439,58 @@ def _trivial_primal_enabled() -> bool:
     )
 
 
+def _gdp_config_primal_enabled() -> bool:
+    """Whether the #823 disjunct-configuration primal is on (env flag, **default
+    OFF** pending the §5 differential panel).
+
+    On a big-M reformulated GDP the indicator binaries are partitioned by
+    ``sum_k y_k == 1`` rows, one per disjunction, and no existing constructor
+    respects that partition: ``enumerate_binary_seeds_subnlp`` self-gates off
+    above 4 binaries (measured 6..138 across the GDPlib small set, so it never
+    runs on this class), while plain ``subnlp`` rounds each indicator
+    independently and can therefore fix a disjunction to zero-or-two active
+    disjuncts — an assignment the model forbids outright, making the fixed
+    sub-NLP infeasible and yielding no incumbent.
+
+    When ON, the root selects one disjunct per disjunction (per-group argmax of
+    the relaxation, plus a bounded set of least-confident flips) and solves the
+    fixed-integer sub-NLP for each. Primal-only: every candidate is verified
+    integer- and constraint-feasible by ``subnlp`` before injection, and the dual
+    bound is untouched, so the certificate cannot weaken."""
+    return os.environ.get("DISCOPT_GDP_CONFIG_PRIMAL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: Share of the remaining wall-clock budget the #823 constructor may spend, and the
+#: absolute cap on that share. A root constructor must be *cheap when it fails*: it
+#: runs before the tree does any work, so every second it spends is a second B&B does
+#: not get. Measured un-bounded (deadline = the whole remaining budget), the search
+#: cost batch_processing 71% of its nodes at 60 s — 307 nodes OFF, 89 ON — while
+#: finding nothing there, i.e. it charged the models it cannot help for the one it
+#: can. The cap is sized from the measured per-attempt cost of 0.018 s on cstr: 15 s
+#: buys ~800 fixed-integer sub-NLPs, comfortably more than the ``max_configs=256``
+#: plan budget can consume, so bounding the clock does not shorten the search that
+#: actually succeeds.
+_GDP_CONFIG_BUDGET_FRACTION = 0.15
+_GDP_CONFIG_BUDGET_CAP_S = 15.0
+
+
+def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
+    """Deadline for the #823 constructor: a bounded share of what is left.
+
+    Never returns a time past ``outer_deadline`` — the caller's budget still binds.
+    """
+    remaining = outer_deadline - now
+    if remaining <= 0.0:
+        return outer_deadline
+    share = min(remaining * _GDP_CONFIG_BUDGET_FRACTION, _GDP_CONFIG_BUDGET_CAP_S)
+    return now + min(remaining, share)
+
+
 def _qubo_primal_enabled() -> bool:
     """Whether the #843 QUBO local-search primal is on (env flag, **default ON** —
     graduated per the §5 panel recorded in
@@ -969,21 +1021,58 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     cand = None
                 if cand is not None and cand[0] is not None:
                     yield np.asarray(cand[0], dtype=np.float64)
-        elif xr is not None and time.perf_counter() < deadline:
-            # Too many free binaries to enumerate: one nearest-rounding sub-NLP.
-            try:
-                cand = subnlp(
-                    model,
-                    xr,
-                    evaluator=ev,
-                    backend=backend,
-                    time_budget=max(1e-3, min(4.0, deadline - time.perf_counter())),
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("native seed subnlp raised: %s", exc)
-                cand = None
-            if cand is not None and cand[0] is not None:
-                yield np.asarray(cand[0], dtype=np.float64)
+        elif time.perf_counter() < deadline:
+            # Too many free integers to enumerate. The legacy fallback is a single
+            # nearest-rounding sub-NLP — and on a disjunctive (GDP) model that is
+            # precisely the wrong move (#823). Indicators partitioned by
+            # ``sum_k y_k == 1`` do not survive independent rounding: (0.4, 0.35,
+            # 0.25) rounds to all zeros and (0.6, 0.55) to two ones, both of which
+            # contradict a constraint the model states outright, so the sub-NLP is
+            # infeasible and the kernel gets NO seed at all. This is the path the
+            # class actually takes — the GDPlib big-M models carry 20/61/138 free
+            # binaries against a cap of 10 — so disjunct selection is tried first.
+            #
+            # Sound by construction: these are only CANDIDATES, and every one is
+            # rigorously re-verified against the original model by
+            # ``_native_kernel_verify_point`` before it may seed anything.
+            if _gdp_config_primal_enabled():
+                # Both markers are INFO on purpose: without an *entering* marker a
+                # differential arm showing no change cannot distinguish "searched and
+                # found nothing" from "the gate never opened" (CLAUDE.md §6). The
+                # count is emitted from ``finally`` so it is reported even when the
+                # consumer abandons this generator after the first candidate.
+                logger.info("GDP config subNLP (native): entering disjunct selection")
+                _cf_n = 0
+                try:
+                    from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+                    for _cf_x, _ in one_hot_config_subnlp(
+                        model,
+                        xr if xr is not None else base,
+                        backend=backend,
+                        evaluator=ev,
+                        deadline=_gdp_config_deadline(deadline, time.perf_counter()),
+                    ):
+                        _cf_n += 1
+                        yield np.asarray(_cf_x, dtype=np.float64)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("native seed one-hot config raised: %s", exc)
+                finally:
+                    logger.info("GDP config subNLP: %d feasible point(s)", _cf_n)
+            if xr is not None and time.perf_counter() < deadline:
+                try:
+                    cand = subnlp(
+                        model,
+                        xr,
+                        evaluator=ev,
+                        backend=backend,
+                        time_budget=max(1e-3, min(4.0, deadline - time.perf_counter())),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("native seed subnlp raised: %s", exc)
+                    cand = None
+                if cand is not None and cand[0] is not None:
+                    yield np.asarray(cand[0], dtype=np.float64)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native seed subnlp import/setup failed: %s", exc)
 
@@ -11525,6 +11614,64 @@ def solve_model(
                 _record_improver(_HEUR_COST["enumerate"], _enum_improved)
                 _heuristic_governor.record("enumerate", _enum_improved)
 
+        # --- Root disjunct-configuration primal (#823, flag-gated, default OFF) ---
+        # The enumeration above self-gates off above 4 binaries, so on a big-M GDP
+        # (6..138 indicators across the GDPlib small set) the root disjunct cover
+        # never runs; and plain rounding can fix a disjunction to zero-or-two
+        # active disjuncts, which the model forbids, so its sub-NLP is infeasible.
+        # This selects one disjunct per ``sum_k y_k == 1`` row instead. Runs only
+        # while NO incumbent exists — it is a constructor, not an improver.
+        if (
+            iteration == 0
+            and _gdp_config_primal_enabled()
+            and _subnlp_backend_fn is not None
+            and tree.incumbent() is None
+            and not _root_optimum_proven()
+            and _root_heur_nlp_entry_ok(evaluator)
+        ):
+            from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+            logger.info("GDP config subNLP (root): entering disjunct selection")
+
+            # Seed from the best root relaxation point when one produced a usable
+            # bound, else the bound midpoint. Computed here rather than reused from
+            # the enumeration above, which may not have run at all.
+            _cfg_cands = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _cfg_cands.sort(key=lambda t: t[1])
+            _cfg_seed = (
+                result_sols[_cfg_cands[0][0]]
+                if _cfg_cands
+                else 0.5 * (np.clip(lb, -_SPC, _SPC) + np.clip(ub, -_SPC, _SPC))
+            )
+            try:
+                _cfg_results = one_hot_config_subnlp(
+                    model,
+                    _cfg_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
+                )
+            except Exception as _e:
+                logger.debug("one_hot_config_subnlp raised: %s", _e)
+                _cfg_results = []
+            # Log unconditionally, including the zero case. Without this, a run
+            # showing no change is ambiguous between "the constructor ran and
+            # found nothing" and "the gate never opened" — the §6 vacuity trap,
+            # where an instrument that measured nothing reads as a clean result.
+            logger.info("GDP config subNLP: %d feasible point(s)", len(_cfg_results))
+            _subnlp_calls += len(_cfg_results)
+            for _x_cf, _obj_cf in _cfg_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
+                    _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf))
+                    _subnlp_incumbent_updates += 1
+                    logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
         # to a far better feasible integer assignment that no unit (1-opt/2-opt)
@@ -14044,6 +14191,52 @@ def _solve_nlp_bb(
                     best_root_idx = i
             if best_root_idx is not None:
                 _root_incumbent = False
+
+                # --- Root disjunct-configuration primal (#823, flag-gated) ---
+                # The THIRD call site, and the one this class needs: a convex GDP
+                # (batch_processing) routes here, not to the spatial kernel or the
+                # Python B&B loop, so wiring only those two left the constructor
+                # unreachable on it — a dead flag on the very subclass it targets
+                # (CLAUDE.md §3). RENS and the pump below both round the relaxation,
+                # which cannot respect ``sum_k y_k == 1``; this selects one disjunct
+                # per row instead. Constructor only: it runs while NO incumbent
+                # exists and never touches the dual bound.
+                if _gdp_config_primal_enabled() and tree.incumbent() is None:
+                    logger.info("GDP config subNLP (nlp-bb): entering disjunct selection")
+                    _cfg_found = []
+                    try:
+                        from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+                        _cfg_found = one_hot_config_subnlp(
+                            model,
+                            result_sols[best_root_idx],
+                            evaluator=evaluator,
+                            deadline=_gdp_config_deadline(
+                                t_start + time_limit, time.perf_counter()
+                            ),
+                        )
+                    except Exception as _e:  # pragma: no cover - defensive
+                        logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
+                    logger.info("GDP config subNLP: %d feasible point(s)", len(_cfg_found))
+                    for _cfg_x, _ in _cfg_found:
+                        # Re-verified here by this path's own standard, exactly as
+                        # RENS and diving results are, rather than trusted because
+                        # the heuristic said so.
+                        _cfg_sol = np.asarray(_cfg_x, dtype=np.float64).copy()
+                        _cfg_obj = float(evaluator.evaluate_objective(_cfg_sol))
+                        _cfg_feas = not cl_list or _check_constraint_feasibility(
+                            evaluator, _cfg_sol, cl_list, cu_list
+                        )
+                        if (
+                            np.isfinite(_cfg_obj)
+                            and _cfg_obj < _SENTINEL_THRESHOLD
+                            and _cfg_feas
+                            and _is_integer_feasible_solution(_cfg_sol, int_offsets, int_sizes)
+                        ):
+                            tree.inject_incumbent(_cfg_sol, _cfg_obj)
+                            _root_incumbent = True
+                            logger.info("GDP config subNLP incumbent: obj=%.6g", _cfg_obj)
+
                 # --- RENS (Relaxation Enforced Neighborhood Search), primary ---
                 # Solve the relaxation's rounding neighbourhood EXACTLY (fix the
                 # integers already integral in the relaxation; restrict each

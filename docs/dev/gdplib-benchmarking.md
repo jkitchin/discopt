@@ -195,7 +195,16 @@ Re-run **2026-07-22** after the recent performance work. discopt and SCIP
 (`pyscipopt`) read the same big-M `.nl`; BARON is run via GAMS (`optcr=0`) as an
 independent third global solver. `reference optimum` is the value **both BARON and
 SCIP prove** (see the cstr correction below). Reproduce discopt/SCIP with
-`python scripts/reeval_gdplib.py`.
+
+```bash
+cd discopt_benchmarks
+python -m benchmarks.gdplib_runner --methods bigm --max-variables 500 --time-limit 60
+```
+
+(Earlier revisions of this page gave the reproduction command as
+`python scripts/reeval_gdplib.py`. **No such script has ever existed in the tree**,
+so the table was not reproducible as documented; the runner above is the real entry
+point.)
 
 Legend: **opt** = proven optimal (gap 0); *feas* = feasible incumbent, not proven;
 *inc* = incumbent only (time limit, gap open); — = no incumbent.
@@ -276,8 +285,10 @@ aliases (verified: the recycle indicators stay unset). What changed:
 
 1. Extend the SCIP-certified `reference_optima()` to the larger models with a longer
    budget; optionally add BARON/Couenne behind the same oracle hook for redundancy.
-2. Wire a curated `gdplib_small` suite into the nightly correctness lane (linear
-   models + short-limit nonlinear feasibility), gating on `incorrect_count == 0`.
+2. Curate a `gdplib_small` suite (linear models + short-limit nonlinear
+   feasibility) gating on `incorrect_count == 0`. **Not in a nightly lane** — the
+   owner's standing instruction is that there is no nightly run (CI-minute cost);
+   run it per-PR or on demand.
 3. Grow the native-discopt subset (`gdplib_native.py`) beyond the current three —
    `cstr`, `positioning`, and the larger process models — porting each from source
    with a certified-optimum test. The hand-ported route already exercises discopt's
