@@ -59,6 +59,36 @@ fn parse_deadline(time_limit_s: Option<f64>) -> PyResult<Option<std::time::Insta
     }
 }
 
+/// The [`parse_deadline`] contract in *seconds*, for callees that build their own
+/// deadline from a duration ([`MilpOptions::time_limit_s`] is relative to the driver's
+/// own `t_start`, so it cannot take an absolute `Instant`).
+///
+/// The distinction this exists to preserve is between an **expired** budget and **no**
+/// budget. Both MILP entries used to take a bare `f64` and map it with
+/// `if time_limit_s > 0.0 { Some(t) } else { None }`, which collapses `0.0` — "my budget
+/// is spent" — onto the same wire value as "run forever". That is the sentinel-collapse
+/// class documented for `INF` in the LP layer, one level up: a caller that had *already*
+/// exhausted a shared budget across earlier attempts launched an **unbounded** MILP
+/// B&B at exactly the moment it should not have started at all. Measured on issue #928:
+/// AMP's `solve(time_limit=3.0)` ran past 350 s. `Some(0.0)` now reaches the driver
+/// intact, where it is an already-elapsed deadline that stops at the first poll with
+/// `gap_certified = false` — the same well-trodden path as a deadline that expires at
+/// node 1, so the bound it reports stays sound.
+fn parse_budget_secs(time_limit_s: Option<f64>) -> PyResult<Option<f64>> {
+    match time_limit_s {
+        None => Ok(None),
+        Some(seconds) if seconds == f64::INFINITY => Ok(None),
+        Some(seconds) if seconds.is_nan() || seconds < 0.0 => Err(PyValueError::new_err(
+            "time_limit_s must be non-negative and not NaN (use None or +inf for no limit)",
+        )),
+        // Reject what the driver's `Duration::from_secs_f64` would panic on.
+        Some(seconds) => match std::time::Duration::try_from_secs_f64(seconds) {
+            Ok(_) => Ok(Some(seconds)),
+            Err(_) => Err(PyValueError::new_err("time_limit_s is too large")),
+        },
+    }
+}
+
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
 /// `a` is the C-contiguous `m × n` equality-constraint matrix; `c`, `lb`, `ub`
@@ -829,7 +859,7 @@ impl MilpDebugHook for PyMilpHook {
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    initial_incumbent=None, time_limit_s=0.0, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=None, debug_hook=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -857,7 +887,7 @@ pub fn solve_milp_py<'py>(
     sb_max_cands: usize,
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
-    time_limit_s: f64,
+    time_limit_s: Option<f64>,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
@@ -930,7 +960,7 @@ pub fn solve_milp_py<'py>(
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    initial_incumbent=None, time_limit_s=0.0, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=None, debug_hook=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -963,7 +993,7 @@ pub fn solve_milp_csc_py<'py>(
     sb_max_cands: usize,
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
-    time_limit_s: f64,
+    time_limit_s: Option<f64>,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1047,18 +1077,14 @@ fn run_milp_hooked<'py>(
     sb_max_cands: usize,
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
-    time_limit_s: f64,
+    time_limit_s: Option<f64>,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let opts = MilpOptions {
         n_struct,
         integer_cols: int_cols,
         max_nodes,
-        time_limit_s: if time_limit_s > 0.0 {
-            Some(time_limit_s)
-        } else {
-            None
-        },
+        time_limit_s: parse_budget_secs(time_limit_s)?,
         gap_tol,
         root_cuts,
         cut_rounds,

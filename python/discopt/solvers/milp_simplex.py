@@ -650,7 +650,13 @@ def solve_milp(
         0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
         int(max_nodes),
         float(gap_tolerance),
-        time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit)),
+        # #928: pass ``None`` for "no limit" and the number — INCLUDING an exact
+        # 0.0 — for a real budget. The previous ``0.0 if time_limit is None``
+        # spelling collapsed the two: the binding mapped 0.0 back to "no
+        # deadline", so a caller whose shared budget was already spent by earlier
+        # attempts (``MilpRelaxationModel.solve`` under ``DISCOPT_LP_WARM_DEADLINE``)
+        # launched an *unbounded* B&B at the one moment it must not start at all.
+        time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
         debug_hook=_debug.rust_hook(),
         **_lp_kwargs,
     )

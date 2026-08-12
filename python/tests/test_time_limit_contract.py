@@ -79,18 +79,20 @@ _SLACK_FRAC = 0.10
 # §1. So this case is marked xfail non-strict rather than silenced or given a
 # wider slack: it keeps running, it keeps reporting, and it will xpass the moment
 # #917 is properly resolved.
-_XFAIL_LP_DEADLINE_DROP = pytest.mark.xfail(
-    reason="#928: warm pure-LP path drops the caller's time_limit, so the #138 "
-    "fallback's separated-relaxation phase overruns its grant by ~4s. Bimodal: "
-    "10.6-13.0s against 12.5s allowed. Not strict — it passes ~2/5 runs.",
-    strict=False,
-)
+# 2026-08-12 (#928): RESOLVED — the xfail is gone and this case is now a plain
+# assertion. ``DISCOPT_LP_WARM_DEADLINE`` is ON by default: the warm pure-LP path
+# honours the caller's ``time_limit``, so the #138 fallback's separated-relaxation
+# phase no longer overruns its grant. The flag's own blocker (an exhausted shared
+# budget reaching ``solve_milp`` as ``time_limit_s=0.0``, the same wire value as "no
+# limit", which took AMP's 3 s budget past 350 s) was fixed first — see
+# ``parse_budget_secs`` in ``lp_bindings.rs``. Measured after the fix: this case
+# passes, and the whole file is 3 passed + 1 xpass with the flag on.
 
 # (instance, time_limit) pairs. Short limits are the discriminating cases —
 # a constant-overhead overrun is invisible at 60 s and catastrophic at 2 s.
 _CASES = [
     ("hda", 5.0),
-    pytest.param("hda", 10.0, marks=_XFAIL_LP_DEADLINE_DROP),
+    ("hda", 10.0),
     ("casctanks", 5.0),
 ]
 

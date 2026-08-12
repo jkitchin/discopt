@@ -18282,7 +18282,7 @@ def _solve_milp_simplex(
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
     # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
-    # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to 0.0 -> no
+    # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to None -> no
     # deadline, so a single node whose simplex fails to converge (or a degenerate
     # cycle) runs unbounded, ignoring the user's ``time_limit`` entirely (issue
     # #291: nvs12's integer-bilinear reformulation hung > 40 s on a 15 s limit).
