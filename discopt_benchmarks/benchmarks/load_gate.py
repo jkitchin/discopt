@@ -4,8 +4,8 @@ CLAUDE.md §8 asks every measurement to assert `module.__file__` and a marker
 string unique to the version under test. A panel can satisfy both and still
 measure something else, because `discopt` is two artifacts, not one: the Python
 package, and a compiled `_rust` extension that is a *build output* and therefore
-invisible to every source-level check. Switching a checkout, or running a panel
-from a worktree that was never built, leaves a Python-new / Rust-old hybrid that
+invisible to every source-level check. Running a panel from a worktree that was
+never built leaves the Python coming from one tree and the Rust from another; it
 imports cleanly and reports numbers with nothing flagging them.
 
 This was found during #993 rather than hypothesized. Two GDP panels ran with
@@ -15,20 +15,24 @@ carried two extensions built eleven weeks apart — `_rust.cpython-312-darwin.so
 and `_rust.cpython-313-darwin.so` — so which stale artifact loaded was decided by
 which interpreter happened to start.
 
-It was first written up as harmless on the grounds that no Rust had changed. That
-was wrong, and writing this gate is what found it: the loaded `.so` was built at
-09:03, and commit `5dc804b9` (#928, expired MILP budgets) landed at 09:09 in the
-panels' own base, changing `lp_bindings.rs` and `solver.py` *in the same commit*.
-Both panels ran the new Python against the old Rust. The build was never stale by
-much, and never stale in a way anything could see — which is the argument for
-checking it mechanically rather than by recollection.
+Deliberately *not* checked here: whether the build is current with respect to its
+sources. The obvious proxy is mtime, and mtime is wrong in both directions. A
+`git checkout` rewrites every file that differs between the two commits, so a
+switch that lands on identical content still bumps the mtime — the main tree
+today has `lp_bindings.rs` at 09:39 and a 09:03 extension whose content matches
+it exactly. And a build legitimately *predates* the commit it validates, because
+the order of work is edit, build, test, then commit; reading that as staleness
+inverts it. This module made both mistakes before it made none, and a gate that
+refuses on a correct tree teaches its reader to pass `--allow-stale-extension`,
+after which it protects nothing.
 
-The check here is deliberately *mtime against sources*, not mtime against a
-branch-switch time or a git hash. A checkout only rewrites files whose content
-changed, so a switch across commits that touch no Rust legitimately leaves the
-build current, and a hash comparison would cry stale on every such switch until
-people learned to ignore it. An alarm that is usually wrong is worse than none:
-it trains its reader to pass the flag.
+The durable answer is a build stamp: hash the Rust sources at build time, embed
+the digest in the extension, and compare it against a hash of the tree's current
+sources. That is exact, immune to checkout churn and to build-before-commit
+ordering, and it answers the real question — *was this binary built from this
+source* — rather than a proxy for it. It needs `build.rs` cooperation, so it is
+tracked separately; the two structural checks below need no build support and are
+correct as they stand.
 """
 
 from __future__ import annotations
@@ -36,11 +40,6 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-
-#: Source patterns whose edit invalidates a compiled extension. Kept narrow on
-#: purpose: a stale `.rs` file changes solver behaviour, whereas a stale README
-#: in `crates/` does not, and a gate that fires on documentation gets disabled.
-_RUST_SOURCE_GLOBS = ("**/*.rs", "**/Cargo.toml", "**/build.rs")
 
 
 class _Auto:
@@ -58,23 +57,21 @@ class _Auto:
 AUTO = _Auto()
 
 
-class StaleExtensionError(RuntimeError):
-    """Raised instead of measuring a build the caller did not intend to measure.
+class ExtensionMismatchError(RuntimeError):
+    """Raised instead of measuring an extension the caller did not intend to load.
 
-    This is a refusal, not a warning (CLAUDE.md §3): the numbers a hybrid produces
-    look entirely ordinary, so anything short of stopping gets scrolled past.
+    This is a refusal, not a warning (CLAUDE.md §3): the numbers a mismatched
+    build produces look entirely ordinary, so anything short of stopping gets
+    scrolled past.
     """
 
 
 @dataclass(frozen=True)
 class ExtensionReport:
-    """What was actually loaded, and whether it is current."""
+    """Which `discopt` Python and which compiled `_rust` this process actually got."""
 
     extension_path: Path | None
     package_path: Path
-    crates_dir: Path | None
-    newest_source: Path | None
-    stale: bool
     hybrid: bool
     siblings: tuple[Path, ...]
 
@@ -97,13 +94,6 @@ class ExtensionReport:
                 "import cleanly and report numbers that describe neither checkout. Build in "
                 "the tree you are measuring (`maturin develop --release`)."
             )
-        if self.stale and self.newest_source is not None:
-            problems.append(
-                f"the loaded extension {self.extension_path.name} is OLDER than the Rust "
-                f"sources it was built from — {self.newest_source} was modified after it. "
-                "Every number this run produces would describe a build that predates the "
-                "checkout. Run `maturin develop --release`."
-            )
         if self.siblings:
             names = ", ".join(sorted(p.name for p in self.siblings))
             problems.append(
@@ -115,29 +105,15 @@ class ExtensionReport:
         return " Also: ".join(problems) if problems else None
 
 
-def _newest_source(crates_dir: Path) -> Path | None:
-    newest: Path | None = None
-    newest_mtime = -1.0
-    for pattern in _RUST_SOURCE_GLOBS:
-        for path in crates_dir.glob(pattern):
-            if not path.is_file():
-                continue
-            mtime = path.stat().st_mtime
-            if mtime > newest_mtime:
-                newest, newest_mtime = path, mtime
-    return newest
-
-
 def inspect_extension(
     package_path: Path | _Auto = AUTO,
     extension_path: Path | None | _Auto = AUTO,
-    crates_dir: Path | None | _Auto = AUTO,
 ) -> ExtensionReport:
     """Describe the loaded `discopt` build.
 
     Every argument defaults to `AUTO`, meaning "work it out from this
     interpreter". Passing an explicit `None` asserts the thing is genuinely
-    absent, which is how the missing-extension and no-crates layouts are tested.
+    absent, which is how the missing-extension layout is tested.
     """
     if isinstance(package_path, _Auto):
         import discopt
@@ -152,18 +128,6 @@ def inspect_extension(
                 rust = None
         raw = getattr(rust, "__file__", None)
         extension_path = Path(raw).resolve() if raw else None
-    if isinstance(crates_dir, _Auto):
-        # `python/discopt/` -> repo root -> `crates/`. Anchored on the extension
-        # when there is one, since that is the tree the build came from, which is
-        # not necessarily the tree the Python came from — the whole failure mode.
-        crates_dir = None
-        anchor = extension_path or package_path
-        for parent in anchor.parents:
-            candidate = parent / "crates"
-            if candidate.is_dir():
-                crates_dir = candidate
-                break
-
     siblings: tuple[Path, ...] = ()
     hybrid = False
     if extension_path is not None:
@@ -174,18 +138,9 @@ def inspect_extension(
         )
         hybrid = extension_path.parent != package_path
 
-    newest = _newest_source(crates_dir) if crates_dir is not None else None
-    stale = (
-        extension_path is not None
-        and newest is not None
-        and newest.stat().st_mtime > extension_path.stat().st_mtime
-    )
     return ExtensionReport(
         extension_path=extension_path,
         package_path=package_path,
-        crates_dir=crates_dir,
-        newest_source=newest,
-        stale=stale,
         hybrid=hybrid,
         siblings=siblings,
     )

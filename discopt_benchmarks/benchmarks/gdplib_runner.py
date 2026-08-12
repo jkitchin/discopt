@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from benchmarks.load_gate import StaleExtensionError, inspect_extension
+from benchmarks.load_gate import ExtensionMismatchError, inspect_extension
 from benchmarks.metrics import (
     BenchmarkResults,
     InstanceInfo,
@@ -103,7 +103,7 @@ class GDPLibSuiteConfig:
     include: list[str] | None = None  # explicit model-name allowlist
     exclude: list[str] = field(default_factory=list)
     oracle: bool = True  # cross-check the linear subset against HiGHS
-    allow_stale_extension: bool = False  # measure a build older than its sources anyway
+    allow_stale_extension: bool = False  # load a mismatched/ambiguous extension anyway
 
 
 #: The curated small set: every GDPlib model whose ``gdp.bigm`` reformulation fits
@@ -754,7 +754,7 @@ def run_suite(config: GDPLibSuiteConfig) -> tuple[BenchmarkResults, list[ModelRu
             f"\n  loaded _rust:    {report.extension_path}"
         )
         if not config.allow_stale_extension:
-            raise StaleExtensionError(detail)
+            raise ExtensionMismatchError(detail)
         print(f"WARNING (--allow-stale-extension): {detail}", file=sys.stderr)
     specs = discover_models(include=config.include, exclude=config.exclude)
     results = BenchmarkResults(suite=config.name, timestamp=datetime.now().isoformat())
@@ -868,8 +868,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-stale-extension",
         action="store_true",
-        help="run even if the compiled _rust extension predates its sources (say so "
-        "deliberately rather than measuring a build you did not intend)",
+        help="run even if the loaded _rust extension is from another tree or is "
+        "ambiguous (say so deliberately rather than measuring a build you did not intend)",
     )
     parser.add_argument("--list", action="store_true", help="list discovered models and exit")
     parser.add_argument("--output", default=None, help="write BenchmarkResults JSON to this path")
@@ -921,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         results, runs = run_suite(config)
-    except StaleExtensionError as exc:
+    except ExtensionMismatchError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 5
     if args.output:

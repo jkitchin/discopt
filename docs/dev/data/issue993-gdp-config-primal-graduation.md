@@ -229,35 +229,27 @@ is underneath) — the last is the marker that makes this run mean anything, sin
 run that silently loaded the editable install from the main tree would have
 re-measured the very base it was meant to replace.
 
-**Retraction (2026-08-12, per §11).** The sentence that stood here — "`_rust`
-resolves to the main tree's release build; no Rust changed in #999, #1000 or this
-branch, so the Python-from-worktree / Rust-from-tree hybrid is the intended one" —
-drew a false conclusion from a true premise, and is withdrawn. The premise holds:
-none of `9a2f8f32`, `0ef7f056`, `6a626125`, `eb70c2d0`, `3fb20772` touches a `.rs`
-file. The conclusion does not, because the relevant comparison is not those
-changesets but the *base*. The loaded `_rust.cpython-312-darwin.so` was built at
-09:03 and never rebuilt (its mtime is still 09:03 well after the last arm), while
-`5dc804b9` — #928, "an expired MILP budget is no longer the wire value for 'no
-limit'" — landed at 09:09 and **is** an ancestor of the panel base `3fb20772`.
-That commit changes `crates/discopt-python/src/lp_bindings.rs` *and*
-`python/discopt/solver.py` *and* `python/discopt/solvers/milp_simplex.py`
-together. Every arm of both panels therefore ran #928's Python half against a
-Rust half that predates it: a hybrid corresponding to no commit, and the precise
-failure mode this document elsewhere claims to have ruled out.
+Note that `_rust` still resolves to the main tree's release build, and that build
+is content-current for this entire history: `git log 5dc804b9..HEAD -- '*.rs'
+'crates/**/Cargo.toml'` is empty, so no Rust source has changed since the
+extension was compiled. The Python-from-worktree / Rust-from-tree hybrid is
+therefore the intended one.
 
-What survives and what does not. The `.so` was byte-identical across every arm of
-both panels, so OFF vs ON is a true A/B and the differential the graduation rests
-on is not an artifact of the stale build. What is *not* established is that the
-absolute numbers describe any shipping configuration. One caveat is sharper than
-that and should not be filed under "controlled": the single missing Rust change
-concerns budget *expiry*, and the flag-ON path is the one that spends budget on
-extra sub-solves, so a shared binary is not by itself proof that the two arms were
-affected equally. This does not overturn the verdict — nothing here shows a wrong
-answer, and the certified values reproduce — but a reader who wants the absolute
-walls or node counts to correspond to `main` needs a rebuilt re-run, not this one.
-The gate added in `discopt_benchmarks/benchmarks/load_gate.py` refuses this
-layout, and was confirmed against these exact two trees rather than only synthetic
-ones.
+**Withdrawn correction (2026-08-12, per §11).** A retraction printed here briefly
+claimed the opposite — that the panels ran a Python-new / Rust-old hybrid, on the
+grounds that the loaded `_rust.cpython-312-darwin.so` (built 09:03) predates
+`5dc804b9` / #928 (committed 09:09), which is an ancestor of the panel base. **That
+claim was wrong and is itself withdrawn.** The inference "build artifact older
+than a commit ⇒ build lacks that commit" is backwards: the ordinary order of work
+is edit, build, test, *then* commit, so a build predating the commit it validates
+is the normal case rather than evidence of staleness. Checked against the
+commit's own discriminator instead of its timestamp,
+`pytest python/tests/test_928_expired_budget_not_unlimited.py` **passes 7/7**
+against the loaded extension, where `5dc804b9`'s own message records 6/7 failing
+against a build from the parent commit. The fix is in the binary. The original
+claim stands, and for a stronger reason than first given: not merely that
+#999/#1000/#1002 skip `.rs`, but that nothing since the build touches Rust at all.
+The graduation's absolute numbers stand and no rebuilt re-run is owed.
 
 Every load-bearing result reproduces. `batch_processing` (593 nodes OFF with no
 incumbent; 822533.66 at 459 nodes ON), `small_batch` (`feasible` 160860.75 →
