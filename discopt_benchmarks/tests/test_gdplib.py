@@ -440,3 +440,82 @@ def test_run_suite_jobshop_only_no_violation():
     # Results flow through the standard metrics pipeline.
     assert "jobshop/bigm" in results.instance_info
     assert results.get_results("discopt")
+
+
+# ── the gdplib_small named suite (#993 Phase D) ─────────────────────────────
+
+
+def test_gdplib_small_is_fully_discoverable():
+    """Every model the preset names must exist in this install.
+
+    This is the test that gives the preset its meaning: ``discover_models``
+    filters ``include`` by set intersection, so a preset naming a model this
+    gdplib revision does not ship would silently shrink to a smaller panel and
+    still report clean. If this fails, install gdplib from source.
+    """
+    found = {s.name for s in gr.discover_models()}
+    missing = sorted(set(gr.GDPLIB_SMALL) - found)
+    assert not missing, f"gdplib_small names undiscoverable models: {missing}"
+    assert len(gr.GDPLIB_SMALL) == len(set(gr.GDPLIB_SMALL)), "duplicate name in preset"
+
+
+def test_suite_expands_to_the_preset(monkeypatch):
+    seen = {}
+
+    def _fake_run_suite(config):
+        from benchmarks.metrics import BenchmarkResults
+
+        seen["include"] = list(config.include or [])
+        return BenchmarkResults(suite="gdplib", timestamp="now"), []
+
+    monkeypatch.setattr(gr, "run_suite", _fake_run_suite)
+    monkeypatch.setattr(gr, "is_available", lambda: True)
+    gr.main(["--suite", "gdplib_small", "--no-oracle"])
+    assert seen["include"] == list(gr.GDPLIB_SMALL)
+
+
+def test_suite_and_models_are_mutually_exclusive():
+    with pytest.raises(SystemExit) as exc:
+        gr.main(["--suite", "gdplib_small", "--models", "jobshop"])
+    assert exc.value.code == 2
+
+
+def test_suite_refuses_a_shrunken_preset(monkeypatch):
+    """A preset model absent from the install exits nonzero, never silently."""
+    # Resolve the spec BEFORE patching — _spec() calls discover_models() itself.
+    only = [_spec("jobshop")]
+    monkeypatch.setattr(gr, "is_available", lambda: True)
+    monkeypatch.setattr(gr, "discover_models", lambda include=None, exclude=None: only)
+
+    def _must_not_run(config):  # pragma: no cover - reached only on a bug
+        raise AssertionError("run_suite must not be reached with a shrunken preset")
+
+    monkeypatch.setattr(gr, "run_suite", _must_not_run)
+    assert gr.main(["--suite", "gdplib_small", "--no-oracle"]) == 4
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(2400)
+def test_gdplib_small_suite_runs_clean():
+    """On-demand wrapper for the named suite: every model runs, nothing unsound.
+
+    Deliberately *not* a CI test — it is the reproducible entry point for the
+    GDP panel (``--suite gdplib_small``). The assertions are the two things a
+    panel must never get wrong: it ran every model it claims to cover (§6), and
+    no run produced a false optimum or a crossed bound (§1).
+    """
+    config = gr.GDPLibSuiteConfig(
+        include=list(gr.GDPLIB_SMALL),
+        methods=("bigm",),
+        time_limit_seconds=60,
+        oracle=True,
+    )
+    results, runs = gr.run_suite(config)
+    assert len(runs) == len(gr.GDPLIB_SMALL), (
+        f"suite ran {len(runs)} of {len(gr.GDPLIB_SMALL)} models — a shrunken panel"
+    )
+    bad = [r.name for r in runs if r.false_optimum or r.bound_crosses]
+    assert not bad, f"soundness violations on {bad}"
+    checked = sum(1 for r in runs if r.oracle_objective is not None)
+    assert checked > 0, "zero oracle-checked runs — this panel verified nothing"
+    assert results.get_results("discopt")
