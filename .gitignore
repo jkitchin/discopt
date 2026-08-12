@@ -106,3 +106,11 @@ scratchpad/**/*.out
 # a hand-written harness like ``issue966_neutral_worker.py`` has none and stays
 # tracked; ``_issue966_yield_fix_worker.py`` is re-emitted on every run.
 scratchpad/_*_worker.py
+
+# LLVM raw coverage profiles. `cargo llvm-cov`/`RUSTFLAGS=-Cinstrument-coverage`
+# drop these in whatever directory the binary ran from, so a Rust coverage run at
+# the repo root litters it with `default_<hash>_<n>_<pid>.profraw`. Six of them
+# (9.8 MB) were committed by accident in c55db7d4; they are build output, never
+# source. The `.profdata` form is the merged artifact from the same tooling.
+*.profraw
+*.profdata
