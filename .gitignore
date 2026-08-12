@@ -106,3 +106,13 @@ scratchpad/**/*.out
 # a hand-written harness like ``issue966_neutral_worker.py`` has none and stays
 # tracked; ``_issue966_yield_fix_worker.py`` is re-emitted on every run.
 scratchpad/_*_worker.py
+
+# LLVM/Rust coverage artifacts — `cargo test` with instrumentation drops these
+# in the working dir. Six of them (~10 MB) were committed by accident in #904.
+*.profraw
+
+# Benchmark-panel outputs written to the repo root. Same rule as the scratchpad
+# block above: keep the harness (`discopt_benchmarks/scripts/*.py`), drop what it
+# generates. `issue844_primal_quality_panel.py` defaults `--out` to a bare
+# filename, so a run from the repo root leaves one here.
+/*_quality_panel.json

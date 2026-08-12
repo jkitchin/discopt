@@ -112,4 +112,4 @@ No dedicated RO crucible article yet. The closest adjacent materials live in MIN
 - **"The counterpart solves slowly because it's now nonconvex"** → `convex-relaxation-expert`, `minlp-solver-expert`.
 - **"Chance constraints / stochastic programming"** → outside discopt's scope as of now; reference external (PyomoSP, rsome).
 - **"Differentiate through the robust counterpart"** → `differentiability-expert` (works if the counterpart is smooth).
-- **"Combine RO with multi-objective / DOE"** → `multiobjective-expert` / `doe-expert`.
+- **"Combine RO with multi-objective / DOE"** → `multiobjective-expert` / `doe-expert` (the last ships with the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin, not this repo).

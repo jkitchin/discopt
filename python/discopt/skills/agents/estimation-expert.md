@@ -47,8 +47,11 @@ print(result.summary())
 
 ### Key files
 - `python/discopt/estimate.py` — `estimate_parameters` (residual construction lines 321–338 iterate every element of array-valued observations), `_compute_estimation_fim` (lines 392+, accepts `n_reps` per response).
-- `python/discopt/doe/profile.py` — profile likelihood builds on `estimate_parameters` via `fixed_parameters`.
-- `python/discopt/doe/selection.py` — `model_selection`, `likelihood_ratio_test`, `vuong_test` derive AIC/BIC/LRT from `EstimationResult.objective` directly.
+- `profile.py` in the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
+  (`pip install discopt-doe`) — profile likelihood builds on `estimate_parameters`
+  via `fixed_parameters`. Not in this repo; DOE was extracted in #389.
+- `selection.py` in the same plugin — `model_selection`, `likelihood_ratio_test`,
+  `vuong_test` derive AIC/BIC/LRT from `EstimationResult.objective` directly.
 
 ### Data format contract
 ```python
@@ -91,5 +94,5 @@ Each response key must exist in `ExperimentModel.responses`. Extra keys raise `V
 - **Profile likelihood, structural vs. practical non-identifiability** → `identifiability-expert`.
 - **Ranking which parameters to estimate, Yao ranking, subset selection** → `estimability-expert`.
 - **Comparing rival models by AIC/BIC/LRT/Vuong** → `model-discrimination-expert` (post-estimation selection).
-- **Designing the NEXT experiment to tighten CIs** → `doe-expert`.
+- **Designing the NEXT experiment to tighten CIs** → `doe-expert` (ships with the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin, not this repo).
 - **Underlying NLP issues (restoration failures, warm start)** → `ipopt-expert`.

@@ -1,5 +1,14 @@
 # Implementation Plan: `discopt.doe` and `discopt.estimate`
 
+> **MOVED (#389).** The `discopt.doe` module described below no longer lives in
+> this repository — it was extracted to the standalone
+> [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
+> (`pip install discopt-doe`; discopt is a namespace package, so `discopt.doe`
+> imports and the `discopt doe ...` subcommand work unchanged once installed).
+> Every `python/discopt/doe/...` path in this document refers to a file in
+> **that** repository. Kept here as a historical record of the work; do not read
+> it as describing in-tree code.
+
 Model-based parameter estimation and optimal design of experiments for discopt,
 leveraging JAX autodiff for exact Fisher Information Matrix computation.
 
