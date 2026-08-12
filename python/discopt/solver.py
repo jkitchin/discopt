@@ -480,9 +480,11 @@ def _gdp_config_primal_enabled() -> bool:
       Node deltas on the six models that *hit* the limit are read as cost, not
       credit: fewer nodes there means time the tree did not get.
     """
-    return os.environ.get("DISCOPT_GDP_CONFIG_PRIMAL", "1").strip().lower() not in (
+    # Empty is deliberately NOT an off-value: it is what an unset variable expands
+    # to, and a graduated default-ON path must not be switched off by an accident
+    # of shell quoting. Same shape as ``_qubo_primal_enabled``.
+    return os.environ.get("DISCOPT_GDP_CONFIG_PRIMAL", "").strip().lower() not in (
         "0",
-        "",
         "false",
         "no",
         "off",

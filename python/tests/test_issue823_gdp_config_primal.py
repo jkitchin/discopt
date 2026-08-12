@@ -201,12 +201,15 @@ def test_flag_is_default_on_with_an_opt_out():
     saved = os.environ.pop("DISCOPT_GDP_CONFIG_PRIMAL", None)
     try:
         assert _gdp_config_primal_enabled() is True, "graduated: unset must mean ON"
-        for off in ("0", "off", "false", "no", ""):
+        for off in ("0", "off", "false", "no"):
             os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = off
             assert _gdp_config_primal_enabled() is False, f"{off!r} must opt out"
-        for on in ("1", "true", "yes", "on"):
+        # Empty is ON, not OFF, and that is the point: ``export X="$UNSET"`` exports
+        # an empty string, and a graduated default-ON path must not be switched off
+        # by an accident of shell quoting while reading in every log as "not set".
+        for on in ("1", "true", "yes", "on", "", "  "):
             os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = on
-            assert _gdp_config_primal_enabled() is True, f"{on!r} must opt in"
+            assert _gdp_config_primal_enabled() is True, f"{on!r} must leave it ON"
     finally:
         os.environ.pop("DISCOPT_GDP_CONFIG_PRIMAL", None)
         if saved is not None:

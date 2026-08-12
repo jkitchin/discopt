@@ -217,7 +217,12 @@ is what the 2026-07-17 policy requires; the nightly panel remains the ongoing
 regression watch rather than a further gate.
 
 Pinned by `test_flag_is_default_on_with_an_opt_out`, which asserts the new default
-*and* that `0`/`off`/`false`/`no`/empty still opt out.
+*and* that `0`/`off`/`false`/`no` still opt out. An **empty** value is deliberately
+not among them: `export DISCOPT_GDP_CONFIG_PRIMAL="$UNSET"` exports an empty
+string, and a graduated default-ON path must not be switched back to the legacy
+one by an accident of shell quoting while reading, in every log and `env` dump, as
+"not set, so the default applies". This matches `_qubo_primal_enabled` and every
+other graduated flag in `solver.py`.
 
 What this verdict does **not** claim: nothing here establishes soundness on
 `gdp_col` or `methanol`, and `gdp_col` is measurably worse ON. If an oracle
