@@ -325,10 +325,15 @@ def test_per_thread_fallback_is_exercised_and_agrees(monkeypatch):
 
     pounce #477/#478 made ``NlProblem`` sendable, so on a current build the
     evaluator shares one problem and the per-thread fallback never runs. That is
-    precisely when a fallback rots: it is retained for users on
-    ``pounce-solver>=0.9`` builds predating the fix, where using it wrongly costs
-    a false ``infeasible``. Forcing the capability probe to ``False`` keeps it
-    covered, and asserts the two paths agree rather than merely both running.
+    precisely when a fallback rots: using it wrongly costs a false
+    ``infeasible``. Forcing the capability probe to ``False`` keeps it covered,
+    and asserts the two paths agree rather than merely both running.
+
+    #477/#478 shipped in ``pounce-solver`` 0.10.0 — the version this project now
+    floors at — so every in-contract install takes the shared path and the
+    fallback covers only a below-floor pounce. It is retained rather than
+    deleted because the capability is *probed*, not assumed from a version
+    string: a build where the probe says "not sendable" must still solve.
     """
     import threading
 
@@ -372,7 +377,7 @@ def test_per_thread_fallback_is_exercised_and_agrees(monkeypatch):
 def test_solve_degrades_to_jax_when_pounce_is_missing():
     """A missing or too-old POUNCE must fall back, not crash.
 
-    ``pyproject`` requires ``pounce-solver>=0.9``, but a minimal install need not
+    ``pyproject`` requires ``pounce-solver>=0.10``, but a minimal install need not
     have it — CI's AMP-coverage lane installed jax/numpy/scipy/highspy and
     nothing else. That was invisible while the tape backend was opt-in and became
     a hard ``ModuleNotFoundError`` on every solve the moment it graduated to

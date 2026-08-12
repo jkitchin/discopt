@@ -18569,7 +18569,7 @@ def _solve_milp_bb(
         try:
             from discopt.decomposition.lagrangian.node_bounder import LagrangianNodeBounder
 
-            _lag_bounder = LagrangianNodeBounder.try_build(model, prefer_pounce=prefer_pounce)
+            _lag_bounder = LagrangianNodeBounder.try_build(model)
             if _lag_bounder is not None:
                 _lag_bounder.solve_root_dual(lb, ub)
             else:

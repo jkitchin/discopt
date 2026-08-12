@@ -10,7 +10,154 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`feral` 0.14 → 0.15.1 and `pounce-solver` `>=0.9` → `>=0.10`**
+  (`chore(deps)`). Two pins that move together: POUNCE 0.10.0's own workspace
+  pins feral 0.15.1, so holding both here keeps a single LU implementation
+  behind the simplex node engine and the NLP evaluator rather than two.
+
+  feral 0.15.0 is a **breaking** release, but only in its diagnostic API
+  (`SupernodeTiming` `us` → `ns`, `BucketStats::sum_us`/`avg_us` → `*_ns`,
+  `ProfileReport::loop_us` → `loop_ns`). discopt consumes only the LU layer —
+  `SparseLu`/`DenseLu`/`SparseColMatrix`/`SparseLuSymbolic`/`LuParams`/
+  `RefactorCause`/`FeralError` in `linsolve.rs` — and none of the multifrontal
+  or profiler surface, so no discopt source changes. What it does buy the node
+  engine: the packed BLAS-3 trailing update is now an explicit pulp SIMD kernel
+  (upstream reports byte-exact output at every SIMD width, pinned by golden
+  bit-digests), and four tuning-knob `env::var` lookups leave the per-panel
+  dispatch path for a `OnceLock`. That second one is per-front *fixed* cost, so
+  it lands hardest on many-small-front bases — the per-node simplex regime.
+
+  POUNCE 0.10.0 carries #477/#478 (`NlProblem` is sendable), so on an
+  in-contract install the tape evaluator shares one problem and the per-thread
+  fallback no longer runs. The fallback is **retained**, not deleted: the
+  capability is probed rather than inferred from a version string, and a build
+  whose probe says "not sendable" must still solve.
+  `test_75_tape_nlp_evaluator.py` keeps it covered by forcing the probe false.
+
+  **Verified bound-neutral (CLAUDE.md §5).** 49-instance cert panel, both arms
+  built on one machine from the same source and told apart by the `feral-<ver>`
+  string cargo bakes into the `_rust` extension: **49/49 rows bit-identical in
+  status, `node_count` and `objective`**. A same-build repeat ran first as the
+  determinism control — also 49/49 bit-identical — so node equality is a real
+  gate here and not an artifact of a panel that never varies. Also green:
+  `cargo test -p discopt-core` (597+4+1), `pytest -m smoke` (943 passed, 1
+  skipped, 2 xpassed), the adversarial suite (10 passed), and
+  `pytest -m requires_pounce` (127 passed, 1 skipped) apart from one failure
+  reproduced identically on the pre-bump control (see below).
+
+  Note on method: the arms were diffed against *each other*, not against
+  `docs/dev/data/cert-baseline.jsonl`, because at the time that reference was
+  stale (18 violations on an *unmodified* tree). It has since been regenerated
+  in this same series — see the next entry — so a future re-run of this check
+  can use the committed reference directly.
+
+- **`docs/dev/data/cert-baseline.jsonl` regenerated, 49 → 52 rows**
+  (`chore(cert)`). The §0.2.5 bound-neutrality reference had drifted out of
+  reproducibility against its own tree: `check_cert_neutrality.py` on an
+  *unmodified* checkout reported **18 violations** — objective drift past
+  `_OBJ_TOL` (`cvxnonsep_nsig30` 1.5e-6, `cvxnonsep_psig40r` 2.9e-6, `m3`
+  5.9e-7) and node swings (`nvs13` 23 → 637, `dispatch` 3 → 23, `tls2`
+  343 → 255, `tspn05` 51 → 39). All 49 still certified `optimal`, so this was a
+  drifted reference and not a soundness bug — but it left the neutrality guard
+  unable to detect a real regression while still reading as a guard, which is
+  worse than having none.
+
+  Regenerated with `gen_cert_baseline.py --time-limit 60`; the generator's
+  determinism filter still gates admission (3 solves per instance, bit-identical
+  `node_count` and `objective`, certifying within 0.6 of budget), so the
+  reference is reproducible by construction. 56 panel rows, `incorrect_count`
+  **0** against 58 oracles, **52 admitted** (`nvs05`, `nvs17`, `tanksize` newly
+  qualify; nothing previously present was dropped), 4 excluded as non-optimal
+  (`carton7`/`hda` time-limited 3/3, `casctanks`/`ex1252` feasible-not-optimal
+  3/3). **Acceptance:** `check_cert_neutrality.py` against the fresh file
+  returns NEUTRAL, 52/52, exit 0. Nothing in `.github/workflows/` consumes this
+  file — it is a local guard, also used by `graduation_gate.py`.
+
+  The `_KNOWN_PERF_GATED` exemption for `nvs17` is left in place though its
+  rationale ("~45s/60s wall") is now stale — it certifies in 15.7s. The
+  exemption only relaxes node-count strictness while soundness is still checked;
+  tightening it is a separate change needing its own measurement.
+
+- **#966's three coupled flags stay default-OFF** — graduation panel scored and
+  **failed both §5 bars**. `DISCOPT_LP_WARM_DEADLINE`,
+  `DISCOPT_NODE_ROUND_BUDGET` and `DISCOPT_HESS_COMPILE_GATE` were measured over
+  2 budgets × 3 reps × 19 instances (artifacts and scorer committed under
+  `discopt_benchmarks/`). *Cert-clean* fails on one certification regression
+  (`nvs05`, bench20 rep2): at a 20s budget that instance sits on its own
+  certification deadline — the fresh baseline puts it at 20.5s — and base
+  certifies it 1/3 while the candidate certifies 0/3. *Net-positive* fails
+  because the benefit is budget-dependent: overrun drops −5.00 ± 0.61 s at a 15s
+  budget but only −0.17 ± 0.72 s at 20s, where the mean is inside its own rep
+  spread and the sign flips between reps; node totals rise slightly at both
+  budgets and `cert_gains` is 0 in all six reps. Bounds are net favorable (28
+  tighter vs 12 looser) and objectives 7 better / 0 worse, so this is *not
+  broadly helpful* rather than harmful — the `DISCOPT_CUT_INHERIT` shape, and
+  per §5 such a flag stays OFF with the measurement recorded.
+
 ### Fixed
+
+- **`solve(time_limit=T)` overran `T` because heuristic sub-NLPs were polled but
+  never capped** (`fix(heuristics)`, contributes to #966). Every deadline guard in
+  `_relax/primal_heuristics.py` gated whether a sub-NLP *starts*; none bounded how
+  long the started solve *runs*. Polling therefore caps the **number** of
+  overshooting solves at one and says nothing about its duration — and
+  `feasibility_pump`'s round 0 was not polled at all. `_HEURISTIC_NLP_MAX_ITER`
+  does not cover this: an iteration cap is not a time cap, and on the
+  no-relaxation flowsheet class a single IPM iteration carrying an exact Hessian
+  is itself seconds long.
+
+  **Attribution (measured, not assumed).** A post-deadline stack sampler put
+  **100 % of its 73 post-deadline samples** inside one `nlp_pounce.solve_nlp`
+  call — 91.8 % reached from `feasibility_pump`, 8.2 % from
+  `integer_local_search`. The overrun reproduced with all three coupled #966 flags
+  ON and OFF alike, within ~0.5 s of each other, which is what makes it a
+  **default-configuration** defect rather than a flag effect. (It is also what was
+  masking the flags' benefit in the #966 graduation panel; the flags themselves
+  remain default-OFF, and #966 stays open.)
+
+  **The fix.** `_deadline_wall_cap()` derives a per-solve `max_wall_time` as
+  `max(0.1, min(3.0, deadline - now))` — the same clamp `solver.py` already
+  applies to the root relaxation — and it is now applied in `feasibility_pump`,
+  `integer_local_search` (both `subnlp` repairs and its relaxation seed) and
+  `diving`, whose own comment already recorded `heatexch_gen3` running "tens of
+  seconds past the deadline" after it gained an entry poll. A caller that passes
+  no deadline gets `None` and is unchanged bit-for-bit; an explicit caller
+  `max_wall_time` still wins.
+
+  `feasibility_pump` now also accepts a `TIME_LIMIT` result: a cap that discards
+  its own truncated points merely trades an overrun for a lost incumbent, which is
+  a different regression, not a fix. The status was **verified, not assumed** —
+  `nlp_ipopt._IPOPT_STATUS_MAP` maps Ipopt −5 `Maximum_WallTime_Exceeded` to
+  exactly this status. This widening is deliberately **not** folded into the
+  shared `_is_nlp_feasible` (used at sites with no re-verification behind it): the
+  pump re-verifies the point independently of its status via
+  `_is_integer_feasible` + `_check_constraint_feasibility`, with `inject_incumbent`
+  enforcing strict improvement — the same footing that already licenses `subnlp`'s
+  `ITERATION_LIMIT`. Two tests pin that soundness: a time-limited but *infeasible*
+  point is still rejected, and `_is_nlp_feasible` itself still refuses
+  `TIME_LIMIT`.
+
+  **Measured.** Interleaved A/B (never blocked), 3 reps, arm asserted inside each
+  child process by a version marker — present for fixed, **absent** for base — so
+  a stale `.pyc` crashes instead of reporting the wrong arm's number:
+  `bchoco07` **+1.65 ± 0.18 s → +0.22 ± 0.04 s**, `bchoco08`
+  **+1.05 ± 0.12 s → +0.25 ± 0.00 s** on a 20 s budget. `heatexch_gen3` overran
+  neither arm in this run (+0.16 s both), so it is neither confirmed nor refuted
+  here. **Bound-neutral (CLAUDE.md §5):** the 52-instance cert panel is
+  **52/52 identical in `node_count`, all 52 `optimal`, max |Δobj| = 0.00e+00**,
+  with a real objective comparison on every row (zero `nan`s). Note the panel
+  shows *no regression* rather than stressing the cap — those instances certify
+  well inside their budgets, so the cap never binds; the binding behaviour is
+  covered by `test_966_heuristic_deadline_wall_cap.py` (7 of its 11 tests fail
+  before the change).
+
+  **Not a hard guarantee**, and recorded as such in the code: POUNCE tests
+  `max_wall_time` between IPM iterations, so one expensive iteration still
+  overruns it (`test_f4_root_budget_gate` records the same observation). This
+  converts an *unbounded* overrun into roughly a one-iteration one; F4's entry
+  gating and this duration cap are complementary, not alternatives.
 
 - **Vectorized models silently got no relaxation at all** (#981). A `Constraint`
   body may be array-valued — `k * x - b == 0` on a 3-vector is *one* `Constraint`
@@ -44,28 +191,25 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
-- **Per-node LP and separation rounds now honour the budget they are handed**
-  (#928, #966). `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET`
-  graduated from default-OFF to **default-ON**; `=0` restores the legacy path
-  byte-for-byte on either. The warm pure-LP node path used to drop its caller's
-  `time_limit` outright (~13 call sites computed a per-LP budget and handed it to
-  a callee that ignored it), and a separation round's grant clamped only the LP,
-  never the round's cold build.
+- **`tutorial_oa` documented an API that no longer selects OA** (`docs`). Every
+  solve cell used `gdp_method="oa"`, which was deprecated in favour of
+  `solver="mip-nlp", mip_nlp_method="oa"`: it now emits a `DeprecationWarning`
+  and is reinterpreted as `gdp_method="big-m"`, a *GDP reformulation*. So the
+  notebook ran spatial branch & bound throughout — its "Comparing OA with Branch
+  & Bound" cell was comparing B&B against B&B, and its ECP cell never entered ECP
+  mode. All five solve cells now use the current spelling, with a note explaining
+  that `gdp_method=` and `solver=` are orthogonal axes.
 
-  Graduation panel (`discopt_benchmarks/scripts/issue928_graduation_panel.py`;
-  4 arms × 19 binding instances × 3 reps at each of two budgets, arms interleaved
-  per instance): total overrun vs the old default is −24.2 / −43.8 / +4.4 s at a
-  20 s budget and −6.2 / −6.2 / +1.1 s at 15 s, with a positive bound ledger (4–7
-  tighter against 1–4 looser per rep, no bound lost, `hda` −2.07e13 → −119286.3
-  reproducibly in 6/6 reps), no incumbent lost in 6/6 reps and a better one every
-  rep, zero unsound cells and zero ceiling violations over 168 counted
-  comparisons, and a lighter tail than the old default (cells above 3× budget:
-  old 1, new 0). Single-instance effect: `hda` at `time_limit=10` goes from
-  23.04 s ± 2.03 to **13.44 s ± 0.04**, with the dual bound improving from
-  −2.07e13 to −119286.3. `DISCOPT_HESS_COMPILE_GATE` stays default-OFF — it is
-  the largest wall win of the three and the only one that costs a certificate
-  (tspn12's incumbent, 6/6 reps). Full record: `docs/dev/performance-plan.md`
-  §14f.
+  Two further corrections. The primary example (`example_simple_minlp`) closes
+  the gap on its first master/subproblem pair, so it illustrates nothing about
+  the alternation; the notebook now also builds `synthes1` (Duran & Grossmann
+  1986, test problem 1), which gives a genuine four-iteration loop, and prints
+  the per-iteration `mip_nlp_trace` — LB 1.411895 → 6.009759 against UB 7.092732
+  → 6.009759 — plus the OA/ECP counter contrast (OA: 4 masters, 4 NLPs, 35 cuts;
+  ECP: 8 masters, 0 NLPs, 20 cuts). The Limitations section claimed single-tree
+  LP/NLP B&B and level-method regularization were "not yet implemented"; both
+  exist (`mip_nlp_method="lp_nlp_bb"`, which needs `milp_solver="gurobi"`, and
+  `add_regularization`/`level_coef`), and the section now says so.
 
 - **All 62 documentation notebooks re-executed** (`docs`). Their committed
   outputs dated from 2026-04-25 and `docs/_config.yml` has
@@ -169,6 +313,22 @@ The release procedure that produces these entries is documented in
   Tests: `test_932_native_base_thread_sharing.py`.
 
 ### Added
+
+- **`docs/notebooks/tutorial_gbd.ipynb`** — a tutorial for Generalized Benders
+  Decomposition (`docs`). `solve_gbd` had shipped with no notebook of its own;
+  `tutorial_benders` covers only the classical linear-recourse case. The new
+  notebook derives the Lagrangian cut, then runs the master/subproblem loop by
+  hand on a model whose value function and multiplier are closed form
+  (`v(y) = (3 - 2y₁ - y₂)₊²`, `μ = 2(3 - 2y₁ - y₂)₊`), so the mechanics are
+  visible without a solver in the loop — it converges in two iterations, LB
+  4 → 5 against UB 9 → 5, and `solve_gbd` reproduces the same optimum. A
+  capacity-expansion model with convex-quadratic congestion cost then shows the
+  three entry points (`solve_gbd`, `solve_benders` dispatch, and
+  `Model.solve(decomposition="benders")`) and a GBD/OA/spatial-B&B comparison, all
+  three agreeing on 20.8000. Covers the dominance hierarchy `z_OA ≥ z_GBD ≥ z_LP`
+  (Grossmann 2002), the convexity requirement for a rigorous bound, and the #946
+  degenerate-recourse failure mode with its integer L-shaped fallback (Laporte &
+  Louveaux 1993). New BibTeX entries: `Grossmann2002`, `Laporte1993`.
 
 - **Anytime dual bound: root seeding + one unified report** (`fix`, #933).
   27% of a 200-instance MINLPLib sweep reported **no dual bound at all** at

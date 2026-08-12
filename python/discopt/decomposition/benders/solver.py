@@ -18,14 +18,21 @@ Every cut is the **complete LP dual objective** as an affine function of the
 master variables: the row-dual term ``lam^T(r - A_x x)`` plus the variable
 reduced-cost term ``bt = sum_j rc_j·(lb_j if rc_j>0 else ub_j)``. By LP weak
 duality this is a lower bound on the recourse value for *every* master point and
-*any* dual-feasible ``(lam, rc)``, so the cut is always a valid global
-underestimator. This is robust to two failure modes that simpler anchors have:
-an interior-point recourse solve returning a slightly *suboptimal* primal
-(anchoring at that primal would over-cut), and the row duals alone being an
-*incomplete* dual when a variable bound is active (the ``rc`` term restores the
-missing contribution). The solver therefore runs soundly on whichever LP/MILP
-backend is installed, including POUNCE's interior-point duals (**no HiGHS
-dependency**), and the master objective is a rigorous lower bound.
+*any* dual-feasible ``(lam, rc)``, so the cut is a valid global underestimator.
+This is robust to two failure modes that simpler anchors have: a recourse solve
+returning a slightly *suboptimal* primal (anchoring at that primal would
+over-cut), and the row duals alone being an *incomplete* dual when a variable
+bound is active (the ``rc`` term restores the missing contribution).
+
+Both the master and the recourse-dual generator are pinned to the **exact-vertex**
+engines (the Rust simplex B&B / simplex), falling back to POUNCE only where the
+binding is unavailable — HiGHS-free either way. #986 retracts the claim this
+docstring used to make, that the weak-duality argument above makes the solver
+sound on POUNCE's interior-point duals: weak duality needs the returned point to
+*be* dual-feasible, and an interior-point method reaches ``c - A^T lam - rc = 0``
+only to its convergence tolerance, so its anchor can exceed the recourse value it
+underestimates (measured worst ``D - Q = 1.391725e-07``). The master objective is
+a rigorous lower bound only when the engines producing it are exact.
 
 A *nonlinear* model is routed to Generalized Benders (:mod:`.gbd`), which
 handles a convex-NLP recourse subproblem with KKT-multiplier cuts.
@@ -182,7 +189,11 @@ def solve_benders(
     SolveResult
         With a rigorous lower ``bound`` (the master objective) on convergence.
     """
-    from discopt.solvers.lp_backend import get_lp_solver, get_milp_solver
+    from discopt.solvers.lp_backend import (
+        get_exact_dual_lp_solver,
+        get_lp_solver,
+        get_milp_solver,
+    )
 
     cfg = config or BendersConfig(
         time_limit=time_limit,
@@ -192,13 +203,37 @@ def solve_benders(
     )
     t0 = time.time()
 
-    # Recourse-LP dual generator. The cuts below use the *complete* LP dual
-    # objective (row duals + variable reduced costs), which is a valid lower
-    # bound by weak duality for any dual-feasible point — so it stays sound even
-    # with POUNCE's interior-point (analytic-centre) duals and an inexact primal,
-    # with no HiGHS dependency. Whichever LP backend is installed is used.
-    dual_lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
-    milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
+    # Recourse-LP dual generator. Every Benders cut is built from this solve's
+    # duals, and the master objective those cuts define *is* the reported dual
+    # ``bound`` — so this is a certificate-producing oracle and gets the exact
+    # (vertex) one when it is available, exactly as OBBT/DBBT do (#145, #356).
+    #
+    # #986: the weak-duality argument that used to justify running this on the
+    # POUNCE IPM ("valid for any dual-feasible point") needs the returned point to
+    # *be* dual-feasible; an interior-point method satisfies ``c - A^T lam - rc =
+    # 0`` only to its convergence tolerance, so its cut anchor ``D`` can sit above
+    # the recourse value ``Q`` it is supposed to underestimate, and the cut then
+    # over-cuts. Measured on the 148 recourse LPs of 12 seeded two-stage
+    # instances, both oracles on identical LP data (290 comparisons): worst dual
+    # residual 3.670730e-11 and worst over-cut ``D - Q = 1.391725e-07`` on the
+    # IPM, against 0.0 / 0.0 on the exact basis. That is what let the reported
+    # ``bound`` sit above the incumbent it certifies once an exact master stopped
+    # masking it (+1.052606e-06 worst, over 120 seeded instances).
+    #
+    # ``get_exact_dual_lp_solver`` returns ``None`` when the Rust simplex binding
+    # is unavailable; POUNCE-only installs then keep today's behaviour, with the
+    # approximate-dual caveat above.
+    dual_lp = get_exact_dual_lp_solver() or get_lp_solver(prefer_pounce=cfg.prefer_pounce)
+    # #986: the master is a *linear* MILP, so it is pinned to the exact-vertex
+    # simplex B&B and NOT routed by ``nlp_solver``, which selects the engine for
+    # the *recourse* subproblem. Reusing it here sent the master to the
+    # POUNCE-IPM-backed B&B, whose returned points are interior rather than
+    # vertices, and whose objective — which *is* this solver's reported dual
+    # ``bound`` — is an analytic-centre value that can drift above the incumbent it
+    # certifies. Same conflation and same fix as the GBD master (#977, ``gbd.py``);
+    # ``get_milp_solver`` still falls back to POUNCE when the Rust simplex binding
+    # is unavailable, so POUNCE-only installs keep working.
+    milp = get_milp_solver(backend="simplex")
 
     if structure is None:
         structure = detect_decomposition(model)
@@ -250,6 +285,8 @@ def solve_benders(
 
     c_master = lin.c[mcols]
     master_bounds = [(float(lb_all[i]), float(ub_all[i])) for i in mcols]
+    lb_master = np.array([b[0] for b in master_bounds], dtype=np.float64)
+    ub_master = np.array([b[1] for b in master_bounds], dtype=np.float64)
 
     # ── partition the recourse into independent blocks (T1.3 multicut) ──
     # Two sub-variables share a block iff they co-occur in a recourse row; the
@@ -344,6 +381,40 @@ def solve_benders(
             gap_tolerance=cfg.gap_tolerance,
         )
         return res
+
+    def _master_x(res) -> np.ndarray:
+        """The first-stage point of a master solve, clamped to its own bounds.
+
+        A MILP engine can return a point that violates the variable bounds it was
+        handed by a sub-tolerance amount (measured over these masters: up to
+        1.8e-07, and 1.8e-15 on the instance behind #986). ``x_hat`` reaches the
+        recourse only through the rhs shift ``r - A_x x_hat``, where each row
+        coefficient scales that noise — enough to turn a pair of rows that pin a
+        recourse variable to a bound (``y <= a·x``, ``y >= a·x``) into a pair that
+        is *mutually inconsistent by ~1e-14*. An exact LP presolve then reports the
+        recourse INFEASIBLE at a point where it is feasible, which costs the
+        incumbent for that iteration and emits a feasibility cut that cannot
+        separate — the loop then stalls out at ``iteration_limit`` with no
+        incumbent at all (the three ``test_decomposition_solve_equivalence``
+        failures in #986). Clamping kills that noise at its source, which is the
+        only defence on a POUNCE-only install: there the recourse LP is solved by
+        the IPM, whose presolve is exact enough to reject such a pair of rows.
+
+        Only sub-tolerance noise is repaired silently. A violation beyond the
+        repo's declared ``abs=1e-6`` is an engine defect, not noise, and clamping
+        it would be a silent approximation — so it is logged with its magnitude.
+        """
+        x = np.asarray(res.x[:n_master], dtype=np.float64)
+        clamped = np.clip(x, lb_master, ub_master)
+        worst = float(np.max(np.abs(clamped - x))) if x.size else 0.0
+        if worst > 1e-6:
+            logger.warning(
+                "Benders master returned a point %.6e outside its own variable "
+                "bounds; clamping, but this is past the declared abs=1e-6 and "
+                "points at the MILP engine rather than at rounding noise.",
+                worst,
+            )
+        return clamped
 
     def _recourse_block(blk: "_Block", x_hat: np.ndarray):
         """Classify one recourse block's LP at x̂ (kinds as in the single-block
@@ -477,7 +548,7 @@ def solve_benders(
         return SolveResult(status="infeasible", wall_time=time.time() - t0, gap_certified=True)
     if init.status != SolveStatus.OPTIMAL or init.x is None:
         return SolveResult(status="error", wall_time=time.time() - t0)
-    x_hat = np.asarray(init.x[:n_master], dtype=np.float64)
+    x_hat = _master_x(init)
 
     results = _recourse_all(x_hat)
     if any(r is not None and r[0] == "recourse_fail" for r in results):
@@ -557,7 +628,7 @@ def solve_benders(
         if mres.x is None:
             status = "error"
             break
-        x_hat = np.asarray(mres.x[:n_master], dtype=np.float64)
+        x_hat = _master_x(mres)
         eta_vec = np.asarray(mres.x[n_master : n_master + n_blocks], dtype=np.float64)
         if x_center is None:
             x_center = x_hat.copy()  # first stabilization centre (T2.2)

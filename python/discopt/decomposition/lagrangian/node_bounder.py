@@ -65,16 +65,16 @@ class LagrangianNodeBounder:
     # ── construction ──────────────────────────────────────────
 
     @classmethod
-    def try_build(
-        cls,
-        model: Model,
-        *,
-        prefer_pounce: bool = True,
-    ) -> "LagrangianNodeBounder | None":
+    def try_build(cls, model: Model) -> "LagrangianNodeBounder | None":
         """Build a bounder, or return ``None`` if the hook does not apply.
 
         Applies only to minimization, linear models that have coupling
         constraints (annotated via ``model.mark_coupling`` or auto-detected).
+
+        Takes no engine preference (#986): the relaxed subproblem it solves is a
+        *linear* MILP whose objective becomes a node lower bound, so it is pinned
+        to the exact-vertex simplex B&B below rather than routed by the caller's
+        ``nlp_solver``. The argument is removed rather than left as a dead flag.
         """
         obj = model._objective
         if obj is not None and obj.sense != ObjectiveSense.MINIMIZE:
@@ -122,7 +122,7 @@ class LagrangianNodeBounder:
         from discopt.solvers.lp_backend import get_milp_solver
 
         try:
-            milp = get_milp_solver(prefer_pounce=prefer_pounce)
+            milp = get_milp_solver(backend="simplex")
         except ImportError:
             return None
         return cls(lin.c, lin.c_offset, A_c, r_c, A_b, r_b, integrality, milp)

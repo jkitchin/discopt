@@ -289,17 +289,20 @@ def solve_gbd(
     # ``bound <= incumbent``. ``get_milp_solver`` still falls back to POUNCE when the
     # Rust simplex binding is unavailable, so POUNCE-only installs keep working.
     #
-    # Scope note (#977, falsified extension): the same conflation exists in
-    # *classical* Benders (``solver.py``) and in the Lagrangian solver/node bounder.
-    # Pinning those masters to the simplex too was tried and reverted — it is sound
-    # but not free. An exact master returns a vertex where the recourse LP is
-    # degenerate, and classical Benders' cut generation then produces no separating
-    # cut and stalls out with the gap still open (measured in CI: three
-    # ``test_decomposition_solve_equivalence`` cases fell to ``iteration_limit``,
-    # with "added no separating cut" twice per run). The interior-point master had
-    # been masking that weakness by proposing luckier points. Fixing it is the
-    # classical-Benders analogue of the #946 degenerate-recourse work and needs its
-    # own change; this line stays scoped to GBD, where #977 actually fired.
+    # Scope note (#977 -> #986, resolved): the same conflation existed in
+    # *classical* Benders (``solver.py``) and in the Lagrangian solver/node
+    # bounder. Pinning those masters here was tried in #977, reverted when CI
+    # showed classical Benders then stalling out at ``iteration_limit``, and
+    # completed in #986 once the mechanism was measured. It is **not** the
+    # degenerate-recourse-dual weakness #977 guessed at (that hypothesis was
+    # falsified: at every stalling iteration the optimality cuts classify as
+    # converged, ``eta_b >= Q_b``). An exact master returns a vertex whose sub-ulp
+    # violation of its own variable bounds is scaled by the recourse row
+    # coefficients into ``r - A_x x_hat``, which makes a gated recourse row pair
+    # inconsistent by ~1e-14; an exact presolve then reports the recourse
+    # INFEASIBLE at a feasible point. #986 clamps the master point to its bounds
+    # and takes the recourse duals from the exact oracle. All four masters now
+    # run on the exact-vertex engine.
     milp = get_milp_solver(backend="simplex")
 
     if structure is None:
