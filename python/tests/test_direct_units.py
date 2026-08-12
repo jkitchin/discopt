@@ -399,3 +399,65 @@ def test_derivative_free_refinement_counts_its_evaluations():
     before = s.stats.evals
     _refine_derivative_free(s, objective, s.best_feasible_point, max_fev=60)
     assert s.stats.evals > before, "polish evaluations must be counted, not hidden"
+
+
+# ── the variant trade-off that fixes the default ─────────────────────────────
+
+
+def _evals_to_tolerance(tf, variant: str, tol: float, budget: int = 6000):
+    """Evaluations before the incumbent first reaches ``tol`` relative accuracy."""
+    s = _DirectSearch(tf.lb, tf.ub, variant=variant)
+    history: list[tuple[int, float]] = []
+    s.run(
+        lambda x: (float(tf.np_body(x)), 0.0),
+        budget,
+        on_iteration=lambda se: history.append((se.stats.evals, se.best_feasible_value)),
+    )
+    return next((e for e, v in history if v is not None and tf.relative_error(v) <= tol), None)
+
+
+def test_variant_tradeoff_is_why_gl_is_not_the_default():
+    """DIRECT-GL wins big on one problem class and loses on another — hence opt-in.
+
+    Measured here rather than asserted, because the choice of default rests on it.
+    Evaluations to 1e-2 relative accuracy, this implementation:
+
+    ==========  =======  ====
+    function    classic  gl
+    ==========  =======  ====
+    hartman_6   105      277
+    shubert     2269     181
+    ==========  =======  ====
+
+    Both directions reproduce the survey: it reports Hartman-6 at 571 evaluations
+    for DIRECT versus 8793 for DIRECT-GL, and Shubert at 2967 for DIRECT versus
+    425 for DIRECT-GL. A fixed-budget comparison of final objective cannot see
+    this — at a generous budget both converge and the difference is noise, which
+    is how an earlier version of this test managed to fail for the wrong reason.
+
+    If GL ever wins on Hartman-6 too, the default deserves revisiting; that is
+    what this test is here to catch.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from support import direct_testfuncs as tfs
+
+    hartman = tfs.get("hartman_6")
+    classic_h = _evals_to_tolerance(hartman, "classic", 1e-2)
+    gl_h = _evals_to_tolerance(hartman, "gl", 1e-2)
+    assert classic_h is not None and gl_h is not None
+    assert classic_h < gl_h, (
+        f"hartman_6: classic {classic_h} vs gl {gl_h} — GL now wins the case that "
+        "justifies classic being the default; re-run the variant panel"
+    )
+
+    shubert = tfs.get("shubert")
+    classic_s = _evals_to_tolerance(shubert, "classic", 1e-2)
+    gl_s = _evals_to_tolerance(shubert, "gl", 1e-2)
+    assert gl_s is not None
+    assert classic_s is None or gl_s < classic_s, (
+        f"shubert: gl {gl_s} vs classic {classic_s} — GL is supposed to win the "
+        "multimodal case; if it no longer does, the GL implementation regressed"
+    )
