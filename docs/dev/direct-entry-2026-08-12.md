@@ -178,15 +178,25 @@ A third defect was in the *panel*, not the code: the symmetric boxes described
 above. Recorded because it is the same failure mode as Dev-Philosophy #6 — an
 instrument that appears to measure and does not.
 
-## Also observed (out of scope here, worth noting)
+## Also observed — filed as #998, fixed separately
 
-discopt's existing local path returns `status="optimal"` with
-`bound = objective` for a non-MCBox `CustomCall` model, while correctly setting
-`gap_certified=False`. The status string and the bound are stronger than the
-evidence supports for an opaque objective. Not changed here — pre-existing and
-outside this work — but it is the reason the DIRECT backend's own contract
-(§1.4 of the plan) is deliberately stricter: `bound=None`, `status="feasible"`,
-never `"optimal"`.
+At the time of this run, discopt's existing local path returned
+`status="optimal"` with `bound = objective` for a non-MCBox `CustomCall` model,
+while correctly setting `gap_certified=False`. On Ackley (true optimum 0) that
+meant a reported dual bound of **15.06**, i.e. not a valid bound at all. The
+same mathematics written algebraically correctly returned `bound=None`, because
+the C-33/SC-1 fix had been applied to the convexity-unknown caller but not to
+the `CustomCall` one.
+
+**Filed as [#998](https://github.com/jkitchin/discopt/issues/998) and being fixed
+independently of this work** — so the arm-A `bound` values described above are a
+snapshot of pre-#998 behaviour, not current behaviour. The panel comparison
+itself is unaffected: it compares `objective`, never `bound`, and the probe's
+soundness check watches `gap_certified`, which was correct throughout.
+
+It is, separately, the reason the DIRECT backend's own contract (§1.4 of the
+plan) is deliberately stricter: `bound=None`, `status="feasible"`, never
+`"optimal"`.
 
 ## Decision
 
