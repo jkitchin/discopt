@@ -16,6 +16,7 @@ exits non-zero if it scored nothing.
 
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import pathlib
@@ -25,6 +26,7 @@ import sys
 
 _RESULTS = pathlib.Path(__file__).resolve().parent.parent / "results"
 _PAIR = "cand vs base"
+_DEFAULT_GLOB = "issue966_grad_bench*_rep*.json"
 
 
 def _pair(summary: dict, name: str) -> dict:
@@ -35,21 +37,39 @@ def _pair(summary: dict, name: str) -> dict:
 
 
 def main() -> int:
-    paths = sorted(glob.glob(str(_RESULTS / "issue966_grad_bench*_rep*.json")))
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--glob",
+        default=_DEFAULT_GLOB,
+        help=(
+            "filename pattern under discopt_benchmarks/results/ to score "
+            f"(default {_DEFAULT_GLOB!r}). Every matched artifact MUST come from the "
+            "same code revision -- mixing revisions silently averages two different "
+            "solvers into one verdict."
+        ),
+    )
+    args = ap.parse_args()
+
+    paths = sorted(glob.glob(str(_RESULTS / args.glob)))
     if not paths:
-        print("FAIL: no artifacts found", file=sys.stderr)
+        print(f"FAIL: no artifacts matched {args.glob!r}", file=sys.stderr)
         return 1
 
     runs = []
     for p in paths:
         with open(p) as fh:
             s = json.load(fh)["summary"]
-        m = re.search(r"bench(\d+)_rep(\d+)", p)
+        m = re.search(r"_rep(\d+)", p)
+        if m is None:
+            # §6: a silently-unparsed name would drop a rep from the spread and
+            # narrow the noise estimate that bar 2 turns on. Refuse instead.
+            print(f"FAIL: cannot parse a rep number from {p!r}", file=sys.stderr)
+            return 1
         runs.append(
             {
                 "path": pathlib.Path(p).name,
                 "budget": s["budget"],
-                "rep": int(m.group(2)),
+                "rep": int(m.group(1)),
                 "s": s,
                 "g": _pair(s, _PAIR),
             }
