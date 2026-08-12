@@ -31,6 +31,35 @@ branch-and-bound (``gap_certified=True`` on the subproblem), while the *outer*
 result reports no certificate at all. Certifying where to sample next is not
 certifying the answer.
 
+Cost model: what you are paying for
+-----------------------------------
+Nearly all the wall clock is the acquisition solve, not the objective. Measured
+on branin with a free objective, ``max_evals=30``: the 15-point initial design
+costs 0.8 s in total, and every subsequent evaluation costs almost exactly
+``acquisition_time_limit`` (20 s by default). That is the intended trade — the
+backend exists for objectives where one evaluation dwarfs 20 s of solver time —
+but it means ``solver="surrogate"`` on a cheap objective is far slower than
+``solver="direct"`` for a worse answer, and the choice between them is a
+statement about *your* evaluation cost.
+
+Do not shorten ``acquisition_time_limit`` to make it feel faster. It is tempting:
+with the default cubic kernel the acquisition never certifies (see the kernel
+table below), so the budget looks wasted. It is not wasted — it is buying primal
+solution quality. Measured, ``max_evals=30``, relative error at 20 s vs 2 s:
+
+=================  ==========  =========
+function           20 s        2 s
+=================  ==========  =========
+branin             0.2156      0.2029
+six_hump_camel     **0.0164**  0.8063
+hartman_3          **0.0098**  0.0103
+=================  ==========  =========
+
+branin alone says 2 s is free money; six_hump_camel is 49x worse for it. The
+default stays at 20 s. This is recorded because the branin-only reading was
+briefly acted on during development and was wrong — a single-instance tuning of
+exactly the kind CLAUDE.md §2 forbids.
+
 Two surrogate families
 ----------------------
 ``surrogate="rbf"`` (**default**) — a radial basis function interpolant

@@ -98,6 +98,18 @@ The release procedure that produces these entries is documented in
   rather than implemented. DIRECT is a stronger baseline than the surrogate
   literature's framing suggests.
 
+  Cost model, worth knowing before choosing this backend: nearly all the wall
+  clock is the acquisition solve, not the objective. On branin with a free
+  objective and `max_evals=30`, the 15-point initial design costs 0.8 s total and
+  every subsequent evaluation costs almost exactly `acquisition_time_limit`
+  (20 s). That is the intended trade when one evaluation dwarfs 20 s of solver
+  time, and the wrong one otherwise — on a cheap objective `solver="direct"` is
+  far faster for a better answer. Shortening `acquisition_time_limit` is a trap:
+  with the default cubic kernel the acquisition never certifies, so the budget
+  *looks* wasted, but it is buying primal quality — relative error at 20 s vs 2 s
+  is branin 0.2156/0.2029, six_hump_camel 0.0164/**0.8063**, hartman_3
+  0.0098/0.0103. The default stays at 20 s.
+
   **Returns no certificate** for the original problem: `bound` and `gap` are
   `None`, `gap_certified` is `False`, the status is never `"optimal"`, and an
   exhausted budget is a limit — never `"infeasible"`. `on_evaluation` is a
