@@ -59,16 +59,19 @@ def _small_lp():
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_off(warm_dl):
-    """Bound-changing, so panel-gated; ships OFF until net-positive is demonstrated.
+def test_flag_defaults_on(warm_dl):
+    """GRADUATED (#928, 2026-08-12): the caller's ``time_limit`` is honoured by default.
 
-    66 in-repo instances at a 15 s budget, OFF/ON interleaved: cert-clean
-    (``cert_regressions=0  lost_incumbents=0  lost_bound=0  unsound=0``; bounds 3
-    tighter / 2 looser), but the wall benefit — total overrun 82.1 s -> 70.9 s — sits
-    inside the metric's own noise (three OFF-arm runs gave 82.1 / 79.2 / 175.6 s).
-    Cert-clean is necessary, not sufficient: the ``DISCOPT_CUT_INHERIT`` rule."""
+    It stayed OFF through several panels, but none of them ever ran this flag
+    *alone* — every arm carrying it also carried #966's two, whose own panel kept
+    them OFF, so the isolating arm did not exist. Run alone over the 19 binding
+    instances at 20 s, 3 reps, rate-scored: bar 1 clean in 3/3 (0 unsound / 0
+    cert_regressions / 0 lost_incumbents / 0 lost_bound over 96 executed oracle
+    comparisons) and bar 2 positive (overrun delta -2.6/-1.0/-0.3 s, negative in
+    3/3; nodes 4647 -> 4611; hda's bound -2.07e13 -> -64473.44 in 3/3). See
+    ``_lp_warm_deadline_enabled``'s docstring for the full ledger."""
     warm_dl(None)
-    assert _lp_warm_deadline_enabled() is False
+    assert _lp_warm_deadline_enabled() is True
 
 
 @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("off", False)])

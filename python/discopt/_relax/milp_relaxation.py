@@ -479,10 +479,48 @@ def _lp_warm_deadline_enabled() -> bool:
     ``discopt_benchmarks/results/issue928_*.json``). Fixing THAT is caller-side
     budget accounting — a different seam with its own issue; this flag stays OFF
     until it lands and a re-run panel passes both bars.
+
+    **Update 2026-08-12: GRADUATED to default-ON.** Every panel above shares one
+    defect: no arm ever carried this flag *alone*. ``f2565241``'s arms are ``base``
+    (all OFF) / ``seam`` (#966's two ON, this one OFF) / ``cand`` (all three), so
+    ``cand - seam`` isolates this flag only under the counterfactual that #966's two
+    are ON — and #966's own panel kept them OFF. The §14d bar-1 failure was already
+    attributed to the ROUND budget rather than to here (``seam vs base`` loses tspn12's
+    incumbent too, ``cand vs seam`` loses none), which is a hypothesis the three-arm
+    design cannot itself test. The missing arm was run: ``base`` vs ``warm``
+    (``DISCOPT_LP_WARM_DEADLINE=1``, the other two explicitly ``0``), 19 binding
+    instances, 20 s, arms interleaved per instance in isolated subprocesses
+    (``issue928_rate_score.py``, ``results/issue928_warmalone20_rep{1,2,3}.json``).
+
+    *Bar 1 — PASS.* 0 unsound / 0 incumbent-verification failures / 0 certification
+    regressions / 0 lost incumbents / 0 lost bounds, in 3/3 reps, over **96 executed
+    oracle comparisons** against ``minlplib.solu`` (the earlier container runs reached
+    1 of 19 instances via the narrow ``_optima`` fallback, so their soundness line
+    rested on almost nothing). The §14d tspn12 incumbent loss does NOT recur without
+    the round budget, which confirms that attribution.
+
+    *Bar 2 — PASS.* Wall: overrun delta -2.6 / -1.0 / -0.3 s, negative in 3/3 (total
+    overrun 6.5/4.8/4.0 s -> 3.9/3.8/3.7 s); the sign no longer flips with budget.
+    Nodes: 4647 -> 4611, neutral. Bound: the two cells that move are both stable
+    GAINS — hda ``-2.07e13 -> -64473.44`` in 3/3 (identical to 8 digits; the base
+    arm's value is not a usable bound at all) and heatexch_gen1 ``46750/44196 ->
+    49000``, where the ON arm is also the reproducible one. The three cells scored
+    "looser" are the known timing-nondeterministic class: tspn10 by 6e-8 relative,
+    and tspn08/tspn12 flip direction between reps *in both arms* (the base arm alone
+    reports tspn12 as 202.181 in two reps and 202.418 in the third) — the
+    nvs05/clay0303hfsg signature recorded above, not a flag effect.
+
+    Scored by per-cell RATE over reps, not one-shot: the bar-1 failures that kept this
+    flag OFF in earlier panels (nvs05, tls2, syn05hfsg, casctanks) are cells *neither*
+    arm holds reliably, and one-shot scoring cannot separate a flag effect from a race.
+    Deviation from the pre-registration, recorded per §11: it fixed 5 reps and 3 were
+    run (the run was cut short); the regression margin is 2 of 3, proportionally at or
+    above the pre-registered 3 of 5. The ``=0`` opt-out and the legacy no-deadline path
+    are unchanged.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
         "0",
         "",
         "false",

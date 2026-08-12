@@ -79,18 +79,20 @@ _SLACK_FRAC = 0.10
 # §1. So this case is marked xfail non-strict rather than silenced or given a
 # wider slack: it keeps running, it keeps reporting, and it will xpass the moment
 # #917 is properly resolved.
-_XFAIL_LP_DEADLINE_DROP = pytest.mark.xfail(
-    reason="#928: warm pure-LP path drops the caller's time_limit, so the #138 "
-    "fallback's separated-relaxation phase overruns its grant by ~4s. Bimodal: "
-    "10.6-13.0s against 12.5s allowed. Not strict — it passes ~2/5 runs.",
-    strict=False,
-)
+# RESOLVED 2026-08-12 (#928): ``DISCOPT_LP_WARM_DEADLINE`` graduated to default-ON,
+# so the warm pure-LP path no longer discards the caller's ``time_limit`` and the
+# ``xfail`` above this case is retired. Measured on the graduated default,
+# ``hda`` at ``time_limit=10`` returns in 10.8 s against the 12.5 s allowed —
+# xpassing, which is why the marker had to go rather than stay as a non-strict
+# safety net: a permanent non-strict xfail on a passing case reports nothing.
+# The graduation ledger (both §5 bars, 3 reps, 96 oracle comparisons) is in
+# ``_lp_warm_deadline_enabled``'s docstring.
 
 # (instance, time_limit) pairs. Short limits are the discriminating cases —
 # a constant-overhead overrun is invisible at 60 s and catastrophic at 2 s.
 _CASES = [
     ("hda", 5.0),
-    pytest.param("hda", 10.0, marks=_XFAIL_LP_DEADLINE_DROP),
+    ("hda", 10.0),
     ("casctanks", 5.0),
 ]
 
