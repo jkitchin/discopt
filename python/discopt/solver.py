@@ -440,8 +440,8 @@ def _trivial_primal_enabled() -> bool:
 
 
 def _gdp_config_primal_enabled() -> bool:
-    """Whether the #823 disjunct-configuration primal is on (env flag, **default
-    OFF** pending the §5 differential panel).
+    """Whether the #823/#993 disjunct-configuration primal is on (**default ON**
+    since the §5 graduation panel; opt out with ``DISCOPT_GDP_CONFIG_PRIMAL=0``).
 
     On a big-M reformulated GDP the indicator binaries are partitioned by
     ``sum_k y_k == 1`` rows, one per disjunction, and no existing constructor
@@ -452,16 +452,40 @@ def _gdp_config_primal_enabled() -> bool:
     disjuncts — an assignment the model forbids outright, making the fixed
     sub-NLP infeasible and yielding no incumbent.
 
-    When ON, the root selects one disjunct per disjunction (per-group argmax of
-    the relaxation, plus a bounded set of least-confident flips) and solves the
-    fixed-integer sub-NLP for each. Primal-only: every candidate is verified
-    integer- and constraint-feasible by ``subnlp`` before injection, and the dual
-    bound is untouched, so the certificate cannot weaken."""
-    return os.environ.get("DISCOPT_GDP_CONFIG_PRIMAL", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    When ON, the root selects one disjunct per disjunction and solves the
+    fixed-integer sub-NLP for each, first in a bounded Hamming *wave* around the
+    relaxation's argmax (#823, ``_WAVE_SOLVE_CAP`` solves) and then, only if the
+    wave returns nothing, in a *dive* that re-solves the relaxation between
+    choices so distant configurations become reachable (#993). Primal-only: every
+    candidate is verified integer- and constraint-feasible by ``subnlp`` before
+    injection, and the dual bound is never relaxed, so the certificate cannot
+    weaken.
+
+    **Graduation panel** (2026-08-12, ``docs/dev/data/issue993-gdp-config-primal-
+    graduation.md``; the 12 GDPlib models under 500 variables, bigm, 120 s limit,
+    OFF/ON interleaved per model in isolated subprocesses, arm order alternating):
+
+    * *cert-clean*: **YES** — 72 executed checks, zero violations. No incumbent
+      beats its reference optimum, no dual bound past one, no certification
+      regression; oracle-verified on 10 of the 12 (``gdp_col`` and ``methanol``
+      have no oracle, so soundness is unestablished rather than clean there).
+    * *net-positive*: **YES** — ``batch_processing`` and ``cstr`` gain an
+      incumbent where 120 s of search found none (``cstr`` at the true optimum
+      3.0620146), ``small_batch`` gains a *certificate* (feasible -> optimal at
+      the same 181 nodes), ``positioning`` certifies the same optimum in 25 %
+      fewer nodes at equal wall, and ``water_network`` improves marginally.
+      One regression: ``gdp_col``'s incumbent worsens 20100.30 -> 20916.39
+      (+4.1 %) — an oracle-less model whose nodes are so expensive that 120 s
+      buys ~30 of them, so the grant is charged against very little tree.
+      Node deltas on the six models that *hit* the limit are read as cost, not
+      credit: fewer nodes there means time the tree did not get.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_PRIMAL", "1").strip().lower() not in (
+        "0",
+        "",
+        "false",
+        "no",
+        "off",
     )
 
 

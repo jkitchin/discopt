@@ -183,19 +183,34 @@ def test_residual_assignments_are_ordered_bounded_and_deterministic():
 
 
 @pytest.mark.smoke
-def test_flag_is_default_off():
-    """§5: the constructor ships default-OFF pending its differential panel."""
+def test_flag_is_default_on_with_an_opt_out():
+    """§5: the constructor graduated default-ON, and the opt-out still works.
+
+    It shipped default-OFF pending its differential panel. That panel ran on
+    2026-08-12 over the twelve GDPlib models under 500 variables and passed both
+    bars (72 checks clean; two models gained an incumbent where 120 s of search
+    found none, one gained a certificate) — recorded in
+    ``docs/dev/data/issue993-gdp-config-primal-graduation.md``. §5 requires the
+    ``=0`` opt-out and the legacy path to survive graduation, so both halves are
+    pinned here, not just the new default.
+    """
     import os
 
     from discopt.solver import _gdp_config_primal_enabled
 
-    os.environ.pop("DISCOPT_GDP_CONFIG_PRIMAL", None)
-    assert _gdp_config_primal_enabled() is False
-    os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = "1"
+    saved = os.environ.pop("DISCOPT_GDP_CONFIG_PRIMAL", None)
     try:
-        assert _gdp_config_primal_enabled() is True
+        assert _gdp_config_primal_enabled() is True, "graduated: unset must mean ON"
+        for off in ("0", "off", "false", "no", ""):
+            os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = off
+            assert _gdp_config_primal_enabled() is False, f"{off!r} must opt out"
+        for on in ("1", "true", "yes", "on"):
+            os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = on
+            assert _gdp_config_primal_enabled() is True, f"{on!r} must opt in"
     finally:
         os.environ.pop("DISCOPT_GDP_CONFIG_PRIMAL", None)
+        if saved is not None:
+            os.environ["DISCOPT_GDP_CONFIG_PRIMAL"] = saved
 
 
 def test_constructor_gets_a_bounded_share_of_the_budget():
