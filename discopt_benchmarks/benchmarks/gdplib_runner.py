@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from benchmarks.load_gate import StaleExtensionError, inspect_extension
 from benchmarks.metrics import (
     BenchmarkResults,
     InstanceInfo,
@@ -102,6 +103,7 @@ class GDPLibSuiteConfig:
     include: list[str] | None = None  # explicit model-name allowlist
     exclude: list[str] = field(default_factory=list)
     oracle: bool = True  # cross-check the linear subset against HiGHS
+    allow_stale_extension: bool = False  # measure a build older than its sources anyway
 
 
 #: The curated small set: every GDPlib model whose ``gdp.bigm`` reformulation fits
@@ -740,6 +742,20 @@ def run_suite(config: GDPLibSuiteConfig) -> tuple[BenchmarkResults, list[ModelRu
             "pip install 'discopt-benchmarks[gdplib]' and install gdplib from source "
             "(the PyPI wheel omits model data files)."
         )
+    # §8: `discopt` is two artifacts, and the source-level markers a panel asserts
+    # say nothing about the compiled one. The check lives here rather than in the
+    # CLI because the #993 panels called `run_suite` directly — gating only
+    # `main()` would have left the very callers that hit this unprotected.
+    report = inspect_extension()
+    reason = report.reason()
+    if reason is not None:
+        detail = (
+            f"{reason}\n  discopt package: {report.package_path}"
+            f"\n  loaded _rust:    {report.extension_path}"
+        )
+        if not config.allow_stale_extension:
+            raise StaleExtensionError(detail)
+        print(f"WARNING (--allow-stale-extension): {detail}", file=sys.stderr)
     specs = discover_models(include=config.include, exclude=config.exclude)
     results = BenchmarkResults(suite=config.name, timestamp=datetime.now().isoformat())
     runs: list[ModelRun] = []
@@ -849,6 +865,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--time-limit", type=float, default=300.0, help="per-solve seconds")
     parser.add_argument("--max-variables", type=int, default=None, help="skip larger models")
     parser.add_argument("--no-oracle", action="store_true", help="skip HiGHS/reference checks")
+    parser.add_argument(
+        "--allow-stale-extension",
+        action="store_true",
+        help="run even if the compiled _rust extension predates its sources (say so "
+        "deliberately rather than measuring a build you did not intend)",
+    )
     parser.add_argument("--list", action="store_true", help="list discovered models and exit")
     parser.add_argument("--output", default=None, help="write BenchmarkResults JSON to this path")
     args = parser.parse_args(argv)
@@ -895,8 +917,13 @@ def main(argv: list[str] | None = None) -> int:
         include=args.models,
         exclude=args.exclude or [],
         oracle=not args.no_oracle,
+        allow_stale_extension=args.allow_stale_extension,
     )
-    results, runs = run_suite(config)
+    try:
+        results, runs = run_suite(config)
+    except StaleExtensionError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 5
     if args.output:
         from pathlib import Path
 

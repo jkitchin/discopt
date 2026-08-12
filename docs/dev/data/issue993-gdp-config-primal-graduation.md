@@ -227,9 +227,37 @@ Its load gate asserts, in **both** the parent and a child subprocess, that
 present (this branch), and that the C-42 comment is present (proof the #999 base
 is underneath) — the last is the marker that makes this run mean anything, since a
 run that silently loaded the editable install from the main tree would have
-re-measured the very base it was meant to replace. Note that `_rust` still
+re-measured the very base it was meant to replace.
+
+**Retraction (2026-08-12, per §11).** The sentence that stood here — "`_rust`
 resolves to the main tree's release build; no Rust changed in #999, #1000 or this
-branch, so the Python-from-worktree / Rust-from-tree hybrid is the intended one.
+branch, so the Python-from-worktree / Rust-from-tree hybrid is the intended one" —
+drew a false conclusion from a true premise, and is withdrawn. The premise holds:
+none of `9a2f8f32`, `0ef7f056`, `6a626125`, `eb70c2d0`, `3fb20772` touches a `.rs`
+file. The conclusion does not, because the relevant comparison is not those
+changesets but the *base*. The loaded `_rust.cpython-312-darwin.so` was built at
+09:03 and never rebuilt (its mtime is still 09:03 well after the last arm), while
+`5dc804b9` — #928, "an expired MILP budget is no longer the wire value for 'no
+limit'" — landed at 09:09 and **is** an ancestor of the panel base `3fb20772`.
+That commit changes `crates/discopt-python/src/lp_bindings.rs` *and*
+`python/discopt/solver.py` *and* `python/discopt/solvers/milp_simplex.py`
+together. Every arm of both panels therefore ran #928's Python half against a
+Rust half that predates it: a hybrid corresponding to no commit, and the precise
+failure mode this document elsewhere claims to have ruled out.
+
+What survives and what does not. The `.so` was byte-identical across every arm of
+both panels, so OFF vs ON is a true A/B and the differential the graduation rests
+on is not an artifact of the stale build. What is *not* established is that the
+absolute numbers describe any shipping configuration. One caveat is sharper than
+that and should not be filed under "controlled": the single missing Rust change
+concerns budget *expiry*, and the flag-ON path is the one that spends budget on
+extra sub-solves, so a shared binary is not by itself proof that the two arms were
+affected equally. This does not overturn the verdict — nothing here shows a wrong
+answer, and the certified values reproduce — but a reader who wants the absolute
+walls or node counts to correspond to `main` needs a rebuilt re-run, not this one.
+The gate added in `discopt_benchmarks/benchmarks/load_gate.py` refuses this
+layout, and was confirmed against these exact two trees rather than only synthetic
+ones.
 
 Every load-bearing result reproduces. `batch_processing` (593 nodes OFF with no
 incumbent; 822533.66 at 459 nodes ON), `small_batch` (`feasible` 160860.75 →
