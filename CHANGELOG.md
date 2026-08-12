@@ -145,6 +145,36 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Opaque `dm.custom` models reported a fabricated (invalid) dual bound**
+  (`fix(correctness)`, C-42, closes #998). A `CustomCall` body that is not
+  MCBox-reducible falls back to a single local NLP; that caller cleared
+  `gap_certified` but left the *local* objective in `bound` / `gap` /
+  `root_bound` / `root_gap`. On a nonconvex body the local optimum is routinely
+  above the true global minimum, so the reported "dual bound" was not a bound at
+  all — 2-D Ackley behind `dm.custom` on `[-25.768, 39.768]` returned
+  `bound=15.06, gap=0.0` against a true global minimum of `0.0`, while the
+  algebraic twin of the same mathematics correctly returned `bound=None`. This is
+  the C-33/SC-1 defect, whose strip was never applied to this caller; an opaque
+  body cannot be inspected at all, so convexity can never be established for it
+  and the strip applies a fortiori. The fix keeps the feasible incumbent and
+  strips the bound/gap on any non-`infeasible` result — it only ever removes a
+  claim, so it can neither introduce a false optimum nor loosen a valid bound.
+  Rigorous `status="infeasible"` and the MCBox-reducible (global reduced-space)
+  `CustomCall` path are unaffected. Regression tests:
+  `python/tests/test_customcall_local_bound.py`.
+
+  **Behaviour change (both uncertified local-NLP paths).** `_solve_continuous`
+  reported `status="optimal"` on the same basis it reported the bound — the NLP
+  converged — which on an unproven-convex model is the same unearned claim. Both
+  the opaque-`CustomCall` path and the pure-continuous convexity-unknown path
+  (`skip_convex_check`, or the convexity classifier abstained) now report
+  `status="feasible"`: a feasible point was found, global optimality was not
+  proved. This is already the convention the spatial path uses when its gap does
+  not close. `"unknown"` is reported when the incumbent itself was withheld. Code
+  that gated on `status == "optimal"` from these paths should check for
+  `"feasible"` too — or, better, read `gap_certified`. The convex fast path,
+  MCBox-relaxable `CustomCall` models, and every certified path are unchanged.
+
 - **`solve(time_limit=T)` overran `T` because heuristic sub-NLPs were polled but
   never capped** (`fix(heuristics)`, contributes to #966). Every deadline guard in
   `_relax/primal_heuristics.py` gated whether a sub-NLP *starts*; none bounded how

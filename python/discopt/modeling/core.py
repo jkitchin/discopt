@@ -937,8 +937,11 @@ class CustomCall(Expression):
       (MAiNGO-parity plan P3.1, #713). A body that uses raw ``jnp`` intrinsics on
       its arguments (e.g. ``jnp.exp(x)`` rather than an ``MCBox``-aware op), a
       non-affine hidden division, a non-scalar leaf, or an unbounded box is **not**
-      reduced-relaxable and falls back to the **local NLP path only** (no global
-      certificate, ``gap_certified`` is ``False``) -- sound-or-refuse.
+      reduced-relaxable and falls back to the **local NLP path only** -- sound-or-
+      refuse. That path proves a feasible point, not a global optimum, so it
+      reports ``status="feasible"`` with ``gap_certified=False`` and
+      ``bound``/``gap``/``root_bound``/``root_gap`` all ``None``: a local NLP's
+      objective is not a valid dual bound on a nonconvex body (#998).
     - Integer/binary variables are supported **when the body is MCBox-relaxable**
       (plan P3.2): the model is branched over the integer + continuous DOF with
       reduced-space node bounds and certified globally. A **non**-MCBox-relaxable
@@ -1532,9 +1535,10 @@ def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
 
     Because the body is opaque to the relaxation machinery, a model that uses a
     ``dm.custom`` function is solved on the **local NLP path only** -- there is
-    no global optimality certificate -- and the solver raises if integer/binary
-    variables are present (global branch-and-bound cannot bound an opaque
-    callable). See :class:`CustomCall`.
+    no global optimality certificate, so the result reports
+    ``status="feasible"`` with no ``bound``/``gap`` -- and the solver raises if
+    integer/binary variables are present (global branch-and-bound cannot bound an
+    opaque callable). See :class:`CustomCall`.
 
     Parameters
     ----------

@@ -126,6 +126,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
 | C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_relax/convexity/interval.py:171`); lost tightening, not unsound | fixed |
 | C-37 | P2 | solver.py callback API | `CallbackContext.best_bound` surfaced the raw tree `global_lower_bound` with no sense-negation and no taint gate → **over-reported** the certified global bound on a non-rigorously-fathomed tree (nvs05: callback 5.32 vs the rigorous `SolveResult.bound` 1.35) and reported a wrong-signed bound for MAXIMIZE; API-surface soundness (the reported `SolveResult.bound` was already correct) | fixed (A1) |
+| C-42 | P1 | solver.py CustomCall local path | the non-MCBox-reducible `dm.custom`/`CustomCall` local-NLP fallback cleared `gap_certified` only, leaving the local NLP objective in `bound`/`gap`/`root_bound`/`root_gap` → an **invalid dual bound above the optimum** on the DEFAULT path (2-D Ackley behind `dm.custom`: `bound=15.06, gap=0.0` against a true global minimum of 0). Same defect as C-33/SC-1, whose strip was never applied to this caller; the algebraic twin of the same model correctly reports `bound=None` (= issue #998) | fixed |
 
 ---
 
@@ -2785,3 +2786,97 @@ fails on `main` (bound 1072.96) and passes after. MBQCP/MIQCP/QCP-class scan
 (12 instances) shows no false optima. Note: the 144-vs-145 repr length is a latent
 `model_to_repr` layout divergence; the fix soundly guards around it — a follow-up
 to *restore* the tightening by aligning the repr layout is tracked in the fix doc.
+
+---
+
+## C-42 (P1, FIXED — issue #998) — opaque `CustomCall` local path emits a fabricated (invalid) dual bound
+
+**Origin:** issue #998 (found while running the entry experiment for a proposed
+derivative-free `solver="direct"` backend, whose panel wraps multimodal test
+functions in `dm.custom`).
+**Area:** `python/discopt/solver.py` — the `CustomCall` local-NLP fallback in
+`solve_model` (the `if not _cc_admissible:` / pure-continuous arm), which calls
+`_solve_continuous` and returns its result.
+**Reachability:** DEFAULT path — any continuous model whose `dm.custom` body is
+*not* MCBox-reducible (raw `jnp` intrinsics, a non-affine hidden division, a
+non-scalar leaf, a non-finite box). No opt-in flag required.
+
+**Mechanism:** `_solve_continuous` sets `bound` / `gap` / `root_bound` /
+`root_gap` from the NLP's own convergence status, which for a local solver means
+"a KKT point was reached", not "this is the global optimum". The `CustomCall`
+caller cleared `gap_certified` only, so the *local* objective survived in
+`result.bound` as a purported dual bound. On a nonconvex opaque body that value
+is routinely **above** the true global minimum — not a valid bound at all. This
+is the identical defect fixed for the convexity-unknown local path as C-33/SC-1;
+that fix strips the bound, and the `CustomCall` caller was never updated to
+match. An opaque body is a *strictly weaker* epistemic position than "convexity
+unknown" — it cannot be inspected at all, so convexity can never be established —
+which makes it the one caller that most needs the strip.
+
+**Severity (P1, not P0):** `gap_certified=False` was set correctly, so a consumer
+that checks the flag was never misled into accepting a false certificate. But
+`result.bound` is read directly by reports, notebooks, and comparison harnesses,
+and a dual bound above the optimum violates the certificate invariant of
+CLAUDE.md §1.
+
+**Reproduce/confirm (VERIFIED, fail-before/pass-after):** 2-D Ackley on
+`[-25.768, 39.768]` (true global minimum 0.0 at the origin) expressed two ways.
+Behind `dm.custom` the pre-fix solver returned `status=optimal,
+objective=15.06351400512647, bound=15.06351400512647, root_bound=15.0635…,
+gap=0.0, gap_certified=False` — a lower bound of 15.06 on a problem whose optimum
+is 0, reported with a zero gap. The algebraic twin of the same mathematics
+(`skip_convex_check=True`, the C-33 path) correctly returned `bound=None,
+gap=None`.
+
+**Fix:** both uncertified-local-NLP callers now route through one shared helper,
+`_withhold_local_optimality_certificate`, rather than each carrying its own copy
+of the treatment — the duplication is precisely how this happened (C-33 fixed one
+site; the other kept emitting the fabricated bound 470 lines away). On any
+non-`infeasible` result it keeps the feasible incumbent (`objective`, `x`) and
+sets `gap_certified=False`, `bound=None`, `root_bound=None`, `gap=None`,
+`root_gap=None`, and downgrades `status="optimal"` to `"feasible"` (see below).
+This only ever *removes* a claim, so it can neither introduce a false optimum nor
+loosen a valid bound (the same soundness argument the C-33 site carries). Genuine
+`status="infeasible"` from `_solve_continuous` is a rigorous
+nonlinear-tightening / NLP-infeasibility claim, not a gap, so it is left
+untouched. The MCBox-reducible `CustomCall` path (reduced-space global engine) is
+not reached by this branch and keeps its valid certificate.
+
+**Status downgrade (the issue's "secondary question", decided in favour of
+changing it):** `_solve_continuous` reports `status="optimal"` on the same basis
+it reported the bound — the NLP converged — so on an unproven-convex model that
+verdict is the same unearned claim. Both local paths now report the honest
+`status="feasible"`: a feasible point was found, global optimality was not
+proved. That is already the codebase's convention for an uncertified incumbent
+(the spatial path returns `"feasible"` when its gap does not close). When the
+incumbent itself was withheld (the #815 feasibility check rejected the NLP's
+point) the verdict is `"unknown"`, since `"feasible"` would assert a feasible
+point that is not in hand. The change is applied to **both** callers together, as
+#998 required of any change to this convention.
+
+**Regression test** (`python/tests/test_customcall_local_bound.py`, all
+`@pytest.mark.smoke`; fail-before/pass-after verified by stashing the fix — 2
+failed / 2 passed before, 4 passed after):
+`test_customcall_local_path_strips_fabricated_bound` (the opaque Ackley repro:
+incumbent kept, all four bound/gap fields `None`, and the invariant that a
+*reported* bound must satisfy `bound <= true_optimum + tol`),
+`test_algebraic_twin_control_agrees` (the C-33 path on the same mathematics),
+`test_customcall_and_algebraic_paths_agree` (the two spellings of one problem
+must report the same kind of answer — this is the assertion that pins the
+divergence), and `test_mcbox_traceable_customcall_still_certifies` (control
+against over-correction: an MCBox-relaxable `dm.custom` still certifies with a
+valid bound).
+
+**Call-site updates for the downgraded status:** `test_custom_udf.py`'s two
+local-path cases (`test_vector_custom_solves`, `test_custom_mixed_with_primitives`)
+asserted `status == "optimal"` alongside `gap_certified is False` — they now
+assert `"feasible"` and no bound/gap. The user-facing docstrings for `dm.custom`,
+`CustomCall`, and the implicit-node module state the reported status.
+
+**Gates:** new test 4 passed; `pytest -m smoke` 958 passed / 15 skipped /
+2 xpassed; adversarial `test_adversarial_recent_fixes.py -m slow` 10 passed;
+`test_customcall_reduced.py` + `test_custom_udf.py` +
+`test_c33_nonconvex_fallback_cert.py` 35 passed; `ruff check` / `ruff format
+--check` clean; `mypy python/discopt/solver.py` clean. No Rust touched.
+
+**Status:** confirmed → fixed.
