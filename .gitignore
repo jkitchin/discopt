@@ -83,6 +83,10 @@ adversary/
 
 # Jupyter Book
 docs/_build/
+# sphinx-autoapi writes the generated API tree next to the source, not under
+# _build/, so it needs its own rule — a docs build otherwise leaves ~2 MB of
+# generated .rst as untracked noise in `git status`.
+docs/autoapi/
 
 # DoE demo workbook artifacts
 docs/notebooks/*.xlsx
