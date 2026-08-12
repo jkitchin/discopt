@@ -1462,6 +1462,38 @@ def _residual_assignments(
     return out[:limit]
 
 
+#: Sub-NLP solves the #823 wave may spend before the #993 dive gets the rest of the
+#: caller's grant. A **count**, not a slice of the clock, and that is the whole point:
+#: a wall-clock split (``_now() + 0.5 * (deadline - _now())``) makes how much of the
+#: wave runs a function of machine speed, which #912 forbids — and
+#: ``test_912_wall_budget_inventory.test_the_converted_layer_stays_converted`` closes
+#: the ``residual`` category to this module outright, so "record it in KNOWN" is not
+#: an honest option here. Bounded by a count, the wave's extent is a function of the
+#: model alone.
+#:
+#: 48 is calibrated, not chosen (``scratchpad/issue993`` E1/E2, 2026-08-12; run the
+#: wave with ``deadline=None`` so only ``max_configs`` binds, and record every plan's
+#: outcome and objective):
+#:
+#: ===============  ==========  =============  ==========================
+#: model            solves/s    feasible at    best objective at plan
+#: ===============  ==========  =============  ==========================
+#: cstr             54.3        8, 42, 47, 57  **42** (3.0620146, optimal)
+#: batch_processing 7.3         none of 256    —
+#: syngas           5.1         none of 256    —
+#: ===============  ==========  =============  ==========================
+#:
+#: So the yield is concentrated: past plan 57 the wave never produced anything on
+#: this corpus, and the plans that matter for *quality* end at 42 — cstr's best is
+#: there, while its plan-8 hit is +2.36 % off. The cap must therefore sit **above
+#: 42** (a cap of 32 would trade cstr's true optimum for a 2.36 %-worse point), and
+#: as far below 256 as that allows. 48 keeps every quality-relevant plan with six
+#: plans of headroom for root-point drift, and costs the wave 6.6 s of a 15 s grant
+#: on batch_processing (48 / 7.3) instead of the 35 s an uncapped wave wants — which
+#: is what leaves the dive a share to work in.
+_WAVE_SOLVE_CAP = 48
+
+
 def one_hot_config_subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -1505,6 +1537,19 @@ def one_hot_config_subnlp(
     searches (not ``2**k``), so it scales to the 138-binary models the enumerator
     skips, and the whole path is additionally deadline-bounded — in practice the
     deadline, not ``max_configs``, is what stops it.
+
+    **When this search returns nothing, control passes to**
+    :func:`one_hot_config_dive` **with the remaining budget** (#993). Both searches
+    here rank disjuncts from one static point and never re-solve, which measurably
+    cannot reach the answer on the harder nonlinear GDPs: on syngas the proven
+    configuration is 3 demotions from the argmax (plan 743 of 256) and on
+    batch_processing 15 of 29 (C(29,15) ~ 7.7e7). The dive re-solves the relaxation
+    between choices, which is what makes those reachable. Ordering is deliberate —
+    the wave is far cheaper when it works (0.018 s/plan on cstr) so it goes first,
+    and the dive only pays for models the wave cannot solve. The wave hands over
+    after ``_WAVE_SOLVE_CAP`` sub-NLP solves: measured, an uncapped wave consumes
+    the entire grant on precisely the models the dive is for, so the two searches
+    would compete for one budget and the cheaper-but-useless one would always win.
 
     ``max_configs`` is deliberately large. Measured on cstr, a fixed-integer
     sub-NLP here costs **0.018 s** (384 plans in 7 s), and the feasible plans sit
@@ -1630,7 +1675,20 @@ def one_hot_config_subnlp(
     results: list[tuple[np.ndarray, float]] = []
     attempted = 0
     stop = "exhausted"
-    for ci, ri in plans[:max_configs]:
+    # Hand over to the dive after a bounded NUMBER of solves, so that what the wave
+    # spends is a function of the model and not of the machine (#912; see
+    # ``_WAVE_SOLVE_CAP`` for the calibration). Measured, an uncapped wave spends the
+    # WHOLE grant on the models the dive exists for and hands it nothing: at a 9 s
+    # constructor budget batch_processing got 66 of 256 plans (all infeasible) and
+    # syngas 53, leaving the dive 0 relaxation solves. The cap costs the wave nothing
+    # where the wave works -- on cstr every quality-relevant plan is reached by 42 --
+    # and where the wave does not work, every solve past the cap is waste. Plans are
+    # ordered most-informed-first, so a capped wave loses late alternates, never its
+    # best-ranked candidates.
+    wave_plans = plans[: min(max_configs, _WAVE_SOLVE_CAP)]
+    if len(wave_plans) < len(plans[:max_configs]):
+        stop = "wave-cap"
+    for ci, ri in wave_plans:
         if deadline is not None and _now() >= deadline:
             stop = "deadline"
             break
@@ -1643,6 +1701,8 @@ def one_hot_config_subnlp(
             seed[pick] = 1.0
         for j, v in zip(residual, residual_assigns[ri]):
             seed[j] = v
+        # The caller's deadline is a stopping contract, so the per-solve budget is
+        # what remains of it — not a slice of it.
         budget = None if deadline is None else max(0.0, deadline - _now())
         if budget is not None and budget <= 0.0:
             stop = "deadline"
@@ -1670,6 +1730,323 @@ def one_hot_config_subnlp(
         len(residual),
         attempted,
         len(plans[:max_configs]),
+        stop,
+        len(results),
+    )
+    if results or not groups:
+        return results
+    # The wave found nothing. Spend what is left of the budget on the dive, which
+    # re-solves between choices and can therefore reach configurations no wave
+    # around a single point can (see this function's docstring, #993). Called from
+    # HERE rather than from the solver's three call sites so that no path can be
+    # left unwired — that omission is exactly how #823 shipped a flag that was dead
+    # on the model class it targeted.
+    return one_hot_config_dive(
+        model,
+        x_relax,
+        backend=backend,
+        nlp_options=nlp_options,
+        evaluator=evaluator,
+        integer_tol=integer_tol,
+        deadline=deadline,
+    )
+
+
+def one_hot_config_dive(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    integer_tol: float = 1e-5,
+    deadline: Optional[float] = None,
+    max_restarts: int = 64,
+    max_level_solves: int = 4000,
+    seed: int = 0,
+) -> list[tuple[np.ndarray, float]]:
+    """Root primal constructor for GDPs that *re-solves* between disjunct choices.
+
+    Why this exists alongside :func:`one_hot_config_subnlp` (#993). That function
+    enumerates configurations in Hamming waves around one static point — the
+    relaxation's per-group argmax — and never re-solves. Measured against BARON's
+    proven-optimal configuration on two nonlinear GDPlib models, the answer is not
+    in reach of any such wave:
+
+    ==================  ======  ========================  =========================
+    model               groups  demotions from the argmax  plan index in the wave
+    ==================  ======  ========================  =========================
+    syngas                  26  3                         743 (``max_configs`` 256)
+    batch_processing        29  15                        C(29,15) ~ 7.7e7
+    ==================  ======  ========================  =========================
+
+    Nothing else was the cause: with the integers pinned to BARON's configuration
+    the fixed-integer sub-NLP solves in 0.07 s (batch_processing, obj 679365.33 =
+    the reference optimum) and 0.36 s (syngas, 4669.0235) *from the constructor's
+    own zero start*, and on batch_processing the environment, the presolved bounds,
+    the seed ranking and the continuous start were each eliminated by a separate
+    arm (all four cells of a 2x2, plus five starts, 0 feasible in 1329 attempts).
+    A weak big-M relaxation (root 546850 vs 679365; 2.06 vs 4669) simply cannot
+    rank disjuncts well enough for one-shot rounding, and a bigger ``max_configs``
+    is the same wrong mechanism with a bigger constant.
+
+    What re-solving buys. Fix one group, re-solve the relaxation, and the remaining
+    fractional indicators move in response. In a design GDP the objective pulls
+    *every* group's argmax to the cheap disjunct at once — hence 15 simultaneous
+    demotions — but once a prefix of cheap choices is pinned the relaxation itself
+    becomes infeasible, and that refusal is the information the wave never gets.
+    Measured, the refusals are trustworthy: 0 of 412 flipped to feasible when
+    retried from an independent start.
+
+    Three ingredients, each added because a measurement demanded it:
+
+    * **Learned decision order.** Plain chronological backtracking thrashes (60 s
+      bought 21 of 26 groups on syngas, 17 of 29 on batch_processing, no feasible
+      point). Recording the group that dead-ends and deciding it first on the next
+      restart is what first completed batch_processing — obj 1063445 at 12.1 s,
+      where the wave returns nothing at all.
+    * **Randomised choice, GRASP-style.** A deterministic restart re-walks its own
+      path: syngas repeated one dead end 65 times. Randomising the *score* is not
+      enough — its size-2 groups sit at margins near 1.0, so additive noise never
+      flips one — so the disjunct *order* itself is randomised with probability
+      rising per restart. This cut batch_processing's time-to-first-feasible from
+      12.3 s to 5.3 s and found 41 configurations in 60 s.
+    * **Local repair.** A dead end at depth 25 of 26 means the answer is one repair
+      away, so discarding the prefix is waste. Only the last ``k`` decisions are
+      released (k doubling: 3, 6, 12, ...) with the dead-end group decided first,
+      and a full restart happens only once ``k`` exceeds the depth.
+
+    Cost is bounded three ways — the absolute ``deadline`` (polled before every
+    solve, and each solve capped so one cannot overrun it), ``max_restarts``, and
+    ``max_level_solves``.
+
+    Soundness: every returned point comes from :func:`subnlp`, which re-verifies
+    integer- and constraint-feasibility, so this proposes incumbents only and never
+    touches the dual bound. A local "infeasible" verdict on a nonconvex partial
+    fixing is used *only* to redirect this heuristic's own search — never to prune a
+    node — so a wrong verdict costs candidates, never correctness. Every bound
+    mutation is restored in a ``finally``.
+
+    Args:
+        model: The optimization model.
+        x_relax: Relaxation point at the node; the dive's starting point.
+        backend: ``solve_nlp(evaluator, x0, options=...)`` callable.
+        nlp_options: Options forwarded to the NLP backend.
+        evaluator: Pre-built evaluator; one is constructed if omitted.
+        integer_tol: Integrality tolerance forwarded to :func:`subnlp`.
+        deadline: Absolute ``perf_counter`` deadline.
+        max_restarts: Cap on randomised restarts.
+        max_level_solves: Cap on relaxation solves across all restarts.
+        seed: RNG seed. Fixed by default so the heuristic is reproducible.
+
+    Returns:
+        Every feasible ``(x, obj)`` found, in discovery order (possibly empty).
+    """
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask):
+        return []
+
+    lb0, ub0 = _get_variable_bounds(model)
+    n_vars = int(int_mask.size)
+    x_relax = np.asarray(x_relax, dtype=np.float64)
+    groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    if not groups:
+        return []
+
+    backend = _resolve_backend(backend)
+    if evaluator is None:
+        evaluator = cached_evaluator(model)
+    slot_map = _flat_slot_map(model)
+    saved = [(v.lb.copy(), v.ub.copy()) for v in model._variables]
+    opts = _heuristic_nlp_options(nlp_options)
+
+    n_groups = len(groups)
+    zero_cont = np.clip(0.0, lb0, ub0)
+    rng = np.random.default_rng(seed)
+
+    results: list[tuple[np.ndarray, float]] = []
+    # Groups that have dead-ended, most recent first: the learned decision order,
+    # carried ACROSS restarts. Deciding a known-constrained group early is what
+    # first completed batch_processing.
+    priority: list[int] = []
+    level_solves = 0
+    restarts = 0
+    dead_ends = 0
+    repairs = 0
+    stop = "restart cap"
+
+    def _release_all() -> None:
+        for v, (lb_v, ub_v) in zip(model._variables, saved):
+            v.lb = lb_v.copy()
+            v.ub = ub_v.copy()
+
+    def _fix_group(gi: int, pick: int) -> None:
+        for j in groups[gi]:
+            v, local = slot_map[j]
+            _fix_slot(v, local, 0.0)
+        v, local = slot_map[pick]
+        _fix_slot(v, local, 1.0)
+
+    def _release_group(gi: int) -> None:
+        for j in groups[gi]:
+            v, local = slot_map[j]
+            _set_slot_bounds(v, local, float(lb0[j]), float(ub0[j]))
+
+    def _level_solve(x_start: np.ndarray) -> Optional[np.ndarray]:
+        """Relaxation under the current partial fixing; None means 'refused'."""
+        nonlocal level_solves
+        lb_cur, ub_cur = _get_variable_bounds(model)
+        step_opts = dict(opts)
+        cap = _deadline_wall_cap(deadline)
+        if cap is not None:
+            step_opts.setdefault("max_wall_time", cap)
+        level_solves += 1
+        try:
+            res = backend(evaluator, np.clip(x_start, lb_cur, ub_cur), options=step_opts)
+        except BaseException:
+            # Backends can raise PanicException (PyO3), which is not an Exception.
+            # A failed step is a refusal like any other; it only redirects the dive.
+            return None
+        if res.x is None:
+            return None
+        x = np.asarray(res.x, dtype=np.float64)
+        # Judge the POINT, not the status: the dive needs "is this partial fixing
+        # satisfiable", and an interior-point solver reports ITERATION_LIMIT at
+        # points that are already feasible and OPTIMAL at points that are not.
+        return x if _check_constraint_feasibility(evaluator, x) else None
+
+    def _out_of_budget() -> bool:
+        return (deadline is not None and _now() >= deadline) or level_solves >= max_level_solves
+
+    try:
+        while restarts < max_restarts:
+            if _out_of_budget():
+                stop = "deadline" if level_solves < max_level_solves else "solve cap"
+                break
+            restarts += 1
+            # Restart 1 is the pure deterministic dive; later restarts diversify.
+            p_rand = 0.0 if restarts == 1 else min(0.05 * restarts, 0.5)
+            _release_all()
+            fixed: dict[int, int] = {}
+            history: list[int] = []
+            forced: list[int] = []
+            x_cur = np.clip(x_relax, lb0, ub0)
+            k_repair = 3
+
+            while len(fixed) < n_groups and not _out_of_budget():
+                remaining = [gi for gi in range(n_groups) if gi not in fixed]
+                # A local repair's own groups first, then the learned order.
+                candidates = [gi for gi in forced if gi in remaining]
+                if not candidates:
+                    candidates = [gi for gi in priority if gi in remaining]
+                if candidates:
+                    gi = (
+                        candidates[int(rng.integers(len(candidates)))]
+                        if rng.random() < p_rand
+                        else candidates[0]
+                    )
+                else:
+                    # Most decisive group first: the largest argmax margin at the
+                    # CURRENT point, which moves as fixings accumulate.
+                    best_gi, best_margin = remaining[0], -np.inf
+                    for g in remaining:
+                        o = sorted(groups[g], key=lambda j: -float(x_cur[j]))
+                        mg = float(x_cur[o[0]]) - (float(x_cur[o[1]]) if len(o) > 1 else 0.0)
+                        if mg > best_margin:
+                            best_gi, best_margin = g, mg
+                    gi = best_gi
+                order = sorted(groups[gi], key=lambda j: -float(x_cur[j]))
+                if rng.random() < p_rand:
+                    order = [order[i] for i in rng.permutation(len(order))]
+
+                placed = False
+                for pick in order:
+                    if _out_of_budget():
+                        break
+                    _fix_group(gi, pick)
+                    x_new = _level_solve(x_cur)
+                    if x_new is not None:
+                        fixed[gi] = pick
+                        history.append(gi)
+                        x_cur = x_new
+                        placed = True
+                        break
+                if placed:
+                    if gi in forced:
+                        forced.remove(gi)
+                    continue
+                if _out_of_budget():
+                    break  # ran out mid-group; not a dead end, so learn nothing
+
+                _release_group(gi)
+                dead_ends += 1
+                if k_repair > len(history):
+                    break  # repair exhausted: restart instead
+                repairs += 1
+                undone = history[-k_repair:]
+                for h in undone:
+                    _release_group(h)
+                    fixed.pop(h, None)
+                history = history[: len(history) - k_repair]
+                forced = [gi] + [h for h in undone if h != gi]
+                x_back = _level_solve(x_cur)
+                if x_back is not None:
+                    x_cur = x_back
+                k_repair *= 2
+
+            if len(fixed) < n_groups:
+                # Learn from the failure: whatever this restart could not place gets
+                # decided first next time, while the prefix is still short enough to
+                # accommodate it.
+                for gi in range(n_groups):
+                    if gi not in fixed:
+                        if gi in priority:
+                            priority.remove(gi)
+                        priority.insert(0, gi)
+                        break
+                continue
+
+            # A complete configuration: hand it to the ordinary sub-NLP, which fixes
+            # every integer (the dive's groups plus any binary outside them, rounded
+            # from the DIVE's point rather than the root's) and verifies the result.
+            seed_x = x_cur.copy()
+            seed_x[~int_mask] = zero_cont[~int_mask]
+            for gi, group in enumerate(groups):
+                for j in group:
+                    seed_x[j] = 0.0
+                seed_x[fixed[gi]] = 1.0
+            # Two starts, in the order measured to matter: the zero continuous start
+            # (what makes a fresh configuration solve at all) then the dive's own
+            # point (better once the configuration is nearly settled).
+            found = None
+            for x0 in (seed_x, x_cur):
+                found = subnlp(
+                    model,
+                    np.clip(x0, lb0, ub0),
+                    backend=backend,
+                    nlp_options=nlp_options,
+                    evaluator=evaluator,
+                    integer_tol=integer_tol,
+                    time_budget=(None if deadline is None else max(0.0, deadline - _now())),
+                )
+                if found is not None or _out_of_budget():
+                    break
+            if found is not None:
+                results.append(found)
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved):
+            v.lb = lb_v
+            v.ub = ub_v
+
+    # §6: without these counts an empty return is unfalsifiable — no restart ran,
+    # the deadline cut it, or every configuration was genuinely infeasible.
+    logger.debug(
+        "one_hot_config_dive: %d group(s), %d restart(s), %d dead end(s), %d local "
+        "repair(s), %d relaxation solve(s) (%s), %d feasible",
+        n_groups,
+        restarts,
+        dead_ends,
+        repairs,
+        level_solves,
         stop,
         len(results),
     )
@@ -1707,18 +2084,24 @@ def _resolve_backend(backend: Optional[Callable]) -> Callable:
     return backend
 
 
-def _fix_slot(v: object, local: int, value: float) -> None:
-    """Fix scalar slot ``local`` of variable ``v`` to ``value``.
+def _set_slot_bounds(v: object, local: int, lo: float, hi: float) -> None:
+    """Set scalar slot ``local`` of variable ``v`` to ``[lo, hi]``.
 
-    Variable bound arrays are read-only, so we replace them with writable copies
-    (the caller saves/restores the originals).
+    Variable bound arrays are read-only views (``np.broadcast_to``), so writing in
+    place raises; they must be replaced with writable copies. The caller
+    saves/restores the originals.
     """
     new_lb = np.array(v.lb, dtype=np.float64)  # type: ignore[attr-defined]
     new_ub = np.array(v.ub, dtype=np.float64)  # type: ignore[attr-defined]
-    new_lb.flat[local] = value
-    new_ub.flat[local] = value
+    new_lb.flat[local] = lo
+    new_ub.flat[local] = hi
     v.lb = new_lb  # type: ignore[attr-defined]
     v.ub = new_ub  # type: ignore[attr-defined]
+
+
+def _fix_slot(v: object, local: int, value: float) -> None:
+    """Fix scalar slot ``local`` of variable ``v`` to ``value``."""
+    _set_slot_bounds(v, local, value, value)
 
 
 def _finalize_candidate(
