@@ -209,6 +209,58 @@ net-positive" — a confident negative from a measurement that never happened.
 `panel.py` builds the OFF arm's environment and True for the ON arm's, and a real
 `Model.solve()` on `cstr` with the flag ON enters `one_hot_config_subnlp` once.
 
+### Re-check on the shipping base (post-#999)
+
+The panel above ran on a base that predates #999 (C-42, "strip fabricated dual
+bound on the opaque CustomCall local path"), which landed on `main` while this
+work was in flight. #999's subject is *certification status*, which is exactly
+what bar 1 scores and what this panel's headline bar-2 credit is (`small_batch`:
+`feasible` → `optimal`). A graduation decided on a pre-#999 base is a decision
+about code that is not `main`, so the five load-bearing arms were re-run after
+merging `origin/main` into the branch: the two incumbent gains, the certificate
+credit, the node credit, and the single regression. The seven omitted models were
+identical OFF vs ON and carry no weight either way.
+
+`scratchpad/issue993/panel_rebase.py`, 30 executed status/objective/bound checks.
+Its load gate asserts, in **both** the parent and a child subprocess, that
+`discopt.__file__` is inside the merged worktree, that `_WAVE_SOLVE_CAP` is
+present (this branch), and that the C-42 comment is present (proof the #999 base
+is underneath) — the last is the marker that makes this run mean anything, since a
+run that silently loaded the editable install from the main tree would have
+re-measured the very base it was meant to replace. Note that `_rust` still
+resolves to the main tree's release build; no Rust changed in #999, #1000 or this
+branch, so the Python-from-worktree / Rust-from-tree hybrid is the intended one.
+
+Every load-bearing result reproduces. `batch_processing` (593 nodes OFF with no
+incumbent; 822533.66 at 459 nodes ON), `small_batch` (`feasible` 160860.75 →
+`optimal` 167427.65 at the same 181 nodes) and `positioning` (409 → 307 nodes,
+same certified optimum) reproduce **node-exactly**, which is the strong form of the
+result: the two models that finish inside the limit are bit-stable across the base
+change, so #999 is inert for this corpus rather than merely benign. That matches
+the structure — the C-42 strip sits behind `if not _cc_admissible:` on a
+`dm.custom(...)` body outside MCBox scope, and on that path a model carrying
+integers *raises* rather than being re-bounded, while every model here is a big-M
+GDP loaded through Pyomo → `.nl` → `from_nl` with no `CustomCall` node at all.
+`cstr` reproduces its objective with ordinary time-limit jitter in the node count
+(OFF 19996 → 20006, ON 22760 → 22450, ON still running more nodes than OFF).
+
+`gdp_col` is the one arm that moved, and it moved in a way that **sharpens** the
+debit rather than contradicting it. Its OFF arm went 20100.296 at 37 nodes →
+20916.392 at 23 nodes, while its ON arm is unchanged at 20916.392 / 23 nodes. The
+re-run machine was noisier (Spotlight indexing at ~92 % CPU, self-inflicted by the
+merge), and on a model where 120 s buys ~30 nodes that is enough to cost the OFF
+arm 14 of them. The informative part is what the two arms then agree on: at the
+*same* 23-node prefix both arms return the identical incumbent to fifteen digits.
+So the flag does not produce a worse *answer* on `gdp_col`; it produces less
+*search*, and this model's incumbent improves late. The original "+4.1 % worse, a
+time race" reading is confirmed by direct measurement rather than inferred from
+the node count. `gdp_col` still exits 3 on both arms (no oracle), unchanged.
+
+Absolute wall times in this re-run are not comparable with the panel above (the
+same contention inflated the harness-measured per-arm wall from ~123 s to ~225 s
+while the solver's own limit held at 120 s); the node counts and the certified
+values are the comparable quantities, and they are the ones tabulated.
+
 ## Verdict
 
 **Graduate `DISCOPT_GDP_CONFIG_PRIMAL` to default ON**, keeping the `=0` opt-out
@@ -225,6 +277,9 @@ one by an accident of shell quoting while reading, in every log and `env` dump, 
 other graduated flag in `solver.py`.
 
 What this verdict does **not** claim: nothing here establishes soundness on
-`gdp_col` or `methanol`, and `gdp_col` is measurably worse ON. If an oracle
+`gdp_col` or `methanol`, and `gdp_col` is measurably worse ON at a fixed wall
+limit — the re-check localizes that to search *quantity* (the two arms agree
+exactly once they reach the same node), but a user who runs `gdp_col` for 120 s
+still gets a worse incumbent with the flag on than without it. If an oracle
 becomes available for either, they should be re-scored before the next flag
 decision that leans on this corpus.
