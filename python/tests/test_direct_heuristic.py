@@ -263,15 +263,23 @@ def test_flag_off_is_byte_identical(monkeypatch):
 
 @pytest.mark.smoke
 def test_flag_on_never_changes_certified_objective_or_bound(monkeypatch):
-    """Flag ON: identical dual bound, no objective degradation, no decertification.
+    """Flag ON: the dual bound does not move, and the certificate cannot weaken.
 
-    A primal heuristic may legitimately change *which* nodes get explored, so
+    A primal heuristic legitimately changes *which* nodes get explored, so
     ``node_count`` is deliberately NOT asserted here (that is the flag-OFF test's
-    job). What must not move is the certificate: the dual bound is computed by
-    the relaxation, which this heuristic never touches, and an injected incumbent
-    is accepted only when it strictly improves — so the certified objective can
-    only stay equal or get better, and a certified instance can never become
-    uncertified.
+    job). Neither is bit-exact bound equality: the bound is never *computed*
+    differently — this heuristic touches no relaxation — but an earlier incumbent
+    prunes a different set of nodes, and the surviving frontier's minimum can
+    therefore differ in the last ulps. Measured on the in-repo corpus at 10 s over
+    16 instances (12 with the probe firing): every bound matched to well inside
+    1e-9 relative, the single non-identical one being st_e13 at
+    1.9999999999999851 vs 1.9999999999999865 — a 1.4e-15 shift, and in the
+    *tighter* direction.
+
+    So the assertions are the ones that are actually load-bearing: the bound
+    agrees to a tolerance far below any tolerance the solver certifies at, the
+    certified objective is equal or better, certification is never lost, and the
+    certificate invariant ``bound <= incumbent`` holds.
     """
     off = {}
     for name, builder in PANEL.items():
@@ -296,7 +304,11 @@ def test_flag_on_never_changes_certified_objective_or_bound(monkeypatch):
         ref = off[name]
 
         # 1. The dual bound is untouched — the heuristic is primal-only.
-        assert res.bound == ref.bound, f"{name}: dual bound moved {ref.bound!r} -> {res.bound!r}"
+        assert (res.bound is None) == (ref.bound is None), f"{name}: bound presence changed"
+        if ref.bound is not None:
+            assert res.bound == pytest.approx(ref.bound, rel=1e-9, abs=1e-9), (
+                f"{name}: dual bound moved {ref.bound!r} -> {res.bound!r}"
+            )
 
         # 2. The certified objective is identical or better (min sense).
         assert res.objective is not None, f"{name}: lost the incumbent"
@@ -354,7 +366,9 @@ def test_injected_incumbent_is_feasibility_verified(monkeypatch):
     assert res.objective == pytest.approx(ref.objective, abs=1e-6, rel=1e-6), (
         f"objective moved on an infeasible proposal: {ref.objective!r} -> {res.objective!r}"
     )
-    assert res.bound == ref.bound, "dual bound moved on an infeasible proposal"
+    assert res.bound == pytest.approx(ref.bound, rel=1e-9, abs=1e-9), (
+        "dual bound moved on an infeasible proposal"
+    )
 
     # ...and the complement: a genuinely feasible, genuinely better point IS
     # taken. Without this arm the test above would also pass if injection were
@@ -375,7 +389,9 @@ def test_injected_incumbent_is_feasibility_verified(monkeypatch):
     assert taken["n"] >= 1, "the substituted probe was never called (test is vacuous)"
     assert res2.objective is not None
     assert res2.objective <= ref.objective + 1e-9
-    assert res2.bound == ref.bound, "dual bound moved on a feasible proposal"
+    assert res2.bound == pytest.approx(ref.bound, rel=1e-9, abs=1e-9), (
+        "dual bound moved on a feasible proposal"
+    )
 
 
 @pytest.mark.smoke
@@ -400,7 +416,7 @@ def test_probe_exception_does_not_break_the_solve(monkeypatch):
     assert raised["n"] >= 1, "the raising probe was never called (test is vacuous)"
     assert res.status == ref.status
     assert res.objective == pytest.approx(ref.objective, abs=1e-6, rel=1e-6)
-    assert res.bound == ref.bound
+    assert res.bound == pytest.approx(ref.bound, rel=1e-9, abs=1e-9)
     assert res.gap_certified == ref.gap_certified
 
 
