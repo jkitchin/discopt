@@ -2828,16 +2828,31 @@ is 0, reported with a zero gap. The algebraic twin of the same mathematics
 (`skip_convex_check=True`, the C-33 path) correctly returned `bound=None,
 gap=None`.
 
-**Fix:** mirror the accepted C-33/SC-1 code at the `CustomCall` caller rather
-than invent a second convention — on any non-`infeasible` result, keep the
-feasible incumbent (`objective`, `x`, `status`) and set `gap_certified=False`,
-`bound=None`, `root_bound=None`, `gap=None`, `root_gap=None`. This only ever
-*removes* a claim, so it can neither introduce a false optimum nor loosen a valid
-bound (the same soundness argument the C-33 site carries). Genuine
+**Fix:** both uncertified-local-NLP callers now route through one shared helper,
+`_withhold_local_optimality_certificate`, rather than each carrying its own copy
+of the treatment — the duplication is precisely how this happened (C-33 fixed one
+site; the other kept emitting the fabricated bound 470 lines away). On any
+non-`infeasible` result it keeps the feasible incumbent (`objective`, `x`) and
+sets `gap_certified=False`, `bound=None`, `root_bound=None`, `gap=None`,
+`root_gap=None`, and downgrades `status="optimal"` to `"feasible"` (see below).
+This only ever *removes* a claim, so it can neither introduce a false optimum nor
+loosen a valid bound (the same soundness argument the C-33 site carries). Genuine
 `status="infeasible"` from `_solve_continuous` is a rigorous
 nonlinear-tightening / NLP-infeasibility claim, not a gap, so it is left
 untouched. The MCBox-reducible `CustomCall` path (reduced-space global engine) is
 not reached by this branch and keeps its valid certificate.
+
+**Status downgrade (the issue's "secondary question", decided in favour of
+changing it):** `_solve_continuous` reports `status="optimal"` on the same basis
+it reported the bound — the NLP converged — so on an unproven-convex model that
+verdict is the same unearned claim. Both local paths now report the honest
+`status="feasible"`: a feasible point was found, global optimality was not
+proved. That is already the codebase's convention for an uncertified incumbent
+(the spatial path returns `"feasible"` when its gap does not close). When the
+incumbent itself was withheld (the #815 feasibility check rejected the NLP's
+point) the verdict is `"unknown"`, since `"feasible"` would assert a feasible
+point that is not in hand. The change is applied to **both** callers together, as
+#998 required of any change to this convention.
 
 **Regression test** (`python/tests/test_customcall_local_bound.py`, all
 `@pytest.mark.smoke`; fail-before/pass-after verified by stashing the fix — 2
@@ -2852,11 +2867,11 @@ divergence), and `test_mcbox_traceable_customcall_still_certifies` (control
 against over-correction: an MCBox-relaxable `dm.custom` still certifies with a
 valid bound).
 
-**Not changed (deliberate, per #998):** both local paths still report
-`status="optimal"` for what is only a local solution. That is the existing
-convention C-33 chose to keep; with `gap` now `None` on both, the output no
-longer reads as a solved problem. Changing it belongs in its own issue covering
-both callers.
+**Call-site updates for the downgraded status:** `test_custom_udf.py`'s two
+local-path cases (`test_vector_custom_solves`, `test_custom_mixed_with_primitives`)
+asserted `status == "optimal"` alongside `gap_certified is False` — they now
+assert `"feasible"` and no bound/gap. The user-facing docstrings for `dm.custom`,
+`CustomCall`, and the implicit-node module state the reported status.
 
 **Gates:** new test 4 passed; `pytest -m smoke` 958 passed / 15 skipped /
 2 xpassed; adversarial `test_adversarial_recent_fixes.py -m slow` 10 passed;

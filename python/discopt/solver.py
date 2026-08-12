@@ -5133,6 +5133,56 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
 )
 
 
+def _withhold_local_optimality_certificate(result: SolveResult) -> SolveResult:
+    """Downgrade an UNCERTIFIED single-NLP result in place (C-33/SC-1, C-42, #998).
+
+    Two callers in :func:`solve_model` route a model to one local NLP without any
+    proof of convexity: the opaque ``dm.custom``/``CustomCall`` fallback (the body
+    cannot be inspected at all, so convexity can never be established) and the
+    pure-continuous convexity-unknown fallback (``skip_convex_check``, or the
+    classifier abstained). Both need the identical treatment, so it lives here
+    rather than being written twice and drifting — the drift is exactly how #998
+    happened: C-33 fixed one site, the other kept emitting the fabricated bound
+    for 470 lines' worth of distance.
+
+    :func:`_solve_continuous` fills ``bound``/``gap``/``root_bound``/``root_gap``
+    from the NLP's own convergence status, which for a local solver means "a KKT
+    point was reached", not "this is the global optimum" — and reports
+    ``status="optimal"`` on that same basis. On a nonconvex model the local
+    optimum is not global (a nonconvex double-well returned obj=-50 while the true
+    min was -78; 2-D Ackley behind ``dm.custom`` returned bound=15.06 on a problem
+    whose optimum is 0), so every one of those fields is a claim the solve did not
+    earn.
+
+    What survives is the *incumbent* — ``objective`` and ``x`` are a genuine
+    feasible point (``_solve_continuous`` verifies feasibility at the source,
+    #815). So the honest report is ``status="feasible"``: a feasible solution was
+    found, global optimality was not proved. That is the same verdict the spatial
+    path already uses when its gap does not close.
+
+    This only ever REMOVES a claim — it can neither introduce a false optimum nor
+    loosen a valid bound. Do NOT weaken it into "trust the NLP": refuse to certify
+    (CLAUDE.md §1, §3).
+
+    A rigorous ``status="infeasible"`` (nonlinear tightening / NLP infeasibility)
+    is a proof, not a gap, and is returned untouched.
+    """
+    if result.status == "infeasible":
+        return result
+    result.gap_certified = False
+    result.bound = None
+    result.root_bound = None
+    result.gap = None
+    result.root_gap = None
+    if result.status == "optimal":
+        # "optimal" here means only "the NLP converged". Downgrade to the honest
+        # verdict — "feasible" when an incumbent survives, "unknown" when the
+        # point was withheld (e.g. the #815 feasibility check rejected it), since
+        # "feasible" would then assert a feasible point we do not have.
+        result.status = "feasible" if result.objective is not None and result.x else "unknown"
+    return result
+
+
 @functools.lru_cache(maxsize=1)
 def solve_model_accepted_kwargs() -> frozenset[str]:
     """The complete set of keyword names ``Model.solve`` may forward to the solver.
@@ -7259,27 +7309,14 @@ def solve_model(
             )
             # C-33/SC-1 (#998) applies here a fortiori: an opaque dm.custom body
             # cannot be inspected at all, so convexity can never be established
-            # for it — the single NLP's objective is a LOCAL optimum only.
-            # `_solve_continuous` sets bound/gap/root_bound/root_gap from the NLP's
-            # own convergence status ("a KKT point was reached"), which on a
-            # nonconvex body is routinely ABOVE the true global minimum, i.e. not a
-            # valid dual bound at all (2-D Ackley on [-25.768, 39.768] stalls at
-            # ~15.06 against a true optimum of 0, reported as bound=15.06, gap=0).
-            # Clearing gap_certified alone is not enough: `result.bound` is read
-            # directly by reports/notebooks/comparison harnesses. Keep the feasible
-            # incumbent (objective, x); strip the fabricated dual bound and gap.
-            # This only ever REMOVES a claim, so it can neither create a false
-            # optimum nor loosen a valid bound. Genuine infeasibility from
-            # `_solve_continuous` is a rigorous nonlinear-tightening / NLP-
-            # infeasibility claim, not a gap, so leave that case alone — same
-            # convention as the convexity-unknown caller below.
-            if result.status != "infeasible":
-                result.gap_certified = False
-                result.bound = None
-                result.root_bound = None
-                result.gap = None
-                result.root_gap = None
-            return result
+            # for it — the single NLP's objective is a LOCAL optimum only, and
+            # `_solve_continuous`'s bound/gap/status describe NLP convergence, not
+            # global optimality (2-D Ackley on [-25.768, 39.768] stalls at ~15.06
+            # against a true optimum of 0, reported as bound=15.06, gap=0,
+            # status="optimal"). Clearing gap_certified alone is not enough:
+            # `result.bound` is read directly by reports/notebooks/comparison
+            # harnesses. Keep the feasible incumbent, withhold the certificate.
+            return _withhold_local_optimality_certificate(result)
         logger.info(
             "Model contains a dm.custom(...) function that traces soundly through "
             "MCBox — solving GLOBALLY via the reduced-space engine (branching on the "
@@ -7771,17 +7808,12 @@ def solve_model(
             # the local objective) is a FALSE optimality certificate (a nonconvex
             # double-well returned obj=-50 certified while the true min was -78).
             # Withhold the certificate: keep the feasible incumbent (objective, x)
-            # but strip the fabricated dual bound/gap and mark it uncertified. Do
-            # NOT weaken this into "trust the NLP" — refuse to certify (CLAUDE.md
-            # §1, §3). Genuine infeasibility from _solve_continuous is a rigorous
+            # but strip the fabricated dual bound/gap, downgrade the NLP-convergence
+            # "optimal" to the honest "feasible", and mark it uncertified. Do NOT
+            # weaken this into "trust the NLP" — refuse to certify (CLAUDE.md §1,
+            # §3). Genuine infeasibility from _solve_continuous is a rigorous
             # nonlinear-tightening / NLP-infeasibility claim, not a gap, so leave it.
-            if _cont_result.status != "infeasible":
-                _cont_result.gap_certified = False
-                _cont_result.bound = None
-                _cont_result.root_bound = None
-                _cont_result.gap = None
-                _cont_result.root_gap = None
-            return _cont_result
+            return _withhold_local_optimality_certificate(_cont_result)
         logger.info(
             "Local NLP on convexity-unknown continuous model returned error; "
             "falling back to spatial Branch-and-Bound (issue #266)"

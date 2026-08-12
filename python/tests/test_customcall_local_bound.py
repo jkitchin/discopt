@@ -78,6 +78,10 @@ def _assert_no_fabricated_bound(r, label):
     assert r.root_bound is None, f"{label}: fabricated root bound {r.root_bound!r}"
     assert r.gap is None, f"{label}: fabricated gap {r.gap!r}"
     assert r.root_gap is None, f"{label}: fabricated root gap {r.root_gap!r}"
+    # "optimal" from a local NLP means only "the NLP converged". With an
+    # incumbent in hand the honest verdict is "feasible": a feasible point was
+    # found, global optimality was not proved.
+    assert r.status == "feasible", f"{label}: local solution reported as {r.status!r}"
 
 
 def _assert_bound_is_valid(r, label):
@@ -132,6 +136,7 @@ def test_customcall_and_algebraic_paths_agree():
     assert (r_opaque.root_bound is None) == (r_algebraic.root_bound is None)
     assert (r_opaque.root_gap is None) == (r_algebraic.root_gap is None)
     assert r_opaque.gap_certified == r_algebraic.gap_certified
+    assert r_opaque.status == r_algebraic.status
 
 
 @pytest.mark.smoke

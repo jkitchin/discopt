@@ -109,7 +109,10 @@ class TestLocalSolve:
         m.minimize(f(x))
 
         result = m.solve()
-        assert result.status == "optimal"
+        # The local NLP proves a feasible point, not a global optimum (#998), so
+        # the honest verdict is "feasible" with no bound/gap.
+        assert result.status == "feasible"
+        assert result.bound is None and result.gap is None
         np.testing.assert_allclose(result.x["x"], np.asarray(target), atol=1e-4)
         assert result.gap_certified is False
 
@@ -152,7 +155,9 @@ class TestLocalSolve:
         m.minimize(opaque(x) + (x - 1.0) ** 2)
 
         result = m.solve()
-        assert result.status == "optimal"
+        # Local NLP path ⇒ feasible point, no global certificate (#998).
+        assert result.status == "feasible"
+        assert result.bound is None and result.gap is None
         # Verify the reported point is a stationary point of the true objective:
         # d/dx [sin^2(x) + (x-1)^2] = sin(2x) + 2(x-1) = 0.
         xv = float(result.x["x"])
