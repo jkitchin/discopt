@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import pkgutil
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -78,6 +79,7 @@ _STATUS_MAP = {
     "maxiterations": SolveStatus.TIME_LIMIT,
     "error": SolveStatus.ERROR,
 }
+
 
 @dataclass
 class GDPModelSpec:
@@ -299,10 +301,47 @@ class ModelRun:
     minimize: bool
     oracle_objective: float | None = None
     oracle_source: str | None = None  # "highs" | "scip" | "reference" | None
+    # True when the objective came from a point that ended at a non-feasible
+    # status (e.g. ``time_limit``) and was feasibility-verified before reporting.
+    # Such an incumbent must face the same oracle cross-check as any other.
+    incumbent_verified: bool = False
     # Soundness flags — any True is a hard failure (never mask these).
     false_optimum: bool = False  # certified optimal but disagrees with oracle
     bound_crosses: bool = False  # dual bound on the wrong side of the oracle
     note: str = ""
+
+
+def _decide_objective(
+    status: SolveStatus,
+    candidate: float | None,
+    violation: float | None,
+) -> tuple[float | None, bool]:
+    """Decide what objective to report for a run, and whether it needed verifying.
+
+    Returns ``(objective, incumbent_verified)``.
+
+    A run that ends at the time limit can still carry a real incumbent: the discopt
+    pyomo bridge loads the solution whenever ``result.x`` is set, regardless of
+    termination condition, so the point is sitting in the model. Discarding it on
+    the status alone under-reports the primal — measured on cstr, discopt exits
+    ``time_limit`` having found 3.3700327 (violation 1.6e-06, inside this file's
+    own ``_ORACLE_FEAS_TOL``) and the sweep recorded "no incumbent".
+
+    Such a point is reported ONLY if it verifies feasible in the real pyomo model,
+    by the same standard applied to an oracle incumbent. An unevaluable or
+    incompletely-loaded solution returns ``None`` and stays unreported — never
+    treated as OK. Note the incumbent is genuinely absent, not merely unreported,
+    on syngas and batch_processing, where no point is loaded at all.
+
+    ``incumbent_verified`` is what re-arms the soundness checks: ``is_feasible`` is
+    OPTIMAL|FEASIBLE only, so without it a reported time-limit objective would slip
+    past the impossible-incumbent test (``CLAUDE.md`` §1).
+    """
+    if status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE):
+        return candidate, False
+    if candidate is not None and violation is not None and violation <= _ORACLE_FEAS_TOL:
+        return candidate, True
+    return None, False
 
 
 def solve_model(
@@ -371,15 +410,13 @@ def solve_model(
 
     tc = str(res.solver.termination_condition).lower()
     status = _STATUS_MAP.get(tc, SolveStatus.UNKNOWN)
-    objective = (
-        _objective_value(model)
-        if status
-        in (
-            SolveStatus.OPTIMAL,
-            SolveStatus.FEASIBLE,
-        )
-        else None
+    candidate = _objective_value(model)
+    violation = (
+        None
+        if status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
+        else _max_constraint_violation(model)
     )
+    objective, incumbent_verified = _decide_objective(status, candidate, violation)
     bound = _problem_bound(res, minimize)
     nodes = _node_count(res)
 
@@ -399,6 +436,7 @@ def solve_model(
         discopt=discopt_result,
         is_linear=is_linear,
         minimize=minimize,
+        incumbent_verified=incumbent_verified,
     )
     if oracle:
         _attach_oracle(run, spec, method, time_limit)
@@ -633,10 +671,13 @@ def _assess(run: ModelRun) -> None:
     abs_tol, rel_tol = 1e-4, 1e-3
     tol = abs_tol + rel_tol * abs(opt)
 
-    if r.is_feasible and r.objective is not None:
-        beats_oracle = (
-            (run.minimize and r.objective < opt - tol)
-            or (not run.minimize and r.objective > opt + tol)
+    # ``is_feasible`` is OPTIMAL|FEASIBLE only, so a verified incumbent reported
+    # from a ``time_limit`` run would otherwise skip the impossible-incumbent test
+    # below — the single most dangerous check here. Reporting that incumbent
+    # without widening this gate would have created an unchecked path.
+    if (r.is_feasible or run.incumbent_verified) and r.objective is not None:
+        beats_oracle = (run.minimize and r.objective < opt - tol) or (
+            not run.minimize and r.objective > opt + tol
         )
         disagrees = abs(r.objective - opt) > tol
         if beats_oracle:
@@ -683,8 +724,26 @@ def run_suite(config: GDPLibSuiteConfig) -> tuple[BenchmarkResults, list[ModelRu
             results.add_result(run.discopt)
             runs.append(run)
             _print_run(run)
-    _print_summary(runs)
+    _print_summary(runs, oracle_enabled=config.oracle)
     return results, runs
+
+
+def sweep_is_vacuous(runs: list[ModelRun], oracle_enabled: bool) -> bool:
+    """True when a sweep that was *meant* to verify something verified nothing.
+
+    ``CLAUDE.md`` §6: every soundness check here is gated on ``oracle_objective is
+    not None`` (see :func:`_assess`, which returns early without it). If no run
+    acquires an oracle -- every model errored on build, every model was skipped by
+    ``--max-variables``, or no oracle backend is installed -- then zero comparisons
+    execute, ``violations`` is trivially 0, and the sweep reports "no soundness
+    violations" while having verified nothing. That is a no-op wearing a pass, so
+    the caller must fail on it instead.
+
+    ``--no-oracle`` is the one honest way to check nothing, so it is exempt.
+    """
+    if not oracle_enabled:
+        return False
+    return not any(r.oracle_objective is not None for r in runs)
 
 
 def _print_run(run: ModelRun) -> None:
@@ -708,7 +767,7 @@ def _print_run(run: ModelRun) -> None:
         print(f"      · {run.note}")
 
 
-def _print_summary(runs: list[ModelRun]) -> None:
+def _print_summary(runs: list[ModelRun], oracle_enabled: bool = True) -> None:
     n = len(runs)
     solved = sum(1 for r in runs if r.discopt.is_solved)
     feasible = sum(1 for r in runs if r.discopt.is_feasible)
@@ -721,8 +780,14 @@ def _print_summary(runs: list[ModelRun]) -> None:
     print(f"oracle-checked={checked} | INCORRECT={incorrect} | bound-crossings={bound_bad}")
     if incorrect or bound_bad:
         print("  ✗ SOUNDNESS VIOLATIONS — see flagged runs above (incorrect_count must be 0)")
+    elif sweep_is_vacuous(runs, oracle_enabled):
+        # Never let "verified nothing" print as "verified clean" (CLAUDE.md §6).
+        print("  ✗ VACUOUS SWEEP — oracle-checked=0: zero comparisons executed, so")
+        print("    'no violations' means 'nothing was checked', not 'nothing is wrong'.")
+    elif not oracle_enabled:
+        print("  — oracle disabled (--no-oracle): no soundness claim is made")
     else:
-        print("  ✓ no soundness violations among oracle-checked runs")
+        print(f"  ✓ no soundness violations across {checked} oracle-checked runs")
     print("=" * 68)
 
 
@@ -779,7 +844,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote results to {args.output}")
     # Nonzero exit on any soundness violation so CI can gate on it.
     violations = sum(1 for r in runs if r.false_optimum or r.bound_crosses)
-    return 1 if violations else 0
+    if violations:
+        return 1
+    if sweep_is_vacuous(runs, config.oracle):
+        # §6: a sweep that executed zero comparisons must not exit green.
+        print(
+            "FAIL: oracle-checked=0 — this sweep verified nothing. Install an oracle "
+            "(highspy for the linear subset, GAMS/SCIP for the nonlinear one), widen "
+            "--max-variables, or pass --no-oracle to say so deliberately.",
+            file=sys.stderr,
+        )
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

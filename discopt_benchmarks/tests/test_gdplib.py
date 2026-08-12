@@ -315,11 +315,117 @@ def test_assess_feasible_worse_is_not_flagged():
     assert run.false_optimum is False
 
 
+def test_verified_time_limit_incumbent_still_faces_the_impossible_check():
+    """A reported time-limit incumbent must NOT bypass the false-primal check.
+
+    ``SolveResult.is_feasible`` is OPTIMAL|FEASIBLE only, so once a verified
+    incumbent from a ``time_limit`` run is reported, the impossible-incumbent
+    test — the most dangerous check in this file — would skip it unless the gate
+    widens too. Reporting without this is an unchecked path (``CLAUDE.md`` §1).
+    """
+    run = _make_run(SolveStatus.TIME_LIMIT, 9.0, minimize=True, oracle=10.0)
+    run.incumbent_verified = True
+    gr._assess(run)
+    assert run.false_optimum is True
+    assert "IMPOSSIBLE INCUMBENT" in run.note
+
+
+def test_unverified_time_limit_objective_is_not_assessed_as_an_incumbent():
+    """Without verification the run carries no objective, so nothing is claimed.
+
+    This pins the pairing: an objective is reported ONLY when verified, and
+    verification is exactly what subjects it to the oracle check above.
+    """
+    run = _make_run(SolveStatus.TIME_LIMIT, None, minimize=True, oracle=10.0)
+    assert run.incumbent_verified is False
+    gr._assess(run)
+    assert run.false_optimum is False
+
+
+def test_time_limit_incumbent_is_reported_only_when_it_verifies():
+    """The production reporting rule: verified -> reported, unverified -> withheld.
+
+    Measured motivation: on cstr discopt exits ``time_limit`` having found
+    3.3700327 with a scale-normalized violation of 1.6e-06 — inside this file's
+    own ``_ORACLE_FEAS_TOL`` — and the sweep recorded "no incumbent".
+    """
+    tl = SolveStatus.TIME_LIMIT
+
+    # cstr's real numbers: inside tolerance -> reported, and flagged for re-check.
+    assert gr._decide_objective(tl, 3.3700327, 1.6294483888765542e-06) == (3.3700327, True)
+    # Outside tolerance -> withheld, never reported as an incumbent.
+    assert gr._decide_objective(tl, 3.3700327, 1e-3) == (None, False)
+    # Unevaluable / incompletely loaded solution -> withheld, never treated as OK.
+    assert gr._decide_objective(tl, 3.37, None) == (None, False)
+    assert gr._decide_objective(tl, None, 0.0) == (None, False)
+    # A genuinely feasible run is untouched by all of this: reported, and not
+    # marked verified because ``is_feasible`` already arms every soundness check.
+    assert gr._decide_objective(SolveStatus.OPTIMAL, 3.06201, None) == (3.06201, False)
+    assert gr._decide_objective(SolveStatus.FEASIBLE, 3.06201, None) == (3.06201, False)
+
+
 def test_assess_flags_bound_crossing_min():
     """A min-sense dual bound above the optimum would fathom it -> crossing."""
     run = _make_run(SolveStatus.TIME_LIMIT, None, minimize=True, oracle=10.0, bound=10.5)
     gr._assess(run)
     assert run.bound_crosses is True
+
+
+def test_sweep_with_no_oracle_acquired_is_vacuous():
+    """§6: zero executed comparisons must not read as a clean sweep."""
+    runs = [_make_run(SolveStatus.TIME_LIMIT, None, oracle=None)]
+    assert gr.sweep_is_vacuous(runs, oracle_enabled=True) is True
+
+
+def test_sweep_with_one_oracle_is_not_vacuous():
+    """A single executed comparison is enough to make the verdict non-vacuous."""
+    runs = [
+        _make_run(SolveStatus.TIME_LIMIT, None, oracle=None),
+        _make_run(SolveStatus.OPTIMAL, 10.0, oracle=10.0),
+    ]
+    assert gr.sweep_is_vacuous(runs, oracle_enabled=True) is False
+
+
+def test_no_oracle_mode_is_exempt_from_vacuity():
+    """--no-oracle is an honest declaration that nothing is being checked."""
+    runs = [_make_run(SolveStatus.TIME_LIMIT, None, oracle=None)]
+    assert gr.sweep_is_vacuous(runs, oracle_enabled=False) is False
+
+
+def test_main_exits_nonzero_on_a_vacuous_sweep(monkeypatch, capsys):
+    """The CLI must fail, not pass, when it verified nothing (CLAUDE.md §6).
+
+    Before this guard, ``violations == 0`` was the only exit criterion, so a sweep
+    in which every model errored or was skipped exited 0 and printed a checkmark.
+    """
+    vacuous = [_make_run(SolveStatus.ERROR, None, oracle=None)]
+
+    def _fake_run_suite(config):
+        from benchmarks.metrics import BenchmarkResults
+
+        return BenchmarkResults(suite="gdplib", timestamp="now"), vacuous
+
+    monkeypatch.setattr(gr, "run_suite", _fake_run_suite)
+    monkeypatch.setattr(gr, "is_available", lambda: True)
+
+    rc = gr.main(["--models", "jobshop"])
+    assert rc == 3, "a sweep that executed zero oracle comparisons must not exit 0"
+    assert "oracle-checked=0" in capsys.readouterr().err
+
+
+def test_main_exits_zero_when_no_oracle_requested(monkeypatch):
+    """--no-oracle is deliberate, so it stays a clean exit."""
+    runs = [_make_run(SolveStatus.TIME_LIMIT, None, oracle=None)]
+
+    def _fake_run_suite(config):
+        from benchmarks.metrics import BenchmarkResults
+
+        return BenchmarkResults(suite="gdplib", timestamp="now"), runs
+
+    monkeypatch.setattr(gr, "run_suite", _fake_run_suite)
+    monkeypatch.setattr(gr, "is_available", lambda: True)
+
+    assert gr.main(["--models", "jobshop", "--no-oracle"]) == 0
 
 
 @pytest.mark.slow
