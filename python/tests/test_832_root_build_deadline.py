@@ -94,10 +94,29 @@ def test_832_flag_byte_identical_on_normal_instance(monkeypatch, inst):
     p = _INREPO / f"{inst}.nl"
     if not p.exists():
         pytest.skip(f"{inst}.nl absent")
+    # The premise — "the base build finishes before the deadline" — has to be
+    # PROVEN, not assumed. With the default 3 s grant it silently stopped holding
+    # for casctanks under the `--cov` job (coverage instruments every Python
+    # bytecode, and the base build is Python-bound): the grant bound, the ON arm
+    # truncated to a weaker-but-sound relaxation, and the arms diverged legitimately
+    # (`None` vs `0.0`) on a test whose whole point is that they must not. That is a
+    # broken premise reported as a soundness failure. Verified on the identical
+    # commit: a rerun of run 31563343233's failed coverage job passed.
+    #
+    # So: a grant far larger than the build, and an assertion that it did not bind.
+    # If a build ever does exceed it, this fails loudly with the measured time
+    # rather than silently comparing two different code paths.
+    grant = 60.0
     monkeypatch.setenv("DISCOPT_ROOT_BUILD_DEADLINE", "0")
-    val_off, _ = _fallback(p)
+    val_off, dt_off = _fallback(p, budget=grant)
     monkeypatch.setenv("DISCOPT_ROOT_BUILD_DEADLINE", "1")
-    val_on, _ = _fallback(p)
+    val_on, dt_on = _fallback(p, budget=grant)
+    assert max(dt_off, dt_on) < grant, (
+        f"{inst}: premise broken — a build took {max(dt_off, dt_on):.1f}s of its "
+        f"{grant:.0f}s grant, so the deadline BOUND and the two arms are no longer "
+        "comparing the same relaxation. This test cannot say anything about "
+        "byte-identity here; raise the grant or drop the instance."
+    )
     if val_off is None or val_on is None:
         assert val_off is val_on, f"{inst}: one side None, other not ({val_off} vs {val_on})"
     else:

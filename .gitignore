@@ -111,9 +111,13 @@ scratchpad/**/*.out
 # tracked; ``_issue966_yield_fix_worker.py`` is re-emitted on every run.
 scratchpad/_*_worker.py
 
-# LLVM/Rust coverage artifacts — `cargo test` with instrumentation drops these
-# in the working dir. Six of them (~10 MB) were committed by accident in #904.
+# LLVM raw coverage profiles. `cargo llvm-cov`/`RUSTFLAGS=-Cinstrument-coverage`
+# drop these in whatever directory the binary ran from, so a Rust coverage run at
+# the repo root litters it with `default_<hash>_<n>_<pid>.profraw`. Six of them
+# (9.8 MB) were committed by accident in c55db7d4; they are build output, never
+# source. The `.profdata` form is the merged artifact from the same tooling.
 *.profraw
+*.profdata
 
 # Benchmark-panel outputs written to the repo root. Same rule as the scratchpad
 # block above: keep the harness (`discopt_benchmarks/scripts/*.py`), drop what it

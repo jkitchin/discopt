@@ -479,10 +479,99 @@ def _lp_warm_deadline_enabled() -> bool:
     ``discopt_benchmarks/results/issue928_*.json``). Fixing THAT is caller-side
     budget accounting — a different seam with its own issue; this flag stays OFF
     until it lands and a re-run panel passes both bars.
+
+    **Update 2026-08-12: the isolating panel PASSES both bars, and the flag STILL
+    stays OFF — blocked by a defect the panel cannot see.** Read the panel result
+    below, then the blocker at the end; the blocker is what decides it.
+
+    Every panel above shares one defect: no arm ever carried this flag *alone*.
+    ``f2565241``'s arms are ``base``
+    (all OFF) / ``seam`` (#966's two ON, this one OFF) / ``cand`` (all three), so
+    ``cand - seam`` isolates this flag only under the counterfactual that #966's two
+    are ON — and #966's own panel kept them OFF. The §14d bar-1 failure was already
+    attributed to the ROUND budget rather than to here (``seam vs base`` loses tspn12's
+    incumbent too, ``cand vs seam`` loses none), which is a hypothesis the three-arm
+    design cannot itself test. The missing arm was run: ``base`` vs ``warm``
+    (``DISCOPT_LP_WARM_DEADLINE=1``, the other two explicitly ``0``), 19 binding
+    instances, 20 s, arms interleaved per instance in isolated subprocesses
+    (``issue928_rate_score.py``, ``results/issue928_warmalone20_rep{1,2,3}.json``).
+
+    *Bar 1 — PASS.* 0 unsound / 0 incumbent-verification failures / 0 certification
+    regressions / 0 lost incumbents / 0 lost bounds, in 3/3 reps, over **96 executed
+    oracle comparisons** against ``minlplib.solu`` (the earlier container runs reached
+    1 of 19 instances via the narrow ``_optima`` fallback, so their soundness line
+    rested on almost nothing). The §14d tspn12 incumbent loss does NOT recur without
+    the round budget, which confirms that attribution.
+
+    *Bar 2 — PASS.* Wall: overrun delta -2.6 / -1.0 / -0.3 s, negative in 3/3 (total
+    overrun 6.5/4.8/4.0 s -> 3.9/3.8/3.7 s); the sign no longer flips with budget.
+    Nodes: 4647 -> 4611, neutral. Bound: the two cells that move are both stable
+    GAINS — hda ``-2.07e13 -> -64473.44`` in 3/3 (identical to 8 digits; the base
+    arm's value is not a usable bound at all) and heatexch_gen1 ``46750/44196 ->
+    49000``, where the ON arm is also the reproducible one. The three cells scored
+    "looser" are the known timing-nondeterministic class: tspn10 by 6e-8 relative,
+    and tspn08/tspn12 flip direction between reps *in both arms* (the base arm alone
+    reports tspn12 as 202.181 in two reps and 202.418 in the third) — the
+    nvs05/clay0303hfsg signature recorded above, not a flag effect.
+
+    Scored by per-cell RATE over reps, not one-shot: the bar-1 failures that kept this
+    flag OFF in earlier panels (nvs05, tls2, syn05hfsg, casctanks) are cells *neither*
+    arm holds reliably, and one-shot scoring cannot separate a flag effect from a race.
+    Deviation from the pre-registration, recorded per §11: it fixed 5 reps and 3 were
+    run (the run was cut short); the regression margin is 2 of 3, proportionally at or
+    above the pre-registered 3 of 5.
+
+    **THE BLOCKER (now fixed) — an exhausted budget was indistinguishable from "no
+    limit".** The default was flipped ON on the strength of the panel above and
+    immediately retracted (§11): ``pytest -m smoke`` failed
+    ``test_amp_integration.py::TestAmpConvergenceProperties::test_time_limit_respected``,
+    which asserts ``solve(solver="amp", time_limit=3.0)`` returns within 8 s. A/B on
+    that single test, same tree: ``DISCOPT_LP_WARM_DEADLINE=0`` **passes in 3.43 s**,
+    ``=1`` **runs past 350 s** (killed) — a >100x regression on a *time-limit* test,
+    the exact inverse of this flag's purpose.
+
+    Faulthandler puts the hang in the MILP branch, not the pure-LP path this flag
+    gates: ``_solve_amp_impl`` -> ``_solve_milp_with_oa_recovery`` ->
+    :meth:`MilpRelaxationModel.solve` -> ``milp_simplex.solve_milp``. The mechanism is
+    the shared-budget seam above. With the flag ON, ``solve_milp`` is handed
+    ``time_limit=_remaining()``; once the warm and equilibrated attempts have spent the
+    caller's budget, ``_remaining()`` is exactly ``0.0``. And ``milp_simplex.py``'s call
+    site reads::
+
+        time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit))
+
+    ``None`` (no limit) and ``0.0`` (budget gone) collapse onto the SAME wire value, so
+    the Rust MILP B&B launches unbounded precisely when it should not start at all.
+    Flag OFF never reaches it because each attempt gets a fresh copy of the duration
+    and ``_remaining()`` is never 0. This is the same sentinel trap as ``INF = 1e20``
+    in the LP layer, one level up, and it is general — AMP only reaches it reliably
+    because it solves with a tight limit after other attempts have run.
+
+    It also retro-explains the "sporadic severe modes" recorded in §14b (contvar
+    500.6 s, bchoco08 80.9 s against a 20 s budget): those are the same unbounded
+    MILP launch, not a diffuse budget-accounting problem.
+
+    **The seam is fixed and this flag is now ON by default.** ``solve_milp_py`` /
+    ``solve_milp_csc_py`` take ``Option<f64>``; ``None``/``+inf`` mean no limit and
+    ``Some(0.0)`` is an already-elapsed deadline that stops at the first poll with
+    ``gap_certified = false``. See ``parse_budget_secs`` in ``lp_bindings.rs`` and
+    ``python/tests/test_928_expired_budget_not_unlimited.py``. Re-verified with the
+    flag ON after that fix: the AMP case that forced the retraction passes in 3.39 s
+    (was >350 s), ``pytest -m smoke`` is 958 passed / 1 skipped / 2 xpassed — byte-
+    identical to the OFF arm — the adversarial suite is 10 passed, and
+    ``test_time_limit_contract.py`` is 3 passed + 1 XPASS, the xpass being the
+    ``hda`` 10 s case this flag exists to fix.
+
+    One caveat on the panel above, in the conservative direction: it was run with the
+    seam still present, so the ON arm's wall times *included* those unbounded MILP
+    launches. Bar 2 passed carrying that handicap, so the fix can only have improved
+    the margin it was graduated on.
+
+    The ``=0`` opt-out and the legacy no-deadline path are unchanged.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
         "0",
         "",
         "false",

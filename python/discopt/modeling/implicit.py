@@ -10,11 +10,12 @@ so we never differentiate through the Newton iterations.
 
 This rides entirely on :class:`~discopt.modeling.core.CustomCall`: the returned
 node is opaque and AD-only, so a model containing an implicit node is solved on
-the **local NLP path only** (no global optimality certificate) and the solver
-raises if integer/binary variables are present -- exactly the CustomCall
-contract.  It is the core-side primitive that lets reduced-space / variable
-aggregation eliminate an irreducible *cyclic* block ``g_B(u, v_B) = 0`` instead
-of leaving its variables in the reduced model.
+the **local NLP path only** (no global optimality certificate: ``status``
+``"feasible"``, no ``bound``/``gap``) and the solver raises if integer/binary
+variables are present -- exactly the CustomCall contract.  It is the core-side
+primitive that lets reduced-space / variable aggregation eliminate an irreducible
+*cyclic* block ``g_B(u, v_B) = 0`` instead of leaving its variables in the
+reduced model.
 
 Prototype for #379 -- API and scope may still change.
 """

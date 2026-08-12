@@ -178,7 +178,7 @@ A third defect was in the *panel*, not the code: the symmetric boxes described
 above. Recorded because it is the same failure mode as Dev-Philosophy #6 — an
 instrument that appears to measure and does not.
 
-## Also observed — filed as #998, fixed separately
+## Also observed — filed as #998, since **fixed**
 
 At the time of this run, discopt's existing local path returned
 `status="optimal"` with `bound = objective` for a non-MCBox `CustomCall` model,
@@ -188,15 +188,25 @@ same mathematics written algebraically correctly returned `bound=None`, because
 the C-33/SC-1 fix had been applied to the convexity-unknown caller but not to
 the `CustomCall` one.
 
-**Filed as [#998](https://github.com/jkitchin/discopt/issues/998) and being fixed
-independently of this work** — so the arm-A `bound` values described above are a
-snapshot of pre-#998 behaviour, not current behaviour. The panel comparison
-itself is unaffected: it compares `objective`, never `bound`, and the probe's
-soundness check watches `gap_certified`, which was correct throughout.
+Filed as [#998](https://github.com/jkitchin/discopt/issues/998) and **fixed by
+[#999](https://github.com/jkitchin/discopt/pull/999)** (C-42), which strips the
+fabricated `bound`/`gap`/`root_bound`/`root_gap` and additionally reports
+`status="feasible"` rather than `"optimal"` — going further than the issue
+proposed, which had flagged the status question as separable. Verified against
+the merged fix:
 
-It is, separately, the reason the DIRECT backend's own contract (§1.4 of the
-plan) is deliberately stricter: `bound=None`, `status="feasible"`, never
-`"optimal"`.
+```text
+status = feasible   objective = 15.06351400512647   bound = None
+gap    = None       root_bound = None               gap_certified = False
+```
+
+So the arm-A `bound` values described in this record are a snapshot of pre-#998
+behaviour. The panel comparison itself is unaffected: it compares `objective`,
+never `bound`, and the probe's soundness check watches `gap_certified`, which was
+correct throughout.
+
+With #999 merged, the local path's contract and the DIRECT backend's contract now
+agree — no bound, no gap, and a status that does not read as a proof.
 
 ## Decision
 
