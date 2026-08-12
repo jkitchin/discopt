@@ -1,0 +1,228 @@
+QPLIB_3814
+QMQ
+minimize
+48 # number of variables
+41 # number of constraints
+8 # number of quadratic terms in objective
+3 1 0.0187028
+4 1 0.0154616
+15 1 -0.0011438
+16 1 0.0085312
+5 2 0.0676294
+6 2 0.0746698
+17 2 0.0032742
+18 2 0.0577992
+0.0 # default value for linear coefficients in objective
+4 # number of non-default linear coefficients in objective
+1 -0.0139904
+2 -0.0661588
+7 0.23947
+8 0.75835
+0.0 # objective constant
+50 # number of quadratic terms in all constraints
+14 42 31 -2.0
+15 43 31 -2.0
+16 44 31 -2.0
+17 39 27 -2.0
+18 40 27 -2.0
+19 41 27 -2.0
+20 37 23 -2.0
+20 39 26 -2.0
+21 38 23 -2.0
+21 40 26 -2.0
+22 41 26 -2.0
+23 42 30 -2.0
+24 43 30 -2.0
+24 45 34 -2.0
+25 44 30 -2.0
+25 46 34 -2.0
+26 37 24 2.0
+26 39 28 2.0
+26 42 32 2.0
+27 38 24 2.0
+27 40 28 2.0
+27 43 32 2.0
+27 45 35 2.0
+28 41 28 2.0
+28 44 32 2.0
+28 46 35 2.0
+29 37 25 2.0
+29 39 29 2.0
+29 42 33 2.0
+30 38 25 2.0
+30 40 29 2.0
+30 43 33 2.0
+30 45 36 2.0
+31 41 29 2.0
+31 44 33 2.0
+31 46 36 2.0
+32 15 1 2.0
+33 16 1 2.0
+34 47 1 2.0
+35 17 2 2.0
+36 18 2 2.0
+37 48 2 2.0
+38 9 3 2.0
+38 37 23 -2.0
+39 10 4 2.0
+39 40 26 -2.0
+40 13 5 2.0
+40 43 30 -2.0
+41 14 6 2.0
+41 46 34 -2.0
+68 # number of linear terms in all constraints
+1 19 1.0
+1 20 1.0
+1 21 1.0
+1 22 1.0
+2 23 1.0
+2 24 -1.0
+2 25 -1.0
+3 26 1.0
+3 27 -1.0
+3 28 -1.0
+3 29 -1.0
+4 30 1.0
+4 31 -1.0
+4 32 -1.0
+4 33 -1.0
+5 34 1.0
+5 35 -1.0
+5 36 -1.0
+6 37 1.0
+6 38 1.0
+7 39 1.0
+7 40 1.0
+7 41 1.0
+8 42 1.0
+8 43 1.0
+8 44 1.0
+9 45 1.0
+9 46 1.0
+10 15 1.0
+10 16 1.0
+10 47 1.0
+11 17 1.0
+11 18 1.0
+11 48 1.0
+12 1 1.0
+12 7 -300.0
+13 2 1.0
+13 8 -300.0
+14 9 1.0
+14 19 -0.3333333333
+15 10 1.0
+15 19 -0.3333333333
+16 11 1.0
+16 19 -0.3333333333
+17 12 1.0
+17 20 -0.3333333333
+18 13 1.0
+18 20 -0.3333333333
+19 14 1.0
+19 20 -0.3333333333
+20 9 1.0
+21 10 1.0
+22 11 1.0
+23 12 1.0
+24 13 1.0
+25 14 1.0
+26 21 0.3333333333
+27 21 0.3333333333
+28 21 0.3333333333
+29 22 0.3333333333
+30 22 0.3333333333
+31 22 0.3333333333
+32 9 -1.0
+33 10 -1.0
+34 11 -1.0
+35 12 -1.0
+36 13 -1.0
+37 14 -1.0
+1.79769313486232E+308 # value for infinity
+0.0 # default left-hand-side value
+15 # number of non-default left-hand-sides
+1 300.0
+6 1.0
+7 1.0
+8 1.0
+9 1.0
+10 1.0
+11 1.0
+12 -1.79769313486232E+308
+13 -1.79769313486232E+308
+26 80.0
+27 30.0
+28 20.0
+29 20.0
+30 70.0
+31 80.0
+0.0 # default right-hand-side value
+13 # number of non-default right-hand-sides
+1 300.0
+6 1.0
+7 1.0
+8 1.0
+9 1.0
+10 1.0
+11 1.0
+26 80.0
+27 30.0
+28 20.0
+29 20.0
+30 70.0
+31 80.0
+0.0 # default variable lower bound value
+4 # number of non-default variable lower bounds
+3 0.85
+4 0.85
+5 0.85
+6 0.85
+300.0 # default variable upper bound value
+30 # number of non-default variable upper bounds
+3 1.0
+4 1.0
+5 1.0
+6 1.0
+7 1.0
+8 1.0
+9 100.0
+10 100.0
+11 100.0
+12 100.0
+13 100.0
+14 100.0
+15 1.0
+16 1.0
+17 1.0
+18 1.0
+21 1.79769313486232E+308
+22 1.79769313486232E+308
+37 1.0
+38 1.0
+39 1.0
+40 1.0
+41 1.0
+42 1.0
+43 1.0
+44 1.0
+45 1.0
+46 1.0
+47 1.0
+48 1.0
+0 # default variable type
+2 # number of non-default variable types
+7 1
+8 1
+0.0 # default variable primal value in starting point
+4 # number of non-default variable primal values in starting point
+3 0.85
+4 0.85
+5 0.85
+6 0.85
+0.0 # default constraint dual value in starting point
+0 # number of non-default constraint dual values in starting point
+0.0 # default variable bound dual value in starting point
+0 # number of non-default variable bound dual values in starting point
+0 # number of non-default variable names
+0 # number of non-default constraint names
