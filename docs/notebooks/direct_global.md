@@ -261,6 +261,33 @@ measure 571 vs 8793 on Hartman-6, and 2967 vs 425 on Shubert). With no way to kn
 in advance which kind of problem you have, the more predictable rule is the safer
 default.
 
+## Parallel evaluation
+
+Within an iteration, every sample point is independent — so they can all be
+evaluated at once. `n_jobs` is the lever that matters when an evaluation is slow:
+
+```python
+r = build().solve(solver="direct", max_evals=900, n_jobs=4)
+```
+
+On a deliberately slow objective (50 ms per evaluation), a 200-evaluation run
+takes 10.0 s serially and 1.9 s on 8 threads. Even on a cheap JAX objective the
+gain is real, because JAX releases the GIL: a 900-evaluation run drops from
+1.55 s to 0.51 s on 4 threads.
+
+```{important}
+`n_jobs` changes the wall clock and **nothing else**. A run with `n_jobs=8` is
+*identical* to `n_jobs=1` — same objective, same point, same partition — not
+merely equivalent. Results are collected in input order and the incumbent is
+updated in selection order, so the search trajectory does not depend on which
+evaluation finishes first.
+```
+
+Threads rather than processes, because a `dm.custom` model is not picklable. The
+speedup therefore depends on your evaluation releasing the GIL: numpy/JAX compute
+and any subprocess or I/O-bound simulator do, a pure-Python arithmetic body does
+not.
+
 ## What you do not get
 
 ```python
@@ -335,6 +362,7 @@ shape implemented here.
 | `local_refine_after` | `100` | evaluations between refinement attempts |
 | `local_refine_method` | `"auto"` | `"nlp"`, `"derivative-free"`, or auto-fallback |
 | `feasibility_tolerance` | `1e-6` | the GLce band treated as feasible |
+| `n_jobs` | `1` | threads for each iteration's samples; `-1` = all CPUs |
 
 Full citations for the works referenced above are on the {doc}`../references`
 page.

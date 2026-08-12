@@ -373,3 +373,30 @@ def test_default_path_still_certifies_an_algebraic_model():
     result = model.solve(time_limit=60.0)
     assert result.objective == pytest.approx(0.0, abs=1e-6)
     assert result.gap_certified is True, "the certified default path regressed"
+
+
+@pytest.mark.slow
+def test_n_jobs_changes_the_wall_clock_and_nothing_else():
+    """Parallel evaluation through the public API returns the identical answer.
+
+    Within an iteration DIRECT's sample points are independent, so they are
+    evaluated together; ``n_jobs`` only decides how many threads do it. The
+    result must be bit-identical, not merely close — verified here through
+    ``Model.solve`` as well as at the engine level in ``test_direct_units.py``.
+    """
+    tf = tfs.get("hartman_3")
+    runs = {}
+    for n_jobs in (1, 4):
+        result = _solve(tf, max_evals=900, n_jobs=n_jobs)
+        runs[n_jobs] = (result.objective, np.asarray(result.x["x"]).tolist())
+        stats = result.solver_stats or {}
+        assert stats.get("direct/batches", 0) > 0
+    assert runs[1] == runs[4], runs
+
+
+@pytest.mark.smoke
+def test_invalid_n_jobs_raises():
+    tf = tfs.get("sphere_2")
+    model, _ = tfs.build_model(tf)
+    with pytest.raises(ValueError, match="n_jobs"):
+        model.solve(solver="direct", n_jobs=0, max_evals=50)

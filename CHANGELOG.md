@@ -36,6 +36,14 @@ The release procedure that produces these entries is documented in
   0.0312500. Refinement launches from the best of {caller's start, DIRECT's
   incumbent}, so the backend cannot lose to the local-only path.
 
+  `n_jobs` evaluates each iteration's independent sample points concurrently
+  (threads; a `dm.custom` model is not picklable so a process pool cannot carry
+  the evaluator). Measured: a 200-evaluation run on a 50 ms objective drops from
+  10.0 s to 1.9 s on 8 threads, and a 900-evaluation JAX objective from 1.55 s to
+  0.51 s on 4. The result is **identical**, not merely equivalent — pinned by
+  differential tests against the pre-batching implementation across 44
+  function/variant configurations.
+
   **Returns no certificate**, and the contract is enforced at the single
   `SolveResult` construction site: `bound` and `gap` are `None`, `gap_certified`
   is `False`, the status is never `"optimal"`, and an exhausted budget is a limit

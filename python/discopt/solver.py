@@ -5139,6 +5139,7 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "local_refine_after",
         "local_refine_time_limit",
         "local_refine_method",
+        "n_jobs",
         "feasibility_tolerance",
     }
 )
@@ -6081,6 +6082,7 @@ def solve_model(
             "local_refine_after",
             "local_refine_time_limit",
             "local_refine_method",
+            "n_jobs",
             "feasibility_tolerance",
         ):
             if key in kwargs:
@@ -6093,7 +6095,7 @@ def solve_model(
         _ignored_direct = [
             name
             for name, differs in (
-                ("threads", threads != 1),
+                ("threads", threads != 1),  # DIRECT parallelism is n_jobs, not threads
                 ("partitions", partitions != 0),
                 ("cutting_planes", cutting_planes is not False),
                 ("mccormick_bounds", mccormick_bounds != "auto"),

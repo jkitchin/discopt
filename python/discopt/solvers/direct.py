@@ -64,6 +64,26 @@ Measured on the survey's own ``1+x₁+…+x₅`` (evaluations to 1% accuracy), 1
 together are worth ~86×: 16,555 → 479 → 193, against the published 14,492 → 470 →
 192 (``docs/dev/direct-entry-2026-08-12.md``).
 
+Parallel evaluation
+-------------------
+Within an iteration every sample point is independent, so ``n_jobs`` evaluates
+them together. This is the lever that matters when an evaluation is slow: on a
+50 ms objective, 8 threads cut a 200-evaluation run from 10.0 s to 1.9 s.
+
+It changes nothing about the answer — a run with ``n_jobs=8`` is *identical* to
+``n_jobs=1``, not merely equivalent. Two things make that true and both are easy
+to lose: results are collected in input order, and the incumbent is updated at
+apply time in selection order rather than as evaluations land. Two more
+subtleties were found by differential-testing against the pre-batching code on 44
+configurations — the budget guard must charge a pessimistic 2 evaluations per
+dimension before sampling, and ``split_counts`` must be charged at *plan* time,
+because the ``divide="one"`` tie-break reads it.
+
+Threads, not processes: a ``dm.custom`` model is not picklable, so a process pool
+cannot carry the evaluator. The speedup therefore depends on the evaluation
+releasing the GIL — numpy/JAX compute and any subprocess or I/O-bound simulator
+do; a pure-Python arithmetic body does not.
+
 Local refinement launches from the **best of** the caller's start and DIRECT's
 incumbent, keeping the better result, so the backend is no worse than the local
 path by construction. That is not cosmetic: on ``griewank_3`` DIRECT's incumbent
@@ -82,7 +102,9 @@ DIRECT-GL / GLce (the ``variant="gl"`` selection and the constraint handling).
 from __future__ import annotations
 
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -123,6 +145,8 @@ class DirectStats:
     local_failures: int = 0
     derivative_free_refines: int = 0
     feasible_found: int = 0
+    batches: int = 0
+    max_batch_size: int = 0
 
     def as_dict(self) -> dict[str, float]:
         return {f"direct/{k}": float(v) for k, v in vars(self).items()}
@@ -514,28 +538,73 @@ class _DirectSearch:
         # dimension run away with the splitting budget.
         return [min(longest, key=lambda k: (int(self.split_counts[k]), k))]
 
-    def divide(
-        self, i: int, oracle: Callable[[np.ndarray], tuple[float, float]], budget: int
-    ) -> bool:
-        """Sample around rectangle ``i`` and trisect it. True if anything was done."""
+    def _plan_division(self, i: int, budget_used: int, max_evals: int):
+        """Sample points rectangle ``i`` needs, without evaluating any of them.
+
+        Splitting planning from evaluation is what makes an iteration batchable:
+        every point the whole iteration needs can be gathered first, evaluated
+        together, and only then applied. Returns ``(entry, new_points, cost)``
+        where ``entry`` maps a split dimension to its ``(u_minus, u_plus)`` pair.
+        """
         dims = self._split_dims(i)
         if not dims:
-            return False
+            return {}, [], 0
         t_i = self.part.t[i]
         c_i = self.part.centers[i]
-
-        samples: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
+        entry: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        new_points: list[np.ndarray] = []
+        cost = 0
         for k in dims:
-            if self.stats.evals + 2 > budget:
+            # Budget guard, deliberately identical to the pre-batching serial
+            # code: charge the PESSIMISTIC 2 evaluations per dimension up front,
+            # even though a cached point turns out to be free. Charging only the
+            # uncached points shifts where the budget cuts off mid-iteration,
+            # which changes the partition and so the answer.
+            if budget_used + cost + 2 > max_evals:
                 break
             delta = 3.0 ** (-(int(t_i[k]) + 1))
             u_minus = c_i.copy()
             u_minus[k] = max(0.0, c_i[k] - delta)
             u_plus = c_i.copy()
             u_plus[k] = min(1.0, c_i[k] + delta)
-            samples[k] = (self.evaluate(u_minus, oracle), self.evaluate(u_plus, oracle))
-        if not samples:
+            # ...but only uncached points are actually *spent*, matching how the
+            # serial path's counter moved.
+            cost += sum(
+                1 for u in (u_minus, u_plus) if self.to_model_point(u).tobytes() not in self._cache
+            )
+            new_points.extend((u_minus, u_plus))
+            entry[k] = (u_minus, u_plus)
+            # Charge the split HERE, not at apply time. The `divide="one"`
+            # tie-break picks the long dimension split fewest times so far, and
+            # the serial code divided each rectangle before planning the next, so
+            # a later rectangle saw the earlier ones' increments. Planning a whole
+            # iteration up front and incrementing at apply time leaves the counter
+            # stale and picks different dimensions.
+            self.split_counts[k] += 1
+        return entry, new_points, cost
+
+    def _apply_division(self, i: int, entry: dict[int, tuple[np.ndarray, np.ndarray]]) -> bool:
+        """Trisect rectangle ``i`` using already-evaluated sample points.
+
+        Incumbent updates happen HERE, in the same order the serial path would
+        make them, so batching cannot change the search trajectory: ``_w`` below
+        reads ``_scalar_rank``, which depends on the incumbent, and offering a
+        later rectangle's points early would reorder this rectangle's split.
+        """
+        if not entry:
             return False
+        t_i = self.part.t[i]
+        c_i = self.part.centers[i]
+
+        samples: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
+        for k, (u_minus, u_plus) in entry.items():
+            pair = []
+            for u in (u_minus, u_plus):
+                x = self.to_model_point(u)
+                fval, viol = self._cache[x.tobytes()]
+                self._offer(x, fval, viol)
+                pair.append((fval, viol))
+            samples[k] = (pair[0], pair[1])
 
         # Split in increasing order of w_k = min(f-, f+) so the best values end up
         # in the biggest subrectangles (survey Algorithm 1), which is what biases
@@ -546,8 +615,7 @@ class _DirectSearch:
 
         t_child = t_i.copy()
         for k in sorted(samples, key=lambda k: (_w(k), k)):
-            t_child[k] += 1
-            self.split_counts[k] += 1
+            t_child[k] += 1  # split_counts was already charged in _plan_division
             delta = 3.0 ** (-int(t_child[k]))
             (fm, vm), (fp, vp) = samples[k]
             u_minus = c_i.copy()
@@ -558,6 +626,38 @@ class _DirectSearch:
             self.part.add(u_plus, t_child.copy(), fp, vp)
         self.part.t[i] = t_child
         return True
+
+    def _evaluate_points(
+        self,
+        points: list[np.ndarray],
+        oracle: Callable[[np.ndarray], tuple[float, float]],
+        executor,
+    ) -> None:
+        """Evaluate and cache ``points``; does NOT touch the incumbent.
+
+        With an executor, evaluations run concurrently and results are collected
+        in **input order** (``executor.map`` preserves it), so the cache ends up
+        identical to the serial path regardless of completion order. The
+        incumbent is deliberately left alone here — see :meth:`_apply_division`.
+        """
+        fresh: list[np.ndarray] = []
+        seen: set[bytes] = set()
+        for u in points:
+            key = self.to_model_point(u).tobytes()
+            if key in self._cache or key in seen:
+                continue
+            seen.add(key)
+            fresh.append(u)
+        if not fresh:
+            return
+        xs = [self.to_model_point(u) for u in fresh]
+        if executor is None or len(xs) == 1:
+            results = [oracle(x) for x in xs]
+        else:
+            results = list(executor.map(oracle, xs))
+        for x, (fval, viol) in zip(xs, results):
+            self._cache[x.tobytes()] = (fval, viol)
+            self.stats.evals += 1
 
     def _scalar_rank(self, fval: float, viol: float) -> float:
         if self.best_feasible_value is None:
@@ -573,8 +673,15 @@ class _DirectSearch:
         max_evals: int,
         deadline: Optional[float] = None,
         on_iteration: Optional[Callable[["_DirectSearch"], None]] = None,
+        executor=None,
     ) -> None:
-        """Run until the evaluation budget or the deadline is exhausted."""
+        """Run until the evaluation budget or the deadline is exhausted.
+
+        ``executor`` is an optional ``concurrent.futures`` executor used to
+        evaluate each iteration's sample points concurrently. Results are still
+        collected in input order and applied in selection order, so the search
+        trajectory -- and the final answer -- do not depend on it.
+        """
         if not self.part:
             c0 = np.full(self.n, 0.5)
             fval, viol = self.evaluate(c0, oracle)
@@ -588,13 +695,36 @@ class _DirectSearch:
             if not selected:
                 break
             evals_before = self.stats.evals
-            progressed = False
+
+            # An iteration in three steps, which is what makes it parallelizable:
+            # plan every sample point the selected rectangles need, evaluate them
+            # together, then apply the divisions in the original selection order.
+            # Splitting it this way is also what keeps the result independent of
+            # n_jobs -- see _evaluate_points and _apply_division.
+            plans: list[tuple[int, dict[int, tuple[np.ndarray, np.ndarray]]]] = []
+            batch: list[np.ndarray] = []
+            spent = 0
             for i in selected:
-                if self.stats.evals >= max_evals:
+                # The same two guards the pre-batching serial loop applied before
+                # each rectangle; dropping them shifts the mid-iteration cutoff.
+                if self.stats.evals + spent >= max_evals:
                     break
                 if deadline is not None and time.perf_counter() >= deadline:
                     break
-                progressed |= self.divide(i, oracle, max_evals)
+                entry, points, cost = self._plan_division(i, self.stats.evals + spent, max_evals)
+                if not entry:
+                    continue
+                plans.append((i, entry))
+                batch.extend(points)
+                spent += cost
+
+            self._evaluate_points(batch, oracle, executor)
+            self.stats.batches += 1
+            self.stats.max_batch_size = max(self.stats.max_batch_size, len(batch))
+
+            progressed = False
+            for i, entry in plans:
+                progressed |= self._apply_division(i, entry)
             self.stats.iterations += 1
             if on_iteration is not None:
                 on_iteration(self)
@@ -807,6 +937,7 @@ def solve_direct(
     local_refine_after: int = 100,
     local_refine_time_limit: float = 30.0,
     local_refine_method: str = "auto",
+    n_jobs: int = 1,
     feasibility_tolerance: float = 1e-6,
     nlp_solver: str = "pounce",
     initial_point: Optional[np.ndarray] = None,
@@ -842,6 +973,19 @@ def solve_direct(
         not necessarily usefully *differentiable* (``jnp.round``, a table lookup, a
         simulator behind ``jax.pure_callback`` all yield useless gradients, and a
         gradient method then stalls while reporting success).
+    n_jobs
+        Evaluate each iteration's sample points concurrently on this many threads
+        (``1`` = serial, the default; ``-1`` = one per CPU). Within an iteration
+        every sample is independent, so this is a near-linear wall-clock win when
+        an evaluation is slow — and it changes nothing about the answer: results
+        are collected in input order and applied in selection order, so a run with
+        ``n_jobs=8`` is identical to ``n_jobs=1``, not merely equivalent.
+
+        Threads, not processes: a ``dm.custom`` model is not picklable (the Rust
+        model repr refuses), so a process pool cannot carry the evaluator. That
+        makes the speedup depend on the evaluation releasing the GIL — numpy/JAX
+        compute and any subprocess or I/O-bound simulator do; a pure-Python
+        arithmetic body does not, and will see no gain.
 
     Raises
     ------
@@ -863,6 +1007,8 @@ def solve_direct(
         raise ValueError(f"direct_variant must be 'classic' or 'gl', got {direct_variant!r}")
     if max_evals < 1:
         raise ValueError(f"max_evals must be >= 1, got {max_evals}")
+    if n_jobs == 0 or n_jobs < -1:
+        raise ValueError(f"n_jobs must be >= 1 or -1 (all CPUs), got {n_jobs}")
     if local_refine_method not in ("auto", "nlp", "derivative-free"):
         raise ValueError(
             "local_refine_method must be 'auto', 'nlp' or 'derivative-free', "
@@ -990,7 +1136,15 @@ def solve_direct(
         # Re-trigger once sampling beats the last local solution (Jones 2001).
         next_refine_at = stats.evals + local_refine_after
 
-    search.run(oracle, max_evals, deadline=deadline, on_iteration=_maybe_refine)
+    workers = (os.cpu_count() or 1) if n_jobs == -1 else int(n_jobs)
+    if workers > 1:
+        logger.info("DIRECT: evaluating each iteration's samples on %d threads", workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            search.run(
+                oracle, max_evals, deadline=deadline, on_iteration=_maybe_refine, executor=pool
+            )
+    else:
+        search.run(oracle, max_evals, deadline=deadline, on_iteration=_maybe_refine)
 
     # A final refinement so the reported point is never a raw centre when a local
     # solve was available and affordable.

@@ -461,3 +461,116 @@ def test_variant_tradeoff_is_why_gl_is_not_the_default():
         f"shubert: gl {gl_s} vs classic {classic_s} — GL is supposed to win the "
         "multimodal case; if it no longer does, the GL implementation regressed"
     )
+
+
+# ── parallel evaluation ──────────────────────────────────────────────────────
+
+
+def _threaded(workers: int):
+    from concurrent.futures import ThreadPoolExecutor
+
+    return ThreadPoolExecutor(max_workers=workers)
+
+
+@pytest.mark.parametrize("name", ["branin", "hartman_6", "shubert", "rastrigin_2"])
+def test_parallel_evaluation_is_identical_to_serial(name):
+    """``n_jobs`` must change the wall clock and nothing else.
+
+    Within an iteration every sample point is independent, so they can be
+    evaluated concurrently — but only if the *result* is bit-for-bit what the
+    serial path produces. Two things make that true and both are easy to lose:
+    results are collected in input order (``executor.map`` preserves it), and the
+    incumbent is updated at apply time in selection order rather than as
+    evaluations land. Compare the full state, not just the objective: a
+    trajectory can diverge while the final value happens to agree.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from support import direct_testfuncs as tfs
+
+    tf = tfs.get(name)
+
+    def state(workers):
+        s = _DirectSearch(tf.lb, tf.ub)
+        pool = _threaded(workers) if workers > 1 else None
+        try:
+            s.run(lambda x: (float(tf.np_body(x)), 0.0), 1200, executor=pool)
+        finally:
+            if pool is not None:
+                pool.shutdown()
+        return (
+            s.best_feasible_value,
+            tuple(s.best_feasible_point),
+            s.stats.evals,
+            len(s.part),
+            tuple(s.split_counts.tolist()),
+        )
+
+    serial = state(1)
+    assert state(4) == serial
+    assert state(8) == serial
+
+
+def test_batched_iteration_matches_the_serial_budget_cutoff():
+    """Planning a whole iteration up front must not move where the budget bites.
+
+    Two subtleties, both found by comparing against the pre-batching
+    implementation on 44 configurations:
+
+    * the budget guard charges a pessimistic 2 evaluations per dimension before
+      sampling, even though a cached point turns out free — charging only the
+      uncached points shifts the mid-iteration cutoff and changes the partition;
+    * ``split_counts`` must be charged at *plan* time, because the ``divide="one"``
+      tie-break reads it and the serial code divided each rectangle before
+      planning the next.
+
+    A budget that is not a multiple of an iteration's demand is what exposes both.
+    """
+    for budget in (7, 23, 51, 118, 349):
+        results = []
+        for workers in (1, 4):
+            s = _DirectSearch(np.zeros(3), np.ones(3))
+            pool = _threaded(workers) if workers > 1 else None
+            try:
+                s.run(lambda x: (float(np.sum(np.cos(3 * x))), 0.0), budget, executor=pool)
+            finally:
+                if pool is not None:
+                    pool.shutdown()
+            results.append((s.best_feasible_value, s.stats.evals, len(s.part)))
+            assert s.stats.evals <= budget, (budget, s.stats.evals)
+        assert results[0] == results[1], f"budget {budget}: {results}"
+
+
+def test_parallel_evaluation_actually_runs_concurrently():
+    """A slow objective must finish faster on more threads, or the plumbing is inert.
+
+    Guards against a batching path that collects the points and then evaluates
+    them serially anyway — which would pass every determinism test above while
+    delivering none of the benefit.
+    """
+    import time
+
+    def slow(x):
+        time.sleep(0.01)
+        return float(np.sum(x**2)), 0.0
+
+    timings = {}
+    for workers in (1, 8):
+        s = _DirectSearch(np.zeros(3), np.ones(3))
+        pool = _threaded(workers) if workers > 1 else None
+        start = time.perf_counter()
+        try:
+            s.run(slow, 120, executor=pool)
+        finally:
+            if pool is not None:
+                pool.shutdown()
+        timings[workers] = time.perf_counter() - start
+        assert s.stats.batches > 0, "no batch was ever formed"
+        assert s.stats.max_batch_size > 1, "batches never held more than one point"
+
+    assert timings[8] < 0.6 * timings[1], (
+        f"8 threads ({timings[8]:.2f}s) should beat serial ({timings[1]:.2f}s) "
+        "on a sleep-bound objective; batching may not be dispatching concurrently"
+    )
