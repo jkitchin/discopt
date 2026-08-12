@@ -59,19 +59,23 @@ def _small_lp():
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_on(warm_dl):
-    """GRADUATED (#928, 2026-08-12): the caller's ``time_limit`` is honoured by default.
+def test_flag_defaults_off(warm_dl):
+    """Still OFF — but as of 2026-08-12 for a NEW and specific reason (#928).
 
-    It stayed OFF through several panels, but none of them ever ran this flag
-    *alone* — every arm carrying it also carried #966's two, whose own panel kept
-    them OFF, so the isolating arm did not exist. Run alone over the 19 binding
-    instances at 20 s, 3 reps, rate-scored: bar 1 clean in 3/3 (0 unsound / 0
-    cert_regressions / 0 lost_incumbents / 0 lost_bound over 96 executed oracle
-    comparisons) and bar 2 positive (overrun delta -2.6/-1.0/-0.3 s, negative in
-    3/3; nodes 4647 -> 4611; hda's bound -2.07e13 -> -64473.44 in 3/3). See
-    ``_lp_warm_deadline_enabled``'s docstring for the full ledger."""
+    The isolating panel finally ran (this flag alone, 19 binding instances, 20 s,
+    3 reps, rate-scored) and passes BOTH §5 bars: 0 unsound / 0 cert_regressions /
+    0 lost_incumbents / 0 lost_bound in 3/3 over 96 executed oracle comparisons,
+    overrun delta -2.6/-1.0/-0.3 s, hda's bound -2.07e13 -> -64473.44 in 3/3.
+
+    The default was flipped ON on that evidence and retracted the same hour: with
+    the flag ON, ``test_amp_integration`` 's ``test_time_limit_respected`` runs
+    past 350 s against an 8 s allowance, where ``=0`` passes in 3.43 s. The cause
+    is that ``solve_milp`` cannot tell an EXPIRED budget from NO limit — both
+    arrive as ``time_limit_s=0.0`` — so an exhausted shared budget launches the
+    MILP B&B unbounded. Graduation is blocked on that seam, not on more panels.
+    See ``_lp_warm_deadline_enabled``'s docstring."""
     warm_dl(None)
-    assert _lp_warm_deadline_enabled() is True
+    assert _lp_warm_deadline_enabled() is False
 
 
 @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("off", False)])

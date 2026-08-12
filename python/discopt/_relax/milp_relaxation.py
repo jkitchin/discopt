@@ -480,8 +480,12 @@ def _lp_warm_deadline_enabled() -> bool:
     budget accounting — a different seam with its own issue; this flag stays OFF
     until it lands and a re-run panel passes both bars.
 
-    **Update 2026-08-12: GRADUATED to default-ON.** Every panel above shares one
-    defect: no arm ever carried this flag *alone*. ``f2565241``'s arms are ``base``
+    **Update 2026-08-12: the isolating panel PASSES both bars, and the flag STILL
+    stays OFF — blocked by a defect the panel cannot see.** Read the panel result
+    below, then the blocker at the end; the blocker is what decides it.
+
+    Every panel above shares one defect: no arm ever carried this flag *alone*.
+    ``f2565241``'s arms are ``base``
     (all OFF) / ``seam`` (#966's two ON, this one OFF) / ``cand`` (all three), so
     ``cand - seam`` isolates this flag only under the counterfactual that #966's two
     are ON — and #966's own panel kept them OFF. The §14d bar-1 failure was already
@@ -515,12 +519,45 @@ def _lp_warm_deadline_enabled() -> bool:
     arm holds reliably, and one-shot scoring cannot separate a flag effect from a race.
     Deviation from the pre-registration, recorded per §11: it fixed 5 reps and 3 were
     run (the run was cut short); the regression margin is 2 of 3, proportionally at or
-    above the pre-registered 3 of 5. The ``=0`` opt-out and the legacy no-deadline path
-    are unchanged.
+    above the pre-registered 3 of 5.
+
+    **THE BLOCKER — an exhausted budget is indistinguishable from "no limit".** The
+    default was flipped ON on the strength of the panel above and immediately
+    retracted (§11): ``pytest -m smoke`` failed
+    ``test_amp_integration.py::TestAmpConvergenceProperties::test_time_limit_respected``,
+    which asserts ``solve(solver="amp", time_limit=3.0)`` returns within 8 s. A/B on
+    that single test, same tree: ``DISCOPT_LP_WARM_DEADLINE=0`` **passes in 3.43 s**,
+    ``=1`` **runs past 350 s** (killed) — a >100x regression on a *time-limit* test,
+    the exact inverse of this flag's purpose.
+
+    Faulthandler puts the hang in the MILP branch, not the pure-LP path this flag
+    gates: ``_solve_amp_impl`` -> ``_solve_milp_with_oa_recovery`` ->
+    :meth:`MilpRelaxationModel.solve` -> ``milp_simplex.solve_milp``. The mechanism is
+    the shared-budget seam above. With the flag ON, ``solve_milp`` is handed
+    ``time_limit=_remaining()``; once the warm and equilibrated attempts have spent the
+    caller's budget, ``_remaining()`` is exactly ``0.0``. And ``milp_simplex.py``'s call
+    site reads::
+
+        time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit))
+
+    ``None`` (no limit) and ``0.0`` (budget gone) collapse onto the SAME wire value, so
+    the Rust MILP B&B launches unbounded precisely when it should not start at all.
+    Flag OFF never reaches it because each attempt gets a fresh copy of the duration
+    and ``_remaining()`` is never 0. This is the same sentinel trap as ``INF = 1e20``
+    in the LP layer, one level up, and it is general — AMP only reaches it reliably
+    because it solves with a tight limit after other attempts have run.
+
+    It also retro-explains the "sporadic severe modes" recorded in §14b (contvar
+    500.6 s, bchoco08 80.9 s against a 20 s budget): those are the same unbounded
+    MILP launch, not a diffuse budget-accounting problem.
+
+    So graduation is blocked on fixing that seam — ``solve_milp`` must be able to tell
+    "expired" from "unlimited" — not on another panel. Until then the flag is OFF and
+    the ``=0`` opt-out and legacy no-deadline path are unchanged.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
         "0",
         "",
         "false",
