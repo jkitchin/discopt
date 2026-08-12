@@ -56,6 +56,78 @@ The release procedure that produces these entries is documented in
   `docs/notebooks/direct_global.md`, which states plainly that this is a baseline
   rather than the state of the art and names the alternatives.
 
+- **`solver="surrogate"` — model-based search for expensive black boxes.** A new
+  backend in `discopt.solvers.surrogate` serving the same class as
+  `solver="direct"` (an opaque `dm.custom` body with no algebraic relaxation) but
+  the other cost regime: it spends real computation between evaluations — a
+  linear solve and a global optimization of the acquisition — so that each
+  evaluation counts. Use it when an evaluation costs minutes; use `"direct"` when
+  it costs milliseconds.
+
+  Two families behind one interface. **RBF is the default** (`surrogate="rbf"`):
+  a cubic / thin-plate / linear kernel with a linear tail, fitted by one symmetric
+  solve, chosen over a GP because integer variables work natively (discopt is a
+  MINLP solver), fitting has no failure mode of its own, and it degrades better
+  with dimension. **Kriging + expected improvement** (`surrogate="kriging"`) is
+  the alternative for smooth, low-dimensional, very expensive objectives, with a
+  nugget so a noisy objective is not forced through its own measurement error.
+  Trust-region restriction and batch proposals are left as seams, not built.
+
+  The acquisition subproblem is an ordinary algebraic model and is solved by
+  discopt's own spatial branch-and-bound. **This is the one place a certificate
+  appears, and it certifies where to sample next — not the answer.** Two
+  measurements bound the claim, and both contradict what was originally planned:
+
+  - *Certified EI does not work.* Built with the division lifted away via
+    `EI(x) = max_u [d(x)Φ(u) + s(x)φ(u)]` and the dense `rᵀR⁻¹r` whitened to
+    `Σvᵢ²`, B&B finds the true acquisition maximum to 5 significant figures, but
+    the dual bound never closes: on branin the bound runs 3.82 / 23.1 / 597 /
+    4871 against optima 0.60 / 0.26 / 0.42 / 1.51 at m = 8/12/20/30. discopt is
+    an excellent *primal* acquisition optimizer here, not a certifying one.
+  - *Certified CORS does work, and the kernel decides it.* Relative gap on branin
+    at m = 6/8/12/20: linear 6.5e-5 / 4.2e-5 / 6.7e-6 / 2.6e-8 (all certified);
+    cubic 6.6e-8 / 0.19 / 6.0 / 27.7, as `max|λ|` grows 10 → 164 faster than a
+    McCormick relaxation can bound. `rbf_kernel` stays `"cubic"` for optimization
+    quality; `"linear"` is documented as the choice when the certificate matters.
+
+  Sample efficiency is real but **not an order of magnitude**. Evaluations to
+  1e-2 relative accuracy versus DIRECT: six_hump_camel 32 vs 137, branin 38 vs
+  69, hartman_3 46 vs 79, ackley_2 48 vs 67 — and goldstein_price 96 vs 75, a
+  **loss**, caused by objective dynamic range (3 → ~1e6); RBFOpt's monotone
+  objective transformation is the named remedy and is documented as a follow-up
+  rather than implemented. DIRECT is a stronger baseline than the surrogate
+  literature's framing suggests.
+
+  **Returns no certificate** for the original problem: `bound` and `gap` are
+  `None`, `gap_certified` is `False`, the status is never `"optimal"`, and an
+  exhausted budget is a limit — never `"infeasible"`. `on_evaluation` is a
+  progress hook, present because a run whose objective takes minutes is otherwise
+  indistinguishable from a hung one, and because evaluations-to-target is not
+  recoverable from a `SolveResult`.
+
+- **DIRECT as a governed root primal heuristic** (`DISCOPT_DIRECT_HEURISTIC`,
+  **default-OFF**). A bounded-budget DIRECT run (300 evaluations, `epsilon=1e-2`)
+  over the root box, registered as a governed source in `heuristic_governor.py`
+  alongside `rens`, so the existing hit-rate throttle can disable it if it spends
+  without improving. Every point it proposes goes through the same
+  feasibility verification and incumbent path as the other heuristics; the dual
+  bound is never touched, so this is CLAUDE.md §5's heuristic-policy regime and
+  can only ever cost nodes.
+
+  Soundness spot-check across 16 in-repo `.nl` instances at 10 s: 12 probe
+  invocations, 0 violations — no bound rose, no objective degraded, no
+  `gap_certified` lost. Note the dual bound is *not* bit-identical in every case:
+  on `st_e13` it moved 1.4e-15 **tighter**, because an earlier incumbent prunes a
+  different node set and the surviving frontier minimum shifts in the last ulps.
+  The bound is never computed differently.
+
+  **Known limitation:** the #764 native Rust spatial kernel (default-ON) bypasses
+  this wiring for its covered subset (scalar variables; bilinear / monomial /
+  affine-square / sqrt), because `solve_model` hands the tree to `discopt-core`
+  before the Python spatial loop and that path seeds itself. Everything outside
+  that subset — trig, exp, log, division, i.e. the multimodal class DIRECT exists
+  for — still routes through the heuristic.
+
 ### Measured (no behaviour change)
 
 - **#966 coupled graduation panel, re-run on top of #990: the three deadline

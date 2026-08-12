@@ -5289,6 +5289,25 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "local_refine_method",
         "n_jobs",
         "feasibility_tolerance",
+        # surrogate backend (solver="surrogate")
+        "surrogate",
+        "rbf_kernel",
+        "rbf_ridge",
+        "n_initial",
+        "acquisition_optimizer",
+        "acquisition_time_limit",
+        "acquisition_gap_tolerance",
+        "acquisition_multistarts",
+        "distance_cycle",
+        "min_distance",
+        "nugget",
+        "estimate_nugget",
+        "kriging_power",
+        "estimate_kriging_power",
+        "theta_bounds",
+        "xi",
+        "seed",
+        "on_evaluation",
     }
 )
 
@@ -6052,10 +6071,20 @@ def solve_model(
     # branch-and-bound, opting out of the automatic GP fast path), and
     # ``"direct"`` (derivative-free sampling search — returns NO certificate).
     # Reject anything else rather than silently falling through to B&B.
-    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "gp-minlp", "bb", "direct"):
+    if _solver not in (
+        None,
+        "amp",
+        "gurobi",
+        "mip-nlp",
+        "gp",
+        "gp-minlp",
+        "bb",
+        "direct",
+        "surrogate",
+    ):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct', 'surrogate'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -6205,6 +6234,88 @@ def solve_model(
             nlp_solver=nlp_solver,
             initial_point=initial_point,
             **mip_nlp_kwargs,
+        )
+
+    # --- Surrogate (model-based) derivative-free search (no certificate) ---
+    #
+    # Same niche as solver="direct" -- an opaque dm.custom body with no algebraic
+    # relaxation -- but the other cost regime: it spends real computation between
+    # evaluations (a linear solve and a global optimization of the acquisition) to
+    # make each one count, which pays only when an evaluation is genuinely
+    # expensive. Placed with the DIRECT block, BEFORE the CustomCall gate further
+    # down, for the same reason: reaching it is the point of the selector.
+    if _solver == "surrogate":
+        import warnings
+
+        from discopt.solvers.surrogate import solve_surrogate
+
+        surrogate_kwargs: dict[str, Any] = {}
+        for key in (
+            "max_evals",
+            "surrogate",
+            "rbf_kernel",
+            "rbf_ridge",
+            "n_initial",
+            "acquisition_optimizer",
+            "acquisition_time_limit",
+            "acquisition_gap_tolerance",
+            "acquisition_multistarts",
+            "distance_cycle",
+            "min_distance",
+            "nugget",
+            "estimate_nugget",
+            "kriging_power",
+            "estimate_kriging_power",
+            "theta_bounds",
+            "xi",
+            "local_refine",
+            "local_refine_time_limit",
+            "feasibility_tolerance",
+            "seed",
+            "on_evaluation",
+        ):
+            if key in kwargs:
+                surrogate_kwargs[key] = kwargs.pop(key)
+
+        # Same warning discipline as the DIRECT block: a user who set
+        # gap_tolerance on a method with no dual bound has a wrong mental model,
+        # and saying so costs less than letting them read a meaningless result.
+        _ignored_surrogate = [
+            name
+            for name, differs in (
+                ("threads", threads != 1),
+                ("partitions", partitions != 0),
+                ("cutting_planes", cutting_planes is not False),
+                ("mccormick_bounds", mccormick_bounds != "auto"),
+                ("nlp_bb", nlp_bb is not None),
+                ("lazy_constraints", lazy_constraints is not None),
+                ("incumbent_callback", incumbent_callback is not None),
+                ("node_callback", node_callback is not None),
+                ("max_nodes", max_nodes != 100_000),
+                ("strategy", strategy != "best_first"),
+                ("gap_tolerance", gap_tolerance != 1e-4),
+            )
+            if differs
+        ]
+        if _ignored_surrogate:
+            warnings.warn(
+                "solver='surrogate' ignores "
+                + ", ".join(sorted(_ignored_surrogate))
+                + ": it is a model-based sampling search with no branch-and-bound "
+                "tree over the original problem and no dual bound. Its cost control "
+                "is max_evals, and it never reports a gap or a certificate. (The "
+                "acquisition subproblem it solves internally IS certified, but that "
+                "certifies where to sample next, not the answer.)",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        return solve_surrogate(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            **surrogate_kwargs,
         )
 
     # --- DIRECT derivative-free global search (no certificate) ---
