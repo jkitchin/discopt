@@ -3170,9 +3170,8 @@ def _yield_keeps_node_open(
     decertified; the node is simply re-visited or branched.
 
     Only fires for a round the caller ran in yield mode (i.e. under
-    ``DISCOPT_NODE_ROUND_BUDGET``, default ON since §14f; ``=0`` restores the
-    legacy path, where no round ever yields and this is dead). Returns True when
-    the node was kept open, for the caller's counters/tests.
+    ``DISCOPT_NODE_ROUND_BUDGET``), so the default path is untouched. Returns
+    True when the node was kept open, for the caller's counters/tests.
     """
     if not (yielded and nlp_failed):
         return False
@@ -9425,8 +9424,7 @@ def solve_model(
     # net-negative); #764 step 1 added cold-path marginals, so the reduction now
     # actually fires here.
     _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc_lp_relaxer is not None
-    # #966 (``DISCOPT_NODE_ROUND_BUDGET``, default ON since the §14f graduation
-    # panel; ``=0`` opts out, §5 bound-changing): make a
+    # #966 (``DISCOPT_NODE_ROUND_BUDGET``, default OFF, §5 bound-changing): make a
     # per-node separated-relaxation round honor its grant end-to-end. The grant a
     # node LP round receives clamps only the LP solves; the round's non-LP cost
     # (cold ``build_uniform_relaxation`` + separation, measured 3.3 s of a 5.7 s

@@ -1045,11 +1045,10 @@ class SolverTuning:
     run-to-run; the ``=0`` opt-out path stays deterministic."""
 
     node_round_budget: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=True)
+        default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=False)
     )
     """Make a per-node separated-relaxation ROUND honor its grant end-to-end
-    (``DISCOPT_NODE_ROUND_BUDGET``, **default ON** since the 2026-08-11 graduation
-    panel; ``=0`` restores the legacy unclamped round; §5 bound-changing; #966).
+    (``DISCOPT_NODE_ROUND_BUDGET``, default **off**; §5 bound-changing; issue #966).
 
     #928 made the warm pure-LP path honor its per-solve ``time_limit``, and the
     residual budget overrun measurably moved OUT of the LP layer: a round's grant
@@ -1103,19 +1102,15 @@ class SolverTuning:
     bound) rather than fathomed-without-proof on the failure sentinel — see
     ``solver._yield_keeps_node_open``.
 
-    **GRADUATED default-ON 2026-08-11** on the four-arm merged-tree panel this flag
-    was always coupled to (performance-plan §14f;
-    ``discopt_benchmarks/results/issue928_grad{20,15}.json``): with
-    ``DISCOPT_LP_WARM_DEADLINE`` (the ``wr`` arm) total overrun vs base is
-    -24.2/-43.8/+4.4 s at 20 s and -6.2/-6.2/+1.1 s at 15 s over 19 binding
-    instances, with a positive bound ledger (4-7 tighter against 1-4 looser per
-    rep, no bound lost, hda ``-2.07e13 -> -119286.3`` in 6/6 reps), no incumbent
-    lost in 6/6 reps, zero unsound cells and zero ceiling violations over 168
-    counted comparisons, and a lighter tail than base (cells above 3x budget: base
-    1, wr 0). The lost incumbent that failed the §14d/§14e panels was attributed to
-    ``DISCOPT_HESS_COMPILE_GATE``, which stays OFF — this flag alone keeps tspn12's
-    incumbent (``scratchpad/issue928_incumbent_attribution.py``). ``=0`` restores
-    the legacy path: no ``round_deadline``, no yield mode, byte-for-byte."""
+    **Panel history.** A four-arm merged-tree panel (performance-plan §14f)
+    graduated this flag together with ``DISCOPT_LP_WARM_DEADLINE`` on 2026-08-11;
+    that graduation was **RETRACTED on 2026-08-12** because it ran in a container
+    whose POUNCE lacked the tape NLP evaluator, so the wall win it measured came
+    largely from XLA first-compile modes that do not exist on the shipped tape
+    backend. On the tape regime the same flags measure FAIL on both bars
+    (main, ``f256524``). Default off pending a panel on the shipped regime;
+    graduation stays coupled to the #928 panel this flag exists to unblock. ``=0``
+    restores the legacy path: no ``round_deadline``, no yield mode, byte-for-byte."""
 
     hessian_compile_gate: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HESS_COMPILE_GATE", default=False)

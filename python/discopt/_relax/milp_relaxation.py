@@ -313,11 +313,10 @@ def _lp_warm_deadline_enabled() -> bool:
     ``DualPivotLoop`` 59 494 degenerate dual pivots deep with Bland never activated,
     turning a 3.9 s solve budget into 53 s (13.5x).
 
-    **Bound-changing, and GRADUATED default-ON on 2026-08-11** (performance-plan
-    §14f; ``DISCOPT_LP_WARM_DEADLINE=0`` restores the legacy budget-dropping path
-    byte-for-byte). The record below is kept in full because it is the history of
-    two failed graduations and what each one measured; read it as history, and §14f
-    (reproduced at the end of this docstring) as the current verdict. Cutting an LP
+    **Bound-changing, so panel-gated; default OFF.** Opt in with
+    ``DISCOPT_LP_WARM_DEADLINE=1``. (A 2026-08-11 graduation to default-ON was
+    RETRACTED the next day — see the retraction at the end of this docstring — so
+    read the whole record below as history, not as a live verdict.) Cutting an LP
     short changes the bound it returns, and on nvs24 the wall win is decisive:
 
     ======  ==============  ==============  ==============  ==============
@@ -483,8 +482,8 @@ def _lp_warm_deadline_enabled() -> bool:
     budget accounting — a different seam with its own issue; this flag stays OFF
     until it lands and a re-run panel passes both bars.
 
-    **Update 2026-08-11 (GRADUATION, performance-plan §14f): both bars pass on the
-    MERGED tree, and the residual was never this flag's.** §14d and §14e each
+    **Update 2026-08-11 (performance-plan §14f) — measured on the merged tree, and
+    RETRACTED on 2026-08-12; read with the retraction that follows it.** §14d and §14e each
     panelled their own change against ``aca13dd``; the merged tree had never been
     panelled. It has now been, with FOUR arms instead of three so the unrelated
     ``DISCOPT_HESS_COMPILE_GATE`` is not welded to this flag's question —
@@ -544,12 +543,31 @@ def _lp_warm_deadline_enabled() -> bool:
     at all), and ``minlplib.solu`` is unreachable, so the soundness result rests on
     the cross-arm primal ceiling plus the bound-crosses-incumbent and
     incumbent-verification arms, all counted.
+
+    **RETRACTION 2026-08-12 (CLAUDE.md §11): the graduation above is withdrawn and
+    this flag stays default-OFF.** The §14f panel ran in a container whose POUNCE
+    (0.9.0) lacks the tape NLP evaluator, so every cell used the JAX evaluator —
+    and that is NOT the shipped regime: the tape backend is default-ON, and
+    ``pyproject`` now requires ``pounce-solver>=0.10``. The difference is not a
+    detail, it is most of the effect. The wall win §14f measured is dominated by
+    uninterruptible first-time XLA compiles (heatexch_gen3 +155.1 s in one cell,
+    the base arm's 62-210 s modes) which **do not exist** on the tape backend,
+    where ``hessian_compile_estimate_s()`` returns 0.0 and no Hessian kernel is
+    compiled at all. A panel run on the tape regime (main, ``f256524``, 3 arms,
+    2 budgets x 3 reps, same 19 instances) measures the flags as **FAIL on both
+    bars**: overrun delta -0.17 +/- 0.72 s at 20 s (sign flips within the budget),
+    -5.00 +/- 0.61 s at 15 s, node totals moving the wrong way at both budgets,
+    zero ``cert_gains`` in 6/6 reps, and one certification regression (nvs05).
+    Two panels, two regimes, opposite verdicts — and the one that governs the
+    shipped default is the tape one. §14f's numbers stand as a measurement OF THE
+    JAX-EVALUATOR REGIME and nothing more.
     """
     import os as _os
 
-    # GRADUATED default-ON (§14f). ``=0`` (and the other falsey spellings) is the
-    # opt-out back to the legacy path that dropped the caller's ``time_limit``.
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
+    # Default OFF. §14f's graduation was RETRACTED (see the docstring's 2026-08-12
+    # entry): it rested on a container without POUNCE's tape NLP evaluator, which
+    # is not the shipped regime.
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
         "0",
         "",
         "false",

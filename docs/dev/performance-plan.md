@@ -2113,8 +2113,31 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > owed to #966 item 3 must now be run once, on the merged tree, on the benchmark
 > machine.
 
-### 14f. #928 GRADUATES on the merged tree — and the residual was never its flag (2026-08-11)
+### 14f. #928 on the merged tree — graduation claimed, then RETRACTED (2026-08-11/12)
 
+> **RETRACTION (2026-08-12, CLAUDE.md §11).** This entry concluded that
+> `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET` pass both §5 bars and
+> graduated them default-ON. **That conclusion is withdrawn and the defaults are
+> back OFF.** The panel below ran in a container whose POUNCE (0.9.0) lacks the tape
+> NLP evaluator, so every cell used the JAX evaluator — and that is not the shipped
+> regime: the tape backend is default-ON and `pyproject` now requires
+> `pounce-solver>=0.10`. The distinction carries most of the measured effect. The
+> wall win here is dominated by uninterruptible first-time XLA compiles (one cell,
+> heatexch_gen3, +155.1 s; the base arm's 62–210 s modes), and **on the tape backend
+> those compiles do not happen at all** — `hessian_compile_estimate_s()` returns 0.0
+> and no Hessian kernel is compiled. A panel on the tape regime (`f256524`, 3 arms,
+> 2 budgets × 3 reps, same 19 instances) scores the same flags **FAIL on both bars**:
+> overrun delta −0.17 ± 0.72 s at 20 s (sign flips inside the budget), −5.00 ± 0.61 s
+> at 15 s, node totals moving the wrong way at both budgets, `cert_gains` 0 in 6/6,
+> and one certification regression (nvs05).
+>
+> What survives the retraction, because it is not a wall-time claim: the
+> **attribution** of the lost incumbent that failed §14d and §14e — it is
+> `DISCOPT_HESS_COMPILE_GATE`'s, in every arm that carries it and no arm that does
+> not, with an equal-wall control — and the observation that the compile gate itself
+> is a JAX-regime-only mechanism. Everything below is a measurement OF THE
+> JAX-EVALUATOR REGIME. Read it as that, not as a graduation.
+>
 > §14e closed by owing one thing: *"the graduation panel … must now be run once, on
 > the merged tree"*. This is that run. It changes the verdict for two of the three
 > flags and, more importantly, it **attributes** the residual both earlier panels
@@ -2194,8 +2217,10 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > Node counts are flat (663–797 vs base 663–775 at 20 s); `cand` buys its extra wall
 > by branching ~1150 nodes, which is also where its lost incumbent comes from.
 >
-> **Verdict.** `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET` **graduate
-> default-ON** (`=0` keeps the legacy path, byte-for-byte). `DISCOPT_HESS_COMPILE_GATE`
+> **Verdict (RETRACTED — see the retraction at the top of this entry).** As written
+> on 2026-08-11: `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET` graduate
+> default-ON. The next day's regime check withdrew it; the defaults are OFF.
+> `DISCOPT_HESS_COMPILE_GATE`
 > **stays default-OFF**: it is the largest wall win of the three and the only one that
 > costs a certificate, which is the wrong trade under CLAUDE.md §1 — the
 > `DISCOPT_CUT_INHERIT` rule with the metrics swapped. Its residual belongs to #966:

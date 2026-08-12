@@ -59,22 +59,16 @@ def _small_lp():
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_on_after_graduation(warm_dl):
-    """GRADUATED default-ON 2026-08-11 (#928, performance-plan §14f); ``=0`` opts out.
+def test_flag_defaults_off(warm_dl):
+    """Bound-changing, so panel-gated; ships OFF until net-positive is demonstrated.
 
-    Four-arm panel on the merged tree (19 binding instances, 3 reps at each of two
-    budgets, arms interleaved per instance): with the round budget, total overrun vs
-    base is -24.2/-43.8/+4.4 s at 20 s and -6.2/-6.2/+1.1 s at 15 s; the bound ledger
-    is positive (4-7 tighter against 1-4 looser per rep, no bound lost, hda
-    -2.07e13 -> -119286.3 in 6/6 reps); no incumbent lost in 6/6 and a better one every
-    rep; zero unsound cells and zero ceiling violations over 168 counted comparisons.
-    The lost incumbent that failed the two earlier panels was attributed to
-    ``DISCOPT_HESS_COMPILE_GATE``, which stays OFF.
-
-    The flag-graduation convention keeps ``=0`` as the escape hatch back to the legacy
-    path that dropped the caller's ``time_limit`` — asserted by ``test_flag_parses``."""
+    66 in-repo instances at a 15 s budget, OFF/ON interleaved: cert-clean
+    (``cert_regressions=0  lost_incumbents=0  lost_bound=0  unsound=0``; bounds 3
+    tighter / 2 looser), but the wall benefit — total overrun 82.1 s -> 70.9 s — sits
+    inside the metric's own noise (three OFF-arm runs gave 82.1 / 79.2 / 175.6 s).
+    Cert-clean is necessary, not sufficient: the ``DISCOPT_CUT_INHERIT`` rule."""
     warm_dl(None)
-    assert _lp_warm_deadline_enabled() is True
+    assert _lp_warm_deadline_enabled() is False
 
 
 @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("off", False)])
