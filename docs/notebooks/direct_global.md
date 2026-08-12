@@ -336,8 +336,5 @@ shape implemented here.
 | `local_refine_method` | `"auto"` | `"nlp"`, `"derivative-free"`, or auto-fallback |
 | `feasibility_tolerance` | `1e-6` | the GLce band treated as feasible |
 
-## References
-
-```{bibliography}
-:filter: docname in docnames
-```
+Full citations for the works referenced above are on the {doc}`../references`
+page.
