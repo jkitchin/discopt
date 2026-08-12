@@ -1530,11 +1530,25 @@ def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
         weird = dm.custom(lambda x: jnp.sum(jnp.sinc(x) ** 2))
         m.minimize(weird(x) + dm.sum(x))
 
-    Because the body is opaque to the relaxation machinery, a model that uses a
-    ``dm.custom`` function is solved on the **local NLP path only** -- there is
-    no global optimality certificate -- and the solver raises if integer/binary
-    variables are present (global branch-and-bound cannot bound an opaque
-    callable). See :class:`CustomCall`.
+    What you get depends on whether the body traces through the reduced-space
+    McCormick type (``MCBox``) -- arithmetic ``+ - * / **`` plus the
+    ``discopt._relax.mcbox`` intrinsic namespace:
+
+    - **Traces through MCBox** -> solved **globally with a certificate** by the
+      reduced-space engine, branching only on the original degrees of freedom;
+      integer/binary variables included (plan P3.1/P3.2, #713).
+    - **Does not trace** (a raw ``jnp`` intrinsic applied to an argument, a
+      non-affine hidden division, a non-scalar leaf, an unbounded box) -> the
+      **local NLP path only**, with no global optimality certificate; and the
+      solver **raises** if integer/binary variables are also present, since global
+      branch-and-bound would have no valid node relaxation (sound-or-refuse).
+
+    For that last case, ``Model.solve(solver="direct")`` runs a derivative-free
+    global *search* over the box instead of a single local solve. It still returns
+    no certificate, but on a multimodal objective it is a much better answer --
+    see :mod:`discopt.solvers.direct` and the ``direct_global`` notebook.
+
+    See :class:`CustomCall`.
 
     Parameters
     ----------
@@ -4167,7 +4181,36 @@ class Model:
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
         solver : str, optional
-            Optional backend selector. Use ``solver="amp"`` to select
+            Optional backend selector.
+
+            Use ``solver="direct"`` for **derivative-free global search** over the
+            variable box (DIRECT). Intended for a model whose objective or
+            constraints contain an opaque ``dm.custom`` body that cannot be
+            relaxed — that model otherwise degrades to a single local NLP, or
+            raises when integer variables are also present. It requires a finite
+            box and **returns no certificate**: ``bound`` and ``gap`` are ``None``,
+            ``gap_certified`` is ``False``, and the status is never ``"optimal"``.
+            Prefer the default solver whenever the model can be written
+            algebraically. Options: ``max_evals`` (the cost control),
+            ``epsilon``, ``direct_variant`` (``"classic"``/``"gl"``), ``divide``,
+            ``break_ties``, ``local_refine``, ``local_refine_after``,
+            ``local_refine_method`` (``"auto"``/``"nlp"``/``"derivative-free"``),
+            ``local_refine_time_limit``, ``feasibility_tolerance``::
+
+                import jax.numpy as jnp
+                import discopt.modeling as dm
+
+                m = dm.Model("rastrigin")
+                x = m.continuous("x", shape=2, lb=-4.12, ub=6.12)
+                f = dm.custom(lambda v: 20 + jnp.sum(v**2 - 10 * jnp.cos(2 * jnp.pi * v)))
+                m.minimize(f(x))
+
+                r = m.solve(solver="direct", max_evals=2000)
+                r.objective       # ~0.0 at the origin
+                r.bound           # None -- no dual information
+                r.gap_certified   # False -- by design
+
+            Use ``solver="amp"`` to select
             Adaptive Multivariate Partitioning. AMP-specific keyword
             arguments include ``rel_gap``, ``abs_tol``, ``max_iter``,
             ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
