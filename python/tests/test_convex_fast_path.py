@@ -187,9 +187,16 @@ class TestConvexFastPathOptOut:
         m.minimize(dm.exp(x))
 
         result = m.solve(skip_convex_check=True)
-        assert result.status == "optimal"
         # With skip_convex_check, the fast path is not used
         assert result.convex_fast_path is False
+        # ...and convexity is therefore never established, so the single local NLP
+        # proves a feasible point, not a global optimum: no certificate, no bound,
+        # and the honest "feasible" rather than the NLP's own "optimal" (#998).
+        # The objective is still exp(-10) — the true minimum here — it is only the
+        # *claim* about it that is withheld.
+        assert result.status == "feasible"
+        assert result.gap_certified is False
+        assert result.bound is None and result.gap is None
 
 
 class TestConvexFastPathSolutions:

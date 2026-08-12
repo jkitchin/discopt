@@ -19,6 +19,18 @@ test, and the author must either convert it to a deterministic budget or record
 it here with a category. Without this, "the class is fixed" would mean "the
 sites that existed on 2026-08-01 were fixed".
 
+Both patterns above are matched a line at a time, and that had a hole: a gate
+spelled across *two* lines — pass ``time.perf_counter()`` into a helper, do the
+``+ <budget>`` arithmetic on the parameter inside it — matches neither, because
+the call site has no ``+`` after the clock read and the body has no clock read at
+all. ``solver.py``'s ``_gdp_config_deadline`` was exactly that and sat unrecorded
+for its whole life, while the inline sibling gate in the same feature was caught
+on the day it was written; the difference was only that one author had factored
+the arithmetic into a helper. ``_scan_via_argument`` below does the one level of
+dataflow that closes it, and its findings join the line-based ones. The hole was
+sized before it was closed: across the package, five call sites hand a clock read
+to a function defined here, and exactly one of them built a budget from it.
+
 Categories:
 
 ``contract``
@@ -70,6 +82,7 @@ residuals stay wall-clock and stay listed here.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 from pathlib import Path
@@ -85,6 +98,124 @@ _PKG = Path(__file__).resolve().parents[1] / "discopt"
 _CLOCK = r"(?:(?:time|_time)\.(?:perf_counter|monotonic)\(\)|(?<![\w.])_now\(\))"
 _MAKE = re.compile(_CLOCK + r"\s*\+")
 _ELAPSED = re.compile(_CLOCK + r"\s*-\s*\w+[^<>]*[<>]=?")
+
+_CLOCK_FUNCS = {"perf_counter", "monotonic"}
+
+
+def _is_clock_read(node: ast.AST) -> bool:
+    """``time.perf_counter()`` / ``time.monotonic()`` / the ``_now()`` seam."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Attribute) and f.attr in _CLOCK_FUNCS:
+        return True
+    return isinstance(f, ast.Name) and f.id == "_now"
+
+
+def _defs_by_name(trees: dict[Path, ast.Module]) -> dict[str, list[tuple[Path, ast.AST]]]:
+    out: dict[str, list[tuple[Path, ast.AST]]] = {}
+    for path, tree in trees.items():
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.setdefault(node.name, []).append((path, node))
+    return out
+
+
+def _params_receiving_clock(call: ast.Call, defs: dict) -> tuple[set[str], list]:
+    """Parameter names of ``call``'s callee that are handed a clock read here."""
+    callee = None
+    if isinstance(call.func, ast.Name):
+        callee = call.func.id
+    elif isinstance(call.func, ast.Attribute):
+        callee = call.func.attr
+    if callee is None or callee not in defs:
+        return set(), []
+    names: set[str] = set()
+    for pos, arg in enumerate(call.args):
+        if not _is_clock_read(arg):
+            continue
+        for _dpath, dnode in defs[callee]:
+            formal = dnode.args.posonlyargs + dnode.args.args
+            # ``obj.method(clock)`` binds argument 0 to formal 1: the receiver has
+            # already consumed ``self``. Without this the mapping is off by one on
+            # every method, which reads as "no budget built from it" — a silent
+            # false negative exactly where a gate is easiest to hide.
+            bound = 1 if isinstance(call.func, ast.Attribute) and formal else 0
+            if bound and formal[0].arg not in ("self", "cls"):
+                bound = 0
+            if pos + bound < len(formal):
+                names.add(formal[pos + bound].arg)
+    for kw in call.keywords:
+        if kw.arg is not None and _is_clock_read(kw.value):
+            names.add(kw.arg)
+    return names, defs[callee]
+
+
+def _scan_via_argument() -> set[tuple[str, str]]:
+    """Budgets built from a clock read that arrived as an ARGUMENT.
+
+    The line-local patterns above see one line at a time, so they are blind to the
+    construction that spells the same gate across two: pass ``time.perf_counter()``
+    into a helper, and do the ``+ budget`` arithmetic on the *parameter* inside it.
+    Neither line matches — the call site has no ``+`` after the clock read, and the
+    body has no clock read at all. Measured on the tree that closed this hole, the
+    package had exactly one such gate (``solver.py``'s ``_gdp_config_deadline``,
+    added by #993 and invisible for its whole life), while the inline sibling in
+    the same feature *was* caught — so coverage depended on nothing more than
+    whether an author had refactored the arithmetic into a helper.
+
+    This does the one level of dataflow that closes it: find call sites handing a
+    clock read to a function defined in this package, map argument position to
+    parameter name, and look for the same two budget constructions on that
+    parameter inside the callee's body.
+    """
+    trees: dict[Path, ast.Module] = {}
+    for root, dirs, files in os.walk(_PKG):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in sorted(files):
+            if not f.endswith(".py"):
+                continue
+            path = Path(root) / f
+            # Deliberately not wrapped: a file this cannot parse must fail the
+            # test loudly, not be skipped into an "all clear" (rule 7).
+            trees[path] = ast.parse(path.read_text(), filename=str(path))
+
+    defs = _defs_by_name(trees)
+    src: dict[Path, list[str]] = {p: p.read_text().splitlines() for p in trees}
+    found: set[tuple[str, str]] = set()
+
+    for path, tree in trees.items():
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call):
+                continue
+            params, targets = _params_receiving_clock(call, defs)
+            if not params:
+                continue
+            for dpath, dnode in targets:
+                rel = str(dpath.relative_to(_PKG))
+                for inner in ast.walk(dnode):
+                    hit = False
+                    # ``param + <budget>`` — a locally invented deadline.
+                    if (
+                        isinstance(inner, ast.BinOp)
+                        and isinstance(inner.op, ast.Add)
+                        and isinstance(inner.left, ast.Name)
+                        and inner.left.id in params
+                    ):
+                        hit = True
+                    # ``<clock> - param > <budget>`` — elapsed against a budget.
+                    if isinstance(inner, ast.Compare) and isinstance(inner.left, ast.BinOp):
+                        b = inner.left
+                        if (
+                            isinstance(b.op, ast.Sub)
+                            and isinstance(b.right, ast.Name)
+                            and b.right.id in params
+                        ):
+                            hit = True
+                    if hit:
+                        found.add((rel, src[dpath][inner.lineno - 1].strip()))
+    return found
+
 
 # (module-relative path, source line, category). See the module docstring.
 KNOWN: tuple[tuple[str, str, str], ...] = (
@@ -157,6 +288,19 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     (
         "solver.py",
         "time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit))),",
+        "residual",
+    ),
+    # The #823/#993 GDP configuration constructor's slice: 15% of what is left,
+    # capped at 15 s. Same shape as the entry above it — a capped fraction of the
+    # caller's remaining budget, spent by a root component that decides how many
+    # fixed-integer sub-NLPs get solved — so it takes the same category. It is not
+    # ``contract``: never exceeding ``outer_deadline`` makes it *sound*, but the
+    # number of configuration plans it gets through is still set by machine speed.
+    # Found only once this scanner learned to follow a clock read through an
+    # argument (see ``_scan_via_argument``); it was invisible for its whole life.
+    (
+        "solver.py",
+        "return now + min(remaining, share)",
         "residual",
     ),
     (
@@ -341,7 +485,7 @@ def _scan() -> set[tuple[str, str]]:
                     continue
                 if _MAKE.search(s) or _ELAPSED.search(s):
                     found.add((rel, s))
-    return found
+    return found | _scan_via_argument()
 
 
 @pytest.mark.unit
@@ -396,8 +540,11 @@ def test_residual_count_is_visible():
     # ``contract`` when its grant became a pre-deadline reserve rather than a
     # post-deadline hand-out. Not a conversion to a deterministic budget — a change
     # in what the gate spends. See the comment on its KNOWN entry.
-    assert len(residual) == 19, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 19). "
+    # 19 -> 20: ``_gdp_config_deadline`` — not a new gate, a newly *visible* one.
+    # It predates this bump; the scanner could not see it until it learned to
+    # follow a clock read through a function argument (#993).
+    assert len(residual) == 20, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 20). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "

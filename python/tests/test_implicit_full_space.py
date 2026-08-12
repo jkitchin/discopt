@@ -99,7 +99,11 @@ def test_full_space_lowering_solves_without_jax():
     # Vacuity control: the SAME problem through the opaque node must import JAX,
     # or "0" above is measuring an environment without JAX rather than the change.
     opaque = _run_raw(_SQRT_BLOCK + _OPAQUE_TAIL.format(x0=1.0) + _REPORT)
-    assert opaque["STATUS"] == "optimal", opaque
+    # The opaque node runs the local-NLP path, which proves a feasible point and
+    # not a global optimum, so it reports "feasible" (#998) — the status half of
+    # the same forfeit that the next test pins as CERTIFIED == "False". The
+    # lowered arm above keeps its genuine "optimal".
+    assert opaque["STATUS"] == "feasible", opaque
     assert int(opaque["JAXMODS"]) > 0, (
         f"control did not import JAX, so the test is vacuous: {opaque}"
     )

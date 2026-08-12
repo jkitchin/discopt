@@ -104,6 +104,38 @@ class GDPLibSuiteConfig:
     oracle: bool = True  # cross-check the linear subset against HiGHS
 
 
+#: The curated small set: every GDPlib model whose ``gdp.bigm`` reformulation fits
+#: under 500 variables, in increasing size. This is the panel the GDP work is
+#: scored on (#823, #993), so it is pinned by NAME rather than derived from
+#: ``--max-variables`` at run time. Two reasons, both learned here: the sizes are
+#: a property of the installed gdplib revision, so a size filter silently changes
+#: the population between installs and makes two panels incomparable; and a
+#: threshold quietly admits a model nothing has ever verified. Sizes are recorded
+#: in ``docs/dev/gdplib-benchmarking.md``.
+#:
+#: ``multiperiod_blending`` (474 vars) is deliberately absent: it fits the size
+#: bound but no in-repo oracle proves its optimum, so it can contribute a timing
+#: number and nothing to a soundness check. Add it here the day it has a verified
+#: reference.
+GDPLIB_SMALL: tuple[str, ...] = (
+    "jobshop",
+    "ex1_linan_2023",
+    "positioning",
+    "small_batch",
+    "cstr",
+    "spectralog",
+    "methanol",
+    "batch_processing",
+    "syngas",
+    "water_network",
+    "gdp_col",
+    "modprodnet",
+)
+
+#: Named model sets selectable with ``--suite``.
+SUITES: dict[str, tuple[str, ...]] = {"gdplib_small": GDPLIB_SMALL}
+
+
 def is_available() -> bool:
     """True if Pyomo and GDPlib are both importable."""
     try:
@@ -801,6 +833,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--exclude", nargs="*", default=None, help="model names to skip")
     parser.add_argument(
+        "--suite",
+        choices=sorted(SUITES),
+        default=None,
+        help="named model set, e.g. gdplib_small (the 12 models under 500 vars). "
+        "Mutually exclusive with --models.",
+    )
+    parser.add_argument(
         "--methods",
         nargs="+",
         default=["bigm"],
@@ -814,12 +853,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", default=None, help="write BenchmarkResults JSON to this path")
     args = parser.parse_args(argv)
 
+    if args.suite is not None:
+        if args.models:
+            parser.error("--suite and --models are mutually exclusive")
+        args.models = list(SUITES[args.suite])
+
     if not is_available():
         print(
             "GDPlib benchmark unavailable: install pyomo + gdplib "
             "(gdplib from source — the PyPI wheel omits data files)."
         )
         return 2
+
+    if args.suite is not None:
+        # `include` filtering in discover_models() drops a requested-but-absent
+        # model silently. For a preset pinned by name that is the §6 vacuity trap:
+        # a panel that ran 8 of 12 models and reported clean. Refuse loudly.
+        found = {s.name for s in discover_models(exclude=args.exclude)}
+        missing = [m for m in args.models if m not in found]
+        if missing:
+            print(
+                f"FAIL: suite '{args.suite}' names {len(missing)} model(s) this gdplib "
+                f"install does not provide: {', '.join(missing)}. A shrunken suite would "
+                "report clean while measuring less than it claims — install gdplib from "
+                "source, or run the models you do have via --models.",
+                file=sys.stderr,
+            )
+            return 4
 
     if args.list:
         specs = discover_models(include=args.models, exclude=args.exclude)
