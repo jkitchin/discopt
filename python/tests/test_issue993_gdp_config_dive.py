@@ -37,10 +37,12 @@ from __future__ import annotations
 import time
 from math import comb
 
+import discopt._relax.primal_heuristics as ph
 import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt._relax.primal_heuristics import (
+    _WAVE_SOLVE_CAP,
     _check_constraint_feasibility,
     _get_variable_bounds,
     _scan_one_hot_rows,
@@ -196,3 +198,62 @@ def test_dive_is_deterministic_for_a_fixed_seed():
     a = one_hot_config_dive(_capacity_gdp(), x_relax, max_restarts=3, deadline=None)
     b = one_hot_config_dive(_capacity_gdp(), x_relax, max_restarts=3, deadline=None)
     assert [round(o, 9) for _, o in a] == [round(o, 9) for _, o in b]
+
+
+@pytest.mark.smoke
+def test_wave_hands_over_on_a_solve_count_not_a_clock_slice(monkeypatch):
+    """#912: how much of the wave runs must not be a function of machine speed.
+
+    The first wiring reserved half the *wall* grant for the dive
+    (``wave_deadline = _now() + 0.5 * (deadline - _now())``), so a slower box tried
+    fewer configurations — a different incumbent, and from there a different search
+    tree, for the same model. ``_WAVE_SOLVE_CAP`` denominates the handover in
+    sub-NLP solves instead. Driving the ``_now()`` seam with two clocks that differ
+    by an unbounded factor pins that: the count is identical, and the deadline is
+    left doing only the job #912 allows it to do — deciding when to stop.
+    """
+    m = _capacity_gdp()
+    x_relax = _relaxation_point()
+    deadline = 120.0  # in the fake clock's own units, not seconds
+
+    def _arm(tick: float) -> tuple[int, float]:
+        reading = [0.0]
+
+        def _fake_now() -> float:
+            reading[0] += tick
+            return reading[0]
+
+        tried: list[object] = []
+
+        def _never_feasible(model, seed, **kwargs):
+            # Return nothing so the wave runs to its own bound rather than stopping
+            # early on a hit; the dive is a separate mechanism, stubbed out here.
+            tried.append(kwargs.get("time_budget"))
+            return None
+
+        monkeypatch.setattr(ph, "_now", _fake_now)
+        monkeypatch.setattr(ph, "subnlp", _never_feasible)
+        monkeypatch.setattr(ph, "one_hot_config_dive", lambda *a, **kw: [])
+        ph.one_hot_config_subnlp(m, x_relax, deadline=deadline)
+        return len(tried), reading[0]
+
+    slow, slow_clock = _arm(1.0)
+    fast, _ = _arm(0.0)
+
+    assert slow == fast == _WAVE_SOLVE_CAP, (
+        f"the wave tried {slow} configuration(s) on the slow clock and {fast} on the "
+        f"fast one; both must be _WAVE_SOLVE_CAP={_WAVE_SOLVE_CAP}, or how far the "
+        "wave gets is a function of the machine"
+    )
+    # Two checks that a *passing* run was not vacuous (CLAUDE.md §6). The slow arm
+    # has to run past the halfway point of the grant, or a half-wall split would not
+    # have truncated it and the count above proves nothing; and it has to stay inside
+    # the grant, or it stopped on the deadline contract rather than on the cap.
+    assert slow_clock > 0.5 * deadline, (
+        f"premise stale: the slow arm stopped at clock {slow_clock:.1f}, inside half "
+        f"of {deadline}; a wall split would not have cut it, so nothing is pinned"
+    )
+    assert slow_clock < deadline, (
+        f"premise stale: the slow arm's clock reached {slow_clock:.1f} of {deadline}, "
+        "so it stopped on the deadline contract and the cap is untested"
+    )

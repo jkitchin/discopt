@@ -1462,6 +1462,38 @@ def _residual_assignments(
     return out[:limit]
 
 
+#: Sub-NLP solves the #823 wave may spend before the #993 dive gets the rest of the
+#: caller's grant. A **count**, not a slice of the clock, and that is the whole point:
+#: a wall-clock split (``_now() + 0.5 * (deadline - _now())``) makes how much of the
+#: wave runs a function of machine speed, which #912 forbids — and
+#: ``test_912_wall_budget_inventory.test_the_converted_layer_stays_converted`` closes
+#: the ``residual`` category to this module outright, so "record it in KNOWN" is not
+#: an honest option here. Bounded by a count, the wave's extent is a function of the
+#: model alone.
+#:
+#: 48 is calibrated, not chosen (``scratchpad/issue993`` E1/E2, 2026-08-12; run the
+#: wave with ``deadline=None`` so only ``max_configs`` binds, and record every plan's
+#: outcome and objective):
+#:
+#: ===============  ==========  =============  ==========================
+#: model            solves/s    feasible at    best objective at plan
+#: ===============  ==========  =============  ==========================
+#: cstr             54.3        8, 42, 47, 57  **42** (3.0620146, optimal)
+#: batch_processing 7.3         none of 256    —
+#: syngas           5.1         none of 256    —
+#: ===============  ==========  =============  ==========================
+#:
+#: So the yield is concentrated: past plan 57 the wave never produced anything on
+#: this corpus, and the plans that matter for *quality* end at 42 — cstr's best is
+#: there, while its plan-8 hit is +2.36 % off. The cap must therefore sit **above
+#: 42** (a cap of 32 would trade cstr's true optimum for a 2.36 %-worse point), and
+#: as far below 256 as that allows. 48 keeps every quality-relevant plan with six
+#: plans of headroom for root-point drift, and costs the wave 6.6 s of a 15 s grant
+#: on batch_processing (48 / 7.3) instead of the 35 s an uncapped wave wants — which
+#: is what leaves the dive a share to work in.
+_WAVE_SOLVE_CAP = 48
+
+
 def one_hot_config_subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -1514,10 +1546,10 @@ def one_hot_config_subnlp(
     batch_processing 15 of 29 (C(29,15) ~ 7.7e7). The dive re-solves the relaxation
     between choices, which is what makes those reachable. Ordering is deliberate —
     the wave is far cheaper when it works (0.018 s/plan on cstr) so it goes first,
-    and the dive only pays for models the wave cannot solve. **Half the budget is
-    reserved for the dive**: measured, an unreserved wave consumes all of it on
-    precisely the models the dive is for, so the two searches would compete for one
-    clock and the cheaper-but-useless one would always win.
+    and the dive only pays for models the wave cannot solve. The wave hands over
+    after ``_WAVE_SOLVE_CAP`` sub-NLP solves: measured, an uncapped wave consumes
+    the entire grant on precisely the models the dive is for, so the two searches
+    would compete for one budget and the cheaper-but-useless one would always win.
 
     ``max_configs`` is deliberately large. Measured on cstr, a fixed-integer
     sub-NLP here costs **0.018 s** (384 plans in 7 s), and the feasible plans sit
@@ -1643,20 +1675,21 @@ def one_hot_config_subnlp(
     results: list[tuple[np.ndarray, float]] = []
     attempted = 0
     stop = "exhausted"
-    # Reserve half the budget for the dive below. Measured, an unreserved wave
-    # spends the WHOLE budget on the models the dive exists for and hands it
-    # nothing: at a 9 s constructor budget batch_processing got 66 of 256 plans
-    # (all infeasible) and syngas 53, leaving the dive 0 relaxation solves. The
-    # reserve costs the wave nothing where the wave works -- on cstr it exhausts
-    # all 256 plans in 4.6 s, under a third of the 15 s budget a 300 s run grants
-    # -- and where the wave does not work, every second it holds is waste. Plans
-    # are ordered most-informed-first, so a truncated wave loses late alternates,
-    # never its best-ranked candidate.
-    wave_deadline = deadline
-    if deadline is not None:
-        wave_deadline = _now() + 0.5 * max(0.0, deadline - _now())
-    for ci, ri in plans[:max_configs]:
-        if wave_deadline is not None and _now() >= wave_deadline:
+    # Hand over to the dive after a bounded NUMBER of solves, so that what the wave
+    # spends is a function of the model and not of the machine (#912; see
+    # ``_WAVE_SOLVE_CAP`` for the calibration). Measured, an uncapped wave spends the
+    # WHOLE grant on the models the dive exists for and hands it nothing: at a 9 s
+    # constructor budget batch_processing got 66 of 256 plans (all infeasible) and
+    # syngas 53, leaving the dive 0 relaxation solves. The cap costs the wave nothing
+    # where the wave works -- on cstr every quality-relevant plan is reached by 42 --
+    # and where the wave does not work, every solve past the cap is waste. Plans are
+    # ordered most-informed-first, so a capped wave loses late alternates, never its
+    # best-ranked candidates.
+    wave_plans = plans[: min(max_configs, _WAVE_SOLVE_CAP)]
+    if len(wave_plans) < len(plans[:max_configs]):
+        stop = "wave-cap"
+    for ci, ri in wave_plans:
+        if deadline is not None and _now() >= deadline:
             stop = "deadline"
             break
         seed = zero_start.copy()
@@ -1668,7 +1701,9 @@ def one_hot_config_subnlp(
             seed[pick] = 1.0
         for j, v in zip(residual, residual_assigns[ri]):
             seed[j] = v
-        budget = None if wave_deadline is None else max(0.0, wave_deadline - _now())
+        # The caller's deadline is a stopping contract, so the per-solve budget is
+        # what remains of it — not a slice of it.
+        budget = None if deadline is None else max(0.0, deadline - _now())
         if budget is not None and budget <= 0.0:
             stop = "deadline"
             break
