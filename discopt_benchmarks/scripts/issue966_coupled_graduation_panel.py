@@ -47,11 +47,18 @@ ROUND = "DISCOPT_NODE_ROUND_BUDGET"
 HESS = "DISCOPT_HESS_COMPILE_GATE"
 
 # (key, label, env). Every flag is named in every arm: an arm must never inherit.
-ARMS = (
-    ("base", "all OFF (today's default)", {WARM: "0", ROUND: "0", HESS: "0"}),
-    ("seam", "#966 ON, #928 OFF", {WARM: "0", ROUND: "1", HESS: "1"}),
-    ("cand", "all three ON", {WARM: "1", ROUND: "1", HESS: "1"}),
-)
+ALL_ARMS = {
+    "base": ("all OFF (today's default)", {WARM: "0", ROUND: "0", HESS: "0"}),
+    "seam": ("#966 ON, #928 OFF", {WARM: "0", ROUND: "1", HESS: "1"}),
+    "cand": ("all three ON", {WARM: "1", ROUND: "1", HESS: "1"}),
+    # #928's flag ALONE. The three-arm default cannot answer "does
+    # DISCOPT_LP_WARM_DEADLINE graduate", because every arm carrying it also
+    # carries #966's two, and #966's own panel (issue #966, f2565241) kept those
+    # OFF. ``cand - seam`` isolates it only under the counterfactual that the
+    # other two are ON, which is not the state of the tree.
+    "warm": ("#928 ON alone", {WARM: "1", ROUND: "0", HESS: "0"}),
+}
+ARMS = tuple((k, ALL_ARMS[k][0], ALL_ARMS[k][1]) for k in ("base", "seam", "cand"))
 
 
 def loadavg() -> list[float]:
@@ -260,10 +267,23 @@ def compare(cells: list[dict], a_key: str, b_key: str) -> dict:
 
 
 def main() -> int:
+    global ARMS
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=float, default=20.0)
     ap.add_argument("--instances", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument(
+        "--arms",
+        default="base,seam,cand",
+        help=f"comma-separated arm keys to run, from {sorted(ALL_ARMS)}. Each arm sets "
+        "EVERY flag explicitly, so a two-arm run is as controlled as the three-arm one.",
+    )
+    ap.add_argument(
+        "--pair",
+        default=None,
+        help="graduation pair as 'control,candidate' (default: first,last of --arms). "
+        "CERT_CLEAN is scored on this pair.",
+    )
     ap.add_argument(
         "--rescore",
         default=None,
@@ -273,8 +293,25 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    keys = [k for k in args.arms.split(",") if k]
+    unknown = [k for k in keys if k not in ALL_ARMS]
+    if unknown:
+        raise SystemExit(f"unknown arm(s) {unknown}; known: {sorted(ALL_ARMS)}")
+    if len(keys) < 2:
+        raise SystemExit("need at least two arms to compare")
+    ARMS = tuple((k, ALL_ARMS[k][0], ALL_ARMS[k][1]) for k in keys)
+    ctrl, cand_key = args.pair.split(",") if args.pair else (keys[0], keys[-1])
+    if ctrl not in keys or cand_key not in keys:
+        raise SystemExit(f"--pair {ctrl},{cand_key} names an arm not in --arms {keys}")
+
     if args.rescore:
         saved = json.loads(Path(args.rescore).read_text())["cells"]
+        # Score the arms the artifact actually holds, not the ones --arms defaults
+        # to: rescoring a two-arm panel under the three-arm default would KeyError,
+        # and rescoring a three-arm panel under a two-arm run would silently skip
+        # an arm's soundness.
+        saved_keys = [k for k in ALL_ARMS if saved and k in saved[0]]
+        ARMS = tuple((k, ALL_ARMS[k][0], ALL_ARMS[k][1]) for k in saved_keys)
         for c in saved:
             c["reference_optimum"] = reference_optimum(c["instance"])
         snd = soundness(saved)
@@ -307,11 +344,13 @@ def main() -> int:
         print(f"[{idx}/{len(names)}] {name:22s} {parts}", flush=True)
 
     snd = soundness(cells)
-    pairs = [
-        compare(cells, "base", "cand"),
-        compare(cells, "seam", "cand"),
-        compare(cells, "base", "seam"),
+    others = [
+        (a, b)
+        for i, a in enumerate(keys)
+        for b in keys[i + 1 :]
+        if (a, b) != (ctrl, cand_key)
     ]
+    pairs = [compare(cells, ctrl, cand_key)] + [compare(cells, a, b) for a, b in others]
     grad = pairs[0]
     cert_clean = not (
         snd["unsound"]
@@ -334,8 +373,8 @@ def main() -> int:
 
     print()
     print(json.dumps(summary, indent=2))
-    print(f"\nCERT_CLEAN={cert_clean}  (graduation pair: cand vs base)")
-    print(f"OVERRUN_DELTA_S_CAND_VS_BASE={grad['overrun_delta_s']}")
+    print(f"\nCERT_CLEAN={cert_clean}  (graduation pair: {cand_key} vs {ctrl})")
+    print(f"OVERRUN_DELTA_S_{cand_key.upper()}_VS_{ctrl.upper()}={grad['overrun_delta_s']}")
     print(f"COMPARISONS_EXECUTED={compared}")
     print(f"ORACLE_COMPARISONS_EXECUTED={snd['oracle_comparisons_executed']}")
     print(f"INSTANCES_WITHOUT_ORACLE={snd['instances_without_oracle']}")
