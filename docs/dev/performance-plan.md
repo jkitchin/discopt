@@ -2238,6 +2238,96 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > incumbent-verification arms, all counted. **No corpus-wide soundness claim rests on
 > a single one of these runs.**
 
+### 14g. #928 on the shipped regime: the flag's benefit is machine-dependent, and its real product is a BOUND (2026-08-12)
+
+> §14f measured a build that silently fell back to the JAX NLP evaluator, and its
+> graduation was retracted. This entry is the re-measurement on the shipped regime,
+> plus the reconciliation of three runs that reached three different verdicts. The
+> lesson is CLAUDE.md §8, one level deeper than "assert the marker": a marker proves
+> *which discopt* you loaded, not *which backend it will use*.
+>
+> **The environment defect that invalidated §14f, stated exactly.** `pyproject`
+> requires `pounce-solver>=0.10` (`3b5d397`); the container came up with **0.9.0**,
+> which lacks `NlExpr`/`build_nl_problem`. `tape_backend_requested()` returned False
+> — printing "This build predates pounce #470" — and every solve used
+> `_relax/nlp_evaluator.py`, the JAX one. That is what put `jit_batch_hvp` XLA
+> compiles on the solve path and made them the dominant term of §14f's wall win.
+> On the current build the check is direct: after a `solve()`, `sys.modules` holds
+> **0** `jax*` modules. **There is no JAX on the solve path**, so
+> `hessian_compile_estimate_s()` is 0.0 and `DISCOPT_HESS_COMPILE_GATE` gates a
+> mechanism that cannot occur. Its measured effect is exactly that: `cand − wr`
+> overrun delta **0.0 ± 2.0 s** over 3 reps.
+>
+> **Tape-regime panel** (same four arms and script as §14f, 19 binding instances,
+> 20 s, 3 reps interleaved, pounce 0.10.0 + tape asserted live, post-#990 tree;
+> `discopt_benchmarks/results/issue928_tape_grad20.json`):
+>
+> | overrun vs base | rep1 | rep2 | rep3 | mean ± sd |
+> |---|---|---|---|---|
+> | `warm` (#928 alone) | −11.6 | −11.0 | −15.3 | −12.6 ± 2.3 |
+> | `wr` | −20.4 | −13.6 | −19.7 | −17.9 ± 3.7 |
+> | `cand` | −20.8 | −15.4 | −17.5 | −17.9 ± 2.7 |
+> | `cand` − `wr` (the compile gate alone) | −0.4 | −1.8 | +2.2 | **0.0 ± 2.0** |
+>
+> **And that win is a slow-machine artifact too.** It is not spread over the corpus:
+> 14 of 19 instances differ by under 1 s between arms, and the delta is `hda`
+> (base 10.7 / 11.1 / 12.0 s of overrun vs `warm` ~1.8, `wr` ~0.4) plus `contvar`
+> (base 5.8–7.5 vs `warm` ~1.3). Against the owner's machine (`f256524` artifacts,
+> same instances and budget) the same base cells land at **hda 20.9 s and contvar
+> 20.2 s** — inside the budget, nothing to clamp. Per-rep total base overrun is
+> 29.9 s here against 13.0 s there, and several instances that bind here finish far
+> inside budget there (syn05hfsg 4.8 s, tspn05 2.6 s, tls2 10.8 s). This box is
+> 1.3–1.5× too slow on exactly the two instances that carry the effect. **A
+> wall-time graduation claim from this container is not admissible**, which is why
+> the defaults stay OFF.
+>
+> **What IS machine-independent, and what §5's wall metric missed.** In the owner's
+> own artifacts, `hda`'s dual bound with the flags on is
+>
+> | | base | `seam` (no LP deadline) | `cand` |
+> |---|---|---|---|
+> | 20 s | −2.07e13 | −2.07e13 | **−64473.44** |
+> | 15 s | −2.07e13 | −2.07e13 | **−85627.36** (and wall 15.2 s vs 17.7 s) |
+>
+> reproducibly in **6/6 reps**, and it is `DISCOPT_LP_WARM_DEADLINE` specifically —
+> the `seam` arm, which carries the round budget but not the LP deadline, keeps the
+> garbage-wide bound. A dual bound of −2.07e13 on a problem whose optimum is near
+> −64473 is not a loose bound, it is no bound; converting it is a certificate
+> improvement, which §5 bar 2 lists first ("node count / wall / bound"). The
+> `f256524` scoring counted it as one line inside "28 tighter vs 12 looser" and
+> failed the flag on wall aggregates and node totals.
+>
+> **Bar-1 residuals on the tape regime are knife-edge cells, measured**
+> (`scratchpad/issue928_certflip_noise.py` re-run on the three items the panel
+> flagged, 60 counted cells, 5 reps each):
+>
+> | | base | warm | wr | cand |
+> |---|---|---|---|---|
+> | heatexch_gen2 incumbent | 5/5 | 5/5 | 5/5 | 5/5 |
+> | syn05hfsg certified | 5/5 | 5/5 | 5/5 | 5/5 |
+> | casctanks incumbent | 1/5 | 0/5 | 1/5 | 1/5 |
+>
+> heatexch_gen2's panel miss was 1 cell in 12; syn05hfsg's "cert regression" does
+> not reproduce at all; and on casctanks the base arm finds the incumbent 1/5 — it
+> is a cell nobody holds, while the flag arms reach the *tighter* bound (+1.3523 vs
+> −90.1786) in 3/5, 2/5 and 4/5 against base's **0/5**. This is the same shape as
+> `f256524`'s own nvs05 note ("base winning a race the candidate never wins").
+>
+> **Verdict: defaults stay OFF, and the decision is escalated rather than taken.**
+> Three runs, three verdicts, and each difference is now explained: JAX-evaluator
+> build (invalid), slow container (wall win concentrated on two instances that only
+> bind here), owner's machine (wall ≈ 0 at 20 s, −5.0 ± 0.6 s at 15 s, `hda` bound
+> fixed 6/6). What the evidence supports is narrower and firmer than a graduation:
+> this flag is a **time-limit contract fix whose benefit scales with how badly the
+> machine misses the budget**, and on the reference machine its measurable product
+> is the `hda` bound, not wall time. Whether that clears bar 2 is a judgment about
+> which axis counts, and it belongs to the owner. What should NOT be re-run is
+> another wall-time panel on a container slower than the reference machine.
+>
+> **Not run, and deliberately:** the 15 s tape-regime panel on this container. It
+> would only re-demonstrate the machine dependence above, and the owner's machine
+> already has 15 s tape data.
+
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
 > **The defect (confirmed).** The McCormick row generators in

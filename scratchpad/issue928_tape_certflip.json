@@ -1,0 +1,1195 @@
+{
+  "load_start": [
+    0.5166015625,
+    0.2080078125,
+    0.07568359375
+  ],
+  "load_end": [
+    1.14794921875,
+    1.12548828125,
+    0.8837890625
+  ],
+  "cells_executed": 60,
+  "cert_rates": {
+    "casctanks": {
+      "base": "0/5",
+      "warm": "0/5",
+      "wr": "0/5",
+      "cand": "0/5"
+    },
+    "heatexch_gen2": {
+      "base": "0/5",
+      "warm": "0/5",
+      "wr": "0/5",
+      "cand": "0/5"
+    },
+    "syn05hfsg": {
+      "base": "5/5",
+      "warm": "5/5",
+      "wr": "5/5",
+      "cand": "5/5"
+    }
+  },
+  "verdicts": {
+    "casctanks": "stable",
+    "heatexch_gen2": "stable",
+    "syn05hfsg": "stable"
+  },
+  "cells": [
+    {
+      "instance": "casctanks",
+      "rep": 1,
+      "budget": 20.0,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 25.424738914999992,
+        "status": "feasible",
+        "objective": 9.207583239275188,
+        "bound": -90.17863668805973,
+        "gap": 10.793952913007658,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.199903610999996,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.27371462500001,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863067603525,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.18225819700001,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "rep": 1,
+      "budget": 20.0,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.429050964000027,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902849488,
+        "gap": 0.3259755067513736,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.403139461999984,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.40391791099998,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.420016418999978,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "rep": 1,
+      "budget": 20.0,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.71019867200002,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.646033240999998,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.87045501299997,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 17.18245665300003,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "casctanks",
+      "rep": 2,
+      "budget": 20.0,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.430471373000046,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863668805973,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.37217126799999,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863067603525,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.471971389000032,
+        "status": "feasible",
+        "objective": 9.163479050753093,
+        "bound": -90.17863067603525,
+        "gap": 10.841090941177413,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.405209720000016,
+        "status": "feasible",
+        "objective": 9.163479050753093,
+        "bound": -90.17863067603525,
+        "gap": 10.841090941177413,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "rep": 2,
+      "budget": 20.0,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.401486044000023,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902849488,
+        "gap": 0.3259755067513736,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.456694415000015,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.465726062999977,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.487720196999987,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "rep": 2,
+      "budget": 20.0,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.940462611999976,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.38235318900007,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.497532679000074,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 17.858088866999992,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "casctanks",
+      "rep": 3,
+      "budget": 20.0,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.508079631999976,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863668805973,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.19764293700007,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.086639750000018,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.066700114000014,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "rep": 3,
+      "budget": 20.0,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.4244333260001,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902849488,
+        "gap": 0.3259755067513736,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.431060027000058,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.406643572999997,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.401702080000064,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "rep": 3,
+      "budget": 20.0,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.689526190000038,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 17.26154000200006,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.65723091899997,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.91061615199999,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "casctanks",
+      "rep": 4,
+      "budget": 20.0,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.312466803999996,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863668805973,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.149986491999925,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.47790781499998,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863067603525,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.170841191000022,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "rep": 4,
+      "budget": 20.0,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.407648258999984,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902849488,
+        "gap": 0.3259755067513736,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.464118120999956,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.398213899999973,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.42964930900007,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "rep": 4,
+      "budget": 20.0,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 18.39440141299997,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 17.18618342000002,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.685203839999986,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.77418331800004,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "casctanks",
+      "rep": 5,
+      "budget": 20.0,
+      "base": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.283686935000105,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863668805973,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.388980872000047,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863067603525,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.96189326500007,
+        "status": "time_limit",
+        "objective": null,
+        "bound": -90.17863067603525,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "casctanks",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 21.246079904999988,
+        "status": "time_limit",
+        "objective": null,
+        "bound": 1.3522533305715756,
+        "gap": null,
+        "gap_certified": false,
+        "node_count": 5,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "rep": 5,
+      "budget": 20.0,
+      "base": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.413994812000055,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902849488,
+        "gap": 0.3259755067513736,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.44883463300016,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.39985235600011,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "heatexch_gen2",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "min",
+        "wall": 20.422715801000095,
+        "status": "feasible",
+        "objective": 824551.3269203164,
+        "bound": 555767.7902857282,
+        "gap": 0.32597550675042836,
+        "gap_certified": false,
+        "node_count": 3,
+        "incumbent_verification_failed": false
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "rep": 5,
+      "budget": 20.0,
+      "base": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "0",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.508966744999952,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980034,
+        "gap": 2.8091518703525014e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "warm": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "0",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.858927666,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "wr": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "0"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 16.926604694999924,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      },
+      "cand": {
+        "instance": "syn05hfsg",
+        "flags": {
+          "DISCOPT_LP_WARM_DEADLINE": "1",
+          "DISCOPT_NODE_ROUND_BUDGET": "1",
+          "DISCOPT_HESS_COMPILE_GATE": "1"
+        },
+        "budget": 20.0,
+        "sense": "max",
+        "wall": 17.03971149799986,
+        "status": "optimal",
+        "objective": 837.7323012718435,
+        "bound": 837.7324008980036,
+        "gap": 2.7955810883701214e-14,
+        "gap_certified": true,
+        "node_count": 277,
+        "incumbent_verification_failed": false
+      }
+    }
+  ]
+}

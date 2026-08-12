@@ -1171,9 +1171,20 @@ class SolverTuning:
     is a flat 15 s risk headroom, so on a 20 s budget every node NLP after the root
     round is refused — including, on tspn12, a compile the base arm affords inside
     22.9 s. Bar 1 has no slack (CLAUDE.md §1: the solver's product is the
-    certificate), so the wall win does not buy graduation. Re-panelling it needs a
-    refusal rule that bounds the COMPILE's cost rather than the entry's budget;
-    that work belongs to #966."""
+    certificate), so the wall win does not buy graduation.
+
+    **Update 2026-08-12 (§14g) — that measurement was taken on a build with NO tape
+    NLP evaluator, and this gate has no purpose on a current one.** The container
+    had ``pounce-solver`` 0.9.0 (``pyproject`` requires >=0.10), so
+    ``tape_backend_requested()`` was False and every solve ran the JAX evaluator —
+    which is what put an XLA Hessian compile on the solve path at all. On a current
+    build a solve leaves **0** ``jax*`` modules in ``sys.modules``,
+    ``hessian_compile_estimate_s()`` returns 0.0, and this gate can never fire; the
+    tape-regime panel measures its marginal effect as **0.0 +/- 2.0 s** over 3 reps
+    (``cand - wr``). So on the shipped configuration it is not "a wall win that
+    costs a certificate" — it is inert. Before re-panelling it, #966 should decide
+    whether a gate against a compile only an out-of-date dependency can trigger is
+    worth keeping at all."""
 
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
