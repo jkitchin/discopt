@@ -83,6 +83,50 @@ python -m benchmarks.gdplib_runner --max-variables 500 --time-limit 120 --output
 
 The CLI exits nonzero if any run trips a soundness flag, so it can gate CI.
 
+## The `gdplib_small` named suite
+
+`--max-variables 500` was how the small panel used to be selected, and it is not
+reproducible: the variable count of a GDPlib model changes with the gdplib
+revision, so the same command silently covers a different set of models on a
+different checkout — and a panel that shrank is a panel that verified less than it
+claims. The set is therefore pinned **by name**, in
+`gdplib_runner.GDPLIB_SMALL`, and selected with `--suite`:
+
+```bash
+cd discopt_benchmarks
+python -m benchmarks.gdplib_runner --suite gdplib_small --methods bigm \
+    --time-limit 120 --output reports/gdplib_small.json
+```
+
+Twelve models: `jobshop`, `ex1_linan_2023`, `positioning`, `small_batch`, `cstr`,
+`spectralog`, `methanol`, `batch_processing`, `syngas`, `water_network`,
+`gdp_col`, `modprodnet`. `multiperiod_blending` (474 variables, so nominally in
+range) is **excluded** because no verified oracle value exists for it — an
+unverified oracle can mask a false primal rather than catch one, which is exactly
+the hole the cstr finding below came from.
+
+`--suite` and `--models` are mutually exclusive, and the suite path refuses (exit
+**4**) when the install does not provide every model the preset names. That guard
+is the point of the preset: `discover_models(include=…)` filters by set
+intersection, so without it a missing model would quietly drop out and the sweep
+would print "no soundness violations" over eleven models while claiming twelve.
+Exit codes: `1` soundness violation, `2` gdplib/pyomo unavailable, `3` vacuous
+sweep (zero oracle-checked runs), `4` incomplete suite.
+
+The on-demand pytest wrapper is
+`discopt_benchmarks/tests/test_gdplib.py::test_gdplib_small_suite_runs_clean`
+(`slow`-marked, 60 s per solve, not in CI):
+
+```bash
+pytest -m slow discopt_benchmarks/tests/test_gdplib.py -k gdplib_small_suite
+```
+
+It asserts the run count equals the preset size, that no run produced a false
+optimum or a crossed bound, and that at least one run was oracle-checked. There
+is deliberately **no nightly lane** — this is a panel you run when a change
+touches the GDP path (e.g. the `DISCOPT_GDP_CONFIG_PRIMAL` graduation panel in
+`docs/dev/data/`), not a continuous watch.
+
 ## Native discopt models
 
 `discopt_benchmarks/benchmarks/gdplib_native.py` rebuilds a curated subset of GDPlib
