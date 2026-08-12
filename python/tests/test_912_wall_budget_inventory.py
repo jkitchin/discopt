@@ -136,8 +136,15 @@ def _params_receiving_clock(call: ast.Call, defs: dict) -> tuple[set[str], list]
             continue
         for _dpath, dnode in defs[callee]:
             formal = dnode.args.posonlyargs + dnode.args.args
-            if pos < len(formal):
-                names.add(formal[pos].arg)
+            # ``obj.method(clock)`` binds argument 0 to formal 1: the receiver has
+            # already consumed ``self``. Without this the mapping is off by one on
+            # every method, which reads as "no budget built from it" — a silent
+            # false negative exactly where a gate is easiest to hide.
+            bound = 1 if isinstance(call.func, ast.Attribute) and formal else 0
+            if bound and formal[0].arg not in ("self", "cls"):
+                bound = 0
+            if pos + bound < len(formal):
+                names.add(formal[pos + bound].arg)
     for kw in call.keywords:
         if kw.arg is not None and _is_clock_read(kw.value):
             names.add(kw.arg)
