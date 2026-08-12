@@ -5138,6 +5138,7 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "local_refine",
         "local_refine_after",
         "local_refine_time_limit",
+        "local_refine_method",
         "feasibility_tolerance",
     }
 )
@@ -6029,6 +6030,7 @@ def solve_model(
             "local_refine",
             "local_refine_after",
             "local_refine_time_limit",
+            "local_refine_method",
             "feasibility_tolerance",
         ):
             if key in kwargs:

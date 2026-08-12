@@ -21,6 +21,29 @@ NLP with no global search at all (see ``docs/global_optimization.md``). A model
 that *can* be written algebraically should not use this backend: spatial
 branch-and-bound will certify it, and DIRECT will not.
 
+Where this sits in derivative-free optimization
+-----------------------------------------------
+**This is a strong baseline, not the state of the art**, and it is worth being
+plain about that. DIRECT dates from 1993. What it offers is a good set of
+properties rather than best-in-class performance: it is deterministic (same
+answer every run), has essentially one hyperparameter, needs no surrogate model
+and no fitting cost, and its sampling is dense in the limit. That makes it a
+dependable default and a fair yardstick.
+
+What it is not: competitive with modern model-based methods on expensive
+objectives. For a genuinely costly evaluation, a surrogate method (Bayesian
+optimization / RBF surrogates) reaches a comparable answer in far fewer calls,
+because it spends real computation deciding *where* to sample. For local
+refinement, trust-region methods (BOBYQA, DFO-LS) beat DIRECT badly — which is
+precisely why the local-refinement hybrid here exists. For constrained blackbox
+work at scale, MADS-family solvers (NOMAD) are the mature choice.
+
+The one caveat against writing the family off: DIRECT *hybridized with a local
+solver* remains competitive. The survey notes that in a recent comparison of
+derivative-free algorithms on problems up to 300 variables, the DIRECT variant
+``glcCluster`` was among the top performers. The variant matters, and the winners
+are all DIRECT-plus-local-search — which is the shape implemented here.
+
 Algorithm
 ---------
 Original DIRECT is Jones, Perttunen & Stuckman (1993). This implementation adds
@@ -98,6 +121,7 @@ class DirectStats:
     local_solves: int = 0
     local_improvements: int = 0
     local_failures: int = 0
+    derivative_free_refines: int = 0
     feasible_found: int = 0
 
     def as_dict(self) -> dict[str, float]:
@@ -647,6 +671,65 @@ def _build_oracle(model: Model, feas_tol: float):
     return evaluate, n_vars, integer_mask
 
 
+def _refine_derivative_free(
+    search: "_DirectSearch",
+    oracle: Callable[[np.ndarray], tuple[float, float]],
+    start: np.ndarray,
+    max_fev: int,
+) -> None:
+    """Derivative-free polish with Powell, integers held fixed.
+
+    The gradient path (:func:`_refine_locally`) is the better refiner when the
+    objective really is differentiable, and a ``dm.custom`` body is JAX-traceable
+    by construction. But traceable is not the same as *usefully* differentiable:
+    a body containing ``jnp.round``/``jnp.floor``, a table lookup, or a simulator
+    behind ``jax.pure_callback`` hands back zero or meaningless gradients, and a
+    gradient method will sit still while reporting success. Powell needs no
+    derivatives at all.
+
+    Powell rather than Nelder-Mead: it handles bounds properly in SciPy and
+    behaves better on the mildly ill-conditioned valleys DIRECT tends to hand
+    over. SciPy is already a core dependency, so this costs no new install.
+
+    Points are scored with the same GLce auxiliary the search itself ranks by, so
+    the polish optimizes exactly what the search optimizes and no new penalty
+    weight is introduced. Every evaluation is routed through the oracle so it
+    counts against the budget and updates the incumbent.
+    """
+    from scipy.optimize import minimize
+
+    free = ~search.integer_mask
+    if not free.any():
+        return  # nothing continuous to polish
+    lo = search.lb[free]
+    hi = search.ub[free]
+    if np.any(hi <= lo):
+        return
+    base = np.asarray(start, dtype=np.float64).copy()
+
+    def objective(z: np.ndarray) -> float:
+        x = base.copy()
+        x[free] = np.clip(z, lo, hi)
+        fval, viol = oracle(x)
+        search.stats.evals += 1
+        search._offer(x, fval, viol)
+        return search._scalar_rank(fval, viol)
+
+    try:
+        minimize(
+            objective,
+            base[free],
+            method="Powell",
+            bounds=list(zip(lo, hi)),
+            options={"maxfev": int(max(1, max_fev)), "xtol": 1e-8, "ftol": 1e-10},
+        )
+    except Exception as exc:
+        # Reported, never swallowed: a polish that cannot run must not read as
+        # "the hybrid ran and did not help" (CLAUDE.md §7).
+        search.stats.local_failures += 1
+        logger.warning("DIRECT: derivative-free refinement raised (%s)", exc)
+
+
 def _refine_locally(
     model: Model,
     start: np.ndarray,
@@ -723,6 +806,7 @@ def solve_direct(
     local_refine: bool = True,
     local_refine_after: int = 100,
     local_refine_time_limit: float = 30.0,
+    local_refine_method: str = "auto",
     feasibility_tolerance: float = 1e-6,
     nlp_solver: str = "pounce",
     initial_point: Optional[np.ndarray] = None,
@@ -746,10 +830,18 @@ def solve_direct(
     divide, break_ties
         The Jones 2001 revisions; see the module docstring. Defaults measured.
     local_refine, local_refine_after
-        Run a local NLP once ``local_refine_after`` evaluations have been spent,
+        Run a local solve once ``local_refine_after`` evaluations have been spent,
         then again whenever sampling improves on the last local solution. The
         refinement starts from the best of the caller's ``initial_point`` and
         DIRECT's incumbent, so this can only improve on the local-only path.
+    local_refine_method
+        ``"nlp"`` uses discopt's gradient-based local solver; ``"derivative-free"``
+        uses Powell, which needs no gradients at all. ``"auto"`` (default) runs the
+        NLP and falls back to Powell when it fails or fails to improve — the right
+        default because a ``dm.custom`` body is JAX-*traceable* by construction but
+        not necessarily usefully *differentiable* (``jnp.round``, a table lookup, a
+        simulator behind ``jax.pure_callback`` all yield useless gradients, and a
+        gradient method then stalls while reporting success).
 
     Raises
     ------
@@ -771,6 +863,11 @@ def solve_direct(
         raise ValueError(f"direct_variant must be 'classic' or 'gl', got {direct_variant!r}")
     if max_evals < 1:
         raise ValueError(f"max_evals must be >= 1, got {max_evals}")
+    if local_refine_method not in ("auto", "nlp", "derivative-free"):
+        raise ValueError(
+            "local_refine_method must be 'auto', 'nlp' or 'derivative-free', "
+            f"got {local_refine_method!r}"
+        )
 
     from discopt.solver import _flat_var_box
 
@@ -845,21 +942,51 @@ def solve_direct(
         if seed_value is not None and best_val is not None and seed_value < best_val:
             start = seed_point
         remaining = max(0.0, deadline - time.perf_counter())
-        refined = _refine_locally(
-            model,
-            start,
-            integer_mask,
-            min(local_refine_time_limit, remaining),
-            nlp_solver,
-            stats,
+        before = search.best_feasible_value
+
+        if local_refine_method in ("nlp", "auto"):
+            refined = _refine_locally(
+                model,
+                start,
+                integer_mask,
+                min(local_refine_time_limit, remaining),
+                nlp_solver,
+                stats,
+            )
+            if refined is not None:
+                value, point = refined
+                fval, viol = oracle(point)
+                search._offer(point, fval, viol)
+                if last_local_value is None or value < last_local_value:
+                    stats.local_improvements += 1
+                last_local_value = value
+
+        # A gradient method that did not move is the signature of a body that is
+        # JAX-traceable but not usefully differentiable (jnp.round, a table
+        # lookup, a pure_callback simulator). Powell does not care.
+        gradient_stalled = (
+            local_refine_method == "auto"
+            and before is not None
+            and search.best_feasible_value is not None
+            and search.best_feasible_value >= before - 1e-12
         )
-        if refined is not None:
-            value, point = refined
-            fval, viol = oracle(point)
-            search._offer(point, fval, viol)
-            if last_local_value is None or value < last_local_value:
-                stats.local_improvements += 1
-            last_local_value = value
+        if local_refine_method == "derivative-free" or gradient_stalled:
+            budget_left = max(0, max_evals - stats.evals)
+            if budget_left > 0:
+                stats.derivative_free_refines += 1
+                _refine_derivative_free(
+                    search,
+                    oracle,
+                    search.best_feasible_point,
+                    max_fev=min(budget_left, 200 * max(1, int((~integer_mask).sum()))),
+                )
+                if (
+                    before is not None
+                    and search.best_feasible_value is not None
+                    and search.best_feasible_value < before - 1e-12
+                ):
+                    stats.local_improvements += 1
+
         # Re-trigger once sampling beats the last local solution (Jones 2001).
         next_refine_at = stats.evals + local_refine_after
 

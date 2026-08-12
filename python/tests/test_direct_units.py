@@ -342,3 +342,60 @@ def test_reproduces_the_surveys_published_evaluation_counts():
     assert abs(one_side - 192) <= 60, f"one-side+break-ties = {one_side}, survey reports 192"
     assert abs(no_ties - 470) <= 120, f"all-sides+break-ties = {no_ties}, survey reports 470"
     assert original > 5000, f"the original rules should be dramatically worse, got {original}"
+
+
+# ── derivative-free refinement ───────────────────────────────────────────────
+
+
+def test_derivative_free_refinement_improves_a_zero_gradient_objective():
+    """Powell moves where a gradient method cannot: a staircase objective.
+
+    A ``dm.custom`` body is JAX-*traceable* by construction, which is not the same
+    as usefully *differentiable*. ``jnp.floor``, a table lookup, or a simulator
+    behind ``jax.pure_callback`` all hand back zero or meaningless gradients, and
+    a gradient method then sits still while reporting success. This is the case
+    ``local_refine_method="derivative-free"`` exists for.
+    """
+    from discopt.solvers.direct import _refine_derivative_free
+
+    def staircase(x):
+        q = np.floor(x * 4.0) / 4.0  # piecewise constant: gradient 0 a.e.
+        return float(np.sum((q - 1.25) ** 2) + 0.01 * np.sum(x**2)), 0.0
+
+    s = _DirectSearch(np.full(2, -3.0), np.full(2, 5.0))
+    s.run(staircase, max_evals=300)
+    before = s.best_feasible_value
+    _refine_derivative_free(s, staircase, s.best_feasible_point, max_fev=400)
+    assert s.best_feasible_value <= before + 1e-12, "refinement must never make things worse"
+
+
+def test_derivative_free_refinement_holds_integers_fixed():
+    """Only continuous coordinates are polished; an integer stays at its value."""
+    from discopt.solvers.direct import _refine_derivative_free
+
+    def objective(x):
+        return float((x[0] - 2.7) ** 2 + (x[1] - 1.3) ** 2), 0.0
+
+    mask = np.array([True, False])
+    s = _DirectSearch(np.array([0.0, 0.0]), np.array([6.0, 6.0]), integer_mask=mask)
+    s.run(objective, max_evals=200)
+    start = s.best_feasible_point.copy()
+    _refine_derivative_free(s, objective, start, max_fev=300)
+    best = s.best_feasible_point
+    assert best[0] == pytest.approx(start[0]), "the integer coordinate must not move"
+    assert abs(best[0] - round(best[0])) < 1e-9, "the integer coordinate must stay integral"
+    assert abs(best[1] - 1.3) < 1e-3, f"the continuous coordinate should be polished: {best[1]}"
+
+
+def test_derivative_free_refinement_counts_its_evaluations():
+    """Polish calls are real function calls and must be charged to the budget."""
+    from discopt.solvers.direct import _refine_derivative_free
+
+    def objective(x):
+        return float(np.sum((x - 0.3) ** 2)), 0.0
+
+    s = _DirectSearch(np.zeros(2), np.ones(2))
+    s.run(objective, max_evals=50)
+    before = s.stats.evals
+    _refine_derivative_free(s, objective, s.best_feasible_point, max_fev=60)
+    assert s.stats.evals > before, "polish evaluations must be counted, not hidden"
