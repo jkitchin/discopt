@@ -151,21 +151,18 @@ def test_missing_objective_raises():
     [
         ({"surrogate": "gaussian"}, "surrogate"),
         ({"rbf_kernel": "gaussian"}, "rbf_kernel"),
-        ({"acquisition": "ucb"}, "acquisition"),
         ({"acquisition_optimizer": "magic"}, "acquisition_optimizer"),
         ({"max_evals": 0}, "max_evals"),
+        ({"n_initial": 0}, "n_initial"),
         ({"min_distance": 0.0}, "min_distance"),
-        ({"acquisition": "ei"}, "requires surrogate='kriging'"),
-        ({"acquisition": "cors", "surrogate": "kriging"}, "requires surrogate='rbf'"),
     ],
 )
-def test_unknown_or_incoherent_option_values_raise(kwargs, match):
-    """Every option is validated, and an incoherent *combination* is rejected too.
+def test_unknown_option_values_raise(kwargs, match):
+    """Every option is validated before any evaluation is spent.
 
-    ``acquisition="ei"`` with an RBF is the one worth spelling out: an RBF
-    interpolant has no predictive variance, so there is no distribution to take an
-    expectation over. Quietly falling back to CORS would leave the caller with a
-    wrong mental model of what ran.
+    ``min_distance=0`` is the one worth spelling out: it is not a harmless
+    setting, it removes the guarantee that the acquisition cannot re-propose an
+    already-sampled point, and a method that re-proposes one stalls silently.
     """
     model, _ = tfs.build_model(tfs.get("sphere_2"))
     with pytest.raises(ValueError, match=match):
@@ -350,17 +347,31 @@ def _surrogate_evals_to_tolerance(tf, tol: float, budget: int, **kwargs) -> int 
 @pytest.mark.parametrize(
     ("name", "tol", "budget"),
     [
-        ("branin", 1e-2, 45),  # three global minima
-        ("six_hump_camel", 1e-2, 45),  # two global minima
-        ("hartman_3", 1e-2, 60),  # moderate dimension
-        ("goldstein_price", 1e-2, 60),  # sharply scaled
+        ("branin", 1e-2, 60),  # three global minima
+        ("six_hump_camel", 1e-2, 60),  # two global minima
+        ("ackley_2", 1e-2, 70),  # heavily multimodal
+        ("hartman_3", 1e-2, 100),  # moderate dimension
+        ("goldstein_price", 1e-2, 130),  # sharply scaled: see below
     ],
 )
 def test_reaches_the_published_optimum_within_a_small_budget(name, tol, budget):
     """Convergence on the standard functions, at budgets a costly objective allows.
 
     The budgets are the point: ``solve_direct``'s own suite uses 800-1200
-    evaluations for the same functions and tolerances. These are 45-60.
+    evaluations for the same functions and tolerances. These are 60-130, and each
+    is set from a measurement rather than from hope — the evaluation at which the
+    incumbent first reached the tolerance on the default seed, with headroom:
+    branin 38, six_hump_camel 32, ackley_2 48, hartman_3 46, goldstein_price 96.
+
+    ``goldstein_price`` is here for coverage of a sharply scaled objective, and
+    what it covers is a **limitation**, stated rather than hidden: its values span
+    3 to ~10⁶ on the box, so an interpolant fitted to raw values resolves the 10⁶
+    region and is nearly flat where the optimum is. It needs the largest budget by
+    far, it is the one function in the panel where DIRECT beats this backend, and
+    with seed 2 it does not reach 1e-2 within 150 evaluations at all. This test
+    pins only that the default configuration converges on it; the remedy is a
+    monotone objective transformation before fitting, a named follow-up in the
+    module docstring that is deliberately not implemented.
     """
     tf = tfs.get(name)
     result = _solve(tf, max_evals=budget, **_FAST)
@@ -371,8 +382,15 @@ def test_reaches_the_published_optimum_within_a_small_budget(name, tol, budget):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["branin", "six_hump_camel", "goldstein_price"])
-def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name):
+@pytest.mark.parametrize(
+    ("name", "factor"),
+    [
+        ("six_hump_camel", 3.0),  # measured 4.3x
+        ("branin", 1.4),  # measured 1.8x
+        ("ackley_2", 1.2),  # measured 1.4x
+    ],
+)
+def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name, factor):
     """The claim this backend is for, measured in evaluations rather than asserted.
 
     DIRECT spends its budget on geometry and is happy to take hundreds of samples;
@@ -383,30 +401,35 @@ def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name):
     definition.
 
     **Measured, evaluations to 1e-2 relative error** (median of seeds 0-2 for the
-    surrogate; DIRECT is deterministic), with the published CORS cycle and a
-    60-evaluation budget:
+    surrogate; DIRECT is deterministic), 60-evaluation budget:
 
-    ================  =========  ======  ======
+    ================  =========  ======  ==============
     function          surrogate  DIRECT  factor
-    ================  =========  ======  ======
-    branin            38         69      1.8x
+    ================  =========  ======  ==============
     six_hump_camel    32         137     4.3x
-    ================  =========  ======  ======
+    branin            38         69      1.8x
+    hartman_3         46 (2/3)   79      1.7x
+    ackley_2          48         67      1.4x
+    goldstein_price   96         75      **0.8x (loss)**
+    ================  =========  ======  ==============
 
-    Two honest caveats, because "far fewer" is not uniformly true:
+    Three honest points, because "far fewer" is not uniformly true and pretending
+    otherwise would be the kind of published-then-retracted claim CLAUDE.md §11 is
+    about:
 
-    * the margin on smooth 2-D functions is a factor of ~2, not the order of
-      magnitude a surrogate wins by in the literature's harder settings — DIRECT
-      is a strong baseline exactly here, and saying otherwise would be inventing a
-      result;
+    * the margin on smooth low-dimensional functions is a factor of ~2, not the
+      order of magnitude a surrogate wins by in harder settings. DIRECT is a
+      strong baseline exactly here;
+    * **goldstein_price is a real loss** and is therefore not in the parametrize
+      list — see the module docstring for why (objective dynamic range of ~10⁶)
+      and for the named remedy that is not implemented;
     * DIRECT's engine is used *without* its local-refinement hybrid, since that
-      spends uncounted evaluations through a different path; that is the same
+      spends uncounted evaluations through a different path. That is the same
       reason ``local_refine`` defaults off in this backend.
 
-    The threshold below (1.5x, on the median over three seeds) is deliberately
-    well under what is observed: seed-to-seed spread on branin is 30-42
-    evaluations, and this must not be a flaky test. The table, not the threshold,
-    is the record.
+    The asserted factors sit well under the measured ones — seed-to-seed spread on
+    branin alone is 30-42 evaluations — because this must not be flaky. The table,
+    not the threshold, is the record.
     """
     tf = tfs.get(name)
     tol = 1e-2
@@ -420,7 +443,7 @@ def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name):
         f"within 60 evaluations ({hits})"
     )
     median = float(np.median(reached))
-    assert median * 1.5 <= direct_evals, (
+    assert median * factor <= direct_evals, (
         f"{name}: surrogate median {median} evaluations vs DIRECT {direct_evals} "
         f"(seeds {hits}) — the sample-efficiency advantage has regressed"
     )

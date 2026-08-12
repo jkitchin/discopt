@@ -1527,7 +1527,6 @@ def solve_surrogate(
     rbf_kernel: str = "cubic",
     rbf_ridge: float = 0.0,
     n_initial: Optional[int] = None,
-    acquisition: str = "auto",
     acquisition_optimizer: str = "auto",
     acquisition_time_limit: float = 20.0,
     acquisition_gap_tolerance: float = 1e-4,
@@ -1582,11 +1581,6 @@ def solve_surrogate(
         ``max(n+2, min(10n, max_evals // 2))``: ``10n`` is the classic rule of
         thumb, ``n+2`` is the minimum an RBF with a linear tail can be fitted
         from, and the cap stops the design from eating a small budget whole.
-    acquisition
-        ``"auto"`` (default) picks CORS for ``"rbf"`` and expected improvement for
-        ``"kriging"``. ``"cors"`` and ``"ei"`` force the choice; ``"ei"`` requires
-        ``surrogate="kriging"``, since an RBF interpolant has no variance to take
-        an expectation over.
     acquisition_optimizer
         How the acquisition subproblem is maximized.
 
@@ -1685,8 +1679,6 @@ def solve_surrogate(
         raise ValueError(f"surrogate must be 'rbf' or 'kriging', got {surrogate!r}")
     if rbf_kernel not in _RBF_KERNELS:
         raise ValueError(f"rbf_kernel must be one of {_RBF_KERNELS}, got {rbf_kernel!r}")
-    if acquisition not in ("auto", "cors", "ei"):
-        raise ValueError(f"acquisition must be 'auto', 'cors' or 'ei', got {acquisition!r}")
     if acquisition_optimizer not in ("auto", "certified", "multistart"):
         raise ValueError(
             "acquisition_optimizer must be 'auto', 'certified' or 'multistart', "
@@ -1701,14 +1693,6 @@ def solve_surrogate(
             f"min_distance must be > 0 (it is what makes re-proposing a sampled "
             f"point infeasible), got {min_distance}"
         )
-    if acquisition == "ei" and surrogate != "kriging":
-        raise ValueError(
-            "acquisition='ei' requires surrogate='kriging': an RBF interpolant has "
-            "no predictive variance, so there is no distribution to take an "
-            "expectation over."
-        )
-    if acquisition == "cors" and surrogate != "rbf":
-        raise ValueError("acquisition='cors' requires surrogate='rbf'")
 
     lb, ub = _flat_var_box(model)
     bad = ~(np.isfinite(lb) & np.isfinite(ub))

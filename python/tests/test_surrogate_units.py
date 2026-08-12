@@ -627,8 +627,6 @@ def test_acquisition_mirrors_every_variable_shape_and_type():
     fractional value for a variable the model declared integral — silently, since
     the driver clips and rounds afterwards.
     """
-    import jax.numpy as jnp
-
     from discopt.modeling.core import VarType
 
     source = dm_model_with_mixed_shapes()
@@ -643,7 +641,6 @@ def test_acquisition_mirrors_every_variable_shape_and_type():
     assert sum(v.size for v in acq._variables) == lb.size
     integral = {v.name for v in acq._variables if v.var_type is VarType.INTEGER}
     assert integral == {"a", "d"}, integral
-    del jnp  # imported only to build the opaque body below
 
 
 def dm_model_with_mixed_shapes():
