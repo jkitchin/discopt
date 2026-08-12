@@ -59,23 +59,28 @@ def _small_lp():
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_off(warm_dl):
-    """Still OFF — but as of 2026-08-12 for a NEW and specific reason (#928).
+def test_flag_defaults_on(warm_dl):
+    """ON by default as of 2026-08-12 (#928), after the seam that blocked it was fixed.
 
-    The isolating panel finally ran (this flag alone, 19 binding instances, 20 s,
-    3 reps, rate-scored) and passes BOTH §5 bars: 0 unsound / 0 cert_regressions /
-    0 lost_incumbents / 0 lost_bound in 3/3 over 96 executed oracle comparisons,
+    The isolating panel (this flag alone, 19 binding instances, 20 s, 3 reps,
+    rate-scored) passes BOTH §5 bars: 0 unsound / 0 cert_regressions / 0
+    lost_incumbents / 0 lost_bound in 3/3 over 96 executed oracle comparisons,
     overrun delta -2.6/-1.0/-0.3 s, hda's bound -2.07e13 -> -64473.44 in 3/3.
 
-    The default was flipped ON on that evidence and retracted the same hour: with
-    the flag ON, ``test_amp_integration`` 's ``test_time_limit_respected`` runs
-    past 350 s against an 8 s allowance, where ``=0`` passes in 3.43 s. The cause
-    is that ``solve_milp`` cannot tell an EXPIRED budget from NO limit — both
-    arrive as ``time_limit_s=0.0`` — so an exhausted shared budget launches the
-    MILP B&B unbounded. Graduation is blocked on that seam, not on more panels.
-    See ``_lp_warm_deadline_enabled``'s docstring."""
+    The default was flipped ON on that evidence, retracted the same hour, and is now
+    flipped again. The retraction was correct at the time: with the flag ON,
+    ``test_amp_integration``'s ``test_time_limit_respected`` ran past 350 s against an
+    8 s allowance because ``solve_milp`` could not tell an EXPIRED budget from NO
+    limit — both arrived as ``time_limit_s=0.0`` — so an exhausted shared budget
+    launched the MILP B&B unbounded. That seam is fixed (``parse_budget_secs`` in
+    ``lp_bindings.rs``; ``test_928_expired_budget_not_unlimited.py``), and with the fix
+    in place the same AMP test passes in 3.39 s, smoke is byte-identical between the
+    two arms, and the ``hda`` 10 s time-limit case XPASSes.
+
+    Keep the ``=0`` opt-out working (``test_flag_parses``): the legacy fresh-duration-
+    per-attempt path stays reachable."""
     warm_dl(None)
-    assert _lp_warm_deadline_enabled() is False
+    assert _lp_warm_deadline_enabled() is True
 
 
 @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("off", False)])

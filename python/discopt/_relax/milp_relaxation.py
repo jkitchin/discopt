@@ -521,9 +521,9 @@ def _lp_warm_deadline_enabled() -> bool:
     run (the run was cut short); the regression margin is 2 of 3, proportionally at or
     above the pre-registered 3 of 5.
 
-    **THE BLOCKER — an exhausted budget is indistinguishable from "no limit".** The
-    default was flipped ON on the strength of the panel above and immediately
-    retracted (§11): ``pytest -m smoke`` failed
+    **THE BLOCKER (now fixed) — an exhausted budget was indistinguishable from "no
+    limit".** The default was flipped ON on the strength of the panel above and
+    immediately retracted (§11): ``pytest -m smoke`` failed
     ``test_amp_integration.py::TestAmpConvergenceProperties::test_time_limit_respected``,
     which asserts ``solve(solver="amp", time_limit=3.0)`` returns within 8 s. A/B on
     that single test, same tree: ``DISCOPT_LP_WARM_DEADLINE=0`` **passes in 3.43 s**,
@@ -551,13 +551,27 @@ def _lp_warm_deadline_enabled() -> bool:
     500.6 s, bchoco08 80.9 s against a 20 s budget): those are the same unbounded
     MILP launch, not a diffuse budget-accounting problem.
 
-    So graduation is blocked on fixing that seam — ``solve_milp`` must be able to tell
-    "expired" from "unlimited" — not on another panel. Until then the flag is OFF and
-    the ``=0`` opt-out and legacy no-deadline path are unchanged.
+    **The seam is fixed and this flag is now ON by default.** ``solve_milp_py`` /
+    ``solve_milp_csc_py`` take ``Option<f64>``; ``None``/``+inf`` mean no limit and
+    ``Some(0.0)`` is an already-elapsed deadline that stops at the first poll with
+    ``gap_certified = false``. See ``parse_budget_secs`` in ``lp_bindings.rs`` and
+    ``python/tests/test_928_expired_budget_not_unlimited.py``. Re-verified with the
+    flag ON after that fix: the AMP case that forced the retraction passes in 3.39 s
+    (was >350 s), ``pytest -m smoke`` is 958 passed / 1 skipped / 2 xpassed — byte-
+    identical to the OFF arm — the adversarial suite is 10 passed, and
+    ``test_time_limit_contract.py`` is 3 passed + 1 XPASS, the xpass being the
+    ``hda`` 10 s case this flag exists to fix.
+
+    One caveat on the panel above, in the conservative direction: it was run with the
+    seam still present, so the ON arm's wall times *included* those unbounded MILP
+    launches. Bar 2 passed carrying that handicap, so the fix can only have improved
+    the margin it was graduated on.
+
+    The ``=0`` opt-out and the legacy no-deadline path are unchanged.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
         "0",
         "",
         "false",
