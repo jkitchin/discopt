@@ -213,6 +213,16 @@ results in `results/`. Use it to draw instances beyond the in-repo test corpus
 `python/tests/data/minlplib_nl/` corpus doesn't exercise), and use `minlplib.solu`
 as the oracle for correctness checks.
 
+The same directory also holds `qplib/` — the full **QPLIB** library (453
+quadratic instances, 390 nonconvex, no overlap with MINLPLib), read natively via
+`discopt.interfaces.qplib` with no AMPL/GAMS conversion. Unlike `.solu`, QPLIB
+ships reference solution *vectors*, so an incumbent can be feasibility-verified
+directly. Select instances by filtering `qplib/qplib_manifest.csv` (gate on
+`usable_oracle`; 421 of 453 qualify) — never by hardcoding names. See
+`docs/dev/qplib-corpus.md`; the `.qplib` layout is conditional on the instance's
+`probtype` code and misreading it produces a wrong model *without raising*, so
+treat that doc's format notes as binding before touching the reader.
+
 ### Linting & Type Checking
 ```bash
 ruff check python/
