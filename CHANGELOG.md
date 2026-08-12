@@ -10,6 +10,44 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **`solver="direct"` — derivative-free global search (DIRECT).** A new backend
+  in `discopt.solvers.direct` for models whose objective or constraints contain
+  an opaque `dm.custom` (`CustomCall`) body outside the reduced-space `MCBox`
+  scope. Such a model previously degraded to a single local NLP with no global
+  search at all, or raised outright when integer variables were also present
+  (sound-or-refuse); it now has a systematic search over the box.
+
+  Implements Jones/Perttunen/Stuckman (1993) with the modifications
+  Jones & Martins (JOGO 2021) conclude are generally beneficial, all default-on:
+  trisect one long side (Jones 2001, choosing the dimension split fewest times so
+  far), select one rectangle among ties, an `epsilon` floor, and hybridization
+  with a local solve. Also implemented: Jones 2001 integer centres, DIRECT-GLce
+  constraint handling, and an evaluation cache. DIRECT-GL's two-step selection is
+  available as `direct_variant="gl"` but is **not** the default — measured,
+  evaluations to 1% accuracy: `hartman_6` classic 105 / gl 277, `shubert` classic
+  2269 / gl 181, reproducing both directions of the survey's trade-off.
+
+  `local_refine_method` selects the gradient NLP, Powell, or `"auto"` (NLP with a
+  Powell fallback). The fallback matters because a `dm.custom` body is
+  JAX-*traceable* by construction but not necessarily usefully *differentiable*:
+  on a staircase objective the NLP stalls at 0.0312790 while Powell reaches
+  0.0312500. Refinement launches from the best of {caller's start, DIRECT's
+  incumbent}, so the backend cannot lose to the local-only path.
+
+  **Returns no certificate**, and the contract is enforced at the single
+  `SolveResult` construction site: `bound` and `gap` are `None`, `gap_certified`
+  is `False`, the status is never `"optimal"`, and an exhausted budget is a limit
+  status — never `"infeasible"`, since DIRECT cannot prove infeasibility. A
+  non-finite box and a missing objective raise rather than being approximated.
+
+  Entry experiment and its falsification record:
+  `docs/dev/direct-entry-2026-08-12.md`; reproduction
+  `scripts/direct_entry_experiment.py --self-check`. Notebook:
+  `docs/notebooks/direct_global.md`, which states plainly that this is a baseline
+  rather than the state of the art and names the alternatives.
+
 ### Measured (no behaviour change)
 
 - **#966 coupled graduation panel, re-run on top of #990: the three deadline
