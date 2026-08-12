@@ -50,6 +50,7 @@ _GALLERY = [
     "example_direct_blackbox",
     "example_direct_simulator_minlp",
     "example_direct_constrained",
+    "example_surrogate_expensive_blackbox",
 ]
 
 

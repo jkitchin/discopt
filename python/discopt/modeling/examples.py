@@ -960,6 +960,58 @@ def example_direct_constrained():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Expensive black box (surrogate backend)
+#
+# Same opaque-body class as the DIRECT examples above, but the
+# other cost regime. When one evaluation costs minutes — a CFD
+# run, a process simulation — you can afford tens of samples, not
+# thousands. A surrogate spends real computation between
+# evaluations (a linear solve and a global optimization of the
+# acquisition) to make each one count.
+#
+#   minimize  branin(x)          # opaque: raw jnp intrinsics
+#   over      x in [-5,10] x [0,15]
+#
+# Global minimum 0.397887, attained at three distinct points.
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_surrogate_expensive_blackbox():
+    import jax.numpy as jnp
+
+    m = dm.Model("surrogate_expensive_blackbox")
+    x = m.continuous("x", shape=2, lb=np.array([-5.0, 0.0]), ub=np.array([10.0, 15.0]))
+
+    calls = {"n": 0}
+
+    def branin(v):
+        # Stands in for an expensive simulation. The counter is the point of the
+        # example: with a costly evaluation, the number of calls IS the cost, and
+        # it is not recoverable from a SolveResult -- which is why the backend
+        # takes an `on_evaluation` progress hook.
+        calls["n"] += 1
+        x1, x2 = v[0], v[1]
+        return (
+            (x2 - 5.1 / (4 * np.pi**2) * x1**2 + 5 / np.pi * x1 - 6) ** 2
+            + 10 * (1 - 1 / (8 * np.pi)) * jnp.cos(x1)
+            + 10
+        )
+
+    m.minimize(dm.custom(branin, name="branin")(x))
+
+    print(m)
+    print("\n  Global minimum: 0.397887 (three global minimizers).")
+    print("  from discopt.solvers.surrogate import solve_surrogate")
+    print("  solve_surrogate(m, max_evals=60)          # RBF, the default")
+    print("  solve_surrogate(m, max_evals=60, surrogate='kriging')")
+    print("\n  Choosing between the two black-box backends:")
+    print("    evaluation is cheap (ms)        -> solver='direct'")
+    print("    evaluation is expensive (min+)  -> the surrogate backend")
+    print("  Neither returns a certificate: bound=None, gap_certified=False.")
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
@@ -984,6 +1036,7 @@ if __name__ == "__main__":
         ("Black-box objective (solver=direct)", example_direct_blackbox),
         ("Black-box MINLP (solver=direct)", example_direct_simulator_minlp),
         ("Constrained black-box (DIRECT-GLce)", example_direct_constrained),
+        ("Expensive black box (surrogate)", example_surrogate_expensive_blackbox),
     ]
 
     for name, func in examples:
