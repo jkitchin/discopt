@@ -151,11 +151,40 @@ def test_build_cost_ema_measured_and_truncation_excluded():
     assert after is not None and after > 0.0
 
 
-def test_flag_default_off():
-    """DISCOPT_NODE_ROUND_BUDGET defaults OFF (§5 bound-changing discipline)."""
+def test_flag_default_on_after_graduation(monkeypatch):
+    """DISCOPT_NODE_ROUND_BUDGET graduated default-ON 2026-08-11 (§14f); ``=0`` opts out.
+
+    Panelled with #928's ``DISCOPT_LP_WARM_DEADLINE`` (the ``wr`` arm), which is how it
+    was always scoped: total overrun vs base -24.2/-43.8/+4.4 s at a 20 s budget and
+    -6.2/-6.2/+1.1 s at 15 s over 19 binding instances, positive bound ledger, no
+    incumbent lost in 6/6 reps, zero unsound cells over 168 counted comparisons, and a
+    lighter tail than base (cells above 3x budget: base 1, this arm 0).
+
+    ``DISCOPT_HESS_COMPILE_GATE`` — the other #966 flag — stays OFF: it is the arm that
+    loses tspn12's incumbent, in 6/6 reps."""
     from discopt.solver_tuning import SolverTuning
 
+    monkeypatch.delenv("DISCOPT_NODE_ROUND_BUDGET", raising=False)
+    assert SolverTuning().node_round_budget is True
+
+    monkeypatch.setenv("DISCOPT_NODE_ROUND_BUDGET", "0")
     assert SolverTuning().node_round_budget is False
+
+    monkeypatch.setenv("DISCOPT_NODE_ROUND_BUDGET", "1")
+    assert SolverTuning().node_round_budget is True
+
+
+def test_hessian_compile_gate_stays_default_off():
+    """The third coupled flag did NOT graduate — it is the one that costs a certificate.
+
+    Largest wall win of the three (-38.8/-59.3/-22.0 s at 20 s) and the only one that
+    loses an incumbent (tspn12, 6/6 reps; every arm carrying it loses it, no arm without
+    it does, and an equal-wall control at base's own measured wall still finds none).
+    Bar 1 has no slack, so it stays OFF pending a refusal rule that bounds the compile's
+    cost rather than the entry's budget (#966)."""
+    from discopt.solver_tuning import SolverTuning
+
+    assert SolverTuning().hessian_compile_gate is False
 
 
 # --------------------------------------------------------------------------- #

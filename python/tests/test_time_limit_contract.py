@@ -43,6 +43,8 @@ _SLACK_S = 1.5
 _SLACK_FRAC = 0.10
 
 # The residual overrun the reserve does NOT fix, and why it is not fixed here.
+# (HISTORY — everything down to the 2026-08-11 UPDATE block describes the state
+# before #928's flag became the default; the mechanism it names is now fixed.)
 #
 # ``hda`` at a 10 s limit is bimodal (5 reps, load-gated, ``scratchpad/hda10.py``):
 # 10.60 / 10.78 / 12.79 / 13.03 / 12.94 s — mean 12.03 s, sd 1.23, against 12.50 s
@@ -70,19 +72,30 @@ _SLACK_FRAC = 0.10
 # test are named ``issue917_*``/``test_917_*`` for historical reasons; #917 is a
 # different, closed issue.)
 #
-# Turning ``DISCOPT_LP_WARM_DEADLINE=1`` makes all cases here pass (11.14 s ± 0.04
-# on this one), but it is not the fix, for two independently sufficient reasons:
-# it fails CLAUDE.md §5 bar 2 — a 3-rep load-gated panel over the 17 instances
-# where the deadline actually binds gives ON-OFF deltas of -3.2 / +6.6 / +5.7 s,
-# flipping sign inside the metric's own noise — and it buys the punctuality by
-# losing the bound (-64473 -> -141697 in 5/5 reps), which is the wrong trade under
-# §1. So this case is marked xfail non-strict rather than silenced or given a
-# wider slack: it keeps running, it keeps reporting, and it will xpass the moment
-# #917 is properly resolved.
+# UPDATE 2026-08-11 — the drop is FIXED and the flag that fixes it is now the
+# DEFAULT (#928 graduated ``DISCOPT_LP_WARM_DEADLINE`` on the four-arm merged-tree
+# panel, performance-plan §14f). This case is nevertheless still marked xfail, and
+# the reason is no longer "the callee drops the budget":
+#
+#   hda @ 10 s, shipped defaults, 3 reps:      13.46 / 13.46 / 13.40 s  (sd 0.04)
+#   hda @ 10 s, DISCOPT_LP_WARM_DEADLINE=0:    25.38 / 21.97 / 21.78 s  (sd 2.03)
+#
+# (``scratchpad/issue928_grad_hda10.py``; the bound at the same time goes
+# -2.07e13 -> -119286.3.) The bimodality this comment used to describe is gone —
+# sd 1.23 -> 0.04 — and the wall is 1.7x better, but 13.4 s still exceeds the
+# 12.50 s this test allows at a 10 s limit. What is left is proportional, not a
+# dropped budget: on this container hda's mandatory root work alone is ~5.6 s
+# (``solve(time_limit=2)`` returns at 5.63 s with no bound at all), and the
+# overrun ratio is flat at 1.18-1.35x across 5 / 10 / 20 s limits
+# (``scratchpad/issue928_hda_floor.json``). On the benchmark machine the same arm
+# measured 11.14 s ± 0.04, i.e. inside the allowance — which is exactly why the
+# marker stays NON-STRICT: it xpasses where the constant fits and keeps reporting
+# where it does not, rather than being silenced or given a wider slack.
 _XFAIL_LP_DEADLINE_DROP = pytest.mark.xfail(
-    reason="#928: warm pure-LP path drops the caller's time_limit, so the #138 "
-    "fallback's separated-relaxation phase overruns its grant by ~4s. Bimodal: "
-    "10.6-13.0s against 12.5s allowed. Not strict — it passes ~2/5 runs.",
+    reason="#928 is fixed and default-ON: hda@10s is 13.44s ± 0.04 (was 10.6-13.0s "
+    "bimodal, and 23.04s ± 2.03 with the flag off) against 12.50s allowed. The "
+    "residual is a flat ~1.2-1.3x proportional overrun on this class, not the "
+    "budget drop. Not strict — it xpasses on hardware where the constant fits.",
     strict=False,
 )
 

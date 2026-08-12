@@ -1,0 +1,42 @@
+{
+  "default": [
+    {
+      "wall": 13.463733773001877,
+      "bound": -119286.31279576839,
+      "status": "time_limit",
+      "flag": true
+    },
+    {
+      "wall": 13.46418900199933,
+      "bound": -119286.31279576839,
+      "status": "time_limit",
+      "flag": true
+    },
+    {
+      "wall": 13.40167418800047,
+      "bound": -119286.31279576839,
+      "status": "time_limit",
+      "flag": true
+    }
+  ],
+  "legacy_optout": [
+    {
+      "wall": 25.378910947001714,
+      "bound": -20747118223745.168,
+      "status": "time_limit",
+      "flag": false
+    },
+    {
+      "wall": 21.968279633998463,
+      "bound": -20747118223745.168,
+      "status": "time_limit",
+      "flag": false
+    },
+    {
+      "wall": 21.779060639000818,
+      "bound": -20747118223745.168,
+      "status": "time_limit",
+      "flag": false
+    }
+  ]
+}

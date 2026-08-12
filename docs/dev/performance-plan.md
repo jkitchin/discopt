@@ -2113,6 +2113,106 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > owed to #966 item 3 must now be run once, on the merged tree, on the benchmark
 > machine.
 
+### 14f. #928 GRADUATES on the merged tree — and the residual was never its flag (2026-08-11)
+
+> §14e closed by owing one thing: *"the graduation panel … must now be run once, on
+> the merged tree"*. This is that run. It changes the verdict for two of the three
+> flags and, more importantly, it **attributes** the residual both earlier panels
+> failed on instead of guessing at it.
+>
+> **The residual is the COMPILE GATE's, and neither #928's flag nor the round budget's.**
+> §14d and §14e both failed `CERT_CLEAN` on one class of item — an incumbent the base
+> arm reports and the all-flags arm does not (tspn12; sporadically tspn10/tls2) — and
+> the three-arm layout could not attribute it, because `seam` sets
+> `DISCOPT_NODE_ROUND_BUDGET` and `DISCOPT_HESS_COMPILE_GATE` together. Running all
+> five flag combinations separates them (`scratchpad/issue928_incumbent_attribution.py`,
+> 32 counted cells + 2 equal-wall controls, tspn12 @ 20 s, both reps identical):
+>
+> | arm | wall | incumbent | bound | nodes |
+> |---|---|---|---|---|
+> | base | 22.9 s | 282.244 | 183.33 | 5 |
+> | `DISCOPT_NODE_ROUND_BUDGET` only | 23.0 s | **282.244** | 183.33 | 5 |
+> | `DISCOPT_HESS_COMPILE_GATE` only | 21.3 s | **None** | 193.95 | 15 |
+> | #966 (both) | 20.9 s | None | 192.92 | 15 |
+> | all three | 21.0 s | None | 192.92 | 15 |
+>
+> Every arm carrying the compile gate loses the incumbent; the round budget alone
+> loses none; tspn10 and tls2 keep theirs in all five arms (tls2's is *better* under
+> the flags, 5.30 vs base 10.30). **Equal-wall control**: re-running the all-flags arm
+> at a budget equal to base's measured wall (22.9 s) still returns no incumbent in
+> 2/2 — so this is a real primal loss from the gate's flat 15 s refusal floor, not an
+> incumbent the control bought by overrunning. The gate refuses the node NLP whenever
+> the remaining grant is under `_HESSIAN_COMPILE_SPARSE_FLOOR_S`, which on a 20 s
+> budget is *every* node NLP after the root round — on tspn12 the compile it refuses
+> is affordable (base finishes at 22.9 s having run it).
+>
+> **The panel** (`discopt_benchmarks/scripts/issue928_graduation_panel.py`, four arms
+> so the compile gate is not welded to the question: `base` / `warm` = #928 alone /
+> `wr` = #928 + round budget / `cand` = all three; the same 19 binding instances,
+> worker, scorers and cross-arm primal ceiling as §14d; 19 × 4 arms × 3 reps at each
+> of two budgets, arms and reps interleaved per instance, load 0.85 → 1.08).
+> Artifacts: `discopt_benchmarks/results/issue928_grad{20,15}.json`.
+>
+> | overrun vs base | rep1 | rep2 | rep3 | mean ± sd |
+> |---|---|---|---|---|
+> | 20 s `warm` | +127.8 | −33.4 | +6.1 | +33.5 ± 84.0 |
+> | 20 s `wr` | −24.2 | −43.8 | +4.4 | **−21.2 ± 24.2** |
+> | 20 s `cand` | −38.8 | −59.3 | −22.0 | −40.0 ± 18.7 |
+> | 15 s `warm` | −4.4 | +1.0 | −3.8 | **−2.4 ± 3.0** |
+> | 15 s `wr` | −6.2 | −6.2 | +1.1 | **−3.8 ± 4.2** |
+> | 15 s `cand` | −11.1 | −10.5 | −9.5 | −10.4 ± 0.8 |
+>
+> `warm`'s +127.8 at 20 s is ONE cell: heatexch_gen3 overrunning by 155.1 s, the
+> uninterruptible first-compile mode — the same class the base arm hits (§14e recorded
+> base at 210.1 s, and this panel's base hits bchoco08 at 62 s). Excluding that one
+> instance, `warm − base` is −16.4 / −33.2 / +5.2. The tail is not relocated by the
+> flag, which was the standing worry: over 114 cells per arm, cells above 3× budget
+> are base 1, `warm` 1, `wr` 0, `cand` 0; above 1.5× budget, base 8, `warm` 6, `wr` 5,
+> `cand` 1.
+>
+> **Bar 1 (cert-clean).** Over both panels: `unsound=[]`, `ceiling_violations=[]` in
+> **168 counted bound-vs-ceiling comparisons**, `lost_bound=[]` in every arm and rep,
+> `incumbent_verification_failed=[]`. `warm` and `wr` lose **no** incumbent in 6/6
+> reps and gain a *better* one every rep (tspn12 265.86 vs base 282.244). `cand`
+> loses tspn12's in **6/6** — bar 1 has no slack, so the compile gate fails it.
+>
+> The two `cert_regressions` the 20 s panel reported (tls2, syn05hfsg) are knife-edge
+> cells, and that was measured rather than asserted
+> (`scratchpad/issue928_certflip_noise.py`, 40 counted cells, discriminator fixed
+> before the run). Certification rate over 5 reps of the same cell: syn05hfsg **5/5 in
+> all four arms** (the panel's rep-2-only certification does not reproduce); tls2
+> **base 1/5, `warm` 4/5, `wr` 2/5, `cand` 2/5** — every arm flips, base included, and
+> the pre-registered "flag effect" rule fires *in the flag's favour* (4/5 vs 1/5), the
+> opposite direction to the panel's rep-3 regression. A per-rep `cert_regressions`
+> entry on this cell is therefore not something either arm earns.
+>
+> **Bar 2 (net-positive).** `wr` is negative at both budgets (−21.2 and −3.8 s mean,
+> helpful in 4 of 6 reps, ~neutral in the other 2), and the bound ledger is positive
+> rather than merely non-negative: 4–7 tighter against 1–4 looser per rep, no bound
+> lost, and one large reproducible qualitative gain — **hda −2.07e13 → −119286.3 in
+> 6/6 reps** (the garbage-wide base bound is what §14d's cut-short floor replaces).
+> Node counts are flat (663–797 vs base 663–775 at 20 s); `cand` buys its extra wall
+> by branching ~1150 nodes, which is also where its lost incumbent comes from.
+>
+> **Verdict.** `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET` **graduate
+> default-ON** (`=0` keeps the legacy path, byte-for-byte). `DISCOPT_HESS_COMPILE_GATE`
+> **stays default-OFF**: it is the largest wall win of the three and the only one that
+> costs a certificate, which is the wrong trade under CLAUDE.md §1 — the
+> `DISCOPT_CUT_INHERIT` rule with the metrics swapped. Its residual belongs to #966:
+> a refusal floor that is a flat 15 s risk headroom refuses affordable compiles, and
+> the treatment has to bound the compile's cost rather than the entry's budget.
+>
+> **Two environmental limits, unchanged from §14e and restated because they still
+> bound what these numbers may be used for.** (1) This container's POUNCE lacks the
+> tape NLP evaluator (`NlExpr`/`build_nl_problem` absent), so every cell used the JAX
+> evaluator — which is also *why* the compile gate is live at all here; on a build
+> with the tape backend `hessian_compile_estimate_s()` returns 0.0 and the gate never
+> fires. (2) `minlplib.solu` is unreachable (the network policy denies minlplib.org),
+> so the curated oracle covers 1/19 instances and the soundness result rests on the
+> cross-arm primal ceiling plus the bound-crosses-incumbent and
+> incumbent-verification arms, all counted. **No corpus-wide soundness claim rests on
+> a single one of these runs.**
+
 ## 15. #956 envelope outward rounding: the defect is real, but it is NOT what drives `n_undecided` (falsified 2026-08-08)
 
 > **The defect (confirmed).** The McCormick row generators in

@@ -1,0 +1,26 @@
+[
+  {
+    "limit": 2.0,
+    "wall": 5.633675091998157,
+    "bound": null,
+    "status": "time_limit"
+  },
+  {
+    "limit": 5.0,
+    "wall": 6.570011632000387,
+    "bound": -141697.43348991545,
+    "status": "time_limit"
+  },
+  {
+    "limit": 10.0,
+    "wall": 11.939639666998119,
+    "bound": -119286.31279576839,
+    "status": "time_limit"
+  },
+  {
+    "limit": 20.0,
+    "wall": 23.600776781000604,
+    "bound": -119286.31279576839,
+    "status": "time_limit"
+  }
+]

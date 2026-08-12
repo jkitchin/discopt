@@ -1045,10 +1045,11 @@ class SolverTuning:
     run-to-run; the ``=0`` opt-out path stays deterministic."""
 
     node_round_budget: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=True)
     )
     """Make a per-node separated-relaxation ROUND honor its grant end-to-end
-    (``DISCOPT_NODE_ROUND_BUDGET``, default **off**; §5 bound-changing; issue #966).
+    (``DISCOPT_NODE_ROUND_BUDGET``, **default ON** since the 2026-08-11 graduation
+    panel; ``=0`` restores the legacy unclamped round; §5 bound-changing; #966).
 
     #928 made the warm pure-LP path honor its per-solve ``time_limit``, and the
     residual budget overrun measurably moved OUT of the LP layer: a round's grant
@@ -1100,9 +1101,21 @@ class SolverTuning:
     (#928, see ``_solve_at_node_impl``). Should even that floor be unavailable, a
     yielded round leaves its node OPEN at ``-inf`` (floored at the proved parent
     bound) rather than fathomed-without-proof on the failure sentinel — see
-    ``solver._yield_keeps_node_open``. Default off pending the §5 corpus-wide
-    differential panel (cert-clean AND net-positive); graduation is coupled to
-    the #928 ``DISCOPT_LP_WARM_DEADLINE`` panel this flag exists to unblock."""
+    ``solver._yield_keeps_node_open``.
+
+    **GRADUATED default-ON 2026-08-11** on the four-arm merged-tree panel this flag
+    was always coupled to (performance-plan §14f;
+    ``discopt_benchmarks/results/issue928_grad{20,15}.json``): with
+    ``DISCOPT_LP_WARM_DEADLINE`` (the ``wr`` arm) total overrun vs base is
+    -24.2/-43.8/+4.4 s at 20 s and -6.2/-6.2/+1.1 s at 15 s over 19 binding
+    instances, with a positive bound ledger (4-7 tighter against 1-4 looser per
+    rep, no bound lost, hda ``-2.07e13 -> -119286.3`` in 6/6 reps), no incumbent
+    lost in 6/6 reps, zero unsound cells and zero ceiling violations over 168
+    counted comparisons, and a lighter tail than base (cells above 3x budget: base
+    1, wr 0). The lost incumbent that failed the §14d/§14e panels was attributed to
+    ``DISCOPT_HESS_COMPILE_GATE``, which stays OFF — this flag alone keeps tspn12's
+    incumbent (``scratchpad/issue928_incumbent_attribution.py``). ``=0`` restores
+    the legacy path: no ``round_deadline``, no yield mode, byte-for-byte."""
 
     hessian_compile_gate: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HESS_COMPILE_GATE", default=False)
@@ -1145,8 +1158,27 @@ class SolverTuning:
     size — see ``estimate_hessian_compile_s``), so an entry admitted with
     remaining budget above the risk floor can still overrun; this flag kills the
     observed late-entry severe modes, not the early-entry gamble the F4 floor
-    deliberately accepts. Default off pending the §5 differential panel
-    (graduation coupled to the #928/#966 panel)."""
+    deliberately accepts.
+
+    **Panel verdict 2026-08-11: stays default-OFF, and it is now a measured
+    negative rather than an unmeasured flag** (performance-plan §14f). On the
+    four-arm merged-tree panel it is the LARGEST wall win of the three coupled
+    flags — total overrun vs base -38.8/-59.3/-22.0 s at 20 s and
+    -11.1/-10.5/-9.5 s at 15 s, with 9-11 bounds tighter per rep — and the only
+    one that pays for it with a certificate: tspn12's incumbent is lost in **6/6
+    reps**, where the other two arms keep it (and find a better one than base).
+    Attribution is direct, not inferred: running all five flag combinations
+    (``scratchpad/issue928_incumbent_attribution.py``) shows every arm carrying
+    THIS flag drops the incumbent and no arm without it does, and an EQUAL-WALL
+    control (re-run at a budget equal to base's measured wall, 22.9 s) still finds
+    none — so it is not an incumbent the control bought by overrunning. The
+    mechanism is this gate's own refusal floor: ``_HESSIAN_COMPILE_SPARSE_FLOOR_S``
+    is a flat 15 s risk headroom, so on a 20 s budget every node NLP after the root
+    round is refused — including, on tspn12, a compile the base arm affords inside
+    22.9 s. Bar 1 has no slack (CLAUDE.md §1: the solver's product is the
+    certificate), so the wall win does not buy graduation. Re-panelling it needs a
+    refusal rule that bounds the COMPILE's cost rather than the entry's budget;
+    that work belongs to #966."""
 
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the

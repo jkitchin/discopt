@@ -313,9 +313,12 @@ def _lp_warm_deadline_enabled() -> bool:
     ``DualPivotLoop`` 59 494 degenerate dual pivots deep with Bland never activated,
     turning a 3.9 s solve budget into 53 s (13.5x).
 
-    **Bound-changing, so panel-gated; default OFF.** Opt in with
-    ``DISCOPT_LP_WARM_DEADLINE=1``. Cutting an LP short changes the bound it returns,
-    and on nvs24 the wall win is decisive:
+    **Bound-changing, and GRADUATED default-ON on 2026-08-11** (performance-plan
+    §14f; ``DISCOPT_LP_WARM_DEADLINE=0`` restores the legacy budget-dropping path
+    byte-for-byte). The record below is kept in full because it is the history of
+    two failed graduations and what each one measured; read it as history, and §14f
+    (reproduced at the end of this docstring) as the current verdict. Cutting an LP
+    short changes the bound it returns, and on nvs24 the wall win is decisive:
 
     ======  ==============  ==============  ==============  ==============
     budget  wall OFF        wall ON         bound OFF       bound ON
@@ -479,10 +482,74 @@ def _lp_warm_deadline_enabled() -> bool:
     ``discopt_benchmarks/results/issue928_*.json``). Fixing THAT is caller-side
     budget accounting — a different seam with its own issue; this flag stays OFF
     until it lands and a re-run panel passes both bars.
+
+    **Update 2026-08-11 (GRADUATION, performance-plan §14f): both bars pass on the
+    MERGED tree, and the residual was never this flag's.** §14d and §14e each
+    panelled their own change against ``aca13dd``; the merged tree had never been
+    panelled. It has now been, with FOUR arms instead of three so the unrelated
+    ``DISCOPT_HESS_COMPILE_GATE`` is not welded to this flag's question —
+    ``base`` / ``warm`` (this flag alone) / ``wr`` (this flag + the round budget) /
+    ``cand`` (all three) — over the same 19 binding instances, 3 reps at each of two
+    budgets, arms and reps interleaved per instance
+    (``discopt_benchmarks/scripts/issue928_graduation_panel.py``;
+    ``results/issue928_grad{20,15}.json``).
+
+    The lost incumbent that failed ``CERT_CLEAN`` in BOTH earlier panels is the
+    compile gate's, measured directly across all five flag combinations
+    (``scratchpad/issue928_incumbent_attribution.py``, tspn12 @ 20 s, 2/2 reps
+    identical): the round budget alone keeps the incumbent (282.244), the compile
+    gate alone drops it, and every arm carrying the gate drops it. An EQUAL-WALL
+    control — the all-flags arm re-run at a budget equal to base's measured wall,
+    22.9 s — still returns none in 2/2, so it is a genuine primal loss, not an
+    incumbent the control bought by overrunning.
+
+    ======  ============  =====================  ================
+    budget  arm           overrun vs base        cert-clean
+    ======  ============  =====================  ================
+    20 s    warm          +127.8/-33.4/+6.1      yes (see below)
+    20 s    wr            -24.2/-43.8/+4.4       yes (see below)
+    20 s    cand          -38.8/-59.3/-22.0      NO (tspn12 3/3)
+    15 s    warm          -4.4/+1.0/-3.8         yes
+    15 s    wr            -6.2/-6.2/+1.1         yes
+    15 s    cand          -11.1/-10.5/-9.5       NO (tspn12 3/3)
+    ======  ============  =====================  ================
+
+    ``warm``'s +127.8 is ONE cell — heatexch_gen3 overrunning by 155.1 s on the
+    uninterruptible first-compile mode the base arm hits too (this panel: base
+    bchoco08 62 s; §14e: base heatexch_gen3 210.1 s). Excluding that instance,
+    ``warm - base`` is -16.4/-33.2/+5.2. The tail is not relocated by the flag:
+    over 114 cells per arm, cells above 3x budget are base 1, warm 1, wr 0, cand 0.
+
+    Bar 1 over both panels: ``unsound=[]`` and ``ceiling_violations=[]`` in 168
+    counted bound-vs-ceiling comparisons, ``lost_bound=[]`` everywhere, no
+    incumbent lost by ``warm``/``wr`` in 6/6 reps and a BETTER one every rep
+    (tspn12 265.86 vs base 282.244). The 20 s panel's two ``cert_regressions``
+    (tls2, syn05hfsg) are knife-edge cells, measured not asserted
+    (``scratchpad/issue928_certflip_noise.py``, 40 counted cells): syn05hfsg
+    certifies 5/5 in ALL four arms, and tls2's rate is base 1/5, warm 4/5, wr 2/5,
+    cand 2/5 — every arm flips and the pre-registered rule fires in this flag's
+    FAVOUR, the opposite direction to the panel's rep-3 entry.
+
+    Bar 2: negative at both budgets for ``wr`` (-21.2 and -3.8 s mean) with a
+    positive bound ledger — 4-7 tighter against 1-4 looser per rep, no bound lost,
+    and hda ``-2.07e13 -> -119286.3`` reproducibly in 6/6 reps — at flat node
+    counts. So this flag and ``DISCOPT_NODE_ROUND_BUDGET`` graduate default-ON;
+    ``DISCOPT_HESS_COMPILE_GATE`` stays OFF as the only one of the three that buys
+    its (larger) wall win with a certificate, which is the wrong trade under
+    CLAUDE.md §1.
+
+    Environmental limits on the graduation run, restated because they bound what it
+    may be used for: the container's POUNCE lacks the tape NLP evaluator (so every
+    cell used the JAX evaluator — which is also why the compile gate is live there
+    at all), and ``minlplib.solu`` is unreachable, so the soundness result rests on
+    the cross-arm primal ceiling plus the bound-crosses-incumbent and
+    incumbent-verification arms, all counted.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
+    # GRADUATED default-ON (§14f). ``=0`` (and the other falsey spellings) is the
+    # opt-out back to the legacy path that dropped the caller's ``time_limit``.
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "1") not in (
         "0",
         "",
         "false",

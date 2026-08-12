@@ -44,6 +44,29 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **Per-node LP and separation rounds now honour the budget they are handed**
+  (#928, #966). `DISCOPT_LP_WARM_DEADLINE` and `DISCOPT_NODE_ROUND_BUDGET`
+  graduated from default-OFF to **default-ON**; `=0` restores the legacy path
+  byte-for-byte on either. The warm pure-LP node path used to drop its caller's
+  `time_limit` outright (~13 call sites computed a per-LP budget and handed it to
+  a callee that ignored it), and a separation round's grant clamped only the LP,
+  never the round's cold build.
+
+  Graduation panel (`discopt_benchmarks/scripts/issue928_graduation_panel.py`;
+  4 arms × 19 binding instances × 3 reps at each of two budgets, arms interleaved
+  per instance): total overrun vs the old default is −24.2 / −43.8 / +4.4 s at a
+  20 s budget and −6.2 / −6.2 / +1.1 s at 15 s, with a positive bound ledger (4–7
+  tighter against 1–4 looser per rep, no bound lost, `hda` −2.07e13 → −119286.3
+  reproducibly in 6/6 reps), no incumbent lost in 6/6 reps and a better one every
+  rep, zero unsound cells and zero ceiling violations over 168 counted
+  comparisons, and a lighter tail than the old default (cells above 3× budget:
+  old 1, new 0). Single-instance effect: `hda` at `time_limit=10` goes from
+  23.04 s ± 2.03 to **13.44 s ± 0.04**, with the dual bound improving from
+  −2.07e13 to −119286.3. `DISCOPT_HESS_COMPILE_GATE` stays default-OFF — it is
+  the largest wall win of the three and the only one that costs a certificate
+  (tspn12's incumbent, 6/6 reps). Full record: `docs/dev/performance-plan.md`
+  §14f.
+
 - **All 62 documentation notebooks re-executed** (`docs`). Their committed
   outputs dated from 2026-04-25 and `docs/_config.yml` has
   `execute_notebooks: "off"`, so nothing had re-run them in three and a half
