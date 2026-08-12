@@ -4,7 +4,7 @@
 [![CI](https://github.com/jkitchin/discopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/discopt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/discopt/graph/badge.svg?token=B3Y6LAtox9)](https://codecov.io/gh/jkitchin/discopt)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19762815-blue)](https://doi.org/10.5281/zenodo.19762815)
-![PyPI Downloads](https://img.shields.io/pypi/dm/discopt.svg)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/discopt?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/discopt)
 
 [![discopt](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)
 
