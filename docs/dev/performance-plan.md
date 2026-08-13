@@ -2792,3 +2792,46 @@ before being trusted as a baseline, and it reproduced the pass.
 
 Pinned by `python/tests/test_1008_nan_lp_bound.py` (3 tests; 2 fail with
 `ValueError: ub[0] is NaN` when `_finite_box` is neutered).
+
+### 18e. The unstable-pivot recovery was gated on the caller's `time_limit` (#1008 R1, 2026-08-13)
+
+§18c closed the false certificate on QPLIB_2170 but left the bound loss standing,
+and named the suspect: `SimplexOptions::bank_deadline_duals`, set as
+`deadline.is_some()`, was doing double duty. Besides banking the dual loop's
+anytime floor (#928 — its actual job) it also switched on the recovery that
+re-tries a near-zero pivot instead of abandoning the warm re-solve.
+
+**Entry experiment** (CLAUDE.md §4), run before the implementation and read from
+counters rather than from control flow — two new counters exist precisely so this
+is a measurement:
+
+| call | `DualUnstablePivotRecoveries` | `DualUnstablePivotBails` | ray rejects | result |
+|---|---|---|---|---|
+| `time_limit=None` | 0 | **1** | 2 | no solution |
+| `time_limit=40.0` | **1** | 0 | 0 | **optimal 0** |
+
+One unstable pivot separates a certified optimum from nothing, and which side you
+land on is decided solely by whether the caller bounded the LP in time. QPLIB_2738
+fires neither counter — its loss was the #1013 stall bail, already fixed — so this
+is a distinct mechanism, not a second reading of the same cell.
+
+**The fix** is an unbundling, not a new mechanism: `recover_unstable_pivot` gets
+its own field and its own env gate (`DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`), and
+`bank_deadline_duals` goes back to banking duals. The deadline path keeps the
+recovery unconditionally (`deadline.is_some() || unstable_pivot_recovery_default()`)
+so it stays bit-identical to what its own panel judged.
+
+**Status: default-OFF for deadline-free callers.** Taking a different pivot is
+bound-changing, so §5 applies and the flag stays off until a corpus differential
+panel clears *both* bars. The graduation panel (88 captured relaxation LPs,
+`scratchpad/i1008/r1_panel.py`, one process per arm because the flag is read once
+via `OnceLock`, HiGHS as oracle, every LP at `time_limit=None` — the exact call
+shape that lost the recovery) was **started and stopped at 18/88 on arm 0 with arm
+1 not begun**; no claim is made from that partial data and none of it is reported
+here. Running it to completion on both arms is what remains before the default can
+flip. Until then this ships as the `DISCOPT_CUT_INHERIT` precedent has it: the
+mechanism lands, the measurement is recorded, the default does not move.
+
+Pinned by `unstable_pivot_recovery_is_not_gated_on_a_deadline` (flag off → bails 1,
+not optimal; flag on → recoveries 1, optimal 0; both arms assert
+`deadline.is_none()`, which is the coupling under test).

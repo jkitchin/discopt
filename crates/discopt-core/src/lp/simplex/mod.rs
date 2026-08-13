@@ -28,7 +28,8 @@ pub mod sparse;
 
 pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
 pub use dual::{
-    solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc, PreparedDual,
+    solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc,
+    unstable_pivot_recovery_default, PreparedDual,
 };
 pub use presolve::{tighten_bounds, tighten_bounds_csc};
 pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
@@ -122,18 +123,40 @@ pub struct SimplexOptions {
     /// basis's row-dual candidate `y = B⁻ᵀc_B` — whose Neumaier–Shcherbina
     /// evaluation is the monotone best-so-far dual objective — instead of falling
     /// back to a cold primal whose spent budget yields a near-useless initial
-    /// basis dual. It also enables two loop-preserving recoveries that exist only
-    /// to keep that anytime floor alive: an in-place refactorize+recompute retry
-    /// on a near-zero pivot, and handing the last exact-refresh duals to the cold
-    /// fallback when the loop breaks down and the fallback is then itself cut.
+    /// basis dual. It also enables handing the last exact-refresh duals to the
+    /// cold fallback when the loop breaks down and the fallback is then itself
+    /// cut — a recovery that exists only to keep that anytime floor alive.
     ///
     /// Default `false`: the MILP B&B driver also sets `deadline` on the default
-    /// route, and these recoveries change the pivot path (same audited optimum,
-    /// possibly a different degenerate vertex), which is *bound-changing* under
-    /// the §5 regime. Only the pure-LP warm binding (`solve_lp_warm_csc_py`)
-    /// sets it, and only when its caller passed a `time_limit` — i.e. exactly the
+    /// route, and this changes the pivot path (same audited optimum, possibly a
+    /// different degenerate vertex), which is *bound-changing* under the §5
+    /// regime. Only the pure-LP warm binding (`solve_lp_warm_csc_py`) sets it,
+    /// and only when its caller passed a `time_limit` — i.e. exactly the
     /// `DISCOPT_LP_WARM_DEADLINE` path whose graduation panel judges it.
     pub bank_deadline_duals: bool,
+    /// On a near-zero (unstable) dual pivot, refactorize + exact-recompute in
+    /// place and re-select instead of abandoning the warm loop for the cold
+    /// primal (#1008 R1).
+    ///
+    /// This used to be gated on [`bank_deadline_duals`](Self::bank_deadline_duals),
+    /// which `lp_bindings` sets to `deadline.is_some()`. Nothing about the
+    /// recovery is deadline-related: a tiny pivot is usually Forrest–Tomlin
+    /// update drift, and refactorize + exact recompute is the loop's soundness
+    /// anchor already. The coupling meant a caller who passed no `time_limit`
+    /// silently got the cold hand-off on the same LP and the same starting basis.
+    /// Measured on QPLIB_2170's root relaxation (`DISCOPT_PROFILE=1`, counters
+    /// `DualUnstablePivotRecoveries` / `DualUnstablePivotBails`): at
+    /// `time_limit=40` the recovery fires once and the LP solves to `optimal 0`
+    /// (HiGHS agrees, 81 pivots); at `time_limit=None` the bail fires once and
+    /// the caller gets nothing. One pivot, and the difference is whether a
+    /// deadline was supplied.
+    ///
+    /// Default `false` and opted into by `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY=1`:
+    /// re-selecting after a refactorize can land on a different degenerate
+    /// vertex, so this is bound-changing under §5 and needs a corpus panel that
+    /// is both cert-clean and net-positive before it graduates. The deadline
+    /// path's behavior is unchanged — it keeps the recovery it already had.
+    pub recover_unstable_pivot: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).
     ///
@@ -227,6 +250,7 @@ impl Default for SimplexOptions {
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
             bank_deadline_duals: false,
+            recover_unstable_pivot: false,
             dual_stall_patience: dual::stall_patience_default(),
             cold_dual_start: false,
         }
