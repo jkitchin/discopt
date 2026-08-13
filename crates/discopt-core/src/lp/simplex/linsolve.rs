@@ -15,6 +15,7 @@
 //!   cross-checking `FeralLU` in tests — not performance.
 
 use super::refine::residual_matvec_dd;
+use super::symcache;
 use feral::{
     should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuSingularAction, RefactorCause,
     SparseColMatrix, SparseLu, SparseLuSymbolic,
@@ -356,12 +357,103 @@ pub struct FeralLU {
     /// double-precision refinement was falsified on this class, #671). `None`
     /// (default) → strict `Fail`, byte-identical to today.
     singular_perturb: Option<f64>,
+    /// #1008: the fill-reducing column ordering from the last *fresh* symbolic
+    /// analysis, kept so successive refactorizations can skip re-running AMD on
+    /// the `AᵀA` pattern. Populated only when [`symcache::enabled`]; `None`
+    /// otherwise, which is byte-identical to the pre-#1008 engine.
+    sym_cache: Option<SymCache>,
+}
+
+/// A reusable column ordering plus the fill it is judged against.
+///
+/// See [`symcache`] for why reusing an ordering is sound (it is a permutation;
+/// the numeric factorization pivots rows itself, so any order factors the matrix
+/// correctly) and can therefore only cost fill.
+#[derive(Clone)]
+struct SymCache {
+    sym: SparseLuSymbolic,
+    /// `nnz(L+U)` that a **fresh** analysis achieved on the basis this ordering
+    /// was computed for — the reference the reuse guard degrades against.
+    ref_nnz: usize,
+}
+
+impl std::fmt::Debug for SymCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymCache")
+            .field("m", &self.sym.m)
+            .field("ref_nnz", &self.ref_nnz)
+            .finish()
+    }
 }
 
 impl FeralLU {
     /// A new, unfactorized solver.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Factor `a` with feral's sparse LU, reusing the cached fill-reducing column
+    /// ordering when [`symcache::enabled`] and the fill it produces stays within
+    /// [`symcache::MAX_FILL_GROWTH`] of what a fresh analysis achieved.
+    ///
+    /// Correctness does not depend on the ordering: `SparseLuSymbolic` is a bare
+    /// column permutation, `SparseLu::factor` validates only its dimension, and
+    /// the numeric factorization chooses its own row pivots. A stale ordering can
+    /// therefore only produce a *denser* factor of the very same matrix, never a
+    /// wrong one — which is exactly what the guard below measures. See
+    /// [`symcache`] for the evidence that motivated this (#1008).
+    ///
+    /// With the flag off this is the pre-#1008 path verbatim: analyze, factor.
+    fn factor_sparse_ordered(
+        &mut self,
+        a: &SparseColMatrix,
+        m: usize,
+        params: LuParams,
+    ) -> Result<SparseLu, LinError> {
+        if symcache::enabled() {
+            if let Some(cached) = self.sym_cache.as_ref().filter(|c| c.sym.m == m) {
+                let attempt = {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
+                    SparseLu::factor(a, &cached.sym, params.clone())
+                };
+                match attempt {
+                    Ok(lu) => {
+                        let cap =
+                            (cached.ref_nnz as f64 * symcache::MAX_FILL_GROWTH).ceil() as usize;
+                        if lu.factor_nnz() <= cap {
+                            crate::profile::incr(crate::profile::Ctr::LuSymbolicReused);
+                            return Ok(lu);
+                        }
+                        // The ordering has gone stale enough to cost real fill —
+                        // pay for a fresh analysis rather than carry the fill into
+                        // every subsequent ftran/btran and FT update.
+                        crate::profile::incr(crate::profile::Ctr::LuSymbolicRefreshFill);
+                    }
+                    // NOT swallowed: the fresh analysis below factors the same
+                    // matrix and will raise this basis's real failure itself. A
+                    // stale ordering is not evidence that the basis is singular.
+                    Err(_) => crate::profile::incr(crate::profile::Ctr::LuSymbolicRefreshFail),
+                }
+            }
+        }
+        // #1008: time the symbolic and numeric halves separately — the entry
+        // flamegraph attributed 59.5% of wall to "refactorize" without saying
+        // which half, and they have completely different fixes.
+        let sym = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
+            SparseLuSymbolic::analyze(a).map_err(feral_err)?
+        };
+        let lu = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
+            SparseLu::factor(a, &sym, params).map_err(feral_err)?
+        };
+        if symcache::enabled() {
+            self.sym_cache = Some(SymCache {
+                sym,
+                ref_nnz: lu.factor_nnz(),
+            });
+        }
+        Ok(lu)
     }
 
     /// Enable numeric-focus mode with the default refinement depth: refined
@@ -413,9 +505,9 @@ impl FeralLU {
     }
 
     /// The [`LuParams`] for this solver's factorizations, carrying the configured
-    /// refinement depth and, when hardening is on, the `PerturbToEps` singular
-    /// action. All other fields are feral's defaults (strict partial pivoting,
-    /// `zero_pivot_tol = 1e-13`, etc.).
+    /// refinement depth, the threshold-pivoting parameter (#1008) and, when
+    /// hardening is on, the `PerturbToEps` singular action. All other fields are
+    /// feral's defaults (`zero_pivot_tol = 1e-13`, etc.).
     fn params(&self) -> LuParams {
         LuParams {
             refine_steps: self.refine_steps,
@@ -628,10 +720,15 @@ impl LinearSolver for FeralLU {
             // Build feral's sparse matrix directly from the sparse columns —
             // O(nnz), no dense m×m intermediate.
             let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
-            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-            Factored::Sparse(Box::new(
-                SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
-            ))
+            let lu = self.factor_sparse_ordered(&a, m, params)?;
+            // #1008: fill-in is the quantity that sets the cost of refactorize,
+            // FT update and ftran/btran simultaneously — record it so those three
+            // can be attributed to "too many factorizations" vs "each factor is
+            // too dense". Gated by `profile::enabled()`, so free when off.
+            crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
+            crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
+            crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
+            Factored::Sparse(Box::new(lu))
         });
         self.retained = dense
             .filter(|_| self.refine_enabled())
@@ -779,6 +876,148 @@ impl LinearSolver for DenseLU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tridiagonal basis of order `m`: same sparsity pattern every time, values
+    /// shifted by `bump` so successive factorizations are numerically distinct.
+    /// `m = 512` is above `FORCE_DENSE_M`, so this exercises the SPARSE path (the
+    /// only one with a symbolic phase).
+    fn tridiagonal_basis(m: usize, bump: f64) -> Vec<Vec<(usize, f64)>> {
+        (0..m)
+            .map(|j| {
+                let mut col = Vec::with_capacity(3);
+                if j > 0 {
+                    col.push((j - 1, -1.0));
+                }
+                col.push((j, 4.0 + bump));
+                if j + 1 < m {
+                    col.push((j + 1, -1.0));
+                }
+                col
+            })
+            .collect()
+    }
+
+    /// Factor `cols`, solve `B x = B·1`, and assert `x == 1`. Returns the number
+    /// of entries checked so the caller can prove the probe fired.
+    fn factor_and_check_unit_solve(
+        lu: &mut FeralLU,
+        m: usize,
+        cols: &[Vec<(usize, f64)>],
+    ) -> usize {
+        lu.factorize_sparse(m, cols).expect("factorization");
+        let mut rhs = vec![0.0; m];
+        for col in cols {
+            for &(row, v) in col {
+                rhs[row] += v;
+            }
+        }
+        lu.ftran(&mut rhs).expect("ftran");
+        for (i, x) in rhs.iter().enumerate() {
+            assert!((x - 1.0).abs() < 1e-9, "row {i}: solved {x}, expected 1");
+        }
+        rhs.len()
+    }
+
+    #[test]
+    fn symbolic_ordering_is_reused_and_solves_stay_exact() {
+        // #1008: with reuse on, only the FIRST of a run of refactorizations may
+        // pay for `SparseLuSymbolic::analyze`; the rest inherit its ordering. The
+        // solves must stay exact on both arms — reuse changes the column order,
+        // never the answer.
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        let m = 512;
+        const N: u64 = 4;
+        let mut checked = 0usize;
+
+        let before_on = crate::profile::counter(crate::profile::Ctr::LuSymbolicReused);
+        symcache::with_enabled(true, || {
+            let mut lu = FeralLU::new();
+            for k in 0..N {
+                let cols = tridiagonal_basis(m, k as f64 * 0.25);
+                checked += factor_and_check_unit_solve(&mut lu, m, &cols);
+            }
+        });
+        let reused = crate::profile::counter(crate::profile::Ctr::LuSymbolicReused) - before_on;
+        assert_eq!(
+            reused,
+            N - 1,
+            "{N} refactorizations of one pattern must run the symbolic analysis once, \
+             reusing the ordering for the other {}; got {reused} reuses — the cache is \
+             not reaching feral's SparseLu::factor",
+            N - 1
+        );
+
+        // Flag off: the pre-#1008 path verbatim, analysis every time.
+        let before_off = crate::profile::counter(crate::profile::Ctr::LuSymbolicReused);
+        symcache::with_enabled(false, || {
+            let mut lu = FeralLU::new();
+            for k in 0..N {
+                let cols = tridiagonal_basis(m, k as f64 * 0.25);
+                checked += factor_and_check_unit_solve(&mut lu, m, &cols);
+            }
+        });
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::LuSymbolicReused) - before_off,
+            0,
+            "the default-off path must never reuse an ordering"
+        );
+
+        crate::profile::set_enabled(false);
+        assert_eq!(checked, 2 * N as usize * m, "solved entries checked");
+    }
+
+    #[test]
+    fn a_cached_ordering_that_costs_fill_is_dropped_and_replaced() {
+        // The guard is the whole soundness story for reuse: a carried-over
+        // ordering can only make the factor DENSER, so it must be thrown away
+        // once the factor it yields exceeds `MAX_FILL_GROWTH` of the reference —
+        // whatever the cause (a stale ordering, or simply a denser basis).
+        //
+        // Deterministic construction: the reference is a diagonal basis, whose
+        // factor is exactly `2m` nonzeros. An arrowhead cannot be factored below
+        // ~`3m`, which exceeds `1.25 * 2m` by construction, so the guard MUST
+        // trip — and the *next* arrowhead must then reuse the refreshed ordering,
+        // proving the cache was replaced rather than merely disabled.
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        let m = 512;
+        let diag: Vec<Vec<(usize, f64)>> = (0..m).map(|j| vec![(j, 3.0)]).collect();
+        let arrow: Vec<Vec<(usize, f64)>> = (0..m)
+            .map(|j| {
+                if j == 0 {
+                    (0..m)
+                        .map(|r| (r, if r == 0 { m as f64 } else { 1.0 }))
+                        .collect()
+                } else {
+                    vec![(0, 1.0), (j, 2.0)]
+                }
+            })
+            .collect();
+
+        let before_fill = crate::profile::counter(crate::profile::Ctr::LuSymbolicRefreshFill);
+        let before_reuse = crate::profile::counter(crate::profile::Ctr::LuSymbolicReused);
+        let mut checked = 0usize;
+        symcache::with_enabled(true, || {
+            let mut lu = FeralLU::new();
+            checked += factor_and_check_unit_solve(&mut lu, m, &diag);
+            checked += factor_and_check_unit_solve(&mut lu, m, &arrow);
+            checked += factor_and_check_unit_solve(&mut lu, m, &arrow);
+        });
+        let refreshes =
+            crate::profile::counter(crate::profile::Ctr::LuSymbolicRefreshFill) - before_fill;
+        let reuses = crate::profile::counter(crate::profile::Ctr::LuSymbolicReused) - before_reuse;
+        crate::profile::set_enabled(false);
+        assert_eq!(
+            refreshes, 1,
+            "the fill guard must drop the diagonal ordering exactly once"
+        );
+        assert_eq!(
+            reuses, 1,
+            "the refreshed ordering must then be reused on the repeat basis"
+        );
+        assert_eq!(checked, 3 * m, "solved entries checked");
+    }
 
     #[test]
     fn dense_retry_suppression_scopes_and_restores() {
