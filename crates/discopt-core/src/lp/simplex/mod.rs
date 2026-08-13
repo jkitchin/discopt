@@ -25,7 +25,6 @@ pub mod refine;
 pub mod regularized_lu;
 pub mod scaling;
 pub mod sparse;
-pub mod symcache;
 
 pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
 pub use dual::{

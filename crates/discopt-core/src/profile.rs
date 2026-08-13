@@ -293,16 +293,6 @@ counters!(
     LuSparseFactorizations,
     LuBasisNnz,
     LuFactorNnz,
-    // #1008 symbolic-ordering reuse (`DISCOPT_LU_SYMBOLIC_REUSE`, default off).
-    // `Reused` = a refactorization that skipped AMD entirely; `RefreshFill` = the
-    // reused ordering produced more than `MAX_FILL_GROWTH` the fill of a fresh
-    // one and was thrown away (costing one wasted numeric factorization);
-    // `RefreshFail` = factoring with the stale ordering errored and the fresh
-    // path was retried. Reuse rate = Reused / LuSparseFactorizations; the two
-    // refresh counters are the price paid for it, so neither can be assumed.
-    LuSymbolicReused,
-    LuSymbolicRefreshFill,
-    LuSymbolicRefreshFail,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,
