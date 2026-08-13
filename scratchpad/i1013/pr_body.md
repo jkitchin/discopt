@@ -108,7 +108,7 @@ within each rep, 20 s per-LP limit; reproduced on the final build.
 |---|---|
 | unchanged cells | **98 / 100** identical status *and* identical iteration count |
 | status regressions | **0** |
-| status improvements | **1** — `QPLIB_3814_rlt1` `infeasible` → `optimal` |
+| status improvements | **0** on the post-#1017 base (see the correction below) |
 | objective drift (optimal/optimal) | **0.00e+00** (n = 96) |
 | wall, LPs ≥ 50 ms (10 of 100) | 0.96x–1.20x; the bail fires on **three** cells, gaining 1.13x (`QPLIB_3814_rlt1`), 1.20x (`tspn10_rlt1`) and 1.01x (`QPLIB_3815_rlt1`, neutral) |
 | wall, LPs < 50 ms (90 of 100) | 0.74x–1.47x spread at **identical iteration counts** — sub-millisecond noise, not effect |
@@ -157,6 +157,49 @@ this — and `lprun.py` recorded counters under `if k in snap`, so a stale `_rus
 produced a full set of clean-looking RES lines containing none of the change.
 Both now refuse loudly; both were demonstrated fail-before/pass-after against the
 real defect, not asserted.
+
+## Correction 2 — the merge with `main` withdrew this PR's status improvement (CLAUDE.md §11)
+
+`main` merged #1019 (the Farkas accumulation-margin fix for #1017, the issue this
+PR's investigation filed) while this branch was open, and the branch has now been
+merged up to it. That fix repairs the certificate that produced the
+`QPLIB_3814_rlt1` false `infeasible`, so on the merged base:
+
+```
+bail=0  status=optimal  obj=0.23839462819531176  maxrun=3352  bails=0
+bail=1  status=optimal  obj=0.23839462819531176  maxrun=2048  bails=1
+```
+
+**That LP is `optimal` with the bail OFF as well as ON.** The "1 status
+improvement" claimed above is **#1017's result, not this mechanism's**, and is
+withdrawn. It supersedes the "1 improvement" line in the previous corrections
+block too.
+
+Panel re-run on the merged base (`scratchpad/i1013/postmerge_panel.jsonl`):
+
+| gate | pre-merge base | post-#1017 base |
+|---|---|---|
+| unchanged cells (status *and* iterations) | 98 / 100 | **99 / 100** |
+| status regressions | 0 | **0** |
+| status improvements | 1 | **0** |
+| objective drift, optimal/optimal | 0.00e+00 (n=96) | **0.00e+00** (n=97) |
+| cells where the bail fires | 3 | 3 — **1.34x**, **1.13x**, one neutral |
+
+Tree panel on the same base: objective, bound and node count identical on all 16
+instances, 96 assertions, 0 issues. `cargo test -p discopt-core` → **608 passed**
+on the merged tree.
+
+**What this leaves.** The mechanism is a **tail guard, not a throughput change**:
+inert on 97 of 100 panel LPs (bit-identical iteration counts), worth 1.34x
+(`QPLIB_3814_rlt1`) and 1.13x (`tspn10_rlt1`) on the stalls it catches, and
+nothing on the third. Same shape of value as the F2 stall guard beside it. With
+the correctness win now attributable to #1017, **"broadly net-positive" is not an
+accurate description of this change** and is no longer claimed. Whether that
+clears the §5 net-positive bar for a default-ON graduation is a call for the
+owner; the alternative is flipping the default to OFF with
+`DISCOPT_LP_DUAL_STALL_BAIL=1` as the opt-in.
+
+Full record: `docs/dev/performance-plan.md` §18a, `scratchpad/i1013/FINDINGS.md` §6.
 
 ## Related
 
