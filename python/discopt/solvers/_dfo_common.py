@@ -56,8 +56,12 @@ def build_oracle(model: Model, *, log_prefix: str) -> tuple[Oracle, int, np.ndar
         integer_mask[off : off + size] = True
 
     n_cons = int(getattr(evaluator, "n_constraints", 0) or 0)
-    cl: Optional[np.ndarray]
-    cu: Optional[np.ndarray]
+    # One binding rather than two: cl and cu are set together and cleared
+    # together, so a single Optional makes that inseparable. Two independent
+    # Optionals are exactly the shape of the bug fixed in 067abc6, where a
+    # ``cl``-keyed guard left ``cu`` at a different length and the violation sum
+    # broadcast to zero.
+    bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
     if n_cons:
         cl_raw, cu_raw = _infer_constraint_bounds(model, evaluator)
         cl = np.asarray(cl_raw, dtype=np.float64)
@@ -70,8 +74,7 @@ def build_oracle(model: Model, *, log_prefix: str) -> tuple[Oracle, int, np.ndar
                 f"constraint bounds do not match the evaluator: n_constraints={n_cons} "
                 f"but cl has shape {cl.shape} and cu has shape {cu.shape}"
             )
-    else:
-        cl = cu = None
+        bounds = (cl, cu)
 
     def evaluate(x: np.ndarray) -> tuple[float, float]:
         fval = float(evaluator.evaluate_objective(x))
@@ -83,10 +86,11 @@ def build_oracle(model: Model, *, log_prefix: str) -> tuple[Oracle, int, np.ndar
             # ``glce_merit`` for a finite stand-in (see ``finite_fill``).
             fval = np.inf
         viol = 0.0
-        if cl is not None:
+        if bounds is not None:
+            lo, hi = bounds
             g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
             g = np.where(np.isfinite(g), g, np.inf)
-            viol = float(np.sum(np.maximum(0.0, g - cu)) + np.sum(np.maximum(0.0, cl - g)))
+            viol = float(np.sum(np.maximum(0.0, g - hi)) + np.sum(np.maximum(0.0, lo - g)))
         return fval, viol
 
     return evaluate, n_vars, integer_mask
@@ -137,7 +141,8 @@ def glce_merit(
         near_feasible = v <= eps_cons
         merit = np.where(near_feasible, f, f + v + np.abs(f - best_feasible_value))
     if not finite_fill:
-        return merit
+        compared: np.ndarray = merit
+        return compared
     bad = ~np.isfinite(merit)
     if bad.any():
         finite = merit[~bad]
