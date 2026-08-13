@@ -572,9 +572,26 @@ def _direct_root_primal(
         return None
 
     _cl = np.asarray(cl_list, dtype=np.float64) if cl_list else None
-    _cu = np.asarray(cu_list, dtype=np.float64) if cl_list else None
-    # They are set and cleared together; binding the pair makes that explicit so
-    # the violation term below is not reaching through an Optional.
+    _cu = np.asarray(cu_list, dtype=np.float64) if cu_list else None
+    # The caller sets and clears the two together, and the violation sum below
+    # indexes both against the same ``g``. Check that rather than assume it: a
+    # length mismatch does not raise in numpy, it broadcasts or truncates, so the
+    # failure mode is a silently *wrong violation* -- and therefore a wrong
+    # feasibility verdict on a candidate incumbent -- not a crash. Refuse loudly
+    # (CLAUDE.md §3); the caller reports it as a warning and continues without the
+    # probe, which costs nodes and never correctness.
+    if (_cl is None) != (_cu is None):
+        raise ValueError(
+            "DIRECT root primal: constraint bounds must be supplied as a pair "
+            f"(cl_list={'set' if _cl is not None else 'empty'}, "
+            f"cu_list={'set' if _cu is not None else 'empty'})"
+        )
+    if _cl is not None and _cu is not None and _cl.shape != _cu.shape:
+        raise ValueError(
+            f"DIRECT root primal: constraint bound length mismatch cl={_cl.shape} vs cu={_cu.shape}"
+        )
+    # Binding the pair makes the invariant explicit so the violation term below is
+    # not reaching through an Optional.
     _bounds = (_cl, _cu) if (_cl is not None and _cu is not None) else None
 
     def _oracle(x: np.ndarray) -> tuple[float, float]:
@@ -586,7 +603,15 @@ def _direct_root_primal(
         viol = 0.0
         if _bounds is not None:
             _lo, _hi = _bounds
-            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64).reshape(-1)
+            if g.shape != _lo.shape:
+                # Same reasoning as the pairing check above: numpy would
+                # broadcast or truncate rather than raise, and the result would
+                # be a violation computed against the wrong rows.
+                raise ValueError(
+                    f"DIRECT root primal: evaluator returned {g.shape[0]} constraint "
+                    f"values but {_lo.shape[0]} bounds were supplied"
+                )
             g = np.where(np.isfinite(g), g, np.inf)
             viol = float(np.sum(np.maximum(0.0, g - _hi)) + np.sum(np.maximum(0.0, _lo - g)))
             if not np.isfinite(viol):

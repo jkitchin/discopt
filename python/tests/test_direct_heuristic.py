@@ -513,3 +513,73 @@ def test_probe_rounds_integer_coordinates():
     x, _, evals = out
     assert evals > 0
     assert x[1] == pytest.approx(round(float(x[1])), abs=1e-9)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "cl_list,cu_list",
+    [
+        ([1.0], []),  # upper bounds dropped
+        ([], [1.0]),  # lower bounds dropped
+        ([1.0, 2.0], [3.0]),  # both present, different lengths
+    ],
+)
+def test_mismatched_constraint_bounds_are_refused(cl_list, cu_list):
+    """An unpaired/ragged ``cl_list``/``cu_list`` must raise, never compute.
+
+    The violation sum indexes ``cl`` and ``cu`` against the same ``g``, and numpy
+    does not raise on a length mismatch — it broadcasts or truncates. Measured on
+    the pre-fix code: with ``g = [5.0]`` and an empty ``cu``, ``g - cu`` has shape
+    ``(0,)`` and the violation sums to **0.0**, so a point violating its
+    constraint by 4.0 was reported as feasible. The ``([], [1.0])`` arm was worse
+    still — the old guard read ``if cl_list`` for *both* arrays, so an empty
+    ``cl_list`` silently dropped the constraints entirely and the probe searched
+    an unconstrained problem.
+
+    Neither case could corrupt an incumbent: ``solve_model`` re-verifies every
+    proposal with ``_check_constraint_feasibility`` before injecting it. What they
+    corrupt is the probe's own ranking, so the whole budget goes into optimizing
+    the wrong problem and the proposals are then thrown away — a silent no-op that
+    reads as "the heuristic ran and did not help" (CLAUDE.md §6/§7).
+    """
+    ev = _StubEvaluator()
+    lb = np.array([0.0, 0.0])
+    ub = np.array([1.0, 1.0])
+
+    with pytest.raises(ValueError, match="constraint bound"):
+        _solver._direct_root_primal(ev, lb, ub, [], [], cl_list, cu_list)
+
+    assert ev.objective_calls == 0, "refused after evaluating the model"
+
+
+@pytest.mark.unit
+def test_constraint_count_mismatch_is_refused():
+    """Bounds that outnumber the evaluator's rows raise instead of broadcasting.
+
+    Complements the check above: the pairing can be consistent while still
+    disagreeing with what ``evaluate_constraints`` returns. ``_StubEvaluator``
+    yields exactly one row, so two bound pairs is a mismatch — and ``(1,)``
+    against ``(2,)`` is a *legal* numpy broadcast, which is precisely why it needs
+    an explicit check rather than an exception it would never get.
+    """
+    ev = _StubEvaluator()
+    lb = np.array([0.0, 0.0])
+    ub = np.array([1.0, 1.0])
+
+    with pytest.raises(ValueError, match="constraint values"):
+        _solver._direct_root_primal(ev, lb, ub, [], [], [1.0, 1.0], [np.inf, np.inf])
+
+
+@pytest.mark.unit
+def test_matched_constraint_bounds_still_work():
+    """The guards must not refuse the ordinary case (no false refusal)."""
+    ev = _StubEvaluator()
+    out = _solver._direct_root_primal(
+        ev, np.array([0.0, 0.0]), np.array([1.0, 1.0]), [], [], [1.0], [np.inf], max_evals=40
+    )
+    assert out is not None, "a well-formed constrained probe was refused"
+    x, fval, evals = out
+    assert evals > 0
+    # sum(x) >= 1 is the stub's only row; the returned point must satisfy it.
+    assert float(np.sum(x)) >= 1.0 - 1e-6
+    assert np.isfinite(fval)
