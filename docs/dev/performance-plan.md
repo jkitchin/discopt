@@ -2692,3 +2692,55 @@ rather than by name, §2). It returns `Unbounded` on the old default and
 `bank_deadline_duals` coupling that makes QPLIB_2170 solvable only when the caller
 passes a `time_limit` (#1008 R1) — both tracked in #1008.
 
+### 18c. The false `Unbounded` is a broken ftran read as a verdict (#1008, 2026-08-13)
+
+§18b left this open. It is not a property of the stall bail: with
+`DISCOPT_LP_DUAL_STALL_BAIL=0` (the default since #1021) and `time_limit=None`,
+QPLIB_2170's root relaxation still reaches the ratio test's unbounded exit —
+`UnboundedRejectRowResidual = 2` end to end.
+
+**What the engine was doing.** `Infeasible` is issued only after
+`farkas_ray_certifies_cols` accepts a dual ray. `Unbounded` was issued on the
+strength of "the ratio test found no blocking row" alone. But that sentence is a
+statement *about* `α = B⁻¹A_q`, so an ftran that silently returns zeros produces
+it verbatim — which is exactly what happens here. The captured ray:
+
+| quantity | required | measured |
+|---|---|---|
+| nonzeros in `d` | ≥ 1 basic + entering | **1** (the entering column only) |
+| `max_i |A d|_i` | 0 | **1.0** |
+| `cᵀd` | < 0 | **0.0** |
+| box-recession violations | 0 | 0 |
+
+Three of the four conditions fail. The LP is `optimal 0` (HiGHS, 81 pivots).
+
+**Blast radius, by driver.** `spatial_tree::verdict_for` already maps
+`Unbounded`, `IterLimit` and `Numerical` alike to `NodeVerdict::Undecided`, so
+there the cost was only the bypassed `dense_retry` — which is gated on
+`Numerical | IterLimit` and so never ran. `milp_driver` is the serious one:
+`out.unbounded` at any node sets `hit_unbounded`, breaks the search loop, and
+short-circuits `decide_status` ahead of every other branch, returning
+`MilpStatus::Unbounded` for a bounded MILP and discarding any incumbent. One
+false node verdict is enough.
+
+**The fix** is the primal mirror of the Farkas path: `ray_certifies_unbounded`
+checks `A d = 0`, `cᵀd < 0` under the cost the *phase* is minimizing (not
+`self.c` — phase 1 is minimizing infeasibility), and box recession, refusing with
+`Numerical` when any fails. Margins are built from accumulation magnitudes rather
+than results (#1017). The relative slack is `1e-7`, deliberately not
+`gamma(nnz)`: the residual carries the LU solve's error, not just summation
+rounding. It rejects the observed breakdown by a factor of 10⁷.
+
+`Numerical` is also the status that routes into `dense_retry`, so the honest
+refusal is strictly more useful than the false claim.
+
+**Not a bound recovery.** On QPLIB_2170 at `time_limit=None` the outcome stays
+"no solution" — the engine simply stops claiming a certificate it cannot support.
+The remaining loss on that cell is the `bank_deadline_duals` coupling (#1008 R1,
+still open): the same LP solves to `optimal 0` at `time_limit=40.0`. The four-cell
+BAIL × time_limit A/B is otherwise unchanged from §18b, so nothing regressed.
+
+Pinned by `cold_primal_does_not_claim_unbounded_on_a_bounded_lp` (returns
+`Unbounded` obj 351 without the certifier, `Numerical` with it) and by the
+pre-existing `unbounded_detected` / `unbounded_emits_a_valid_primal_ray`, which
+confirm a genuine unbounded ray still certifies untouched.
