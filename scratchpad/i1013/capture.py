@@ -23,8 +23,27 @@ assert discopt.__file__.startswith(ROOT), discopt.__file__
 OUT = os.path.join(ROOT, "scratchpad/i1013/lps")
 os.makedirs(OUT, exist_ok=True)
 
-QDIR = os.path.join(ROOT, "python/tests/data/qplib/qplib")
-NLDIR = os.path.join(ROOT, "python/tests/data/minlplib_nl")
+# Default to the vendored corpora, but let a machine that HAS the full snapshot
+# point at it without editing this file. The remaining #1013 work is re-running
+# the issue's QPLIB_0911 cells, which need the full QPLIB directory; the PR body
+# claimed "pointing it at the full snapshot is the only change needed" while
+# these paths were in fact fixed, so that redirect required a source edit.
+#   I1013_QDIR=~/Dropbox/projects/discopt-minlp-benchmark/qplib \
+#   I1013_NLDIR=~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl \
+#   I1013_ONLY=QPLIB_0911 python -u scratchpad/i1013/capture.py
+QDIR = os.path.expanduser(
+    os.environ.get("I1013_QDIR", os.path.join(ROOT, "python/tests/data/qplib/qplib"))
+)
+NLDIR = os.path.expanduser(
+    os.environ.get("I1013_NLDIR", os.path.join(ROOT, "python/tests/data/minlplib_nl"))
+)
+# Optional comma-separated substring filter on the instance name (never a
+# hardcoded name in the script itself -- CLAUDE.md §2).
+ONLY = [s for s in os.environ.get("I1013_ONLY", "").split(",") if s]
+
+for _d, _label in ((QDIR, "I1013_QDIR"), (NLDIR, "I1013_NLDIR")):
+    if not os.path.isdir(_d):
+        raise SystemExit(f"{_label} does not exist: {_d}")
 
 MAX_BUILD_S = float(os.environ.get("I1013_MAX_BUILD_S", "60"))
 
@@ -81,7 +100,11 @@ for f in sorted(os.listdir(QDIR)):
 for f in sorted(os.listdir(NLDIR)):
     if f.endswith(".nl"):
         sources.append(("nl", f[:-3], os.path.join(NLDIR, f)))
-print(f"sources: {len(sources)}", flush=True)
+if ONLY:
+    sources = [s for s in sources if any(p in s[1] for p in ONLY)]
+    if not sources:
+        raise SystemExit(f"I1013_ONLY={ONLY} matched nothing under {QDIR} / {NLDIR}")
+print(f"sources: {len(sources)}  (QDIR={QDIR} NLDIR={NLDIR} ONLY={ONLY or '-'})", flush=True)
 
 for kind, name, path in sources:
     t0 = time.perf_counter()

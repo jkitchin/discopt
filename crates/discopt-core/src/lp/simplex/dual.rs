@@ -94,19 +94,37 @@ const STALL_PATIENCE: usize = 2048;
 pub(super) fn stall_patience_default() -> usize {
     static PATIENCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *PATIENCE.get_or_init(|| {
-        match std::env::var("DISCOPT_LP_DUAL_STALL_BAIL")
-            .unwrap_or_default()
-            .as_str()
-        {
-            "" | "1" | "true" | "on" => STALL_PATIENCE,
-            "0" | "false" | "off" => 0,
-            other => other
-                .parse()
-                .ok()
-                .filter(|&n| n >= 2)
-                .unwrap_or(STALL_PATIENCE),
-        }
+        let raw = std::env::var("DISCOPT_LP_DUAL_STALL_BAIL").unwrap_or_default();
+        parse_stall_patience(&raw).unwrap_or_else(|e| panic!("{e}"))
     })
+}
+
+/// The parse table behind [`stall_patience_default`], split out so the accepted
+/// and rejected spellings are testable without a process-global `OnceLock`.
+///
+/// An unrecognized value is an **error**, not a silent default. Every other flag
+/// in this engine is default-OFF, where the house pattern (anything unrecognized
+/// reads as on) is harmless: a typo turns the feature on, which shows up in the
+/// measurement. This flag is default-**ON**, which inverts the failure: a typo in
+/// the *off* arm leaves the feature on and the A/B harness reports two identical
+/// arms as a clean "no effect". Python's `str(False)` == `"False"` hits exactly
+/// this — it is neither `"false"` nor a parseable integer. Refusing loudly is
+/// CLAUDE.md §3; the alternative silently corrupts a graduation panel.
+fn parse_stall_patience(raw: &str) -> Result<usize, String> {
+    match raw.trim() {
+        "" | "1" | "true" | "True" | "on" | "ON" => Ok(STALL_PATIENCE),
+        "0" | "false" | "False" | "off" | "OFF" => Ok(0),
+        other => match other.parse::<usize>() {
+            Ok(n) if n >= 2 => Ok(n),
+            _ => Err(format!(
+                "DISCOPT_LP_DUAL_STALL_BAIL={other:?} is not a recognized value. \
+                 Use 1/true/on (default, patience {STALL_PATIENCE}), 0/false/off \
+                 (disable), or an integer >= 2 (explicit patience). A patience of 1 \
+                 is rejected because it would bail on the first degenerate pivot; \
+                 =1 means \"on\"."
+            )),
+        },
+    }
 }
 
 /// Whether to emit the per-pivot dual trace (`DISCOPT_LP_DUAL_TRACE=1`).
@@ -1423,6 +1441,49 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    /// #1013 D2: an *off* spelling must actually disable the bail, and anything
+    /// unrecognized must be refused rather than silently read as the default-ON
+    /// patience. Before this test's fix, `"False"` (Python's `str(False)`) parsed
+    /// as neither `"false"` nor an integer and fell through to `STALL_PATIENCE`,
+    /// so an A/B harness's off arm ran the on path and the two arms measured the
+    /// same thing.
+    #[test]
+    fn stall_patience_off_spellings_disable_and_junk_is_refused() {
+        let mut checked = 0usize;
+
+        for on in ["", "1", "true", "True", "on", "ON"] {
+            assert_eq!(
+                parse_stall_patience(on),
+                Ok(STALL_PATIENCE),
+                "{on:?} should select the default patience"
+            );
+            checked += 1;
+        }
+        for off in ["0", "false", "False", "off", "OFF", "  false  "] {
+            assert_eq!(
+                parse_stall_patience(off),
+                Ok(0),
+                "{off:?} must DISABLE the bail, not fall through to the default"
+            );
+            checked += 1;
+        }
+        for (raw, want) in [("2", 2usize), ("4096", 4096)] {
+            assert_eq!(parse_stall_patience(raw), Ok(want));
+            checked += 1;
+        }
+        // Rejected: a bare 1 is "on" (handled above), so the only integer that
+        // can reach the error arm is one that is neither on/off nor >= 2.
+        for bad in ["yes", "no", "-1", "1.5", "None", "tru", "2048x"] {
+            assert!(
+                parse_stall_patience(bad).is_err(),
+                "{bad:?} must be refused loudly, not silently defaulted"
+            );
+            checked += 1;
+        }
+
+        assert_eq!(checked, 21, "probe did not run every case it claims to");
     }
 
     #[test]

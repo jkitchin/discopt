@@ -61,7 +61,13 @@ rec = {
     "obj": out[2],
     "iters": int(out[3]),
 }
-for k in (
+
+# CLAUDE.md §8: prove which build we loaded before recording anything from it.
+# These counters ship WITH the #1013 change, so a stale `_rust` (built before it)
+# exposes none of them. The previous `if k in snap` skipped them silently, which
+# turned "this panel measured a build without the fix" into a full set of
+# clean-looking RES lines -- the exact failure mode §8 exists to stop.
+COUNTERS = (
     "DualDegeneratePivots",
     "DualStallTrips",
     "DualBlandActivations",
@@ -70,7 +76,15 @@ for k in (
     "DualDegenerateRunArms",
     "DualDegenerateRunMax",
     "DualDegenerateStallBails",
-):
-    if k in snap:
-        rec[k] = snap[k]
+)
+missing = [k for k in COUNTERS if k not in snap]
+if missing:
+    raise SystemExit(
+        f"stale or wrong discopt._rust at {_rust.__file__}: missing counters {missing}. "
+        f"`DualDegenerateStallBails` is unique to #1013, so this build predates the "
+        f"change under test -- rebuild (maturin develop) before running the panel."
+    )
+rec["_rust"] = _rust.__file__
+for k in COUNTERS:
+    rec[k] = snap[k]
 print("RES " + json.dumps(rec), flush=True)
