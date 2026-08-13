@@ -134,6 +134,34 @@ pub struct SimplexOptions {
     /// sets it, and only when its caller passed a `time_limit` — i.e. exactly the
     /// `DISCOPT_LP_WARM_DEADLINE` path whose graduation panel judges it.
     pub bank_deadline_duals: bool,
+    /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
+    /// slack basis instead of the cold two-phase primal.
+    ///
+    /// The kernel's node LP (`bnb::spatial_kernel::solve_spatial_node`) has always
+    /// gone straight to `solve_lp_cols_scaled`, i.e. the cold PRIMAL loop — the
+    /// one whose own comment reads "a dense, degenerate lifted-McCormick LP can
+    /// otherwise grind toward `max_iter` and run uninterruptibly for minutes". It
+    /// does exactly that on relaxations rich in linear *equalities*: an equality
+    /// reaches the LP layer as two opposing `<=` rows, both tight at every
+    /// feasible point, so the LP is massively primal-degenerate. Measured on the
+    /// constraint-factor-RLT root relaxation of a continuous nonconvex QP
+    /// (QPLIB_1157, 3937 rows): the cold primal exhausted `max_iter` after >150 s
+    /// and returned no bound; the dual start returns the same optimum (to 5e-13
+    /// against HiGHS) in ~6 s.
+    ///
+    /// With slacks basic and each structural column nonbasic at the bound its
+    /// objective sign selects, `y = B⁻ᵀc_B = 0` and every reduced cost is `c_j`,
+    /// so the basis is dual-feasible whenever each selected side is finite.
+    /// `PreparedDual::prepare` re-verifies that precondition independently and
+    /// falls back to the cold path when it fails, so an accepted basis can never
+    /// make the engine converge wrong — this only changes *which* algorithm
+    /// reaches the same LP optimum.
+    ///
+    /// Default `false`: a different optimal basis on a degenerate LP means a
+    /// different (still rigorous) safe bound and can move downstream branching,
+    /// which is bound-changing under the §5 regime. Set from Python by
+    /// `DISCOPT_LP_COLD_DUAL_START`, pending its graduation panel.
+    pub cold_dual_start: bool,
 }
 
 impl SimplexOptions {
@@ -174,6 +202,7 @@ impl Default for SimplexOptions {
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
             bank_deadline_duals: false,
+            cold_dual_start: false,
         }
     }
 }

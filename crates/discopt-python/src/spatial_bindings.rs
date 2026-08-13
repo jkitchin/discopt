@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
     min_box_width=1e-9, run_obbt=false, run_propagation=true,
     propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
     incumbent_time_extension_s=None, bound_time_extension_s=None,
+    cold_dual_start=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -84,6 +85,7 @@ pub fn solve_spatial_tree_py<'py>(
     time_limit_s: Option<f64>,
     incumbent_time_extension_s: Option<f64>,
     bound_time_extension_s: Option<f64>,
+    cold_dual_start: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -312,7 +314,14 @@ pub fn solve_spatial_tree_py<'py>(
         incumbent_time_extension,
         bound_time_extension,
     };
-    let opts = SimplexOptions::default();
+    // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
+    // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default; note
+    // that `deadline` deliberately stays `None` here — see the tree loop, which
+    // enforces `cfg.deadline` between nodes.
+    let opts = SimplexOptions {
+        cold_dual_start,
+        ..SimplexOptions::default()
+    };
 
     // Release the GIL for the (potentially long) solve.
     let res = py.allow_threads(|| solve_spatial_tree(&spec, &cfg, &opts));

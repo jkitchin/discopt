@@ -2881,6 +2881,139 @@ def _emit_quadratic_rlt(
                 ctx.add_row({int(j): float(coeffs[j]) for j in nz}, float(rhs))
 
 
+def _emit_linear_equality_rlt(ctx: _Builder, model: Model) -> None:
+    """Add level-1 RLT rows from the model's *linear equality* constraints.
+
+    For an equality body ``a'x + c == 0`` and any variable ``x_j``, the product
+
+        ``(a'x + c) * x_j == 0``
+
+    is an identity on the feasible region. Linearized over the lifted product
+    columns it becomes ``sum_i a_i X_ij + c x_j == 0`` — the Sherali–Adams
+    constraint-factor row. It holds with *equality* at every feasible point
+    (``X_ij = x_i x_j`` there), so it cannot remove one: sound by construction,
+    tightening only the lifted McCormick polytope where ``X`` is free to drift
+    from ``x x'``.
+
+    Two properties distinguish this family from the bound-factor RLT passes
+    (:func:`_emit_quadratic_rlt` and the per-node ``rlt_constraint_bound_cut``
+    separator), and they are why it is worth having as its own pass:
+
+    * **No binary requirement.** ``_relax/rlt.py``'s exhaustive RLT-1 LP is gated
+      to binary variables because its ``X_ii = x_i`` diagonal and bound-factor
+      rows need them. This row needs neither, so it applies to *continuous*
+      nonconvex QPs — the class where the McCormick root bound is weakest.
+    * **No box data.** Every coefficient comes from the constraint, not from
+      ``[l, u]``, so the row is identical at every node of the tree. It is
+      therefore a box-independent *fixed* row, which is what lets it flow through
+      ``spatial_producer`` into the native Rust spatial kernel unchanged — the
+      bound-factor families cannot, since the kernel regenerates only the
+      per-term envelope rows when it patches a node box.
+
+    Multipliers ``x_j`` are restricted to variables that already participate in
+    some registered nonlinear product: elsewhere the row would tighten nothing
+    and every ``X_ij`` it names would have to be lifted from scratch. Products
+    the base decomposition did not register are lifted on demand (McCormick), up
+    to ``DISCOPT_RLT_LINEQ_MAX`` new columns.
+    """
+    from discopt._relax.milp_relaxation import _linear_form_terms
+    from discopt.solver_tuning import current as _tuning
+
+    n_orig = ctx.n_orig
+
+    # ``body == 0`` rows in sparse original-column form. A body the affine
+    # linearizer refuses (nonlinear, non-finite coefficient) is simply not a
+    # linear factor and is skipped; the quadratic pass owns those.
+    rows: list[tuple[dict[int, float], float]] = []
+    for constraint in model._constraints:
+        if constraint.sense != "==":
+            continue
+        form = _linear_form_terms(constraint.body, model, n_orig)
+        if form is None:
+            continue
+        terms, const = form
+        terms = {int(i): float(a) for i, a in terms.items() if a != 0.0}
+        # The stored constraint is ``body == rhs`` and the linearizer describes the
+        # BODY only, so the zero-form constant is ``const - rhs`` — the same shift
+        # the base constraint-row loop applies. Dropping ``rhs`` here would emit
+        # ``(a'x + const) x_j == 0`` for a constraint that never said that, which
+        # for a nonzero rhs is a WRONG row, not merely a weak one.
+        if terms:
+            rows.append((terms, float(const) - float(constraint.rhs)))
+    if not rows:
+        return
+
+    # Multiplier candidates: original variables inside some registered product.
+    multipliers: set[int] = set()
+    for a, b in ctx.bilinear_map:
+        multipliers.update((a, b))
+    for i, _p in ctx.monomial_map:
+        multipliers.add(i)
+    for tri in ctx.trilinear_map:
+        multipliers.update(tri)
+    for multi in ctx.multilinear_map:
+        multipliers.update(multi)
+    multipliers = {j for j in multipliers if 0 <= j < n_orig}
+    if not multipliers:
+        return
+
+    prod: dict[tuple[int, int], int] = {}
+    for (a, b), col in ctx.bilinear_map.items():
+        prod[(min(a, b), max(a, b))] = col
+    for (i, p), col in ctx.monomial_map.items():
+        if p == 2:
+            prod[(i, i)] = col
+
+    cap = int(_tuning().rlt_lineq_max)
+    start_cols = len(ctx.col_lb)
+
+    def _pair_col(i: int, j: int) -> Optional[int]:
+        """Lifted column for ``x_i x_j``, lifting it if the base build had no need
+        for it. ``None`` when it cannot be lifted soundly (infinite box) or the
+        new-column budget is spent — the caller then drops the whole row."""
+        key = (min(i, j), max(i, j))
+        hit = prod.get(key)
+        if hit is not None:
+            return hit
+        if len(ctx.col_lb) - start_cols >= cap:
+            return None
+        a, b = key
+        ba = (ctx.col_lb[a], ctx.col_ub[a])
+        bb = (ctx.col_lb[b], ctx.col_ub[b])
+        if not (_finite(*ba) and _finite(*bb)):
+            return None
+        tb = _interval_mul(ba, bb)
+        w = ctx.new_aux(tb[0], tb[1])
+        _emit_mccormick(ctx, w, LinForm.col(a), ba, LinForm.col(b), bb)
+        prod[key] = w
+        if a == b:
+            ctx.register_power(a, 2, w)
+        else:
+            ctx.register_product([a, b], w)
+        return w
+
+    for terms, const in rows:
+        for j in sorted(multipliers):
+            row: dict[int, float] = {}
+            ok = True
+            for i, coef in terms.items():
+                pair_col = _pair_col(i, j)
+                if pair_col is None:
+                    ok = False
+                    break
+                row[pair_col] = row.get(pair_col, 0.0) + coef
+            if not ok:
+                continue
+            if const != 0.0:
+                row[j] = row.get(j, 0.0) + const
+            row = {c: v for c, v in row.items() if v != 0.0}
+            if not row:
+                continue
+            # ``row · z == 0`` as the two inequalities the LP layer takes.
+            ctx.add_row(row, 0.0)
+            ctx.add_row({c: -v for c, v in row.items()}, 0.0)
+
+
 def _clamped_breakpoints(
     raw: "np.ndarray", lo: float, hi: float, min_intervals: int = 2
 ) -> Optional[list[float]]:
@@ -3242,6 +3375,7 @@ def build_uniform_relaxation(
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
     *,
     rlt_quad: bool = False,
+    rlt_lineq: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     disc_state: object = None,
@@ -3277,6 +3411,14 @@ def build_uniform_relaxation(
         lifting the resulting degree-3 monomials on demand, and add the valid RLT
         product rows. Sound (only tightens); the caller gates it on the
         ``rlt_level1`` build option AND ``DISCOPT_RLT_QUAD``.
+    rlt_lineq : bool, default False
+        Enable the linear-equality constraint-factor RLT pass: multiply each
+        linear equality by each product-participating variable and add the
+        resulting ``sum_i a_i X_ij + c x_j == 0`` rows (see
+        :func:`_emit_linear_equality_rlt`). Sound (an identity at every feasible
+        point) and box-independent, so unlike ``rlt_quad`` its rows survive the
+        native spatial kernel's per-node box patching. Callers gate it on
+        ``DISCOPT_RLT_LINEQ``.
 
     Returns
     -------
@@ -3366,6 +3508,10 @@ def build_uniform_relaxation(
     # keeps the truncation honoring the deadline.
     if rlt_quad and not build_truncated:
         _emit_quadratic_rlt(ctx, model, flat_lb, flat_ub)
+    # Linear-equality constraint-factor RLT, gated the same way and for the same
+    # reasons (adds rows only, so skipping a truncated build stays sound).
+    if rlt_lineq and not build_truncated:
+        _emit_linear_equality_rlt(ctx, model)
 
     obj_offset = obj_lin.const
 
