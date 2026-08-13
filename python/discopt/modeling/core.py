@@ -4348,14 +4348,29 @@ class Model:
         # backend-passthrough set; an unknown key raises TypeError with a
         # near-match suggestion (CLAUDE.md §3: loud refusal over silent swallow).
         if kwargs:
-            from discopt.solver import solve_model_accepted_kwargs
+            from discopt.solver import selector_for_kwarg, solve_model_accepted_kwargs
 
-            allowed = solve_model_accepted_kwargs()
+            # Selector-aware: an option that only exists for solver="direct" or
+            # solver="surrogate" is NOT accepted on a default solve. A flat
+            # allowlist would accept m.solve(n_jobs=8) on a branch-and-bound run,
+            # ignore it, and run serially — the M6 hazard this guard exists to
+            # stop, on a parameter users already confuse with `threads`.
+            allowed = solve_model_accepted_kwargs(solver)
             unknown = [k for k in kwargs if k not in allowed]
             if unknown:
                 import difflib
 
                 bad = unknown[0]
+                owner = selector_for_kwarg(bad)
+                if owner is not None:
+                    raise TypeError(
+                        f"solve() got '{bad}', which is an option of "
+                        f"solver={owner!r} and has no effect on this solve. "
+                        f"Pass solver={owner!r} to use it. Backend options are "
+                        f"rejected rather than silently ignored (a swallowed "
+                        f"option would leave the solver at its default while you "
+                        f"believe it was set)."
+                    )
                 close = difflib.get_close_matches(bad, sorted(allowed), n=1, cutoff=0.6)
                 hint = f" Did you mean '{close[0]}'?" if close else ""
                 raise TypeError(

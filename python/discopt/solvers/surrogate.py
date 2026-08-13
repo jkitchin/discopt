@@ -653,7 +653,7 @@ class KrigingSurrogate:
         def objective(params: np.ndarray) -> float:
             theta, power, eta = unpack(params)
             out = self._concentrated(absdiff, yn, theta, power, eta)
-            return np.inf if out is None else out[0]
+            return np.inf if out is None else float(out[0])
 
         # Deterministic starts: a geometric ladder plus the classic
         # "1 / (2 * mean squared distance)" scale heuristic. No RNG, so a refit on

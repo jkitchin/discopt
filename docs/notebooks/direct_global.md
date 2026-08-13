@@ -288,6 +288,16 @@ speedup therefore depends on your evaluation releasing the GIL: numpy/JAX comput
 and any subprocess or I/O-bound simulator do, a pure-Python arithmetic body does
 not.
 
+```{warning}
+Threads also mean **your objective is called concurrently in one process**, so
+`n_jobs > 1` requires a reentrant body. A simulator that writes a fixed scratch
+file, mutates module-level state, or holds one global session will corrupt itself
+or interleave results — and the determinism guarantee above does not save you,
+because it is a property of the *search*, not of a body that is unsafe to call
+twice at once. Keep such a body at `n_jobs=1`, or give each call its own working
+directory.
+```
+
 ## What you do not get
 
 ```python
@@ -362,7 +372,7 @@ shape implemented here.
 | `local_refine_after` | `100` | evaluations between refinement attempts |
 | `local_refine_method` | `"auto"` | `"nlp"`, `"derivative-free"`, or auto-fallback |
 | `feasibility_tolerance` | `1e-6` | the GLce band treated as feasible |
-| `n_jobs` | `1` | threads for each iteration's samples; `-1` = all CPUs |
+| `n_jobs` | `1` | threads for each iteration's samples; `-1` = all CPUs. Requires a reentrant objective |
 
 Full citations for the works referenced above are on the {doc}`../references`
 page.

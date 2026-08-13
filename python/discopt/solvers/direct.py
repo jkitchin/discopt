@@ -82,7 +82,10 @@ because the ``divide="one"`` tie-break reads it.
 Threads, not processes: a ``dm.custom`` model is not picklable, so a process pool
 cannot carry the evaluator. The speedup therefore depends on the evaluation
 releasing the GIL — numpy/JAX compute and any subprocess or I/O-bound simulator
-do; a pure-Python arithmetic body does not.
+do; a pure-Python arithmetic body does not. It also means the objective is called
+concurrently in one address space, so ``n_jobs > 1`` requires a **reentrant**
+body: a simulator with a shared scratch file or one global session must stay at
+``n_jobs=1``.
 
 Local refinement launches from the **best of** the caller's start and DIRECT's
 incumbent, keeping the better result, so the backend is no worse than the local
@@ -780,6 +783,14 @@ def _build_oracle(model: Model, feas_tol: float):
         cl, cu = _infer_constraint_bounds(model, evaluator)
         cl = np.asarray(cl, dtype=np.float64)
         cu = np.asarray(cu, dtype=np.float64)
+        # The violation sum below indexes cl and cu against the same g vector, so
+        # a length mismatch would broadcast-or-truncate into a silently wrong
+        # violation — i.e. a wrong feasibility verdict, not a crash. Refuse loudly.
+        if cl.shape != (n_cons,) or cu.shape != (n_cons,):
+            raise ValueError(
+                f"constraint bounds do not match the evaluator: n_constraints={n_cons} "
+                f"but cl has shape {cl.shape} and cu has shape {cu.shape}"
+            )
     else:
         cl = cu = None
 
@@ -986,6 +997,15 @@ def solve_direct(
         makes the speedup depend on the evaluation releasing the GIL — numpy/JAX
         compute and any subprocess or I/O-bound simulator do; a pure-Python
         arithmetic body does not, and will see no gain.
+
+        **Your objective must be reentrant.** Because these are threads sharing
+        one address space, ``n_jobs > 1`` calls the body concurrently in the same
+        process. A body that writes a fixed scratch file, mutates module-level
+        state, or drives a simulator with one global session will corrupt itself
+        or interleave results, and the determinism guarantee above buys you
+        nothing — it holds for the *search*, not for a body that is not safe to
+        call twice at once. Keep such a body at ``n_jobs=1``, or give each call
+        its own working directory/handle.
 
     Raises
     ------

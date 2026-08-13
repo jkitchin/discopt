@@ -5191,7 +5191,7 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 # legitimately accepted — the kwarg-validation guard (M6) must allow them so a
 # real backend option is never rejected as a typo. Sourced from every
 # ``kwargs.get``/``kwargs.pop`` site in this module plus the AMP option list.
-_BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
+_GENERIC_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
     {
         # lp-spatial diagnostic path
         "lp_spatial",
@@ -5281,37 +5281,6 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "obbt_with_cutoff",
         "alphabb_cutoff_obbt",
         "obbt_time_limit",
-        # DIRECT derivative-free backend (solver="direct")
-        "max_evals",
-        "epsilon",
-        "direct_variant",
-        "divide",
-        "break_ties",
-        "local_refine",
-        "local_refine_after",
-        "local_refine_time_limit",
-        "local_refine_method",
-        "n_jobs",
-        "feasibility_tolerance",
-        # surrogate backend (solver="surrogate")
-        "surrogate",
-        "rbf_kernel",
-        "rbf_ridge",
-        "n_initial",
-        "acquisition_optimizer",
-        "acquisition_time_limit",
-        "acquisition_gap_tolerance",
-        "acquisition_multistarts",
-        "distance_cycle",
-        "min_distance",
-        "nugget",
-        "estimate_nugget",
-        "kriging_power",
-        "estimate_kriging_power",
-        "theta_bounds",
-        "xi",
-        "seed",
-        "on_evaluation",
     }
 )
 
@@ -5366,12 +5335,86 @@ def _withhold_local_optimality_certificate(result: SolveResult) -> SolveResult:
     return result
 
 
-@functools.lru_cache(maxsize=1)
-def solve_model_accepted_kwargs() -> frozenset[str]:
+#: Options that ONLY exist for a specific ``solver=`` selector. Kept out of the
+#: generic set on purpose: :func:`solve_model_accepted_kwargs` is a flat
+#: membership test that never looks at ``solver=``, so anything listed generically
+#: is accepted on EVERY path — including a default branch-and-bound solve where
+#: nothing consumes it. That is exactly the M6 hazard the guard exists to stop
+#: (``m.solve(gap_tolerence=…)`` running at the default gap while the user
+#: believes it was tightened).
+#:
+#: The pre-existing generic members survive because they are *distinctive* —
+#: nobody types ``convhull_ebd_encoding`` by accident. The DFO options are not:
+#: ``seed``, ``max_evals``, ``local_refine``, ``feasibility_tolerance`` and above
+#: all ``n_jobs`` are all things a user would plausibly write on a default solve
+#: believing they had set something. ``m.solve(n_jobs=8)`` accepted-and-ignored,
+#: running serially with no warning, is the M6 failure mode reproduced on the very
+#: parameter this module's own dispatch comment flags as confusable with
+#: ``threads``.
+_SELECTOR_ONLY_KWARGS: dict[str, frozenset[str]] = {
+    "direct": frozenset(
+        {
+            "max_evals",
+            "epsilon",
+            "direct_variant",
+            "divide",
+            "break_ties",
+            "local_refine",
+            "local_refine_after",
+            "local_refine_time_limit",
+            "local_refine_method",
+            "n_jobs",
+            "feasibility_tolerance",
+        }
+    ),
+    "surrogate": frozenset(
+        {
+            "max_evals",
+            "surrogate",
+            "rbf_kernel",
+            "rbf_ridge",
+            "n_initial",
+            "acquisition_optimizer",
+            "acquisition_time_limit",
+            "acquisition_gap_tolerance",
+            "acquisition_multistarts",
+            "distance_cycle",
+            "min_distance",
+            "nugget",
+            "estimate_nugget",
+            "kriging_power",
+            "estimate_kriging_power",
+            "theta_bounds",
+            "xi",
+            "local_refine",
+            "local_refine_time_limit",
+            "feasibility_tolerance",
+            "seed",
+            "on_evaluation",
+        }
+    ),
+}
+
+#: Every selector-only name, for the "you supplied X without its selector" hint.
+_ALL_SELECTOR_ONLY_KWARGS: frozenset[str] = frozenset().union(*_SELECTOR_ONLY_KWARGS.values())
+
+
+def selector_for_kwarg(name: str) -> Optional[str]:
+    """The ``solver=`` value a selector-only option belongs to, else ``None``."""
+    for selector, keys in _SELECTOR_ONLY_KWARGS.items():
+        if name in keys:
+            return selector
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def solve_model_accepted_kwargs(solver: Optional[str] = None) -> frozenset[str]:
     """The complete set of keyword names ``Model.solve`` may forward to the solver.
 
-    Union of (a) ``solve_model``'s own named parameters and (b) the curated
-    backend-passthrough keys forwarded through its ``**kwargs``. Used by
+    Union of (a) ``solve_model``'s own named parameters, (b) the curated generic
+    backend-passthrough keys, and (c) the options belonging to ``solver`` when one
+    is given. Passing ``solver`` is what keeps a DFO-only option such as
+    ``n_jobs`` from being silently accepted on a default branch-and-bound solve. Used by
     ``Model.solve`` to reject a misspelled/unknown keyword loudly (M6) instead of
     silently swallowing it — a swallowed ``gap_tolerence=…`` leaves the solver at
     the default gap while the user believes it was tightened (a results-integrity
@@ -5388,7 +5431,10 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
     }
     # ``model`` is the positional target, not a forwardable option; drop it.
     named.discard("model")
-    return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
+    allowed = named | _GENERIC_PASSTHROUGH_KWARGS
+    if solver is not None:
+        allowed |= _SELECTOR_ONLY_KWARGS.get(solver, frozenset())
+    return frozenset(allowed)
 
 
 def _stamp_layer_timing(fn: _F) -> _F:
