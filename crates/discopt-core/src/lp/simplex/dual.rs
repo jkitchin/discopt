@@ -112,6 +112,55 @@ pub(super) fn stall_patience_default() -> usize {
     })
 }
 
+/// How many product-form updates may accumulate before the basis is refactorized
+/// from scratch, read once from `DISCOPT_LP_REFAC_INTERVAL` (#1008 D3).
+///
+/// Default **48**, the constant both simplex loops hardcoded before this gate
+/// existed — unset, every solve is byte-identical to the previous engine.
+///
+/// The constant is under measurement because it is the *only* thing that sets how
+/// often the dominant cost is paid. Attribution over 19 captured relaxation LPs:
+/// `LuNumeric` is **72.6%** of LP wall while `FtUpdate` is **1.9%**, i.e. in
+/// aggregate the updates this cap truncates are ~38x cheaper than the
+/// factorizations it forces. On `QPLIB_1451_rlt0` every one of the 265 primal
+/// refactorizations was cap-triggered (`RefacCap`; 12764 pivots / 48 = 266) — the
+/// adaptive `refac_work_budget` gate beside it never fired, because the fixed cap
+/// always trips first. A cap tuned for cheap factors is exactly backwards when a
+/// factor costs ~0.6s at a 19x fill ratio.
+///
+/// Read once per process: the interval changes the pivot *path* (a refactorization
+/// reseeds `x_B` exactly), so flipping it mid-solve would make a measurement
+/// incomparable with itself.
+pub(super) fn refac_interval_default() -> usize {
+    static INTERVAL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_REFAC_INTERVAL").unwrap_or_default();
+        parse_refac_interval(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`refac_interval_default`]. Unrecognized input is
+/// refused rather than defaulted, for the reason on [`parse_stall_patience`]: an
+/// A/B arm whose value silently reads as the default makes the harness measure one
+/// arm twice. Zero is refused too — it would refactorize on every pivot, which is
+/// not a cap anyone means to ask for.
+fn parse_refac_interval(raw: &str) -> Result<usize, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(48);
+    }
+    match t.parse::<usize>() {
+        Ok(0) => Err("DISCOPT_LP_REFAC_INTERVAL=0 would refactorize on every \
+                      pivot; use a positive interval (the default is 48)."
+            .to_string()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!(
+            "DISCOPT_LP_REFAC_INTERVAL={t:?} is not a positive integer. \
+             Use a positive update count, or leave it unset for the default 48."
+        )),
+    }
+}
+
 /// Whether the near-zero-pivot recovery is enabled for callers that did **not**
 /// supply a deadline, read once from `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY` (#1008
 /// R1). Default **off**: re-selecting after a refactorize can land on a different
@@ -665,6 +714,7 @@ impl<'a> PreparedDual<'a> {
         let mut since_refresh = 0usize;
 
         let mut updates = 0usize;
+        let refac_interval = refac_interval_default();
         // Dual Devex reference weights γ_i ≥ 1, one per basic slot. The leaving
         // variable maximizes (bound violation)²/γ_i — a cheap steepest-edge
         // approximation that cuts dual iterations versus plain largest-violation
@@ -1101,7 +1151,15 @@ impl<'a> PreparedDual<'a> {
             stat[q] = BASIC;
             let need_refac = lu.update(r, &raw_q).is_err();
             updates += 1;
-            if need_refac || updates >= 48 {
+            if need_refac || updates >= refac_interval {
+                // #1008 D3: attribute the trigger. Priority FT-fail > cap, matching
+                // the primal loop's convention so the two are comparable.
+                crate::profile::incr(if need_refac {
+                    crate::profile::Ctr::DualRefacFtFail
+                } else {
+                    crate::profile::Ctr::DualRefacCap
+                });
+                crate::profile::incr(crate::profile::Ctr::DualRefactorizations);
                 let cols: Vec<Vec<(usize, f64)>> = basis
                     .iter()
                     .map(|&j| {
@@ -1546,6 +1604,32 @@ mod tests {
         }
 
         assert_eq!(checked, 21, "probe did not run every case it claims to");
+    }
+
+    /// `DISCOPT_LP_REFAC_INTERVAL` (#1008 D3). Unset must be exactly the constant
+    /// both loops hardcoded before the gate existed, so an unset environment is
+    /// byte-identical to the previous engine; anything unparseable must be refused
+    /// rather than silently read as that default, which would make an A/B harness
+    /// measure the baseline twice and report "no difference".
+    #[test]
+    fn refac_interval_parses_or_refuses() {
+        let mut checked = 0;
+        assert_eq!(parse_refac_interval(""), Ok(48), "unset must be the old 48");
+        assert_eq!(parse_refac_interval("  "), Ok(48));
+        checked += 2;
+        for (raw, want) in [("48", 48usize), ("100", 100), (" 500 ", 500), ("1", 1)] {
+            assert_eq!(parse_refac_interval(raw), Ok(want));
+            checked += 1;
+        }
+        // 0 would refactorize on every pivot — not a cap anyone means to ask for.
+        for bad in ["0", "-1", "1.5", "on", "true", "48x", "None"] {
+            assert!(
+                parse_refac_interval(bad).is_err(),
+                "{bad:?} must be refused loudly, not silently defaulted"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 13, "probe did not run every case it claims to");
     }
 
     #[test]

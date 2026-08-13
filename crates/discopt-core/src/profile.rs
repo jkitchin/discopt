@@ -166,7 +166,7 @@ counters!(
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced
-    // refactor); RefacCap = the hard 48-update cap; RefacWorkGate = the adaptive
+    // refactor); RefacCap = the fixed refactorization interval (DISCOPT_LP_REFAC_INTERVAL); RefacWorkGate = the adaptive
     // work gate (accumulated update work exceeded factor nnz × mult).
     RefacFtFail,
     RefacCap,
@@ -336,6 +336,15 @@ counters!(
     LuSparseFactorizations,
     LuBasisNnz,
     LuFactorNnz,
+    // #1008 D3: the DUAL loop's refactorizations. Previously invisible — the
+    // `Refactorizations`/`Refac*` counters above are incremented only by the
+    // primal loop, so on an LP the dual solved outright the profile showed 100+
+    // `LuSparseFactorizations` against zero refactorization events and the cost
+    // could not be attributed to a trigger. `DualRefacCap` is the fixed-interval
+    // cap (`DISCOPT_LP_REFAC_INTERVAL`), `DualRefacFtFail` a failed FT update.
+    DualRefactorizations,
+    DualRefacCap,
+    DualRefacFtFail,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,

@@ -10,6 +10,31 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **LP refactorization attribution, and the measurement it settled** (`perf(lp)`,
+  #1008). Three counters — `DualRefactorizations`, `DualRefacCap`,
+  `DualRefacFtFail` — plus `DISCOPT_LP_REFAC_INTERVAL`, which exposes the update
+  cap both simplex loops previously hardcoded as a literal `48`. Unset is **48**,
+  so every solve is byte-identical to the previous engine; an unparseable value is
+  refused loudly rather than read as the default (an A/B arm that silently reads
+  as the baseline makes a harness measure it twice).
+
+  The dual loop's refactorizations were previously invisible: the existing
+  `Refactorizations`/`Refac*` counters are incremented only by the primal, so an
+  LP the dual solved outright reported 100+ `LuSparseFactorizations` against zero
+  refactorization events.
+
+  What they measured, over captured relaxation LPs: **`LuNumeric` is 72.6% of LP
+  wall and pricing is 1.5%** (`PriceSweep` alone 0.1%), so #1008's cost is the LU
+  and not the PRICE loop. And raising the interval — the fix that attribution most
+  obviously suggests — is a **regression**: 48 → 100+ gives +19% factorizations
+  and **+312% factor nonzeros** (fill 5.32x → 13.7x), because above ~100 the cap
+  stops firing and the product-form update runs to its own stability limit
+  instead, landing the search on denser bases. The 48-update cap is load-bearing.
+  No default moved. Details and the falsification record in
+  `docs/dev/performance-plan.md` §18f.
+
 ### Fixed
 
 - **The primal simplex could return a false `Unbounded` on a bounded LP**
