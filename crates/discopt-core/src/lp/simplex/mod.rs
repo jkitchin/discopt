@@ -147,9 +147,17 @@ pub struct SimplexOptions {
     ///
     /// The action on trip is the one every other difficulty in the dual loop
     /// already takes — return to the caller's cold two-phase primal, which
-    /// self-verifies its own verdict — so it cannot make a solve wrong, only
-    /// slower or faster. Default from `DISCOPT_LP_DUAL_STALL_BAIL`; see
-    /// `dual::STALL_PATIENCE` for how the default was derived.
+    /// self-verifies its own verdict.
+    ///
+    /// That was originally documented as "cannot make a solve wrong, only slower
+    /// or faster". **That is withdrawn (#1008).** It assumes the cold solve
+    /// finishes, which the #1013 panel's three bailing cells all happened to do.
+    /// On an LP where it does not, the bail trades a certified optimum for no
+    /// bound — and on the captured QPLIB_2170 relaxation the cold path does not
+    /// merely refuse, it returns `Unbounded` against a true optimum of 0. The flag
+    /// is therefore **default-OFF**; `DISCOPT_LP_DUAL_STALL_BAIL=1` opts in. See
+    /// `dual::STALL_PATIENCE` for how the patience was derived and
+    /// `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails` for the case.
     pub dual_stall_patience: usize,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.

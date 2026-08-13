@@ -78,9 +78,22 @@ const DEGEN_ARM_RUN: usize = 32;
 const STALL_PATIENCE: usize = 2048;
 
 /// Default for [`SimplexOptions::dual_stall_patience`], from
-/// `DISCOPT_LP_DUAL_STALL_BAIL`: unset or `1`/`true`/`on` → [`STALL_PATIENCE`],
-/// `0`/`false`/`off` → disabled (the pre-#1013 loop), any integer ≥ 2 → that
-/// patience.
+/// `DISCOPT_LP_DUAL_STALL_BAIL`: unset → **disabled** (the pre-#1013 loop),
+/// `1`/`true`/`on` → [`STALL_PATIENCE`], `0`/`false`/`off` → disabled, any
+/// integer ≥ 2 → that patience.
+///
+/// **Default-OFF since #1008.** #1013 graduated this flag default-ON on a panel
+/// whose stalling cells all had a cold fallback that succeeded, so the bail read
+/// as bound-neutral: it only changed *which* engine finished the solve. That is a
+/// property of those cells, not of the bail. On an LP whose cold fallback fails,
+/// abandoning the warm solve loses the bound outright — measured on the captured
+/// QPLIB_2170 relaxation, where the warm loop reaches the HiGHS optimum after
+/// ~22.8k Bland-driven degenerate pivots and the bail's handoff instead returns
+/// `Unbounded`. The detector cannot tell "stalled" from "converging slowly", and
+/// §1 does not trade a certificate for wall-clock. See
+/// `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails`; the opt-in path
+/// and the measured escape it provides are kept intact for a future panel that
+/// gates on bound retention as well as speed.
 ///
 /// `1` is deliberately **not** read as "a patience of one pivot": every other
 /// flag in this engine is an on/off switch, so `=1` reads as "on" to a caller
@@ -102,26 +115,29 @@ pub(super) fn stall_patience_default() -> usize {
 /// The parse table behind [`stall_patience_default`], split out so the accepted
 /// and rejected spellings are testable without a process-global `OnceLock`.
 ///
-/// An unrecognized value is an **error**, not a silent default. Every other flag
-/// in this engine is default-OFF, where the house pattern (anything unrecognized
-/// reads as on) is harmless: a typo turns the feature on, which shows up in the
-/// measurement. This flag is default-**ON**, which inverts the failure: a typo in
-/// the *off* arm leaves the feature on and the A/B harness reports two identical
-/// arms as a clean "no effect". Python's `str(False)` == `"False"` hits exactly
-/// this — it is neither `"false"` nor a parseable integer. Refusing loudly is
-/// CLAUDE.md §3; the alternative silently corrupts a graduation panel.
+/// An unrecognized value is an **error**, not a silent default. The house pattern
+/// elsewhere in this engine (anything unrecognized reads as on) is harmless only
+/// where a typo turns a feature *on* and shows up in the measurement. Here it once
+/// cut the other way: while this flag was default-ON, a typo in an A/B harness's
+/// *off* arm left the bail on and reported two identical arms as a clean "no
+/// effect". Python's `str(False)` == `"False"` hits exactly this — it is neither
+/// `"false"` nor a parseable integer. The flag is default-OFF again as of #1008,
+/// but the loud refusal stays: it is CLAUDE.md §3, and it is what keeps the next
+/// graduation panel from measuring one arm twice.
 fn parse_stall_patience(raw: &str) -> Result<usize, String> {
     match raw.trim() {
-        "" | "1" | "true" | "True" | "on" | "ON" => Ok(STALL_PATIENCE),
-        "0" | "false" | "False" | "off" | "OFF" => Ok(0),
+        // Unset joins the *off* arm: the bail is opt-in until a panel gates on
+        // bound retention, not only on speed.
+        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(0),
+        "1" | "true" | "True" | "on" | "ON" => Ok(STALL_PATIENCE),
         other => match other.parse::<usize>() {
             Ok(n) if n >= 2 => Ok(n),
             _ => Err(format!(
                 "DISCOPT_LP_DUAL_STALL_BAIL={other:?} is not a recognized value. \
-                 Use 1/true/on (default, patience {STALL_PATIENCE}), 0/false/off \
-                 (disable), or an integer >= 2 (explicit patience). A patience of 1 \
-                 is rejected because it would bail on the first degenerate pivot; \
-                 =1 means \"on\"."
+                 Use 1/true/on (patience {STALL_PATIENCE}), 0/false/off (the \
+                 default, disabled), or an integer >= 2 (explicit patience). A \
+                 patience of 1 is rejected because it would bail on the first \
+                 degenerate pivot; =1 means \"on\"."
             )),
         },
     }
@@ -1453,19 +1469,23 @@ mod tests {
     fn stall_patience_off_spellings_disable_and_junk_is_refused() {
         let mut checked = 0usize;
 
-        for on in ["", "1", "true", "True", "on", "ON"] {
+        for on in ["1", "true", "True", "on", "ON"] {
             assert_eq!(
                 parse_stall_patience(on),
                 Ok(STALL_PATIENCE),
-                "{on:?} should select the default patience"
+                "{on:?} should opt in to the standard patience"
             );
             checked += 1;
         }
-        for off in ["0", "false", "False", "off", "OFF", "  false  "] {
+        // #1008: unset belongs with the *off* spellings. It sat with the on arm
+        // while the bail was default-ON; that default cost a bound on an LP whose
+        // cold fallback fails, so the flag is opt-in again. Pinned here because a
+        // default is exactly the kind of thing that flips back by accident.
+        for off in ["", "0", "false", "False", "off", "OFF", "  false  "] {
             assert_eq!(
                 parse_stall_patience(off),
                 Ok(0),
-                "{off:?} must DISABLE the bail, not fall through to the default"
+                "{off:?} must DISABLE the bail, not fall through to a patience"
             );
             checked += 1;
         }
@@ -2170,6 +2190,86 @@ mod tests {
             "bailed obj {} must equal the warm-converged obj {} (bound-neutral)",
             bailed.obj,
             ground.obj
+        );
+    }
+
+    // #1008: the bound-neutrality the test above asserts is a property of THAT
+    // fixture, not of the bail. It holds on `tspn12` because the cold solve the
+    // bail hands off to happens to succeed. When the cold solve does *not* succeed,
+    // the bail does not change which engine finishes the solve — it changes a
+    // certified optimum into no bound at all, which is the one outcome a
+    // performance guard may never produce (CLAUDE.md §1).
+    //
+    // The fixture is the captured QPLIB_2170 root relaxation (1755x3193), selected
+    // by measured outcome — its cold fallback fails — and not by name (§2). HiGHS
+    // solves it to optimal 0 in 81 pivots, so the true status is known from outside
+    // this engine. The warm loop reaches that same optimum after ~22.8k degenerate
+    // pivots driven by Bland's rule: it is stalling by the detector's measure and
+    // converging all the same, which is precisely the case the 2048-pivot patience
+    // cannot distinguish.
+    //
+    // `bank_deadline_duals` is on in both arms to isolate the bail. That flag also
+    // gates the unstable-pivot recovery this LP needs (the #1008 R1 coupling); with
+    // it off, both arms fail and the bail's effect is invisible.
+    #[test]
+    fn dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let json = include_str!("testdata/qplib2170_cold_fail_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        // Arm 1 is the guarantee: the SHIPPED options must retain the bound. It
+        // reads `opts()` rather than setting the patience by hand, so the default
+        // itself is what is under test — this arm returned `Unbounded` while the
+        // bail was default-ON.
+        let mut shipped = opts();
+        shipped.bank_deadline_duals = true;
+        let ground = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &shipped);
+        let bails_default = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
+        assert_eq!(
+            ground.status,
+            LpStatus::Optimal,
+            "shipped defaults must solve this LP; HiGHS certifies optimal 0"
+        );
+        assert!(
+            ground.obj.abs() <= 1e-6,
+            "obj {} must match the HiGHS optimum 0",
+            ground.obj
+        );
+        assert!(
+            ground.iters > 0,
+            "the warm loop is what solved it, not a fallback"
+        );
+        assert_eq!(bails_default, 0, "the shipped default must not bail");
+
+        // Arm 2 proves the fixture actually reaches the mechanism (§6) — without it
+        // arm 1 could pass on an LP that never stalls, and would then be guarding
+        // nothing. Only the firing is asserted: what the handoff *returns* here
+        // (`Unbounded`, against a true optimum of 0) is the defect that motivates
+        // the default, and pinning it would cement a bug rather than a guarantee.
+        let mut forced = opts();
+        forced.dual_stall_patience = STALL_PATIENCE;
+        forced.bank_deadline_duals = true;
+        let bailed = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &forced);
+        let bails = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
+        crate::profile::set_enabled(false);
+
+        assert_eq!(
+            bails, 1,
+            "the forced patience must trip the bail exactly once"
+        );
+        assert_ne!(
+            bailed.iters, ground.iters,
+            "the bailed arm must take a different path than the converging one, \
+             otherwise this fixture is not exercising the bail at all"
         );
     }
 
