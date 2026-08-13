@@ -1,6 +1,6 @@
 # #1013 — the dual pivot path's marginal stability, measured on the in-repo corpus
 
-Companion to `docs/dev/performance-plan.md` §17. Everything here is reproducible
+Companion to `docs/dev/performance-plan.md` §18. Everything here is reproducible
 from this directory; the harnesses are the ones that produced the numbers.
 
 ## Environment caveat, stated first

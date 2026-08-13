@@ -2435,7 +2435,85 @@ warm-stall guard cannot fire on a cold dual solve. The dual-Harris pass clears i
 (46.2 s `iter_limit` → 4.4 s `optimal`, 10.5x) even though it is corpus-neutral,
 which is why the mechanism is recorded there rather than discarded.
 
-## 17. #1013 dual degeneracy stall: both escapes are unreachable, and the fix is the cold hand-off (2026-08-13)
+## 17. #1004 GDP primal: the "~80% false-infeasible" rate is a property of the start *sampler*, not of the constructor (falsified 2026-08-13)
+
+**Claim under test.** Issue #1004: `one_hot_config_subnlp` "rejects ~80% of
+genuinely feasible configurations" because it solves **one** start per candidate
+configuration. Evidence given: with the integers pinned to a known-feasible
+configuration on `syngas`, 12 of 67 starts (B1) and 2 of 6 (#993 C2) produced a
+feasible point.
+
+**Entry attribution, before any clock.** The constructor does not draw its start
+from a family. At a fixed configuration its seed is `clip(0, lb, ub)` on every
+continuous slot plus the candidate configuration on every one-hot and residual
+binary — a function of the model and the candidate alone (`x_relax` survives only
+in *general* integer slots outside every group, which on `gdplib_small` means
+`modprodnet` and nothing else). A detection rate obtained by sampling starts
+measures the sampler. Both cited probes sampled.
+
+**E1 — detection panel, all 12 `gdplib_small` models, plus a deep second pass on
+the three whose first pool held no feasible configuration: 12,180 executed
+feasibility tests.** Three arms per configuration: **Z** the constructor's own start, **X**
+the relaxation point's continuous slots, **R** 8 stratified random starts.
+Feasibility oracle = "any arm succeeded", so it is symmetric across arms. The
+configuration pool deliberately excludes dive-derived configurations from the
+verdict table: `one_hot_config_dive` accepts by trying the zero start *first*, so
+a dive-sourced witness set is enriched with exactly what arm Z can already solve —
+a bias that sank this probe's first version and forced the rebuild.
+
+| arm | detection |
+|---|---|
+| Z — the constructor's start | **192/193 (99%)** |
+| X — relaxation-point start | 186/193 (96%) |
+| R — stratified random start | 981/1544 (64%) |
+| **Z, restricted to configurations proven feasible *without* it** | **188/189 (99%)** |
+
+The deep pass — dive disabled, so every pooled configuration comes from a channel
+that never consults the zero start — adds 9 feasible configurations out of 915
+sampled (2 in 460 on `small_batch`, 1 in 447 on `cstr`: the rare-event regime is
+real) and the constructor's start solves **9 of 9**. Combined: **201/202**.
+
+`batch_processing` is the mechanism in one row: **64/64** for the constructor's
+start on the same 64 configurations where **0/512** random starts succeed. A
+sampling probe on that model would report 0% and conclude the constructor rejects
+everything.
+
+**E2 — the escape hatch (restart cost), 420 timed solves across two arms.** The
+issue's own budget argument (`(1−(1−p)^k)/(k·p) ≤ 1`) flips sign only if starts
+2..k on an already-built sub-problem are materially cheaper than start 1. The
+same-start control — vary nothing but repetition — measures **0.967 / 0.954 /
+1.026 / 1.010 / 1.005** on small_batch / cstr / spectralog / batch_processing /
+gdp_col. A restart costs what the first solve costs; `subnlp` shares its evaluator
+across every plan already and retains nothing per configuration.
+
+The different-starts arm carries the trap worth generalizing: `batch_processing`
+reads **0.018** there (271 ms → 4.9 ms), which looks exactly like the escape
+hatch. Those are the 0/512 random starts *failing immediately*. **A ratio below 1
+in a multistart timing arm tracks how fast a start fails, not how cheap a restart
+is** — the two are indistinguishable without a same-start control, and the control
+for that model is 1.010.
+
+**Break-even, at the measured `p = 0.995`.** With restart cost ratio `ρ`, `k`
+starts per candidate cover `B/(1+(k−1)ρ)` candidates and yield
+`(1−(1−p)^k)/[(1+(k−1)ρ)·p]` relative to single-start: break-even needs `ρ ≤
+0.52%` at `k = 2` (0.26% at `k = 3`, 0.13% at `k = 5`). At the measured `ρ ≈ 1.0`,
+`k = 2` yields **0.50×** — it halves the answer rate. Even a restart costing 10%
+of a first solve loses (0.91×). **Binding conclusion: no multistart-per-candidate
+ships; the single-start design is correct and the margin is not close.**
+
+**Retraction (§11).** #1004's headline is withdrawn — the B1/C2 measurements stand
+as measurements, the inference to the constructor does not. Nothing here says
+`zero_start` is *optimal*: `water_network` costs it 1 of 7 configurations and
+`gdp_col`'s dive pool 2 of 5 (where the relaxation-point start gets 5/5). The
+union of two starts would detect more, at exactly the coverage cost the arithmetic
+above rejects.
+
+Full record and artifacts: `docs/dev/data/issue1004-gdp-config-start-detection.md`.
+Pinned by `python/tests/test_issue1004_gdp_config_start.py` (start is
+relaxation-point independent; each candidate tested exactly once; the wave's
+`_WAVE_SOLVE_CAP` stays a *candidate* cap) — all three mutation-checked.
+
+## 18. #1013 dual degeneracy stall: both escapes are unreachable, and the fix is the cold hand-off (2026-08-13)
 
 **Claim under test.** Issue #1013: a rounding-level perturbation of the dual
 pivot path multiplies the iteration count several-fold and turns `optimal` into
@@ -2535,3 +2613,4 @@ engine's own counter says 663. A whole conjunctive test was designed around that
 number, shipped into a panel, and measured as useless. The rule that would have
 caught it earlier: read the quantity **the code tests**, out of the code, not a
 reimplementation of it.
+

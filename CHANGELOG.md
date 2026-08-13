@@ -45,7 +45,7 @@ The release procedure that produces these entries is documented in
   Measurement, falsified alternatives (including #1008's dual Harris pass
   re-tested scoped to the stall, and Bland at a reachable threshold — both
   regress a status elsewhere) and the reproduction harnesses:
-  `docs/dev/performance-plan.md` §17, `scratchpad/i1013/FINDINGS.md`.
+  `docs/dev/performance-plan.md` §18, `scratchpad/i1013/FINDINGS.md`.
 
   The `QPLIB_3814_rlt1` certificate itself is a **separate** defect — its
   Neumaier–Shcherbina margin is built from result magnitudes rather than

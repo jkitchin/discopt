@@ -119,7 +119,7 @@ within each rep, 20 s per-LP limit; reproduced on the final build.
 beyond it, no certification or status regression), **0 issues**. The bail does not
 fire in these trees (longest degenerate runs 47–87 pivots).
 
-**Falsified and NOT shipped** (measurements in `docs/dev/performance-plan.md` §17
+**Falsified and NOT shipped** (measurements in `docs/dev/performance-plan.md` §18
 and `scratchpad/i1013/FINDINGS.md`):
 
 | lever | outcome |
