@@ -2645,3 +2645,50 @@ number, shipped into a panel, and measured as useless. The rule that would have
 caught it earlier: read the quantity **the code tests**, out of the code, not a
 reimplementation of it.
 
+### 18b. The bail is default-OFF: "never the value" was false (#1008, 2026-08-13)
+
+The soundness argument for graduating this flag default-ON, in §18 and in the
+shipped doc comments, was: the bail returns to the cold two-phase primal, which
+self-verifies its own verdict, **so it can change only *which* engine finishes a
+solve, never the value.** That argument silently assumes the cold solve finishes.
+All three bailing cells of the 100-LP panel had a cold solve that did. **Measured
+on QPLIB root relaxations outside that panel, two do not** — and the guarantee
+fails in the worst available direction (CLAUDE.md §11; this withdraws the claim
+in §18, in `SimplexOptions::dual_stall_patience`, and in the CHANGELOG).
+
+Env A/B on the shipped binary, no rebuild, `time_limit=None`, oracle = HiGHS:
+
+| LP | `DUAL_STALL_BAIL=0` | default (`=1`) | bails | cold verdict |
+|---|---|---|---:|---|
+| `QPLIB_2738` | **`optimal` −5.0587686**, 9.6 s | **no solution**, 12.5 s | 1 | `Numerical` |
+| `QPLIB_2170` (`time_limit=40`) | **`optimal` 0**, 1.7 s | **no solution**, 0.2 s | 1 | **`Unbounded`** |
+| `QPLIB_3225` | no solution | no solution | 0 | `Numerical` — unrelated, needs feral #160 |
+
+The `QPLIB_2170` row is the sharper one: the cold path does not refuse, it
+**claims `Unbounded`** on an LP HiGHS certifies as `optimal 0` in 81 pivots and
+that our own warm loop solves to 0. A bail whose fallback can produce a false
+verdict is not a neutral change of engine.
+
+**The detector cannot separate "stalled" from "converging slowly."** QPLIB_2170
+reaches its optimum after **~22 800** consecutive degenerate pivots with 16 435
+Bland activations — an order of magnitude past the 2048-pivot patience, and past
+the "every converging warm loop peaks at 902" population that derived it. That
+population was measured on the same 100 LPs that contained no cold-failing cell;
+it is a property of that sample, not of the loop.
+
+Against the mechanism's own measured worth — inert on 97 of 100, 1.34x and 1.13x
+on two cells, one neutral — §1 does not permit trading a certificate for that.
+The flag is **default-OFF**; `DISCOPT_LP_DUAL_STALL_BAIL=1` opts in and the
+mechanism is untouched, so a future panel that gates on *bound retention* as well
+as wall-clock can re-graduate it. #1013's own PR body had already withdrawn
+"broadly net-positive" and named this as the alternative.
+
+Pinned by `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails` against the
+vendored `qplib2170_cold_fail_lp.json` (1755×3193, captured by measured outcome
+rather than by name, §2). It returns `Unbounded` on the old default and
+`optimal 0` on this one, in ~2 s, with no Python and no corpus dependency.
+
+**Still open, and not fixed here:** the false `Unbounded` itself, and the
+`bank_deadline_duals` coupling that makes QPLIB_2170 solvable only when the caller
+passes a `time_limit` (#1008 R1) — both tracked in #1008.
+

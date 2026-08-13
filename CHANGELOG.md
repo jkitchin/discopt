@@ -12,6 +12,33 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The #1013 degeneracy-stall bail could turn a certified optimum into no bound,
+  and shipped default-ON** (`fix(lp)`, #1008). `DISCOPT_LP_DUAL_STALL_BAIL` is now
+  **default-OFF**; `=1`/`true`/`on` opts in, and the mechanism itself is unchanged.
+
+  The entry below justified the default-ON graduation with "it can change only
+  *which* engine finishes a solve, never the value". That holds only if the cold
+  two-phase primal the bail hands off to actually finishes, which all three
+  bailing cells of the 100-LP panel happened to do. On an LP where it does not,
+  the bail abandons a warm loop that was converging and the caller gets nothing.
+  Measured on two QPLIB root relaxations outside that panel, at
+  `time_limit=None`: `QPLIB_2738` goes from `optimal −5.0587686` (9.6 s) to no
+  solution, and `QPLIB_2170` from `optimal 0` (1.7 s, with a deadline) to no
+  solution — in the latter case the cold path does not refuse but returns
+  `Unbounded`, against an optimum HiGHS certifies as 0 in 81 pivots. The
+  detector cannot separate "stalled" from "converging slowly": QPLIB_2170 reaches
+  its optimum after ~22 800 degenerate pivots driven by Bland's rule, well past
+  the 2048-pivot patience.
+
+  Regressed against the panel's own measured benefit — inert on 97 of 100 LPs,
+  1.34x and 1.13x on two cells — this is not a trade §1 permits. #1013's PR body
+  had already withdrawn the "broadly net-positive" claim and named flipping the
+  default to OFF as the alternative; this does that. Vendored fixture
+  `qplib2170_cold_fail_lp.json` (1755×3193) and the regression test
+  `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails` pin it: the test
+  returns `Unbounded` on the previous default and `optimal 0` on this one.
+  `cargo test -p discopt-core` → 609 passed.
+
 - **A stalled warm dual re-solve had no escape, and the two that were supposed to
   cover it were unreachable** (`fix(lp)`, #1013). The warm dual simplex escalates
   to Bland's rule after `2·(n+1)` consecutive degenerate pivots, and the F2 stall
@@ -25,10 +52,12 @@ The release procedure that produces these entries is documented in
   returning `infeasible` on an LP that SciPy/HiGHS, every perturbed arm of our own
   engine, and an elastic `min t` feasibility LP all agree is feasible.
 
-  `SimplexOptions::dual_stall_patience` (default 2048) now hands such a solve to
-  the caller's cold two-phase primal — the action every other difficulty in the
-  dual loop already takes, and one that self-verifies its own verdict, so it can
-  change only *which* engine finishes a solve, never the value. The threshold
+  `SimplexOptions::dual_stall_patience` (default 2048 as shipped here; **flipped
+  to OFF by #1008 — see the entry above**) now hands such a solve to the caller's
+  cold two-phase primal — the action every other difficulty in the dual loop
+  already takes, and one that self-verifies its own verdict, so it can change only
+  *which* engine finishes a solve, never the value. (**That last clause is
+  withdrawn**: it assumes the cold solve finishes.) The threshold
   separates two non-overlapping measured populations: every warm loop that
   converges peaks at a 902-pivot degenerate run, every one that does not runs
   ≥ 1274. `DISCOPT_LP_DUAL_STALL_BAIL=<n≥2>` overrides it; `=0` restores the
