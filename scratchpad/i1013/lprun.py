@@ -84,6 +84,20 @@ if missing:
         f"`DualDegenerateStallBails` is unique to #1013, so this build predates the "
         f"change under test -- rebuild (maturin develop) before running the panel."
     )
+# ...and PRESENT is not FIRED (CLAUDE.md §6). The counters are gated on
+# DISCOPT_PROFILE: without it every one of them reads 0, which is a perfectly
+# well-formed record that says "no degeneracy, no bail, no warm solve" about a
+# solve that just did 1279 warm dual pivots with 553 degenerate ones. A driver
+# that forgot the variable produced exactly that -- 32 clean cells, every counter
+# 0 -- and the presence check above passed the whole way, because the symbols
+# existed and only their values were meaningless. `DualWarmSolves` is the proof:
+# this script only ever calls the warm entry point, so it CANNOT legitimately be 0.
+if snap["DualWarmSolves"] < 1:
+    raise SystemExit(
+        "counters are present but did not fire (DualWarmSolves=0 after a warm "
+        "solve): set DISCOPT_PROFILE=1. Without it every counter reads 0 and the "
+        "record looks clean while measuring nothing."
+    )
 rec["_rust"] = _rust.__file__
 for k in COUNTERS:
     rec[k] = snap[k]
