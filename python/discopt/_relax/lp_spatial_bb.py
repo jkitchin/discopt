@@ -612,6 +612,10 @@ def solve_lp_spatial_bb(
     # on the incremental path (needs the explicit row system).
     cut_enabled = _inc.ok
     _MAX_INHERITED_CUTS = 400
+    # No node LP is handed a zero/negative duration (the backend rejects one), so a
+    # node that starts with the engine's budget already spent still gets a floor and
+    # exits on it rather than erroring.
+    _NODE_LP_FLOOR_S = 0.05
 
     def node_relax(lb, ub, basis, inherited, rounds):
         """Solve the node LP with inherited cuts, then run ``rounds`` of cut
@@ -645,7 +649,18 @@ def solve_lp_spatial_bb(
             return b_, x_, bas, (), verdict, info_
         cuts = list(inherited)
         A, b, bounds = _inc.assemble(lb, ub, cuts)
-        _st, b_, x_, bas, _farkas = _inc.solve_assembled_full(A, b, bounds, in_basis=basis)
+        # #1009: budget this LP against the engine's own deadline. Without it a
+        # single warm solve on a large lift runs uninterruptibly past ``time_limit``
+        # (the top-of-loop poll at line ~958 only fires BETWEEN nodes). An expired
+        # budget exits as ``iter_limit`` -> ``b_ is None`` -> ``"unresolved"``, which
+        # the caller folds into ``unresolved_lb`` — never a fathom.
+        _st, b_, x_, bas, _farkas = _inc.solve_assembled_full(
+            A,
+            b,
+            bounds,
+            in_basis=basis,
+            time_limit=max(_own_deadline - time.perf_counter(), _NODE_LP_FLOOR_S),
+        )
         if b_ is None:
             _verdict = "fathom" if (_st == "infeasible" and _farkas) else "unresolved"
             return None, None, None, tuple(cuts), _verdict, info
