@@ -315,9 +315,14 @@ pub fn solve_spatial_tree_py<'py>(
         bound_time_extension,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
-    // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default; note
-    // that `deadline` deliberately stays `None` here — see the tree loop, which
-    // enforces `cfg.deadline` between nodes.
+    // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
+    //
+    // `deadline` stays `None` here on purpose, but no longer because node LPs are
+    // uninterruptible (#1009 — they were, and `time_limit` was silently advisory
+    // on this path): the tree owns the budget and now stamps its LIVE deadline,
+    // post-extension, onto the options each node LP runs under. Setting
+    // `cfg.deadline` here as well would freeze the pre-extension value into every
+    // node and defeat the #917/#933 extensions. See `spatial_tree::node_lp_opts`.
     let opts = SimplexOptions {
         cold_dual_start,
         ..SimplexOptions::default()
