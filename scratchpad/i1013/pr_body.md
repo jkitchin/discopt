@@ -20,12 +20,16 @@ solve. It also ships the instrumentation the issue asks for
 (`DualDegenerateRunMax` via a new `profile::record_max`, `DualDegenerateRunArms`,
 `DualDegenerateStallBails`, and a per-pivot `DISCOPT_LP_DUAL_TRACE` stream).
 
-**Environment caveat, stated up front.** `QPLIB_0911` — the instance the issue is
-written around — is unreachable from the environment this was developed in (no
-`~/Dropbox` corpus, `qplib.zib.de` blocked by the network policy, and
-`scratchpad/i1008/lps/*.npz` was never committed). Its headline cell was **not**
-re-measured and is neither confirmed nor contradicted here. Everything below is
-measured on the vendored corpora. **This is the main reason to test locally.**
+**Environment caveat — superseded, see "What remains on #1013 — corrected".**
+This description originally said `QPLIB_0911` was unreachable and that its
+headline cell could not be measured. The first half was true of the environment
+this was *developed* in (no `~/Dropbox` corpus, `qplib.zib.de` blocked by the
+network policy) but **not** of the machine the cells were later run on, where the
+instance is present. The cells have since been run, and the reason they cannot
+settle the issue turned out to be different — the levers the issue names live on
+the unmerged `perf/1008` branch. That section carries the corrected account and
+the measurement; everything in the panels below is measured on the vendored
+corpora either way.
 
 ### To run it locally
 
