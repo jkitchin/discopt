@@ -241,6 +241,16 @@ counters!(
     UnboundedRejectRowResidual,
     UnboundedRejectObjective,
     UnboundedRejectBox,
+    // #1008 R1: the warm dual's unstable- (near-zero-) pivot exit, split by which
+    // way it went. `Recoveries` counts in-place refactorize+recompute+re-select,
+    // which keeps the monotone dual loop alive; `Bails` counts the hand-off to the
+    // cold primal. The recovery is gated on `bank_deadline_duals`, which
+    // `lp_bindings` sets to `deadline.is_some()` — so a caller passing no
+    // `time_limit` gets the bail on the same LP and the same starting basis. These
+    // two counters are what makes that a measurement rather than a reading of the
+    // control flow.
+    DualUnstablePivotRecoveries,
+    DualUnstablePivotBails,
     // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
     // Python spatial engine's per-node LPs come through, and it can return without
     // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above

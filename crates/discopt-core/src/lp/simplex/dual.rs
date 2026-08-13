@@ -112,6 +112,34 @@ pub(super) fn stall_patience_default() -> usize {
     })
 }
 
+/// Whether the near-zero-pivot recovery is enabled for callers that did **not**
+/// supply a deadline, read once from `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY` (#1008
+/// R1). Default **off**: re-selecting after a refactorize can land on a different
+/// degenerate vertex, so graduating it needs the §5 corpus panel. The deadline
+/// path is not routed through here — it keeps the recovery it already had.
+pub fn unstable_pivot_recovery_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY").unwrap_or_default();
+        parse_unstable_pivot_recovery(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`unstable_pivot_recovery_default`]. Unrecognized input
+/// is refused rather than defaulted, for the reason spelled out on
+/// [`parse_stall_patience`]: a typo in an A/B harness's arm that silently reads as
+/// a valid setting makes the harness measure one arm twice.
+fn parse_unstable_pivot_recovery(raw: &str) -> Result<bool, String> {
+    match raw.trim() {
+        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(false),
+        "1" | "true" | "True" | "on" | "ON" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY={other:?} is not a recognized \
+             value. Use 1/true/on, or 0/false/off (the default)."
+        )),
+    }
+}
+
 /// The parse table behind [`stall_patience_default`], split out so the accepted
 /// and rejected spellings are testable without a process-global `OnceLock`.
 ///
@@ -946,10 +974,12 @@ impl<'a> PreparedDual<'a> {
             }
             let piv = alpha[r];
             if piv.abs() <= tol {
-                // Unstable (near-zero) pivot. On a solve with NO deadline this
-                // hands off to the robust cold fallback, exactly as before. On a
-                // deadline-carrying solve (#928) that hand-off forfeits the dual
-                // loop's anytime floor: the cold primal proves no usable bound
+                // Unstable (near-zero) pivot. Without the recovery this hands off
+                // to the robust cold fallback.
+                //
+                // #928 motivated the recovery from the deadline side: the
+                // hand-off forfeits the dual loop's anytime floor — the cold
+                // primal proves no usable bound
                 // mid-run, so if IT is then cut by the deadline the recovered
                 // floor collapses to the trivial `g(y=0)` box bound (measured on
                 // the hda node LP: floor -141697 vs optimum -64473 at every
@@ -957,12 +987,22 @@ impl<'a> PreparedDual<'a> {
                 // pivot is usually Forrest–Tomlin update drift, and the existing
                 // recovery for drift is refactorize + exact recompute — so do
                 // that in place and re-select, keeping the (monotone-bound) dual
-                // loop alive. Bounded: a few attempts per solve, then the old
+                // loop alive.
+                //
+                // But nothing in that reasoning is about deadlines, and #1008 R1
+                // is what a deadline-shaped gate costs: on QPLIB_2170's root
+                // relaxation the recovery fires once at `time_limit=40` and the
+                // LP solves to `optimal 0`; at `time_limit=None` the bail fires
+                // once instead and the caller gets nothing — same LP, same
+                // starting basis. The gate is now its own option, so a caller can
+                // ask for the recovery without inventing a deadline to get it.
+                //
+                // Bounded: a few attempts per solve, then the old
                 // cold bail; a genuinely singular selection re-trips immediately
                 // and exits through it. Sound: refactorize + exact recompute is
                 // the loop's soundness anchor already, and no pivot is taken on
                 // the near-zero element.
-                if opts.bank_deadline_duals && unstable_recoveries < UNSTABLE_RECOVERY_MAX {
+                if opts.recover_unstable_pivot && unstable_recoveries < UNSTABLE_RECOVERY_MAX {
                     unstable_recoveries += 1;
                     let cols: Vec<Vec<(usize, f64)>> = basis
                         .iter()
@@ -976,9 +1016,11 @@ impl<'a> PreparedDual<'a> {
                         dvec = refresh_rc!();
                         updates = 0;
                         since_refresh = 0;
+                        crate::profile::incr(crate::profile::Ctr::DualUnstablePivotRecoveries);
                         continue;
                     }
                 }
+                crate::profile::incr(crate::profile::Ctr::DualUnstablePivotBails);
                 return None; // unstable (near-zero) pivot → robust cold fallback
             }
             {
@@ -2193,6 +2235,77 @@ mod tests {
         );
     }
 
+    // #1008 R1: the near-zero-pivot recovery must not be reachable only by
+    // supplying a deadline.
+    //
+    // Same captured QPLIB_2170 relaxation and the same starting basis in both
+    // arms; the ONLY difference is `recover_unstable_pivot`. Off, the loop hits one
+    // unstable pivot and hands off to the cold primal, which fails — no bound. On,
+    // it refactorizes in place, re-selects, and reaches `optimal 0`, the value
+    // HiGHS certifies in 81 pivots.
+    //
+    // Before the split this option did not exist and the recovery rode on
+    // `bank_deadline_duals`, which `lp_bindings` sets to `deadline.is_some()`. So
+    // the two arms below were reachable from Python only by passing or omitting
+    // `time_limit` — a wall-clock argument silently deciding whether a bound comes
+    // back. `deadline` is `None` in both arms here, which is the point: the
+    // recovery has nothing to do with deadlines.
+    #[test]
+    fn unstable_pivot_recovery_is_not_gated_on_a_deadline() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let json = include_str!("testdata/qplib2170_cold_fail_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        let mut off = opts();
+        off.bank_deadline_duals = true;
+        off.recover_unstable_pivot = false;
+        assert!(off.deadline.is_none(), "no arm may carry a deadline");
+        let without = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+        let bails = crate::profile::counter(crate::profile::Ctr::DualUnstablePivotBails);
+
+        crate::profile::reset();
+        let mut on = off.clone();
+        on.recover_unstable_pivot = true;
+        let with = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &on);
+        let recoveries = crate::profile::counter(crate::profile::Ctr::DualUnstablePivotRecoveries);
+        crate::profile::set_enabled(false);
+
+        // The mechanism is what separates the arms, proven by counter rather than
+        // inferred from the outcome (§6): the same pivot goes one way or the other.
+        assert_eq!(
+            bails, 1,
+            "the OFF arm must bail on exactly one unstable pivot"
+        );
+        assert_eq!(
+            recoveries, 1,
+            "the ON arm must recover from exactly one unstable pivot"
+        );
+        assert_ne!(
+            without.status,
+            LpStatus::Optimal,
+            "the OFF arm is the defect: it must not already solve this LP"
+        );
+        assert_eq!(
+            with.status,
+            LpStatus::Optimal,
+            "the recovery must retain the bound with no deadline supplied"
+        );
+        assert!(
+            with.obj.abs() <= 1e-6,
+            "obj {} must match the HiGHS optimum 0",
+            with.obj
+        );
+    }
+
     // #1008: the cold primal must not CLAIM `Unbounded` on a bounded LP.
     //
     // Same captured QPLIB_2170 relaxation, entered through the cold path (no warm
@@ -2258,9 +2371,13 @@ mod tests {
     // converging all the same, which is precisely the case the 2048-pivot patience
     // cannot distinguish.
     //
-    // `bank_deadline_duals` is on in both arms to isolate the bail. That flag also
-    // gates the unstable-pivot recovery this LP needs (the #1008 R1 coupling); with
-    // it off, both arms fail and the bail's effect is invisible.
+    // Both arms set `bank_deadline_duals` and `recover_unstable_pivot` so the only
+    // variable is the bail. The second one is what this LP actually needs: it hits
+    // one near-zero pivot, and without the in-place refactorize+recompute recovery
+    // both arms fail and the bail's effect is invisible. Until #1008 R1 split them,
+    // setting `bank_deadline_duals` alone was enough — which is precisely the
+    // coupling R1 removes, and this test failing on that split is the coupling
+    // showing up in a unit test rather than only on a QPLIB relaxation.
     #[test]
     fn dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails() {
         let _guard = crate::profile::test_guard();
@@ -2282,6 +2399,7 @@ mod tests {
         // bail was default-ON.
         let mut shipped = opts();
         shipped.bank_deadline_duals = true;
+        shipped.recover_unstable_pivot = true;
         let ground = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &shipped);
         let bails_default = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
         assert_eq!(
@@ -2308,6 +2426,7 @@ mod tests {
         let mut forced = opts();
         forced.dual_stall_patience = STALL_PATIENCE;
         forced.bank_deadline_duals = true;
+        forced.recover_unstable_pivot = true;
         let bailed = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &forced);
         let bails = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
         crate::profile::set_enabled(false);

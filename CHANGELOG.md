@@ -54,6 +54,39 @@ The release procedure that produces these entries is documented in
   `Unbounded` (obj 351) without the certifier and `Numerical` with it, and
   asserts a rejection counter fired so the fixture is proven to reach the guard.
 
+- **The dual simplex's unstable-pivot recovery was gated on the caller passing a
+  `time_limit`** (`fix(lp)`, #1008). `SimplexOptions::bank_deadline_duals` is set
+  as `deadline.is_some()` and was doing double duty: besides banking the dual
+  loop's anytime floor (#928, its actual job), it also switched on the recovery
+  that re-tries a near-zero pivot instead of abandoning the re-solve. The two have
+  nothing to do with each other, so a caller who passed no `time_limit` silently
+  lost a numerical safeguard.
+
+  Measured on the captured QPLIB_2170 root relaxation, by counter rather than by
+  reading control flow:
+
+  | call | `DualUnstablePivotRecoveries` | `DualUnstablePivotBails` | result |
+  |---|---|---|---|
+  | `time_limit=None` | 0 | **1** | no solution |
+  | `time_limit=40.0` | **1** | 0 | **optimal 0** |
+
+  Exactly one unstable pivot separates a certified optimum from nothing, decided
+  solely by whether the caller bounded the LP in time. The recovery now has its
+  own gate, `SimplexOptions::recover_unstable_pivot`
+  (`DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`), and `bank_deadline_duals` is back to
+  banking duals only.
+
+  **Default-OFF for deadline-free callers, per §5**: the recovery changes which
+  pivot the dual loop takes, so it is bound-changing and stays behind the flag
+  until a corpus differential panel clears both the cert-clean and net-positive
+  bars. The deadline path keeps the recovery unconditionally
+  (`deadline.is_some() || …`), so it is bit-identical to what its own panel already
+  judged. Two counters (`DualUnstablePivotRecoveries` / `DualUnstablePivotBails`)
+  make the mechanism measurable instead of inferred, and
+  `unstable_pivot_recovery_is_not_gated_on_a_deadline` pins the split (bails 1 /
+  not optimal with the flag off, recoveries 1 / optimal 0 with it on, and asserts
+  no deadline is set in either arm).
+
 - **A NaN variable bound reached the simplex and was read two contradictory
   ways** (`fix(lp)`, #1008). The modeling layer spells "no bound" as **NaN**
   (`Model.continuous(ub=None)` stores `array(nan)`); the LP layer spells it as

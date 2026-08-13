@@ -21,8 +21,8 @@ use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
-    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc, LpInstance,
-    LpStatus, SimplexOptions, SparseCols,
+    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc,
+    unstable_pivot_recovery_default, LpInstance, LpStatus, SimplexOptions, SparseCols,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -406,6 +406,7 @@ pub fn solve_lp_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -543,6 +544,7 @@ pub fn solve_lp_warm_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -654,6 +656,14 @@ pub fn solve_lp_warm_csc_py<'py>(
         // driver's own deadline route keeps the default `false`, so the default
         // B&B pivot path is untouched.
         bank_deadline_duals: deadline.is_some(),
+        // #1008 R1: the near-zero-pivot recovery used to ride on the line above,
+        // so a caller who passed no `time_limit` lost it — measured on
+        // QPLIB_2170, that is the difference between `optimal 0` and no bound at
+        // all. It now has its own gate. `deadline.is_some()` keeps the deadline
+        // path bit-identical to what its own graduation panel judged; the env
+        // opt-in extends it to deadline-free callers and is default-OFF until the
+        // §5 panel graduates it.
+        recover_unstable_pivot: deadline.is_some() || unstable_pivot_recovery_default(),
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -789,6 +799,7 @@ pub fn solve_lp_batch_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -1167,6 +1178,7 @@ fn run_milp_hooked<'py>(
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
             bank_deadline_duals: false,
+            recover_unstable_pivot: false,
             // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
             // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
