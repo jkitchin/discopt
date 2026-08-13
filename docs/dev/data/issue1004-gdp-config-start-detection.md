@@ -49,8 +49,8 @@ zero_start[residual binaries] = the plan's residual assignment
 
 so on a big-M GDP the start is a function of **the model and the candidate
 configuration alone**. `x_relax` survives only in *general* integer slots outside
-every one-hot row and outside the 0/1 residual set — none of the eleven measured
-models has one except `modprodnet`.
+every one-hot row and outside the 0/1 residual set — of the twelve measured models
+only `modprodnet` has one (363 of its 365 integers).
 
 A detection rate measured by sampling starts therefore measures the *sampler*, not
 the constructor. That is the whole of the issue's arithmetic error: B1's 12/67 and
