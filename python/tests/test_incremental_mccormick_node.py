@@ -19,6 +19,7 @@ conservative rollout limit (#355), not a soundness boundary. Any uncovered term
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -374,6 +375,118 @@ def test_incremental_solve_bound_matches_cold_builder_with_constant():
     relax._integrality = None
     b_cold = relax.solve().bound
     assert b_inc == pytest.approx(b_cold, abs=1e-6)
+
+
+def _spy_warm_lp(monkeypatch):
+    """Record the ``time_limit`` every incremental-path LP is issued with.
+
+    ``incremental_mccormick.solve_assembled_full`` imports ``solve_lp_warm_std``
+    from ``discopt.solvers.milp_simplex`` *inside* the function body, so patching
+    the module attribute intercepts it. The real solver still runs — this only
+    reads the argument in flight.
+    """
+    from discopt.solvers import milp_simplex
+
+    real = milp_simplex.solve_lp_warm_std
+    seen: list = []
+
+    def _spy(*a, **kw):
+        seen.append(kw.get("time_limit", "ABSENT"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(milp_simplex, "solve_lp_warm_std", _spy)
+    return seen
+
+
+@pytest.mark.smoke
+def test_incremental_fast_path_receives_the_callers_time_limit(monkeypatch):
+    """#1009: ``solve_at_node(time_limit=T)`` must reach the fast path's LP.
+
+    Before the fix ``_try_incremental_node`` was called before the node-wide
+    deadline was even anchored and ``solve_assembled_full`` had no parameter to
+    carry one, so every LP on this path was issued unbounded — one such LP ran
+    416 s against a caller's 20 s budget. The LP-level ``time_limit`` is the only
+    thing that reaches ``SimplexOptions::deadline``.
+    """
+    monkeypatch.delenv("DISCOPT_LP_WARM_DEADLINE", raising=False)
+    m = _int_qcqp()
+    relaxer = MccormickLPRelaxer(m)
+    assert relaxer._inc is not None, "fast path must be active or this proves nothing"
+
+    seen = _spy_warm_lp(monkeypatch)
+    lb, ub = np.array([0.0, 0.0]), np.array([5.0, 5.0])
+    relaxer.solve_at_node(lb, ub, time_limit=7.0)
+
+    assert seen, "probe never fired: no warm LP was issued on the fast path"
+    checked = 0
+    for tl in seen:
+        assert tl != "ABSENT", "solve_lp_warm_std called without a time_limit kwarg"
+        assert tl is not None, "the caller's budget was dropped before the LP"
+        # A slice of the caller's duration, never more than it, never <= 0 (the
+        # backend rejects a nonpositive budget — hence the floor).
+        assert 0.0 < tl <= 7.0
+        checked += 1
+    assert checked == len(seen) and checked > 0, "probe fired on every LP"
+
+
+@pytest.mark.smoke
+def test_no_time_limit_leaves_the_fast_path_unbounded_as_before(monkeypatch):
+    """Bound-neutrality: with no caller budget the LP is issued exactly as it was
+    — unbounded. This is the arm that must not move."""
+    monkeypatch.delenv("DISCOPT_LP_WARM_DEADLINE", raising=False)
+    relaxer = MccormickLPRelaxer(_int_qcqp())
+    assert relaxer._inc is not None
+
+    seen = _spy_warm_lp(monkeypatch)
+    relaxer.solve_at_node(np.array([0.0, 0.0]), np.array([5.0, 5.0]))
+
+    assert seen, "probe never fired"
+    for tl in seen:
+        assert tl is None, f"an unbudgeted node LP acquired a deadline: {tl}"
+
+
+@pytest.mark.smoke
+def test_warm_deadline_opt_out_restores_the_unbounded_fast_path(monkeypatch):
+    """``DISCOPT_LP_WARM_DEADLINE=0`` is the documented escape hatch for exactly
+    this guarantee; it must cover this path too, or the opt-out is a lie."""
+    monkeypatch.setenv("DISCOPT_LP_WARM_DEADLINE", "0")
+    relaxer = MccormickLPRelaxer(_int_qcqp())
+    assert relaxer._inc is not None
+
+    seen = _spy_warm_lp(monkeypatch)
+    relaxer.solve_at_node(np.array([0.0, 0.0]), np.array([5.0, 5.0]), time_limit=7.0)
+
+    assert seen, "probe never fired"
+    for tl in seen:
+        assert tl is None, f"opt-out ignored: LP still budgeted at {tl}"
+
+
+@pytest.mark.smoke
+def test_an_exhausted_budget_still_hands_the_lp_a_positive_floor(monkeypatch):
+    """A node that starts with its budget already spent must not hand the backend
+    a zero/negative duration (it would reject it, turning a bounded solve into an
+    error). ``_SOLVE_DEADLINE_FLOOR_S`` is the guard."""
+    from discopt._relax.mccormick_lp import _SOLVE_DEADLINE_FLOOR_S
+
+    monkeypatch.delenv("DISCOPT_LP_WARM_DEADLINE", raising=False)
+    relaxer = MccormickLPRelaxer(_int_qcqp())
+    assert relaxer._inc is not None
+
+    seen = _spy_warm_lp(monkeypatch)
+    # An absolute round grant that expired in the past — the tightest possible case.
+    relaxer.solve_at_node(
+        np.array([0.0, 0.0]),
+        np.array([5.0, 5.0]),
+        time_limit=7.0,
+        round_deadline=time.perf_counter() - 100.0,
+    )
+
+    assert seen, "probe never fired"
+    for tl in seen:
+        # Every LP issued under an expired grant collapses to the floor, not to the
+        # caller's full 7 s. (The cold fallback re-slices the same floor against its
+        # own elapsed time, so this is an upper bound, not an equality.)
+        assert 0.0 < tl <= _SOLVE_DEADLINE_FLOOR_S + 1e-9, f"floor not applied: {tl}"
 
 
 if __name__ == "__main__":

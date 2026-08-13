@@ -31,6 +31,7 @@ from discopt._relax.milp_relaxation import (
     _RELAX_NUMERIC_CAP,
     _any_linear_constraint_form,
     _collect_affine_powers,
+    _lp_warm_deadline_enabled,
     _quadratic_constraint_forms,
     build_milp_relaxation,
 )
@@ -683,6 +684,7 @@ class MccormickLPRelaxer:
         inherited_cuts: Optional[tuple],
         *,
         want_marginals: bool = False,
+        deadline: Optional[float] = None,
     ) -> Optional["MccormickLPResult"]:
         """Incremental McCormick node solve: patch the cached structure + warm-start,
         instead of a cold ``build_milp_relaxation`` + equilibration. Returns a
@@ -695,10 +697,33 @@ class MccormickLPRelaxer:
         When ``want_marginals`` is set, the returned result additionally carries the
         node LP's row duals, safe bound, and the ORIGINAL-column reduced costs
         (cert:T2.4a). Those are computed from the same solve — no extra LP — and
-        never change ``lower_bound``/``x``."""
+        never change ``lower_bound``/``x``.
+
+        ``deadline`` (absolute ``perf_counter`` time, ``None`` = unbounded) bounds the
+        LPs this path issues. Issue #1009: this path used to receive no budget at all
+        — ``_solve_at_node_impl`` anchors its deadline *after* the fast path has
+        already returned — on the assumption, written at the fast-path call site, that
+        "the incremental fast path is already cheap". That holds until the patched LP
+        is large: one warm solve at m=3937 ran 416 s against a caller's 20 s budget
+        with nothing able to interrupt it. A spent budget yields no certified verdict,
+        so this method returns ``None`` and the node falls back to the cold build —
+        the same decline as any other inconclusive LP, never a fathom."""
         inc = self._inc
         if inc is None:
             return None
+
+        # Per-LP slice of the caller's remaining budget. Gated on the SAME flag that
+        # already promises this exact guarantee elsewhere — ``DISCOPT_LP_WARM_DEADLINE``
+        # (#928), whose docstring is "honour the caller's ``time_limit`` on the warm
+        # pure-LP node path" and which is default-ON. This path was simply never
+        # covered by it; with ``=0`` the historical unbounded behaviour is unchanged.
+        _budget_on = _lp_warm_deadline_enabled()
+
+        def _lp_budget() -> Optional[float]:
+            if deadline is None or not _budget_on:
+                return None
+            return max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+
         lb = np.asarray(node_lb, dtype=np.float64).ravel()
         ub = np.asarray(node_ub, dtype=np.float64).ravel()
         if lb.size != inc.n or ub.size != inc.n:
@@ -783,7 +808,12 @@ class MccormickLPRelaxer:
                 else None
             )
             _solved = inc.solve_assembled_full(
-                A, b, bounds, in_basis=in_basis, return_cert=want_marginals
+                A,
+                b,
+                bounds,
+                in_basis=in_basis,
+                return_cert=want_marginals,
+                time_limit=_lp_budget(),
             )
             if want_marginals:
                 status, bound, x_full, basis, farkas_certified, cert = _solved
@@ -859,7 +889,9 @@ class MccormickLPRelaxer:
                         c_x,
                         _c_basis,
                         c_farkas,
-                    ) = inc.solve_assembled_full(A, b, bounds, in_basis=None)
+                    ) = inc.solve_assembled_full(
+                        A, b, bounds, in_basis=None, time_limit=_lp_budget()
+                    )
                 except Exception:
                     c_status = None
                     c_bound = None
@@ -876,14 +908,20 @@ class MccormickLPRelaxer:
             # the equilibration re-verify, which fathoms ONLY on a verified Farkas
             # ray and otherwise defers to the cold rebuild (never trusts an
             # uncertified infeasible — see :meth:`_reverify_incremental_infeasible`).
-            return self._reverify_incremental_infeasible(inc, A, b, bounds)
+            return self._reverify_incremental_infeasible(inc, A, b, bounds, time_limit=_lp_budget())
 
         # time_limit / unbounded / numerical error: no certified verdict — fall back
         # to the trusted cold build.
         return None
 
     def _reverify_incremental_infeasible(
-        self, inc, A: np.ndarray, b: np.ndarray, bounds: np.ndarray
+        self,
+        inc,
+        A: np.ndarray,
+        b: np.ndarray,
+        bounds: np.ndarray,
+        *,
+        time_limit: Optional[float] = None,
     ) -> Optional["MccormickLPResult"]:
         """Confirm an incremental ``infeasible`` verdict soundly, without a cold
         rebuild, when the simplex's Farkas ray did not already certify it. A node
@@ -923,7 +961,12 @@ class MccormickLPRelaxer:
             bl = [(float(bounds[i, 0]), float(bounds[i, 1])) for i in range(bounds.shape[0])]
             c2, a2, b2, bd2, col_scale = equilibrate_relaxation_lp(inc.c, a_csr, b, bl, None)
             status, bound, x_s, _, farkas = inc.solve_assembled_full(
-                a2, b2, np.asarray(bd2, dtype=np.float64), in_basis=None, c_override=c2
+                a2,
+                b2,
+                np.asarray(bd2, dtype=np.float64),
+                in_basis=None,
+                c_override=c2,
+                time_limit=time_limit,
             )
         except Exception:
             return None  # re-verify failed -> trusted cold rebuild
@@ -1285,8 +1328,24 @@ class MccormickLPRelaxer:
             and self._model_has_composite_lift()
         )
         if out_cuts is None:
+            # #1009: the fast path needs its OWN anchor. The node-wide ``_deadline``
+            # below is taken deliberately AFTER the cold build (see its comment), so
+            # it does not exist yet here — which is exactly why this path used to run
+            # unbudgeted. Anchoring now, from the same ``time_limit``/``round_deadline``
+            # pair, bounds the fast path without moving the cold path's anchor.
+            _fast_deadline = None if time_limit is None else time.perf_counter() + time_limit
+            if round_deadline is not None:
+                _fast_deadline = (
+                    round_deadline
+                    if _fast_deadline is None
+                    else min(_fast_deadline, round_deadline)
+                )
             _fast = self._try_incremental_node(
-                node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
+                node_lb,
+                node_ub,
+                inherited_cuts,
+                want_marginals=want_marginals,
+                deadline=_fast_deadline,
             )
             if _fast is not None and not (_skip_fast_for_lift and _fast.status == "optimal"):
                 return _fast
@@ -1294,9 +1353,11 @@ class MccormickLPRelaxer:
         try:
             # Issue #694 anytime build: ``build_deadline`` (a ``perf_counter`` time,
             # default None) truncates the cold relaxation build's constraint loop
-            # once spent, yielding a valid weaker relaxation. The incremental fast
-            # path above is already cheap, so it ignores the deadline; only this
-            # cold, row-generating build (the ~16.8s sonet23v4 cost, #694) honors it.
+            # once spent, yielding a valid weaker relaxation. It truncates only this
+            # cold, row-generating build (the ~16.8s sonet23v4 cost, #694); the
+            # incremental fast path above generates no rows, and is bounded instead by
+            # its own ``_fast_deadline`` on the LP itself (#1009 — it is not always
+            # cheap: a large patched LP ran 416 s against a 20 s budget).
             # #966: a ``round_deadline`` clamps the build too (the round's grant
             # covers the build), min-combined with any caller ``build_deadline``.
             _eff_build_deadline = build_deadline

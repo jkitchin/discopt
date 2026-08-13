@@ -1091,7 +1091,7 @@ class IncrementalMcCormickLP:
         return float(result.objective) + off, np.asarray(result.x, dtype=float), out_basis
 
     def solve_assembled_full(
-        self, A, b, bounds, in_basis=None, c_override=None, *, return_cert=False
+        self, A, b, bounds, in_basis=None, c_override=None, *, return_cert=False, time_limit=None
     ):
         """Like :meth:`solve_assembled`, but return the terminal *status* too so a
         caller can tell a (certified) ``infeasible`` apart from any other
@@ -1115,7 +1115,13 @@ class IncrementalMcCormickLP:
         ``(..., farkas_certified, cert)`` with the :class:`LpWarmCert` carrying the
         node LP's row duals / column status / safe bound (cert:T2.4a) -- a pure
         side-channel; ``bound``/``x`` are computed identically whether or not it is
-        requested."""
+        requested.
+
+        ``time_limit`` (seconds, ``None`` = unbounded) bounds this one LP; it reaches
+        ``SimplexOptions::deadline``, which the pivot loops poll. A spent budget exits
+        as ``iter_limit``, which this method reports as ``"other"`` — no certified
+        verdict, so the caller falls back rather than fathoming on it (issue #1009).
+        Passing ``None`` reproduces the historical unbounded behaviour exactly."""
         from discopt.solvers import SolveStatus
         from discopt.solvers.milp_simplex import LpWarmCert, solve_lp_warm_std
 
@@ -1130,7 +1136,13 @@ class IncrementalMcCormickLP:
 
         try:
             result, out_basis, cert = solve_lp_warm_std(
-                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis, return_cert=True
+                cobj,
+                sp.csr_matrix(A),
+                b,
+                bounds,
+                in_basis=in_basis,
+                return_cert=True,
+                time_limit=time_limit,
             )
         except Exception:
             return _ret("other", None, None, None, False)
