@@ -293,11 +293,11 @@ import math
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
-from discopt.modeling.core import Model, SolveResult
+from discopt.modeling.core import Constant, Model, SolveResult
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +417,8 @@ def expected_improvement(
 def _pairwise_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Euclidean distances between rows of ``a`` and rows of ``b``."""
     diff = a[:, None, :] - b[None, :, :]
-    return np.sqrt(np.maximum(np.sum(diff * diff, axis=-1), 0.0))
+    out: np.ndarray = np.sqrt(np.maximum(np.sum(diff * diff, axis=-1), 0.0))
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -559,7 +560,8 @@ class RBFSurrogate:
         Z = np.atleast_2d(np.asarray(Z, dtype=np.float64))
         phi = _rbf_phi(_pairwise_distance(Z, self.Z), self.kernel)
         n = self.Z.shape[1]
-        return phi @ self.lam + Z @ self.tail[:n] + self.tail[n]
+        out: np.ndarray = phi @ self.lam + Z @ self.tail[:n] + self.tail[n]
+        return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -737,7 +739,8 @@ class KrigingSurrogate:
         Z = np.atleast_2d(np.asarray(Z, dtype=np.float64))
         absdiff = np.abs(Z[:, None, :] - self.Z[None, :, :])
         r = np.exp(-np.sum((absdiff**self.fitted_power) * self.theta, axis=-1))  # (N, m)
-        return solve_triangular(self.L, r.T, lower=True)
+        out: np.ndarray = solve_triangular(self.L, r.T, lower=True)
+        return out
 
     def predict(self, Z: np.ndarray) -> np.ndarray:
         """Kriging predictor at each row of ``Z``, in the caller's ``y`` units."""
@@ -872,7 +875,10 @@ def build_cors_model(
     zs = _normalized_coordinates(xs, lb, ub)
 
     n = rbf.Z.shape[1]
-    obj = float(rbf.tail[n])
+    # Seeded as a Constant, not a float: with no tail terms and no centres the
+    # accumulation below never promotes it, and Model.minimize needs an
+    # Expression. Same value, correct type.
+    obj: Any = Constant(float(rbf.tail[n]))
     for h in range(n):
         obj = obj + float(rbf.tail[h]) * zs[h]
     for i in range(rbf.Z.shape[0]):
@@ -1014,6 +1020,7 @@ def _solve_acquisition_model(
     means the subproblem produced no usable point at all.
     """
     result = acq.solve(time_limit=float(time_limit), gap_tolerance=float(gap_tolerance))
+    assert isinstance(result, SolveResult)  # stream=False, so never an iterator
     if result.x is None:
         return None, False
     flat = np.concatenate(
@@ -1241,7 +1248,8 @@ class _SurrogateSearch:
             else:
                 spread = float(finite.max() - finite.min())
                 merit = np.where(bad, finite.max() + spread + 1.0, merit)
-        return merit
+        out: np.ndarray = merit
+        return out
 
     # -- proposal ----------------------------------------------------------
     def propose(
@@ -1365,23 +1373,25 @@ class _SurrogateSearch:
             # distance constraint carried as an exact penalty. The penalty scale
             # is tied to the surrogate's own spread so it dominates whatever units
             # the objective happens to be in.
-            def score(X: np.ndarray) -> np.ndarray:
+            def cors_score(X: np.ndarray) -> np.ndarray:
                 Z = self.normalize(X)
                 value = surrogate_obj.predict_standardized(Z)
                 dist2 = np.sum((Z[:, None, :] - design[None, :, :]) ** 2, axis=-1)
                 shortfall = np.maximum(0.0, delta**2 - dist2.min(axis=1))
-                return -(value + 1e3 * (1.0 + np.abs(value)) * shortfall)
+                penalized: np.ndarray = -(value + 1e3 * (1.0 + np.abs(value)) * shortfall)
+                return penalized
 
-            return score
+            return cors_score
 
         f_min = self._acquisition_f_min()
 
-        def score(X: np.ndarray) -> np.ndarray:
+        def ei_score(X: np.ndarray) -> np.ndarray:
             Z = self.normalize(X)
             y_hat, s = surrogate_obj.predict_with_error(Z)
-            return expected_improvement(y_hat, s, f_min, xi)
+            ei: np.ndarray = expected_improvement(y_hat, s, f_min, xi)
+            return ei
 
-        return score
+        return ei_score
 
     def maximin_distance(self, rng: np.random.Generator, n_candidates: int = 2000) -> float:
         """``Δ``: the largest distance-to-the-design achievable in the box.
@@ -1412,11 +1422,13 @@ class _SurrogateSearch:
         raw = _generate_starts(self.lb, self.ub, int(n_candidates), rng)
         cands = np.array([self.to_model_point(z) for z in raw])
         if not self.X:
-            return cands[0]
+            first: np.ndarray = cands[0]
+            return first
         Zc = self.normalize(cands)
         design = self.normalize(np.asarray(self.X, dtype=np.float64))
         d2 = np.sum((Zc[:, None, :] - design[None, :, :]) ** 2, axis=-1)
-        return cands[int(np.argmax(np.min(d2, axis=1)))]
+        farthest: np.ndarray = cands[int(np.argmax(np.min(d2, axis=1)))]
+        return farthest
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1816,7 +1828,7 @@ def solve_surrogate(
                 if fitted.ill_conditioned:
                     stats.ill_conditioned_fits += 1
             else:
-                fitted = KrigingSurrogate(
+                fitted = KrigingSurrogate(  # type: ignore[assignment]  # union by design
                     nugget=float(nugget),
                     estimate_nugget=bool(estimate_nugget),
                     power=float(kriging_power),
@@ -1945,9 +1957,11 @@ def solve_surrogate(
             solver_stats=stats.as_dict(),
         )
 
+    best_value = search.best_feasible_value
+    assert best_value is not None  # the no-incumbent case returned above
     return SolveResult(
         status="time_limit" if hit_deadline else "feasible",
-        objective=float(search.best_feasible_value),
+        objective=float(best_value),
         bound=None,
         gap=None,
         x=_unpack_solution(model, np.asarray(search.best_feasible_point, dtype=np.float64)),

@@ -573,6 +573,9 @@ def _direct_root_primal(
 
     _cl = np.asarray(cl_list, dtype=np.float64) if cl_list else None
     _cu = np.asarray(cu_list, dtype=np.float64) if cl_list else None
+    # They are set and cleared together; binding the pair makes that explicit so
+    # the violation term below is not reaching through an Optional.
+    _bounds = (_cl, _cu) if (_cl is not None and _cu is not None) else None
 
     def _oracle(x: np.ndarray) -> tuple[float, float]:
         fval = float(evaluator.evaluate_objective(x))
@@ -581,10 +584,11 @@ def _direct_root_primal(
             # rather than poison the ordering with a NaN.
             fval = np.inf
         viol = 0.0
-        if _cl is not None:
+        if _bounds is not None:
+            _lo, _hi = _bounds
             g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
             g = np.where(np.isfinite(g), g, np.inf)
-            viol = float(np.sum(np.maximum(0.0, g - _cu)) + np.sum(np.maximum(0.0, _cl - g)))
+            viol = float(np.sum(np.maximum(0.0, g - _hi)) + np.sum(np.maximum(0.0, _lo - g)))
             if not np.isfinite(viol):
                 # inf - inf on a two-sided-infinite row: unusable, not feasible.
                 viol = np.inf

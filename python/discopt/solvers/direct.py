@@ -1086,6 +1086,7 @@ def solve_direct(
         start = search.best_feasible_point
         best_val = search.best_feasible_value
         if seed_value is not None and best_val is not None and seed_value < best_val:
+            assert seed_point is not None  # set together with seed_value
             start = seed_point
         remaining = max(0.0, deadline - time.perf_counter())
         before = search.best_feasible_value
@@ -1177,9 +1178,11 @@ def solve_direct(
 
     hit_deadline = time.perf_counter() >= deadline and stats.evals < max_evals
     status = "time_limit" if hit_deadline else "feasible"
+    best_value = search.best_feasible_value
+    assert best_value is not None  # the no-incumbent case returned above
     return SolveResult(
         status=status,
-        objective=float(search.best_feasible_value),
+        objective=float(best_value),
         bound=None,
         gap=None,
         x=_unpack_solution(model, np.asarray(search.best_feasible_point, dtype=np.float64)),
