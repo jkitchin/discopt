@@ -2434,3 +2434,104 @@ pivots / 1.9 s `optimal` to >6000 pivots / >45 s `iter_limit`, with
 warm-stall guard cannot fire on a cold dual solve. The dual-Harris pass clears it
 (46.2 s `iter_limit` → 4.4 s `optimal`, 10.5x) even though it is corpus-neutral,
 which is why the mechanism is recorded there rather than discarded.
+
+## 17. #1013 dual degeneracy stall: both escapes are unreachable, and the fix is the cold hand-off (2026-08-13)
+
+**Claim under test.** Issue #1013: a rounding-level perturbation of the dual
+pivot path multiplies the iteration count several-fold and turns `optimal` into
+`iter_limit`, while `DualStallTrips` reads 0 through 43% degenerate pivots. Its
+suggested direction: instrument the ratio test, re-land #1008's dual Harris pass
+*scoped to the stall*, and make the stall detector able to fire.
+
+**Environment caveat, first.** `QPLIB_0911` — the instance the issue is written
+around — is unreachable here: the `~/Dropbox` MINLPLib/QPLIB snapshot is absent,
+`qplib.zib.de` is blocked by the network policy, and `scratchpad/i1008/lps/*.npz`
+was never committed. The issue's headline cell (1279 pivots → `iter_limit`; the
+10.5x Harris recovery) was **not** re-measured and is neither confirmed nor
+contradicted below. The panel is built instead from the vendored corpora: 102
+root relaxations from all 9 in-repo QPLIB instances and all 68 in-repo MINLPLib
+`.nl` instances at `rlt_lineq` off/on, of which 100 have a dual-feasible slack
+start (`scratchpad/i1013/`, `FINDINGS.md`).
+
+**Entry measurement — the escapes are not merely quiet, they are unreachable.**
+Over all 100 LPs: `DualStallTrips` = **0** and `DualBlandActivations` = **0**, on
+every single LP, including cells that are 98.7% degenerate and exhaust their
+budget. Bland's rule engages at `2·(n+1)` consecutive degenerate pivots (58 194
+on the worst cell) and the F2 guard at the size-derived pivot cap (~10⁶). This
+generalizes the issue's point 3 past its instance: on lifted relaxations the dual
+loop has **no** anti-degeneracy escape at all.
+
+**The mechanism is not the hypothesized tiny pivots.** Per-pivot trace
+(`DISCOPT_LP_DUAL_TRACE=1`, new) on `QPLIB_3815_rlt1`, 8192 pivots: 98.6%
+degenerate, chosen `|pivot|` median **exactly 1.0** (min 1.1e-2, max 4.6e2),
+**zero** pivots below 1e-4, and the primal step is never 0. The degeneracy is
+*dual* — `d_q ≈ 0` because a lifted relaxation's objective is sparse — so a
+stability tie-break on `|α_rj|` has nothing to discriminate.
+
+**Falsified levers** (100-LP panel, arms interleaved within each rep, per-LP
+20 s limit; each pre-registered against a status-regression kill criterion).
+
+| lever | outcome |
+|---|---|
+| dual Harris pass, **armed only inside a degeneracy stall** (the issue's ask) | fires on 22/100, wall median **0.995x**, iteration median **0**, and regresses `tspn10_rlt1` `optimal` → `iter_limit`. Same verdict as #1008 on a different corpus |
+| Bland's rule at a *reachable* run length (512) | fires on 8/100, median 1.007x, regresses `tspn10_rlt1` the same way |
+| a second progress measure (bail only if the total primal infeasibility is *also* flat) | on every LP traced, `max_noprog == max_run` exactly — the primal term never reset a counter the degeneracy test had not already reset. No discriminating power; removed rather than shipped as an untested branch |
+
+**What ships.** `SimplexOptions::dual_stall_patience` (default **2048**,
+`DISCOPT_LP_DUAL_STALL_BAIL=<n>` overrides, `=0` disables): after that many
+consecutive degenerate pivots the warm loop returns `None`, i.e. the caller's
+cold two-phase primal — the action every other difficulty in this loop already
+takes, and one that self-verifies its own verdict. The threshold separates two
+non-overlapping measured populations: every LP whose warm loop converges peaks at
+a **902**-pivot run (median 120); every cell that does not converge runs
+**≥ 1274**.
+
+**Graduation panel (2 reps, `off` vs default).**
+
+| gate | result |
+|---|---|
+| unchanged cells | **98 / 100** identical status *and* identical iteration count |
+| status regressions | **0** |
+| status improvements | **1** — `QPLIB_3814_rlt1` `infeasible` → `optimal` |
+| objective drift on optimal/optimal | **0.00e+00** (n=96) |
+| wall, LPs ≥ 50 ms | 0.96x–1.20x; the two cells where it fires gain 1.13x and 1.20x |
+| wall, LPs < 50 ms (83 of 100) | 0.74x–1.47x spread at **identical iteration counts** — sub-millisecond noise, not effect |
+
+**Tree-level differential panel.** Every vendored `.nl` with a recorded optimum
+(16 instances, 60 s each, `scratchpad/i1013/tree_panel.py`), default vs off: 96
+assertions (no bound past its reference optimum, no incumbent beyond it, no
+certification or status regression), **0 issues**, and objective, bound and node
+count **bit-identical on all 16** — the bail does not fire in these trees, whose
+longest degenerate runs are 47–87 pivots. `pytest -m smoke` (1008 passed),
+`pytest -m slow python/tests/test_adversarial_recent_fixes.py` (10 passed) and
+`cargo test -p discopt-core` (604 passed) are green.
+
+**The `QPLIB_3814_rlt1` cell is why this is not only a throughput issue.** On the
+default path that LP returns **`infeasible`** after 5543 pivots (3352 of them one
+degenerate run). SciPy/HiGHS returns `optimal` at 0.238394628159; every perturbed
+arm of our own engine returns `optimal` at 0.238394628195; the returned point
+satisfies every row and bound to 2e-8; an elastic LP (`min t` s.t. `Ax − t ≤ b`)
+returns `t* = 0.0`. The certificate that decides it turns on `bᵀy = 3.0e-8`
+against a term magnitude `Σ|b_i·y_i| = 600` — a relative margin of **5e-11** —
+tested against a Neumaier–Shcherbina margin, `1e-9·(1+|bᵀy|+Σ|boxmax|)`, built
+from *result* magnitudes rather than accumulation magnitudes. **That is a
+separate defect and is filed separately** (the bail only stops the stalled warm
+loop from being the thing that decides it; it does not repair the margin).
+
+**A second methodological note (§8), because it produced a false regression.**
+The first tree panel reported `nvs12` 2.8 s → 47.8 s and `nvs11` 0.7 s → 6.6 s.
+That was the harness: its "on" arm set `DISCOPT_LP_DUAL_STALL_BAIL=1` and the
+flag parsed `1` literally as *a patience of one pivot*, bailing on the first
+degenerate pivot of every node LP. The counters said so — 16 bails with
+`DualDegenerateRunMax` = 1, which is impossible under the intended semantics —
+and reading them back is what caught it. The flag now reads `1`/`true`/`on` as
+"enabled at the default patience" and only integers ≥ 2 as an explicit patience.
+
+**Methodological note (§6 again, and it cost a design).** The first version of
+this fix was built on a Python probe that reconstructed the engine's progress
+test *without its tolerance filter*, so sub-tolerance noise read as progress and
+the probe reported `QPLIB_3871_rlt0`'s no-progress window as 24 pivots when the
+engine's own counter says 663. A whole conjunctive test was designed around that
+number, shipped into a panel, and measured as useless. The rule that would have
+caught it earlier: read the quantity **the code tests**, out of the code, not a
+reimplementation of it.
