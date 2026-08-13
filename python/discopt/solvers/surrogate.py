@@ -298,6 +298,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 
 from discopt.modeling.core import Constant, Model, SolveResult
+from discopt.solvers._dfo_common import build_oracle, glce_merit
 
 logger = logging.getLogger(__name__)
 
@@ -1220,36 +1221,23 @@ class _SurrogateSearch:
     def merits(self) -> np.ndarray:
         """The scalar the surrogate is fitted to, one per evaluated point.
 
-        Identical in form to ``_DirectSearch.rank_values`` (DIRECT-GLce): total
-        violation while nothing feasible is known, then the objective for
-        near-feasible points and ``f + viol + |f - f_min|`` for the rest. The
-        ``|f - f_min|`` term denies an infeasible point credit for a low
-        objective and needs no penalty weight to be tuned. For an unconstrained
-        model this is just the objective.
+        The rule itself lives in :func:`_dfo_common.glce_merit`, shared with
+        ``_DirectSearch.rank_values``: the two backends must optimize the same
+        thing to be comparable. For an unconstrained model it is just the
+        objective.
 
-        A non-finite objective (a black box undefined at that point) is mapped to
-        the worst finite merit plus the observed spread, rather than to ``+inf``:
-        an infinite value would make the interpolation system meaningless, while
-        dropping the point would throw away the one thing it does tell us, that
-        the region is bad.
+        ``finite_fill=True`` because this value is *fitted*, not only compared: a
+        non-finite objective (a black box undefined at that point) would make the
+        interpolation system meaningless as ``+inf``, while dropping the point
+        would throw away the one thing it does tell us, that the region is bad.
         """
-        f = np.asarray(self.f, dtype=np.float64)
-        v = np.asarray(self.viol, dtype=np.float64)
-        if self.best_feasible_value is None:
-            merit = v.copy()
-        else:
-            near = v <= self.eps_cons
-            merit = np.where(near, f, f + v + np.abs(f - self.best_feasible_value))
-        bad = ~np.isfinite(merit)
-        if bad.any():
-            finite = merit[~bad]
-            if finite.size == 0:
-                merit = np.zeros_like(merit)
-            else:
-                spread = float(finite.max() - finite.min())
-                merit = np.where(bad, finite.max() + spread + 1.0, merit)
-        out: np.ndarray = merit
-        return out
+        return glce_merit(
+            np.asarray(self.f, dtype=np.float64),
+            np.asarray(self.viol, dtype=np.float64),
+            self.best_feasible_value,
+            self.eps_cons,
+            finite_fill=True,
+        )
 
     # -- proposal ----------------------------------------------------------
     def propose(
@@ -1434,60 +1422,6 @@ class _SurrogateSearch:
 # ══════════════════════════════════════════════════════════════════════════════
 # Model-facing entry point
 # ══════════════════════════════════════════════════════════════════════════════
-
-
-def _build_oracle(model: Model, feas_tol: float):
-    """``(evaluate, n_vars, integer_mask)`` for ``model``.
-
-    ``evaluate`` maps a model point to ``(objective, total_violation)``. Both come
-    from the one evaluator funnel the rest of the solver uses, so an opaque
-    ``dm.custom`` body is evaluated exactly as the local NLP path would. This
-    mirrors ``direct._build_oracle`` deliberately: the two backends must see
-    identical values for a given point, or a comparison between them measures the
-    plumbing instead of the algorithms.
-    """
-    from discopt.solver import _extract_variable_info, _infer_constraint_bounds, _make_evaluator
-
-    evaluator = _make_evaluator(model)
-    logger.info("surrogate: evaluator backend is %s", type(evaluator).__name__)
-
-    n_vars, _lb, _ub, int_offsets, int_sizes = _extract_variable_info(model)
-    integer_mask = np.zeros(n_vars, dtype=bool)
-    for off, size in zip(int_offsets, int_sizes):
-        integer_mask[off : off + size] = True
-
-    n_cons = int(getattr(evaluator, "n_constraints", 0) or 0)
-    if n_cons:
-        cl, cu = _infer_constraint_bounds(model, evaluator)
-        cl = np.asarray(cl, dtype=np.float64)
-        cu = np.asarray(cu, dtype=np.float64)
-        # Same guard as ``direct._build_oracle``: the violation sum indexes cl and
-        # cu against the same g, so a length mismatch broadcasts or truncates into
-        # a silently wrong violation -- a wrong feasibility verdict, not a crash.
-        if cl.shape != (n_cons,) or cu.shape != (n_cons,):
-            raise ValueError(
-                f"constraint bounds do not match the evaluator: n_constraints={n_cons} "
-                f"but cl has shape {cl.shape} and cu has shape {cu.shape}"
-            )
-    else:
-        cl = cu = None
-
-    def evaluate(x: np.ndarray) -> tuple[float, float]:
-        fval = float(evaluator.evaluate_objective(x))
-        if not np.isfinite(fval):
-            # A black box may be undefined here. +inf loses every comparison,
-            # which is the honest ranking for "no value"; ``merits`` then maps it
-            # to a finite worst-case so the fit stays well posed.
-            fval = np.inf
-        viol = 0.0
-        if cl is not None:
-            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
-            g = np.where(np.isfinite(g), g, np.inf)
-            viol = float(np.sum(np.maximum(0.0, g - cu)) + np.sum(np.maximum(0.0, cl - g)))
-        return fval, viol
-
-    del feas_tol  # the caller owns the tolerance; kept for signature stability
-    return evaluate, n_vars, integer_mask
 
 
 def _refine_locally(
@@ -1767,7 +1701,7 @@ def solve_surrogate(
             n_vars,
         )
 
-    oracle, n_from_model, integer_mask = _build_oracle(model, feasibility_tolerance)
+    oracle, n_from_model, integer_mask = build_oracle(model, log_prefix="surrogate")
     if n_from_model != n_vars:
         raise ValueError(f"variable-count mismatch: box has {n_vars}, evaluator has {n_from_model}")
 

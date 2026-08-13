@@ -26,6 +26,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
+from discopt.solvers._dfo_common import glce_merit
 from discopt.solvers.direct import (
     _DirectSearch,
     _lower_right_hull,
@@ -237,37 +238,55 @@ def test_evaluation_cache_serves_repeated_points():
 # ── constraint handling (DIRECT-GLce) ────────────────────────────────────────
 
 
-def test_glce_phase_a_ranks_by_violation_before_any_feasible_point():
-    """With nothing feasible yet, the search minimizes total violation."""
-    s = _DirectSearch(np.zeros(1), np.ones(1))
-    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), 100.0, 5.0)
-    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), -100.0, 9.0)
-    assert s.best_feasible_value is None
-    ranks = s.rank_values()
-    assert ranks[0] < ranks[1], "phase A must prefer the less-violating point"
+def test_rank_values_reads_the_partition_through_the_shared_merit_rule():
+    """``rank_values`` is wiring, not a formula: the rule lives in ``_dfo_common``.
 
-
-def test_glce_phase_b_denies_credit_to_infeasible_low_objective():
-    """An infeasible point cannot outrank the incumbent by having a lower objective.
-
-    The ``|f - f_min|`` term is what removes that credit, and it needs no penalty
-    weight to be tuned.
+    The rule's own behaviour (both phases, the ``ε_cons`` band, ``finite_fill``)
+    is covered in ``test_dfo_common``. What is checked *here* is what only this
+    class can get wrong — that it feeds the partition's own ``fvals``/``viols``
+    and its own incumbent and tolerance, in that order.
     """
-    s = _DirectSearch(np.zeros(1), np.ones(1))
-    s.best_feasible_value = 10.0
-    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), 10.0, 0.0)  # feasible incumbent
-    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), -1e6, 3.0)  # infeasible, great f
-    ranks = s.rank_values()
-    assert ranks[0] < ranks[1], "an infeasible point must not win on objective alone"
-
-
-def test_glce_treats_violation_within_eps_cons_as_feasible():
-    """The 'ce' refinement: no penalty discontinuity right at the feasible boundary."""
     s = _DirectSearch(np.zeros(1), np.ones(1))
     s.best_feasible_value = 5.0
     s.eps_cons = 1e-3
-    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), 4.0, 1e-6)
-    assert s.rank_values()[0] == pytest.approx(4.0)
+    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), 4.0, 1e-6)  # inside the band
+    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), -1e6, 3.0)  # infeasible, great f
+
+    expected = glce_merit(
+        np.array(s.part.fvals, dtype=np.float64),
+        np.array(s.part.viols, dtype=np.float64),
+        s.best_feasible_value,
+        s.eps_cons,
+        finite_fill=False,
+    )
+    np.testing.assert_array_equal(s.rank_values(), expected)
+    assert s.rank_values()[0] < s.rank_values()[1], "an infeasible point must not win on f alone"
+
+
+def test_rank_values_leaves_an_undefined_objective_at_infinity():
+    """DIRECT ranks by comparison, so ``finite_fill=False`` is the right choice here.
+
+    A point where the black box was undefined carries ``+inf``, which loses every
+    comparison and is never selected. This pins the flag: the surrogate backend
+    passes ``True`` because it *fits* the merit, and picking that up here would
+    make an undefined point selectable.
+    """
+    s = _DirectSearch(np.zeros(1), np.ones(1))
+    s.best_feasible_value = 1.0
+    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), 1.0, 0.0)
+    s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), np.inf, 0.0)
+    assert np.isinf(s.rank_values()[1])
+
+
+def test_scalar_rank_matches_rank_values_on_the_same_point():
+    """The one-at-a-time ranker used by the polish must not drift from the batch one."""
+    s = _DirectSearch(np.zeros(1), np.ones(1))
+    s.best_feasible_value = 10.0
+    s.eps_cons = 1e-3
+    for fval, viol in [(10.0, 0.0), (4.0, 1e-6), (-1e6, 3.0)]:
+        s.part = type(s.part)()
+        s.part.add(np.array([0.5]), np.zeros(1, dtype=np.int64), fval, viol)
+        assert s._scalar_rank(fval, viol) == pytest.approx(s.rank_values()[0])
 
 
 # ── engine-level behaviour ───────────────────────────────────────────────────
