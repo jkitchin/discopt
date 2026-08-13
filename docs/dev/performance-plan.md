@@ -2826,11 +2826,29 @@ bound-changing, so §5 applies and the flag stays off until a corpus differentia
 panel clears *both* bars. The graduation panel (88 captured relaxation LPs,
 `scratchpad/i1008/r1_panel.py`, one process per arm because the flag is read once
 via `OnceLock`, HiGHS as oracle, every LP at `time_limit=None` — the exact call
-shape that lost the recovery) was **started and stopped at 18/88 on arm 0 with arm
-1 not begun**; no claim is made from that partial data and none of it is reported
-here. Running it to completion on both arms is what remains before the default can
-flip. Until then this ships as the `DISCOPT_CUT_INHERIT` precedent has it: the
-mechanism lands, the measurement is recorded, the default does not move.
+shape that lost the recovery) has since **run to completion on both arms**. Result:
+
+| bar | verdict | evidence |
+|---|---|---|
+| **cert-clean** | **PASS** | 82 LPs compared; 0 bounds below the HiGHS optimum, 0 certification regressions, 0 objective drift, 0 LPs at the iteration cap |
+| **net-positive** | **FAIL** | 0 bounds recovered; retention identical at 72/82 in both arms |
+
+**GRADUATE: NO — the flag stays default-OFF.** The mechanism is *sound*, not
+*helpful*: precisely the `DISCOPT_CUT_INHERIT` outcome, and per §5 a cert-clean
+but neutral flag stays off with the measurement recorded.
+
+The probe was **not empty**, which is what makes the FAIL meaningful (§6): the
+recovery fired on 5 ON-arm LPs (`QPLIB_2590_rlt0/rlt1`, `QPLIB_2819_rlt0`,
+`QPLIB_2823_rlt1`, `QPLIB_3089_rlt1`, 12 recoveries total) against 7 OFF-arm bails.
+So the ON arm really did take different pivots on those LPs and still recovered no
+bound the OFF arm lacked — a measured neutral, not an arm compared against itself.
+6 of the 88 LPs were skipped (`_dual_start_slack_basis` rejected the start, so they
+never enter the warm path) and are named in the log rather than silently dropped.
+
+Wall was 2829.81s OFF vs 2835.45s ON — a single unreplicated run, on a machine
+that was also running the §18f interval experiment (load I created myself), so it
+is directional only and supports no timing claim in either direction. It is
+recorded because a 0.2% spread is worth knowing is *not* a signal.
 
 Pinned by `unstable_pivot_recovery_is_not_gated_on_a_deadline` (flag off → bails 1,
 not optimal; flag on → recoveries 1, optimal 0; both arms assert
