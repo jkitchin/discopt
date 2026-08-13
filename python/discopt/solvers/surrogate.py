@@ -1461,6 +1461,14 @@ def _build_oracle(model: Model, feas_tol: float):
         cl, cu = _infer_constraint_bounds(model, evaluator)
         cl = np.asarray(cl, dtype=np.float64)
         cu = np.asarray(cu, dtype=np.float64)
+        # Same guard as ``direct._build_oracle``: the violation sum indexes cl and
+        # cu against the same g, so a length mismatch broadcasts or truncates into
+        # a silently wrong violation -- a wrong feasibility verdict, not a crash.
+        if cl.shape != (n_cons,) or cu.shape != (n_cons,):
+            raise ValueError(
+                f"constraint bounds do not match the evaluator: n_constraints={n_cons} "
+                f"but cl has shape {cl.shape} and cu has shape {cu.shape}"
+            )
     else:
         cl = cu = None
 
