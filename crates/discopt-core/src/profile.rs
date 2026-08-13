@@ -208,6 +208,12 @@ counters!(
     // from "the LP is not actually infeasible".
     FarkasRejectOpen,
     FarkasRejectMargin,
+    // The subset of `Margin` rejections that the pre-#1017 margin would have
+    // ACCEPTED: `bᵀy − contrib` cleared the `1e-9·(1 + |by| + Σ|boxmax|)` floor but not
+    // the rigorous bound on the rounding of the accumulations that produced it. Each
+    // one is a certificate #1017 removed — the whole cost side of that change, and the
+    // only way to see it in a corpus run without an A/B rebuild.
+    FarkasRejectCancellation,
     // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
     // Python spatial engine's per-node LPs come through, and it can return without
     // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above

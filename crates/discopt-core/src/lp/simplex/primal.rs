@@ -474,6 +474,39 @@ fn row_roundoff(terms: u32, term_scale: f64) -> f64 {
     8.0 * (terms as f64) * f64::EPSILON * term_scale
 }
 
+/// The classic dot-product error factor `γ_k = k·u/(1 − k·u)` (Higham, *Accuracy and
+/// Stability of Numerical Algorithms*, §3.1): a sum of `k` floating-point terms
+/// evaluated in any order differs from the exact sum by at most `γ_k · Σ|terms|`.
+///
+/// `u` is taken as `f64::EPSILON` — **twice** the true unit roundoff `2⁻⁵³` — so the
+/// first-order bound carries a factor-2 headroom over the `O(u²)` terms it drops and
+/// over the float64 evaluation of the margin expression itself. (The Python
+/// boundary's sharp NS margin, `_safe_lp_lower_bound_sharp`, buys the same headroom
+/// with `u = 2⁻⁵³` and an explicit ×1.0625; see
+/// `docs/dev/ns-sharp-margin-2026-07-16.md` §2.) Returns `+∞` — no usable bound, the
+/// caller must bail — once `k·u ≥ 1`.
+#[inline]
+fn gamma(k: usize) -> f64 {
+    let ku = k as f64 * f64::EPSILON;
+    if ku >= 1.0 {
+        f64::INFINITY
+    } else {
+        ku / (1.0 - ku)
+    }
+}
+
+/// `v` nudged upward by a few ulps, covering the rounding of the handful of
+/// operations that produced it. Used where only an *upper* bound on `v` is sound
+/// (the recovered slack bounds); `+∞`/NaN pass through as `+∞`, which the caller
+/// treats as "not recoverable".
+#[inline]
+fn round_up(v: f64) -> f64 {
+    if !v.is_finite() {
+        return INF;
+    }
+    v + 4.0 * f64::EPSILON * v.abs()
+}
+
 /// Recover finite, *valid* upper bounds for the **slack** columns of the standard
 /// form (discopt C-39, generalized). A Farkas ray has row multipliers whose reduced
 /// cost on a slack `s ∈ [0, ∞)` selects its open upper side, collapsing the
@@ -496,10 +529,19 @@ fn row_roundoff(terms: u32, term_scale: f64) -> f64 {
 /// (`open_count == 1` and this `j` is that open column) or there are none
 /// (`open_count == 0`). Otherwise `+∞` (the check bails that sign, conservative).
 ///
-/// Exact (one pass, no iterative-FBBT division roundoff) and superset-preserving
-/// (removes only already-infeasible points), so it can never make a *feasible* LP
-/// certify: sound by construction. Returns the slack upper bounds (`+∞` where not
+/// One pass (no iterative-FBBT division roundoff) and superset-preserving (removes
+/// only already-infeasible points), so it can never make a *feasible* LP certify:
+/// sound by construction. Returns the slack upper bounds (`+∞` where not
 /// recoverable).
+///
+/// **The returned bound is rounded up, not "exact"** (#1017). `min_other`/`max_other`
+/// are floating-point row sums over every column of the row, so the recovered
+/// `(b_i − min_other)/a` carries their rounding; the bound is only *valid* — and the
+/// certificate built on it only *rigorous* — if that rounding is added back. Each
+/// bound is therefore inflated by `γ_{k+1}·Σ|a_ik·bnd_k| / |a|` (the row-sum error
+/// bound) plus a few ulps for the subtraction and division. A **larger** upper bound
+/// is free soundness here: it can only enlarge the box, hence only enlarge `g₀`'s
+/// box-maximum term, hence only *weaken* a certificate.
 fn slack_upper_bounds(
     cols: &SparseCols,
     m: usize,
@@ -517,6 +559,13 @@ fn slack_upper_bounds(
     let mut max_ax = vec![0.0f64; m];
     let mut open_min = vec![0u32; m];
     let mut open_max = vec![0u32; m];
+    // Magnitudes and term counts of those two accumulations, per row — what the
+    // `γ_k·Σ|terms|` bound on their rounding needs (#1017). Without them the
+    // recovered bound is a bare float with unrepresented error.
+    let mut min_abs = vec![0.0f64; m];
+    let mut max_abs = vec![0.0f64; m];
+    let mut min_cnt = vec![0usize; m];
+    let mut max_cnt = vec![0usize; m];
     for j in 0..n {
         let (rows, vals) = cols.col(j);
         for (k, &i) in rows.iter().enumerate() {
@@ -530,22 +579,30 @@ fn slack_upper_bounds(
                     open_min[i] += 1;
                 } else {
                     min_ax[i] += a * l[j];
+                    min_abs[i] += (a * l[j]).abs();
+                    min_cnt[i] += 1;
                 }
                 if u[j] >= INF {
                     open_max[i] += 1;
                 } else {
                     max_ax[i] += a * u[j];
+                    max_abs[i] += (a * u[j]).abs();
+                    max_cnt[i] += 1;
                 }
             } else {
                 if u[j] >= INF {
                     open_min[i] += 1;
                 } else {
                     min_ax[i] += a * u[j];
+                    min_abs[i] += (a * u[j]).abs();
+                    min_cnt[i] += 1;
                 }
                 if l[j] <= -INF {
                     open_max[i] += 1;
                 } else {
                     max_ax[i] += a * l[j];
+                    max_abs[i] += (a * l[j]).abs();
+                    max_cnt[i] += 1;
                 }
             }
         }
@@ -585,7 +642,11 @@ fn slack_upper_bounds(
             };
             if others_finite {
                 let min_other = min_ax[i] - j_term;
-                sub[j] = (b[i] - min_other) / a;
+                // `min_other_true ≥ min_other − err` (the `+1` term covers removing
+                // `j`'s own contribution), so the *largest* the slack can be is
+                // `(b_i − (min_other − err))/a`. Rounding up is the conservative side.
+                let err = gamma(min_cnt[i] + 1) * min_abs[i];
+                sub[j] = round_up((b[i] - (min_other - err)) / a);
             }
         } else {
             // a<0. max side: j contributes a·l_j (a<0 → j finite iff l_j finite).
@@ -601,7 +662,10 @@ fn slack_upper_bounds(
             };
             if others_finite {
                 let max_other = max_ax[i] - j_term;
-                sub[j] = (b[i] - max_other) / a;
+                // `max_other_true ≤ max_other + err`, and dividing by `a < 0` flips:
+                // the largest the slack can be is `(b_i − (max_other + err))/a`.
+                let err = gamma(max_cnt[i] + 1) * max_abs[i];
+                sub[j] = round_up((b[i] - (max_other + err)) / a);
             }
         }
     }
@@ -613,9 +677,10 @@ fn slack_upper_bounds(
 /// (discopt C-39). The system is infeasible iff some free-sign `y` has `bᵀy`
 /// strictly above the box-maximum of `(Aᵀy)ᵀx` — the `c = 0` Neumaier–Shcherbina
 /// safe bound `g₀(y) > 0`. Both `±y` are tried (the ray is known up to sign) with a
-/// magnitude-scaled margin keeping the strict inequality rigorous under rounding.
+/// margin that bounds the rounding of every accumulation actually performed, keeping
+/// the strict inequality rigorous.
 /// A **slack** column `[0, ∞)` whose open upper side is selected would collapse `g₀`
-/// to `−∞`; an *exact* upper bound recovered from its defining row
+/// to `−∞`; an upper bound recovered from its defining row
 /// ([`slack_upper_bounds`], covering both `+1` and `−1` surplus slacks) makes the
 /// term finite, so a genuine infeasibility whose ray touches either a `≤`-slack or a
 /// `≥`-surplus-slack still certifies (mirrors the Python boundary's
@@ -635,44 +700,72 @@ pub(super) fn farkas_ray_certifies_cols(
     if y.len() != m || !y.iter().all(|v| v.is_finite()) {
         return false;
     }
-    // Exact, superset-preserving upper bounds for the slack columns (the only open
-    // columns a `≤`-Farkas ray selects on these LPs), so a genuine infeasibility
-    // whose ray touches a slack still certifies. Built lazily on first need.
+    // Superset-preserving upper bounds for the slack columns (the only open columns a
+    // `≤`-Farkas ray selects on these LPs), so a genuine infeasibility whose ray
+    // touches a slack still certifies. Built lazily on first need.
     let mut slack_ub: Option<Vec<f64>> = None;
     for sgn in [1.0f64, -1.0] {
         let ys: Vec<f64> = y.iter().map(|v| sgn * v).collect();
-        let by: f64 = b.iter().zip(&ys).map(|(bi, yi)| bi * yi).sum();
+        // `bᵀy` and the magnitude its rounding is bounded by. `by.abs()` says nothing
+        // about the error of this sum: on the #1017 LP `Σ|b_i·y_i| = 6e2` produced
+        // `by = 3e-8`, a relative cancellation of 5e-11 — the *result* looked
+        // comfortably resolved while it was pure rounding.
+        let mut by = 0.0f64;
+        let mut by_abs = 0.0f64;
+        for (bi, yi) in b.iter().zip(&ys) {
+            let t = bi * yi;
+            by += t;
+            by_abs += t.abs();
+        }
         let mut contrib = 0.0f64;
         let mut abs_sum = 0.0f64;
         let mut open = false;
         for j in 0..n {
-            let aty = cols.dot(j, &ys);
-            // Box-max of `aty · x` over `[l_j, u_j]`: `aty·u_j` (aty>0) / `aty·l_j`
-            // (aty<0). An open selected side collapses `g₀` to `−∞` — recover a finite
-            // upper bound for a slack column from its defining row; a genuinely open
-            // structural side bails this sign (conservative).
-            let boxmax = if aty > 0.0 {
-                let uj = if u[j] >= INF {
-                    let sub =
-                        slack_ub.get_or_insert_with(|| slack_upper_bounds(cols, m, n, b, l, u));
-                    if sub[j] >= INF {
-                        open = true;
-                        break;
+            let (aty, aty_abs, nnz) = cols.dot_with_magnitude(j, &ys);
+            // `aty` is itself a cancelling sum, so the true value is only known to lie
+            // in `[aty − e, aty + e]`. `γ_{nnz+2}` (rather than `γ_nnz`) also covers
+            // the rounding of the two endpoint additions below.
+            let e = gamma(nnz + 2) * aty_abs;
+            // Upper bound on `sup_x (aty_true · x_j)` over `x_j ∈ [l_j, u_j]`. For a
+            // fixed `t` that sup is `t·u_j` (t>0) / `t·l_j` (t<0) / `0` (t=0), and it
+            // is convex in `t`, so its max over the interval is attained at an
+            // endpoint. An open side the interval can select collapses `g₀` to `−∞` —
+            // recover a finite upper bound for a slack column from its defining row; a
+            // genuinely open structural side bails this sign (conservative).
+            let mut boxmax = f64::NEG_INFINITY;
+            for t in [aty - e, aty + e] {
+                let sup = if t > 0.0 {
+                    let uj = if u[j] >= INF {
+                        let sub =
+                            slack_ub.get_or_insert_with(|| slack_upper_bounds(cols, m, n, b, l, u));
+                        sub[j]
+                    } else {
+                        u[j]
+                    };
+                    if uj >= INF {
+                        f64::INFINITY
+                    } else {
+                        t * uj
                     }
-                    sub[j]
+                } else if t < 0.0 {
+                    if l[j] <= -INF {
+                        f64::INFINITY
+                    } else {
+                        t * l[j]
+                    }
                 } else {
-                    u[j]
+                    0.0
                 };
-                aty * uj
-            } else if aty < 0.0 {
-                if l[j] <= -INF {
-                    open = true;
-                    break;
+                if sup > boxmax {
+                    boxmax = sup;
                 }
-                aty * l[j]
-            } else {
-                0.0
-            };
+            }
+            // `+∞` (an open selected side) and NaN alike: no usable bound on this
+            // column, so no bound on `g₀`.
+            if !boxmax.is_finite() {
+                open = true;
+                break;
+            }
             contrib += boxmax;
             abs_sum += boxmax.abs();
         }
@@ -683,12 +776,33 @@ pub(super) fn farkas_ray_certifies_cols(
             crate::profile::incr(crate::profile::Ctr::FarkasRejectOpen);
             continue;
         }
-        // Neumaier–Shcherbina relative margin so the strict `> 0` is rigorous.
-        let margin = 1e-9 * (1.0 + by.abs() + abs_sum);
-        if by - contrib > margin {
+        // The Neumaier–Shcherbina margin, over the *accumulations that were actually
+        // performed* (#1017): `γ_{m+1}·Σ|b_i·y_i|` for the row side, `γ_{n+1}·Σ|boxmax_j|`
+        // for the column side (the `+1` covering one product rounding per term), and the
+        // final subtraction's own rounding. Scaling by the *results* — the pre-#1017
+        // `1e-9·(1 + |by| + Σ|boxmax|)` — bounds none of them: it certified a feasible
+        // LP infeasible off a `by` that was 5e-11 of the magnitudes summed to reach it.
+        let ns_margin = gamma(m + 1) * by_abs
+            + gamma(n + 1) * abs_sum
+            + f64::EPSILON * (by.abs() + contrib.abs());
+        // Never *looser* than the pre-#1017 heuristic floor: this change may only
+        // remove certificates, never add one, so its risk is bounded to lost fathoming
+        // (measured) and can never be a new false `Infeasible`. The `1.0 + …` also
+        // keeps a nonzero margin when every magnitude is zero.
+        let legacy_margin = 1e-9 * (1.0 + by.abs() + abs_sum);
+        // `1 + 64ε` covers the margin's own evaluation (a handful of rounded ops).
+        let margin = legacy_margin.max(ns_margin) * (1.0 + 64.0 * f64::EPSILON);
+        let g0 = by - contrib;
+        if g0 > margin {
             return true;
         }
         crate::profile::incr(crate::profile::Ctr::FarkasRejectMargin);
+        if g0 > legacy_margin {
+            // Rejected only because of the accumulation bound: a certificate the
+            // pre-#1017 margin would have issued. Counted so the cost of that change
+            // is visible in any run, not assumed.
+            crate::profile::incr(crate::profile::Ctr::FarkasRejectCancellation);
+        }
     }
     false
 }
@@ -2624,6 +2738,286 @@ mod tests {
              (HiGHS solves it feasible); got {:?}",
             r.status
         );
+    }
+
+    /// Compensated (Neumaier) summation — the *exact* sum of the input floats for any
+    /// data whose per-step compensation is itself representable, which the `#1017`
+    /// fixture below is by construction. Used only as a test instrument, to state the
+    /// ground truth the naive accumulation is being compared against.
+    fn exact_sum(v: &[f64]) -> f64 {
+        let mut s = 0.0f64;
+        let mut c = 0.0f64;
+        for &x in v {
+            let t = s + x;
+            c += if s.abs() >= x.abs() {
+                (s - t) + x
+            } else {
+                (x - t) + s
+            };
+            s = t;
+        }
+        s + c
+    }
+
+    /// #1017: the Farkas margin must bound the rounding of the **accumulations** that
+    /// produce `g₀`, not the magnitude of their results.
+    ///
+    /// The LP is a path incidence matrix (`A_j = e_j − e_{j+1}`) on `m = 11` rows with
+    /// finite boxes, and `y = 1`. Every column sums to zero, so `Aᵀy = 0` **exactly**
+    /// and `range(A) = {v : Σv_i = 0}`: the system `Ax = b` is feasible for real `x`
+    /// (`x_j = Σ_{i≤j} b_i`, all inside the box) precisely because `bᵀy = Σb_i` is
+    /// exactly zero. It is exactly zero — and yet the naive left-to-right sum the check
+    /// performs returns `+4`, because `b = [1e16, 1.5×8, −1e16, −12]` accumulates `1.5`
+    /// onto `1e16`, where the ulp is `2`, eight times: each add rounds up by `0.5`.
+    ///
+    /// Pre-#1017 the margin was `1e-9·(1 + |by| + Σ|boxmax|) = 5e-9`, scaled off the
+    /// *result* `by = 4` and a `Σ|boxmax| = 0`; `4 > 5e-9` certified this feasible LP
+    /// infeasible. The rigorous margin scales off `Σ|b_i·y_i| = 2e16`, giving
+    /// `γ_12 · 2e16 ≈ 53 > 4` — the sum is entirely rounding, and is rejected.
+    ///
+    /// This is the mechanism reported on the `QPLIB_3814` relaxation LP (`by = 3e-8`
+    /// out of `Σ|b_i·y_i| = 600`, i.e. 5e-11 relative), reduced to arithmetic that
+    /// needs no external corpus. FAILS pre-fix (`certifies` returns `true`).
+    #[test]
+    fn c39_farkas_margin_rejects_a_cancellation_only_certificate_1017() {
+        let m = 11usize;
+        let n = 10usize;
+        let mut b = vec![1e16];
+        b.extend(std::iter::repeat_n(1.5, 8));
+        b.push(-1e16);
+        b.push(-12.0);
+        assert_eq!(b.len(), m);
+
+        // Ground truth: `bᵀy` is exactly zero (⇒ `b ∈ range(A)` ⇒ the LP is FEASIBLE),
+        // while the naive accumulation the certificate performs reports `+4`.
+        let y = vec![1.0f64; m];
+        let terms: Vec<f64> = b.iter().zip(&y).map(|(bi, yi)| bi * yi).collect();
+        assert_eq!(exact_sum(&terms), 0.0, "premise: the exact bᵀy is zero");
+        let naive: f64 = terms.iter().copied().sum();
+        assert!(
+            naive > 1e-9 * (1.0 + naive.abs()),
+            "premise: the naive bᵀy ({naive}) clears the pre-#1017 margin"
+        );
+
+        // `A_j = e_j − e_{j+1}` in CSC, boxes wide enough to hold `x_j = Σ_{i≤j} b_i`
+        // (max |x| = 1e16 + 1.5) and finite, so nothing bails as structurally open.
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            row_idx.push(j);
+            vals.push(1.0);
+            row_idx.push(j + 1);
+            vals.push(-1.0);
+            col_ptr.push(row_idx.len());
+        }
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let l = vec![-2e16; n];
+        let u = vec![2e16; n];
+
+        assert!(
+            !farkas_ray_certifies_cols(&y, &sp, n, m, &b, &l, &u),
+            "a bᵀy that is exactly zero in exact arithmetic must never certify \
+             infeasibility, whatever the naive sum reports"
+        );
+        let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+        assert!(
+            !farkas_ray_certifies_cols(&neg, &sp, n, m, &b, &l, &u),
+            "neither sign of the ray may certify"
+        );
+
+        // End to end: the engine must not fathom this feasible LP.
+        let c = vec![0.0; n];
+        let r = solve_lp_cols(sp, m, n, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_ne!(
+            r.status,
+            LpStatus::Infeasible,
+            "feasible cancellation LP must never be reported Infeasible, got {:?}",
+            r.status
+        );
+    }
+
+    /// #1017, the class rather than the instance: over a family of LPs that are
+    /// **feasible by construction** — `A_j = e_j − e_{j+1}` (so `range(A) = {v : Σv = 0}`
+    /// and `Aᵀ1 = 0`) with `b` built to sum to exactly zero out of terms spanning up to
+    /// 16 orders of magnitude — the ray `y = 1` may never certify, whatever the naive
+    /// accumulation of `bᵀy` happens to report. Sweeps the big-term magnitude (1e12 to
+    /// 1e18, so the ulp at the accumulator runs from below to well above the small
+    /// terms) and the count and size of the small terms.
+    #[test]
+    fn c39_farkas_never_certifies_a_feasible_cancellation_family_1017() {
+        let mut cases = 0usize;
+        let mut naive_nonzero = 0usize;
+        for big_exp in [12, 14, 15, 16, 17, 18] {
+            for k in [2usize, 3, 8, 17, 40] {
+                for step in [0.5f64, 1.5, 2.5, 3.5] {
+                    let big = 10f64.powi(big_exp);
+                    // Small terms are multiples of 0.5 and few enough that their sum is
+                    // exact, so `Σb_i` is exactly zero as a real number: the LP has a
+                    // real solution and no `y` can certify it empty.
+                    let smalls: Vec<f64> = (0..k).map(|t| step + 0.5 * (t % 7) as f64).collect();
+                    let ssum: f64 = exact_sum(&smalls);
+                    let mut b = vec![big];
+                    b.extend_from_slice(&smalls);
+                    b.push(-big);
+                    b.push(-ssum);
+                    let m = b.len();
+                    let n = m - 1;
+                    assert_eq!(exact_sum(&b), 0.0, "generator: b must sum to exactly 0");
+
+                    let mut col_ptr = vec![0usize];
+                    let mut row_idx = Vec::new();
+                    let mut vals = Vec::new();
+                    for j in 0..n {
+                        row_idx.push(j);
+                        vals.push(1.0);
+                        row_idx.push(j + 1);
+                        vals.push(-1.0);
+                        col_ptr.push(row_idx.len());
+                    }
+                    let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+                    // Wide enough for `x_j = Σ_{i≤j} b_i` (max ≈ big + Σsmalls).
+                    let w = 4.0 * (big + ssum.abs() + 1.0);
+                    let l = vec![-w; n];
+                    let u = vec![w; n];
+
+                    let y = vec![1.0f64; m];
+                    let naive: f64 = b.iter().sum();
+                    if naive != 0.0 {
+                        naive_nonzero += 1;
+                    }
+                    for ray in [y.clone(), y.iter().map(|v| -v).collect()] {
+                        assert!(
+                            !farkas_ray_certifies_cols(&ray, &sp, n, m, &b, &l, &u),
+                            "false certificate on a feasible LP: big=1e{big_exp} k={k} \
+                             step={step} naive bᵀy={naive} (exact 0)"
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        // #6: prove the probe fired, and that the family actually exercises the
+        // defect (a family whose naive sums were all exactly 0 would be vacuous).
+        assert_eq!(cases, 240, "expected 240 (LP, sign) checks");
+        assert!(
+            naive_nonzero >= 40,
+            "family is vacuous: only {naive_nonzero} of 120 LPs have a nonzero naive bᵀy"
+        );
+        println!(
+            "checks executed: {cases}; LPs with a rounding-only nonzero bᵀy: \
+             {naive_nonzero}/120 (57 measured; 114 of the 240 checks \
+             false-certify on the pre-#1017 margin)"
+        );
+    }
+
+    /// The cost side of #1017, measured rather than assumed: a margin that is too
+    /// loose is a false fathom, but one that is too tight turns rigorous fathoming
+    /// into `Numerical`. On the two captured *genuinely-infeasible* node LPs the
+    /// certificate clears the rigorous margin by 3.2e9× and 5.0e11×, and the
+    /// accumulation term is itself **below** the pre-#1017 heuristic floor
+    /// (7.6e-14 vs 2.5e-9; 3.1e-10 vs 1.1e-7), i.e. the check on these LPs is
+    /// unchanged. The new term only binds under a cancellation ratio
+    /// `Σ|terms| / |result|` above ~1e4 — the reported LP's was 2e10.
+    ///
+    /// This test fails if a future margin change eats that headroom.
+    #[test]
+    fn c39_genuine_infeasibility_keeps_wide_margin_headroom_1017() {
+        let mut checked = 0usize;
+        for (name, json) in [
+            (
+                "c39_surplus_slack",
+                include_str!("testdata/c39_surplus_slack_infeasible_lp.json"),
+            ),
+            (
+                "c39_scaled_surplus_slack",
+                include_str!("testdata/c39_scaled_surplus_slack_infeasible_lp.json"),
+            ),
+        ] {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b) = parse_lp_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let mut certifying = 0usize;
+            let r = solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &SimplexOptions::default());
+            assert_eq!(r.status, LpStatus::Infeasible, "{name}");
+            let y = r.dual.clone();
+            assert_eq!(y.len(), m, "{name}: no ray");
+            let mut lb = l.clone();
+            let mut ub = u.clone();
+            lb.resize(n, 0.0);
+            ub.resize(n, 0.0);
+            for sgn in [1.0f64, -1.0] {
+                let ys: Vec<f64> = y.iter().map(|v| sgn * v).collect();
+                let (mut by, mut by_abs) = (0.0f64, 0.0f64);
+                for (bi, yi) in b.iter().zip(&ys) {
+                    by += bi * yi;
+                    by_abs += (bi * yi).abs();
+                }
+                let sub = slack_upper_bounds(&sp, m, n, &b, &lb, &ub);
+                let (mut contrib, mut abs_sum, mut open) = (0.0f64, 0.0f64, false);
+                for j in 0..n {
+                    let (aty, aty_abs, nnz) = sp.dot_with_magnitude(j, &ys);
+                    let e = gamma(nnz + 2) * aty_abs;
+                    let mut bm = f64::NEG_INFINITY;
+                    for t in [aty - e, aty + e] {
+                        let s = if t > 0.0 {
+                            let uj = if ub[j] >= INF { sub[j] } else { ub[j] };
+                            if uj >= INF {
+                                f64::INFINITY
+                            } else {
+                                t * uj
+                            }
+                        } else if t < 0.0 {
+                            if lb[j] <= -INF {
+                                f64::INFINITY
+                            } else {
+                                t * lb[j]
+                            }
+                        } else {
+                            0.0
+                        };
+                        if s > bm {
+                            bm = s;
+                        }
+                    }
+                    if !bm.is_finite() {
+                        open = true;
+                        break;
+                    }
+                    contrib += bm;
+                    abs_sum += bm.abs();
+                }
+                if open {
+                    println!("{name} sgn={sgn:+}: OPEN (bails)");
+                    continue;
+                }
+                let ns = gamma(m + 1) * by_abs
+                    + gamma(n + 1) * abs_sum
+                    + f64::EPSILON * (by.abs() + contrib.abs());
+                let legacy = 1e-9 * (1.0 + by.abs() + abs_sum);
+                let g0 = by - contrib;
+                println!(
+                    "{name} sgn={sgn:+} m={m} n={n} g0={g0:.6e} by={by:.6e} \
+                     by_abs={by_abs:.6e} abs_sum={abs_sum:.6e} ns={ns:.6e} \
+                     legacy={legacy:.6e} headroom_ns={:.3e} headroom_legacy={:.3e}",
+                    g0 / ns,
+                    g0 / legacy
+                );
+                if g0 > 0.0 {
+                    assert!(
+                        g0 > 1e6 * ns,
+                        "{name}: the certifying sign clears the rigorous margin by \
+                         only {:.3e}× — the accumulation term is eating real \
+                         fathoming headroom",
+                        g0 / ns
+                    );
+                    certifying += 1;
+                }
+                checked += 1;
+            }
+            assert!(certifying > 0, "{name}: no sign certified");
+        }
+        // #6: the probe must prove it fired.
+        assert_eq!(checked, 4, "expected 4 (fixture, sign) pairs measured");
     }
 
     /// Minimal JSON parser for the standard-form LP fixture (flat numeric arrays;

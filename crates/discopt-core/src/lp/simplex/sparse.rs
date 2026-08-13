@@ -127,6 +127,26 @@ impl SparseCols {
         s
     }
 
+    /// Sparse dot `yᵀ A_j` **with the magnitudes its rounding error is bounded by**:
+    /// returns `(Σ y_i a_ij, Σ|y_i a_ij|, k)` where `k` is the number of terms summed.
+    /// The classic bound is `|fl(x·y) − x·y| ≤ γ_k · Σ|x_i y_i|` (Higham, *Accuracy and
+    /// Stability of Numerical Algorithms*, §3.1) — the *result* alone says nothing
+    /// about the error of a cancelling sum, so a rigorous consumer (the Farkas
+    /// certificate in [`super::primal::farkas_ray_certifies_cols`]) needs the absolute
+    /// sum and the length, not just the dot.
+    #[inline]
+    pub fn dot_with_magnitude(&self, j: usize, y: &[f64]) -> (f64, f64, usize) {
+        let (rows, vals) = self.col(j);
+        let mut s = 0.0;
+        let mut abs = 0.0;
+        for (k, &r) in rows.iter().enumerate() {
+            let t = y[r] * vals[k];
+            s += t;
+            abs += t.abs();
+        }
+        (s, abs, rows.len())
+    }
+
     /// Scatter column `j` into a dense buffer (only the nonzero rows are written;
     /// the caller must supply a zeroed buffer of length `m`).
     #[inline]
