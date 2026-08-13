@@ -103,7 +103,7 @@ consumers (by call-site density):
 | `_relax/obbt.py` | LP engine for optimality-based bound tightening |
 | `_relax/mccormick_lp.py`, `_relax/milp_relaxation.py` | McCormick-LP relaxation mode |
 | `_relax/partition_selection.py` | Partition-point LPs (piecewise McCormick) |
-| `doe/design.py`, `doe/fractional.py`, `doe/screening.py` | MILP-based optimal design |
+| `doe/design.py`, `doe/fractional.py`, `doe/screening.py` (now in the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin, #389) | MILP-based optimal design |
 | `ro/formulations/polyhedral.py` | Polyhedral uncertainty subproblems |
 | `_relax/convexity/linear_context.py`, `_relax/gdp_reformulate.py`, `export/`, `cli.py`, `constants.py` | Minor / incidental |
 

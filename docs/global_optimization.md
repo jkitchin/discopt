@@ -121,7 +121,12 @@ but the global *guarantee* is gone — so do not read `result.objective` as glob
   call arbitrary Python and have **no algebraic relaxation**, so the bounding step
   cannot reason about them. They are evaluated pointwise during local NLP solves
   only — useful for modeling convenience, but they reduce the run to local
-  optimization with no global certificate.
+  optimization with no global certificate. If the body traces through the
+  reduced-space `MCBox` type you *do* get a certificate — see
+  {doc}`notebooks/reduced_space_customcall`. If it does not, `solver="direct"`
+  gives you a systematic global *search* over the box in place of a single local
+  solve ({doc}`notebooks/direct_global`) — still with no certificate, but a much
+  better answer on a multimodal objective.
 
 - **External simulators, table lookups, or interpolated data** used as objective
   or constraint terms. Same reason as black-box functions: discopt cannot
@@ -147,7 +152,9 @@ but the global *guarantee* is gone — so do not read `result.objective` as glob
 ```{warning}
 A black-box `udf` does not raise an error — it silently turns a global solve into
 a local one. If you need a *certificate*, keep the model algebraic and built from
-the supported intrinsics.
+the supported intrinsics. If you cannot, `solver="direct"` at least searches the
+box instead of taking the first local minimum it finds — but it does not restore
+the certificate, and nothing else will either.
 ```
 
 ## A quick amenability checklist

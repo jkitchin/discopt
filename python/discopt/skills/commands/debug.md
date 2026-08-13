@@ -36,7 +36,9 @@ Read the output carefully:
   set `JAX_PLATFORMS=cpu` (or `cuda`) before importing. discopt needs 64-bit
   floats; `JAX_ENABLE_X64=1` is auto-set but verify it if you see precision loss.
 - **Optional dep `not installed`** (cyipopt, highspy, onnx, litellm, pycutest) →
-  install the matching extra: `pip install "discopt[nn]"`, `[llm]`, `[doe]`, etc.
+  install the matching extra: `pip install "discopt[nn]"`, `[llm]`, `[ipopt]`, etc.
+  (Design of experiments is no longer an extra — it is a separate package:
+  `pip install discopt-doe`.)
 
 ## Step 1 — Reproduce minimally
 

@@ -83,6 +83,10 @@ adversary/
 
 # Jupyter Book
 docs/_build/
+# sphinx-autoapi writes the generated API tree next to the source, not under
+# _build/, so it needs its own rule — a docs build otherwise leaves ~2 MB of
+# generated .rst as untracked noise in `git status`.
+docs/autoapi/
 
 # DoE demo workbook artifacts
 docs/notebooks/*.xlsx
@@ -118,3 +122,9 @@ scratchpad/_*_worker.py
 # source. The `.profdata` form is the merged artifact from the same tooling.
 *.profraw
 *.profdata
+
+# Benchmark-panel outputs written to the repo root. Same rule as the scratchpad
+# block above: keep the harness (`discopt_benchmarks/scripts/*.py`), drop what it
+# generates. `issue844_primal_quality_panel.py` defaults `--out` to a bare
+# filename, so a run from the repo root leaves one here.
+/*_quality_panel.json

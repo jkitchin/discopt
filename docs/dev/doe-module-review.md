@@ -1,5 +1,14 @@
 # DOE Module Review — Correctness and SOTA
 
+> **MOVED (#389).** The `discopt.doe` module described below no longer lives in
+> this repository — it was extracted to the standalone
+> [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
+> (`pip install discopt-doe`; discopt is a namespace package, so `discopt.doe`
+> imports and the `discopt doe ...` subcommand work unchanged once installed).
+> Every `python/discopt/doe/...` path in this document refers to a file in
+> **that** repository. Kept here as a historical record of the work; do not read
+> it as describing in-tree code.
+
 **Date:** 2026-07-03
 **Scope:** `python/discopt/doe/` (~13,000 lines, 24 files) — Design of Experiments:
 optimal design (A/D/E/ME criteria + FIM), model discrimination, model selection,
