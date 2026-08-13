@@ -37,6 +37,42 @@
 //! is *bound-changing* under CLAUDE.md §5 even though no bound formula moves:
 //! default **off**, opt in with `DISCOPT_LU_SYMBOLIC_REUSE=1`, pending the
 //! corpus-wide differential panel §5 requires for graduation.
+//!
+//! # Measured: the panel FAILED. This flag must not graduate.
+//!
+//! Interleaved A/B (3 reps per arm, arms alternated within each instance, 45 s
+//! per-LP limit) over 13 captured QPLIB relaxation LPs:
+//!
+//! - **Median speedup 1.009x** (1.024x if the two regressed instances are
+//!   excluded); range 0.97x–1.24x. The pre-registered bar was ≥ 1.05x.
+//! - **Two status regressions**: QPLIB_0911 `_rlt0` and `_rlt1` go from
+//!   `optimal` in 2.1 s / 1279 dual pivots to `iter_limit` in >45 s / 6144
+//!   pivots. An `iter_limit` on a node LP is an *uncertified node* (CLAUDE.md
+//!   §1), which by itself disqualifies the flag.
+//! - Reuse rate 77.2% (1016 of 1316 sparse factorizations), 287 fill refreshes,
+//!   0 factorization failures — the mechanism *operated*; it is simply not worth
+//!   anything.
+//! - Objective agreement was clean: 0 of 11 `optimal`/`optimal` pairs drifted
+//!   above 1e-9 relative.
+//!
+//! This is the `DISCOPT_CUT_INHERIT` outcome — sound but not net-positive — with
+//! an added status regression on top. The earlier prediction of "roughly 1.10x"
+//! is **retracted** (CLAUDE.md §11). What survives is the
+//! `Phase::LuSymbolic`/`LuNumeric` split this work added, which is what produced
+//! the attribution (numeric ≈50% of LP wall, symbolic ≈11%, everything else
+//! ≈38%); the reuse path itself is kept only because it is byte-identical when
+//! off and is the control arm for that measurement.
+//!
+//! Caveat (§9): `uptime` load average was 4.57 during the A/B. The 0.05x/0.04x
+//! regressions are far outside any plausible noise; the ~1.0x cluster is not, and
+//! individual cells in 0.97x–1.07x should be read as "no measurable effect"
+//! rather than cited as separate results.
+//!
+//! The QPLIB_0911 collapse is **not** caused by this flag: the same instance goes
+//! to `iter_limit` under five independent rounding-level perturbations of the
+//! pivot path (refactor interval 100 and 200; LU pivot threshold 0.5 and 0.01;
+//! this ordering cache). The underlying defect is the dual ratio test's missing
+//! stability pass — see `simplex/harris.rs`.
 
 use std::sync::OnceLock;
 
