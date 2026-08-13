@@ -1,0 +1,140 @@
+[
+  {
+    "model": "jobshop",
+    "n_vars": 10,
+    "n_int": 6,
+    "n_groups": 3,
+    "n_residual": 0,
+    "dive_points": 0,
+    "dive_seconds": 0.0,
+    "tests": 48,
+    "all": {
+      "configs": 8,
+      "feasible": 6,
+      "zero_hits": 6,
+      "relax_hits": 6,
+      "random_hits": 24,
+      "random_tests": 24,
+      "nonz_feasible": 6,
+      "zero_hits_on_nonz": 6,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "unbiased": {
+      "configs": 8,
+      "feasible": 6,
+      "zero_hits": 6,
+      "relax_hits": 6,
+      "random_hits": 24,
+      "random_tests": 24,
+      "nonz_feasible": 6,
+      "zero_hits_on_nonz": 6,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "dive_pool": {
+      "configs": 0,
+      "feasible": 0,
+      "zero_hits": 0,
+      "relax_hits": 0,
+      "random_hits": 0,
+      "random_tests": 0,
+      "nonz_feasible": 0,
+      "zero_hits_on_nonz": 0,
+      "z_only": 0,
+      "z_missed": 0
+    }
+  },
+  {
+    "model": "small_batch",
+    "n_vars": 49,
+    "n_int": 30,
+    "n_groups": 12,
+    "n_residual": 6,
+    "dive_points": 0,
+    "dive_seconds": 0.0,
+    "tests": 2760,
+    "all": {
+      "configs": 460,
+      "feasible": 2,
+      "zero_hits": 2,
+      "relax_hits": 2,
+      "random_hits": 8,
+      "random_tests": 8,
+      "nonz_feasible": 2,
+      "zero_hits_on_nonz": 2,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "unbiased": {
+      "configs": 460,
+      "feasible": 2,
+      "zero_hits": 2,
+      "relax_hits": 2,
+      "random_hits": 8,
+      "random_tests": 8,
+      "nonz_feasible": 2,
+      "zero_hits_on_nonz": 2,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "dive_pool": {
+      "configs": 0,
+      "feasible": 0,
+      "zero_hits": 0,
+      "relax_hits": 0,
+      "random_hits": 0,
+      "random_tests": 0,
+      "nonz_feasible": 0,
+      "zero_hits_on_nonz": 0,
+      "z_only": 0,
+      "z_missed": 0
+    }
+  },
+  {
+    "model": "cstr",
+    "n_vars": 76,
+    "n_int": 20,
+    "n_groups": 6,
+    "n_residual": 5,
+    "dive_points": 0,
+    "dive_seconds": 0.0,
+    "tests": 2682,
+    "all": {
+      "configs": 447,
+      "feasible": 1,
+      "zero_hits": 1,
+      "relax_hits": 1,
+      "random_hits": 1,
+      "random_tests": 4,
+      "nonz_feasible": 1,
+      "zero_hits_on_nonz": 1,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "unbiased": {
+      "configs": 447,
+      "feasible": 1,
+      "zero_hits": 1,
+      "relax_hits": 1,
+      "random_hits": 1,
+      "random_tests": 4,
+      "nonz_feasible": 1,
+      "zero_hits_on_nonz": 1,
+      "z_only": 0,
+      "z_missed": 0
+    },
+    "dive_pool": {
+      "configs": 0,
+      "feasible": 0,
+      "zero_hits": 0,
+      "relax_hits": 0,
+      "random_hits": 0,
+      "random_tests": 0,
+      "nonz_feasible": 0,
+      "zero_hits_on_nonz": 0,
+      "z_only": 0,
+      "z_missed": 0
+    }
+  }
+]
