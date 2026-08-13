@@ -53,6 +53,35 @@ The release procedure that produces these entries is documented in
   test `cold_primal_does_not_claim_unbounded_on_a_bounded_lp` returns
   `Unbounded` (obj 351) without the certifier and `Numerical` with it, and
   asserts a rejection counter fired so the fixture is proven to reach the guard.
+
+- **A NaN variable bound reached the simplex and was read two contradictory
+  ways** (`fix(lp)`, #1008). The modeling layer spells "no bound" as **NaN**
+  (`Model.continuous(ub=None)` stores `array(nan)`); the LP layer spells it as
+  the sentinel `±1e20`. Nothing translated between them, and an untranslated NaN
+  does not fail loudly — every comparison against it is false, so each guard
+  reads it as whichever answer its comparison happens to be written for. The
+  ratio test asks `ub < INF` ("does this bound block?") and calls a NaN bound
+  **open**, stepping to `t = INF`; the ray certifier above asks `ub >= INF` ("is
+  this side open?") and calls the same bound **closed**. This is the
+  `INF`-is-`1e20` hazard already documented in `CLAUDE.md`, in its other guise:
+  there the sentinel silently survives a multiplication, here it is silently
+  absent.
+
+  Found by the certifier: a Benders recourse LP (`min -w` over `w ∈ [0, NaN]`,
+  `-w ≤ 0`) had been reported `unbounded` on the strength of a box no guard could
+  certify as recessive. That verdict was correct — the LP *is* unbounded below —
+  but it was correct by luck, resting on which of the two readings the ratio test
+  happened to use, over a box the engine could not derive it from.
+
+  Both halves are fixed: `lp_simplex._finite_box` translates the box (NaN and
+  `±inf`, and any magnitude past the sentinel, onto `±1e20`) so the simplex sees
+  one convention, and the PyO3 LP/MILP entry points refuse a NaN bound with a
+  `ValueError` naming the index, so a caller that skips the translation gets a
+  loud error instead of a verdict derived from two incompatible readings of the
+  same number. `±inf` is deliberately *not* refused: it satisfies `>= INF` and
+  fails `< INF`, so both readings already agree it is open. Regression tests in
+  `python/tests/test_1008_nan_lp_bound.py` fail without the translation
+  (`ValueError: ub[0] is NaN`) and pass with it.
   The pre-existing `unbounded_detected` / `unbounded_emits_a_valid_primal_ray`
   tests confirm a genuine unbounded ray still certifies untouched.
   `cargo test -p discopt-core` → 610 passed.
