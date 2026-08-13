@@ -1356,6 +1356,7 @@ mod tests {
         let expired = SimplexOptions {
             deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
             bank_deadline_duals: true,
+            cold_dual_start: false,
             ..opts()
         };
         let cut = solve_lp_warm(&lp2, &b, &cold.basis, &expired);

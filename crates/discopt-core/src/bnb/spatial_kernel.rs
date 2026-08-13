@@ -24,7 +24,9 @@ use crate::bnb::mccormick_patch as mc;
 use crate::bnb::obbt_sweep::{obbt_probe_sweep, ObbtSweepResult};
 use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
-use crate::lp::simplex::{primal::solve_lp_cols_scaled, LpStatus, SimplexOptions};
+use crate::lp::simplex::{
+    dual::solve_lp_warm_csc, primal::solve_lp_cols_scaled, LpStatus, SimplexOptions,
+};
 
 /// A box-independent linear constraint row `sum(coeffs[k] * x[cols[k]]) <= rhs`
 /// (senses are normalized to `<=` by the Python producer; an `==` row is two `<=`).
@@ -376,6 +378,51 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     }
 }
 
+/// The sign-matched slack start basis for a node LP in the kernel's standard form
+/// `[A | I] z = b`, or `None` when it would not be dual-feasible.
+///
+/// Slacks (`n_cols..n_total`) basic, so `B = I`; the objective is zero over them,
+/// hence `y = B⁻ᵀc_B = 0` and each reduced cost is just `c_j`. Putting structural
+/// column `j` at its lower bound when `c_j > 0` and its upper when `c_j < 0` then
+/// makes every reduced cost point the right way — dual feasibility — provided the
+/// selected side is finite. `INF` here is the layer's `1e20` sentinel, never
+/// `f64::INFINITY`, so the test is on the magnitude of the bound itself.
+///
+/// This is the Rust twin of `_dual_start_slack_basis` in `solvers/milp_simplex.py`,
+/// which does the same job for the Python pure-LP entry.
+fn cold_dual_start_basis(
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n_total: usize,
+) -> Option<crate::lp::basis::Basis> {
+    use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
+    const INF: f64 = 1e20;
+    if m == 0 || n_total != l.len() || n_total != u.len() || c.len() != n_total {
+        return None;
+    }
+    let n_struct = n_total - m;
+    let mut col_status = vec![AT_LOWER; n_total];
+    for (j, status) in col_status.iter_mut().enumerate().take(n_struct) {
+        if c[j] < 0.0 {
+            if u[j] >= INF {
+                return None; // selected side open → dual-infeasible
+            }
+            *status = AT_UPPER;
+        } else if l[j] <= -INF {
+            return None;
+        }
+    }
+    for status in col_status.iter_mut().skip(n_struct) {
+        *status = BASIC;
+    }
+    Some(Basis {
+        col_status,
+        basic_vars: (n_struct..n_total).collect(),
+    })
+}
+
 /// Run one native spatial node over the box `(lo, hi)` (length `n_cols`): assemble,
 /// solve the relaxation, and — if `run_obbt` and candidates exist — run the in-kernel
 /// OBBT sweep warm-started from the node's optimal basis.
@@ -399,16 +446,41 @@ pub fn solve_spatial_node(
     // trusted path uses and unscales x/dual/ray back to the original space, so the
     // safe-bound evaluation sees well-conditioned certificates against the
     // original system.
-    let sol = solve_lp_cols_scaled(
-        lp.sp.clone(),
-        lp.m,
-        lp.n_total,
-        &c,
-        &lp.l,
-        &lp.u,
-        &lp.b,
-        opts,
-    );
+    //
+    // `cold_dual_start` (default OFF) routes the same equilibrated solve through
+    // the DUAL simplex started from the sign-matched slack basis instead. Same LP,
+    // same scaling, same certificates — only the algorithm that reaches the
+    // optimum changes, and `solve_lp_warm_csc` cold-falls-back whenever the basis
+    // is unusable. See `SimplexOptions::cold_dual_start` for why: the cold primal
+    // grinds to `max_iter` on equality-rich (hence primal-degenerate) relaxations.
+    let start = if opts.cold_dual_start {
+        cold_dual_start_basis(&c, &lp.l, &lp.u, lp.m, lp.n_total)
+    } else {
+        None
+    };
+    let sol = match start {
+        Some(ref basis) => solve_lp_warm_csc(
+            lp.sp.clone(),
+            lp.m,
+            lp.n_total,
+            &c,
+            &lp.l,
+            &lp.u,
+            &lp.b,
+            Some(basis),
+            opts,
+        ),
+        None => solve_lp_cols_scaled(
+            lp.sp.clone(),
+            lp.m,
+            lp.n_total,
+            &c,
+            &lp.l,
+            &lp.u,
+            &lp.b,
+            opts,
+        ),
+    };
     let mut n_lp_solves = 1usize;
 
     // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective
@@ -497,6 +569,87 @@ mod tests {
         // 4 envelope rows -> m=4, n_total = 3 + 4.
         assert_eq!(lp.m, 4);
         assert_eq!(lp.n_total, 7);
+    }
+
+    /// A spec with a linear EQUALITY (as the two opposing `<=` rows the producer
+    /// emits) over a bilinear term — the primal-degenerate shape `cold_dual_start`
+    /// exists for. Generic structure, not a named instance.
+    fn equality_spec() -> SpatialKernelSpec {
+        // x + y == 2, minimize w = x*y, x,y in [0,2].
+        SpatialKernelSpec {
+            n_cols: 3,
+            n_orig: 2,
+            c: vec![0.0, 0.0, 1.0],
+            integrality: vec![false, false, false],
+            global_lo: vec![0.0, 0.0, -1e20],
+            global_hi: vec![2.0, 2.0, 1e20],
+            fixed_rows: vec![
+                FixedRow {
+                    cols: vec![0, 1],
+                    coeffs: vec![1.0, 1.0],
+                    rhs: 2.0,
+                },
+                FixedRow {
+                    cols: vec![0, 1],
+                    coeffs: vec![-1.0, -1.0],
+                    rhs: -2.0,
+                },
+            ],
+            terms: vec![EnvTerm::Bilinear { i: 0, j: 1, w: 2 }],
+            blf_terms: vec![],
+            obbt_candidates: vec![0, 1],
+        }
+    }
+
+    #[test]
+    fn cold_dual_start_reaches_the_same_node_bound() {
+        // The flag chooses the ALGORITHM, never the answer: the dual start and the
+        // cold primal must certify the same safe bound on the same node LP.
+        let spec = equality_spec();
+        let lo = vec![0.0, 0.0, -1e20];
+        let hi = vec![2.0, 2.0, 1e20];
+        let off = solve_spatial_node(&spec, &lo, &hi, false, &SimplexOptions::default());
+        let on = solve_spatial_node(
+            &spec,
+            &lo,
+            &hi,
+            false,
+            &SimplexOptions {
+                cold_dual_start: true,
+                ..SimplexOptions::default()
+            },
+        );
+        assert_eq!(off.status, LpStatus::Optimal);
+        assert_eq!(on.status, LpStatus::Optimal);
+        assert!(
+            (on.bound - off.bound).abs() < 1e-7,
+            "start basis moved the bound: {} vs {}",
+            on.bound,
+            off.bound
+        );
+        // Both are sound: min x*y on x+y==2, x,y in [0,2] is 0 (at a corner).
+        assert!(
+            on.bound <= 1e-9,
+            "safe bound {} above the optimum",
+            on.bound
+        );
+    }
+
+    #[test]
+    fn cold_dual_start_basis_is_dual_feasible_or_refused() {
+        // Slacks basic; each structural at the side its objective sign selects.
+        let c = [1.0, -1.0, 0.0, 0.0, 0.0]; // 3 structural + 2 slack columns
+        let l = [0.0, 0.0, 0.0, 0.0, 0.0];
+        let u = [1.0, 1.0, 1.0, 1e20, 1e20];
+        let b = cold_dual_start_basis(&c, &l, &u, 2, 5).expect("eligible");
+        assert_eq!(b.col_status, vec![0, 2, 0, 1, 1]); // AT_LOWER, AT_UPPER, AT_LOWER, BASIC, BASIC
+        assert_eq!(b.basic_vars, vec![3, 4]);
+
+        // An OPEN selected side is refused rather than handed over dual-infeasible.
+        let u_open = [1.0, 1e20, 1.0, 1e20, 1e20];
+        assert!(cold_dual_start_basis(&c, &l, &u_open, 2, 5).is_none());
+        let l_open = [-1e20, 0.0, 0.0, 0.0, 0.0];
+        assert!(cold_dual_start_basis(&c, &l_open, &u, 2, 5).is_none());
     }
 
     #[test]

@@ -2315,10 +2315,16 @@ def _uniform_relaxation_delegate(
     # engaged level-1 RLT AND ``DISCOPT_RLT_QUAD`` is on (default on). Off => the
     # base build is byte-identical to before.
     rlt_quad = bool(rlt_level1 and _tuning().rlt_quad)
+    # Linear-equality RLT is NOT gated on ``rlt_level1``: its rows are box-free
+    # equalities that are sound and cheap on every model with a linear equality,
+    # and the class they fix (continuous nonconvex QPs) does not otherwise trip
+    # the RLT auto-engage policy. Its own flag is the gate.
+    rlt_lineq = bool(_tuning().rlt_lineq)
     rel = build_uniform_relaxation(
         model,
         box=(flat_lb, flat_ub),
         rlt_quad=rlt_quad,
+        rlt_lineq=rlt_lineq,
         skip_separable_floor=skip_separable_floor,
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,

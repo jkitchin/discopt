@@ -305,6 +305,41 @@ class SolverTuning:
     rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
+    rlt_lineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_LINEQ", default=False))
+    """Build-time RLT products of *linear equality* constraints with the original
+    variables (``DISCOPT_RLT_LINEQ``, default **off** pending the graduation panel).
+
+    For a linear equality ``a'x + c == 0`` and a variable ``x_j``, the product
+    ``(a'x + c) * x_j == 0`` linearizes over the lifted product columns to
+    ``sum_i a_i X_ij + c x_j == 0`` — the Sherali–Adams level-1 constraint-factor
+    row. It holds with equality at every feasible point, so it never cuts one.
+
+    Unlike the bound-factor RLT families (``rlt``/``rlt_quad``), this row contains
+    **no box data**: it is identical at every node, which is why it can be emitted
+    once as a fixed row and carried into the native spatial kernel unchanged.
+
+    Motivation (measured, QPLIB continuous nonconvex QPs, root LP bound vs the
+    published optimum): the McCormick-only root bound is hopeless on this class,
+    and *all* of the recoverable gap on the instances that respond comes from this
+    equality family — the bound-factor rows added nothing on top of it:
+
+    ==============  ===========  ================  ==========  ===========
+    instance        McCormick    +linear-eq RLT    optimum     gap closed
+    ==============  ===========  ================  ==========  ===========
+    QPLIB_1157        -14.8046          -11.7716    -10.9482        78.6 %
+    QPLIB_1493        -85.6492          -65.5915    -43.1604        47.2 %
+    QPLIB_1143       -140.3576         -114.7060    -57.2467        30.9 %
+    QPLIB_1423        -25.6777          -22.6093    -14.9675        28.6 %
+    QPLIB_1507        -18.1057          -15.8070     -8.3014        23.4 %
+    ==============  ===========  ================  ==========  ===========
+
+    No bound crossed its published optimum on any instance in the probe."""
+
+    rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 4096))
+    """New-column cap for linear-equality RLT (``DISCOPT_RLT_LINEQ_MAX``, default
+    4096). Products already registered by the base decomposition are free; only
+    columns this pass has to lift itself count against the cap."""
+
     multilinear_rlt_max: int = field(
         default_factory=lambda: _env_int("DISCOPT_MULTILINEAR_RLT_MAX", 4)
     )
@@ -957,6 +992,58 @@ class SolverTuning:
     )
     """Warm-start the node LP from the parent basis (``DISCOPT_LP_WARMSTART``)."""
 
+    lp_cold_dual_start: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_LP_COLD_DUAL_START", default=False)
+    )
+    """Start a COLD pure-LP solve from the sign-matched dual-feasible slack basis
+    even with no deadline (``DISCOPT_LP_COLD_DUAL_START``).
+
+    ``solve_lp_warm_std`` already builds that basis (``_dual_start_slack_basis``),
+    but #928 engaged it only when the caller passed a finite ``time_limit``,
+    because #928's *motivation* was an anytime bankable floor rather than speed.
+    Since ``lp_warm_deadline`` is itself default-OFF, no deadline reaches the LP on
+    the default path, so in practice **every** cold node LP takes the Rust cold
+    PRIMAL loop — the loop whose own comment reads "a dense, degenerate
+    lifted-McCormick LP can otherwise grind toward ``max_iter`` and run
+    uninterruptibly for minutes" (``lp/simplex/primal.rs``).
+
+    It does. Measured on the QPLIB relaxation LPs, one variable changed (the start
+    basis) and **no deadline on either arm**, so both run to optimality and the LP
+    optimum is a control (``scratchpad/qplib_run/coldstart_ab.py``):
+
+    ==========  =====  ==================  =========================
+    instance    RLT    dual-slack start    cold primal (pre-flag)
+    ==========  =====  ==================  =========================
+    QPLIB_1157  off    0.27 s              0.18 s
+    QPLIB_1157  on     **6.17 s** optimal  **>150 s, iter-cap fail**
+    QPLIB_1493  off    0.34 s              0.30 s
+    QPLIB_1493  on     **2.91 s** optimal  **11.79 s, iter-cap fail**
+    QPLIB_1507  off    0.19 s              0.38 s
+    QPLIB_1507  on     0.56 s              0.88 s
+    QPLIB_1143  off    0.88 s              1.63 s
+    QPLIB_1143  on     5.17 s              14.59 s
+    ==========  =====  ==================  =========================
+
+    The dual start wins 6 of 8; both losses are under 0.1 s absolute. On 2 of 8 the
+    cold primal does not merely run long, it **fails** — ``max_iter`` exhausted,
+    ``None`` returned, which then cascades into the equilibrated retry and the
+    ~170x-slower cold ``solve_milp``. Wherever both arms returned, the objectives
+    agree to <=3e-12 (and to HiGHS likewise), so this is bound-neutral on those.
+
+    Why the degeneracy: an equality row reaches the LP layer as two opposing
+    ``<=`` rows, both tight at every feasible point. Relaxations rich in linear
+    equalities (constraint-factor RLT above all — see ``rlt_lineq``) are therefore
+    massively primal-degenerate, and the cold primal stalls where a dual simplex
+    started dual-feasible does not. That is a property of the row structure, not of
+    any instance.
+
+    Default **off** pending the graduation panel. It is not provably bound-neutral:
+    a different optimal basis can be returned on a degenerate LP, which can move
+    downstream branching, and the iter-cap cases change status ``None`` -> optimal
+    (a strict gain, but a change). Ineligible LPs — an open bound on the side the
+    objective sign selects — keep the primal path exactly as before.
+    """
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
@@ -1161,6 +1248,8 @@ class SolverTuning:
     def __post_init__(self) -> None:
         if self.rlt_quad_max < 1:
             raise ValueError(f"rlt_quad_max must be >= 1, got {self.rlt_quad_max}")
+        if self.rlt_lineq_max < 0:
+            raise ValueError(f"rlt_lineq_max must be >= 0, got {self.rlt_lineq_max}")
         if self.rlt_sparse_max_vars < 1:
             raise ValueError(f"rlt_sparse_max_vars must be >= 1, got {self.rlt_sparse_max_vars}")
         if self.rlt_sparse_max_terms < 1:

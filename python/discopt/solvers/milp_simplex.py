@@ -449,6 +449,14 @@ def _refined_safe_bound_regularized(
     return best
 
 
+def _cold_dual_start_enabled() -> bool:
+    """``DISCOPT_LP_COLD_DUAL_START`` — use the dual slack start on a cold,
+    deadline-free pure LP too. Resolved per call so a test can set the env var."""
+    from discopt.solver_tuning import current as _tuning_current
+
+    return bool(_tuning_current().lp_cold_dual_start)
+
+
 def _dual_start_slack_basis(
     c_arr: np.ndarray,
     lb: np.ndarray,
@@ -470,10 +478,15 @@ def _dual_start_slack_basis(
     was -141697 at *any* deadline fraction (15/40/75% of the full solve) against
     an optimum of -64473. The dual simplex maintains dual feasibility, so its
     dual objective is a monotone anytime lower bound and a deadline exit banks
-    the best bound proved so far. Only engaged when the caller set a finite
-    ``time_limit`` (i.e. it wants an interruptible solve with a bankable floor);
-    a solve without a deadline keeps the historical cold-primal path
-    bit-identical.
+    the best bound proved so far. That is why a finite ``time_limit`` engages it.
+
+    A cold solve with **no** deadline engages it only under
+    ``DISCOPT_LP_COLD_DUAL_START`` (default OFF, so the historical cold-primal
+    path stays bit-identical by default). The reason there is speed rather than
+    bankability: on equality-rich lifted relaxations — every equality reaching the
+    LP layer as two opposing, always-tight ``<=`` rows — the cold primal is
+    massively degenerate and stalls, exhausting ``max_iter`` on LPs this start
+    solves in seconds to the same optimum. See ``SolverTuning.lp_cold_dual_start``.
     """
     if m <= 0:
         return None
@@ -774,9 +787,17 @@ def solve_lp_warm_std(
     # the sign-matched slack basis when that basis is dual-feasible, because only
     # the dual loop has an anytime (monotone, bankable) lower bound to return when
     # the deadline fires — the cold primal proves nothing usable mid-run. An
-    # ineligible LP (an open bound on a selected side) keeps the primal path, and
-    # a solve with no deadline is bit-identical to before.
-    if in_basis is None and time_limit is not None and np.isfinite(time_limit):
+    # ineligible LP (an open bound on a selected side) keeps the primal path.
+    #
+    # ``lp_cold_dual_start`` (default OFF) extends the SAME start to a cold solve
+    # with no deadline, for a different reason: speed. On equality-rich lifted
+    # relaxations the cold primal grinds — on the RLT-on QPLIB_1157 root LP it
+    # exhausted ``max_iter`` after >150 s where this start returns the identical
+    # optimum in 6.2 s. See ``SolverTuning.lp_cold_dual_start`` for the 8-LP table.
+    # With the flag off, a deadline-free solve stays bit-identical to before.
+    if in_basis is None and (
+        (time_limit is not None and np.isfinite(time_limit)) or _cold_dual_start_enabled()
+    ):
         in_basis = _dual_start_slack_basis(c_arr, lb, ub, m)
 
     cs0 = None if in_basis is None else np.ascontiguousarray(in_basis[0], dtype=np.int8)

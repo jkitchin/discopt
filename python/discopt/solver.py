@@ -1271,6 +1271,11 @@ def _try_native_spatial_kernel(
             max_nodes=int(max_nodes),
             gap_tol=float(gap_tolerance),
             time_limit_s=remaining,
+            # Node-LP start basis (default OFF). The kernel's cold two-phase primal
+            # grinds to `max_iter` on equality-rich, hence primal-degenerate,
+            # relaxations — the constraint-factor-RLT class above all. See
+            # ``SolverTuning.lp_cold_dual_start``.
+            cold_dual_start=bool(_tuning().lp_cold_dual_start),
         )
         if _bound_reserve > 0.0:
             solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)

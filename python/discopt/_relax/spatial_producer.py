@@ -55,6 +55,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
     from discopt._relax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import VarType
+    from discopt.solver_tuning import current as _tuning
 
     # Scalar-variable models only: the relaxation's column 0..n_orig-1 maps to the n
     # variable objects one-to-one only when each has size 1. Vector variables shift
@@ -80,8 +81,17 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         # relaxation (a valid lower bound dropped, never invented) and makes each
         # term's envelope match the kernel's regeneration row-for-row. Mirrors the
         # incremental engine's ``_full_build``.
+        # Linear-equality RLT rows carry no box data, so they land in the
+        # box-INDEPENDENT fixed-row set below and the kernel's per-node patcher
+        # (which regenerates only per-term envelope rows) leaves them correct at
+        # every node. The bound-factor RLT families are excluded for exactly the
+        # opposite reason.
         return build_uniform_relaxation(
-            model, box=(box_lb, box_ub), skip_separable_floor=True, skip_convex_lift=True
+            model,
+            box=(box_lb, box_ub),
+            rlt_lineq=bool(_tuning().rlt_lineq),
+            skip_separable_floor=True,
+            skip_convex_lift=True,
         )
 
     # STRUCTURE is identified on a PROBE box with distinct, strictly sign-matched
