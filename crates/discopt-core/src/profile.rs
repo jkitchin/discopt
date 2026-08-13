@@ -228,6 +228,19 @@ counters!(
     // one is a certificate #1017 removed — the whole cost side of that change, and the
     // only way to see it in a corpus run without an A/B rebuild.
     FarkasRejectCancellation,
+    // #1008: the same treatment for the PRIMAL unbounded ray, which had none. An
+    // `Infeasible` verdict must clear `farkas_ray_certifies_cols`; an `Unbounded`
+    // verdict was taken on faith from "the ratio test found no blocking row",
+    // which is also what a silently broken ftran looks like. `Certified` counts
+    // rays that pass; the three `Reject` counters say which condition failed —
+    // `A d = 0` (the ray is not a recession direction at all), `cᵀd < 0` (the
+    // objective does not improve along it), or box recession (it leaves the box).
+    // On the captured QPLIB_2170 relaxation the ray had ONE nonzero, |A d| = 1.0
+    // and cᵀd = 0: every basic α came back zero for a column that is not zero.
+    UnboundedRayCertified,
+    UnboundedRejectRowResidual,
+    UnboundedRejectObjective,
+    UnboundedRejectBox,
     // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
     // Python spatial engine's per-node LPs come through, and it can return without
     // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above

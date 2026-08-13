@@ -89,6 +89,38 @@ fn parse_budget_secs(time_limit_s: Option<f64>) -> PyResult<Option<f64>> {
     }
 }
 
+/// Refuse a NaN entry in an LP's variable box.
+///
+/// A NaN bound has no meaning in an LP, and — worse — it reads *differently
+/// depending on which way the comparison is written*, because every comparison
+/// against NaN is false. The simplex asks "is this side open?" both ways:
+/// `ub < INF` (the ratio test's blocking check) calls a NaN upper bound **open**,
+/// while `ub >= INF` (the unbounded-ray box-recession check) calls the same bound
+/// **closed**. On issue #1008 that split produced an LP the ratio test walked to
+/// `t = INF` on and reported `unbounded`, over a box it could not certify as
+/// recessive. This is the `INF`-is-`1e20` hazard from CLAUDE.md in its other
+/// guise: there the sentinel silently survived a multiplication, here it is
+/// silently absent.
+///
+/// The modeling layer spells "no bound" as NaN (`Model.continuous(ub=None)` →
+/// `array(nan)`); the LP layer spells it as the sentinel `±1e20`. Translating
+/// between the two is the caller's job — `lp_simplex._finite_box` does it — and
+/// this refuses loudly rather than let an untranslated box reach the simplex and
+/// be read two ways. `±inf` is *not* rejected: it satisfies `>= INF` and fails
+/// `< INF`, so both readings agree it is open.
+fn check_box_not_nan(lb: &[f64], ub: &[f64]) -> PyResult<()> {
+    for (name, v) in [("lb", lb), ("ub", ub)] {
+        if let Some(j) = v.iter().position(|x| x.is_nan()) {
+            return Err(PyValueError::new_err(format!(
+                "{name}[{j}] is NaN; an LP bound must be finite or the ±1e20 \
+                 unbounded sentinel (NaN is read as both open and closed by \
+                 different guards — see issue #1008)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
 /// `a` is the C-contiguous `m × n` equality-constraint matrix; `c`, `lb`, `ub`
@@ -351,6 +383,7 @@ pub fn solve_lp_py<'py>(
     max_iter: usize,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, usize)> {
     let dims = a.shape();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let (m, n) = (dims[0], dims[1]);
     let a_flat = a
         .as_slice()
@@ -487,6 +520,7 @@ pub fn solve_lp_warm_py<'py>(
     Bound<'py, PyArray1<f64>>,
 )> {
     let dims = a.shape();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let (m, n) = (dims[0], dims[1]);
     let a_flat = a
         .as_slice()
@@ -599,6 +633,7 @@ pub fn solve_lp_warm_csc_py<'py>(
     // otherwise leave profiling uninitialized and dump() a no-op. Cheap; first call
     // per process fixes the flag.
     discopt_core::profile::init_from_env();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let col_ptr: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     let row_idx: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
     let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
@@ -714,6 +749,7 @@ pub fn solve_lp_batch_py<'py>(
     Bound<'py, PyArray1<f64>>,
 )> {
     let dims = a.shape();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let (m, n) = (dims[0], dims[1]);
     let k = b.shape()[0];
     if b.shape()[1] != m {
@@ -907,6 +943,7 @@ pub fn solve_milp_py<'py>(
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let (m, n) = (dims[0], dims[1]);
     // Materialize owned copies of the borrowed numpy inputs. `PyReadonlyArray`
     // borrows are only valid while the GIL is held, so we copy before releasing
@@ -1013,6 +1050,7 @@ pub fn solve_milp_csc_py<'py>(
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
     let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
     let c_owned: Vec<f64> = c.as_slice()?.to_vec();

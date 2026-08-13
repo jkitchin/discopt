@@ -12,6 +12,80 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The primal simplex could return a false `Unbounded` on a bounded LP**
+  (`fix(lp)`, #1008). The ratio test now certifies the primal ray before the
+  verdict is issued: `A d = 0`, `cᵀd < 0` under the cost the phase is actually
+  minimizing, and box recession on every coordinate `d` moves. A ray that fails
+  any of the three is a numerical breakdown, not an unbounded LP, so the status
+  becomes `Numerical` — an honest refusal, and the one that routes into
+  `dense_retry`'s dense-LU path, which a false `Unbounded` bypassed entirely.
+
+  `Infeasible` has never been taken on faith (`farkas_ray_certifies_cols`);
+  `Unbounded` was, and the asymmetry was not justified. "No basic variable
+  blocks" is a statement *about* `α = B⁻¹A_q`, so a silently broken ftran
+  produces it verbatim. On the captured QPLIB_2170 root relaxation it did: every
+  basic `α` came back zero for a column that is not zero, giving a ray with a
+  single nonzero, `|A d| = 1.0` and `cᵀd = 0`, against an LP HiGHS certifies
+  optimal at 0 in 81 pivots.
+
+  What that cost depends on the driver. `spatial_tree::verdict_for` already
+  lumps `Unbounded` with `Numerical` into `Undecided`, so there the damage was
+  the bypassed `dense_retry`, not a bad bound. `milp_driver` is the serious one:
+  a node LP returning `Unbounded` sets `out.unbounded`, which breaks the search
+  (`hit_unbounded`) and short-circuits `decide_status` ahead of every other
+  branch — so a single false node verdict returns `MilpStatus::Unbounded` for a
+  bounded MILP, discarding any incumbent. That is a false certificate, which is
+  the one output §1 gives no slack at all.
+
+  The stall-bail flip below does not subsume this. End to end on QPLIB_2170's
+  root relaxation with `DISCOPT_LP_DUAL_STALL_BAIL=0` — the shipped default —
+  and `time_limit=None`, `UnboundedRejectRowResidual` is 2: the false verdict was
+  reachable without the bail ever firing. The externally visible outcome on that
+  cell is unchanged (no solution either way); what changed is that the engine no
+  longer *claims* a certificate it cannot support. The remaining loss on that
+  cell is a separate defect (the unstable-pivot recovery is gated on
+  `bank_deadline_duals`, so a caller passing no `time_limit` loses it — the same
+  LP solves to `optimal 0` with `time_limit=40.0`); it is not addressed here.
+
+  The margins are built from accumulation magnitudes, not from the result
+  (#1017); the relative slack is `1e-7` rather than `gamma(nnz)` because the
+  residual carries the LU solve's error, not just summation rounding. Regression
+  test `cold_primal_does_not_claim_unbounded_on_a_bounded_lp` returns
+  `Unbounded` (obj 351) without the certifier and `Numerical` with it, and
+  asserts a rejection counter fired so the fixture is proven to reach the guard.
+
+- **A NaN variable bound reached the simplex and was read two contradictory
+  ways** (`fix(lp)`, #1008). The modeling layer spells "no bound" as **NaN**
+  (`Model.continuous(ub=None)` stores `array(nan)`); the LP layer spells it as
+  the sentinel `±1e20`. Nothing translated between them, and an untranslated NaN
+  does not fail loudly — every comparison against it is false, so each guard
+  reads it as whichever answer its comparison happens to be written for. The
+  ratio test asks `ub < INF` ("does this bound block?") and calls a NaN bound
+  **open**, stepping to `t = INF`; the ray certifier above asks `ub >= INF` ("is
+  this side open?") and calls the same bound **closed**. This is the
+  `INF`-is-`1e20` hazard already documented in `CLAUDE.md`, in its other guise:
+  there the sentinel silently survives a multiplication, here it is silently
+  absent.
+
+  Found by the certifier: a Benders recourse LP (`min -w` over `w ∈ [0, NaN]`,
+  `-w ≤ 0`) had been reported `unbounded` on the strength of a box no guard could
+  certify as recessive. That verdict was correct — the LP *is* unbounded below —
+  but it was correct by luck, resting on which of the two readings the ratio test
+  happened to use, over a box the engine could not derive it from.
+
+  Both halves are fixed: `lp_simplex._finite_box` translates the box (NaN and
+  `±inf`, and any magnitude past the sentinel, onto `±1e20`) so the simplex sees
+  one convention, and the PyO3 LP/MILP entry points refuse a NaN bound with a
+  `ValueError` naming the index, so a caller that skips the translation gets a
+  loud error instead of a verdict derived from two incompatible readings of the
+  same number. `±inf` is deliberately *not* refused: it satisfies `>= INF` and
+  fails `< INF`, so both readings already agree it is open. Regression tests in
+  `python/tests/test_1008_nan_lp_bound.py` fail without the translation
+  (`ValueError: ub[0] is NaN`) and pass with it.
+  The pre-existing `unbounded_detected` / `unbounded_emits_a_valid_primal_ray`
+  tests confirm a genuine unbounded ray still certifies untouched.
+  `cargo test -p discopt-core` → 610 passed.
+
 - **The #1013 degeneracy-stall bail could turn a certified optimum into no bound,
   and shipped default-ON** (`fix(lp)`, #1008). `DISCOPT_LP_DUAL_STALL_BAIL` is now
   **default-OFF**; `=1`/`true`/`on` opts in, and the mechanism itself is unchanged.

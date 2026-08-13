@@ -76,6 +76,33 @@ def _reject_unknown_kwargs(kwargs: dict[str, Any]) -> None:
         )
 
 
+#: The LP layer's "no bound" sentinel. The Rust simplex tests openness as
+#: ``ub >= INF`` / ``lb <= -INF`` with ``INF = 1e20``; anything at or beyond it is
+#: unbounded on that side.
+_LP_INF = 1e20
+
+
+def _finite_box(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Translate a modeling-layer box into the LP layer's sentinel convention.
+
+    The two layers spell "no bound" differently: ``Model.continuous(ub=None)``
+    stores **NaN**, while the simplex reads the sentinel ``±1e20``. A NaN that
+    crosses untranslated is not merely unhelpful — it is read *both ways*, since
+    every comparison against NaN is false. The ratio test's ``ub < INF`` calls a
+    NaN upper bound open and steps to ``t = INF``; the unbounded-ray box-recession
+    check's ``ub >= INF`` calls the same bound closed. Issue #1008: a Benders
+    recourse LP over ``w ∈ [0, NaN]`` was walked to an unbounded ray the box could
+    not certify, so the verdict depended on which guard you asked.
+
+    NaN means unbounded on that side, and ``±inf`` (and any magnitude past the
+    sentinel, which the simplex already treats as unbounded) is clamped onto it so
+    the two readings agree. Finite bounds pass through untouched.
+    """
+    lo = np.where(np.isnan(lb), -_LP_INF, np.maximum(lb, -_LP_INF))
+    hi = np.where(np.isnan(ub), _LP_INF, np.minimum(ub, _LP_INF))
+    return lo, hi
+
+
 def _dense_rows(A: Optional[Union[np.ndarray, sp.spmatrix]], n: int) -> np.ndarray:
     """Dense ``(m, n)`` view of a constraint block, or an empty ``(0, n)``."""
     if A is None:
@@ -181,13 +208,17 @@ def solve_lp(
         a_std = sp.csc_matrix((0, n), dtype=np.float64)
     c_std = np.concatenate([c_arr, np.zeros(m)])
     if bounds is not None:
-        lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
-        ub = np.array([hi for _, hi in bounds], dtype=np.float64)
+        # `None`/NaN on either side means "no bound" here (scipy's spelling and
+        # the modeling layer's); `_finite_box` maps both onto the LP sentinel.
+        lb, ub = _finite_box(
+            np.array([lo for lo, _ in bounds], dtype=np.float64),
+            np.array([hi for _, hi in bounds], dtype=np.float64),
+        )
     else:
         lb = np.zeros(n, dtype=np.float64)
-        ub = np.full(n, 1e20, dtype=np.float64)
+        ub = np.full(n, _LP_INF, dtype=np.float64)
     lb_std = np.concatenate([lb, np.zeros(m)])
-    ub_std = np.concatenate([ub, np.full(m_ub, 1e20), np.zeros(m_eq)])
+    ub_std = np.concatenate([ub, np.full(m_ub, _LP_INF), np.zeros(m_eq)])
 
     _warm_kw: dict[str, Any] = {}
     if max_iter is not None:
@@ -318,11 +349,13 @@ def solve_lp_batch(
     for t, (b_ub, bounds) in enumerate(instances):
         b_stack[t, :] = np.asarray(b_ub, dtype=np.float64).ravel()
         if bounds is not None:
-            lb_stack[t, :n] = [lo for lo, _ in bounds]
-            ub_stack[t, :n] = [hi for _, hi in bounds]
+            lb_stack[t, :n], ub_stack[t, :n] = _finite_box(
+                np.array([lo for lo, _ in bounds], dtype=np.float64),
+                np.array([hi for _, hi in bounds], dtype=np.float64),
+            )
         else:
-            ub_stack[t, :n] = 1e20
-        ub_stack[t, n:] = 1e20  # slacks in [0, inf)
+            ub_stack[t, :n] = _LP_INF
+        ub_stack[t, n:] = _LP_INF  # slacks in [0, inf)
 
     statuses, xs, objs = solve_lp_batch_py(
         np.ascontiguousarray(c_std),

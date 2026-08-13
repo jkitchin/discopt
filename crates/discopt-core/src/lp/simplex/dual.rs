@@ -2193,6 +2193,56 @@ mod tests {
         );
     }
 
+    // #1008: the cold primal must not CLAIM `Unbounded` on a bounded LP.
+    //
+    // Same captured QPLIB_2170 relaxation, entered through the cold path (no warm
+    // basis) — the route the stall bail hands off to. Before the ray certifier the
+    // cold solve returned `Unbounded` on an LP HiGHS certifies optimal at 0: every
+    // basic `α = B⁻¹A_q` came back zero for a column that is not zero, so the ratio
+    // test found no blocking row and the breakdown was read as a verdict. The
+    // captured ray had one nonzero, `|A d| = 1.0` and `cᵀd = 0` — it satisfies none
+    // of the three conditions an unbounded ray must satisfy.
+    //
+    // `Unbounded` on a minimization relaxation means a node bound of −∞, so a false
+    // one is a bound loss, not a slowdown. The certifier turns it into `Numerical`,
+    // an honest refusal that also routes into `dense_retry`'s dense-LU path.
+    #[test]
+    fn cold_primal_does_not_claim_unbounded_on_a_bounded_lp() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        let json = include_str!("testdata/qplib2170_cold_fail_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, _basic_vars, _col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let mut o = opts();
+        o.bank_deadline_duals = true;
+
+        let cold = solve_csc_core(&sp, m, n, &c, &l, &u, &b, None, &o);
+        let rejects = crate::profile::counter(crate::profile::Ctr::UnboundedRejectRowResidual)
+            + crate::profile::counter(crate::profile::Ctr::UnboundedRejectObjective)
+            + crate::profile::counter(crate::profile::Ctr::UnboundedRejectBox);
+        crate::profile::set_enabled(false);
+
+        // The defect itself, asserted first so removing the guard reports the wrong
+        // *verdict* rather than a bookkeeping count.
+        assert_ne!(
+            cold.status,
+            LpStatus::Unbounded,
+            "cold solve claims Unbounded on an LP HiGHS certifies optimal at 0 \
+             (obj={})",
+            cold.obj
+        );
+        // And the probe fired: the certifier actually rejected a ray here, so the
+        // assertion above is exercising the guard and not an unrelated path where
+        // the fixture stopped reaching the ratio test's unbounded exit at all (§6).
+        assert!(
+            rejects > 0,
+            "the ray certifier never rejected anything on the LP that motivated it; \
+             this fixture no longer reaches the guard (rejects={rejects})"
+        );
+    }
+
     // #1008: the bound-neutrality the test above asserts is a property of THAT
     // fixture, not of the bail. It holds on `tspn12` because the cold solve the
     // bail hands off to happens to succeed. When the cold solve does *not* succeed,

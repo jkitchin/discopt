@@ -474,6 +474,18 @@ fn row_roundoff(terms: u32, term_scale: f64) -> f64 {
     8.0 * (terms as f64) * f64::EPSILON * term_scale
 }
 
+/// Relative slack allowed when certifying a primal unbounded ray (`ray_certifies_unbounded`).
+///
+/// Deliberately *not* `gamma(nnz)`: the residual `A d` carries the error of the LU
+/// solve that produced `α = B⁻¹A_q`, which is orders of magnitude above the
+/// summation rounding `γ` bounds. `1e-7` relative is loose enough that a ray from a
+/// healthy factorization certifies, and tight enough that the breakdown this guard
+/// exists for — `|A d| = 1.0` against an accumulation of `1.0`, a relative residual
+/// of 1 — is refused by a factor of 10⁷. A genuine unbounded ray rejected here means
+/// the factorization is that badly wrong, in which case `Numerical` is the right
+/// verdict on its own merits.
+const RAY_CERT_REL: f64 = 1e-7;
+
 /// The classic dot-product error factor `γ_k = k·u/(1 − k·u)` (Higham, *Accuracy and
 /// Stability of Numerical Algorithms*, §3.1): a sum of `k` floating-point terms
 /// evaluated in any order differs from the exact sum by at most `γ_k · Σ|terms|`.
@@ -1797,6 +1809,96 @@ impl<'a> Simplex<'a> {
         Ok(self.assemble(st, &art_sign))
     }
 
+    /// True when `d` is a certified primal unbounded ray for the LP as currently
+    /// loaded: `A d = 0`, `cᵀd < 0` under the cost actually in use, and the box
+    /// recedes on every coordinate `d` moves. Increments a rejection counter naming
+    /// the condition that failed.
+    ///
+    /// This is the primal mirror of `farkas_ray_certifies_cols`. The ratio test
+    /// concluding "no basic variable blocks" is a *statement about `α = B⁻¹A_q`*,
+    /// and an ftran that silently returns garbage produces exactly that statement,
+    /// so the conclusion has to be re-derived from `A` and `c` directly rather than
+    /// inherited from the object under suspicion.
+    ///
+    /// `cost` is the phase's own cost vector, not `self.c`: in phase 1 the loop is
+    /// minimizing infeasibility and `self.c` is not the objective being improved.
+    fn ray_certifies_unbounded(&self, d: &[f64], cost: &[f64], alpha: &[f64]) -> bool {
+        let (m, n) = (self.m, self.n);
+        if d.len() != n || !d.iter().all(|v| v.is_finite()) {
+            crate::profile::incr(crate::profile::Ctr::UnboundedRejectRowResidual);
+            return false;
+        }
+        // A basic *artificial* moving along the ray puts the direction in the
+        // extended space `[A | art]`; truncating it to the real columns silently
+        // drops those entries, so `A d = 0` would be checked against an incomplete
+        // vector. Phase 2 pins artificials to [0,0], so the ratio test blocks on
+        // them and this is unreachable; phase 1 minimizes a quantity bounded below
+        // by zero and therefore has no unbounded direction to find. Refuse either
+        // way rather than certify a truncation.
+        for i in 0..m {
+            if self.basis[i] >= n && alpha[i].abs() > self.tol {
+                crate::profile::incr(crate::profile::Ctr::UnboundedRejectRowResidual);
+                return false;
+            }
+        }
+        // `A d` alongside the magnitude bounding its rounding. Per #1017 the
+        // *result* of a cancelling sum says nothing about that sum's error, so the
+        // margin is built from the accumulation, not from `r[i]`.
+        let mut r = vec![0.0f64; m];
+        let mut r_abs = vec![0.0f64; m];
+        for j in 0..n {
+            let dj = d[j];
+            if dj == 0.0 {
+                continue;
+            }
+            let (rows, vals) = self.cols.col(j);
+            for (&i, &a) in rows.iter().zip(vals) {
+                let t = a * dj;
+                r[i] += t;
+                r_abs[i] += t.abs();
+            }
+        }
+        for i in 0..m {
+            if r[i].abs() > RAY_CERT_REL * (1.0 + r_abs[i]) {
+                crate::profile::incr(crate::profile::Ctr::UnboundedRejectRowResidual);
+                return false;
+            }
+        }
+        // In exact arithmetic `cᵀd = dir·d_q`, the entering reduced cost, which
+        // pricing already required to be `< −tol`. Recomputing it from `c` is
+        // therefore a cross-check of the btran that produced that reduced cost
+        // against the ftran that produced `α`. An all-zero `d` (no nonzero at all)
+        // lands here with `cd = 0` and is refused.
+        let mut cd = 0.0f64;
+        let mut cd_abs = 0.0f64;
+        for j in 0..n {
+            let t = cost[j] * d[j];
+            cd += t;
+            cd_abs += t.abs();
+        }
+        if !(cd < 0.0 && cd.abs() > RAY_CERT_REL * cd_abs) {
+            crate::profile::incr(crate::profile::Ctr::UnboundedRejectObjective);
+            return false;
+        }
+        // Recession: travelling along `d` forever must stay inside the box. `INF` is
+        // the sentinel `1e20`, so the comparison is against the *bound*, never a
+        // product involving it.
+        for j in 0..n {
+            let open = if d[j] > self.tol {
+                self.ub[j] >= INF
+            } else if d[j] < -self.tol {
+                self.lb[j] <= -INF
+            } else {
+                true
+            };
+            if !open {
+                crate::profile::incr(crate::profile::Ctr::UnboundedRejectBox);
+                return false;
+            }
+        }
+        true
+    }
+
     /// Primal simplex iterations for the given `cost`. Returns Ok(()) at
     /// optimality, Err(Unbounded/IterLimit/Numerical) otherwise.
     fn simplex_loop(
@@ -2032,6 +2134,27 @@ impl<'a> Simplex<'a> {
                         ray[bi] = -dir * alpha[i];
                     }
                 }
+                // #1008: certify the ray before CLAIMING unboundedness.
+                //
+                // The comment above says a caller verifies this. No caller did —
+                // the ray is exported to Python and read by nobody in Rust, while
+                // the *status* was returned on faith. `Infeasible` has never been
+                // taken on faith (`farkas_ray_certifies_cols`), and the asymmetry
+                // is not justified: "the ratio test found no blocking row" is also
+                // exactly what a silently broken ftran produces. On the captured
+                // QPLIB_2170 relaxation it did — every basic α came back zero for a
+                // column that is not zero, giving a ray with one nonzero, |A d| =
+                // 1.0 and cᵀd = 0, against an LP HiGHS certifies as optimal at 0.
+                //
+                // A ray that fails is a numerical breakdown, not an unbounded LP,
+                // so the verdict becomes `Numerical` — an honest refusal, and the
+                // status that routes into `dense_retry`'s robust LU path (§3:
+                // refuse loudly rather than claim). A genuine unbounded ray passes
+                // untouched, so no true `Unbounded` is downgraded.
+                if !self.ray_certifies_unbounded(&ray, cost, &alpha) {
+                    return Err(LpStatus::Numerical);
+                }
+                crate::profile::incr(crate::profile::Ctr::UnboundedRayCertified);
                 self.unbounded_ray = ray;
                 return Err(LpStatus::Unbounded);
             }

@@ -2692,3 +2692,103 @@ rather than by name, §2). It returns `Unbounded` on the old default and
 `bank_deadline_duals` coupling that makes QPLIB_2170 solvable only when the caller
 passes a `time_limit` (#1008 R1) — both tracked in #1008.
 
+### 18c. The false `Unbounded` is a broken ftran read as a verdict (#1008, 2026-08-13)
+
+§18b left this open. It is not a property of the stall bail: with
+`DISCOPT_LP_DUAL_STALL_BAIL=0` (the default since #1021) and `time_limit=None`,
+QPLIB_2170's root relaxation still reaches the ratio test's unbounded exit —
+`UnboundedRejectRowResidual = 2` end to end.
+
+**What the engine was doing.** `Infeasible` is issued only after
+`farkas_ray_certifies_cols` accepts a dual ray. `Unbounded` was issued on the
+strength of "the ratio test found no blocking row" alone. But that sentence is a
+statement *about* `α = B⁻¹A_q`, so an ftran that silently returns zeros produces
+it verbatim — which is exactly what happens here. The captured ray:
+
+| quantity | required | measured |
+|---|---|---|
+| nonzeros in `d` | ≥ 1 basic + entering | **1** (the entering column only) |
+| `max_i |A d|_i` | 0 | **1.0** |
+| `cᵀd` | < 0 | **0.0** |
+| box-recession violations | 0 | 0 |
+
+Three of the four conditions fail. The LP is `optimal 0` (HiGHS, 81 pivots).
+
+**Blast radius, by driver.** `spatial_tree::verdict_for` already maps
+`Unbounded`, `IterLimit` and `Numerical` alike to `NodeVerdict::Undecided`, so
+there the cost was only the bypassed `dense_retry` — which is gated on
+`Numerical | IterLimit` and so never ran. `milp_driver` is the serious one:
+`out.unbounded` at any node sets `hit_unbounded`, breaks the search loop, and
+short-circuits `decide_status` ahead of every other branch, returning
+`MilpStatus::Unbounded` for a bounded MILP and discarding any incumbent. One
+false node verdict is enough.
+
+**The fix** is the primal mirror of the Farkas path: `ray_certifies_unbounded`
+checks `A d = 0`, `cᵀd < 0` under the cost the *phase* is minimizing (not
+`self.c` — phase 1 is minimizing infeasibility), and box recession, refusing with
+`Numerical` when any fails. Margins are built from accumulation magnitudes rather
+than results (#1017). The relative slack is `1e-7`, deliberately not
+`gamma(nnz)`: the residual carries the LU solve's error, not just summation
+rounding. It rejects the observed breakdown by a factor of 10⁷.
+
+`Numerical` is also the status that routes into `dense_retry`, so the honest
+refusal is strictly more useful than the false claim.
+
+**Not a bound recovery.** On QPLIB_2170 at `time_limit=None` the outcome stays
+"no solution" — the engine simply stops claiming a certificate it cannot support.
+The remaining loss on that cell is the `bank_deadline_duals` coupling (#1008 R1,
+still open): the same LP solves to `optimal 0` at `time_limit=40.0`. The four-cell
+BAIL × time_limit A/B is otherwise unchanged from §18b, so nothing regressed.
+
+Pinned by `cold_primal_does_not_claim_unbounded_on_a_bounded_lp` (returns
+`Unbounded` obj 351 without the certifier, `Numerical` with it) and by the
+pre-existing `unbounded_detected` / `unbounded_emits_a_valid_primal_ray`, which
+confirm a genuine unbounded ray still certifies untouched.
+
+### 18d. A NaN bound is read as both open and closed (#1008, 2026-08-13)
+
+The certifier in §18c turned a CI job red on `test_c3_unbounded_recourse_reported`
+(`unbounded` → `iteration_limit`). The measurement — profile counters on the
+Benders solve, `DISCOPT_PROFILE=1` — put the rejection at
+`UnboundedRejectBox = 2`, not at the residual or objective margins. The LP behind
+it, captured by wrapping the recourse oracle:
+
+```
+min -w   s.t.  -w <= 0,   w in [0, nan]
+```
+
+The **upper bound is NaN**. `Model.continuous(ub=None)` stores `array(nan)`; the
+Rust simplex reads the sentinel `±1e20`. Nothing translated between the two, and
+NaN does not announce itself, because every comparison against it is false — so
+each guard reads the same bound as whichever answer its comparison is written for:
+
+| guard | question asked | NaN answer | reading |
+|---|---|---|---|
+| ratio test | `ub < INF` — does this bound block? | false | **open** → `t = INF` → `unbounded` |
+| §18c ray certifier | `ub >= INF` — is this side open? | false | **closed** → refuse |
+
+So the pre-#1022 `unbounded` on that LP was *correct but underived*: right answer,
+resting on which of the two readings the ratio test happened to use, over a box
+the engine could not certify as recessive. The certifier did not break it — it
+made a latent ambiguity observable. This is the `INF`-is-`1e20` hazard already in
+`CLAUDE.md`, in its other guise: there the sentinel silently survives a
+multiplication; here it is silently absent.
+
+**The fix has two halves**, and needs both. `lp_simplex._finite_box` translates
+the box (NaN, `±inf`, and any magnitude past the sentinel → `±1e20`) so the
+simplex sees one convention; the PyO3 LP/MILP entry points refuse a NaN bound
+with a `ValueError` naming the index, so a caller that skips the translation gets
+a loud error rather than a verdict derived from two incompatible readings. `±inf`
+is deliberately *not* refused — it satisfies `>= INF` and fails `< INF`, so both
+readings already agree it is open.
+
+**Method note.** The regression was found by CI and diagnosed by counter, not by
+reading control flow: the first probe (`c3_probe.py`) printed every
+`Unbounded*`/`Farkas*` counter and the *box* counter was the one that moved. A
+control-flow reading would have blamed the residual margin, which is where the
+§18c work had been concentrated. Baseline separation followed CLAUDE.md §8 — the
+pre-#1022 `.so` was asserted to *lack* the `UnboundedRejectRowResidual` marker
+before being trusted as a baseline, and it reproduced the pass.
+
+Pinned by `python/tests/test_1008_nan_lp_bound.py` (3 tests; 2 fail with
+`ValueError: ub[0] is NaN` when `_finite_box` is neutered).
