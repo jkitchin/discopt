@@ -414,6 +414,17 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "_deadline = None if time_limit is None else time.perf_counter() + time_limit",
         "contract",
     ),
+    # #1009's sibling of the line above, and the same category for the same
+    # reason: it spends the caller's own ``time_limit``, answering "when do we
+    # stop?", never "how much work do we do?". It exists separately only because
+    # the node-wide anchor above is taken *after* the cold build, by which point
+    # the incremental fast path has already returned — which is how that path
+    # came to issue its LPs unbudgeted.
+    (
+        "_relax/mccormick_lp.py",
+        "_fast_deadline = None if time_limit is None else time.perf_counter() + time_limit",
+        "contract",
+    ),
     (
         "_relax/mccormick_lp.py",
         "and (time.perf_counter() - _psd_t0) > _gate_budget * _base_solve_wall",
