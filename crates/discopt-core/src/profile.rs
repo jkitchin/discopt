@@ -90,6 +90,14 @@ timed_phases!(
     DualPrepare,
     DualRecompute,
     DualPivotLoop,
+    // #1008: the two halves of a SPARSE basis refactorization. `LuSymbolic` is
+    // `SparseLuSymbolic::analyze` (AMD on the AᵀA pattern — a fill-reducing
+    // ordering recomputed from scratch on every refactorization even though an
+    // LP basis changes by one column per pivot); `LuNumeric` is `SparseLu::factor`
+    // (the actual elimination). "Refactorization is 59.5% of wall" does not say
+    // which half, and the two have completely different fixes.
+    LuSymbolic,
+    LuNumeric,
 );
 
 // Pivot categorization for the cold-primal simplex (degeneracy analysis).
@@ -275,7 +283,27 @@ counters!(
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,
+    // #1008 LU fill-in. Accumulated over every SPARSE `factorize_sparse` call:
+    // the nonzero count of the basis handed in (`LuBasisNnz`), the nonzero count
+    // of the `L`+`U` that came out (`LuFactorNnz`), and the call count
+    // (`LuSparseFactorizations`). `LuFactorNnz / LuBasisNnz` is the fill ratio —
+    // the quantity that sets the cost of ALL THREE of the LU hot spots at once
+    // (refactorize, each FT update, and every ftran/btran), so it separates "we
+    // refactorize too often" from "each factor is far denser than it should be".
+    LuSparseFactorizations,
+    LuBasisNnz,
+    LuFactorNnz,
 );
+
+/// Add `n` to a counter (for accumulated quantities such as nonzero counts,
+/// where [`incr`]'s +1 is not the datum). Same enable-gating as [`incr`].
+#[inline(always)]
+pub fn incr_by(c: Ctr, n: u64) {
+    if enabled() {
+        CVALS[c as usize].fetch_add(n, Ordering::Relaxed);
+        CTOTALS[c as usize].fetch_add(n, Ordering::Relaxed);
+    }
+}
 
 #[inline(always)]
 pub fn incr(c: Ctr) {
@@ -371,6 +399,24 @@ pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
 #[cfg(test)]
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Process-wide lock every test that calls [`set_enabled`] or reads a [`counter`]
+/// must hold.
+///
+/// `ENABLED` and the counter arrays are global, and `cargo test` runs the suite
+/// on a thread pool: without this, one test's closing `set_enabled(false)` lands
+/// in the middle of another's measurement and the second reads 0. That is exactly
+/// the CLAUDE.md #6 failure mode — an instrument that silently measures nothing —
+/// and it is why it is a lock rather than a retry.
+#[cfg(test)]
+pub static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`TEST_LOCK`], ignoring poisoning (a failed test elsewhere must not
+/// cascade into unrelated failures here).
+#[cfg(test)]
+pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Print the accumulated table to stderr when profiling is enabled, then reset.

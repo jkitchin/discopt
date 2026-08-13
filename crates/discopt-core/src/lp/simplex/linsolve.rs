@@ -364,6 +364,30 @@ impl FeralLU {
         Self::default()
     }
 
+    /// Factor `a` with feral's sparse LU: fill-reducing analysis, then numeric
+    /// factorization.
+    ///
+    /// The two halves are timed separately (#1008): the entry flamegraph
+    /// attributed 59.5% of LP wall to "refactorize" without saying which half,
+    /// and they have completely different fixes. The split measured numeric
+    /// ≈50% of total LP wall and symbolic ≈11% (2.7%–25.5% across 18 captured
+    /// QPLIB relaxation LPs) — see the #1008 record.
+    fn factor_sparse_ordered(
+        &mut self,
+        a: &SparseColMatrix,
+        params: LuParams,
+    ) -> Result<SparseLu, LinError> {
+        let sym = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
+            SparseLuSymbolic::analyze(a).map_err(feral_err)?
+        };
+        let lu = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
+            SparseLu::factor(a, &sym, params).map_err(feral_err)?
+        };
+        Ok(lu)
+    }
+
     /// Enable numeric-focus mode with the default refinement depth: refined
     /// [`ftran`](LinearSolver::ftran_refined)/[`btran`](LinearSolver::btran_refined)
     /// solves and [`condition_estimate`](Self::condition_estimate)/[`growth`](Self::growth)
@@ -628,10 +652,15 @@ impl LinearSolver for FeralLU {
             // Build feral's sparse matrix directly from the sparse columns —
             // O(nnz), no dense m×m intermediate.
             let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
-            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-            Factored::Sparse(Box::new(
-                SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
-            ))
+            let lu = self.factor_sparse_ordered(&a, params)?;
+            // #1008: fill-in is the quantity that sets the cost of refactorize,
+            // FT update and ftran/btran simultaneously — record it so those three
+            // can be attributed to "too many factorizations" vs "each factor is
+            // too dense". Gated by `profile::enabled()`, so free when off.
+            crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
+            crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
+            crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
+            Factored::Sparse(Box::new(lu))
         });
         self.retained = dense
             .filter(|_| self.refine_enabled())
@@ -779,6 +808,103 @@ impl LinearSolver for DenseLU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tridiagonal basis of order `m`: same sparsity pattern every time, values
+    /// shifted by `bump` so successive factorizations are numerically distinct.
+    /// `m = 512` is above `FORCE_DENSE_M`, so this exercises the SPARSE path (the
+    /// only one with a symbolic phase).
+    fn tridiagonal_basis(m: usize, bump: f64) -> Vec<Vec<(usize, f64)>> {
+        (0..m)
+            .map(|j| {
+                let mut col = Vec::with_capacity(3);
+                if j > 0 {
+                    col.push((j - 1, -1.0));
+                }
+                col.push((j, 4.0 + bump));
+                if j + 1 < m {
+                    col.push((j + 1, -1.0));
+                }
+                col
+            })
+            .collect()
+    }
+
+    /// Factor `cols`, solve `B x = B·1`, and assert `x == 1`. Returns the number
+    /// of entries checked so the caller can prove the probe fired.
+    fn factor_and_check_unit_solve(
+        lu: &mut FeralLU,
+        m: usize,
+        cols: &[Vec<(usize, f64)>],
+    ) -> usize {
+        lu.factorize_sparse(m, cols).expect("factorization");
+        let mut rhs = vec![0.0; m];
+        for col in cols {
+            for &(row, v) in col {
+                rhs[row] += v;
+            }
+        }
+        lu.ftran(&mut rhs).expect("ftran");
+        for (i, x) in rhs.iter().enumerate() {
+            assert!((x - 1.0).abs() < 1e-9, "row {i}: solved {x}, expected 1");
+        }
+        rhs.len()
+    }
+
+    #[test]
+    fn the_sparse_factorization_counters_fire_and_solves_stay_exact() {
+        // #1008 instrumentation: `LuSparseFactorizations` / `LuBasisNnz` /
+        // `LuFactorNnz` are what produced the attribution recorded on the issue
+        // (numeric LU ≈50% of LP wall, symbolic ≈11%, fill within 6% of SuperLU).
+        // They are only trustworthy if they actually count the SPARSE path — a
+        // silent fall to the dense route would leave them at zero and read as
+        // "no factorizations happened" (CLAUDE.md §6).
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        let m = 512; // above FORCE_DENSE_M, so this is the sparse route
+        const N: u64 = 4;
+        let mut checked = 0usize;
+
+        let before = crate::profile::counter(crate::profile::Ctr::LuSparseFactorizations);
+        let before_basis = crate::profile::counter(crate::profile::Ctr::LuBasisNnz);
+        let before_factor = crate::profile::counter(crate::profile::Ctr::LuFactorNnz);
+        let mut lu = FeralLU::new();
+        for k in 0..N {
+            let cols = tridiagonal_basis(m, k as f64 * 0.25);
+            checked += factor_and_check_unit_solve(&mut lu, m, &cols);
+        }
+        let factorizations =
+            crate::profile::counter(crate::profile::Ctr::LuSparseFactorizations) - before;
+        let basis_nnz = crate::profile::counter(crate::profile::Ctr::LuBasisNnz) - before_basis;
+        let factor_nnz = crate::profile::counter(crate::profile::Ctr::LuFactorNnz) - before_factor;
+        crate::profile::set_enabled(false);
+
+        // Lower bounds, not equalities: these counters are process-global and
+        // `set_enabled(true)` also arms them for whatever other tests are running
+        // on sibling threads (`test_guard` only serializes the tests that take
+        // it). Contamination can only ADD, so a lower bound is exactly as
+        // mutation-sensitive as an equality here — suppressing any of the three
+        // `incr` sites drives its delta to zero and fails this test — while an
+        // equality would be flaky. Verified: with the `LuSparseFactorizations`
+        // increment commented out this test fails.
+        assert!(
+            factorizations >= N,
+            "{N} sparse factorizations were performed but only {factorizations} counted — \
+             either the sparse route was not taken or the counter is not wired"
+        );
+        // A tridiagonal basis has 3m-2 stored nonzeros.
+        assert!(
+            basis_nnz >= N * (3 * m as u64 - 2),
+            "basis nnz undercounted: {basis_nnz} < {}",
+            N * (3 * m as u64 - 2)
+        );
+        // Any nonsingular m×m LU stores at least its m diagonal entries.
+        assert!(
+            factor_nnz >= N * m as u64,
+            "factor nnz undercounted: {factor_nnz} < {}",
+            N * m as u64
+        );
+        assert_eq!(checked, N as usize * m, "solved entries checked");
+    }
 
     #[test]
     fn dense_retry_suppression_scopes_and_restores() {

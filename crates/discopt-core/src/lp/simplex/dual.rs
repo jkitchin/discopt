@@ -1924,6 +1924,7 @@ mod tests {
     // the *value* returned is still asserted equal to a cold solve (bound-neutral).
     #[test]
     fn warm_stall_guard_trip_counter_fires_only_on_stall() {
+        let _guard = crate::profile::test_guard();
         crate::profile::set_enabled(true);
 
         // A warm re-solve that takes several dual pivots (many bounds tightened at

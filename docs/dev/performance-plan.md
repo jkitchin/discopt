@@ -2352,3 +2352,85 @@ against 902 at K=0 — the exact-`x_B` refresh is far cheaper per pivot than the
 node-level work around it, so the throughput cost that decides against it is small
 and instance-dependent, not structural.
 
+## 16. #1008 LP throughput: the gap is per-iteration linear algebra, and six in-repo levers are falsified (2026-08-12)
+
+**Claim under test.** The in-house simplex is 8.7x–29x slower than HiGHS on
+identical LPs (issue #1008, measured on QPLIB_1157's root relaxation:
+`rlt=0 rows=3273 highs=0.034 s in-house=0.292 s`, `rlt=1 rows=3937
+highs=0.231 s in-house=6.696 s`). Panel throughout: 18 relaxation LPs captured
+from the spatial B&B root on manifest-selected continuous nonconvex QPLIB
+instances (`m` 2550–8000), 45 s per-LP limit, arms interleaved *within* each
+repetition, `uptime` recorded per run.
+
+**Entry attribution (`samply --rate 999`, QPLIB_1157 `rlt=1`, `m = 3937`).**
+
+| region | share |
+|---|---:|
+| `FeralLU::factorize_sparse` | 59.5% |
+| — numeric `SparseLu::factor` | 45.7% |
+| — symbolic `SparseLuSymbolic::analyze` | 13.5% |
+| Forrest–Tomlin `update` | 18.7% |
+| ftran / btran | 16.4% |
+| pricing + ratio test | 1.7% |
+
+Iteration counts: **in-house 4965 pivots vs HiGHS 2153 — 2.3x the pivots but
+12.5x the time per pivot.** Pricing and the ratio test, the issue's named
+suspects, are 1.7% of wall combined; Devex pricing is already present in both
+loops. This is the binding decomposition: the gap is *per-iteration linear
+algebra*, and any future attempt that starts from the pivot rule is starting in
+the 1.7%.
+
+**Falsified levers.** Each was pre-registered with a kill criterion before
+implementation.
+
+| lever | outcome |
+|---|---|
+| refactorization cadence (`updates >= 48`, constant in `m`) | median 1.12x at interval 100/200, and QPLIB_0911 goes 1.9 s `optimal` → 47 s `iter_limit` |
+| LU threshold pivoting (`u = 0.1`) to cut fill | fill −2% to −18%, wall flat; `u = 0.5` and `u = 0.01` both regress QPLIB_0911 to `iter_limit` |
+| *is there any fill headroom at all?* | **no** — SuperLU/COLAMD on the same 12 final bases is median **0.94x**; feral's factor is already smaller on 8 of 12. The planned maximum-transversal work was cancelled on this measurement |
+| symbolic-ordering reuse (`DISCOPT_LU_SYMBOLIC_REUSE`) | reuse rate 77.2% (1016/1316), so the mechanism operated — median **1.009x** vs a 1.05x bar, plus two `optimal` → `iter_limit` regressions. Objectives clean (0/11 pairs above 1e-9) |
+| dual-loop Harris stability pass (`DISCOPT_LP_DUAL_HARRIS`) | wall median **0.999x** (0.774x–1.228x), median Δiter **−0.3%** vs a −5% bar, fires on only 10/18, and regresses QPLIB_1745_rlt1 `optimal` (42.5 s) → `iter_limit` |
+
+Both flags were **deleted**, not shipped default-OFF (CLAUDE.md §3, no dead
+flags) — the `DISCOPT_CUT_INHERIT` outcome with a status regression on top.
+Retraction (§11): an earlier "roughly 1.10x expected from ordering reuse"
+estimate is withdrawn.
+
+**Phase split, the one artifact kept (PR #1012, bound-neutral instrumentation).**
+`Phase::LuSymbolic`/`LuNumeric` plus `LuSparseFactorizations`/`LuBasisNnz`/
+`LuFactorNnz` decompose the 59.5% bar over the 18-LP panel: numeric ≈**50%** of
+total LP wall (18%–74%), symbolic ≈**11%** (2.7%–25.5%), everything else
+(ftran/btran + FT update) ≈**38%**.
+
+**Where the residual lives — and it is not in this repository.** feral's numeric
+kernel is a median **2.1x** slower than `scipy splu` on the engine's own final
+bases (n=18, min 0.6x, max 4.1x, biased in feral's favour), and at ~50% of wall a
+*perfect* numeric fix is worth at most `1/(0.5/2.1 + 0.5) = 1.36x`. The other
+≈38% is ftran/btran/FT-update, and feral's `src/lu/sparse_solve.rs` implements
+these as **dense-vector loops over all `m`, not hyper-sparse** (Hall & McKinnon)
+— on `m ≈ 4000–8000` bases with single-digit-nnz right-hand sides that is the
+textbook order-of-magnitude case. So ≈88% of per-pivot cost is external to
+discopt. **Binding conclusion: no in-repo scheduling change (cadence, ordering,
+pivot threshold, ratio-test stability) moves this gap.** Closing #1008 requires
+hyper-sparse triangular solves and a faster numeric kernel *in `feral`*, or a
+different LU backend — a scope decision, not a tuning exercise.
+
+**Two methodological notes worth generalizing.**
+
+1. *Iteration counts on time-limited rows measure throughput, not convergence.*
+   On a row that hits the limit in both arms, **fewer** iterations means
+   **slower** per iteration. The dual-Harris panel's headline "−20% iterations"
+   on QPLIB_1451_rlt1 is a 20% throughput **loss**. This is the most attractive
+   misreading available in any deadline-capped A/B.
+2. *A single pivot-path change is not an effect size.* One repivot in 6121 pivots
+   moved QPLIB_1619_rlt1's wall by 1.23x. Cells in these panels are only
+   interpretable in aggregate.
+
+**Separable finding (issue #1013).** Five *independent* rounding-level
+perturbations of the dual pivot path (refactor interval 100 and 200; LU pivot
+threshold 0.5 and 0.01; ordering reuse) each drive QPLIB_0911's root LP from 1279
+pivots / 1.9 s `optimal` to >6000 pivots / >45 s `iter_limit`, with
+`DualDegeneratePivots` = 553/1279 and `DualStallTrips` = **0** throughout — the
+warm-stall guard cannot fire on a cold dual solve. The dual-Harris pass clears it
+(46.2 s `iter_limit` → 4.4 s `optimal`, 10.5x) even though it is corpus-neutral,
+which is why the mechanism is recorded there rather than discarded.
