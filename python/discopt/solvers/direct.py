@@ -114,6 +114,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, SolveResult
+from discopt.solvers._dfo_common import build_oracle, glce_merit, glce_merit_scalar
 
 logger = logging.getLogger(__name__)
 
@@ -402,24 +403,22 @@ class _DirectSearch:
     def rank_values(self) -> np.ndarray:
         """Per-rectangle ranking value, following DIRECT-GLce.
 
-        * **Phase A** (no feasible point yet): rank by total constraint violation,
-          so the search first hunts for feasibility.
-        * **Phase B** (a feasible point exists): a feasible centre ranks by its
-          objective; an infeasible one is penalized by its violation *plus*
-          ``|f - f_min|``. That last term is what stops an infeasible point from
-          earning credit for an objective below the incumbent, and it needs no
-          penalty weight to be tuned.
-        * The ``ce`` refinement: a violation within ``eps_cons`` is treated as
-          feasible, so the ranking is not discontinuous exactly at the boundary
-          where optima usually sit (DIRECT has no convergence guarantee across a
-          discontinuity).
+        The rule itself lives in :func:`_dfo_common.glce_merit`, shared with the
+        surrogate backend: the two must rank the same point identically or a
+        comparison between them measures the plumbing instead of the algorithms.
+
+        ``finite_fill=False`` because this value is only ever *compared*. A point
+        where the black box was undefined carries ``+inf``, which loses every
+        comparison — the honest ranking for "no value". The surrogate backend,
+        which has to *fit* the merit, needs a finite stand-in instead.
         """
-        f = np.asarray(self.part.fvals, dtype=np.float64)
-        v = np.asarray(self.part.viols, dtype=np.float64)
-        if self.best_feasible_value is None:
-            return v
-        near_feasible = v <= self.eps_cons
-        return np.where(near_feasible, f, f + v + np.abs(f - self.best_feasible_value))
+        return glce_merit(
+            np.asarray(self.part.fvals, dtype=np.float64),
+            np.asarray(self.part.viols, dtype=np.float64),
+            self.best_feasible_value,
+            self.eps_cons,
+            finite_fill=False,
+        )
 
     # -- evaluation --------------------------------------------------------
     def evaluate(
@@ -663,11 +662,8 @@ class _DirectSearch:
             self.stats.evals += 1
 
     def _scalar_rank(self, fval: float, viol: float) -> float:
-        if self.best_feasible_value is None:
-            return viol
-        if viol <= self.eps_cons:
-            return fval
-        return fval + viol + abs(fval - self.best_feasible_value)
+        """:meth:`rank_values` for one point, for callers that rank one at a time."""
+        return glce_merit_scalar(fval, viol, self.best_feasible_value, self.eps_cons)
 
     # -- driver ------------------------------------------------------------
     def run(
@@ -759,57 +755,6 @@ class _DirectSearch:
 # ══════════════════════════════════════════════════════════════════════════════
 # Model-facing entry point
 # ══════════════════════════════════════════════════════════════════════════════
-
-
-def _build_oracle(model: Model, feas_tol: float):
-    """``(evaluate, n_vars, integer_mask)`` for ``model``.
-
-    ``evaluate`` maps a model point to ``(objective, total_violation)``. Both come
-    from the one evaluator funnel the rest of the solver uses, so an opaque
-    ``dm.custom`` body is evaluated exactly as the local NLP path would.
-    """
-    from discopt.solver import _extract_variable_info, _infer_constraint_bounds, _make_evaluator
-
-    evaluator = _make_evaluator(model)
-    logger.info("DIRECT: evaluator backend is %s", type(evaluator).__name__)
-
-    n_vars, _lb, _ub, int_offsets, int_sizes = _extract_variable_info(model)
-    integer_mask = np.zeros(n_vars, dtype=bool)
-    for off, size in zip(int_offsets, int_sizes):
-        integer_mask[off : off + size] = True
-
-    n_cons = int(getattr(evaluator, "n_constraints", 0) or 0)
-    if n_cons:
-        cl, cu = _infer_constraint_bounds(model, evaluator)
-        cl = np.asarray(cl, dtype=np.float64)
-        cu = np.asarray(cu, dtype=np.float64)
-        # The violation sum below indexes cl and cu against the same g vector, so
-        # a length mismatch would broadcast-or-truncate into a silently wrong
-        # violation — i.e. a wrong feasibility verdict, not a crash. Refuse loudly.
-        if cl.shape != (n_cons,) or cu.shape != (n_cons,):
-            raise ValueError(
-                f"constraint bounds do not match the evaluator: n_constraints={n_cons} "
-                f"but cl has shape {cl.shape} and cu has shape {cu.shape}"
-            )
-    else:
-        cl = cu = None
-
-    def evaluate(x: np.ndarray) -> tuple[float, float]:
-        fval = float(evaluator.evaluate_objective(x))
-        if not np.isfinite(fval):
-            # A black box may be undefined here. Treat it as an unusable point
-            # rather than letting a NaN poison the ordering: +inf loses every
-            # comparison, which is the honest ranking for "no value".
-            fval = np.inf
-        viol = 0.0
-        if cl is not None:
-            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
-            g = np.where(np.isfinite(g), g, np.inf)
-            viol = float(np.sum(np.maximum(0.0, g - cu)) + np.sum(np.maximum(0.0, cl - g)))
-        return fval, viol
-
-    del feas_tol  # the caller owns the tolerance; kept for signature stability
-    return evaluate, n_vars, integer_mask
 
 
 def _refine_derivative_free(
@@ -1060,7 +1005,7 @@ def solve_direct(
             n_vars,
         )
 
-    oracle, n_from_model, integer_mask = _build_oracle(model, feasibility_tolerance)
+    oracle, n_from_model, integer_mask = build_oracle(model, log_prefix="DIRECT")
     if n_from_model != n_vars:
         raise ValueError(f"variable-count mismatch: box has {n_vars}, evaluator has {n_from_model}")
 

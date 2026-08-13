@@ -28,6 +28,7 @@ import math
 
 import numpy as np
 import pytest
+from discopt.solvers._dfo_common import glce_merit
 from discopt.solvers.surrogate import (
     AcquisitionNotExpressible,
     KrigingSurrogate,
@@ -444,34 +445,40 @@ def test_a_repeated_point_is_refused_rather_than_duplicated_in_the_design():
     assert s.stats.evals == 1
 
 
-def test_merit_ranks_violation_first_then_objective():
-    """The GLce merit the surrogate is fitted to, in both phases.
+def test_merits_reads_the_evaluated_points_through_the_shared_merit_rule():
+    """``merits`` is wiring, not a formula: the rule lives in ``_dfo_common``.
 
-    Phase A (nothing feasible known) ranks by total violation so the search first
-    hunts for feasibility; phase B denies an infeasible point credit for a low
-    objective via the ``|f - f_min|`` term, which needs no penalty weight tuned.
-    Same construction as ``_DirectSearch.rank_values`` on purpose — the two
-    backends must optimize the same thing to be comparable.
+    The rule's own behaviour (both phases, the ``ε_cons`` band, ``finite_fill``)
+    is covered in ``test_dfo_common``, shared with ``_DirectSearch.rank_values``
+    so the two backends cannot rank the same point differently. What is checked
+    *here* is what only this class can get wrong — that it feeds its own ``f``,
+    ``viol``, incumbent and tolerance, in that order.
     """
     s = _SurrogateSearch(np.zeros(1), np.ones(1))
     s.X = [np.array([0.1]), np.array([0.2])]
-    s.f = [100.0, -100.0]
-    s.viol = [5.0, 9.0]
-    assert s.best_feasible_value is None
-    assert s.merits()[0] < s.merits()[1], "phase A must prefer the less-violating point"
-
-    s.best_feasible_value = 10.0
     s.f = [10.0, -1e6]
     s.viol = [0.0, 3.0]
+    s.best_feasible_value = 10.0
+
+    expected = glce_merit(
+        np.asarray(s.f, dtype=np.float64),
+        np.asarray(s.viol, dtype=np.float64),
+        s.best_feasible_value,
+        s.eps_cons,
+        finite_fill=True,
+    )
+    np.testing.assert_array_equal(s.merits(), expected)
     assert s.merits()[0] < s.merits()[1], "an infeasible point must not win on objective alone"
 
 
-def test_merit_maps_an_undefined_objective_to_a_finite_worst_case():
-    """A black box that returns nothing must not poison the interpolation system.
+def test_merits_maps_an_undefined_objective_to_a_finite_worst_case():
+    """This backend *fits* the merit, so it must pass ``finite_fill=True``.
 
-    ``+inf`` in the right-hand side makes every coefficient ``nan``; dropping the
-    point throws away the one thing it does tell us, which is that the region is
-    bad. Mapping it to the worst finite merit plus the observed spread keeps both.
+    ``+inf`` in the right-hand side makes every interpolation coefficient ``nan``;
+    dropping the point throws away the one thing it does tell us, which is that
+    the region is bad. This pins the flag rather than the fill arithmetic (which
+    ``test_dfo_common`` covers): picking up DIRECT's ``False`` here would silently
+    break every fit that touches an undefined point.
     """
     s = _SurrogateSearch(np.zeros(1), np.ones(1))
     s.X = [np.array([0.1]), np.array([0.2]), np.array([0.3])]
