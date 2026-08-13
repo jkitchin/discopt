@@ -2835,3 +2835,98 @@ mechanism lands, the measurement is recorded, the default does not move.
 Pinned by `unstable_pivot_recovery_is_not_gated_on_a_deadline` (flag off → bails 1,
 not optimal; flag on → recoveries 1, optimal 0; both arms assert
 `deadline.is_none()`, which is the coupling under test).
+
+### 18f. LP wall is LU factorization, and the 48-update cap is load-bearing (#1008 D3, 2026-08-13)
+
+Two results: an attribution that redirects #1008's planned work, and a
+falsification that kills the fix that attribution most obviously suggests.
+
+**The attribution.** Phase profile over the 19 captured relaxation LPs the R1
+panel had finished (`scratchpad/i1008/attrib.py`, share-of-wall over 600.5s):
+
+| phase | share of LP wall |
+|---|---|
+| **LuNumeric** (`SparseLu::factor`) | **72.6%** |
+| Refactorize (primal, outer timer) | 7.7% |
+| LuSymbolic (`SparseLuSymbolic::analyze`) | 5.0% |
+| FtUpdate | 1.9% |
+| PriceBtran + AlphaFtran + PriceSweep | **1.5%** |
+
+`PriceSweep` alone is **0.1%**. The planned D2 work — column-wise PRICE at
+O(nnz(A)) per pivot — therefore targets a phase that is 1.5% of wall on this
+corpus and cannot pay for the 8.7x–29x gap in the issue title. **D2 is
+deprioritized**; the cost is the LU.
+
+Shares, not speeds: the two panel arms ran concurrently, so absolute ms are
+contention-inflated (§9). Contention inflates all phases alike, so the shares hold
+and no speed claim is made from them. Per-LP, the `LuNumeric` share tracks the
+fill ratio directly — fill 1.0 → ~5%, fill ~6–7 → ~50%, `QPLIB_1451_rlt0` at fill
+**19.1x** → **74.8%**.
+
+**The hypothesis this suggested, and its falsification.** Both simplex loops
+refactorized on a hardcoded `updates >= 48`. On `QPLIB_1451_rlt0` all 265 primal
+refactorizations were cap-triggered (`RefacCap`; 12764 pivots / 48 = 266) and the
+adaptive `refac_work_budget` gate beside it never fired, because the fixed cap
+always trips first. With `FtUpdate` at 1.9% against `LuNumeric` at 72.6%, the
+updates the cap truncates looked ~38x cheaper than the factorizations it forces,
+so raising the interval should have cut the dominant cost.
+
+It does the opposite. Entry experiment over 16 captured LPs
+(`scratchpad/i1008/refac_entry.py` + `refac_report.py`, one process per interval —
+the gate is a `OnceLock`), counters exact and load-independent:
+
+| interval | factorizations | factor nnz | basis nnz | fill | cap-trig | FT-fail |
+|---|---|---|---|---|---|---|
+| **48** (default) | **667** | **75.1M** | 14.1M | **5.32x** | 651 | 0 |
+| 100 / 200 / 500 | 792 | 309.4M | 22.5M | **13.7x** | 0 | 776 |
+
+**+19% factorizations and +312% factor nonzeros.** Above ~100 the arms are
+*identical*: the cap stops firing entirely and feral's product-form update reaches
+its own stability limit instead (`DualRefacCap` 651 → 0, `DualRefacFtFail` 0 →
+776). Letting updates accumulate to that limit lands the search on denser bases
+(`basis_nnz` 14.1M → 22.5M — a different pivot path, not merely different factors)
+and then produces far denser factors from them. Directional wall agreed: 30.5s →
+195s.
+
+**Kill criterion met; the direction is dead.** The 48-update cap is not mistuned,
+it is load-bearing — it refactorizes *before* the update degrades, and the cheap
+fresh factor it produces is the point. "Refactorize less often" is not available
+as a #1008 fix. Correctness was unaffected throughout (64 arm×LP comparisons
+against HiGHS, **0 deviations**), so this is a performance verdict only.
+
+**The single-instance trap, for the record (§2).** On `QPLIB_1423_rlt1` alone,
+raising the interval *helped* — 66 → 55 factorizations, 11.37M → 9.55M factor nnz.
+That one LP was read first and looked like confirmation. The corpus aggregate
+reverses it 4x. Nothing here was claimed until the 16-LP aggregate ran.
+
+**What shipped.** Instrumentation and a measurement knob, no default change:
+`DISCOPT_LP_REFAC_INTERVAL` (default **48** — unset is byte-identical to the
+previous engine, unparseable input refused loudly rather than read as the default,
+which would make an A/B harness measure the baseline twice), and three counters
+that made the falsification visible at all — `DualRefactorizations`,
+`DualRefacCap`, `DualRefacFtFail`. The dual loop's refactorizations were
+previously **unattributed**: the `Refactorizations`/`Refac*` counters are
+incremented only by the primal, so an LP the dual solved outright showed 100+
+`LuSparseFactorizations` against zero refactorization events, and the aggregate
+above could not have been computed.
+
+**Corrections to statements made earlier in this issue's work (§11).**
+
+1. `QPLIB_1451_rlt0` was described mid-investigation as "545 seconds at zero
+   pivots". It is not: `Phase1Pivots 9` + `Phase2Pivots 12755` = **12,764 pivots**.
+   The panel's `iters=0` is the *cold-fallback* signature (`DualColdFallbacks 1`;
+   dual.rs documents `iters == 0` as exactly that) — the dual was abandoned and the
+   cold primal did the work without reporting its iteration count. The reported
+   `iters` on a cold-fallback solve is an observability gap, not a pivot count.
+2. The `piv` column of `attrib.py` is a **primal-only** count
+   (`Phase1Pivots + Phase2Pivots`). It reads 0 for the 18 LPs the dual solved
+   because dual pivots are not in those counters — not because those LPs pivoted
+   zero times.
+
+**What the attribution leaves open.** The cost is `LuNumeric` and the lever is
+fill, not frequency. feral's `analyze` already triangularizes and runs AMD on the
+residual bump, so the 19.1x fill on `QPLIB_1451_rlt0` is *after* a fill-reducing
+ordering — the next question for #1008 is whether that fill is intrinsic to these
+bases or an artifact of static ordering under partial pivoting (the usual remedy
+being threshold-Markowitz pivoting, which chooses pivots dynamically against both
+sparsity and stability). That is a feral-side question and is **not** opened here.

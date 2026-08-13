@@ -1410,6 +1410,7 @@ impl<'a> Simplex<'a> {
         const PIVOT_MIN: f64 = 1e-7;
         const ART_TOL: f64 = 1e-9;
         let mut updates_since_refac = 0usize;
+        let refac_interval = super::dual::refac_interval_default();
         // Rows whose basic artificial cannot be reduced (no reducing pivot, or only
         // degenerate zero-step pivots that never lower its value): a genuine
         // redundant-row infeasibility. Skipped so the pass always makes progress.
@@ -1603,7 +1604,7 @@ impl<'a> Simplex<'a> {
                     let col = self.column(q, art_sign);
                     let need_refac = self.lu.update(li, &col).is_err();
                     updates_since_refac += 1;
-                    if need_refac || updates_since_refac >= 48 {
+                    if need_refac || updates_since_refac >= refac_interval {
                         self.refactorize(art_sign)?;
                         updates_since_refac = 0;
                         xb = self.basic_values(art_sign)?;
@@ -1637,6 +1638,7 @@ impl<'a> Simplex<'a> {
         }
         let mut xb = self.basic_values(art_sign)?;
         let mut updates_since_refac = 0usize;
+        let refac_interval = super::dual::refac_interval_default();
         // NEUTRALITY: the legacy emission substitutes, for a basic artificial in
         // constraint row `r`, that row's own zero-valued structural SINGLETON
         // (its slack in the `[A_ub|I]` standard form every production node LP
@@ -1702,7 +1704,7 @@ impl<'a> Simplex<'a> {
             let col = self.column(q, art_sign);
             let need_refac = self.lu.update(slot, &col).is_err();
             updates_since_refac += 1;
-            if need_refac || updates_since_refac >= 48 {
+            if need_refac || updates_since_refac >= refac_interval {
                 self.refactorize(art_sign)?;
                 updates_since_refac = 0;
                 xb = self.basic_values(art_sign)?;
@@ -1909,6 +1911,7 @@ impl<'a> Simplex<'a> {
     ) -> Result<(), LpStatus> {
         let m = self.m;
         let mut updates = 0usize;
+        let refac_interval = super::dual::refac_interval_default();
         let mut stall = 0usize;
         // Adaptive refactorization budget (discopt#268 / feral#87): the FT basis
         // update is O(bump²) on non-localized spikes — on a wide lifted-McCormick
@@ -2241,12 +2244,12 @@ impl<'a> Simplex<'a> {
                         self.lu.update(slot, &col).is_err()
                     };
                     updates += 1;
-                    // Refactorize on: a failed FT update, the hard 48-update cap, or
+                    // Refactorize on: a failed FT update, the fixed refactorization interval, or
                     // the adaptive work gate (accumulated bump-update work exceeded
                     // the factor's nnz — the wide-McCormick-bump regime).
                     let work_gate =
                         refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
-                    if need_refac || updates >= 48 || work_gate {
+                    if need_refac || updates >= refac_interval || work_gate {
                         // THRU-5: attribute the trigger (priority: FT-fail > cap > gate).
                         crate::profile::incr(if need_refac {
                             // ENGINE-1 (#557): split the FT-fail by feral's own
@@ -2265,7 +2268,7 @@ impl<'a> Simplex<'a> {
                                     Some(Singular) => {
                                         crate::profile::incr(crate::profile::Ctr::RefacFtSingular)
                                     }
-                                    // UpdateBudget can't reach here (discopt's 48-cap
+                                    // UpdateBudget can't reach here (discopt's fixed-interval cap
                                     // trips first) and None means the dense path;
                                     // leave the sub-split silent, the aggregate still
                                     // counts it.
@@ -2273,7 +2276,7 @@ impl<'a> Simplex<'a> {
                                 }
                             }
                             crate::profile::Ctr::RefacFtFail
-                        } else if updates >= 48 {
+                        } else if updates >= refac_interval {
                             crate::profile::Ctr::RefacCap
                         } else {
                             crate::profile::Ctr::RefacWorkGate
