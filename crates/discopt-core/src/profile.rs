@@ -149,6 +149,20 @@ counters!(
     // healthy majority — so the guard's action is auditable and its
     // bound-neutrality (same optimum, cold path) is measurable.
     DualStallTrips,
+    // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
+    // above fires only when the F2 *cap* is reached, so an LP that grinds below
+    // the cap reads 0 there while 43% of its pivots take a zero-length step —
+    // a detector that cannot see the stall it is named for (CLAUDE.md §6).
+    // These measure the degeneracy directly:
+    //   `DualDegenerateRunArms` — episodes where the run of consecutive
+    //     degenerate pivots crossed the arming threshold (the stall signal);
+    //   `DualDegenerateRunMax` — the longest such run in the process (a MAX, not
+    //     a sum: written with `record_max`);
+    //   `DualDegenerateStallBails` — warm solves abandoned for the trusted cold
+    //     solve because a run reached `SimplexOptions::dual_stall_patience`.
+    DualDegenerateRunArms,
+    DualDegenerateRunMax,
+    DualDegenerateStallBails,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced
@@ -308,6 +322,18 @@ pub fn incr_by(c: Ctr, n: u64) {
     if enabled() {
         CVALS[c as usize].fetch_add(n, Ordering::Relaxed);
         CTOTALS[c as usize].fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+/// Keep the **maximum** `v` ever recorded on a counter, rather than a sum. For
+/// extremal quantities (the longest degenerate pivot run, #1013) a total is
+/// meaningless — summing run lengths across solves says nothing about whether any
+/// single solve stalled. Same enable-gating as [`incr`].
+#[inline(always)]
+pub fn record_max(c: Ctr, v: u64) {
+    if enabled() {
+        CVALS[c as usize].fetch_max(v, Ordering::Relaxed);
+        CTOTALS[c as usize].fetch_max(v, Ordering::Relaxed);
     }
 }
 

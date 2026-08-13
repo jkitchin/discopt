@@ -373,6 +373,9 @@ pub fn solve_lp_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+        // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+        dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         cold_dual_start: false,
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
@@ -506,6 +509,9 @@ pub fn solve_lp_warm_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+        // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+        dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         cold_dual_start: false,
     };
     let b_slice = b.as_slice()?;
@@ -613,6 +619,9 @@ pub fn solve_lp_warm_csc_py<'py>(
         // driver's own deadline route keeps the default `false`, so the default
         // B&B pivot path is untouched.
         bank_deadline_duals: deadline.is_some(),
+        // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+        // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+        dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         cold_dual_start: false,
     };
     let start = match (start_col_status, start_basic_vars) {
@@ -744,6 +753,9 @@ pub fn solve_lp_batch_py<'py>(
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
         bank_deadline_duals: false,
+        // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+        // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+        dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         cold_dual_start: false,
     };
     // The solve touches no Python objects, so release the GIL to let the core's
@@ -1117,6 +1129,9 @@ fn run_milp_hooked<'py>(
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
             bank_deadline_duals: false,
+            // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+            // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+            dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             cold_dual_start: false,
         },
     };

@@ -133,6 +133,9 @@ fn opts(inst: &Instance) -> MilpOptions {
             expel_zero_artificials: false,
             bank_deadline_duals: false,
             cold_dual_start: false,
+            // Take the default for anything not named above, so adding a field
+            // to `SimplexOptions` does not break the examples again (#1013).
+            ..Default::default()
         },
     }
 }

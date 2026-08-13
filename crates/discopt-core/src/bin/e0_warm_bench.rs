@@ -160,6 +160,7 @@ fn main() -> ExitCode {
         warm_stall_cap_override: None,
         expel_zero_artificials: true,
         bank_deadline_duals: false,
+        dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         cold_dual_start: false,
     };
 

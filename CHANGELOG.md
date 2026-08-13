@@ -10,7 +10,66 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stalled warm dual re-solve had no escape, and the two that were supposed to
+  cover it were unreachable** (`fix(lp)`, #1013). The warm dual simplex escalates
+  to Bland's rule after `2·(n+1)` consecutive degenerate pivots, and the F2 stall
+  guard trips at the size-derived pivot cap `20·(m+n)+500`. On a lifted
+  relaxation those are 58 194 and ~10⁶ pivots: measured over a 100-LP panel of
+  in-repo root relaxations (all 9 vendored QPLIB instances and all 68 vendored
+  MINLPLib `.nl` instances, `rlt_lineq` off and on), `DualBlandActivations` and
+  `DualStallTrips` are **0 on every single LP** — including cells where 98.7 % of
+  pivots are degenerate and the solve exhausts its budget. A degenerate stall
+  therefore ran to the iteration cap, and one LP (`QPLIB_3814_rlt1`) ended it by
+  returning `infeasible` on an LP that SciPy/HiGHS, every perturbed arm of our own
+  engine, and an elastic `min t` feasibility LP all agree is feasible.
+
+  `SimplexOptions::dual_stall_patience` (default 2048) now hands such a solve to
+  the caller's cold two-phase primal — the action every other difficulty in the
+  dual loop already takes, and one that self-verifies its own verdict, so it can
+  change only *which* engine finishes a solve, never the value. The threshold
+  separates two non-overlapping measured populations: every warm loop that
+  converges peaks at a 902-pivot degenerate run, every one that does not runs
+  ≥ 1274. `DISCOPT_LP_DUAL_STALL_BAIL=<n≥2>` overrides it; `=0` restores the
+  previous loop (`1`/`true`/`on` mean "enabled at the default patience", not a
+  patience of one pivot).
+
+  Graduation panel (2 reps, default vs off), re-run on the post-#1017 base:
+  **99 of 100 LPs identical in status *and* iteration count**, 0 status
+  regressions, **0 status improvements**, objective drift 0.00e+00 across 97
+  optimal/optimal pairs, and 1.34x / 1.13x / neutral on the three cells where it
+  fires. (An earlier revision credited this change with an `infeasible` →
+  `optimal` improvement on `QPLIB_3814_rlt1`; #1019's Farkas margin fix for
+  #1017 landed on `main` in the meantime and that LP is now `optimal` with the
+  bail off as well as on, so the improvement is #1017's, not this one's. This is
+  a **tail guard** — inert on 97 of 100 — not a throughput change.) A
+  tree-level panel over every vendored `.nl` with a recorded optimum (16
+  instances) is bit-identical in objective, bound and node count on all 16, with
+  96 soundness assertions and 0 issues.
+  Measurement, falsified alternatives (including #1008's dual Harris pass
+  re-tested scoped to the stall, and Bland at a reachable threshold — both
+  regress a status elsewhere) and the reproduction harnesses:
+  `docs/dev/performance-plan.md` §18, `scratchpad/i1013/FINDINGS.md`.
+
+  The `QPLIB_3814_rlt1` certificate itself is a **separate** defect — its
+  Neumaier–Shcherbina margin is built from result magnitudes rather than
+  accumulation magnitudes, so a `bᵀy` of 3.0e-8 against a term magnitude of 600
+  passes as a proof of infeasibility — and is filed separately; this change only
+  stops a stalled warm loop from being the thing that decides it.
+
 ### Added
+
+- **Degeneracy-stall instrumentation for the warm dual simplex** (#1013).
+  `DualDegenerateRunMax` (longest run of consecutive degenerate pivots — a
+  maximum, not a sum), `DualDegenerateRunArms` (episodes crossing the 32-pivot
+  arming threshold), `DualDegenerateStallBails` (warm solves handed to the cold
+  path by the stall bail), plus `profile::record_max`. `DISCOPT_LP_DUAL_TRACE=1`
+  emits one `DUALTRACE` line per dual pivot (chosen pivot magnitude, primal and
+  dual step lengths, degeneracy, ratio-test state) — the instrument that showed
+  the stall on this corpus is *not* the hypothesized tiny-pivot mechanism: on the
+  worst cell the chosen pivot magnitude is exactly 1.0 at the median with none
+  below 1e-4.
 
 - **`solver="direct"` — derivative-free global search (DIRECT).** A new backend
   in `discopt.solvers.direct` for models whose objective or constraints contain

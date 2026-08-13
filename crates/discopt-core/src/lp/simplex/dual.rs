@@ -36,6 +36,108 @@ const INF: f64 = 1e20;
 /// values) still reaches the robust cold fallback within a handful of attempts.
 const UNSTABLE_RECOVERY_MAX: usize = 5;
 
+/// Consecutive **degenerate** (zero-length) dual pivots that count as a
+/// degeneracy *episode* for the #1013 stall detector.
+///
+/// The dual loop's only anti-degeneracy escalation was Bland's rule at
+/// `2·(n+1)` consecutive degenerate pivots. On a lifted relaxation that is tens
+/// of thousands of pivots (`n` = structural + slack columns), so it never fires:
+/// over the 100-LP in-repo relaxation panel `DualBlandActivations` is 0 on
+/// **every** LP, including cells with 98% degenerate pivots and runs of
+/// thousands.
+///
+/// This is deliberately a low bar — it marks "this solve has degenerate runs
+/// worth counting", not "this solve is stalled" (that is [`STALL_PATIENCE`], two
+/// orders of magnitude higher). It exists so the *detector* reports a number on
+/// the many LPs that are degenerate without stalling, which is exactly what
+/// `DualStallTrips` could not do.
+const DEGEN_ARM_RUN: usize = 32;
+
+/// Consecutive degenerate pivots after which the warm dual loop gives up and
+/// hands the LP to the trusted cold solve (#1013).
+///
+/// A degenerate dual pivot raises no dual objective, so a run of them is a run
+/// with no progress in the loop's primary measure. The threshold separates two
+/// measured populations on the 100-LP in-repo relaxation panel: every LP whose
+/// warm loop *converges* peaks at a run of **902** pivots (median 120), while
+/// every cell that does not converge — an iteration-limit exit, a cold
+/// fallback, or the `QPLIB_3814_rlt1` `infeasible` verdict that HiGHS and every
+/// perturbed arm of this engine contradict — runs **≥ 1274**. 2048 sits 2.3x
+/// above the highest converging run and below every non-converging one.
+///
+/// It is a corpus-derived constant and is stated as one:
+/// `DISCOPT_LP_DUAL_STALL_BAIL=<n≥2>` overrides it (and `=0` disables the bail
+/// entirely) so a future panel can re-derive it without a rebuild.
+///
+/// The loop's *other* progress measure — the total primal infeasibility it drives
+/// to zero — was implemented and measured as a second, conjunctive test
+/// ("bail only if NEITHER improves"). On all 100 panel LPs it never once reset
+/// the counter that the degeneracy test had not already reset, i.e. it added no
+/// discriminating power for its cost, so it was removed rather than shipped as
+/// an untested branch (CLAUDE.md §3). See `scratchpad/i1013/FINDINGS.md` §4.
+const STALL_PATIENCE: usize = 2048;
+
+/// Default for [`SimplexOptions::dual_stall_patience`], from
+/// `DISCOPT_LP_DUAL_STALL_BAIL`: unset or `1`/`true`/`on` → [`STALL_PATIENCE`],
+/// `0`/`false`/`off` → disabled (the pre-#1013 loop), any integer ≥ 2 → that
+/// patience.
+///
+/// `1` is deliberately **not** read as "a patience of one pivot": every other
+/// flag in this engine is an on/off switch, so `=1` reads as "on" to a caller
+/// and to every A/B harness. Taking it literally made one measurement in this
+/// issue's own tree panel bail on the *first* degenerate pivot of every node LP
+/// and report a 17x regression that had nothing to do with the shipped default.
+/// A patience of 1 is meaningless anyway — every degenerate pivot would bail.
+///
+/// Read once per process: the bail changes which engine solves a stalled LP, so
+/// flipping it mid-solve would make a measurement incomparable with itself.
+pub(super) fn stall_patience_default() -> usize {
+    static PATIENCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PATIENCE.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_DUAL_STALL_BAIL").unwrap_or_default();
+        parse_stall_patience(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`stall_patience_default`], split out so the accepted
+/// and rejected spellings are testable without a process-global `OnceLock`.
+///
+/// An unrecognized value is an **error**, not a silent default. Every other flag
+/// in this engine is default-OFF, where the house pattern (anything unrecognized
+/// reads as on) is harmless: a typo turns the feature on, which shows up in the
+/// measurement. This flag is default-**ON**, which inverts the failure: a typo in
+/// the *off* arm leaves the feature on and the A/B harness reports two identical
+/// arms as a clean "no effect". Python's `str(False)` == `"False"` hits exactly
+/// this — it is neither `"false"` nor a parseable integer. Refusing loudly is
+/// CLAUDE.md §3; the alternative silently corrupts a graduation panel.
+fn parse_stall_patience(raw: &str) -> Result<usize, String> {
+    match raw.trim() {
+        "" | "1" | "true" | "True" | "on" | "ON" => Ok(STALL_PATIENCE),
+        "0" | "false" | "False" | "off" | "OFF" => Ok(0),
+        other => match other.parse::<usize>() {
+            Ok(n) if n >= 2 => Ok(n),
+            _ => Err(format!(
+                "DISCOPT_LP_DUAL_STALL_BAIL={other:?} is not a recognized value. \
+                 Use 1/true/on (default, patience {STALL_PATIENCE}), 0/false/off \
+                 (disable), or an integer >= 2 (explicit patience). A patience of 1 \
+                 is rejected because it would bail on the first degenerate pivot; \
+                 =1 means \"on\"."
+            )),
+        },
+    }
+}
+
+/// Whether to emit the per-pivot dual trace (`DISCOPT_LP_DUAL_TRACE=1`).
+///
+/// One `DUALTRACE` line per pivot on stderr with the chosen pivot magnitude, the
+/// primal and dual step lengths, and the ratio-test state — the instrument the
+/// #1013 diagnosis runs on (`scratchpad/i1013/trace_report.py`). Off by default
+/// and read once per process; when off the trace costs one relaxed load per pivot.
+fn dual_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DISCOPT_LP_DUAL_TRACE").is_some())
+}
+
 /// Re-optimize `min cᵀx s.t. A x = b, l ≤ x ≤ u` from a warm `start` basis via
 /// the dual simplex, falling back to a cold solve on any difficulty.
 ///
@@ -533,6 +635,7 @@ impl<'a> PreparedDual<'a> {
         // was the iteration cap → cold fallback; Bland resolves it in place.
         let mut stall = 0usize;
         let bland_threshold = 2 * (n + 1);
+        let trace = dual_trace_enabled();
         // #928: in-place recoveries from a near-zero pivot, attempted only on a
         // deadline-carrying solve (see the unstable-pivot arm below). Capped per
         // solve so a persistently singular selection still reaches the cold
@@ -687,6 +790,24 @@ impl<'a> PreparedDual<'a> {
                     }
                 };
 
+            // #1013: a stalled warm loop hands the LP to the cold solve. `stall` is
+            // the run of consecutive degenerate pivots — pivots that raise no dual
+            // objective — and past `dual_stall_patience` the loop is not converging
+            // slowly, it is stalled: no LP in the measured panel that converges warm
+            // ever reaches this run length, and the ones that do reach it end in an
+            // iteration limit, a cold fallback anyway, or a verdict that independent
+            // solvers contradict. The action is the one every other difficulty in
+            // this loop already takes — return `None` so the caller cold-solves —
+            // so it cannot make a solve wrong, only slower or faster. The two
+            // escapes that were supposed to cover this are both unreachable here:
+            // Bland's rule needs `2·(n+1)` consecutive degenerate pivots (58 194 on
+            // the panel's worst cell) and the F2 guard needs the size-derived pivot
+            // cap (~10⁶).
+            if opts.dual_stall_patience > 0 && stall >= opts.dual_stall_patience {
+                crate::profile::incr(crate::profile::Ctr::DualDegenerateStallBails);
+                return None;
+            }
+
             // Pivot row ρ = e_rᵀ B⁻¹, then α_rj = ρ·A_j for every nonbasic j (kept
             // for both the ratio test and the incremental reduced-cost update). No
             // per-iteration `y = B⁻ᵀc_B` btran: the reduced costs are maintained.
@@ -748,6 +869,8 @@ impl<'a> PreparedDual<'a> {
                 }
             }
             cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Ratio-test state for the per-pivot trace (written only when tracing).
+            let (mut trace_stop, mut trace_ncand) = (0usize, 0usize);
             let (q, flips): (usize, Vec<usize>) = if bland {
                 // Bland (anti-cycling): the plain min-ratio dual pivot with the
                 // smallest-index tie-break and NO bound flips (a short step). The
@@ -767,19 +890,24 @@ impl<'a> PreparedDual<'a> {
                 // (never flipped), so even if the bound gaps can't fully close
                 // `delta` the step is a valid dual pivot and the search progresses.
                 let mut slope = 0.0f64;
-                let mut q = cand[cand.len() - 1].0;
-                let mut flips: Vec<usize> = Vec::new();
                 let last = cand.len() - 1;
+                let mut stop = last;
                 for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
                     let gap = u[j] - l[j];
                     slope += aj * gap;
                     if idx == last || gap >= INF || slope >= delta - tol {
-                        q = j; // this breakpoint enters the basis; stop flipping
+                        stop = idx; // this breakpoint enters the basis; stop flipping
                         break;
                     }
-                    flips.push(j); // fully traversed → flip to the opposite bound
                 }
-                (q, flips)
+                if trace {
+                    trace_stop = stop;
+                    trace_ncand = cand.len();
+                }
+                (
+                    cand[stop].0,
+                    cand[..stop].iter().map(|&(j, _, _)| j).collect(),
+                )
             };
             // Apply the bound flips (no basis change); their effect on x_B and the
             // reduced costs is realized by the next iteration's exact recompute.
@@ -944,8 +1072,32 @@ impl<'a> PreparedDual<'a> {
             if degenerate {
                 stall += 1;
                 crate::profile::incr(crate::profile::Ctr::DualDegeneratePivots);
+                crate::profile::record_max(crate::profile::Ctr::DualDegenerateRunMax, stall as u64);
+                // #1013: the degeneracy-stall detector. It counts the *episode*
+                // (exactly at the crossing), and is recorded whether or not the
+                // bail below is enabled, so the signal stays measurable with the
+                // mechanism off.
+                if stall == DEGEN_ARM_RUN {
+                    crate::profile::incr(crate::profile::Ctr::DualDegenerateRunArms);
+                }
             } else {
                 stall = 0;
+            }
+            if trace {
+                // One line per pivot: the diagnostic for "is this a run of
+                // zero-length steps on tiny pivots, or genuine cycling?" (#1013).
+                eprintln!(
+                    "DUALTRACE it={pivots} piv={:.6e} t={:.6e} dstep={:.6e} degen={} \
+                     run={stall} ncand={trace_ncand} stop={trace_stop} flips={} \
+                     bland={} delta={:.6e}",
+                    piv.abs(),
+                    t.abs(),
+                    theta_d.abs(),
+                    degenerate as u8,
+                    flips.len(),
+                    bland as u8,
+                    delta.abs(),
+                );
             }
         }
         // Loop exhausted the pivot budget without converging. When the stall guard
@@ -1289,6 +1441,49 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    /// #1013 D2: an *off* spelling must actually disable the bail, and anything
+    /// unrecognized must be refused rather than silently read as the default-ON
+    /// patience. Before this test's fix, `"False"` (Python's `str(False)`) parsed
+    /// as neither `"false"` nor an integer and fell through to `STALL_PATIENCE`,
+    /// so an A/B harness's off arm ran the on path and the two arms measured the
+    /// same thing.
+    #[test]
+    fn stall_patience_off_spellings_disable_and_junk_is_refused() {
+        let mut checked = 0usize;
+
+        for on in ["", "1", "true", "True", "on", "ON"] {
+            assert_eq!(
+                parse_stall_patience(on),
+                Ok(STALL_PATIENCE),
+                "{on:?} should select the default patience"
+            );
+            checked += 1;
+        }
+        for off in ["0", "false", "False", "off", "OFF", "  false  "] {
+            assert_eq!(
+                parse_stall_patience(off),
+                Ok(0),
+                "{off:?} must DISABLE the bail, not fall through to the default"
+            );
+            checked += 1;
+        }
+        for (raw, want) in [("2", 2usize), ("4096", 4096)] {
+            assert_eq!(parse_stall_patience(raw), Ok(want));
+            checked += 1;
+        }
+        // Rejected: a bare 1 is "on" (handled above), so the only integer that
+        // can reach the error arm is one that is neither on/off nor >= 2.
+        for bad in ["yes", "no", "-1", "1.5", "None", "tru", "2048x"] {
+            assert!(
+                parse_stall_patience(bad).is_err(),
+                "{bad:?} must be refused loudly, not silently defaulted"
+            );
+            checked += 1;
+        }
+
+        assert_eq!(checked, 21, "probe did not run every case it claims to");
     }
 
     #[test]
@@ -1856,6 +2051,126 @@ mod tests {
                 cold.obj
             );
         }
+    }
+
+    // #1013: the degeneracy-stall DETECTOR fires where `DualStallTrips` is blind.
+    //
+    // `DualStallTrips` increments only when the F2 size-derived cap is reached, so
+    // an LP that grinds *below* the cap reports 0 — "no stall" — however degenerate
+    // it is. Measured over the 100-LP in-repo relaxation panel, that is every LP in
+    // the corpus: `DualStallTrips = 0` everywhere, including cells with 98% of
+    // pivots degenerate and runs of thousands. The captured `st_testgr3` root
+    // relaxation replayed here is the small end of that class (103×144, 208 warm
+    // pivots): the trip counter stays 0 while the run-length counters show a
+    // degenerate run two orders of magnitude past the arming threshold. That gap is
+    // the CLAUDE.md §6 failure mode this counter pair removes.
+    #[test]
+    fn degenerate_run_detector_sees_what_the_stall_trip_counter_cannot() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let json = include_str!("testdata/st_testgr3_degenerate_stall_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let o = opts();
+        let prep = PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u, &start, &o)
+            .expect("the captured slack start is dual-feasible");
+        let warm = prep.reoptimize(&l, &u, &b, &o);
+        assert_eq!(warm.status, LpStatus::Optimal);
+
+        let trips = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        let degen = crate::profile::counter(crate::profile::Ctr::DualDegeneratePivots);
+        let run_max = crate::profile::counter(crate::profile::Ctr::DualDegenerateRunMax);
+        let arms = crate::profile::counter(crate::profile::Ctr::DualDegenerateRunArms);
+        crate::profile::set_enabled(false);
+
+        assert_eq!(
+            trips, 0,
+            "this LP never reaches the size-derived cap, so the old counter is blind"
+        );
+        assert!(
+            degen > 100,
+            "the captured re-solve is heavily degenerate; got {degen} degenerate pivots"
+        );
+        assert!(
+            run_max as usize >= DEGEN_ARM_RUN,
+            "a degenerate RUN past the arming threshold must be recorded; got \
+             run_max={run_max} (threshold {DEGEN_ARM_RUN})"
+        );
+        assert!(arms >= 1, "the arming episode must be counted; got {arms}");
+    }
+
+    // #1013: the no-progress bail fires on a captured STALL and returns the cold
+    // optimum, and the LP it fires on is one neither existing escape can see.
+    //
+    // The fixture is the captured `tspn12` root relaxation (1345×1801), whose warm
+    // re-solve runs 620 consecutive degenerate pivots. With the bail off the loop
+    // grinds through them and converges; with a patience below that run the loop
+    // hands the LP to the cold solve instead and the caller gets the SAME optimum
+    // — the guarantee that makes this sound: the bail only changes *which* engine
+    // finishes the solve, never the value.
+    #[test]
+    fn dual_stall_bail_fires_on_a_captured_stall_and_is_bound_neutral() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let json = include_str!("testdata/tspn12_dual_stall_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        // Through the production entry point (`solve_lp_warm_csc`), so the replay
+        // sees the same equilibration — and therefore the same pivot path — as the
+        // panel that measured this LP's 1242-pivot no-progress window.
+        let mut off = opts();
+        off.dual_stall_patience = 0;
+        let ground = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+        assert_eq!(ground.status, LpStatus::Optimal, "bail off: warm converges");
+        assert!(
+            ground.iters > 0,
+            "bail off: the warm loop is what solved it"
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails),
+            0,
+            "bail off must not bail"
+        );
+
+        // Patience set explicitly (below this LP's 620-pivot run): the shipped
+        // default is 2048, derived from a panel whose stalling cells are far too
+        // large to vendor as a fixture. The mechanism under test is the same one.
+        let mut on = opts();
+        on.dual_stall_patience = 256;
+        let bailed = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &on);
+        let bails = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
+        crate::profile::set_enabled(false);
+
+        assert_eq!(
+            bails, 1,
+            "the captured stall must trip the bail exactly once"
+        );
+        assert_eq!(
+            bailed.status,
+            LpStatus::Optimal,
+            "the cold solve the bail hands off to must still be optimal"
+        );
+        assert!(
+            (bailed.obj - ground.obj).abs() <= 1e-6 * (1.0 + ground.obj.abs()),
+            "bailed obj {} must equal the warm-converged obj {} (bound-neutral)",
+            bailed.obj,
+            ground.obj
+        );
     }
 
     // A healthy warm re-solve (a one-bound branch from a clean optimum) converges in

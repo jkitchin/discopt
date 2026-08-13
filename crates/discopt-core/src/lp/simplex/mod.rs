@@ -134,6 +134,23 @@ pub struct SimplexOptions {
     /// sets it, and only when its caller passed a `time_limit` — i.e. exactly the
     /// `DISCOPT_LP_WARM_DEADLINE` path whose graduation panel judges it.
     pub bank_deadline_duals: bool,
+    /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
+    /// is abandoned for the cold solve; `0` disables the bail (#1013).
+    ///
+    /// A degenerate dual pivot raises no dual objective, so a long run of them is
+    /// a run with no progress — and the two escapes that were supposed to catch
+    /// that cannot: Bland's rule engages at `2·(n+1)` consecutive degenerate
+    /// pivots (tens of thousands on a lifted relaxation — measured
+    /// `DualBlandActivations` = 0 on all 100 LPs of the in-repo relaxation panel)
+    /// and the F2 stall guard only trips at the size-derived pivot cap
+    /// (`DualStallTrips` = 0 on all 100, including cells that are 98% degenerate).
+    ///
+    /// The action on trip is the one every other difficulty in the dual loop
+    /// already takes — return to the caller's cold two-phase primal, which
+    /// self-verifies its own verdict — so it cannot make a solve wrong, only
+    /// slower or faster. Default from `DISCOPT_LP_DUAL_STALL_BAIL`; see
+    /// `dual::STALL_PATIENCE` for how the default was derived.
+    pub dual_stall_patience: usize,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -202,6 +219,7 @@ impl Default for SimplexOptions {
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
             bank_deadline_duals: false,
+            dual_stall_patience: dual::stall_patience_default(),
             cold_dual_start: false,
         }
     }
