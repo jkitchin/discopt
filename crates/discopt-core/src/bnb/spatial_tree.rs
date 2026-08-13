@@ -286,6 +286,38 @@ fn term_gap_and_branch_col(t: &EnvTerm, x: &[f64], width: &dyn Fn(usize) -> f64)
     (gap, col)
 }
 
+/// The [`SimplexOptions`] a node LP runs under, given the caller's base options
+/// and the tree's *live* deadline (#1009).
+///
+/// The tree checks its clock only BETWEEN nodes, so without this the wall-clock
+/// budget bounds nothing: one pathological node LP runs uninterruptibly to
+/// `max_iter` and the whole search overruns by an unbounded margin. Measured on
+/// QPLIB_1157 with `DISCOPT_RLT_LINEQ=1` and a 20 s `time_limit`: **240.83 s on
+/// node 1**, 11.9x over budget, because the root LP alone could not be stopped.
+///
+/// Takes the EARLIER of the two when both are set: the caller's own per-LP cap
+/// (e.g. the `DISCOPT_LP_WARM_DEADLINE` path) is a cap on a single solve and the
+/// tree's is a cap on the whole search — honoring the later of them would let one
+/// of the two budgets be silently ignored, which is the bug being fixed.
+///
+/// Sound by construction: a deadline bail is reported as [`LpStatus::IterLimit`],
+/// which the loop below routes to `NodeVerdict::Undecided` — the region is
+/// BRANCHED with the parent's (valid) bound inherited, never fathomed, and
+/// `n_uncertified`/`n_undecided` record it. Cutting an LP short can therefore
+/// only make the reported bound looser, never wrong. When `config.deadline` is
+/// `None` and the caller set none either, this is `base` unchanged and the solve
+/// is bit-identical to before.
+fn node_lp_opts(base: &SimplexOptions, live_deadline: Option<Instant>) -> SimplexOptions {
+    let deadline = match (base.deadline, live_deadline) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    SimplexOptions {
+        deadline,
+        ..base.clone()
+    }
+}
+
 /// Solve `spec` by native spatial branch-and-bound. `spec.global_lo/global_hi` is
 /// the root box; `spec.integrality` marks integer columns; `spec.obbt_candidates`
 /// (if `config.run_obbt`) are probed per node.
@@ -453,7 +485,12 @@ pub fn solve_spatial_tree(
             continue;
         }
 
-        let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, opts);
+        // #1009: hand the node LP the tree's LIVE deadline (post-extension), not
+        // `config.deadline` — an extension taken above must reach the LP too, or
+        // the extra slice the tree just granted itself is spent on an LP that
+        // still cannot be interrupted. See `node_lp_opts`.
+        let node_opts = node_lp_opts(opts, deadline);
+        let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, &node_opts);
         n_lp_solves += node.n_lp_solves;
         if node.status == LpStatus::Optimal && node.bound == f64::NEG_INFINITY {
             n_uncertified += 1;
@@ -981,6 +1018,123 @@ mod tests {
         assert_eq!(res.status, TreeStatus::TimeLimit);
         assert_eq!(res.node_count, 0);
         assert_eq!(res.bound, f64::NEG_INFINITY);
+    }
+
+    /// #1009: the node LP must run under the tree's LIVE deadline.
+    ///
+    /// Before this, `SimplexOptions::deadline` was left `None` on the kernel path
+    /// and the tree could only check its clock BETWEEN nodes, so a single slow
+    /// node LP overran the budget without limit — measured 240.83 s against a
+    /// 20 s `time_limit` on QPLIB_1157 (`DISCOPT_RLT_LINEQ=1`), 11.9x over, on
+    /// node 1.
+    #[test]
+    fn node_lp_opts_takes_the_earlier_deadline_and_preserves_everything_else() {
+        let now = Instant::now();
+        let early = now + Duration::from_secs(1);
+        let late = now + Duration::from_secs(100);
+        let base = SimplexOptions::default();
+        let mut checked = 0usize;
+
+        // No deadline anywhere: unchanged, so a solve with no time limit stays
+        // bit-identical to the pre-#1009 path.
+        assert_eq!(node_lp_opts(&base, None).deadline, None);
+        checked += 1;
+        // Tree deadline only — the case the bug dropped on the floor.
+        assert_eq!(node_lp_opts(&base, Some(late)).deadline, Some(late));
+        checked += 1;
+        // Caller's per-LP cap only: still honored when the tree has no budget.
+        let capped = SimplexOptions {
+            deadline: Some(early),
+            ..base.clone()
+        };
+        assert_eq!(node_lp_opts(&capped, None).deadline, Some(early));
+        checked += 1;
+        // Both set: the EARLIER wins, in either order. Taking the later would let
+        // one of the two budgets be silently ignored — the bug being fixed.
+        assert_eq!(node_lp_opts(&capped, Some(late)).deadline, Some(early));
+        checked += 1;
+        let capped_late = SimplexOptions {
+            deadline: Some(late),
+            ..base.clone()
+        };
+        assert_eq!(
+            node_lp_opts(&capped_late, Some(early)).deadline,
+            Some(early)
+        );
+        checked += 1;
+
+        // Every other field is carried through untouched: this composes a
+        // deadline, it does not reset the caller's tuning (a silent revert of
+        // `cold_dual_start` or `max_iter` here would be invisible in a bound).
+        let tuned = SimplexOptions {
+            max_iter: 12345,
+            tol: 1e-9,
+            cold_dual_start: true,
+            warm_stall_guard: false,
+            ..base.clone()
+        };
+        let out = node_lp_opts(&tuned, Some(late));
+        assert_eq!(out.max_iter, 12345);
+        assert_eq!(out.tol, 1e-9);
+        assert!(out.cold_dual_start);
+        assert!(!out.warm_stall_guard);
+        checked += 4;
+
+        assert_eq!(checked, 9, "probe fired on every arm");
+    }
+
+    /// The other half of the chain: an expired deadline reaching the LP must come
+    /// back as `IterLimit`, and the tree must treat that as UNDECIDED — branch the
+    /// region with the parent's valid bound inherited, never fathom it.
+    ///
+    /// This is why threading the deadline in is sound rather than merely
+    /// convenient: cutting an LP short can only make the reported bound looser.
+    /// If a future change ever routed `IterLimit` to a fathom, this fails.
+    #[test]
+    fn an_interrupted_node_lp_is_undecided_never_fathomed() {
+        let spec = xy_min_spec();
+        // Expired per-LP deadline, no tree deadline: the tree's between-node check
+        // passes, so nodes really are processed and every node LP is cut at entry
+        // (the iteration loop polls at `_iter == 0`).
+        let opts = SimplexOptions {
+            deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..SimplexOptions::default()
+        };
+        let cfg = SpatialTreeConfig {
+            max_nodes: 8,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &opts);
+
+        assert!(
+            res.node_count > 0,
+            "no node was processed, probe never fired"
+        );
+        assert!(
+            res.n_undecided >= 1,
+            "an LP cut by its deadline was not recorded undecided: {res:?}"
+        );
+        // Never a false certificate off an interrupted LP.
+        assert_ne!(
+            res.status,
+            TreeStatus::Optimal,
+            "claimed Optimal with every node LP interrupted: {res:?}"
+        );
+        // The bound stays a valid lower bound for the true optimum (2.0).
+        assert!(
+            res.bound <= 2.0 + 1e-6,
+            "interrupted search reported bound {} above the true optimum 2.0",
+            res.bound
+        );
+
+        // Control: the identical search with no deadline decides its nodes, so the
+        // assertions above are about the deadline and not about this spec.
+        let clean = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(
+            clean.n_undecided, 0,
+            "control run should decide every node LP: {clean:?}"
+        );
     }
 
     /// #927 regression: ONLY a certified `Infeasible` licenses the tree to treat a
