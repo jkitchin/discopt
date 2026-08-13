@@ -375,7 +375,6 @@ impl FeralLU {
     fn factor_sparse_ordered(
         &mut self,
         a: &SparseColMatrix,
-        _m: usize,
         params: LuParams,
     ) -> Result<SparseLu, LinError> {
         let sym = {
@@ -438,9 +437,9 @@ impl FeralLU {
     }
 
     /// The [`LuParams`] for this solver's factorizations, carrying the configured
-    /// refinement depth, the threshold-pivoting parameter (#1008) and, when
-    /// hardening is on, the `PerturbToEps` singular action. All other fields are
-    /// feral's defaults (`zero_pivot_tol = 1e-13`, etc.).
+    /// refinement depth and, when hardening is on, the `PerturbToEps` singular
+    /// action. All other fields are feral's defaults (strict partial pivoting,
+    /// `zero_pivot_tol = 1e-13`, etc.).
     fn params(&self) -> LuParams {
         LuParams {
             refine_steps: self.refine_steps,
@@ -653,7 +652,7 @@ impl LinearSolver for FeralLU {
             // Build feral's sparse matrix directly from the sparse columns —
             // O(nnz), no dense m×m intermediate.
             let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
-            let lu = self.factor_sparse_ordered(&a, m, params)?;
+            let lu = self.factor_sparse_ordered(&a, params)?;
             // #1008: fill-in is the quantity that sets the cost of refactorize,
             // FT update and ftran/btran simultaneously — record it so those three
             // can be attributed to "too many factorizations" vs "each factor is
