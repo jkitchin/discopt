@@ -45,6 +45,12 @@ _GALLERY = [
     "example_assignment",
     "example_multicommodity_flow",
     "example_bilevel_toll",
+    # solver="direct" worked examples. Registered here so the examples are
+    # themselves tested and cannot rot alongside the API they demonstrate.
+    "example_direct_blackbox",
+    "example_direct_simulator_minlp",
+    "example_direct_constrained",
+    "example_surrogate_expensive_blackbox",
 ]
 
 

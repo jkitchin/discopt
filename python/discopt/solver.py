@@ -491,6 +491,183 @@ def _gdp_config_primal_enabled() -> bool:
     )
 
 
+# ── Governed root DIRECT primal heuristic (default OFF) ──────────────────────
+#
+#: Evaluation budget for the root DIRECT probe. Two orders of magnitude below
+#: ``solve_direct``'s standalone ``max_evals=5000`` on purpose: this is ONE bounded
+#: probe standing next to multistart / RENS / RINS at the root, not a search in its
+#: own right. The size is taken from the backend's own entry experiment
+#: (``docs/dev/direct-entry-2026-08-12.md``, "Second measured claim"): with the
+#: measured defaults (``divide="one"``, ``break_ties=True``), of the 12 panel
+#: instances that reached 1e-2 relative accuracy at all, **11 reached it within 200
+#: evaluations** (43, 193, 59, 127, 65, 65, 175, 121, 71, 101, 23; the twelfth,
+#: rastrigin_2, needed 513). A few hundred is therefore where the cheap part of
+#: DIRECT's curve lives on that panel. This is NOT a claim that 300 is optimal for
+#: the corpus — it is the flag's opening value, to be moved only by a measurement.
+_DIRECT_HEURISTIC_MAX_EVALS = 300
+
+#: Eq. 4's relative floor for the root probe. Larger than ``solve_direct``'s 1e-4
+#: deliberately: this probe wants the *basin*, and the surrounding solver (subnlp,
+#: the node NLPs, B&B itself) does the refining — which is exactly the survey's
+#: advice whenever DIRECT is hybridized with a local method.
+_DIRECT_HEURISTIC_EPSILON = 1e-2
+
+
+def _direct_heuristic_enabled() -> bool:
+    """Whether the governed root DIRECT primal heuristic runs (**default OFF**).
+
+    ``DISCOPT_DIRECT_HEURISTIC=1`` (also ``on``/``true``/``yes``) turns it on. The
+    polarity is the inverse of :func:`discopt.heuristic_governor._governor_enabled`
+    — that flag guards a *graduated* default-ON policy, this one guards a new
+    default-OFF one — and the accepted spellings are the same set.
+
+    Default-OFF per CLAUDE.md §5: a new primal source ships behind a flag until a
+    corpus-wide differential panel measures it net-positive. Note which regime it
+    sits in — this is **heuristic-policy**, not bound-changing. A primal heuristic
+    can only ever cost B&B *nodes*: it proposes points, every proposal is re-verified
+    by the caller's own feasibility check and then screened by ``inject_incumbent``'s
+    strict-improvement test, and it never touches the dual bound, the relaxation, or
+    the certificate arithmetic. So the flag's risk is wasted wall, never a wrong
+    optimum, a loose bound, or a lost certificate.
+    """
+    return os.environ.get("DISCOPT_DIRECT_HEURISTIC", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _direct_root_primal(
+    evaluator,
+    lb,
+    ub,
+    int_offsets,
+    int_sizes,
+    cl_list,
+    cu_list,
+    *,
+    max_evals: int = _DIRECT_HEURISTIC_MAX_EVALS,
+    deadline: Optional[float] = None,
+    feasibility_tolerance: float = 1e-6,
+):
+    """A bounded DIRECT sampling probe over the root box.
+
+    Returns ``(x, objective, evaluations)`` for the best *near-feasible* point the
+    probe sampled, or ``None`` when the probe does not apply or found nothing. The
+    caller must re-verify the point through its own acceptance path — this returns a
+    candidate, never an incumbent.
+
+    :class:`~discopt.solvers.direct._DirectSearch` is driven directly rather than
+    through :func:`~discopt.solvers.direct.solve_direct`: the local-refinement loop
+    and the ``SolveResult`` contract belong to the standalone backend, and here the
+    surrounding B&B already owns both the refining and the reporting. What is wanted
+    from DIRECT at the root is one thing — a point in a basin the local starts did
+    not reach.
+
+    Declines quietly (``None``, a debug log, no exception) in the two cases where
+    DIRECT is undefined:
+
+    * **no continuous degrees of freedom** — DIRECT trisects a box, and a pure
+      integer model has nothing to trisect;
+    * **a non-finite side** — an infinite side has no midpoint and no centre-vertex
+      distance.
+
+    ``solve_direct`` raises on both, correctly: there the user asked for DIRECT and a
+    silent substitution would be an approximation they did not sanction. Here nobody
+    asked; declining is the honest answer and raising would abort a solve over an
+    optional heuristic.
+    """
+    from discopt.solvers.direct import _DirectSearch
+
+    lb = np.asarray(lb, dtype=np.float64).reshape(-1)
+    ub = np.asarray(ub, dtype=np.float64).reshape(-1)
+
+    integer_mask = np.zeros(lb.size, dtype=bool)
+    for _off, _size in zip(int_offsets, int_sizes):
+        integer_mask[_off : _off + _size] = True
+
+    if not bool((~integer_mask).any()):
+        logger.debug("DIRECT root primal: no continuous degrees of freedom; skipping")
+        return None
+    if not (bool(np.all(np.isfinite(lb))) and bool(np.all(np.isfinite(ub)))):
+        logger.debug("DIRECT root primal: box is not finite on every variable; skipping")
+        return None
+    if bool(np.any(ub < lb)):
+        logger.debug("DIRECT root primal: empty box (ub < lb); skipping")
+        return None
+
+    _cl = np.asarray(cl_list, dtype=np.float64) if cl_list else None
+    _cu = np.asarray(cu_list, dtype=np.float64) if cu_list else None
+    # The caller sets and clears the two together, and the violation sum below
+    # indexes both against the same ``g``. Check that rather than assume it: a
+    # length mismatch does not raise in numpy, it broadcasts or truncates, so the
+    # failure mode is a silently *wrong violation* -- and therefore a wrong
+    # feasibility verdict on a candidate incumbent -- not a crash. Refuse loudly
+    # (CLAUDE.md §3); the caller reports it as a warning and continues without the
+    # probe, which costs nodes and never correctness.
+    if (_cl is None) != (_cu is None):
+        raise ValueError(
+            "DIRECT root primal: constraint bounds must be supplied as a pair "
+            f"(cl_list={'set' if _cl is not None else 'empty'}, "
+            f"cu_list={'set' if _cu is not None else 'empty'})"
+        )
+    if _cl is not None and _cu is not None and _cl.shape != _cu.shape:
+        raise ValueError(
+            f"DIRECT root primal: constraint bound length mismatch cl={_cl.shape} vs cu={_cu.shape}"
+        )
+    # Binding the pair makes the invariant explicit so the violation term below is
+    # not reaching through an Optional.
+    _bounds = (_cl, _cu) if (_cl is not None and _cu is not None) else None
+
+    def _oracle(x: np.ndarray) -> tuple[float, float]:
+        fval = float(evaluator.evaluate_objective(x))
+        if not np.isfinite(fval):
+            # A point where the objective is undefined must lose every comparison
+            # rather than poison the ordering with a NaN.
+            fval = np.inf
+        viol = 0.0
+        if _bounds is not None:
+            _lo, _hi = _bounds
+            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64).reshape(-1)
+            if g.shape != _lo.shape:
+                # Same reasoning as the pairing check above: numpy would
+                # broadcast or truncate rather than raise, and the result would
+                # be a violation computed against the wrong rows.
+                raise ValueError(
+                    f"DIRECT root primal: evaluator returned {g.shape[0]} constraint "
+                    f"values but {_lo.shape[0]} bounds were supplied"
+                )
+            g = np.where(np.isfinite(g), g, np.inf)
+            viol = float(np.sum(np.maximum(0.0, g - _hi)) + np.sum(np.maximum(0.0, _lo - g)))
+            if not np.isfinite(viol):
+                # inf - inf on a two-sided-infinite row: unusable, not feasible.
+                viol = np.inf
+        return fval, viol
+
+    search = _DirectSearch(
+        lb,
+        ub,
+        integer_mask=integer_mask,
+        epsilon=_DIRECT_HEURISTIC_EPSILON,
+        divide="one",
+        break_ties=True,
+    )
+    search.eps_cons = float(feasibility_tolerance)
+    search.run(_oracle, int(max_evals), deadline=deadline)
+
+    if search.best_feasible_point is None or search.best_feasible_value is None:
+        logger.debug(
+            "DIRECT root primal: no near-feasible point in %d evaluations", search.stats.evals
+        )
+        return None
+    return (
+        np.asarray(search.best_feasible_point, dtype=np.float64),
+        float(search.best_feasible_value),
+        int(search.stats.evals),
+    )
+
+
 #: Share of the remaining wall-clock budget the #823 constructor may spend, and the
 #: absolute cap on that share. A root constructor must be *cheap when it fails*: it
 #: runs before the tree does any work, so every second it spends is a second B&B does
@@ -5070,7 +5247,7 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 # legitimately accepted — the kwarg-validation guard (M6) must allow them so a
 # real backend option is never rejected as a typo. Sourced from every
 # ``kwargs.get``/``kwargs.pop`` site in this module plus the AMP option list.
-_BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
+_GENERIC_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
     {
         # lp-spatial diagnostic path
         "lp_spatial",
@@ -5214,12 +5391,86 @@ def _withhold_local_optimality_certificate(result: SolveResult) -> SolveResult:
     return result
 
 
-@functools.lru_cache(maxsize=1)
-def solve_model_accepted_kwargs() -> frozenset[str]:
+#: Options that ONLY exist for a specific ``solver=`` selector. Kept out of the
+#: generic set on purpose: :func:`solve_model_accepted_kwargs` is a flat
+#: membership test that never looks at ``solver=``, so anything listed generically
+#: is accepted on EVERY path — including a default branch-and-bound solve where
+#: nothing consumes it. That is exactly the M6 hazard the guard exists to stop
+#: (``m.solve(gap_tolerence=…)`` running at the default gap while the user
+#: believes it was tightened).
+#:
+#: The pre-existing generic members survive because they are *distinctive* —
+#: nobody types ``convhull_ebd_encoding`` by accident. The DFO options are not:
+#: ``seed``, ``max_evals``, ``local_refine``, ``feasibility_tolerance`` and above
+#: all ``n_jobs`` are all things a user would plausibly write on a default solve
+#: believing they had set something. ``m.solve(n_jobs=8)`` accepted-and-ignored,
+#: running serially with no warning, is the M6 failure mode reproduced on the very
+#: parameter this module's own dispatch comment flags as confusable with
+#: ``threads``.
+_SELECTOR_ONLY_KWARGS: dict[str, frozenset[str]] = {
+    "direct": frozenset(
+        {
+            "max_evals",
+            "epsilon",
+            "direct_variant",
+            "divide",
+            "break_ties",
+            "local_refine",
+            "local_refine_after",
+            "local_refine_time_limit",
+            "local_refine_method",
+            "n_jobs",
+            "feasibility_tolerance",
+        }
+    ),
+    "surrogate": frozenset(
+        {
+            "max_evals",
+            "surrogate",
+            "rbf_kernel",
+            "rbf_ridge",
+            "n_initial",
+            "acquisition_optimizer",
+            "acquisition_time_limit",
+            "acquisition_gap_tolerance",
+            "acquisition_multistarts",
+            "distance_cycle",
+            "min_distance",
+            "nugget",
+            "estimate_nugget",
+            "kriging_power",
+            "estimate_kriging_power",
+            "theta_bounds",
+            "xi",
+            "local_refine",
+            "local_refine_time_limit",
+            "feasibility_tolerance",
+            "seed",
+            "on_evaluation",
+        }
+    ),
+}
+
+#: Every selector-only name, for the "you supplied X without its selector" hint.
+_ALL_SELECTOR_ONLY_KWARGS: frozenset[str] = frozenset().union(*_SELECTOR_ONLY_KWARGS.values())
+
+
+def selector_for_kwarg(name: str) -> Optional[str]:
+    """The ``solver=`` value a selector-only option belongs to, else ``None``."""
+    for selector, keys in _SELECTOR_ONLY_KWARGS.items():
+        if name in keys:
+            return selector
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def solve_model_accepted_kwargs(solver: Optional[str] = None) -> frozenset[str]:
     """The complete set of keyword names ``Model.solve`` may forward to the solver.
 
-    Union of (a) ``solve_model``'s own named parameters and (b) the curated
-    backend-passthrough keys forwarded through its ``**kwargs``. Used by
+    Union of (a) ``solve_model``'s own named parameters, (b) the curated generic
+    backend-passthrough keys, and (c) the options belonging to ``solver`` when one
+    is given. Passing ``solver`` is what keeps a DFO-only option such as
+    ``n_jobs`` from being silently accepted on a default branch-and-bound solve. Used by
     ``Model.solve`` to reject a misspelled/unknown keyword loudly (M6) instead of
     silently swallowing it — a swallowed ``gap_tolerence=…`` leaves the solver at
     the default gap while the user believes it was tightened (a results-integrity
@@ -5236,7 +5487,10 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
     }
     # ``model`` is the positional target, not a forwardable option; drop it.
     named.discard("model")
-    return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
+    allowed = named | _GENERIC_PASSTHROUGH_KWARGS
+    if solver is not None:
+        allowed |= _SELECTOR_ONLY_KWARGS.get(solver, frozenset())
+    return frozenset(allowed)
 
 
 def _stamp_layer_timing(fn: _F) -> _F:
@@ -5919,13 +6173,24 @@ def solve_model(
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
     # ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
-    # GP-structured MINLP y-space branch-and-bound), and ``"bb"`` (force classic
-    # branch-and-bound, opting out of the automatic GP fast path). Reject
-    # anything else rather than silently falling through to B&B.
-    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "gp-minlp", "bb"):
+    # GP-structured MINLP y-space branch-and-bound), ``"bb"`` (force classic
+    # branch-and-bound, opting out of the automatic GP fast path), and
+    # ``"direct"`` (derivative-free sampling search — returns NO certificate).
+    # Reject anything else rather than silently falling through to B&B.
+    if _solver not in (
+        None,
+        "amp",
+        "gurobi",
+        "mip-nlp",
+        "gp",
+        "gp-minlp",
+        "bb",
+        "direct",
+        "surrogate",
+    ):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'gp-minlp', 'bb'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct', 'surrogate'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -6075,6 +6340,157 @@ def solve_model(
             nlp_solver=nlp_solver,
             initial_point=initial_point,
             **mip_nlp_kwargs,
+        )
+
+    # --- Surrogate (model-based) derivative-free search (no certificate) ---
+    #
+    # Same niche as solver="direct" -- an opaque dm.custom body with no algebraic
+    # relaxation -- but the other cost regime: it spends real computation between
+    # evaluations (a linear solve and a global optimization of the acquisition) to
+    # make each one count, which pays only when an evaluation is genuinely
+    # expensive. Placed with the DIRECT block, BEFORE the CustomCall gate further
+    # down, for the same reason: reaching it is the point of the selector.
+    if _solver == "surrogate":
+        import warnings
+
+        from discopt.solvers.surrogate import solve_surrogate
+
+        surrogate_kwargs: dict[str, Any] = {}
+        for key in (
+            "max_evals",
+            "surrogate",
+            "rbf_kernel",
+            "rbf_ridge",
+            "n_initial",
+            "acquisition_optimizer",
+            "acquisition_time_limit",
+            "acquisition_gap_tolerance",
+            "acquisition_multistarts",
+            "distance_cycle",
+            "min_distance",
+            "nugget",
+            "estimate_nugget",
+            "kriging_power",
+            "estimate_kriging_power",
+            "theta_bounds",
+            "xi",
+            "local_refine",
+            "local_refine_time_limit",
+            "feasibility_tolerance",
+            "seed",
+            "on_evaluation",
+        ):
+            if key in kwargs:
+                surrogate_kwargs[key] = kwargs.pop(key)
+
+        # Same warning discipline as the DIRECT block: a user who set
+        # gap_tolerance on a method with no dual bound has a wrong mental model,
+        # and saying so costs less than letting them read a meaningless result.
+        _ignored_surrogate = [
+            name
+            for name, differs in (
+                ("threads", threads != 1),
+                ("partitions", partitions != 0),
+                ("cutting_planes", cutting_planes is not False),
+                ("mccormick_bounds", mccormick_bounds != "auto"),
+                ("nlp_bb", nlp_bb is not None),
+                ("lazy_constraints", lazy_constraints is not None),
+                ("incumbent_callback", incumbent_callback is not None),
+                ("node_callback", node_callback is not None),
+                ("max_nodes", max_nodes != 100_000),
+                ("strategy", strategy != "best_first"),
+                ("gap_tolerance", gap_tolerance != 1e-4),
+            )
+            if differs
+        ]
+        if _ignored_surrogate:
+            warnings.warn(
+                "solver='surrogate' ignores "
+                + ", ".join(sorted(_ignored_surrogate))
+                + ": it is a model-based sampling search with no branch-and-bound "
+                "tree over the original problem and no dual bound. Its cost control "
+                "is max_evals, and it never reports a gap or a certificate. (The "
+                "acquisition subproblem it solves internally IS certified, but that "
+                "certifies where to sample next, not the answer.)",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        return solve_surrogate(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            **surrogate_kwargs,
+        )
+
+    # --- DIRECT derivative-free global search (no certificate) ---
+    #
+    # Placed here, in the solver-family dispatch, so it runs BEFORE the
+    # ``CustomCall`` gate further down: a model whose opaque ``dm.custom`` body is
+    # outside the reduced-space MCBox scope otherwise degrades to a single local
+    # NLP (continuous) or raises outright (with integers). Reaching DIRECT is the
+    # whole point of the selector, so it must not be blocked by that gate.
+    if _solver == "direct":
+        import warnings
+
+        from discopt.solvers.direct import solve_direct
+
+        direct_kwargs: dict[str, Any] = {}
+        for key in (
+            "max_evals",
+            "epsilon",
+            "direct_variant",
+            "divide",
+            "break_ties",
+            "local_refine",
+            "local_refine_after",
+            "local_refine_time_limit",
+            "local_refine_method",
+            "n_jobs",
+            "feasibility_tolerance",
+        ):
+            if key in kwargs:
+                direct_kwargs[key] = kwargs.pop(key)
+
+        # Generic solve_model options DIRECT has no way to honour. Warn rather
+        # than accept silently: a user who set gap_tolerance on a method with no
+        # dual bound has a wrong mental model, and saying so is cheaper than
+        # letting them read a meaningless result.
+        _ignored_direct = [
+            name
+            for name, differs in (
+                ("threads", threads != 1),  # DIRECT parallelism is n_jobs, not threads
+                ("partitions", partitions != 0),
+                ("cutting_planes", cutting_planes is not False),
+                ("mccormick_bounds", mccormick_bounds != "auto"),
+                ("nlp_bb", nlp_bb is not None),
+                ("lazy_constraints", lazy_constraints is not None),
+                ("incumbent_callback", incumbent_callback is not None),
+                ("node_callback", node_callback is not None),
+                ("max_nodes", max_nodes != 100_000),
+                ("strategy", strategy != "best_first"),
+                ("gap_tolerance", gap_tolerance != 1e-4),
+            )
+            if differs
+        ]
+        if _ignored_direct:
+            warnings.warn(
+                "solver='direct' ignores "
+                + ", ".join(sorted(_ignored_direct))
+                + ": DIRECT is a derivative-free sampling search with no "
+                "branch-and-bound tree and no dual bound. Its cost control is "
+                "max_evals, and it never reports a gap or a certificate.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        return solve_direct(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            **direct_kwargs,
         )
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
@@ -11467,6 +11883,112 @@ def solve_model(
                             logger.info("Continuous multistart found incumbent: obj=%.6g", _obj_cms)
                 except Exception as e:
                     logger.debug("Continuous multistart failed: %s", e)
+
+            # --- Root DIRECT probe (governed primal source, default OFF) ---
+            # A bounded derivative-free sampling search over the WHOLE root box,
+            # standing alongside the multistart / pump / RENS / RINS sources above.
+            # What it adds is coverage no local start has: every source above is
+            # seeded from the relaxation point or from perturbations of it, so on a
+            # model whose relaxation lands in the wrong basin they all inherit that
+            # basin. DIRECT samples the box by geometry instead, so it can propose a
+            # point from a basin no start reached (the entry experiment's
+            # goldstein_price 30 -> 3, ackley 15.06 -> 0, shubert -32.8 -> -123.6;
+            # ``docs/dev/direct-entry-2026-08-12.md``).
+            #
+            # Soundness (heuristic-policy regime, CLAUDE.md §5): this is a PRIMAL
+            # source and nothing else. It can only ever cost B&B *nodes* — never a
+            # bound, never a certificate. Concretely: the dual bound is not read and
+            # not written here; the probe touches no relaxation, no cut pool and no
+            # node bound; every point it proposes is re-evaluated and re-checked for
+            # constraint and integer feasibility below by this path's OWN standard
+            # (identical to the pump/ILS/diving checks) and then passed to
+            # ``_inject_incumbent``, which screens it against the user's callbacks
+            # and accepts it only if it strictly improves the incumbent. A worse or
+            # bogus proposal is therefore discarded, not believed.
+            #
+            # G2 governor: DIRECT is expensive in the governed sense (a whole
+            # sampling search fired at the root) and its entry experiment already
+            # shows the miss profile the class hit-rate exists to detect — 4/13 ties
+            # at an optimum the local path already had. ``allowed``/``record`` let it
+            # throttle itself off once it stops paying (see
+            # ``heuristic_governor.EXPENSIVE_SOURCES``). ``gap_open`` mirrors the
+            # root binary-seed enumeration: as a *finder* (no incumbent) it always
+            # gets through, since securing the first incumbent wins; as an *improver*
+            # it stops once the root optimum is proven.
+            #
+            # The flag is tested FIRST and nothing above it is evaluated, so with
+            # ``DISCOPT_DIRECT_HEURISTIC`` unset this whole block is one `os.environ`
+            # lookup and the default path is byte-identical to the pre-wiring one:
+            # no tree read, no relaxation touch, no governor entry.
+            if _direct_heuristic_enabled() and _heuristic_governor.allowed(
+                "direct",
+                gap_open=(tree.incumbent() is None or not _root_optimum_proven()),
+            ):
+                _direct_inc0 = tree.incumbent()
+                _direct_obj0 = (
+                    float(_direct_inc0[1])
+                    if _direct_inc0 is not None and np.isfinite(_direct_inc0[1])
+                    else np.inf
+                )
+                logger.info(
+                    "Root DIRECT probe: entering (budget=%d evaluations)",
+                    _DIRECT_HEURISTIC_MAX_EVALS,
+                )
+                try:
+                    _dr = _direct_root_primal(
+                        evaluator,
+                        lb,
+                        ub,
+                        int_offsets,
+                        int_sizes,
+                        cl_list,
+                        cu_list,
+                        deadline=_deadline,
+                    )
+                    if _dr is not None:
+                        _x_dr, _, _evals_dr = _dr
+                        _x_dr = np.asarray(_x_dr, dtype=np.float64).copy()
+                        # Re-verified HERE by this path's own standard, exactly as
+                        # the pump / ILS / diving results are, rather than trusted
+                        # because the probe reported it feasible.
+                        _obj_dr = float(evaluator.evaluate_objective(_x_dr))
+                        _dr_feas = not cl_list or _check_constraint_feasibility(
+                            evaluator, _x_dr, cl_list, cu_list
+                        )
+                        _dr_ok = bool(
+                            np.isfinite(_obj_dr)
+                            and _obj_dr < _SENTINEL_THRESHOLD
+                            and _dr_feas
+                            and _is_integer_feasible_solution(_x_dr, int_offsets, int_sizes)
+                        )
+                        _dr_accepted = bool(_inject_incumbent(_x_dr, _obj_dr)) if _dr_ok else False
+                        # Both markers are INFO on purpose: without them a
+                        # differential arm showing no change cannot tell "the probe
+                        # ran and its point was declined" from "the gate never
+                        # opened" (CLAUDE.md §6).
+                        logger.info(
+                            "Root DIRECT probe: %d evaluations, candidate obj=%.6g, "
+                            "verified=%s, accepted=%s",
+                            _evals_dr,
+                            _obj_dr,
+                            _dr_ok,
+                            _dr_accepted,
+                        )
+                except Exception as _e:
+                    # Reported, not swallowed: an explicitly-enabled heuristic that
+                    # cannot run must not read as "it ran and did not help"
+                    # (CLAUDE.md §7). The solve continues — a failed primal source
+                    # costs nodes, never correctness.
+                    logger.warning(
+                        "Root DIRECT probe raised (%s: %s); continuing without it",
+                        type(_e).__name__,
+                        _e,
+                    )
+                _direct_inc1 = tree.incumbent()
+                _direct_improved = bool(
+                    _direct_inc1 is not None and float(_direct_inc1[1]) < _direct_obj0 - 1e-9
+                )
+                _heuristic_governor.record("direct", _direct_improved)
 
         # --- SubNLP primal heuristic ---
         # Fix integers in the best relaxation solution, then solve the

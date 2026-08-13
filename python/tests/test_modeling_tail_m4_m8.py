@@ -25,7 +25,11 @@ import numpy as np
 import pytest
 from discopt import Model
 from discopt.modeling.core import Constraint, _known_shape
-from discopt.solver import solve_model_accepted_kwargs
+from discopt.solver import (
+    _SELECTOR_ONLY_KWARGS,
+    selector_for_kwarg,
+    solve_model_accepted_kwargs,
+)
 
 # ─────────────────────────────────────────────────────────────
 # M4 — hashing / membership / boolean context
@@ -286,6 +290,86 @@ def test_m6_allowlist_covers_solver_and_backend_kwargs():
     }
     missing = must_have - allowed
     assert not missing, f"allowlist missing legitimate kwargs: {sorted(missing)}"
+
+
+# ─────────────────────────────────────────────────────────────
+# M6b — the allowlist is SELECTOR-AWARE, not a flat membership test
+# ─────────────────────────────────────────────────────────────
+#
+# The derivative-free backends (solver="direct" / solver="surrogate") added ~30
+# option names. Putting them in the flat generic passthrough set would have made
+# every one of them accepted-and-ignored on a DEFAULT branch-and-bound solve —
+# the exact M6 hazard, on names a user would plausibly type by accident. The
+# worst is ``n_jobs``: ``m.solve(n_jobs=8)`` on an algebraic model must NOT be
+# quietly accepted and then run serially. These tests fail before the
+# selector-aware split and pass after.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "kwarg,value",
+    [
+        ("n_jobs", 8),  # the reviewer's case: silently serial
+        ("max_evals", 1000),
+        ("seed", 42),
+        ("local_refine", True),
+        ("feasibility_tolerance", 1e-9),
+        ("surrogate", "kriging"),
+        ("divide", "all"),
+        ("xi", 0.1),
+    ],
+)
+def test_m6b_dfo_only_kwarg_rejected_on_default_solve(kwarg, value):
+    """A DFO backend option on a default solve raises and names its selector."""
+    m = Model()
+    z = m.continuous("z", lb=0, ub=5)
+    m.minimize(z)
+    m.subject_to(z >= 1)
+    with pytest.raises(TypeError) as exc:
+        m.solve(**{kwarg: value})
+    msg = str(exc.value)
+    assert kwarg in msg
+    owner = selector_for_kwarg(kwarg)
+    assert owner in ("direct", "surrogate")
+    assert f"solver={owner!r}" in msg, msg
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "selector,kwarg,value",
+    [
+        ("direct", "n_jobs", 2),
+        ("direct", "max_evals", 50),
+        ("direct", "divide", "all"),
+        ("surrogate", "xi", 0.1),
+        ("surrogate", "seed", 42),
+        ("surrogate", "surrogate", "kriging"),
+    ],
+)
+def test_m6b_dfo_kwarg_accepted_with_its_selector(selector, kwarg, value):
+    """The same option is accepted when its selector is supplied (no false refusal)."""
+    allowed = solve_model_accepted_kwargs(selector)
+    assert kwarg in allowed
+    # And the other backend's exclusive options are still refused under it.
+    other = "surrogate" if selector == "direct" else "direct"
+    exclusive = {
+        k for k in _SELECTOR_ONLY_KWARGS[other] if k not in _SELECTOR_ONLY_KWARGS[selector]
+    }
+    assert exclusive, "backends must retain some non-shared options for this check"
+    assert not (exclusive & allowed)
+
+
+@pytest.mark.unit
+def test_m6b_dfo_options_are_not_in_the_generic_set():
+    """No selector-only name may leak into the selector-blind generic allowlist."""
+    from discopt.solver import _ALL_SELECTOR_ONLY_KWARGS, _GENERIC_PASSTHROUGH_KWARGS
+
+    leaked = _ALL_SELECTOR_ONLY_KWARGS & _GENERIC_PASSTHROUGH_KWARGS
+    assert not leaked, f"selector-only options in the generic set: {sorted(leaked)}"
+    # ...and none of them is a solve_model named parameter either, which would
+    # make the guard accept it on every path regardless of the split.
+    default_allowed = solve_model_accepted_kwargs()
+    assert not (_ALL_SELECTOR_ONLY_KWARGS & default_allowed)
 
 
 # ─────────────────────────────────────────────────────────────

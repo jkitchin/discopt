@@ -29,6 +29,8 @@ parts:
       - file: notebooks/tutorial_lagrangian
       - file: notebooks/decomposition_advisor
       - file: notebooks/amp_global_minlp
+      - file: notebooks/direct_global
+      - file: notebooks/surrogate_global
       - file: notebooks/tutorial_solver_pounce
       - file: notebooks/tutorial_pounce_sipopt
       - file: notebooks/differentiable_pounce_layer

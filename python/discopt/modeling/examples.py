@@ -843,6 +843,175 @@ def example_bilevel_toll():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Black-box objective (solver="direct")
+#
+# An opaque `dm.custom` body has no algebraic relaxation, so the
+# default path degrades to a single local NLP with no global
+# search at all. `solver="direct"` searches the box by sampling
+# instead — no derivatives, no relaxation, no certificate.
+#
+#   minimize  ackley(x)          # opaque: raw jnp intrinsics
+#   over      x in [-25.768, 39.768]^2
+#
+# Global minimum 0 at the origin; the box is deliberately
+# asymmetric so the origin is not the box centre (DIRECT samples
+# the centre first, which would otherwise "solve" it instantly).
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_direct_blackbox():
+    import jax.numpy as jnp
+
+    m = dm.Model("direct_blackbox")
+    x = m.continuous("x", shape=2, lb=-25.768, ub=39.768)
+
+    def ackley(v):
+        # Raw jnp intrinsics on the arguments: outside the reduced-space MCBox
+        # scope, so this is genuinely opaque to the relaxation layer.
+        n = v.shape[0]
+        return (
+            -20 * jnp.exp(-0.2 * jnp.sqrt(jnp.sum(v**2) / n))
+            - jnp.exp(jnp.sum(jnp.cos(2 * np.pi * v)) / n)
+            + 20
+            + np.e
+        )
+
+    m.minimize(dm.custom(ackley, name="ackley")(x))
+
+    print(m)
+    print("\n  Global minimum: 0.0 at the origin.")
+    print("  Compare the two paths:")
+    print("      m.solve()                            # local NLP only, no global search")
+    print("      m.solve(solver='direct', max_evals=2000)")
+    print("  DIRECT returns bound=None, gap=None, gap_certified=False — by design.")
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Black-box objective with an integer variable
+#
+# The case the default path REFUSES: global branch-and-bound has
+# no valid node relaxation for an opaque body, so with integers
+# present the solver raises (sound-or-refuse). DIRECT needs no
+# relaxation, so it turns the refusal into a usable answer, and
+# keeps every sampled centre integral in the integer coordinate.
+#
+#   minimize  (a - 3)^2 + (b - 2.5)^2     # opaque
+#   over      a in {0..6}, b in [0, 6]
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_direct_simulator_minlp():
+    import jax.numpy as jnp
+
+    m = dm.Model("direct_simulator_minlp")
+    a = m.integer("a", lb=0, ub=6)
+    b = m.continuous("b", lb=0.0, ub=6.0)
+
+    # Stands in for a simulation called with a discrete configuration and a
+    # continuous set point.
+    #
+    # NOTE the raw `jnp.cos` applied to an ARGUMENT. That is what puts this body
+    # outside the reduced-space MCBox scope. A body built only from arithmetic
+    # (`(a-3)**2 + (b-2.5)**2`) traces through MCBox and is solved GLOBALLY WITH
+    # A CERTIFICATE by the reduced-space engine, integers included — for that
+    # model the default path is strictly better than DIRECT, and you should use
+    # it. Reach for `solver="direct"` only when the body genuinely cannot be
+    # relaxed.
+    def simulate(config, setpoint):
+        return jnp.cos(config * 1.7) + (setpoint - 2.5) ** 2 + 0.05 * config
+
+    m.minimize(dm.custom(simulate, name="simulate")(a, b))
+
+    print(m)
+    print("\n  m.solve()                -> raises: an opaque body outside the MCBox")
+    print("                              scope gives global B&B no node relaxation,")
+    print("                              and integers are present (sound-or-refuse)")
+    print("  m.solve(solver='direct')  -> returns the answer, uncertified")
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Constrained black-box (DIRECT-GLce)
+#
+# The unconstrained minimum sits at the origin, which the
+# constraint excludes — so a solver ignoring the constraint would
+# report 0 rather than 2. DIRECT handles this in two phases:
+# first minimize total violation until a feasible point exists,
+# then optimize while penalizing infeasible points by their
+# violation plus |f - f_min| (no penalty weight to tune).
+#
+#   minimize  x0^2 + x1^2          # opaque
+#   s.t.      x0 + x1 >= 2
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_direct_constrained():
+    m = dm.Model("direct_constrained")
+    x = m.continuous("x", shape=2, lb=-5.0, ub=5.0)
+
+    m.minimize(dm.custom(lambda v: v[0] ** 2 + v[1] ** 2, name="quad")(x))
+    m.subject_to(x[0] + x[1] >= 2.0)
+
+    print(m)
+    print("\n  Optimum: 2.0 at (1, 1) — the origin is infeasible.")
+    print("  m.solve(solver='direct', max_evals=1500)")
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Expensive black box (surrogate backend)
+#
+# Same opaque-body class as the DIRECT examples above, but the
+# other cost regime. When one evaluation costs minutes — a CFD
+# run, a process simulation — you can afford tens of samples, not
+# thousands. A surrogate spends real computation between
+# evaluations (a linear solve and a global optimization of the
+# acquisition) to make each one count.
+#
+#   minimize  branin(x)          # opaque: raw jnp intrinsics
+#   over      x in [-5,10] x [0,15]
+#
+# Global minimum 0.397887, attained at three distinct points.
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_surrogate_expensive_blackbox():
+    import jax.numpy as jnp
+
+    m = dm.Model("surrogate_expensive_blackbox")
+    x = m.continuous("x", shape=2, lb=np.array([-5.0, 0.0]), ub=np.array([10.0, 15.0]))
+
+    calls = {"n": 0}
+
+    def branin(v):
+        # Stands in for an expensive simulation. The counter is the point of the
+        # example: with a costly evaluation, the number of calls IS the cost, and
+        # it is not recoverable from a SolveResult -- which is why the backend
+        # takes an `on_evaluation` progress hook.
+        calls["n"] += 1
+        x1, x2 = v[0], v[1]
+        return (
+            (x2 - 5.1 / (4 * np.pi**2) * x1**2 + 5 / np.pi * x1 - 6) ** 2
+            + 10 * (1 - 1 / (8 * np.pi)) * jnp.cos(x1)
+            + 10
+        )
+
+    m.minimize(dm.custom(branin, name="branin")(x))
+
+    print(m)
+    print("\n  Global minimum: 0.397887 (three global minimizers).")
+    print("  from discopt.solvers.surrogate import solve_surrogate")
+    print("  solve_surrogate(m, max_evals=60)          # RBF, the default")
+    print("  solve_surrogate(m, max_evals=60, surrogate='kriging')")
+    print("\n  Choosing between the two black-box backends:")
+    print("    evaluation is cheap (ms)        -> solver='direct'")
+    print("    evaluation is expensive (min+)  -> the surrogate backend")
+    print("  Neither returns a certificate: bound=None, gap_certified=False.")
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
@@ -864,6 +1033,10 @@ if __name__ == "__main__":
         ("Transportation (named sets)", example_transportation),
         ("Assignment (indexed binaries)", example_assignment),
         ("Multi-commodity Flow (set algebra)", example_multicommodity_flow),
+        ("Black-box objective (solver=direct)", example_direct_blackbox),
+        ("Black-box MINLP (solver=direct)", example_direct_simulator_minlp),
+        ("Constrained black-box (DIRECT-GLce)", example_direct_constrained),
+        ("Expensive black box (surrogate)", example_surrogate_expensive_blackbox),
     ]
 
     for name, func in examples:

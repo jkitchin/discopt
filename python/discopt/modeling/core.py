@@ -1533,12 +1533,27 @@ def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
         weird = dm.custom(lambda x: jnp.sum(jnp.sinc(x) ** 2))
         m.minimize(weird(x) + dm.sum(x))
 
-    Because the body is opaque to the relaxation machinery, a model that uses a
-    ``dm.custom`` function is solved on the **local NLP path only** -- there is
-    no global optimality certificate, so the result reports
-    ``status="feasible"`` with no ``bound``/``gap`` -- and the solver raises if
-    integer/binary variables are present (global branch-and-bound cannot bound an
-    opaque callable). See :class:`CustomCall`.
+    What you get depends on whether the body traces through the reduced-space
+    McCormick type (``MCBox``) -- arithmetic ``+ - * / **`` plus the
+    ``discopt._relax.mcbox`` intrinsic namespace:
+
+    - **Traces through MCBox** -> solved **globally with a certificate** by the
+      reduced-space engine, branching only on the original degrees of freedom;
+      integer/binary variables included (plan P3.1/P3.2, #713).
+    - **Does not trace** (a raw ``jnp`` intrinsic applied to an argument, a
+      non-affine hidden division, a non-scalar leaf, an unbounded box) -> the
+      **local NLP path only**. The result reports ``status="feasible"`` with no
+      ``bound``/``gap`` (#998): a single local NLP finds a local optimum, and
+      reporting it as a dual bound would be a false certificate. With
+      integer/binary variables also present the solver **raises**, since global
+      branch-and-bound would have no valid node relaxation (sound-or-refuse).
+
+    For that last case, ``Model.solve(solver="direct")`` runs a derivative-free
+    global *search* over the box instead of a single local solve. It still returns
+    no certificate, but on a multimodal objective it is a much better answer --
+    see :mod:`discopt.solvers.direct` and the ``direct_global`` notebook.
+
+    See :class:`CustomCall`.
 
     Parameters
     ----------
@@ -4171,7 +4186,36 @@ class Model:
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
         solver : str, optional
-            Optional backend selector. Use ``solver="amp"`` to select
+            Optional backend selector.
+
+            Use ``solver="direct"`` for **derivative-free global search** over the
+            variable box (DIRECT). Intended for a model whose objective or
+            constraints contain an opaque ``dm.custom`` body that cannot be
+            relaxed — that model otherwise degrades to a single local NLP, or
+            raises when integer variables are also present. It requires a finite
+            box and **returns no certificate**: ``bound`` and ``gap`` are ``None``,
+            ``gap_certified`` is ``False``, and the status is never ``"optimal"``.
+            Prefer the default solver whenever the model can be written
+            algebraically. Options: ``max_evals`` (the cost control),
+            ``epsilon``, ``direct_variant`` (``"classic"``/``"gl"``), ``divide``,
+            ``break_ties``, ``local_refine``, ``local_refine_after``,
+            ``local_refine_method`` (``"auto"``/``"nlp"``/``"derivative-free"``),
+            ``local_refine_time_limit``, ``feasibility_tolerance``::
+
+                import jax.numpy as jnp
+                import discopt.modeling as dm
+
+                m = dm.Model("rastrigin")
+                x = m.continuous("x", shape=2, lb=-4.12, ub=6.12)
+                f = dm.custom(lambda v: 20 + jnp.sum(v**2 - 10 * jnp.cos(2 * jnp.pi * v)))
+                m.minimize(f(x))
+
+                r = m.solve(solver="direct", max_evals=2000)
+                r.objective       # ~0.0 at the origin
+                r.bound           # None -- no dual information
+                r.gap_certified   # False -- by design
+
+            Use ``solver="amp"`` to select
             Adaptive Multivariate Partitioning. AMP-specific keyword
             arguments include ``rel_gap``, ``abs_tol``, ``max_iter``,
             ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -4304,14 +4348,29 @@ class Model:
         # backend-passthrough set; an unknown key raises TypeError with a
         # near-match suggestion (CLAUDE.md §3: loud refusal over silent swallow).
         if kwargs:
-            from discopt.solver import solve_model_accepted_kwargs
+            from discopt.solver import selector_for_kwarg, solve_model_accepted_kwargs
 
-            allowed = solve_model_accepted_kwargs()
+            # Selector-aware: an option that only exists for solver="direct" or
+            # solver="surrogate" is NOT accepted on a default solve. A flat
+            # allowlist would accept m.solve(n_jobs=8) on a branch-and-bound run,
+            # ignore it, and run serially — the M6 hazard this guard exists to
+            # stop, on a parameter users already confuse with `threads`.
+            allowed = solve_model_accepted_kwargs(solver)
             unknown = [k for k in kwargs if k not in allowed]
             if unknown:
                 import difflib
 
                 bad = unknown[0]
+                owner = selector_for_kwarg(bad)
+                if owner is not None:
+                    raise TypeError(
+                        f"solve() got '{bad}', which is an option of "
+                        f"solver={owner!r} and has no effect on this solve. "
+                        f"Pass solver={owner!r} to use it. Backend options are "
+                        f"rejected rather than silently ignored (a swallowed "
+                        f"option would leave the solver at its default while you "
+                        f"believe it was set)."
+                    )
                 close = difflib.get_close_matches(bad, sorted(allowed), n=1, cutoff=0.6)
                 hint = f" Did you mean '{close[0]}'?" if close else ""
                 raise TypeError(
