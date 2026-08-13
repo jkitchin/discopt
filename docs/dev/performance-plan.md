@@ -2596,6 +2596,37 @@ from *result* magnitudes rather than accumulation magnitudes. **That is a
 separate defect and is filed separately** (the bail only stops the stalled warm
 loop from being the thing that decides it; it does not repair the margin).
 
+### 18a. Re-measured on the post-#1017 base: the status improvement was #1017's (2026-08-13)
+
+`main` merged #1019 (the Farkas accumulation-margin fix for #1017) while this
+branch was open. That fix repairs the certificate that produced the
+`QPLIB_3814_rlt1` false `infeasible`, so on the merged base **that LP returns
+`optimal` with the stall bail OFF as well as ON** (obj `0.23839462819531176`,
+identical). The "1 status improvement" this section credited to the bail is
+therefore **#1017's result, not this mechanism's**, and the claim is withdrawn
+(CLAUDE.md §11).
+
+Panel re-run on the merged base (100 LPs, 2 reps, `scratchpad/i1013/postmerge_panel.jsonl`):
+
+| gate | pre-merge base | post-#1017 base |
+|---|---|---|
+| unchanged cells (status *and* iterations) | 98 / 100 | **99 / 100** |
+| status regressions | 0 | **0** |
+| status improvements | 1 (`QPLIB_3814_rlt1`) | **0** — the cell is now `optimal` in both arms |
+| objective drift, optimal/optimal | 0.00e+00 (n=96) | **0.00e+00** (n=97) |
+| cells where the bail fires | 3 | 3 — 1.34x, 1.13x, and one neutral |
+
+Tree panel re-run on the same base: objective, bound and node count identical on
+all 16 instances, 96 assertions, 0 issues.
+
+**What the mechanism is now worth, stated plainly.** It is a *tail* guard, not a
+throughput change: inert on 97 of 100 panel LPs (bit-identical iteration counts),
+and on the three where it fires it converts a stalled warm grind into a cold
+solve worth 1.34x (`QPLIB_3814_rlt1`, 1.78 s → 1.33 s) and 1.13x
+(`tspn10_rlt1`, 16.18 s → 14.36 s), with the third neutral. That is the same
+shape of value as the F2 stall guard it sits beside — bounding a pathological
+tail — and it is **not** a broad net-positive, which is how it should be read.
+
 **A second methodological note (§8), because it produced a false regression.**
 The first tree panel reported `nvs12` 2.8 s → 47.8 s and `nvs11` 0.7 s → 6.6 s.
 That was the harness: its "on" arm set `DISCOPT_LP_DUAL_STALL_BAIL=1` and the

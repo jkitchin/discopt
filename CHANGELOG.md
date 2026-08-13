@@ -35,10 +35,15 @@ The release procedure that produces these entries is documented in
   previous loop (`1`/`true`/`on` mean "enabled at the default patience", not a
   patience of one pivot).
 
-  Graduation panel (2 reps, default vs off): **98 of 100 LPs identical in status
-  *and* iteration count**, 0 status regressions, 1 status improvement
-  (`QPLIB_3814_rlt1` `infeasible` → `optimal`), objective drift 0.00e+00 across
-  96 optimal/optimal pairs, and 1.13x–1.20x on the two cells where it fires. A
+  Graduation panel (2 reps, default vs off), re-run on the post-#1017 base:
+  **99 of 100 LPs identical in status *and* iteration count**, 0 status
+  regressions, **0 status improvements**, objective drift 0.00e+00 across 97
+  optimal/optimal pairs, and 1.34x / 1.13x / neutral on the three cells where it
+  fires. (An earlier revision credited this change with an `infeasible` →
+  `optimal` improvement on `QPLIB_3814_rlt1`; #1019's Farkas margin fix for
+  #1017 landed on `main` in the meantime and that LP is now `optimal` with the
+  bail off as well as on, so the improvement is #1017's, not this one's. This is
+  a **tail guard** — inert on 97 of 100 — not a throughput change.) A
   tree-level panel over every vendored `.nl` with a recorded optimum (16
   instances) is bit-identical in objective, bound and node count on all 16, with
   96 soundness assertions and 0 issues.

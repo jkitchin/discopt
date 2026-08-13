@@ -199,3 +199,19 @@ no-progress bail replaces that verdict with the cold path's `optimal` (0.39 s vs
 account for accumulation magnitude (`Σ|b_i y_i|`) rather than result magnitude is
 a separate defect, filed separately — this issue's mechanism only stops the
 stalled warm loop from being the thing that decides it.
+
+## 6. Re-measured on the post-#1017 base (2026-08-13)
+
+`main` merged #1019 (the #1017 Farkas accumulation-margin fix) while this branch
+was open, and it repairs the certificate behind §5's false `infeasible`. On the
+merged base `QPLIB_3814_rlt1` is `optimal` with the bail **off** as well as on
+(obj `0.23839462819531176`, identical), so §5's status improvement belongs to
+#1017 and is withdrawn as evidence for this mechanism (CLAUDE.md §11).
+
+Panel re-run (`postmerge_panel.jsonl`): 99/100 identical in status *and*
+iteration count, 0 regressions, **0 improvements**, drift 0.00e+00 (n=97), and
+the same 3 cells fire — 1.34x, 1.13x, one neutral. Tree panel: identical on all
+16 instances, 96 assertions, 0 issues.
+
+The mechanism is a **tail guard**, not a throughput change, and should be read
+that way: inert on 97 of 100, and worth 1.1x–1.3x on the stalls it catches.
