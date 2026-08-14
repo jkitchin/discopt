@@ -10,6 +10,28 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **feral bumped to `0.16.0`; the sparse LU now pivots with threshold Markowitz**
+  (`deps`, #1008). `0.16.0` is a breaking release, and its one breaking item is
+  the reason to take it: `SparseLu::factor` chooses its column order *during*
+  factorization (feral #171/#172) instead of consuming an AMD-on-AᵀA ordering and
+  factoring with Gilbert–Peierls. discopt keeps the new default at both call
+  sites; `LuPivoting::GilbertPeierls` would restore the old rule.
+
+  Why: #1008 attributed 72.6% of LP wall to `LuNumeric` and named **fill** as the
+  lever. Markowitz attacks fill directly — upstream's 16-basis corpus reports
+  `factor_nnz/nnz(B)` geomean **2.77x → 1.06x**, never worse on any basis, faster
+  on 15 of 16, best case 1066.64 ms → 10.98 ms.
+
+  The upgrade is safe on the release's silent-substitution hazard: Markowitz
+  ignores the `symbolic` argument, so a caller that passes a deliberately chosen
+  ordering has it discarded without warning. discopt passes a throwaway
+  `SparseLuSymbolic::analyze` at both sites, asserts nothing on `reach_visits()`
+  or `used_dense_bump()`, and pins no pivot row or permutation; `FeralLU::params()`
+  builds with `..LuParams::default()`, so the new `LuParams::pivoting` field is
+  not a build break. The audit is `docs/dev/performance-plan.md` §18i.
+
 ### Added
 
 - **LP refactorization attribution, and the measurement it settled** (`perf(lp)`,
