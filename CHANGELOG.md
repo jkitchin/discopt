@@ -36,9 +36,10 @@ The release procedure that produces these entries is documented in
   AMD ordering; an unparseable value is refused loudly rather than read as OFF.
 
   Why it matters: #1008 attributed 72.6% of LP wall to `LuNumeric` and named
-  **fill** as the lever, and the peel is the fill lever. Measured on the captured
-  relaxation LPs it cuts fill several-fold and takes 2–5x off the wall of most
-  of them.
+  **fill** as the lever, and the peel is the fill lever. Measured over 31
+  captured relaxation LPs it cuts aggregate fill 11.09x → 6.51x and total factor
+  nonzeros by **31.6%** (better on 25 of 31), including the corpus's worst
+  instance, `QPLIB_1451_rlt0`, at 19.12x → 2.62x.
 
   Why it is OFF: it is a different rounding trajectory, and it costs the #649
   bchoco06 ill-conditioned root LP its dual bound — the guard test

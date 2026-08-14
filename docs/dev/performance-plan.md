@@ -2989,31 +2989,41 @@ e00aa706 with the peel on; one process each over the captured relaxation LPs,
 per §8 on a marker string (`sparse_triangular` present in the bumped extension,
 absent at 0.15.1), not on a path.
 
-- `off` vs `base`: **18 LPs × 8 fields (`status`, bit-level `obj`, `facs`,
+- `off` vs `base`: **31 LPs × 8 fields (`status`, bit-level `obj`, `facs`,
   `basis_nnz`, `factor_nnz`, `p1`, `p2`, `cold_fallback`) — 0 differences.**
 - `cargo test -p discopt-core --lib` at e00aa706, flag off: **614 passed, 0 failed**.
-- All three arms' objectives against HiGHS at the repo tolerance, zero slack: **54
+- All three arms' objectives against HiGHS at the repo tolerance, zero slack: **93
   arm×LP comparisons, 0 deviations.**
 
 **What the peel does (`on` vs `base`; counters are exact integers and
-load-independent, wall is directional only because the arms ran concurrently, §9):**
+load-independent, wall is directional only because the arms ran concurrently, §9).
+A representative slice of the 31:**
 
 | LP | fill base | fill on | facs b→on | wall b→on | cold |
 |---|---|---|---|---|---|
+| **QPLIB_1451_rlt0** | **19.12x** | **2.62x** | 683→757 | **569.5→31.8** | 1→1 |
+| QPLIB_1675_rlt0 | 10.61x | **1.06x** | 67→95 | 5.66→0.50 | 0 |
+| QPLIB_1661_rlt1 | 10.15x | 8.67x | 326→323 | 155.5→60.4 | 0 |
+| QPLIB_1493_rlt0 | 3.57x | **1.01x** | 30→22 | 0.34→0.07 | 0 |
 | QPLIB_1055_rlt0/1 | 3.60x | **1.00x** | 19→20 | 0.37→0.07 | 0 |
 | QPLIB_1143_rlt0 | 4.81x | **1.09x** | 30→31 | 0.92→0.15 | 0 |
-| QPLIB_1157_rlt0 | 2.59x | **1.02x** | 31→30 | 0.28→0.09 | 0 |
-| QPLIB_1423_rlt0 | 2.06x | **1.01x** | 33→31 | 0.41→0.13 | 0 |
-| QPLIB_1437_rlt1 | 7.05x | 6.51x | 179→175 | 25.40→11.98 | 0 |
+| QPLIB_1437_rlt1 | 7.05x | 6.51x | 179→175 | 25.4→12.0 | 0 |
 | QPLIB_1353_rlt1 | 6.15x | 6.70x | 111→106 | 7.00→4.80 | 0 |
 | **QPLIB_0911_rlt0/1** | 6.79x | 2.93x | **27→474** | **2.00→13.06** | **0→1** |
 
-Aggregate over the 18 LPs: fill **5.84x → 3.71x**, per-LP factor nonzeros better
-on 13, worse on 4, unchanged on 1 — but **total** factor nnz **+65%** and
-factorizations 892 → 1774, both of which are `QPLIB_0911` alone. The peel is a
-real fill reduction on the bases whose fill was moderate (several go to ~1.0x,
-i.e. the factor becomes as sparse as the basis) and does little on the worst
-offenders.
+Aggregate over the 31: fill **11.09x → 6.51x**, total factor nonzeros
+**2.81e9 → 1.92e9 (−31.6%)**, per-LP factor nonzeros better on 25, worse on 5,
+unchanged on 1; directional wall 1809.5s → 584.4s. The peel takes the bases whose
+fill was moderate down to ~1.0x — the factor becomes as sparse as the basis — and
+takes a third off the worst one in the corpus (`QPLIB_1451_rlt0`, 19.12x → 2.62x,
+the instance §18f's attribution singled out at 74.8% `LuNumeric`).
+
+*Correction to an interim figure stated in this session (§11).* The first 18 LPs
+of this run gave fill 5.84x → 3.71x and total factor nnz **+65%**, and that
+prefix was reported as the aggregate. It is not: the +65% was `QPLIB_0911`
+dominating a prefix that had not yet reached the large instances. On the full
+31-LP set the sign reverses to −31.6%. `QPLIB_0911` is still a real regression —
+it is just not the largest term once the corpus is.
 
 **Two blockers keep it default-OFF.**
 
