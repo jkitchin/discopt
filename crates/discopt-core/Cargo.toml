@@ -88,7 +88,37 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # `docs/dev/data/cert-baseline.jsonl`: that reference is stale against `main`
 # (18 violations on an UNMODIFIED tree on a POUNCE-equipped machine), which is
 # why the arms are diffed against each other instead.
-feral = "0.15.1"
+#
+# NOW PINNED TO A GIT REV, NOT A CRATES.IO RELEASE (#1008). e00aa706 is the head
+# of feral's `claude/issue-161-w05b75` (PR #162), which carries v0.15.1 plus the
+# whole of feral #160/#162/#163/#164/#165: Suhl-Suhl basis triangularization
+# (`SparseLuSymbolic::analyze_triangularized`, selected through
+# `analyze_with(a, LuOrderingParams { triangularize })`), the `dense_bump_max_dim`
+# route for the residual bump, the sparse-rhs ftran/btran entry points, and the
+# `hyper_sparse_max_density` 0.25 -> 0.10 default fix. There is no release
+# carrying any of it; 0.15.1 remains crates.io's latest.
+#
+# WHY: #1008's attribution put 72.6% of LP wall in `LuNumeric` and named FILL as
+# the lever (docs/dev/performance-plan.md §18f). §18f eliminated "ordering" on the
+# grounds that feral's `analyze` already triangularized — that elimination was
+# read off feral's unreleased main and is WRONG for the version discopt links
+# (`git grep "fn triangularize" v0.15.1` returns nothing; §18g records the
+# retraction). Triangularization was never actually tested on discopt's build.
+# MEASURED over the captured relaxation LPs, counter-based
+# (`LuFactorNnz`/`LuBasisNnz`, exact integers, load-independent): see §18g for the
+# table and `scratchpad/i1008/feral_arm.py` for the harness. Upstream's own
+# 14-LP interleaved measurement puts the ordering at 1.306x geomean and the
+# ordering plus the sparse-rhs API at 1.497x, i.e. discopt's gap to HiGHS from
+# 14.4x to 9.6x; discopt takes the ordering here and the sparse-rhs entry points
+# are follow-up work, not part of this bump.
+#
+# COST OF THE GIT PIN: this breaks the 0.15.1 alignment with POUNCE 0.10.0's
+# workspace noted above, so two feral copies can now build into one environment.
+# Accepted deliberately — discopt consumes only the LU layer and POUNCE only the
+# multifrontal side, so they do not share state — and it reverts to a version
+# requirement as soon as feral cuts a release containing e00aa706. The rev is on a
+# PR branch, not `main`: re-pin to the merge commit once feral #162 lands.
+feral = { git = "https://github.com/jkitchin/feral", rev = "e00aa7060bb87359a8ed014a4a71a9f22fff0167" }
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.

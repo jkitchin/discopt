@@ -16,8 +16,8 @@
 
 use super::refine::residual_matvec_dd;
 use feral::{
-    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuSingularAction, RefactorCause,
-    SparseColMatrix, SparseLu, SparseLuSymbolic,
+    should_use_dense_lu, DenseLu, GeneralMatrix, LuOrderingParams, LuParams, LuSingularAction,
+    RefactorCause, SparseColMatrix, SparseLu, SparseLuSymbolic,
 };
 
 /// Error from a basis factorization/solve.
@@ -358,6 +358,75 @@ pub struct FeralLU {
     singular_perturb: Option<f64>,
 }
 
+/// Build the symbolic factorization of a basis, choosing feral's ordering.
+///
+/// #1008. The bump to `e00aa706` brings feral's Suhl–Suhl peel: triangularize
+/// the basis and hand AMD only the residual bump, instead of ordering the whole
+/// basis. Upstream measures the analysis itself 4.2–9.8x cheaper, and the
+/// simplex pays it on *every* refactorization.
+///
+/// It is not free. The peel is a different rounding trajectory, and upstream's
+/// feral #163 records that it costs one ill-conditioned LP its dual bound —
+/// discopt's own guard, `bchoco06_illcond_scaled_path_recovers_bound_649`, is
+/// that LP, and it fails with the peel. Upstream measured a fix at feral
+/// `895ef65`: peel **paired with** the `dense_bump_max_dim` route passed it,
+/// because the dense bump kernel reorders the bump's arithmetic again. That
+/// pairing is why the two are set together here and never the peel alone — but
+/// at `e00aa706` it **no longer rescues the bound** on discopt's fixture, with
+/// the route measurably engaged (42 of 48 factorizations take the dense bump;
+/// see §18g). Coin-flip sensitivity of one ill-conditioned LP to any
+/// perturbation of the bits its ratio test reads, exactly as upstream frames it
+/// — and the reason this ships default-OFF.
+///
+/// Default is feral's own default (`triangularize: false`, whole-basis AMD),
+/// keeping the engine byte-identical to the 0.15.1 build; set
+/// `DISCOPT_LU_TRIANGULARIZE=1` to take the peel. Default-OFF per CLAUDE.md §5
+/// until the graduation panel passes on both bars — see §18g of
+/// `docs/dev/performance-plan.md` for the measurement.
+fn analyze_symbolic(a: &SparseColMatrix) -> Result<SparseLuSymbolic, feral::FeralError> {
+    SparseLuSymbolic::analyze_with(
+        a,
+        LuOrderingParams {
+            triangularize: triangularize_enabled(),
+        },
+    )
+}
+
+/// Bump dimension at or below which the peeled residual bump takes feral's dense
+/// kernel (`LuParams::dense_bump_max_dim`; `0` disables the route).
+///
+/// Set only when the peel is on — feral applies it only to a symbolic that
+/// actually triangularized, and the peel-without-it configuration is the one
+/// that loses the #649 bound. 4096 is upstream's measured setting (a 4096-wide
+/// bump packs a 134 MB `f64` buffer, the bound on being wrong here) and is the
+/// configuration their 1.71x on a discopt root LP was measured in.
+const DENSE_BUMP_MAX_DIM: usize = 4096;
+
+/// Whether `DISCOPT_LU_TRIANGULARIZE` selects feral's triangularizing analysis.
+///
+/// Read once per process. Refuses an unparseable value rather than silently
+/// treating it as OFF — a typo'd flag that reads as "off" is how a measurement
+/// arm ends up measuring the baseline twice (CLAUDE.md §6/§8).
+fn triangularize_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LU_TRIANGULARIZE").unwrap_or_default();
+        parse_triangularize(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+fn parse_triangularize(raw: &str) -> Result<bool, String> {
+    match raw.trim() {
+        "" | "0" => Ok(false),
+        "1" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_LU_TRIANGULARIZE={other:?} is not 0 or 1. Use 1 to select \
+             feral's Suhl-Suhl triangularizing symbolic analysis, 0 (or leave it \
+             unset) for the whole-basis AMD ordering."
+        )),
+    }
+}
+
 impl FeralLU {
     /// A new, unfactorized solver.
     pub fn new() -> Self {
@@ -379,7 +448,7 @@ impl FeralLU {
     ) -> Result<SparseLu, LinError> {
         let sym = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
-            SparseLuSymbolic::analyze(a).map_err(feral_err)?
+            analyze_symbolic(a).map_err(feral_err)?
         };
         let lu = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
@@ -446,6 +515,14 @@ impl FeralLU {
             on_singular: match self.singular_perturb {
                 Some(abs_floor) => LuSingularAction::PerturbToEps { abs_floor },
                 None => LuSingularAction::Fail,
+            },
+            // #1008: paired with the peel, never set alone — see `analyze_symbolic`.
+            // feral ignores it on a symbolic that did not triangularize, so this is
+            // belt-and-braces, but the pairing is the point and it is stated here too.
+            dense_bump_max_dim: if triangularize_enabled() {
+                DENSE_BUMP_MAX_DIM
+            } else {
+                0
             },
             ..LuParams::default()
         }
@@ -612,7 +689,7 @@ impl LinearSolver for FeralLU {
             ))
         } else {
             let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
-            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+            let sym = analyze_symbolic(&a).map_err(feral_err)?;
             Factored::Sparse(Box::new(
                 SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
             ))
@@ -660,6 +737,14 @@ impl LinearSolver for FeralLU {
             crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
             crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
             crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
+            // #1008: did the peel actually peel, and did the dense-bump route
+            // actually fire? `DISCOPT_LU_TRIANGULARIZE=1` pairs the two, and a
+            // pairing that silently does not engage is a measurement of the
+            // unpaired configuration under the paired label (CLAUDE.md §6).
+            crate::profile::incr_by(crate::profile::Ctr::LuBumpDim, lu.bump_dim() as u64);
+            if lu.used_dense_bump() {
+                crate::profile::incr(crate::profile::Ctr::LuDenseBumpFactorizations);
+            }
             Factored::Sparse(Box::new(lu))
         });
         self.retained = dense
@@ -1217,6 +1302,40 @@ mod tests {
             g.is_finite() && g >= 1.0,
             "growth is a ≥1 high-water ratio, got {g}"
         );
+    }
+
+    /// #1008. The gate must refuse a value it cannot parse instead of reading it
+    /// as OFF: a typo'd flag that silently means "baseline" is how an A/B arm
+    /// ends up measuring the baseline twice (CLAUDE.md §6/§8). Unset and `0` are
+    /// the pre-bump whole-basis AMD path; only `1` selects triangularization.
+    #[test]
+    fn triangularize_flag_parses_or_refuses() {
+        let mut checked = 0;
+        for (raw, want) in [
+            ("", false),
+            ("  ", false),
+            ("0", false),
+            (" 0 ", false),
+            ("1", true),
+        ] {
+            assert_eq!(parse_triangularize(raw), Ok(want), "raw={raw:?}");
+            checked += 1;
+        }
+        for raw in ["2", "-1", "on", "true", "yes", "1x", "None", "0.0"] {
+            assert!(
+                parse_triangularize(raw).is_err(),
+                "raw={raw:?} must be refused"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 13, "probe must have executed every case");
+    }
+
+    /// The default path is feral's retained pre-#160 ordering, so the bump to
+    /// `e00aa706` does not change the engine unless the flag is set.
+    #[test]
+    fn triangularize_defaults_off() {
+        assert_eq!(parse_triangularize(""), Ok(false));
     }
 
     #[test]
