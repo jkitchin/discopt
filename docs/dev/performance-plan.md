@@ -2662,7 +2662,15 @@ Env A/B on the shipped binary, no rebuild, `time_limit=None`, oracle = HiGHS:
 |---|---|---|---:|---|
 | `QPLIB_2738` | **`optimal` −5.0587686**, 9.6 s | **no solution**, 12.5 s | 1 | `Numerical` |
 | `QPLIB_2170` (`time_limit=40`) | **`optimal` 0**, 1.7 s | **no solution**, 0.2 s | 1 | **`Unbounded`** |
-| `QPLIB_3225` | no solution | no solution | 0 | `Numerical` — unrelated, needs feral #160 |
+| `QPLIB_3225` | no solution | no solution | 0 | `Numerical` — unrelated; cause still unfound (see below) |
+
+> **The `QPLIB_3225` attribution above is RETRACTED, 2026-08-14 (§11).** It
+> originally read "needs feral #160", i.e. that the LU ordering was the cause.
+> Upstream ran the A/B and closed **feral #166** as not reproducible: the AMD arm
+> and the peel arm return the *same* objective (511.52671247757985), differing
+> only in bound (508.88462071047877 / 508.88769205717875) and nodes (4625 / 5357).
+> `QPLIB_3225` does not track the ordering flip. The real cause is still unfound;
+> nothing in the row above depends on it, since the row is a zero-bail control.
 
 The `QPLIB_2170` row is the sharper one: the cold path does not refuse, it
 **claims `Unbounded`** on an LP HiGHS certifies as `optimal 0` in 81 pivots and
@@ -3147,3 +3155,66 @@ conclusion ("closing #1008 requires work in feral or a different LU backend")
 survives both, and its own prescription needs the same correction: it named
 hyper-sparse triangular solves as half the fix, and upstream has now measured
 that half at ~1.00x end to end. What is left is the numeric kernel, upstream.
+
+### 18i. Upstream replaced the ordering lever entirely: threshold-Markowitz makes `DISCOPT_LU_TRIANGULARIZE` dead (#1008, 2026-08-14)
+
+feral PR #172 (closing feral #171) changes `SparseLu::factor`'s **default** from
+AMD-on-AᵀA + Gilbert–Peierls to **threshold-Markowitz** pivoting, which chooses
+its column order *during* factorization. It therefore **ignores the `symbolic`
+argument** beyond a dimension check. `LuPivoting::GilbertPeierls` restores the
+old rule; the change is breaking and ships as 0.16.0 (not yet on crates.io —
+0.15.1 is still the latest published version as of this entry).
+
+**Audit of this repo for silent ordering substitution** (upstream's four hazard
+classes, run at `bce881ff` and on this branch):
+
+| hazard | shipped `main` | this branch (#1025) |
+|---|---|---|
+| `SparseLu::factor(&a, &sym, …)` with a deliberately chosen `sym` | **clean** — both sites pass plain `SparseLuSymbolic::analyze`, a throwaway AMD | **HIT** — both sites pass `analyze_with(a, LuOrderingParams { triangularize })` |
+| assertions on `reach_visits()` | none | none |
+| assertions on `used_dense_bump()` | none | **HIT** — `linsolve.rs:745` counts it |
+| tests pinning a pivot row or permutation | none | none |
+
+`main`'s `FeralLU::params()` builds with `..LuParams::default()`, so the new
+`pivoting` field is not a build break either. **Shipped discopt has zero
+exposure**; both hits are in the unmerged #1025 branch.
+
+**Both hits resolve by deletion, not by `pivoting: LuPivoting::GilbertPeierls`.**
+Pinning Gilbert–Peierls at those sites would keep `DISCOPT_LU_TRIANGULARIZE`
+functioning, but §18h already established what it gates: the configuration that
+loses bchoco06's dual bound, for a speedup unreachable without that loss. Keeping
+a superseded lever alive by pinning the LU back to the slower rule is the "dead
+flag" §3 forbids. The `used_dense_bump()` counter is the sharper case: under the
+Markowitz default the dense-bump route is unreachable, so `LuDenseBumpFactorizations`
+would read a permanent 0 — a non-vacuity guard that has itself gone vacuous, which
+is exactly the instrument §6 exists to prevent. A guard that can only report 0 is
+worse than no guard.
+
+**De-risk run, measured here, not taken on report** (CLAUDE.md §8/§6). Worktree
+at `bce881ff` + `[patch.crates-io] feral = { git = …, branch = "main" }`,
+resolving to feral `c9c3adc`. §8 markers asserted present in the fetched source:
+`pub enum LuPivoting`, `used_markowitz`, and `pivoting: LuPivoting::Markowitz`
+as the `LuParams::default()` value (`src/lu/mod.rs:457`).
+
+| check | result |
+|---|---|
+| `cargo test -p discopt-core --lib --no-fail-fast` | **602 passed, 0 failed** |
+| `cargo test -p discopt-core --lib lp::` | **112 passed, 0 failed** |
+| `bchoco06_illcond_scaled_path_recovers_bound_649` | **ok** |
+| §6 probe `used_markowitz()` at the factor site | **46 true, 0 false** |
+
+The 112/112 and the 46 firings reproduce upstream's numbers exactly, from a
+different harness. The probe matters because both routes are silent: a passing
+test proves nothing about *which* rule ran, and `--lib` captures `eprintln!` from
+passing tests, so the first run of it read 0 firings for a purely instrumental
+reason — `-- --nocapture` is required. Neither the probe nor the `[patch.crates-io]`
+stanza is committed; they were reverted after the run.
+
+**Consequence for #1008 and for PR #1025.** Upstream's own corpus reports fill
+(`factor_nnz/nnz(B)`) geomean **2.77x → 1.06x**, never worse, faster on 15 of 16
+bases, best case 1066.64 ms → 10.98 ms. That is the numeric-kernel work §18h
+named as "what is left, upstream" — arriving as a default, requiring no discopt
+lever at all. It supersedes the peel: it gets bchoco06 green *and* better fill,
+where the peel had to trade one for the other. The 0.16.0 bump is therefore the
+only remaining #1008 action, and it is a one-line version change plus a re-run of
+the panel above, not a flag.
