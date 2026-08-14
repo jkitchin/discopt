@@ -2994,6 +2994,10 @@ absent at 0.15.1), not on a path.
 - `cargo test -p discopt-core --lib` at e00aa706, flag off: **614 passed, 0 failed**.
 - All three arms' objectives against HiGHS at the repo tolerance, zero slack: **93
   arm×LP comparisons, 0 deviations.**
+- The certifying panel, the acceptance regime the Cargo.toml pin comment mandates
+  (`scratchpad/i1008/feral_cert_arm.py` + `feral_cert_report.py`, both arms
+  concurrent under equal load): **52 instances × 4 fields (`status`,
+  `node_count`, `objective`, `bound`) — all 52 rows bit-identical.**
 
 **What the peel does (`on` vs `base`; counters are exact integers and
 load-independent, wall is directional only because the arms ran concurrently, §9).

@@ -112,6 +112,12 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # 14.4x to 9.6x; discopt takes the ordering here and the sparse-rhs entry points
 # are follow-up work, not part of this bump.
 #
+# MEASURED FOR THIS BUMP, same regime, arms diffed against each other: the 52-row
+# certifying panel is bit-identical in `status`, `node_count`, `objective` AND
+# `bound` on all 52 instances (0.15.1 -> e00aa706 with the ordering flag unset;
+# both arms run concurrently under equal load, budgets from
+# `_instance_budgets(60.0)`; harness `scratchpad/i1008/feral_cert_arm.py`).
+#
 # COST OF THE GIT PIN: this breaks the 0.15.1 alignment with POUNCE 0.10.0's
 # workspace noted above, so two feral copies can now build into one environment.
 # Accepted deliberately — discopt consumes only the LU layer and POUNCE only the
