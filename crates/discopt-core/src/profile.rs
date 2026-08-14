@@ -336,15 +336,6 @@ counters!(
     LuSparseFactorizations,
     LuBasisNnz,
     LuFactorNnz,
-    // #1008: the Suhl-Suhl peel and its dense-bump route (feral #160/#163),
-    // selected together by `DISCOPT_LU_TRIANGULARIZE=1`. `LuBumpDim` sums the
-    // residual bump dimension per sparse factorization (equal to `m` when
-    // nothing peeled); `LuDenseBumpFactorizations` counts the factorizations
-    // that actually took feral's dense bump kernel. Both stay 0 with the flag
-    // off, which is what makes "the pairing engaged" checkable rather than
-    // assumed.
-    LuBumpDim,
-    LuDenseBumpFactorizations,
     // #1008 D3: the DUAL loop's refactorizations. Previously invisible — the
     // `Refactorizations`/`Refac*` counters above are incremented only by the
     // primal loop, so on an LP the dual solved outright the profile showed 100+

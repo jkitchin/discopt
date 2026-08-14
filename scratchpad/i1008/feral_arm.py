@@ -45,7 +45,7 @@ import scipy.sparse as sp
 from scipy.optimize import linprog
 
 WT = os.environ["WT"]
-ARM = os.environ["FERAL_ARM"]  # "base" (0.15.1), "off"/"on" (e00aa706)
+ARM = os.environ["FERAL_ARM"]  # a crates.io version, e.g. "0.15.1" or "0.16.0"
 OUT = os.environ["FERAL_OUT"]
 LP_DIR = os.environ.get("LP_DIR", "/private/tmp/wt1008d/scratchpad/i1008/lps")
 MAX_ITER = int(os.environ.get("REFAC_MAX_ITER", "20000"))
@@ -55,28 +55,26 @@ import discopt._rust as _rust  # noqa: E402
 
 assert _rust.__file__.startswith(WT), _rust.__file__
 blob = open(_rust.__file__, "rb").read()
-has_tri = b"sparse_triangular" in blob
-want_tri = ARM != "v0.15.1"  # the BUILD carries feral post-#160; the FLAG picks the path
-assert has_tri == want_tri, (
-    f"arm {ARM} wanted sparse_triangular={want_tri} but the loaded build has "
-    f"{has_tri}: {_rust.__file__}"
-)
+# §8: cargo bakes the dependency source path — hence the literal `feral-<version>`
+# — into the extension's panic locations, so the arm name IS the marker. The
+# foreign marker must be ABSENT or a stale .so reports one arm twice.
+want_marker = f"feral-{ARM}".encode()
+other_marker = b"feral-0.16.0" if ARM != "0.16.0" else b"feral-0.15.1"
+assert want_marker in blob, f"arm {ARM}: marker {want_marker!r} absent from {_rust.__file__}"
+assert other_marker not in blob, f"arm {ARM}: foreign marker {other_marker!r} present"
 assert b"DISCOPT_LP_REFAC_INTERVAL" in blob, "build predates the #1024 counters"
 # The counters are env-gated (profile.rs `init_from_env`). Without this the whole
 # run reports facs=0/bnnz=0 and reads as "no factorization work" — the exact
 # silent no-op §6 exists to prevent. Caught once on the first launch of this
 # script; asserted here so it cannot recur.
 assert os.environ.get("DISCOPT_PROFILE"), "DISCOPT_PROFILE must be set or every counter reads 0"
-TRI = os.environ.get("DISCOPT_LU_TRIANGULARIZE", "")
-# The arm name and the flag must agree, or a mislabeled arm silently measures the
-# other configuration (CLAUDE.md §8) — the failure this whole comparison exists to
-# avoid. "-on" arms require the flag set; every other arm requires it unset.
-assert (TRI == "1") == ARM.endswith("-on"), f"arm {ARM} with DISCOPT_LU_TRIANGULARIZE={TRI!r}"
-print(
-    f"# arm={ARM} sparse_triangular_linked={has_tri} "
-    f"DISCOPT_LU_TRIANGULARIZE={TRI!r} so={_rust.__file__}",
-    flush=True,
+# `DISCOPT_LU_TRIANGULARIZE` was removed with the peel (§18i); a leftover setting
+# in the environment means the caller is running a stale recipe, so refuse.
+assert not os.environ.get("DISCOPT_LU_TRIANGULARIZE"), (
+    "DISCOPT_LU_TRIANGULARIZE no longer exists; unset it (the peel was removed in §18i)"
 )
+print(f"# arm={ARM} marker={want_marker!r} present, {other_marker!r} absent so={_rust.__file__}",
+      flush=True)
 
 from discopt.solvers.milp_simplex import _dual_start_slack_basis  # noqa: E402
 
@@ -135,7 +133,6 @@ for p in paths:
     rec = {
         "tag": tag,
         "arm": ARM,
-        "triangularize": os.environ.get("DISCOPT_LU_TRIANGULARIZE", ""),
         "rows": nrow,
         "cols": ncol,
         "status": out[0],

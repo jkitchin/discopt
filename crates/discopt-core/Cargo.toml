@@ -75,10 +75,30 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # one feral release keeps a single LU implementation behind both the simplex
 # node engine and the NLP evaluator.
 #
-# ACCEPTANCE (CLAUDE.md §5, bound-neutral regime): a dependency bump that moves
-# LU arithmetic is only admissible if `node_count` and the certified `objective`
-# are EXACTLY unchanged on a certifying panel — any drift, even an apparent
-# improvement, means the bump is wrong. MEASURED, 49-instance cert panel, same
+# ACCEPTANCE. Which CLAUDE.md §5 regime applies depends on what the bump CLAIMS.
+#
+#   (a) A bump that claims arithmetic neutrality — diagnostics, the multifrontal
+#       side discopt does not call, a parameterization whose default discopt
+#       passes unchanged — is BOUND-NEUTRAL: `status`, `node_count` and the
+#       certified `objective` must be EXACTLY unchanged on a certifying panel,
+#       and any drift, even an apparent improvement, means the bump is wrong.
+#   (b) A bump that REPLACES a numeric kernel — a different pivoting rule, a
+#       different ordering, a different factorization — cannot be held to (a):
+#       a different rounding trajectory reshuffles degenerate pivot choices, so
+#       node counts move by construction and (a) would forbid ever adopting a
+#       better LU. It is BOUND-CHANGING and takes that regime's pair instead:
+#       cert-clean (no status regression, no bound above its reference optimum,
+#       objectives within abs 1e-6 / rel 1e-4, no certification regression) AND
+#       net-positive on an instrument that can actually SEE the change. The
+#       certifying panel cannot: `docs/dev/baron-gap-plan.md` §1.3 puts node-LP
+#       at 0.06% of its wall, so it shows a kernel bump's rounding cost and none
+#       of its benefit. Net-positive for an LU bump is measured on the captured
+#       relaxation LPs, counter-based (`LuFactorNnz`/`LuBasisNnz`).
+#
+# This split was written when 0.16.0 forced it; the (a) text below is the record
+# of the 0.15.1 bump, which was a genuine (a).
+#
+# MEASURED under (a), 49-instance cert panel, same
 # machine, arms built from the same source and distinguished by the `feral-<ver>`
 # string cargo bakes into the `_rust` extension: 49/49 rows bit-identical in
 # status, node_count AND objective (0.14.0+pounce 0.9.0 -> 0.15.1+pounce 0.10.0).
@@ -89,42 +109,69 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # (18 violations on an UNMODIFIED tree on a POUNCE-equipped machine), which is
 # why the arms are diffed against each other instead.
 #
-# NOW PINNED TO A GIT REV, NOT A CRATES.IO RELEASE (#1008). e00aa706 is the head
-# of feral's `claude/issue-161-w05b75` (PR #162), which carries v0.15.1 plus the
-# whole of feral #160/#162/#163/#164/#165: Suhl-Suhl basis triangularization
-# (`SparseLuSymbolic::analyze_triangularized`, selected through
-# `analyze_with(a, LuOrderingParams { triangularize })`), the `dense_bump_max_dim`
-# route for the residual bump, the sparse-rhs ftran/btran entry points, and the
-# `hyper_sparse_max_density` 0.25 -> 0.10 default fix. There is no release
-# carrying any of it; 0.15.1 remains crates.io's latest.
+# 0.16.0 is the current pin (#1008). It is a BREAKING release whose one breaking
+# item is the default this bump is taken for: `SparseLu::factor` now pivots with
+# threshold Markowitz (feral #171/#172) instead of AMD-on-AtA plus Gilbert-Peierls.
+# Markowitz chooses its column order DURING factorization, so it ignores the
+# `symbolic` argument beyond a dimension check; `LuPivoting::GilbertPeierls`
+# restores the old rule. discopt keeps the new default at both call sites.
 #
-# WHY: #1008's attribution put 72.6% of LP wall in `LuNumeric` and named FILL as
-# the lever (docs/dev/performance-plan.md §18f). §18f eliminated "ordering" on the
-# grounds that feral's `analyze` already triangularized — that elimination was
-# read off feral's unreleased main and is WRONG for the version discopt links
-# (`git grep "fn triangularize" v0.15.1` returns nothing; §18g records the
-# retraction). Triangularization was never actually tested on discopt's build.
-# MEASURED over the captured relaxation LPs, counter-based
-# (`LuFactorNnz`/`LuBasisNnz`, exact integers, load-independent): see §18g for the
-# table and `scratchpad/i1008/feral_arm.py` for the harness. Upstream's own
-# 14-LP interleaved measurement puts the ordering at 1.306x geomean and the
-# ordering plus the sparse-rhs API at 1.497x, i.e. discopt's gap to HiGHS from
-# 14.4x to 9.6x; discopt takes the ordering here and the sparse-rhs entry points
-# are follow-up work, not part of this bump.
+# WHY: #1008 attributed 72.6% of LP wall to `LuNumeric` and named FILL as the
+# lever (docs/dev/performance-plan.md §18f, as corrected by §18g). Markowitz is a
+# direct attack on fill: upstream's 16-basis corpus reports `factor_nnz/nnz(B)`
+# geomean 2.77x -> 1.06x, never worse on any basis, faster on 15 of 16, best case
+# 1066.64ms -> 10.98ms (`QPLIB_1451_rlt0_cap100000`, fill 24.90x -> 1.14x). It
+# supersedes the Suhl-Suhl peel this branch previously shipped behind
+# `DISCOPT_LU_TRIANGULARIZE`: the peel had to trade a lost dual bound on
+# bchoco06 for its speedup (feral #163/#168, §18h), where Markowitz gets both.
+# That flag and its `dense_bump_max_dim` pairing are REMOVED here rather than
+# kept alive with a `GilbertPeierls` pin -- under the new default the peel is
+# ignored and its `used_dense_bump()` non-vacuity counter could only ever read 0,
+# which is the dead flag CLAUDE.md §3 forbids and the vacuous instrument §6 does
+# (§18i records the audit; shipped code had no other exposure).
 #
-# MEASURED FOR THIS BUMP, same regime, arms diffed against each other: the 52-row
-# certifying panel is bit-identical in `status`, `node_count`, `objective` AND
-# `bound` on all 52 instances (0.15.1 -> e00aa706 with the ordering flag unset;
-# both arms run concurrently under equal load, budgets from
-# `_instance_budgets(60.0)`; harness `scratchpad/i1008/feral_cert_arm.py`).
+# SAFE ON THE SILENT-SUBSTITUTION HAZARD: both `SparseLu::factor` sites pass a
+# throwaway `SparseLuSymbolic::analyze`, not a deliberately chosen AMD/METIS/AMF
+# ordering, so there is no ordering for Markowitz to discard. Nothing asserts
+# `reach_visits()` (Gilbert-Peierls-only, returns 0 under Markowitz) or
+# `used_dense_bump()`, and no test pins a pivot row or permutation. Source-
+# compatible: `FeralLU::params()` builds with `..LuParams::default()`, so the new
+# `LuParams::pivoting` field is not a build break.
 #
-# COST OF THE GIT PIN: this breaks the 0.15.1 alignment with POUNCE 0.10.0's
-# workspace noted above, so two feral copies can now build into one environment.
-# Accepted deliberately — discopt consumes only the LU layer and POUNCE only the
-# multifrontal side, so they do not share state — and it reverts to a version
-# requirement as soon as feral cuts a release containing e00aa706. The rev is on a
-# PR branch, not `main`: re-pin to the merge commit once feral #162 lands.
-feral = { git = "https://github.com/jkitchin/feral", rev = "e00aa7060bb87359a8ed014a4a71a9f22fff0167" }
+# ACCEPTANCE: see the bound-neutral regime stated above. MEASURED FOR THIS BUMP:
+# MEASURED FOR THIS BUMP under (b), both gates, arms
+# distinguished by the `feral-<ver>` string cargo bakes into the extension and
+# each asserting the OTHER arm's marker absent:
+#
+#   cert-clean   PASS. 52-instance certifying panel, 103 checks, 0 violations,
+#                51 oracle-backed against `minlplib.solu`. No `optimal` instance
+#                left `optimal`, no dual bound above its reference optimum, every
+#                objective inside tolerance. 47 of 52 node counts bit-identical;
+#                the 5 that moved (nvs02 345->421, nvs14 129->839, nvs11, nvs12,
+#                tanksize) are rounding-trajectory drift, +1.3% in total, and are
+#                the expected (b) cost, not a defect.
+#   net-positive PASS, decisively, on the instrument that can see it. 82 captured
+#                relaxation LPs: aggregate fill 8.32x -> 1.28x, factor nonzeros
+#                4,597,979,997 -> 836,938,845 (-81.8%), better on 58 LPs, worse on
+#                18, within 1% on 6. 144 of 144 arm x LP objectives at the HiGHS
+#                optimum. Wall 2751.9s -> 493.0s is consistent but NOT a claim:
+#                the arms ran concurrently with unequal contention (§9).
+#
+# ROBUSTNESS, the column to read next to fill: status changes are symmetric, one
+# each way. QPLIB_2480_rlt1 regresses `optimal` -> `numerical` (fill was already
+# 1.03x, so Markowitz had nothing to win there and only moved the trajectory);
+# QPLIB_1675_rlt1 goes `numerical` -> `optimal` with fill 12.84x -> 2.00x and
+# wall 446.56s -> 35.42s; QPLIB_2823_rlt1 moves `numerical` -> `iter_limit`, both
+# non-solutions. Cold primal fallbacks 28 -> 30 across 82 LPs. `numerical` is a
+# refusal, not a false answer, and neither arm produced a false verdict in 144
+# comparisons — but the cold path is the one §18b/§18c measured returning false
+# `Unbounded`/`Numerical`, so this count is the thing to watch on the next bump.
+#
+# This restores a crates.io version requirement, ending the git-rev pin the
+# previous paragraph carried (e00aa706, feral PR #162) and with it the two-copy
+# build; POUNCE 0.10.0 pins feral 0.15.1, so the shared-release alignment noted
+# above returns as soon as POUNCE follows to 0.16.0.
+feral = "0.16.0"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.

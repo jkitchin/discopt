@@ -12,9 +12,9 @@ This script runs ONE arm over the 52 certifying instances at the baseline budget
 and writes a jsonl row per instance. `feral_cert_report.py` diffs two arms.
 
 §8: asserts both `discopt.__file__` under the arm's worktree AND a marker string
-that discriminates the builds — `sparse_triangular` appears in the extension only
-when feral's post-0.15.1 LU is linked. A stale .so fails here rather than
-reporting one arm twice.
+that discriminates the builds — cargo bakes the dependency's source path, and so
+the literal `feral-<version>`, into the extension's panic locations, so the arm
+name IS the marker. A stale .so fails here rather than reporting one arm twice.
 §6: prints an executed-instance count and exits non-zero if it is zero.
 §7: nothing is caught.
 §10: per-instance progress, unbuffered.
@@ -30,19 +30,19 @@ from pathlib import Path
 import discopt
 
 WT = os.environ["WT"]
-ARM = os.environ["FERAL_ARM"]  # "v0.15.1" or "e00aa706"
+ARM = os.environ["FERAL_ARM"]  # a crates.io version, e.g. "0.15.1" or "0.16.0"
 OUT = os.environ["FERAL_OUT"]
 
 assert discopt.__file__.startswith(WT), discopt.__file__
 import discopt._rust as _rust  # noqa: E402
 
 assert _rust.__file__.startswith(WT), _rust.__file__
-has_tri = b"sparse_triangular" in open(_rust.__file__, "rb").read()
-want_tri = ARM != "v0.15.1"
-assert has_tri == want_tri, (
-    f"arm {ARM} wanted sparse_triangular={want_tri}, loaded build has {has_tri}: {_rust.__file__}"
-)
-print(f"# arm={ARM} sparse_triangular={has_tri} so={_rust.__file__}", flush=True)
+blob = open(_rust.__file__, "rb").read()
+want = f"feral-{ARM}".encode()
+other = b"feral-0.16.0" if ARM != "0.16.0" else b"feral-0.15.1"
+assert want in blob, f"arm {ARM}: marker {want!r} absent from {_rust.__file__}"
+assert other not in blob, f"arm {ARM}: foreign marker {other!r} present in {_rust.__file__}"
+print(f"# arm={ARM} marker={want!r} present, {other!r} absent so={_rust.__file__}", flush=True)
 
 _BENCH_ROOT = Path(WT) / "discopt_benchmarks"
 sys.path.insert(0, str(_BENCH_ROOT))

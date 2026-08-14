@@ -3218,3 +3218,72 @@ lever at all. It supersedes the peel: it gets bchoco06 green *and* better fill,
 where the peel had to trade one for the other. The 0.16.0 bump is therefore the
 only remaining #1008 action, and it is a one-line version change plus a re-run of
 the panel above, not a flag.
+
+### 18j. feral 0.16.0 taken: fill 8.32x → 1.28x on discopt's own bases, and it will barely move MINLP wall (#1008, 2026-08-14)
+
+feral 0.16.0 published; discopt is bumped from `0.15.1` (the git-rev pin on
+`e00aa706` and the `DISCOPT_LU_TRIANGULARIZE` peel it carried are both gone — see
+§18i for why the peel is deleted rather than kept alive with a `GilbertPeierls`
+pin). Two arms, `feral-0.15.1` vs `feral-0.16.0`, each asserting the other arm's
+marker **absent** in the loaded extension (§8).
+
+**Which §5 regime applies was the first question, and it is not a formality.**
+The `Cargo.toml` pin comment demanded `node_count` and `objective` be EXACTLY
+unchanged for any bump that moves LU arithmetic. 0.16.0 fails that flatly: 28 of
+208 exact comparisons drift, including `nvs02` 345 → 421 nodes and `nvs14`
+129 → 839. But that rule was written for bumps that *claim* neutrality, and
+0.16.0 replaces the pivoting rule outright — a different factorization means a
+different rounding trajectory means different degenerate pivot choices. Held to
+the letter, the rule forbids ever adopting a better LU. The pin comment now
+splits the regime explicitly rather than being quietly reinterpreted.
+
+**Gate 1, cert-clean: PASS.** 52-instance certifying panel, 103 checks, 0
+violations, 51 oracle-backed. No `optimal` instance left `optimal`, no dual bound
+above its reference optimum, all objectives inside abs 1e-6 / rel 1e-4. 47 of 52
+node counts bit-identical; total nodes +1.3%.
+
+**Gate 2 on the certifying panel would read FAIL — and that reading is wrong.**
+Node counts improve on 0 instances and worsen on 5. That is the `DISCOPT_CUT_INHERIT`
+shape, and taken at face value it kills the bump. It is the wrong instrument:
+`baron-gap-plan.md` §1.3 measures node-LP at **0.06%** of that panel's wall, so a
+fill improvement is invisible there by construction while the rounding reshuffle
+it also causes is fully visible. The panel reports this change's cost and none of
+its benefit. Quoting it as the verdict would repeat the §18g error — a component
+ratio read as a downstream prediction — with the sign flipped.
+
+**Gate 2 on an instrument that can see it: PASS, decisively.** 82 captured
+relaxation LPs, counter-based (exact integers, load-independent):
+
+| | 0.15.1 | 0.16.0 |
+|---|---:|---:|
+| aggregate fill (`LuFactorNnz/LuBasisNnz`) | 8.32x | **1.28x** |
+| factor nonzeros | 4,597,979,997 | **836,938,845** (−81.8%) |
+| factorizations | 11,628 | 13,558 |
+| per-LP factor nnz | — | better 58, worse 18, within 1% 6 |
+| objectives at the HiGHS optimum | 72/72 | 72/72 |
+
+Upstream's 2.77x → 1.06x geomean reproduces here as 8.32x → 1.28x aggregate on
+discopt's own bases — a different corpus and a different harness. Wall was
+2751.9s → 493.0s; that is **not** a timing claim (the arms ran concurrently with
+unequal contention, §9) and nothing here rests on it.
+
+**Robustness is a wash, one status change each way.** `QPLIB_2480_rlt1` regresses
+`optimal` → `numerical` (its fill was already 1.03x, so Markowitz had nothing to
+win and only moved the trajectory: 276 → 823 factorizations, 31,798 phase-1
+pivots, then a refusal). `QPLIB_1675_rlt1` goes the other way, `numerical` →
+`optimal`, and larger: fill 12.84x → 2.00x, wall 446.56s → 35.42s — an LP 0.15.1
+could not solve at all. `QPLIB_2823_rlt1` moves `numerical` → `iter_limit`, both
+non-solutions. Cold primal fallbacks 28 → 30 across 82 LPs. `numerical` is a
+refusal, not a false answer, and **neither arm produced a false verdict in 144
+comparisons** — but the cold path is exactly the one §18b/§18c measured returning
+a false `Unbounded` on `QPLIB_2170` and a false `Numerical` on `QPLIB_2738`, so
+the fallback count is the number to watch on the next bump, not a footnote.
+
+**What this does NOT do, stated plainly.** It does not close #1008's headline gap
+and it will barely move discopt's MINLP wall. The LP layer is 0.06% of panel wall
+on those families; an 81.8% cut in factor work inside 0.06% is unmeasurable
+end-to-end. This is the right change on its own terms — it is the fill lever §18f
+named, delivered upstream, and it is worth taking because the LP layer is now
+genuinely fast rather than because the solver got faster. §16's conclusion stands
+unchanged: discopt's gap to BARON is node-NLP and Python marshaling (69% and
+82.5% respectively per `baron-gap-plan.md` §1.3), not LU throughput.

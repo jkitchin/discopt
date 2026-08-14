@@ -12,47 +12,27 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
-- **feral is pinned to a git rev (`e00aa706`), not crates.io `0.15.1`**
-  (`deps`, #1008). That rev is the head of feral's PR #162 branch and carries the
-  Suhl–Suhl basis triangularization (feral #160/#163), the `dense_bump_max_dim`
-  route for the residual bump, the sparse-rhs ftran/btran entry points, and the
-  `hyper_sparse_max_density` default fix. None of it is released; `0.15.1` is
-  still crates.io's latest. Re-pin to the merge commit once feral #162 lands.
+- **feral bumped to `0.16.0`; the sparse LU now pivots with threshold Markowitz**
+  (`deps`, #1008). `0.16.0` is a breaking release, and its one breaking item is
+  the reason to take it: `SparseLu::factor` chooses its column order *during*
+  factorization (feral #171/#172) instead of consuming an AMD-on-AᵀA ordering and
+  factoring with Gilbert–Peierls. discopt keeps the new default at both call
+  sites; `LuPivoting::GilbertPeierls` would restore the old rule.
 
-  **The bump changes nothing by default.** feral's `analyze` is parameterized now
-  (`analyze_with(a, LuOrderingParams { triangularize })`) and discopt passes
-  feral's own default, whole-basis AMD. Verified rather than asserted: on the
-  captured relaxation LPs the bumped build is **exactly** equal to the `0.15.1`
-  build — same status, same bit-level objective, same
-  `LuSparseFactorizations`/`LuBasisNnz`/`LuFactorNnz`, same pivot counts, same
-  cold-fallback flags.
+  Why: #1008 attributed 72.6% of LP wall to `LuNumeric` and named **fill** as the
+  lever. Markowitz attacks fill directly — upstream's 16-basis corpus reports
+  `factor_nnz/nnz(B)` geomean **2.77x → 1.06x**, never worse on any basis, faster
+  on 15 of 16, best case 1066.64 ms → 10.98 ms.
+
+  The upgrade is safe on the release's silent-substitution hazard: Markowitz
+  ignores the `symbolic` argument, so a caller that passes a deliberately chosen
+  ordering has it discarded without warning. discopt passes a throwaway
+  `SparseLuSymbolic::analyze` at both sites, asserts nothing on `reach_visits()`
+  or `used_dense_bump()`, and pins no pivot row or permutation; `FeralLU::params()`
+  builds with `..LuParams::default()`, so the new `LuParams::pivoting` field is
+  not a build break. The audit is `docs/dev/performance-plan.md` §18i.
 
 ### Added
-
-- **`DISCOPT_LU_TRIANGULARIZE`, the Suhl–Suhl peel, default-OFF** (`perf(lp)`,
-  #1008). Set it to `1` to have the basis triangularized and AMD run only on the
-  residual bump, paired with feral's `dense_bump_max_dim` route (the two ship
-  together and never the peel alone — see below). Unset or `0` is the whole-basis
-  AMD ordering; an unparseable value is refused loudly rather than read as OFF.
-
-  Why it matters: #1008 attributed 72.6% of LP wall to `LuNumeric` and named
-  **fill** as the lever, and the peel is the fill lever. Measured over 31
-  captured relaxation LPs it cuts aggregate fill 11.09x → 6.51x and total factor
-  nonzeros by **31.6%** (better on 25 of 31), including the corpus's worst
-  instance, `QPLIB_1451_rlt0`, at 19.12x → 2.62x.
-
-  Why it is OFF: it is a different rounding trajectory, and it costs the #649
-  bchoco06 ill-conditioned root LP its dual bound — the guard test
-  `bchoco06_illcond_scaled_path_recovers_bound_649` fails with the flag ON, even
-  paired with the dense-bump route that upstream measured as recovering it — and
-  the pairing is measurably engaged, not silently inert: on that fixture the peel
-  strips ~95% of each basis and 42 of 48 factorizations take the dense bump, and
-  the bound is lost anyway. It also drops one LP off the dual path onto the cold
-  primal fallback. A
-  bound-losing regression is not tradeable against fill (CLAUDE.md §1), so the
-  flag waits for a graduation panel. Two counters — `LuBumpDim`,
-  `LuDenseBumpFactorizations` — make "the pairing actually engaged" checkable
-  rather than assumed. Details in `docs/dev/performance-plan.md` §18g.
 
 - **LP refactorization attribution, and the measurement it settled** (`perf(lp)`,
   #1008). Three counters — `DualRefactorizations`, `DualRefacCap`,
