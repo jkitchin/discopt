@@ -3081,3 +3081,69 @@ a discopt-side call-site change with no ordering risk and are **not** part of th
 bump; they are the next increment. The ordering itself graduates only when #649's
 instance survives it — that is a feral-side numerical question (their recorded
 counterexample `QPLIB_2055` at 0.389x is the same shape) and belongs upstream.
+
+> **Both sentences above are RETRACTED, 2026-08-14 (§11).** See §18h: the
+> sparse-rhs increment measures ~1.00x end to end, and the ordering's blocker is
+> not "#649 vs a 1.71x we could otherwise take" — the 1.71x *is* the ordering.
+
+### 18h. There is no in-repo increment left on #1008: the sparse-rhs lever is ~1.00x and the 1.71x cannot be decoupled from the bound loss (2026-08-14)
+
+Two questions left open by §18g, both now settled — and both settled *against*
+§18g's stated plan.
+
+**1. The sparse-rhs entry points are not worth a call-site change (§11
+retraction).** §18g sized them at **1.067x** from upstream's 14-LP panel and
+named them "the next increment". feral PR #162's own end-to-end table, discopt
+held fixed and only feral varying, on the QPLIB_1157 root LP:
+
+| feral arm | wall | vs crates.io |
+|---|---|---|
+| 0.15.1 | 6.088 s | 1.00x |
+| `main` + `dense_bump_max_dim = 4096` | 3.567 s | 1.71x |
+| #162 (sparse-rhs) + bump + cap 0.10 | 3.607 s | **1.69x** |
+
+**~1.00x for the sparse-rhs work**, against 10.8x on the `ftran` component.
+Upstream also retracted issue #161's "93.1% of wall in the LU layer" as a
+profile-attribution artifact — triangular solves are ~1% of that solve. A 10.8x
+component speedup that moves the total by 1% *is* a direct measurement that the
+component was 1% of the total. The 1.067x panel figure and the 1.497x stack are
+component/panel numbers and must not be read as downstream predictions; §18g read
+them that way and was wrong to.
+
+**2. The 1.71x cannot be taken without the peel, and the peel loses the bound.**
+`feral/src/lu/sparse_factor.rs:334` makes `symbolic.triangularized` a *hard
+precondition* of the dense-bump route, so a "cap without peel" configuration does
+not exist by construction. Upstream `895ef65` recorded that the paired
+configuration is nonetheless safe (`peel + cap 4096` → PASSED on #649's
+instance), which if true would have decoupled the speedup from the regression.
+**It does not reproduce.** Same discopt commit `bce881ff`, unmodified, only feral
+varying, patched exactly as `895ef65` describes:
+
+| feral rev | ordering | cap | `bchoco06_illcond_..._649` | dense-bump firings |
+|---|---|---|---|---|
+| `e00aa706` | whole-basis AMD | 0 | **ok** | **0** |
+| `e00aa706` | peel | 0 | FAILED — `Numerical` | 0 |
+| `e00aa706` | peel | 4096 | **FAILED — `Numerical`** | **26** |
+| `895ef65` | peel | 4096 | **FAILED — `Numerical`** | **26** |
+
+Rows 1–2 reproduce `895ef65` exactly; row 3 refutes it; row 4 shows it is not a
+regression from the three `src/lu/` commits since. §6: the firing counter is
+patched into `sparse_factor.rs` immediately after `want_dense_bump`, so the
+failing arm is one where the dense route demonstrably ran — 26 firings where the
+route should fire and 0 where it should not. This also rules out a silently
+inert patch, which would have reproduced peel-no-cap instead. It agrees with the
+independent counter measurement on this branch (42/48 factorizations dense-bump,
+`LuBumpDim` 26,656 → 2,036, `Numerical`).
+
+Filed upstream as **feral #168**, with a comment on feral PR #162.
+
+**Conclusion.** `DISCOPT_LU_TRIANGULARIZE` default-OFF is confirmed correct, and
+it is not a conservative placeholder waiting on a graduation panel: the
+configuration it gates is the one that loses a dual bound, and the speedup that
+would justify the risk is unreachable without it. **#1008 has no remaining
+in-repo increment.** Both candidate levers §18g left are closed — one measures
+~1.00x, the other is inseparable from a certificate loss. §16's binding
+conclusion ("closing #1008 requires work in feral or a different LU backend")
+survives both, and its own prescription needs the same correction: it named
+hyper-sparse triangular solves as half the fix, and upstream has now measured
+that half at ~1.00x end to end. What is left is the numeric kernel, upstream.
