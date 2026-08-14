@@ -10,7 +10,48 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **feral is pinned to a git rev (`e00aa706`), not crates.io `0.15.1`**
+  (`deps`, #1008). That rev is the head of feral's PR #162 branch and carries the
+  Suhl–Suhl basis triangularization (feral #160/#163), the `dense_bump_max_dim`
+  route for the residual bump, the sparse-rhs ftran/btran entry points, and the
+  `hyper_sparse_max_density` default fix. None of it is released; `0.15.1` is
+  still crates.io's latest. Re-pin to the merge commit once feral #162 lands.
+
+  **The bump changes nothing by default.** feral's `analyze` is parameterized now
+  (`analyze_with(a, LuOrderingParams { triangularize })`) and discopt passes
+  feral's own default, whole-basis AMD. Verified rather than asserted: on the
+  captured relaxation LPs the bumped build is **exactly** equal to the `0.15.1`
+  build — same status, same bit-level objective, same
+  `LuSparseFactorizations`/`LuBasisNnz`/`LuFactorNnz`, same pivot counts, same
+  cold-fallback flags.
+
 ### Added
+
+- **`DISCOPT_LU_TRIANGULARIZE`, the Suhl–Suhl peel, default-OFF** (`perf(lp)`,
+  #1008). Set it to `1` to have the basis triangularized and AMD run only on the
+  residual bump, paired with feral's `dense_bump_max_dim` route (the two ship
+  together and never the peel alone — see below). Unset or `0` is the whole-basis
+  AMD ordering; an unparseable value is refused loudly rather than read as OFF.
+
+  Why it matters: #1008 attributed 72.6% of LP wall to `LuNumeric` and named
+  **fill** as the lever, and the peel is the fill lever. Measured on the captured
+  relaxation LPs it cuts fill several-fold and takes 2–5x off the wall of most
+  of them.
+
+  Why it is OFF: it is a different rounding trajectory, and it costs the #649
+  bchoco06 ill-conditioned root LP its dual bound — the guard test
+  `bchoco06_illcond_scaled_path_recovers_bound_649` fails with the flag ON, even
+  paired with the dense-bump route that upstream measured as recovering it — and
+  the pairing is measurably engaged, not silently inert: on that fixture the peel
+  strips ~95% of each basis and 42 of 48 factorizations take the dense bump, and
+  the bound is lost anyway. It also drops one LP off the dual path onto the cold
+  primal fallback. A
+  bound-losing regression is not tradeable against fill (CLAUDE.md §1), so the
+  flag waits for a graduation panel. Two counters — `LuBumpDim`,
+  `LuDenseBumpFactorizations` — make "the pairing actually engaged" checkable
+  rather than assumed. Details in `docs/dev/performance-plan.md` §18g.
 
 - **LP refactorization attribution, and the measurement it settled** (`perf(lp)`,
   #1008). Three counters — `DualRefactorizations`, `DualRefacCap`,

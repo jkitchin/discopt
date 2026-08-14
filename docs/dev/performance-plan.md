@@ -2948,3 +2948,122 @@ ordering — the next question for #1008 is whether that fill is intrinsic to th
 bases or an artifact of static ordering under partial pivoting (the usual remedy
 being threshold-Markowitz pivoting, which chooses pivots dynamically against both
 sparsity and stability). That is a feral-side question and is **not** opened here.
+
+> **RETRACTED, 2026-08-13 (§11).** The sentence "feral's `analyze` already
+> triangularizes and runs AMD on the residual bump" is **false for the feral
+> version discopt links**. It was read off feral's unreleased `main`;
+> `git grep "fn triangularize" v0.15.1` returns nothing — triangularization landed
+> in feral `1217992` (PR #160), seven commits past the pinned tag. Ordering was
+> therefore never eliminated as a #1008 lever; it was never tested. §18g measures
+> it.
+
+### 18g. The ordering lever was never actually tested: feral bumped, peel measured, shipped OFF (#1008, 2026-08-13)
+
+**First, the retraction (§11).** §18f closed by eliminating *ordering* as a #1008
+lever — "feral's `analyze` already triangularizes and runs AMD on the residual
+bump, so the 19.1x fill on `QPLIB_1451_rlt0` is *after* a fill-reducing ordering."
+That is wrong for the build discopt links. `git grep "fn triangularize" v0.15.1`
+returns nothing; triangularization landed in feral `1217992` (PR #160), **seven
+commits past the pinned tag**. The claim was read off feral's unreleased `main`
+and generalized to the shipped crate. `SparseLuSymbolic::analyze` at 0.15.1 runs
+AMD over the **whole basis**, no Suhl–Suhl peel. The lever was not eliminated; it
+was never tried. §18f's in-place note records this.
+
+**The bump.** `crates/discopt-core/Cargo.toml` now pins feral to the git rev
+`e00aa7060bb87359a8ed014a4a71a9f22fff0167` (head of feral's `claude/issue-161-w05b75`,
+PR #162) rather than crates.io `0.15.1`. There is no release carrying any of this
+work — 0.15.1 is still crates.io's latest. The rev carries feral #160/#162/#163/
+#164/#165: Suhl–Suhl basis triangularization behind the parameterized
+`SparseLuSymbolic::analyze_with(a, LuOrderingParams { triangularize })`, the
+`LuParams::dense_bump_max_dim` route that sends a peeled residual bump to the
+dense kernel, the sparse-rhs ftran/btran entry points, and the
+`hyper_sparse_max_density` 0.25 → 0.10 default fix. The pin comment records that
+this breaks the 0.15.1 alignment with POUNCE 0.10.0's workspace and must revert to
+a version requirement once feral cuts a release.
+
+**The bump changes nothing by default** — the Cargo.toml acceptance regime
+(CLAUDE.md §5, bound-neutral) demands exactly that, and it is measured, not
+assumed. Arms: `base` = 0.15.1, `off` = e00aa706 with the new flag unset, `on` =
+e00aa706 with the peel on; one process each over the captured relaxation LPs,
+`scratchpad/i1008/feral_arm.py` + `feral_report3.py`. Build identity is asserted
+per §8 on a marker string (`sparse_triangular` present in the bumped extension,
+absent at 0.15.1), not on a path.
+
+- `off` vs `base`: **18 LPs × 8 fields (`status`, bit-level `obj`, `facs`,
+  `basis_nnz`, `factor_nnz`, `p1`, `p2`, `cold_fallback`) — 0 differences.**
+- `cargo test -p discopt-core --lib` at e00aa706, flag off: **614 passed, 0 failed**.
+- All three arms' objectives against HiGHS at the repo tolerance, zero slack: **54
+  arm×LP comparisons, 0 deviations.**
+
+**What the peel does (`on` vs `base`; counters are exact integers and
+load-independent, wall is directional only because the arms ran concurrently, §9):**
+
+| LP | fill base | fill on | facs b→on | wall b→on | cold |
+|---|---|---|---|---|---|
+| QPLIB_1055_rlt0/1 | 3.60x | **1.00x** | 19→20 | 0.37→0.07 | 0 |
+| QPLIB_1143_rlt0 | 4.81x | **1.09x** | 30→31 | 0.92→0.15 | 0 |
+| QPLIB_1157_rlt0 | 2.59x | **1.02x** | 31→30 | 0.28→0.09 | 0 |
+| QPLIB_1423_rlt0 | 2.06x | **1.01x** | 33→31 | 0.41→0.13 | 0 |
+| QPLIB_1437_rlt1 | 7.05x | 6.51x | 179→175 | 25.40→11.98 | 0 |
+| QPLIB_1353_rlt1 | 6.15x | 6.70x | 111→106 | 7.00→4.80 | 0 |
+| **QPLIB_0911_rlt0/1** | 6.79x | 2.93x | **27→474** | **2.00→13.06** | **0→1** |
+
+Aggregate over the 18 LPs: fill **5.84x → 3.71x**, per-LP factor nonzeros better
+on 13, worse on 4, unchanged on 1 — but **total** factor nnz **+65%** and
+factorizations 892 → 1774, both of which are `QPLIB_0911` alone. The peel is a
+real fill reduction on the bases whose fill was moderate (several go to ~1.0x,
+i.e. the factor becomes as sparse as the basis) and does little on the worst
+offenders.
+
+**Two blockers keep it default-OFF.**
+
+1. **A bound is lost, and the pairing does not rescue it.**
+   `bchoco06_illcond_scaled_path_recovers_bound_649` fails with the peel on —
+   `Numerical` where the test asserts `Optimal`. Root-caused by a same-build A/B:
+   flag on FAIL, flag unset PASS, so it is the ordering and not the bump.
+   Upstream's own table (feral `895ef65`, `dev/research/lu-ordering-and-kernel-2026-08-13.md`)
+   records whole-basis AMD PASS, peel-**without**-cap FAIL (`Numerical`), and
+   peel-**plus**-`dense_bump_max_dim = 4096` **PASS** — the dense kernel reorders
+   the bump's arithmetic again and lands back on a certifying path. discopt pairs
+   the cap with the peel exactly as prescribed and **still fails at e00aa706**.
+
+   That is not a wiring failure, and it is not assumed to be one (§6). The two
+   counters added with this change measure the pairing directly on that fixture,
+   profiling on, same build, flag the only difference:
+
+   | | factorizations | `LuBumpDim` (sum) | `LuDenseBumpFactorizations` | status |
+   |---|---|---|---|---|
+   | flag off | 32 | 26,656 (≈833 = `m`, nothing peeled) | 0 | **Optimal**, obj −0.999989 |
+   | flag on | 48 | **2,036** (≈42/factorization, ~95% peeled) | **42** | **Numerical** |
+
+   The peel peels and the dense route fires on 42 of 48 factorizations; the bound
+   is lost anyway. So the divergence from upstream's table is real and is the
+   feral rev — `e00aa706` is #163's revert plus #164/#165, and their PASS was
+   measured at `895ef65`. Reported as a fact here, not diagnosed: it is a
+   feral-side numerical question. This is a §1 stop regardless — fill is not
+   tradeable against a lost bound, whatever the geomean says.
+2. **A cold fallback appears.** `QPLIB_0911` goes 27 → 474 factorizations with
+   `DualColdFallbacks` 0 → 1 — the dual abandons and the cold primal redoes the
+   work (§18f correction 1 documents that signature). Wall 2.0s → 13.1s. Fill fell
+   (6.79x → 2.93x) and the LP still got 6x slower, so fill is not a sufficient
+   objective on its own.
+
+**Verdict (§5).** The dependency bump ships. The ordering ships as
+`DISCOPT_LU_TRIANGULARIZE`, **default OFF** — matching feral's own
+`analyze` default — with `dense_bump_max_dim = 4096` paired to it (feral #163
+pairs the cap with the peel; unpaired, upstream's own table has it failing #649's
+instance too) and `0` when the peel is off. Unparseable input is refused loudly
+rather than read as the default, per the `DISCOPT_LP_REFAC_INTERVAL` precedent —
+a harness that silently measures the baseline twice is the §6 failure mode. Two
+counters were added so "the pairing engaged" is checkable rather than assumed:
+`LuBumpDim` (sum of residual-bump dimensions; equals the basis dimension when
+nothing peeled) and `LuDenseBumpFactorizations`.
+
+**What remains for #1008.** Upstream's own 14-LP interleaved measurement (feral
+`b8906a6`, all arms in one binary) puts the ordering at **1.306x** geomean, the
+sparse-rhs ftran/btran entry points at **1.067x** alone, and both together at
+**1.497x** — discopt's gap to HiGHS 14.4x → 9.6x. The sparse-rhs entry points are
+a discopt-side call-site change with no ordering risk and are **not** part of this
+bump; they are the next increment. The ordering itself graduates only when #649's
+instance survives it — that is a feral-side numerical question (their recorded
+counterexample `QPLIB_2055` at 0.389x is the same shape) and belongs upstream.
