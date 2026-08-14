@@ -329,6 +329,10 @@ def test_search_respects_the_evaluation_budget():
         assert s.stats.evals <= budget, (budget, s.stats.evals)
 
 
+class _Answered(Exception):
+    """Stops a DIRECT run from the iteration hook once its crossing is recorded."""
+
+
 def test_reproduces_the_surveys_published_evaluation_counts():
     """Guards the whole engine against the class of bug the entry experiment hit.
 
@@ -342,15 +346,33 @@ def test_reproduces_the_surveys_published_evaluation_counts():
     def linear(x):
         return 1.0 + float(np.sum(x)), 0.0
 
+    def crossed(value):
+        return value is not None and abs(value - 1.0) <= 1e-2
+
     def evals_to_one_percent(divide, break_ties):
+        # Every arm asks one question -- at which evaluation does the incumbent
+        # first come within 1% -- so the budget past that point buys no assertion
+        # and is pure cost. The budget stays at the survey's 40,000 (the original
+        # rules need ~14.5k of it, and a regression that pushed a crossing past
+        # the budget must still show up as `None`); the hook stops the search the
+        # moment the answer is recorded. `history` is append-only and the value is
+        # the FIRST crossing, so stopping after it is observed cannot change what
+        # this returns -- verified equal to the run-to-budget values (16555/503/203).
+        # Without this the three arms burn 120k evaluations of hull maintenance
+        # nothing asserts, which under `--cov` on a CI runner overran the timeout.
         s = _DirectSearch(np.zeros(5), np.ones(5), divide=divide, break_ties=break_ties)
         history: list[tuple[int, float]] = []
-        s.run(
-            linear,
-            max_evals=40000,
-            on_iteration=lambda se: history.append((se.stats.evals, se.best_feasible_value)),
-        )
-        return next((e for e, v in history if v is not None and abs(v - 1.0) <= 1e-2), None)
+
+        def observe(se):
+            history.append((se.stats.evals, se.best_feasible_value))
+            if crossed(se.best_feasible_value):
+                raise _Answered
+
+        try:
+            s.run(linear, max_evals=40000, on_iteration=observe)
+        except _Answered:
+            pass  # our own sentinel only; any real failure still propagates
+        return next((e for e, v in history if crossed(v)), None)
 
     original = evals_to_one_percent("all", False)
     no_ties = evals_to_one_percent("all", True)
