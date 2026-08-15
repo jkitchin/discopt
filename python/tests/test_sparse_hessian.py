@@ -161,14 +161,33 @@ class TestRouting:
 class TestEndToEndSolve:
     """A discretized collocation NLP solves (does not hang) via the sparse path."""
 
+    # This is a real NLP solve, not a unit test, and it runs inside the
+    # xdist-parallel PR-fast lane and the coverage lane, both of which pass
+    # `--timeout=120`. 120 s is a unit-test bound; it was deciding this test's
+    # result on a loaded runner rather than backstopping a hang. 300 s matches
+    # what the other end-to-end solves in this suite already declare
+    # (test_examples_gallery.py, test_c40_util_false_optimal.py) and still
+    # catches what this test exists to catch: if the compressed-HVP path
+    # regressed to dense `jax.hessian` assembly, the cost is O(n^2) in ~500
+    # variables, not a 3x slip.
+    @pytest.mark.timeout(300)
     def test_dae_collocation_solve_does_not_hang(self):
         sys.setrecursionlimit(100000)
-        # nfe=25 keeps this a fast plumbing smoke test: it still routes through
-        # the compressed-HVP Hessian path (asserted below), but solves in a few
+        # nfe keeps this a fast plumbing smoke test: it still routes through the
+        # compressed-HVP Hessian path (asserted below), but solves in a few
         # seconds even on the ipm fallback used in CI (where pounce is absent).
         # The O(n²)→O(seeds) scaling that actually defeats the dense-assembly
         # hang is proven separately, without a solve, by TestSeedCount.
-        m, _k = _dae_estimation_model(nfe=25, n_states=1)
+        #
+        # It was 25, which had stopped being "a few seconds": measured solve wall
+        # is 15.56 s at nfe=25 against 4.41 s at 15, and coverage instrumentation
+        # plus a slow runner took that past the 120 s timeout. 15 keeps every
+        # assertion here — the routing switch flips to sparse by nfe=10, so 15
+        # clears it with margin, and the objective still lands at 5.98e-08 against
+        # the 1e-4 bar. Do not lower it further: below the routing boundary this
+        # test would exercise the dense path, which is what the `_use_sparse_hessian`
+        # assertion above exists to catch.
+        m, _k = _dae_estimation_model(nfe=15, n_states=1)
         assert NLPEvaluator(m)._use_sparse_hessian()
         try:
             import pounce  # noqa: F401
