@@ -221,13 +221,71 @@ def test_out_of_range_solution_index_raises(tmp_path):
 def test_to_model_builds_a_solvable_model(name):
     """The parsed instance must translate into a discopt Model.
 
-    Only the translation is checked here, not a solve: the objective value at
-    the reference point is already pinned by the tests above.
+    Shape only. What the *lowering* computes is pinned separately by
+    ``test_to_model_reproduces_the_reference_point`` below -- the objective
+    tests above go through ``QplibInstance``'s own arithmetic, which
+    ``to_model`` does not use.
     """
     inst = _read(name)
     m = qp.to_model(inst)
     assert len(m._variables) == inst.n_vars
     assert m.name == name
+
+
+def _model_at(model, x):
+    """(max constraint violation, user-sense objective) at ``x``, via the Model.
+
+    Deliberately routed through ``NLPEvaluator`` and ``_infer_constraint_bounds``
+    -- the pair a solve actually uses -- rather than ``QplibInstance``'s arrays.
+    ``NLPEvaluator`` reports the *internal minimization* objective, so the sign
+    is undone here for a like-for-like comparison against the published value.
+    """
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    ev = NLPEvaluator(model)
+    obj = (-1.0 if ev._negate else 1.0) * float(ev.evaluate_objective(x))
+    cl, cu = _infer_constraint_bounds(ev)
+    c = np.asarray(ev.evaluate_constraints(x), dtype=float)
+    if c.size == 0:
+        return 0.0, obj
+    below = np.maximum(cl - c, 0.0).max()
+    above = np.maximum(c - cu, 0.0).max()
+    return float(max(below, above)), obj
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", FIXTURES)
+def test_to_model_reproduces_the_reference_point(name, solu):
+    """The *lowered Model* must agree with the published reference point.
+
+    Every other objective/feasibility test in this file evaluates through
+    ``QplibInstance.evaluate_objective`` / ``.max_violation``, which read the
+    parsed arrays directly. ``to_model`` is a second, independent translation of
+    those arrays into an expression DAG: it applies ``_QUAD_SCALE`` again, it
+    chooses equality-vs-inequality per row, it re-signs for MAXIMIZE, and it
+    decides which rows exist at all. A dropped row, a doubled quadratic scale or
+    an inverted sense in *that* step reproduces perfectly in the instance-level
+    tests and still hands the solver a different problem than the user asked
+    for -- silently, because nothing raises.
+
+    QPLIB ships a reference *point*, so this is checkable outright: lower the
+    model, evaluate the point through the solver's own evaluator, and require
+    the same feasibility and the same objective.
+    """
+    inst = _read(name)
+    model = qp.to_model(inst)
+    x, objvar = qp.read_solution(os.path.join(DATA, "sol", f"{name}.sol"), inst)
+    assert objvar is not None, f"{name}: fixture .sol carries no objvar"
+
+    viol, obj = _model_at(model, np.asarray(x, dtype=float))
+    assert viol <= 1e-4, f"{name}: reference point violates the lowered model by {viol:.3e}"
+    assert obj == pytest.approx(objvar, rel=1e-6, abs=1e-9)
+    # Sense survives the lowering: a flipped sense would negate the objective,
+    # which the approx above already catches, but assert it directly so a
+    # failure names the cause.
+    assert model._objective.sense.name.lower().startswith(inst.sense[:3])
+    assert solu[name] == pytest.approx(obj, rel=1e-6, abs=1e-9)
 
 
 @pytest.mark.unit
