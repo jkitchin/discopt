@@ -445,9 +445,10 @@ class BenchmarkRunner:
             elapsed = time.monotonic() - start_time
 
             # Parse solver output (solver-specific parsing)
-            return self._parse_external_output(
+            result = self._parse_external_output(
                 solver.name, instance, proc.stdout, proc.stderr, elapsed
             )
+            return self._reject_non_result(solver, instance, result, proc.stdout)
         except subprocess.TimeoutExpired:
             return SolveResult(
                 instance=instance,
@@ -461,6 +462,55 @@ class BenchmarkRunner:
                 solver=solver.name,
                 status=SolveStatus.ERROR,
             )
+
+    def _reject_non_result(
+        self,
+        solver: SolverConfig,
+        instance: str,
+        result: SolveResult,
+        stdout: str,
+    ) -> SolveResult:
+        """Turn a non-answer from an external solver into a loud ERROR.
+
+        This is the class fix for a defect found by the 2026-08 release audit
+        (CLAUDE.md §2: fix the class, not the instance). ``[solvers.baron]``
+        carried ``command = "baron"``, which resolves on PATH to whichever BARON
+        is installed; on a machine with GAMS that is the ``.bar``-only build,
+        which answers a ``.nl`` argument by printing a usage message and exiting
+        **rc = 0**. The parser saw no recognizable verdict, returned
+        ``status=UNKNOWN, objective=None``, and the run recorded it as an
+        instance BARON simply did not solve.
+
+        Nothing about that is loud, and the failure mode generalizes to any
+        wrong binary, unreadable format or refused license. Two shapes are
+        rejected here for every external solver:
+
+        * output containing a refusal/usage phrase -- the solver never read the
+          model;
+        * a claimed terminal success (``OPTIMAL``/``FEASIBLE``) with no
+          objective -- a status we cannot check against a known optimum, which
+          is exactly the input a correctness gate must never silently accept.
+        """
+        low = (stdout or "").lower()
+        reason = None
+        if any(p in low for p in self._EXTERNAL_REFUSAL_PHRASES):
+            reason = "refused the model (usage/license message, solver never read it)"
+        elif (
+            result.status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
+            and result.objective is None
+        ):
+            reason = f"reported {result.status.value} with no objective"
+
+        if reason is None:
+            return result
+
+        print(f"    !! {solver.name} on {instance}: {reason} -- recorded as ERROR")
+        return SolveResult(
+            instance=instance,
+            solver=solver.name,
+            status=SolveStatus.ERROR,
+            wall_time=result.wall_time,
+        )
 
     def _build_command(self, solver: SolverConfig, instance: str) -> list[str]:
         """Build a solver command line for the .nl-interface external solvers.
@@ -554,8 +604,81 @@ class BenchmarkRunner:
             return self._parse_scip(instance, solver_name, stdout, elapsed)
         if name.startswith("highs"):
             return self._parse_highs(instance, solver_name, stdout, elapsed)
-        # Couenne / BARON / Bonmin and other AMPL-ASL solvers.
+        if name.startswith("baron"):
+            return self._parse_baron(instance, solver_name, stdout, elapsed)
+        # Couenne / Bonmin and other AMPL-ASL solvers.
         return self._parse_ampl_solver(instance, solver_name, stdout, elapsed)
+
+    # Phrases an external solver emits when it never looked at the model at all:
+    # a wrong binary invoked with an unreadable format, or a solver whose license
+    # refuses the instance size. Both used to parse to UNKNOWN with no objective,
+    # which is indistinguishable from "this solver tried and failed to solve it"
+    # -- so a systematically broken solver reads as a merely weak one, and every
+    # ratio computed against it flatters us. They are ERROR, loudly.
+    _EXTERNAL_REFUSAL_PHRASES = (
+        "demo license",
+        "license is limited",
+        "usage :",
+        "usage:",
+        "no license",
+        "licensing@",
+    )
+
+    def _parse_baron(
+        self, instance: str, solver_name: str, stdout: str, elapsed: float
+    ) -> SolveResult:
+        """Parse BARON's AMPL driver stdout.
+
+        BARON is NOT Couenne and must not share its parser. Two differences, both
+        verified against ``pointpack02`` (a maximize instance whose known optimum
+        is ``+2.0``):
+
+        * BARON reports ``Objective <value>`` in the model's **original** sense
+          (it printed ``+2.0``), whereas Couenne reports ``Lower bound:`` /
+          ``Upper bound:`` in *internal minimization* sense (it printed ``-2``).
+          Running BARON through :meth:`_parse_ampl_solver` therefore found no
+          objective at all -- it looks only for Couenne's bound lines -- and
+          returned ``status=OPTIMAL, objective=None``, so no correctness check
+          against a known optimum could fire.
+        * BARON's status line is ``BARON <version>: <n> iterations, <verdict>``,
+          which Couenne's ``^\\w+:`` verdict regex does not match (the version
+          string sits between the name and the colon).
+        """
+        low = stdout.lower()
+        if any(p in low for p in self._EXTERNAL_REFUSAL_PHRASES):
+            return SolveResult(
+                instance=instance,
+                solver=solver_name,
+                status=SolveStatus.ERROR,
+                wall_time=elapsed,
+            )
+
+        status = SolveStatus.UNKNOWN
+        if "infeasible" in low:
+            status = SolveStatus.INFEASIBLE
+        elif "unbounded" in low:
+            status = SolveStatus.UNBOUNDED
+        elif "optimal within tolerances" in low or "optimal solution found" in low:
+            status = SolveStatus.OPTIMAL
+        elif "max. allowable time" in low or "time limit" in low:
+            status = SolveStatus.TIME_LIMIT
+        elif "numerical difficulties" in low:
+            status = SolveStatus.NUMERICAL_ERROR
+        elif "max. allowable nodes" in low or "max. allowable iterations" in low:
+            status = SolveStatus.FEASIBLE
+
+        # Original sense -- deliberately NOT negated for maximize models.
+        objective = self._first_float(r"^Objective\s+([+\-0-9.eE]+)", stdout)
+        bound = self._first_float(r"Best possible:\s*([+\-0-9.eE]+)", stdout)
+        return SolveResult(
+            instance=instance,
+            solver=solver_name,
+            status=status,
+            objective=objective,
+            bound=bound,
+            wall_time=elapsed,
+            node_count=self._first_int(r"([0-9]+)\s+iterations", stdout),
+        )
 
     def _parse_scip(
         self, instance: str, solver_name: str, stdout: str, elapsed: float
