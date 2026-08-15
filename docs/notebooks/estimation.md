@@ -46,7 +46,7 @@ class MyExperiment(Experiment):
 
 $$\min_\theta \sum_i \left(\frac{y_i^{\text{obs}} - y_i^{\text{model}}(\theta)}{\sigma_i}\right)^2$$
 
-and solves it with discopt's NLP solvers (Ipopt or pure-JAX IPM). The result
+and solves it with discopt's NLP solvers (POUNCE by default, or Ipopt). The result
 includes estimated parameter values, the Fisher Information Matrix, parameter
 covariance ($\text{Cov}(\theta) \approx \text{FIM}^{-1}$), and 95% confidence
 intervals.
