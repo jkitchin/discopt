@@ -5,12 +5,20 @@ build-backend = "maturin"
 [project]
 name = "discopt"
 version = "0.7.1.dev0"
-description = "Hybrid MINLP solver combining Rust and JAX"
+description = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
 license = {text = "EPL-2.0"}
 readme = "README.md"
-keywords = ["optimization", "MINLP", "branch-and-bound", "nonlinear", "solver", "JAX"]
+keywords = [
+    "optimization",
+    "MINLP",
+    "branch-and-bound",
+    "global-optimization",
+    "nonlinear",
+    "solver",
+    "rust",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",

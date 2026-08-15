@@ -6,25 +6,28 @@
 :align: center
 ```
 
-A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend, JAX automatic differentiation, and Python orchestration. Solves MINLP problems via NLP-based spatial Branch & Bound {cite:p}`Land1960,Belotti2013` with JIT-compiled objective/gradient/Hessian evaluation.
+A Mixed-Integer Nonlinear Programming (MINLP) solver built on a Rust core with Python orchestration. Solves MINLPs by spatial Branch & Bound {cite:p}`Land1960,Belotti2013` over rigorous convex relaxations, with an in-house primal/dual simplex for the per-node LPs and a Rust automatic-differentiation tape for objective/gradient/Jacobian/Hessian evaluation.
 
 ## Architecture
 
 ```
-Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
+Model.solve()  -->  Python orchestrator  -->  Rust B&B kernel / TreeManager
                         |                          |
-                  JAX NLPEvaluator           Node pool / branching / pruning
-                  NLP backends:              Zero-copy numpy arrays (PyO3)
-                    pounce  (pure-Rust Ipopt port)  [default single solve]
-                    ipm     (pure-JAX, vmap batch)  [B&B node relaxations]
-                    cyipopt (Ipopt)
+                  NLP evaluation:            Node pool / branching / pruning
+                    POUNCE AD tape           In-house primal/dual simplex (node LPs)
+                    (default, JAX-free)      Zero-copy numpy arrays (PyO3)
+                  NLP backends:
+                    pounce  (pure-Rust Ipopt port)  [default]
+                    cyipopt (Ipopt)                 [fallback]
 ```
 
-**Rust backend** (`crates/discopt-core`): Expression IR, Branch & Bound tree (node pool, branching, pruning), .nl file parser, FBBT/presolve (interval arithmetic, probing, Big-M simplification).
+**Rust backend** (`crates/discopt-core`): Expression IR, Branch & Bound tree (node pool, branching, pruning), the native spatial B&B kernel, in-house primal/dual simplex with a sparse LU basis (`feral`), .nl file parser, FBBT/presolve (interval arithmetic, probing, Big-M simplification).
 
-**JAX layer** (`python/discopt/_relax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (28 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
+**NLP evaluation** (`python/discopt/_tape_nlp_evaluator.py`, `_nl_expr_compiler.py`): objective, gradient, constraints, Jacobian, and Lagrangian Hessian (dense and sparse) from a POUNCE Rust AD tape, with no JAX on the path. Expressions with no tape opcode fall back to the JAX evaluator, and `DISCOPT_NLP_EVAL=jax` selects it wholesale. Pure LP, QP, MIQP, and simplex-MILP solves never import JAX at all.
 
-**Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt {cite:p}`Wachter2006`, HiGHS LP and MILP wrappers with warm-start support (MILP used by the LOA decomposition solver).
+**Relaxation layer** (`python/discopt/_relax`): DAG compiler, the uniform factorable relaxation engine, McCormick convex/concave relaxations {cite:p}`McCormick1976` (28 primitive operations including sigmoid, softplus, tanh), alphaBB, piecewise McCormick, cutting planes, and a relaxation compiler with vmap support. This layer still uses JAX for envelope evaluation and cut separation.
+
+**Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt {cite:p}`Wachter2006`, AMP, the MIP-NLP decomposition family, GDPopt-LOA, the derivative-free backends, and an optional Gurobi backend. highspy is used only on the OA/GDP paths.
 
 **Neural network embedding** (`python/discopt/nn`): embeds trained feedforward networks as algebraic MINLP constraints {cite:p}`Ceccon2022` via full-space (smooth activations), ReLU big-M MILP {cite:p}`Anderson2020`, and reduced-space strategies; interval arithmetic bound propagation; ONNX model import.
 
@@ -93,23 +96,25 @@ print(result.confidence_intervals)
 
 ## NLP Backend Comparison
 
-discopt supports three NLP solver backends, each with different strengths:
+`Model.solve()` accepts these `nlp_solver` selectors:
 
-| Backend              | Implementation       | Use Case                                   |
-|----------------------|----------------------|--------------------------------------------|
-| `pounce` (default)   | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock     |
-| `ipm`                | Pure-JAX IPM         | B&B inner loop; GPU-batched via `jax.vmap`  |
-| `cyipopt`            | Ipopt via cyipopt    | Single-problem NLP; most robust            |
+| Backend                  | Implementation                     | Use Case                                    |
+|--------------------------|------------------------------------|---------------------------------------------|
+| `pounce` (default)       | Pure-Rust Ipopt port               | Universal default: LP/QP/MILP/MIQP/NLP/MINLP |
+| `ipopt` / `cyipopt`      | Ipopt via cyipopt                  | NLP node and continuous solves; most robust |
+| `simplex`                | Pure-Rust warm-started simplex B&B | MILP; the fully JAX-free MILP path          |
+| `ipm` / `sparse_ipm`     | Back-compat aliases                | Simplex-first LP/MILP routing; resolve to POUNCE for NLP/MINLP |
 
-For single continuous solves the default NLP backend resolves to a KKT-valid
-solver — POUNCE when installed, falling back to cyipopt, then to the pure-JAX
-IPM. The pure-JAX `ipm` remains the vmap-batched engine for B&B node relaxations.
+The pure-JAX interior-point method has been retired. `nlp_solver="ipm"` is kept as
+an alias so existing scripts keep working: it selects the simplex-first matrix
+routing for LP/MILP and resolves to POUNCE for NLP/MINLP. See
+{doc}`notebooks/ipm_vs_ipopt` for a measured comparison.
 
 ```python
-result = model.solve()                       # default: POUNCE when installed
+result = model.solve()                       # default: POUNCE
 result = model.solve(nlp_solver="pounce")    # POUNCE (pure-Rust Ipopt port)
-result = model.solve(nlp_solver="ipm")       # Pure-JAX IPM
-result = model.solve(nlp_solver="cyipopt")   # Ipopt
+result = model.solve(nlp_solver="ipopt")     # Ipopt via cyipopt
+result = model.solve(nlp_solver="simplex")   # pure-Rust simplex MILP B&B
 ```
 
 ## Contents

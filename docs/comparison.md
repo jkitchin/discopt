@@ -118,10 +118,11 @@ This is the fundamental difference. discopt is a **solver** with an integrated m
 ```
 Python modeling API
     │
-    ├──→ JAX DAG compiler → autodiff (grad, Hessian, Jacobian)
+    ├──→ Rust AD tape (POUNCE) → grad, Jacobian, Lagrangian Hessian
+    │
+    ├──→ JAX relaxation layer
     │        │
     │        ├──→ McCormick / alphaBB / ICNN relaxations
-    │        ├──→ Pure-JAX IPM (Mehrotra predictor-corrector)
     │        ├──→ Convexity detection → bypass / per-constraint OA
     │        └──→ vmap batching → parallel node evaluation
     │

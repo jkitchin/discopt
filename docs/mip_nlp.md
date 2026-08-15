@@ -425,11 +425,14 @@ master.
 ## Backend limitations
 
 - `nlp_solver` controls fixed-integer NLP subproblems. POUNCE is the default
-  single-solve backend when installed, with cyipopt and the pure-JAX IPM used
-  where configured.
+  backend, with cyipopt used where configured. The `"ipm"` selector is a
+  back-compat alias that resolves to POUNCE on this path; the pure-JAX IPM it
+  used to name has been retired.
 - `milp_solver` controls MILP masters where a method exposes that option.
-  `highs`, `pounce`, `simplex`, `gurobi`, or `auto` may be accepted depending on
-  the method and installed extras.
+  The accepted values are `auto` (simplex-first, then POUNCE), `pounce`,
+  `simplex`, and `gurobi`; anything else raises `ValueError`. HiGHS was removed
+  from the MILP path in issue #356. Some methods narrow this further —
+  `lp_nlp_bb` and `solution_pool` require `gurobi`.
 - `solution_pool=True` currently requires `milp_solver="gurobi"`.
 - `lp_nlp_bb` requires `milp_solver="gurobi"` for lazy callbacks.
 - MIP-NLP methods ignore branch-and-bound-only options such as spatial branching

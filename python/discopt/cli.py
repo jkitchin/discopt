@@ -51,7 +51,10 @@ def _cmd_about(_args):
         license_text = meta["License"] or ""
     except importlib.metadata.PackageNotFoundError:
         pkg_version = version
-        summary = "Hybrid MINLP solver combining Rust and JAX"
+        # Fallback only when the distribution metadata is unreadable (e.g. a
+        # source tree with no installed dist). Keep in sync with the `description`
+        # field in pyproject.toml, which is the real source.
+        summary = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
         license_text = "EPL-2.0"
 
     try:
