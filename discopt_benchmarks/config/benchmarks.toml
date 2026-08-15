@@ -421,10 +421,21 @@ type = "internal"
 options = { threads = 1 }
 
 [solvers.baron]
-command = "baron"
+command = "/Applications/AMPL/baron"
 type = "external"
 nl_interface = true
 options = { threads = 1, epsa = 1e-6, epsr = 1e-4 }
+note = """BARON 25.12.10, the AMPL-ASL driver, which reads .nl directly. The path \
+is explicit on purpose: this entry used to say `command = "baron"`, and on a \
+machine with GAMS installed PATH resolves that to \
+GAMS.framework/Resources/baron, which reads only `.bar` and answers a `.nl` \
+argument with a usage message and rc=0. CAVEAT: the AMPL bundle's BARON is \
+DEMO-LICENSED (10 variables, 10 constraints) -- it refuses anything larger, \
+which `_reject_non_result` now records as ERROR rather than a silent non-solve. \
+BARON at corpus scale is available only through GAMS (fully licensed here), and \
+that needs a .nl -> .gms bridge which does not exist yet; until it does, \
+`geomean_ratio_vs_baron` and `root_gap_ratio_vs_baron` are NOT producible on \
+this machine and must not be reported as measured."""
 
 [solvers.couenne]
 command = "/Applications/AMPL/couenne"

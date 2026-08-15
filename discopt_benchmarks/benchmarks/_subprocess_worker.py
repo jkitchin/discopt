@@ -105,6 +105,14 @@ def _solve(
         bound=getattr(result, "bound", None),
         wall_time=float(getattr(result, "wall_time", time.monotonic() - start)),
         node_count=int(getattr(result, "node_count", 0) or 0),
+        # The in-process runner records this (runner.py) and this worker did
+        # not, so `--subprocess` -- the mode recommended for every large suite --
+        # silently produced `root_gap = None` on every row. That is the exact
+        # input `root_gap_populated_fraction` measures for `[gates.cert0]`, so
+        # the Phase-0 exit metric read 0.00 against a 0.90 floor purely because
+        # of how the suite was launched. Found on the 2026-08-15 global50 run,
+        # where it looked like a gate failure and was an instrumentation hole.
+        root_gap=getattr(result, "root_gap", None),
         rust_time_fraction=rust_frac,
         jax_time_fraction=jax_frac,
         python_time_fraction=py_frac,
