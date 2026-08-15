@@ -744,8 +744,12 @@ def _solve_master_milp(
         solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError as e:
         raise ImportError(
+            # HiGHS was removed from the MILP path in #356; get_milp_solver
+            # accepts only auto/pounce/simplex/gurobi, so `pip install highspy`
+            # was a dead hint. The simplex backend is in-tree and needs no
+            # install, which is why it is not listed here.
             "LOA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
+            "pip install pounce-solver  |  pip install gurobipy"
         ) from e
 
     # Determine master problem dimensions
