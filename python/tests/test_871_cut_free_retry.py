@@ -41,7 +41,6 @@ import pytest
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import discopt.modeling as dm  # noqa: E402
 from discopt.modeling.core import ObjectiveSense  # noqa: E402
 
 _DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl")
@@ -60,25 +59,29 @@ def kernel_on(monkeypatch):
 
 
 @pytest.mark.correctness
-@pytest.mark.timeout(600)
-def test_clay0303hfsg_certifies_after_the_cut_free_retry(kernel_on):
+@pytest.mark.timeout(900)
+def test_clay0303hfsg_certifies_after_the_cut_free_retry(kernel_on, convex_kernel_solve):
     """The instance #871 blocks now certifies, and the certified value is correct.
 
     Fail-before / pass-after: with the retry removed this returns ``exhausted`` with
     bound 26668.921579 (measured), so the ``optimal`` assertion is what the change
     buys. Not marked ``slow`` — every CI lane excludes ``slow`` (``ci.yml`` 178 / 262 /
     388), and a guard that cannot run is documentation. It carries an explicit
-    ``timeout(600)`` because the solve is ~7 s locally but far slower on CI runners.
-    """
-    from discopt.solvers._convex_kernel import build_convex_spec, solve_convex_tree
+    ``timeout(900)`` because the solve is ~9 s locally but far slower on CI runners;
+    it must stay above ``CONVEX_KERNEL_BUDGET_S`` so the solver's own budget, not
+    pytest, is what bounds the run.
 
+    The solve comes from the session-scoped ``convex_kernel_solve`` fixture: three
+    tests across two files were re-running this identical deterministic tree, which
+    is what pushed the correctness lane to 1353 s. See the fixture's docstring in
+    ``conftest.py`` for the determinism measurement.
+    """
     opt = _known_optimum("clay0303hfsg")
-    m = dm.from_nl(os.path.join(_DATA, "clay0303hfsg.nl"))
+    solved = convex_kernel_solve("clay0303hfsg")
+    m, spec, r = solved["model"], solved["spec"], solved["result"]
     assert m._objective.sense == ObjectiveSense.MINIMIZE, "sense assumed below"
-    spec = build_convex_spec(m)
     assert spec is not None, "clay0303hfsg must be kernel-eligible"
 
-    r = solve_convex_tree(spec, initial_incumbent=None, time_limit_s=300.0)
     inc, bound, status = r["incumbent"], r["bound"], r["status"]
     tol = 1e-4 * max(1.0, abs(opt))
 
@@ -98,12 +101,12 @@ def test_clay0303hfsg_certifies_after_the_cut_free_retry(kernel_on):
 
 
 @pytest.mark.correctness
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 @pytest.mark.parametrize(
     "name",
     ["syn05m", "syn05hfsg", "clay0303hfsg"],
 )
-def test_kernel_certificates_stay_correct(kernel_on, name):
+def test_kernel_certificates_stay_correct(kernel_on, name, convex_kernel_solve):
     """No instance that already certified may regress, and none may certify wrongly.
 
     Reads the objective SENSE from the model rather than assuming MINIMIZE: `syn*` are
@@ -117,8 +120,6 @@ def test_kernel_certificates_stay_correct(kernel_on, name):
     non-regression is covered by the measurement in this module's docstring and by
     ``test_convex_kernel_perspective_865``.
     """
-    from discopt.solvers._convex_kernel import build_convex_spec, solve_convex_tree
-
     path = os.path.join(_DATA, f"{name}.nl")
     if not os.path.exists(path):
         pytest.skip(f"{name}.nl not vendored")
@@ -129,12 +130,11 @@ def test_kernel_certificates_stay_correct(kernel_on, name):
         # vendored). Skipping is honest; asserting against a transcribed literal is how
         # a wrong oracle gets published, which happened once already on this issue.
         pytest.skip(f"no recorded optimum for {name} in known_optima.toml")
-    m = dm.from_nl(path)
+    solved = convex_kernel_solve(name)
+    m, spec, r = solved["model"], solved["spec"], solved["result"]
     maximize = m._objective.sense == ObjectiveSense.MAXIMIZE
-    spec = build_convex_spec(m)
     assert spec is not None, f"{name} must be kernel-eligible"
 
-    r = solve_convex_tree(spec, initial_incumbent=None, time_limit_s=300.0)
     inc, bound, status = r["incumbent"], r["bound"], r["status"]
     tol = 1e-4 * (1.0 + abs(opt))
 

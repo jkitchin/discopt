@@ -52,6 +52,71 @@ def heterogeneous_array_bounds():
     return make
 
 
+# The convex kernel's per-instance solve budget in the correctness lane. It was
+# 300 s, chosen when clay0303hfsg measured 194 s there. The feral 0.16.0 bump
+# (#1025, threshold-Markowitz pivoting) moved that instance's rounding trajectory
+# -- measured locally as 141 -> 207 nodes (+47%) and 7.00 s -> 9.03 s (+29%),
+# sound in both (bound 26669.109557 / 26669.109563, optimum 26669.10955143) --
+# and 194 s became >=300 s, i.e. the budget itself started deciding the result.
+# CI is ~30-40x this machine on this instance (9.4 s local vs 194 s pre-bump; the
+# docstring in test_convex_kernel_perspective_865 records a 40x spread), so 600 s
+# restores roughly 2x margin over the ~250-350 s the bumped solve should now take.
+# This is a wall budget, not a correctness threshold: every caller still asserts
+# `optimal`/`exhausted` and full bound soundness, and none of those assertions
+# changes with a larger budget.
+CONVEX_KERNEL_BUDGET_S = 600.0
+
+
+@pytest.fixture(scope="session")
+def convex_kernel_solve():
+    """One convex-kernel solve per instance, shared across the correctness lane.
+
+    Three tests in two files each ran ``build_convex_spec`` + ``solve_convex_tree``
+    on clay0303hfsg with identical arguments, so the correctness lane paid for the
+    same tree three times -- 900 s of a 1353 s lane once the solves started hitting
+    their budget. ``test_convex_kernel_perspective_865`` already learned this lesson
+    within one file ("an earlier split into two tests re-solved the same instance and
+    added 251 s for nothing"); this extends it across files.
+
+    Sharing is information-neutral only because the solve is deterministic, which is
+    measured rather than assumed: three repeats returned byte-identical
+    ``status='optimal'``, bound 26669.109563083734, incumbent 26669.109572474063 and
+    207 nodes (8 executed comparisons; wall 9.37 s +/- 0.33 s). The env var
+    ``DISCOPT_CONVEX_KERNEL`` does not enter into it -- it gates ``try_convex_solve``
+    on the ``Model.solve()`` path, not these direct calls, which is why the 865 test
+    reaches the same tree without the ``kernel_on`` fixture.
+
+    Returns
+    -------
+    callable
+        ``solve(name) -> {"model", "spec", "result"}`` for ``<name>.nl`` in the
+        vendored MINLPLib corpus, memoized for the session. ``spec`` may be ``None``
+        (callers assert kernel-eligibility themselves). The returned objects are
+        shared: read them, do not mutate them.
+    """
+    import discopt.modeling as dm
+    from discopt.solvers._convex_kernel import build_convex_spec, solve_convex_tree
+
+    data_dir = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl")
+    cache: dict[str, dict] = {}
+
+    def solve(name: str) -> dict:
+        if name not in cache:
+            model = dm.from_nl(os.path.join(data_dir, f"{name}.nl"))
+            spec = build_convex_spec(model)
+            result = (
+                None
+                if spec is None
+                else solve_convex_tree(
+                    spec, initial_incumbent=None, time_limit_s=CONVEX_KERNEL_BUDGET_S
+                )
+            )
+            cache[name] = {"model": model, "spec": spec, "result": result}
+        return cache[name]
+
+    return solve
+
+
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "correctness: Known-optimum correctness validation")

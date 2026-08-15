@@ -231,8 +231,8 @@ def test_only_exponent_two_is_admitted():
 
 
 @pytest.mark.correctness
-@pytest.mark.timeout(600)
-def test_clay0303hfsg_is_sound_and_any_certificate_is_correct():
+@pytest.mark.timeout(900)
+def test_clay0303hfsg_is_sound_and_any_certificate_is_correct(convex_kernel_solve):
     """THE check whose absence let the #879 false certificate ship.
 
     Exactness and convexity of the marshaled rows both PASSED while the kernel
@@ -246,13 +246,19 @@ def test_clay0303hfsg_is_sound_and_any_certificate_is_correct():
     ``slow`` (``ci.yml`` 178 / 262 / 388), so as a slow test this guard would never
     execute on a PR — reproducing the exact #879 gap it exists to close.
 
-    It does need an explicit ``timeout(600)``: the solve is ~7 s on an M-series laptop
+    It does need an explicit ``timeout(900)``: the solve is ~9 s on an M-series laptop
     but **263 s** on the CI runner, which blew the lane's 120 s default. That 40x
-    spread is why "it only takes 7 s" is not a safe basis for a marker decision.
+    spread is why "it only takes 9 s" is not a safe basis for a marker decision. The
+    marker must also stay above ``CONVEX_KERNEL_BUDGET_S`` so the solver's budget, not
+    pytest, is what bounds the run.
 
     ONE solve, both facts. Asserting soundness and conditionally checking the
     certificate costs a single tree; an earlier split into two tests re-solved the same
-    instance and added 251 s for nothing.
+    instance and added 251 s for nothing. That was a within-file lesson; the same
+    duplication existed *across* files (two more tests in ``test_871_cut_free_retry``
+    re-solved this instance), so the tree now comes from the session-scoped
+    ``convex_kernel_solve`` fixture in ``conftest.py``, which records the determinism
+    measurement that makes sharing information-neutral.
 
     Measured today: ``status='exhausted'``, incumbent 26669.109572 (the known optimum
     to 7 figures), bound 26668.921579, relative gap 7.0e-06 — inside the usual 1e-4,
@@ -264,10 +270,9 @@ def test_clay0303hfsg_is_sound_and_any_certificate_is_correct():
     below tightens automatically to the full #879 check.
     """
     opt = known_optimum("clay0303hfsg")
-    m = dm.from_nl(os.path.join(_DATA, "clay0303hfsg.nl"))
-    spec = build_convex_spec(m)
+    solved = convex_kernel_solve("clay0303hfsg")
+    spec, r = solved["spec"], solved["result"]
     assert spec is not None
-    r = solve_convex_tree(spec, initial_incumbent=None, time_limit_s=300.0)
     inc, bound, status = r["incumbent"], r["bound"], r["status"]
     tol = 1e-4 * max(1.0, abs(opt))
 
