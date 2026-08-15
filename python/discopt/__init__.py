@@ -22,7 +22,7 @@ modeling
 solver
     Solve orchestrator: Branch & Bound with NLP relaxations.
 solvers
-    NLP solver backends: POUNCE (pure-Rust Ipopt port), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
+    NLP solver backends: POUNCE (pure-Rust Ipopt port, the default) and cyipopt (Ipopt).
 """
 
 __version__ = "0.7.1.dev0"
