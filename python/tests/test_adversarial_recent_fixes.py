@@ -1,7 +1,7 @@
 """Adversarial regression suite for the soundness / crash / deadline fixes merged
-in the week of 2026-06-18..24.
+in the weeks of 2026-06-18..24 and 2026-08-08..15.
 
-Two layers:
+Three layers:
 
 1. **Real triggering instances** (``_INSTANCES``) — the exact MINLPLib models that
    each bug was found on, so they provably exercise the fixed code path, checked
@@ -13,6 +13,14 @@ Two layers:
 2. **Synthetic path-targeted problems** — constructed to hit a specific fixed code
    path that no small vendored instance covers (the OA maximize loop; the dense
    Jacobian XLA-compile guard on a > 1e6-entry model).
+
+3. **Oracle-driven sweeps** (2026-08-08..15) — for the LP churn and the new
+   derivative-free selectors there is no single triggering instance to vendor, so
+   these tests carry their own oracle: an independent LP implementation
+   (scipy/HiGHS) plus self-contained feasibility arithmetic, and, for the
+   randomized MINLPs, box sampling. Every one of them counts its executed
+   assertions and fails if that count is zero — a sweep that silently checks
+   nothing reads exactly like a passing sweep (CLAUDE.md §6).
 
 Soundness invariants (sense-aware), asserted everywhere:
   * not false-infeasible / not false-unbounded
@@ -210,6 +218,354 @@ def test_large_dense_jacobian_no_crash():
     # Sound certificate: a finite lower bound never exceeds the incumbent.
     if r.objective is not None and r.bound is not None:
         assert r.bound <= r.objective + 1e-3, "large model: UNSOUND CERT (bound > incumbent)"
+
+
+# ---------------------------------------------------------------------------
+# Week of 2026-08-08..15
+# ---------------------------------------------------------------------------
+
+_BIG = 1e20  # the LP layer's INF sentinel is 1e20, not f64::INFINITY
+
+
+def _make_lp(rng, kind):
+    """One adversarial LP shape: ``(c, A, b, lb, ub)`` for ``min c'x, Ax=b, lb<=x<=ub``.
+
+    The shapes target what the LP layer took this week: degenerate vertices
+    (#1023's unstable-pivot recovery), rank-deficient rows (#1025's threshold
+    Markowitz), wild column scaling, a Farkas-certified empty system (#1019's
+    margin) and an explicit primal ray (#1022's ray certification before
+    claiming Unbounded).
+    """
+    import numpy as np
+
+    m = int(rng.integers(2, 7))
+    n = int(rng.integers(m + 1, m + 8))
+    A = rng.normal(size=(m, n))
+    c = rng.normal(size=n)
+    lb = np.zeros(n)
+    ub = np.full(n, 10.0)
+
+    if kind == "degenerate":
+        A = np.round(A)
+        A[A == 0] = 1.0
+        x0 = np.zeros(n)
+        x0[: max(1, n // 3)] = 1.0
+        b = A @ x0
+    elif kind == "rank_deficient":
+        A[-1] = A[0] + A[1] if m >= 2 else A[0]
+        b = A @ rng.uniform(0, 3, size=n)
+    elif kind == "badly_scaled":
+        scale = 10.0 ** rng.integers(-6, 7, size=n)
+        A, c, ub = A * scale, c * scale, ub / scale
+        b = A @ (rng.uniform(0, 1, size=n) * ub)
+    elif kind == "infeasible":
+        # y'A = 0 with y'b > 0 is a Farkas certificate: no solution exists, box
+        # or no box. The expected verdict is not an opinion.
+        y = rng.normal(size=m)
+        A = A - np.outer(y, y @ A) / (y @ y)
+        b = y * 5.0
+    elif kind == "unbounded":
+        # A free column with strictly improving cost and no row activity: a ray.
+        A = np.hstack([A, np.zeros((m, 1))])
+        c = np.append(c, -1.0)
+        lb = np.append(lb, 0.0)
+        ub = np.append(ub, _BIG)
+        b = A[:, :n] @ rng.uniform(0, 3, size=n)
+    else:  # "generic"
+        b = A @ rng.uniform(0, 5, size=n)
+
+    return c, np.ascontiguousarray(A), b, lb, ub
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "kind",
+    ["generic", "degenerate", "rank_deficient", "badly_scaled", "infeasible", "unbounded"],
+)
+def test_lp_layer_differential_vs_highs(kind):
+    """Every per-node dual bound comes off the Rust simplex, so a wrong verdict
+    there is a false certificate at the top. Eight of the 2026-08-08..15 PRs land
+    in ``crates/discopt-core/src/lp/`` (#996, #1012, #1018, #1019, #1021, #1022,
+    #1023, #1024, #1025), and no vendored instance isolates them.
+
+    Two independent oracles per LP:
+
+    * self-contained — a reported ``optimal`` point must satisfy ``Ax = b`` and
+      the box, and ``c'x`` must equal the reported objective. No second solver is
+      involved, so a violation is a defect outright.
+    * differential — statuses must agree with scipy's HiGHS. The single genuine
+      ambiguity is an empty feasible set with an unbounded recession cone, which
+      either solver may legitimately report either way; everything else is one of
+      the two being wrong.
+    """
+    import discopt._rust as R
+    import numpy as np
+    from scipy.optimize import linprog
+
+    rng = np.random.default_rng(20260815)
+    checks = 0
+    for i in range(20):
+        c, A, b, lb, ub = _make_lp(rng, kind)
+        st, x, obj, _iters = R.solve_lp_py(c, A, b, lb, ub, 1e-9, 20000)
+
+        if st == "optimal":
+            x = np.asarray(x, dtype=float)
+            checks += 3
+            resid = float(np.abs(A @ x - b).max())
+            assert resid <= 1e-6 * max(1.0, float(np.abs(b).max())), (
+                f"{kind} lp {i}: 'optimal' point violates Ax=b by {resid:.3e}"
+            )
+            box = float(max((lb - x).max(), (x - ub).max()))
+            assert box <= 1e-6, f"{kind} lp {i}: 'optimal' point is outside its box by {box:.3e}"
+            cx = float(c @ x)
+            assert abs(cx - obj) <= 1e-6 * max(1.0, abs(cx)), (
+                f"{kind} lp {i}: reported objective {obj:.10g} != c'x {cx:.10g}"
+            )
+
+        bounds = [(float(lo), None if hi >= _BIG else float(hi)) for lo, hi in zip(lb, ub)]
+        res = linprog(c, A_eq=A, b_eq=b, bounds=bounds, method="highs")
+        sst = {0: "optimal", 2: "infeasible", 3: "unbounded"}.get(res.status)
+        if sst is None or st not in ("optimal", "infeasible", "unbounded"):
+            continue
+
+        checks += 1
+        if {st, sst} != {"infeasible", "unbounded"}:
+            assert st == sst, f"{kind} lp {i}: discopt says {st}, HiGHS says {sst}"
+            if st == "optimal":
+                checks += 1
+                assert abs(obj - float(res.fun)) <= 1e-6 * max(1.0, abs(res.fun)), (
+                    f"{kind} lp {i}: discopt {obj:.10g} vs HiGHS {float(res.fun):.10g}"
+                )
+
+    # A shape whose LPs all landed on a status the comparison skips would make
+    # this test a silent no-op (CLAUDE.md §6).
+    assert checks > 0, f"{kind}: no assertion executed — the sweep checked nothing"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("selector", ["direct", "surrogate"])
+def test_dfo_never_fabricates_a_certificate(selector):
+    """The derivative-free selectors added in #1006 have no dual argument —
+    DIRECT is a sampling search, the surrogate path optimizes a *fitted* model —
+    so whatever they return must not read as a proof. A finite ``bound``, a
+    ``gap_certified=True`` or a ``status="optimal"`` off either path is a false
+    certificate even when the point it names happens to be the true optimum,
+    because downstream gates count the *claim*.
+
+    The returned point must still be honest: inside the declared box, satisfying
+    the declared rows, with the reported objective equal to the objective there.
+    """
+    import numpy as np
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    m = dm.Model(f"dfo_{selector}")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-1.0, ub=3.0)
+    m.minimize(100 * (y - x * x) ** 2 + (1 - x) ** 2)
+    m.subject_to(x + y <= 2.5, name="r0")
+
+    r = m.solve(solver=selector, time_limit=15)
+
+    assert r.bound is None or not np.isfinite(r.bound), (
+        f"{selector}: reported dual bound {r.bound!r} with no dual argument behind it"
+    )
+    assert not r.gap_certified, f"{selector}: gap_certified=True off a derivative-free method"
+    assert r.status != "optimal", f"{selector}: status='optimal' with no certificate behind it"
+
+    if r.x is None:
+        return
+    xs = np.asarray([float(np.ravel(np.asarray(r.x[n]))[0]) for n in ("x", "y")])
+    lo = np.asarray([-2.0, -1.0])
+    hi = np.asarray([2.0, 3.0])
+    out = float(max((lo - xs).max(), (xs - hi).max()))
+    assert out <= 1e-6, f"{selector}: returned point is outside the declared box by {out:.3e}"
+
+    ev = NLPEvaluator(m)
+    cl, cu = _infer_constraint_bounds(ev)
+    con = np.asarray(ev.evaluate_constraints(xs), dtype=float)
+    viol = float(max(np.maximum(cl - con, 0.0).max(), np.maximum(con - cu, 0.0).max()))
+    assert viol <= 1e-5, f"{selector}: returned point violates a declared row by {viol:.3e}"
+
+    if r.objective is not None:
+        # NLPEvaluator reports the internal *minimization* objective; this model
+        # minimizes, so no sign flip is needed — assert that rather than assume it.
+        assert not ev._negate
+        here = float(ev.evaluate_objective(xs))
+        assert abs(here - r.objective) <= 1e-5 * max(1.0, abs(here)), (
+            f"{selector}: reported {r.objective:.10g}, objective at the point is {here:.10g}"
+        )
+
+
+def _fuzz_model(rng, idx):
+    """A small random MINLP mixing the operators and shapes the week touched."""
+
+    m = dm.Model(f"fuzz{idx}")
+    scalars, meta = [], []
+    for i in range(rng.integers(1, 4)):
+        lo = round(float(rng.uniform(-5, 0)), 3)
+        hi = round(lo + float(rng.uniform(0.5, 8)), 3)
+        scalars.append(m.continuous(f"c{i}", lb=lo, ub=hi))
+        meta.append((f"c{i}", lo, hi, False))
+    for i in range(rng.integers(0, 2)):
+        lo = int(rng.integers(-3, 0))
+        hi = lo + int(rng.integers(1, 5))
+        scalars.append(m.integer(f"i{i}", lb=lo, ub=hi))
+        meta.append((f"i{i}", float(lo), float(hi), True))
+
+    def term():
+        kind = ["lin", "bilin", "sq", "exp", "log", "sqrt", "div"][int(rng.integers(0, 7))]
+        a = scalars[int(rng.integers(0, len(scalars)))]
+        b = scalars[int(rng.integers(0, len(scalars)))]
+        k = round(float(rng.uniform(-3, 3)), 3)
+        if kind == "lin":
+            return k * a
+        if kind == "bilin":
+            return k * a * b
+        if kind == "sq":
+            return k * a * a
+        if kind == "exp":
+            return k * dm.exp(0.3 * a)
+        if kind == "log":
+            return k * dm.log(dm.exp(0.2 * a) + 1.5)  # argument provably positive
+        if kind == "sqrt":
+            return k * dm.sqrt(a * a + 1.0)
+        return k * a / (a * a + 2.0)  # denominator provably positive
+
+    obj = dm.sum([term() for _ in range(int(rng.integers(1, 4)))])
+    (m.minimize if idx % 2 else m.maximize)(obj)
+    sense = "min" if m._objective.sense == ObjectiveSense.MINIMIZE else "max"
+
+    for ci in range(int(rng.integers(1, 4))):
+        body = dm.sum([term() for _ in range(int(rng.integers(1, 3)))])
+        rhs = round(float(rng.uniform(-6, 6)), 3)
+        # Inequalities only. An equality can carve out a measure-zero feasible
+        # set, which no sampled point can ever land on — the sampling arm below
+        # would then be vacuous while still reporting no counterexample.
+        if rng.random() < 0.5:
+            m.subject_to(body <= rhs, name=f"r{ci}")
+        else:
+            m.subject_to(body >= rhs, name=f"r{ci}")
+    return m, meta, sense
+
+
+@pytest.mark.slow
+def test_randomized_minlp_certificate_invariants():
+    """Randomized (seeded) MINLPs, checked against invariants that hold for every
+    model regardless of what the answer is.
+
+    This is the broad net under the week's certificate work — the graduated flags
+    (#1002, #996), the reformulation and relaxation changes (#982, #983, #984,
+    #988, #1007, #1014, #1015) and the feral bump (#1025) all move numbers on
+    arbitrary models, and no fixed instance list covers the shapes they touch.
+
+    Per model: a reported incumbent must be inside its box, integral where the
+    model says integral, feasible when re-evaluated from the DAG, and equal to
+    the reported objective; the dual bound must not cross it; ``gap_certified``
+    must carry a finite bound unless the status is ``infeasible`` (where the
+    certificate is of the infeasibility, not of a gap — ``core.py``'s
+    ``_NON_GAP_CERTIFICATE_STATUSES``); and box sampling must never turn up a
+    point that refutes an ``infeasible`` verdict or beats a certified optimum.
+    """
+    import numpy as np
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    rng = np.random.default_rng(20260815)
+    checks = 0
+    sampled_feasible = 0  # proves the sampling arm was not vacuous
+
+    for idx in range(10):
+        model, meta, sense = _fuzz_model(rng, idx)
+        r = model.solve(time_limit=5, gap_tolerance=1e-4)
+
+        ev = NLPEvaluator(model)
+        cl, cu = _infer_constraint_bounds(ev)
+        cl = np.asarray(cl, dtype=float)
+        cu = np.asarray(cu, dtype=float)
+        sign = -1.0 if ev._negate else 1.0
+
+        def value(xs, _ev=ev, _sign=sign, _cl=cl, _cu=cu):
+            con = np.asarray(_ev.evaluate_constraints(xs), dtype=float)
+            viol = (
+                0.0
+                if con.size == 0
+                else float(max(np.maximum(_cl - con, 0.0).max(), np.maximum(con - _cu, 0.0).max()))
+            )
+            return viol, _sign * float(_ev.evaluate_objective(xs))
+
+        checks += 1
+        assert not (
+            r.gap_certified
+            and r.status != "infeasible"
+            and (r.bound is None or not np.isfinite(r.bound))
+        ), f"model {idx}: gap_certified with bound={r.bound}"
+
+        if r.objective is not None and r.x is not None:
+            xs = np.asarray([float(np.ravel(np.asarray(r.x[n]))[0]) for n, _, _, _ in meta])
+            checks += 4
+            lo = np.asarray([b for _, b, _, _ in meta])
+            hi = np.asarray([b for _, _, b, _ in meta])
+            box = float(max((lo - xs).max(), (xs - hi).max()))
+            assert box <= 1e-6, f"model {idx}: incumbent outside its box by {box:.3e}"
+            for (nm, _, _, is_int), v in zip(meta, xs):
+                assert not is_int or abs(v - round(v)) <= 1e-5, (
+                    f"model {idx}: integer {nm} took the value {v!r}"
+                )
+            viol, here = value(xs)
+            assert viol <= 1e-5, f"model {idx}: incumbent violates a row by {viol:.3e}"
+            assert abs(here - r.objective) <= 1e-5 * max(1.0, abs(here)), (
+                f"model {idx}: reported {r.objective:.10g}, re-evaluated {here:.10g}"
+            )
+            if r.bound is not None and np.isfinite(r.bound):
+                checks += 1
+                if sense == "min":
+                    assert r.bound <= r.objective + 1e-4, (
+                        f"model {idx}: bound {r.bound:.10g} above incumbent {r.objective:.10g}"
+                    )
+                else:
+                    assert r.bound >= r.objective - 1e-4, (
+                        f"model {idx}: bound {r.bound:.10g} below incumbent {r.objective:.10g}"
+                    )
+
+        # Sampling refutation: the box is small and the constraints are cheap, so
+        # a feasible sample is a witness the solver has to be consistent with.
+        lo = np.asarray([b for _, b, _, _ in meta])
+        hi = np.asarray([b for _, _, b, _ in meta])
+        is_int = np.asarray([b for _, _, _, b in meta])
+        pts = rng.uniform(lo, hi, size=(500, len(meta)))
+        pts[:, is_int] = np.round(pts[:, is_int])
+        best = None
+        for p in pts:
+            viol, val = value(p)
+            if viol <= 1e-8 and (best is None or (val < best) == (sense == "min")):
+                best = val
+        if best is None:
+            continue
+        sampled_feasible += 1
+        checks += 1
+        assert r.status != "infeasible", (
+            f"model {idx}: FALSE-INFEASIBLE — sampling found a feasible point"
+        )
+        if r.status == "optimal" and r.objective is not None:
+            checks += 1
+            slack = 1e-4 * max(1.0, abs(r.objective))
+            if sense == "min":
+                assert best >= r.objective - slack, (
+                    f"model {idx}: FALSE-OPTIMAL — sample {best:.10g} beats certified "
+                    f"{r.objective:.10g}"
+                )
+            else:
+                assert best <= r.objective + slack, (
+                    f"model {idx}: FALSE-OPTIMAL — sample {best:.10g} beats certified "
+                    f"{r.objective:.10g}"
+                )
+
+    assert checks > 0, "no assertion executed — the sweep checked nothing"
+    assert sampled_feasible > 0, (
+        "no model produced a feasible sample — the refutation arm never fired and "
+        "its silence means nothing"
+    )
 
 
 if __name__ == "__main__":
