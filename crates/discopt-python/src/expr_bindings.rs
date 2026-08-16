@@ -874,6 +874,15 @@ impl PyModelRepr {
             if !d.structure.convex_constraints.is_empty() {
                 dd.set_item("convex_constraints", d.structure.convex_constraints.clone())?;
             }
+            // #1053: rows proved redundant but NOT removed (a BoundsOnly
+            // pass cannot remove one). Distinct from `constraints_removed`
+            // above, which reports rows that are actually gone.
+            if !d.structure.redundant_constraints.is_empty() {
+                dd.set_item(
+                    "redundant_constraints",
+                    d.structure.redundant_constraints.clone(),
+                )?;
+            }
             dd.set_item("work_units", d.work_units)?;
             dd.set_item("wall_time_ms", d.wall_time_ms)?;
             deltas_list.append(dd)?;

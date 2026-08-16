@@ -595,8 +595,13 @@ def test_d3_reduction_constraints_pass_fixes_vars_to_zero():
     assert stats["bounds_hi"][0] == 0.0
     assert stats["bounds_lo"][1] == 0.0
     assert stats["bounds_hi"][1] == 0.0
-    # And the constraint was marked redundant.
-    assert list(rc_deltas[0]["constraints_removed"]) == [0]
+    # And the constraint was marked redundant. It goes under
+    # `redundant_constraints`, NOT `constraints_removed`: this pass is
+    # `PassCategory::BoundsOnly`, holds the model immutably and cannot remove
+    # anything, so claiming a removal made `made_progress()` permanently true
+    # and the presolve fixed point unreachable (#1053).
+    assert list(rc_deltas[0]["redundant_constraints"]) == [0]
+    assert list(rc_deltas[0].get("constraints_removed", [])) == []
 
 
 def test_d3_reduction_constraints_skips_non_sos_polynomials():

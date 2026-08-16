@@ -143,8 +143,8 @@ def _refine_sign(
     would need a general interval walker and are left at their
     syntactic sign. The refinement is monotone: it never loses
     strength (a STRICT ``current_sign`` is returned unchanged), and
-    is sound because ``LinearContext.affine_range`` is a proven
-    enclosure over the intersection of the box and the linear
+    is sound because ``LinearContext.affine_sign`` derives it from a
+    proven enclosure over the intersection of the box and the linear
     relaxation.
     """
     if is_strict(current_sign):
@@ -156,8 +156,10 @@ def _refine_sign(
     if aff is None:
         return current_sign
     coeffs, const = aff
-    lo, hi = ctx.affine_range(coeffs, const)
-    return sign_from_bounds(lo, hi)
+    # `affine_sign`, not `affine_range`: only the sign is used here, and
+    # it skips the LP pair whenever the variable box already settles it
+    # (#1053 -- that was 21% of a 60 s solve on `hda`).
+    return ctx.affine_sign(coeffs, const)
 
 
 # ──────────────────────────────────────────────────────────────────────

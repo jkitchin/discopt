@@ -10,6 +10,65 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Presolve reached its iteration cap on every model with a bound-redundant
+  row** (`presolve`, #1053). `SimplifyPass` is `PassCategory::BoundsOnly` — it
+  holds `&ctx.model` and cannot remove anything — yet it stamped the rows it
+  proved *redundant* into `PresolveDelta::constraints_removed`, which
+  `made_progress()` reads as a model change. The rows stayed in the model, the
+  next sweep re-derived the identical list, and the `NoProgress` break became
+  unreachable. `StructureManifest::implications` had the same defect. Detections
+  now go to the new `StructureManifest::redundant_constraints`, which is
+  reported but never counted as progress, and a `debug_assert` in the
+  orchestrator rejects any `BoundsOnly` pass claiming a model change it cannot
+  have made. Measured standalone on MINLPLib `hda` at a 30 s presolve budget:
+  16 sweeps / `IterationCap` / 22.68 s before, 6 sweeps / `NoProgress` /
+  9.55 s after, with an identical reduction. (Standalone, not end-to-end —
+  the in-solve figure is under the next entry, which had to land first.)
+
+- **Presolve counted last-bit numerical noise as a tightening and never reached
+  its fixed point** (`presolve`, #1053). `count_tightened` — the single choke
+  point all seven bound passes route `bounds_tightened` through — compared
+  endpoints with no tolerance, so a bound converging asymptotically reported
+  progress forever. Fixing the redundancy defect above was not enough on its
+  own: `hda`'s in-solve presolve still ran to `TimeBudget` at 10 sweeps and
+  15.00 s, exactly its `0.25 × time_limit` cap. With `max_iterations` pinned,
+  sweeps 5..14 moved the returned bound vector by at most **4.0e-14** across
+  4650 endpoints while reporting 3-9 "tightenings" each. Movement is now
+  ignored below a relative `TIGHTEN_PROGRESS_TOL` of 1e-9 — three orders below
+  `FEAS_TOL`, five above the observed noise — scaled by the smaller of the two
+  magnitudes so an unbounded endpoint becoming finite always counts. The
+  tightening itself is still applied and returned; only the progress *signal*
+  is withheld, so presolve stops with a box looser by at most the tolerance,
+  which is the safe direction. In-solve on `hda` (782 vars, 778 cons):
+  15.00 s / 10 sweeps / `TimeBudget` → 8.87 s / 5 sweeps / `NoProgress`.
+
+- **Convexity classification spent its entire time budget on LPs that answered
+  nothing** (`_relax/convexity`, #1053). `_refine_sign` needs only the *sign* of
+  an affine expression, but called `LinearContext.affine_range`, which solves a
+  POUNCE LP pair whenever the model has any linear row. `affine_range`
+  intersects its LP result with the free box enclosure, so a strict box sign is
+  already the final answer and the LP cannot change it. The new
+  `LinearContext.affine_sign` short-circuits on that case — exact, not an
+  approximation. On `hda` all 12 calls were box-conclusive and cost 12.66 s,
+  which overran the 12 s classification budget (`0.2 × time_limit`) and aborted
+  the classification entirely: three `ConvexityBudgetExceeded` fallbacks to
+  convexity-unknown. Classification now completes in 0.33 s and identifies 567
+  of 718 constraints as convex.
+
+- **The BARON head-to-head scored a false infeasibility claim as an ordinary
+  miss** (`benchmarks`, #1053). A solver asserting "infeasible" on an instance
+  with a published finite optimum is making a false claim; `classify` returned
+  `n/a`, indistinguishable from an honest out-of-time result. It is now a
+  `VIOLATION` for either solver, with its own report section. Diagnosed on
+  `hda`: BARON 25.12.10 under the full CMU floating-network license returns
+  `19 Infeasible - No Solution` in 0.27 s ("Problem solved during preprocessing
+  / Lower bound is infinity"), while the same build with bound tightening
+  disabled (`LBTTDo 0 / OBTTDo 0 / TDo 0 / MDo 0`) returns the published optimum
+  -5964.5341 — so the fault is BARON's preprocessing, not the GAMS driver as
+  #1053 supposed.
+
 ## [0.8.0] - 2026-08-16
 
 ### Changed

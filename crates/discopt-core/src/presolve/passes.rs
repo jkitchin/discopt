@@ -124,7 +124,12 @@ impl PresolvePass for SimplifyPass {
         let mut delta = PresolveDelta::empty("simplify", ctx.iter);
         delta.bounds_tightened = count_tightened(&before, &ctx.bounds);
         delta.var_bounds_after = Some(ctx.bounds.clone());
-        delta.constraints_removed = result.redundant_constraints.clone();
+        // #1053: DETECTED, not removed. This pass is `BoundsOnly` and
+        // holds `&ctx.model` — it cannot drop a row. Stamping these into
+        // `delta.constraints_removed` made `made_progress()` true on
+        // every sweep forever, since the rows stay in the model and are
+        // re-detected identically next time.
+        delta.structure.redundant_constraints = result.redundant_constraints.clone();
         delta.work_units = (result.bigm_tightened
             + result.integer_bounds_tightened
             + result.constraints_removed) as u64;
@@ -557,11 +562,15 @@ impl PresolvePass for PolynomialReformPass {
 ///
 /// Detects sum-of-squares (or sum-of-even-powers) inequalities of the
 /// form `Σ cᵢ · ∏ xⱼ^(2 kⱼ) ≤ r` with `r ≤ 0`, and tightens every
-/// participating variable's bounds to `[0, 0]`. Marks the constraint
-/// as redundant and stamps the indices into
-/// `delta.constraints_removed` so the redundancy pass can drop them on
-/// the next sweep. Surfaces structural infeasibility immediately
-/// (e.g. `x² ≤ -1`).
+/// participating variable's bounds to `[0, 0]`. The constraint is then
+/// implied by those bounds; its index is reported in
+/// `delta.structure.redundant_constraints`. Surfaces structural
+/// infeasibility immediately (e.g. `x² ≤ -1`).
+///
+/// The redundancy report is a *detection*: this pass is `BoundsOnly`,
+/// nothing consumes the list to drop the row, and the row stays in the
+/// model. It therefore must not count as progress — until #1053 these
+/// indices went into `delta.constraints_removed`, which does.
 #[derive(Debug, Default, Clone)]
 pub struct ReductionConstraintsPass;
 
@@ -583,7 +592,7 @@ impl PresolvePass for ReductionConstraintsPass {
             .into_iter()
             .map(|b| (b, 0.0))
             .collect();
-        delta.constraints_removed = stats.constraints_made_redundant;
+        delta.structure.redundant_constraints = stats.constraints_made_redundant;
         delta.work_units = stats.constraints_examined as u64;
         // Infeasibility surfaces through the bounds array (the kernel
         // writes an empty Interval); the orchestrator's standard
@@ -682,6 +691,66 @@ impl PresolvePass for AlwaysProgressPass {
         // Synthesise progress without actually changing anything that
         // would affect downstream passes.
         delta.bounds_tightened = 1;
+        delta
+    }
+}
+
+/// Test-only pass that reports the *same* diagnostic findings on every
+/// sweep while never changing the model — the shape real probing settles
+/// into once bounds stop moving (#1053).
+///
+/// This is the regression probe for the fixed-point break: a pass like
+/// this must NOT keep the orchestrator sweeping. Before #1053,
+/// `made_progress()` counted `structure.implications`, so this pass ran
+/// to the iteration cap forever.
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub struct DiagnosticOnlyPass;
+
+#[cfg(test)]
+impl PresolvePass for DiagnosticOnlyPass {
+    fn name(&self) -> &'static str {
+        "diagnostic_only"
+    }
+    fn category(&self) -> PassCategory {
+        PassCategory::BoundsOnly
+    }
+    fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+        let mut delta = PresolveDelta::empty("diagnostic_only", ctx.iter);
+        // Re-derived, identical every sweep; bounds and constraints
+        // untouched. Every actionable counter stays zero.
+        delta.structure.implications = vec![DeltaImpl {
+            binary_var: 0,
+            binary_val: true,
+            implied_var: 0,
+            implied_lo: 0.0,
+            implied_hi: 1.0,
+        }];
+        delta.structure.cliques = vec![(0, 1)];
+        delta.structure.redundant_constraints = vec![0];
+        delta
+    }
+}
+
+/// Test-only `BoundsOnly` pass that LIES: it claims to have removed a
+/// constraint it cannot have touched. Exists to prove the
+/// orchestrator's #1053 contract check actually fires — a guard nobody
+/// has seen trip is a guard nobody knows is wired up.
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub struct LyingBoundsOnlyPass;
+
+#[cfg(test)]
+impl PresolvePass for LyingBoundsOnlyPass {
+    fn name(&self) -> &'static str {
+        "lying_bounds_only"
+    }
+    fn category(&self) -> PassCategory {
+        PassCategory::BoundsOnly
+    }
+    fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+        let mut delta = PresolveDelta::empty("lying_bounds_only", ctx.iter);
+        delta.constraints_removed = vec![0];
         delta
     }
 }

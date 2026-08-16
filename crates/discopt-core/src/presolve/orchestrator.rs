@@ -117,6 +117,36 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
 
             if matches!(category, PassCategory::RewritesModel) {
                 ctx.resync_bounds_after_rewrite();
+            } else {
+                // #1053. A `BoundsOnly` pass receives `&ctx.model`; it
+                // cannot have removed, rewritten, or added anything. If
+                // it claims otherwise the claim is false, and a false
+                // model-change claim is not a cosmetic reporting bug —
+                // `made_progress()` reads these fields, the underlying
+                // condition never clears because the model never
+                // changed, and the fixed-point break is unreachable for
+                // the rest of the run. Detections belong in
+                // `delta.structure.redundant_constraints`.
+                //
+                // debug_assert: this is an internal contract between
+                // passes and the orchestrator, checked in tests and dev
+                // builds. A release solve must not abort over it.
+                debug_assert!(
+                    delta.constraints_removed.is_empty()
+                        && delta.constraints_rewritten.is_empty()
+                        && delta.aux_constraints_introduced == 0
+                        && delta.aux_vars_introduced == 0
+                        && delta.vars_aggregated.is_empty(),
+                    "BoundsOnly pass `{}` reported a model change it cannot have made \
+                     (removed={:?}, rewritten={:?}, aux_cons={}, aux_vars={}, aggregated={}) \
+                     — see #1053",
+                    delta.pass_name,
+                    delta.constraints_removed,
+                    delta.constraints_rewritten,
+                    delta.aux_constraints_introduced,
+                    delta.aux_vars_introduced,
+                    delta.vars_aggregated.len(),
+                );
             }
 
             // #907. A bound crossing below `FEAS_TOL` is floating-point noise,
@@ -288,6 +318,56 @@ mod tests {
         // Empty pass set runs zero iterations? No, at least one sweep
         // ran: a sweep with one no-op pass returns NoProgress.
         assert!(result.iterations >= 1);
+    }
+
+    /// #1053: a pass that only *reports* structure must not keep the
+    /// orchestrator sweeping.
+    ///
+    /// `DiagnosticOnlyPass` mimics probing at its fixed point: it
+    /// re-derives the same implications and cliques on every sweep and
+    /// changes nothing. Before the fix, `made_progress()` counted
+    /// `structure.implications`, so a sweep containing such a pass always
+    /// claimed progress and the loop ran to `max_iterations`. Measured
+    /// standalone on MINLPLib `hda` at a 30 s presolve budget: 16 sweeps
+    /// / `IterationCap` / 22.68 s before, 6 sweeps / `NoProgress` /
+    /// 9.55 s after, with an identical reduction either way — sweeps
+    /// 7..16 were pure waste.
+    #[test]
+    fn diagnostic_only_pass_does_not_drive_sweeps() {
+        const CAP: u32 = 8;
+        let model = trivial_model();
+        let mut opts = OrchestratorOptions::with_passes(vec![Box::new(passes::DiagnosticOnlyPass)]);
+        opts.max_iterations = CAP;
+        let result = run(model, opts);
+
+        assert_eq!(
+            result.terminated_by,
+            TerminationReason::NoProgress,
+            "a pass that changed nothing kept the fixed-point break from firing (#1053)"
+        );
+        assert!(
+            result.iterations < CAP,
+            "ran {} sweeps against a cap of {CAP} — the diagnostic findings were \
+             treated as progress",
+            result.iterations
+        );
+        // The findings themselves must still reach consumers: the fix
+        // stops them driving iteration, it does not discard them.
+        assert!(!result.deltas.is_empty());
+        assert!(!result.deltas[0].structure.implications.is_empty());
+        assert!(!result.deltas[0].structure.redundant_constraints.is_empty());
+    }
+
+    /// ANTI-VACUITY CONTROL for the test above: the #1053 contract check
+    /// must actually fire. A `BoundsOnly` pass that claims a model
+    /// change is a false progress signal, and the orchestrator refuses
+    /// it rather than looping to the cap on a lie.
+    #[test]
+    #[should_panic(expected = "reported a model change it cannot have made")]
+    #[cfg(debug_assertions)]
+    fn bounds_only_pass_claiming_a_model_change_is_rejected() {
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(passes::LyingBoundsOnlyPass)]);
+        let _ = run(trivial_model(), opts);
     }
 
     #[test]

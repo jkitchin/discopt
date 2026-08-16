@@ -109,6 +109,23 @@ def _claims_global(status: str) -> bool:
 # verdict vocabulary
 OK, GAP, VIOLATION, NA = "ok", "GAP", "VIOLATION", "n/a"
 
+# GAMS model statuses that *assert* the feasible set is empty. 5 (Locally
+# Infeasible) and 6 (Intermediate Infeasible) are deliberately absent: those
+# report a local/incomplete search failing to find a point, not a claim that
+# none exists.
+_GAMS_INFEASIBLE_STATUSES = ("4 ", "10 ", "19 ")
+
+
+def _claims_infeasible(status: str) -> bool:
+    """Did the solver assert that no feasible point exists?
+
+    Covers discopt's ``infeasible`` and the GAMS model statuses that mean the
+    same thing (4 Infeasible, 10 Integer Infeasible, 19 Infeasible - No
+    Solution).
+    """
+    s = (status or "").strip().lower()
+    return s == "infeasible" or s.startswith(_GAMS_INFEASIBLE_STATUSES)
+
 
 def bound_violates_oracle(bound: float | None, known: float | None, maximize: bool) -> bool:
     """Does the reported *dual bound* cross the known global optimum?
@@ -138,8 +155,9 @@ def classify(
     - ``ok``        : incumbent matches the known global within tolerance.
     - ``VIOLATION`` : the non-negotiable red line — the solver *claimed* a
                       certified global with the wrong value, returned an incumbent
-                      strictly *better* than the proven global, or reported a
-                      *dual bound that crosses the oracle* (an impossible bound,
+                      strictly *better* than the proven global, *asserted the model
+                      is infeasible* when a finite global is published, or reported
+                      a *dual bound that crosses the oracle* (an impossible bound,
                       i.e. a relaxation/incumbent/bound bug).
     - ``GAP``       : an honest feasible/uncertified incumbent that is *worse*
                       than the global — a convergence gap, not a correctness bug.
@@ -148,6 +166,18 @@ def classify(
     # An invalid dual bound is a VIOLATION even when the incumbent is fine or
     # absent — it is the core certificate failure.
     if bound_violates_oracle(bound, known, maximize):
+        return VIOLATION
+    # "Infeasible" on an instance with a published finite optimum is a false
+    # claim, not a miss (#1053). It has to be caught before the `obj is None`
+    # arm below, which would otherwise score it `n/a` — indistinguishable from
+    # an honest "ran out of time without an incumbent". Measured on `hda`:
+    # BARON 25.12.10 under a full CMU license returns `19 Infeasible - No
+    # Solution` in 0.27 s ("Problem solved during preprocessing / Lower bound
+    # is infinity"), yet with its bound tightening disabled (`LBTTDo 0 / OBTTDo
+    # 0 / TDo 0 / MDo 0`) the same build returns -5964.5341, the published
+    # optimum. Solver-agnostic by construction: discopt's own `infeasible` is
+    # judged by the same rule.
+    if known is not None and not math.isnan(known) and _claims_infeasible(status):
         return VIOLATION
     if obj is None or known is None or math.isnan(known):
         return NA
@@ -688,14 +718,40 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
         lines += ["", "## ⚠️ discopt correctness VIOLATIONS", ""]
         for r in viol:
             bad_bound = bound_violates_oracle(r.discopt.lower_bound, r.known, r.maximize)
-            reason = (
-                f"dual bound {fmt(r.discopt.lower_bound).strip()} crosses the proven "
-                f"global {fmt(r.known).strip()} (invalid bound)"
-                if bad_bound
-                else f"incumbent {r.discopt.objective} (status {r.discopt.status}) "
-                f"vs proven global {r.known}"
-            )
+            if bad_bound:
+                reason = (
+                    f"dual bound {fmt(r.discopt.lower_bound).strip()} crosses the proven "
+                    f"global {fmt(r.known).strip()} (invalid bound)"
+                )
+            elif _claims_infeasible(r.discopt.status):
+                reason = (
+                    f"claimed infeasible (`{r.discopt.status}`) on an instance with "
+                    f"published global {fmt(r.known).strip()}"
+                )
+            else:
+                reason = (
+                    f"incumbent {r.discopt.objective} (status {r.discopt.status}) "
+                    f"vs proven global {r.known}"
+                )
             lines.append(f"- **{r.instance}**: {reason}")
+
+    # #1053: a solver asserting infeasibility where a finite global is published
+    # is making a false claim, and it must not be tallied as an ordinary miss.
+    # Listed for both arms — this is a property of the claim, not of the solver.
+    false_infeas = [
+        (r, who, run)
+        for r in rows
+        for who, run in (("discopt", r.discopt), ("BARON", r.baron))
+        if r.known is not None and not math.isnan(r.known) and _claims_infeasible(run.status)
+    ]
+    if false_infeas:
+        lines += ["", "## ⚠️ false infeasibility claims (published global exists)", ""]
+        for r, who, run in false_infeas:
+            lines.append(
+                f"- **{r.instance}**: {who} returned `{run.status}` in "
+                f"{run.wall_time:.2f} s, but the published global is "
+                f"{fmt(r.known).strip()} — scored VIOLATION, not a miss"
+            )
 
     gaps = [r for r in rows if r.d_verdict == GAP]
     if gaps:
