@@ -94,13 +94,18 @@ array transfer for the B&B tree manager, expression IR, batch dispatch, and .nl 
 objective, gradient, constraints, Jacobian, and Lagrangian Hessian (dense and sparse)
 from a POUNCE Rust AD tape. This is the default; expressions with no tape opcode (an
 opaque `dm.custom` body, a matrix norm) fall back to the JAX evaluator, and
-`DISCOPT_NLP_EVAL=jax` selects it wholesale. Pure LP, QP, MIQP, and simplex-MILP
-solves never import JAX at all.
+`DISCOPT_NLP_EVAL=jax` selects it wholesale. A default solve does not import JAX --
+not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear ones either.
 
 **Relaxation layer** (`python/discopt/_relax`): DAG compiler, the uniform factorable
 relaxation engine, McCormick convex/concave envelopes, alphaBB, piecewise McCormick,
-cutting planes, convexity detection, and the relaxation compiler with vmap support.
-This layer still uses JAX for envelope evaluation and cut separation.
+cutting planes, convexity detection, and the relaxation compiler. This layer is
+**numpy**: measured over eight nonlinear corpus instances, a default solve loads
+~50 `_relax` modules -- envelope evaluation (`uniform_relax`, `mccormick_lp`,
+`incremental_mccormick`) and cut separation (`cutting_planes`,
+`multilinear_separation`, `psd_cuts`) among them -- and zero `jax` modules. JAX is
+imported only by the optional differentiable-solve and learned-relaxation
+subsystems, which are off the default path.
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for
 LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt, AMP, the MIP-NLP

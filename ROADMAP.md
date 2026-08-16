@@ -2,6 +2,25 @@
 
 discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8 track ongoing and future extensions; many items in 5-8 are already shipped (see status columns).
 
+> **These tables record each task as it was completed, not the architecture as it
+> stands.** Several were later superseded, and the rows are deliberately left
+> as-written rather than back-edited. Where they disagree with the tree, the tree
+> wins. The ones that mislead most often, as of v0.8.0:
+>
+> - **JAX is not on the default solve path.** A default solve imports zero `jax`
+>   modules (measured). T8's "JIT-compiled grad/Hessian/Jacobian via JAX" is now the
+>   POUNCE Rust AD tape (`_tape_nlp_evaluator.py`); `DISCOPT_NLP_EVAL=jax` is the
+>   opt-out. T4's DAG compiler and T19's batch relaxation evaluator are numpy — the
+>   `_relax` directory was named `_jax` before the removal, so its name is not a
+>   guide either.
+> - **The pure-JAX IPM (T17) has been retired**, so T9a's "replaced by T17" no
+>   longer describes anything live. `nlp_solver="ipm"` survives only as a
+>   back-compat alias. The NLP backends are `pounce` and `cyipopt`.
+> - **HiGHS is not the per-node LP engine** (T7). The default is the in-house
+>   Rust primal/dual simplex; highspy is used only on the OA/GDP paths.
+> - **T5's count is stale**: `_relax/mccormick.py` now defines 28 relaxation
+>   functions, not 19.
+
 ## Phase 1: Working Solver (complete)
 
 | Task                     | Status      | Description                                        |

@@ -13,25 +13,25 @@
 
 * Abstract
 
-We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, which integrates POUNCE, a separate companion project providing a faithful Rust translation of Ipopt's interior point algorithm, as one of its NLP backends. The system makes six contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) integration of POUNCE, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. The linear and mixed-integer subproblems throughout --- every spatial-B&B node relaxation and the AMP MILP master --- are solved by a self-hosted, hardened pure-Rust revised simplex that retires an external-solver fallback chain in favour of in-engine numerical robustness (iterative refinement, condition monitoring, and EXPAND anti-degeneracy). The global solver couples spatial branch and bound with a cutting-plane framework (reformulation-linearization, second-order-cone, and moment/PSD separators under a structure-gated =cuts='auto'= policy), complementarity/MPEC reformulations, automatic geometric-program detection with log-space convex routing, and irreducible-infeasible-subsystem diagnosis; differentiability extends to mixed-integer programs via a fix-and-differentiate restriction. All three NLP backends (pure-JAX IPM, POUNCE, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. Because a global solver's product is its /certificate/, we report a systematic soundness audit --- roughly three dozen tracked correctness fixes plus a twenty-module code review --- that hardened the certificate across the relaxation, presolve, branch-and-bound, cut, parser, and dual-bound layers while maintaining a zero-incorrect-result gate. In a head-to-head against full-license BARON cite:&Tawarmalani2005 and SCIP cite:&Bestuzheva2023 over roughly two hundred MINLPLib instances at a matched 60~s budget, discopt records *zero* correctness violations against either solver --- no run ever certified a global optimum at the wrong value or returned an incumbent better than the proven optimum; on the orthogonal /coverage/ axis (the fraction of instances certified globally optimal within the budget) the two mature solvers lead, each certifying on the order of $180$ instances to discopt's $\approx 120$, a per-node wall-time gap on a serial engine rather than a soundness deficit (Section ref:sec-experiments). On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. discopt is available under the EPL-2.0 license, and POUNCE is available as a separate project (https://github.com/jkitchin/pounce) under the EPL-2.0 license.
+We present discopt, a hybrid Rust/Python solver for mixed-integer nonlinear programming (MINLP) problems, which integrates POUNCE, a separate companion project providing a faithful Rust translation of Ipopt's interior point algorithm, as its default NLP backend. The numerical core is Rust and =numpy=: JAX never enters =sys.modules= on a default solve, and underpins only the optional differentiable and learned-relaxation subsystems described below. The system makes six contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation over the NLP relaxations at branch-and-bound nodes, served by POUNCE's Rust =solve_nlp_batch= after an earlier =jax.vmap= implementation; (3) a JAX-free derivative path built on POUNCE's Rust AD tape, which replaced an in-repo pure-JAX interior point method and agrees with the JAX evaluator to $7.8 \times 10^{-13}$ on the Lagrangian Hessian and better than $10^{-14}$ on gradients and Jacobians across 66 corpus instances; (4) integration of POUNCE, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. The linear and mixed-integer subproblems throughout --- every spatial-B&B node relaxation and the AMP MILP master --- are solved by a self-hosted, hardened pure-Rust revised simplex that retires an external-solver fallback chain in favour of in-engine numerical robustness (iterative refinement, condition monitoring, and EXPAND anti-degeneracy). The global solver couples spatial branch and bound with a cutting-plane framework (reformulation-linearization, second-order-cone, and moment/PSD separators under a structure-gated =cuts='auto'= policy), complementarity/MPEC reformulations, automatic geometric-program detection with log-space convex routing, and irreducible-infeasible-subsystem diagnosis; differentiability extends to mixed-integer programs via a fix-and-differentiate restriction. Both NLP backends (POUNCE and Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. Because a global solver's product is its /certificate/, we report a systematic soundness audit --- roughly three dozen tracked correctness fixes plus a twenty-module code review --- that hardened the certificate across the relaxation, presolve, branch-and-bound, cut, parser, and dual-bound layers while maintaining a zero-incorrect-result gate. In a head-to-head against full-license BARON cite:&Tawarmalani2005 and SCIP cite:&Bestuzheva2023 over roughly two hundred MINLPLib instances at a matched 60~s budget, discopt records *zero* correctness violations against either solver --- no run ever certified a global optimum at the wrong value or returned an incumbent better than the proven optimum; on the orthogonal /coverage/ axis (the fraction of instances certified globally optimal within the budget) the two mature solvers lead, each certifying on the order of $180$ instances to discopt's $\approx 120$, a per-node wall-time gap on a serial engine rather than a soundness deficit (Section ref:sec-experiments). On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. discopt is available under the EPL-2.0 license, and POUNCE is available as a separate project (https://github.com/jkitchin/pounce) under the EPL-2.0 license.
 
 * Introduction
 
 Mixed-integer nonlinear programming (MINLP) is a powerful framework for optimization problems involving both discrete choices and nonlinear relationships, with applications spanning process synthesis, network design, scheduling, and machine learning pipeline optimization [[cite:&Belotti2013;&Grossmann2021]]. The dominant algorithmic paradigm for deterministic global MINLP is spatial branch and bound (sBB), which enumerates a search tree of progressively tighter variable-bound regions, solving a convex relaxation at each node cite:&Land1960;&Dakin1965;&Smith1999.
 
-State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne, SCIP cite:&Bestuzheva2023, and Bonmin cite:&Bonami2008 are monolithic C, C++, or Fortran codebases that have accumulated decades of numerical hardening. While effective, this architecture creates three gaps in the current solver ecosystem.
+State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne cite:&Belotti2009couenne, SCIP cite:&Bestuzheva2023, and Bonmin cite:&Bonami2008 are monolithic C, C++, or Fortran codebases that have accumulated decades of numerical hardening. While effective, this architecture creates three gaps in the current solver ecosystem.
 
 *Gap 1: No differentiable MINLP.* Recent work on differentiable optimization has produced layers for quadratic programs (OptNet cite:&Amos2017), convex programs (cvxpylayers cite:&Agrawal2019), and decision-focused learning for combinatorial problems cite:&Elmachtoub2022;&Wilder2019;&Mandi2020. However, none of these approaches handle nonconvex MINLP. Differentiating through an MINLP solver would enable end-to-end learning of cost parameters from decision outcomes---a capability with broad applications in process optimization and operations research.
 
-*Gap 2: No batched or GPU-accelerated branch and bound.* In spatial B&B, each node requires solving an NLP relaxation. Modern accelerators (GPUs, TPUs) excel at batched computation, yet existing MINLP solvers process nodes sequentially with sparse linear algebra tuned for single-instance performance. A solver built on JAX cite:&jax2018 could use =jax.vmap= to solve batches of node relaxations simultaneously.
+*Gap 2: No batched or GPU-accelerated branch and bound.* In spatial B&B, each node requires solving an NLP relaxation. Modern accelerators (GPUs, TPUs) excel at batched computation, yet existing MINLP solvers process nodes sequentially with sparse linear algebra tuned for single-instance performance. Solving those node relaxations as a batch --- through an array-programming framework such as JAX cite:&jax2018, or, as discopt ultimately settled on, through a batch entry point in the Rust NLP backend --- is largely unexplored.
 
 *Gap 3: No memory-safe, dependency-free IPM.* Ipopt cite:&Wachter2006 is the workhorse NLP solver used inside most MINLP solvers. It depends on Fortran BLAS/LAPACK, the MUMPS sparse direct solver, and C++ infrastructure totaling hundreds of thousands of lines of code. Installing cyipopt on a fresh system requires compiling or locating these Fortran dependencies. A Rust cite:&Matsakis2014 reimplementation would provide memory safety guarantees, zero C/Fortran dependencies, and a clean =cargo build= workflow.
 
 This paper describes discopt and its integration with POUNCE, which together address these three gaps. The contributions are:
 
 1. *Differentiable MINLP* via two mechanisms: the envelope theorem (Level 1) for fast objective sensitivity, and implicit differentiation of the KKT system (Level 3) for full primal--dual sensitivity matrices, enabling decision-focused learning through nonconvex solvers.
-2. *Batched node evaluation* using =jax.vmap= over NLP relaxation solves at B&B nodes, with warm-starting from parent solutions.
-3. *Pure-JAX interior point method* with Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, and carry-based =jax.lax.while_loop= for JIT cache reuse.
+2. *Batched node evaluation* over the NLP relaxation solves at B&B nodes, with warm-starting from parent solutions. The batch is dispatched to POUNCE's Rust =solve_nlp_batch=; an earlier =jax.vmap= implementation of the same interface is described in Section ref:sec-jax-ipm and is no longer the path taken.
+3. *A JAX-free derivative path.* An in-repo pure-JAX interior point method --- Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, carry-based =jax.lax.while_loop= for JIT cache reuse --- served as the reference implementation and was then retired in favour of POUNCE plus a Rust AD tape, which supplies the same derivatives with no framework dependency and no JIT cold start. We report the equivalence measurements that licensed the swap (Sections ref:sec-jax-ipm and ref:sec-experiments) rather than the algorithm alone, because the negative result is the useful one.
 4. *POUNCE integration*: discopt uses POUNCE, a separate companion project that is a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface, as one of its NLP backends.
 5. *Compositional relaxation framework* driven by a single uniform factorable-relaxation pass over the expression DAG, with McCormick envelopes cite:&McCormick1976;&Tsoukalas2014, exact composite convex atoms (log-sum-exp, entropy, norm), \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, ICNN-learned relaxations cite:&Amos2017icnn, a sound DCP/SUSPECT-style structural convexity certifier cite:&GrantBoydYe2006;&Ceccon2020 that routes certified-convex models to a single-solve fast path, and a generalised-(G-)convexity layer that extends the sound-verdict fast path beyond $x$-space convexity to log-convex and reparameterisation-convex structure.
 6. *Neural network embedding* that formulates trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies, with interval arithmetic bound propagation and ONNX model import cite:&Ceccon2022;&Anderson2020.
@@ -106,35 +106,43 @@ Table ref:tab-gaps summarizes the capabilities of existing systems versus discop
 
 ** System Overview
 
-discopt is organized as a three-layer system: (1) a Python modeling API for problem formulation, (2) a JAX-based numerical layer for evaluation, automatic differentiation, and batch computation, and (3) a Rust backend for tree management, expression structure detection, and presolve.
+discopt is organized as a three-layer system: (1) a Python modeling API for problem formulation, (2) a =numpy= relaxation and evaluation layer, and (3) a Rust backend for tree management, expression structure detection, presolve, the simplex, and automatic differentiation. A default solve touches only these three; the JAX-backed subsystems of Sections ref:sec-diff and ref:sec-relax sit beside the default path rather than under it, and =jax= is not imported unless one of them is used.
 
 #+BEGIN_SRC text
   User Model (Python)
        |
        v
-  Expression DAG ---> DAG Compiler ---> JAX Functions (JIT/grad/vmap)
+  Expression DAG ---> uniform factorable pass ---> numpy relaxation
        |                                        |
        v                                        v
-  Rust Expression IR             NLP Evaluator (obj, grad, Hess, Jac)
+  Rust Expression IR             AD tape (obj, grad, Hess, Jac)
        |                                        |
        v                                        v
   B&B Tree Manager               NLP Solver Backend
-  (node pool, branching,         (IPM / POUNCE / Ipopt)
-   bound tightening)                    |
-       |                                v
+  (node pool, branching,         (POUNCE / Ipopt)
+   bound tightening,                    |
+   revised simplex)                     v
+       |                                |
        +-------- batch dispatch --------+
                      |
                      v
               SolveResult
+
+  (optional, off the default path)
+  Expression DAG ---> JAX DAG compiler ---> jit / grad / vmap
+                          |
+                          v
+       differentiable solve, ICNN-learned relaxations,
+       parametric sensitivity, model-based DoE
 #+END_SRC
 
-An automatic problem classifier inspects the expression DAG to categorize problems as LP, QP, NLP, MILP, MIQP, or MINLP. For LP and QP subclasses, discopt dispatches to specialized IPM solvers that extract algebraic coefficients directly from the DAG, bypassing JAX tracing and autodiff entirely. This algebraic extraction path provides 100--226\times speedups over the generic NLP path (\S 7.4).
+An automatic problem classifier inspects the expression DAG to categorize problems as LP, QP, NLP, MILP, MIQP, or MINLP. For LP and QP subclasses, discopt dispatches to specialized solvers that extract algebraic coefficients directly from the DAG, bypassing expression-level autodiff entirely. This algebraic extraction path provides 17--226\times speedups over the generic NLP path (\S 7.4).
 
 *Core and plugins.* To keep the core lean, the domain-specific /application builders/ --- model-based design of experiments (=discopt.doe=), the teaching / tutor front-ends, and the alternating-current optimal-power-flow and pooling builders (=discopt.opf=, =discopt.pooling=) --- have been extracted into standalone =discopt-doe=, =discopt-course=, and =discopt-apps= distributions.  Because =discopt= is a namespace package, installing a plugin restores its =discopt.<name>= import path unchanged, and each plugin registers its command-line front-end through a =discopt.cli= entry-point hook so that =discopt <subcommand>= dispatches to it.  A stable public =discopt.parametric= API compiles model expressions into JAX-differentiable functions of $(x, p)$ without reaching into internal modules, giving both in-tree consumers (parameter estimation) and external plugins (DoE, microkinetics) a single supported contract.  The core retains the general MINLP machinery --- GDP, DAE collocation, neural-network embedding, robust and stochastic optimisation --- while domain builders live as plugins.
 
 ** Modeling API
 
-The modeling API uses operator overloading to construct an expression DAG that maps to both JAX-traceable functions and Rust expression IR:
+The modeling API uses operator overloading to construct an expression DAG that maps to Rust expression IR, to the =numpy= relaxation pass, and --- for the optional differentiable subsystems --- to JAX-traceable functions:
 
 #+BEGIN_SRC python
 import discopt.modeling as dm
@@ -159,7 +167,7 @@ The =discopt.dae= module extends the modeling API to dynamic optimization proble
 
 ** Neural Network Embedding
 
-The =discopt.nn= module embeds trained feedforward neural networks as algebraic constraints in MINLP models, enabling optimization over machine learning surrogates with global optimality guarantees. This follows the approach of OMLT cite:&Ceccon2022, adapted to discopt's expression DAG, JAX automatic differentiation, and McCormick relaxation framework.
+The =discopt.nn= module embeds trained feedforward neural networks as algebraic constraints in MINLP models, enabling optimization over machine learning surrogates with global optimality guarantees. This follows the approach of OMLT cite:&Ceccon2022, adapted to discopt's expression DAG, automatic differentiation, and McCormick relaxation framework.
 
 An =NNFormulation= builder (following the same pattern as =DAEBuilder=) takes an existing =Model=, a =NetworkDefinition= describing the trained network's weights, biases, and activation functions, and a formulation strategy, then adds all necessary variables and constraints:
 
@@ -178,7 +186,7 @@ model.minimize(dm.sum(nn.outputs))
 
 Three formulation strategies are provided:
 
-- *Full-space*: Explicit pre-activation ($\hat{z}$) and post-activation ($z$) variables for each neuron, with affine constraints $\hat{z} = Wx + b$ and activation constraints $z = \sigma(\hat{z})$. Supports smooth activations (sigmoid, tanh, softplus) that integrate directly with JAX autodiff and McCormick relaxations for spatial B&B.
+- *Full-space*: Explicit pre-activation ($\hat{z}$) and post-activation ($z$) variables for each neuron, with affine constraints $\hat{z} = Wx + b$ and activation constraints $z = \sigma(\hat{z})$. Supports smooth activations (sigmoid, tanh, softplus) that integrate directly with the AD tape and McCormick relaxations for spatial B&B.
 - *ReLU big-M* cite:&Anderson2020. For networks with ReLU activations, introduces binary variables $q_j$ and linear big-M constraints: $z \ge 0$, $z \ge \hat{z}$, $z \le u \cdot q$, $z \le \hat{z} - l(1-q)$, where $l, u$ are pre-activation bounds from interval arithmetic. Neurons with bounds that are always positive (or always negative) are detected and simplified to avoid unnecessary binary variables.
 - *Reduced-space*: Builds a single nested expression with no intermediate variables, suitable for small networks.
 
@@ -323,14 +331,15 @@ A bilevel (Stackelberg) program optimises a /leader's/ objective subject to a /f
 
 The builder handles the /optimistic/ bilevel formulation and refuses loudly --- rather than silently returning a wrong answer --- on cases outside its soundness envelope: integer follower variables, a lower level nonconvex in $y$, or pessimistic semantics. Because both reformulations emit an ordinary =Model=, a bilevel program inherits the same spatial branch and bound, relaxations, and NLP backends as the rest of discopt.
 
-** JAX DAG Compiler
+** DAG Consumers: Relaxation, Derivatives, and Differentiability
 
-The DAG compiler walks the expression tree and produces pure JAX functions compatible with =jax.jit=, =jax.grad=, and =jax.vmap=. Each expression node type (=Variable=, =Constant=, =BinaryOp=, =FunctionCall=, etc.) maps to a corresponding JAX operation. The compiler handles:
+The expression DAG has three consumers, and it is worth being explicit about which one runs when, because the answer changed over the project's life and the earlier framing of this paper described a path that is no longer the default.
 
-- *Lazy evaluation*: expressions are not evaluated until the DAG is compiled
-- *Automatic differentiation*: the JAX function graph supports forward and reverse mode AD for gradients, Hessians, and Jacobians
-- *Vectorization*: =jax.vmap= can map the compiled function over batches of variable values or bound vectors
-- *JIT compilation*: compiled functions are traced and optimized by XLA for efficient repeated evaluation
+*The uniform factorable pass (default).* A single pass over the DAG lowers every node to the auxiliary-variable form of Section ref:sec-relax and emits the relaxation as =numpy= arrays handed to the Rust simplex. There is no tracing, no compilation step, and no framework dependency; the same pass serves LP, QP, and the nonlinear envelopes, which is what lets the classifier of Section ref:sec-arch route a linear model without paying for machinery it will not use.
+
+*The AD tape (default).* Derivatives for node and incumbent NLP solves come from a tape built from the same DAG and evaluated inside POUNCE. This replaced a JAX evaluator that had been the single trigger importing JAX on every nonlinear solve; Section ref:sec-experiments reports the agreement measurements and the panel that licensed the switch.
+
+*The JAX compiler (optional).* A separate compiler walks the tree and produces pure JAX functions compatible with =jax.jit=, =jax.grad=, and =jax.vmap=, mapping each node type (=Variable=, =Constant=, =BinaryOp=, =FunctionCall=) to a corresponding JAX operation. It supplies forward- and reverse-mode AD for the differentiable-solve layer (Section ref:sec-diff), the ICNN-learned relaxations, parametric sensitivity, and the design-of-experiments Jacobians, and it is imported only when one of those is requested. Its properties --- lazy evaluation until compilation, AD for gradients/Hessians/Jacobians, =jax.vmap= over batches of variable values or bound vectors, and XLA JIT for repeated evaluation --- are what those subsystems need and what an ordinary solve does not.
 
 ** Rust Backend
 
@@ -338,7 +347,7 @@ The Rust backend (=discopt-core= and =discopt-python= crates) provides three com
 
 *Expression IR.* A typed expression intermediate representation in Rust that mirrors the Python DAG but enables structure detection on the Rust side. PyO3 bindings cite:&pyo3 provide zero-copy data transfer between Python =numpy= arrays and Rust =Vec<f64>= via =into_pyarray()=.
 
-*Branch-and-bound tree.* The =PyTreeManager= manages the B&B node pool in Rust with configurable selection strategies (best-first, depth-first). Node bounds, solutions, and parent solution vectors are stored in Rust memory. The Python layer calls =export_batch(k)= to retrieve $k$ open nodes, solves the NLP relaxations (in Python/JAX), and returns results via =import_results()=. This separation keeps the tree manipulation in Rust (zero GIL contention) while leveraging JAX for numerical computation.
+*Branch-and-bound tree.* The =PyTreeManager= manages the B&B node pool in Rust with configurable selection strategies (best-first, depth-first). Node bounds, solutions, and parent solution vectors are stored in Rust memory. The Python layer calls =export_batch(k)= to retrieve $k$ open nodes, dispatches the relaxations, and returns results via =import_results()=. This separation keeps tree manipulation in Rust with zero GIL contention while Python retains orchestration; the relaxation solves themselves land back in Rust, in the simplex for linear relaxations and in POUNCE for node NLPs.
 
 *Presolve.* Feasibility-based bound tightening (FBBT) and probing propagate domain reductions through the expression graph. A =.nl= file parser enables importing problems from the MINLPLib benchmark library cite:&Bussieck2003.
 
@@ -349,14 +358,18 @@ The Rust backend (=discopt-core= and =discopt-python= crates) provides three com
 
 #+LATEX: \label{sec-nlp-backends}
 
-discopt supports three interchangeable NLP solver backends, selectable via =Model.solve(nlp_solver=...)=. All three implement the same interface: given an objective function $f(x)$, constraints $g(x)$, variable bounds $x_l \le x \le x_u$, and constraint bounds $g_l \le g(x) \le g_u$, find $x^*$ that minimizes $f$ subject to all constraints.
+discopt dispatches continuous NLP solves through a single seam that resolves to one of two interchangeable backends --- POUNCE (the default) or Ipopt via cyipopt --- so no call site needs to know which is in use. Both implement the same interface: given an objective function $f(x)$, constraints $g(x)$, variable bounds $x_l \le x \le x_u$, and constraint bounds $g_l \le g(x) \le g_u$, find $x^*$ that minimizes $f$ subject to all constraints.
 
-** Pure-JAX Interior Point Method
+A third backend, a pure-JAX interior point method, was the project's original NLP solver and has been retired. We describe it below because the /reason/ it was retired is a result, not a footnote: it was written to make node relaxations JIT-compilable and =vmap=-able, it worked, it agreed with Ipopt to machine precision --- and it was still the slowest of the three, at which point a Rust implementation of the same algorithm made the framework dependency unnecessary. Reporting only the surviving design would hide the measurement that decided it.
+
+** Pure-JAX Interior Point Method (retired)
    :PROPERTIES:
    :CUSTOM_ID: sec-jax-ipm
    :END:
 
-The pure-JAX IPM implements a primal-dual barrier method that is fully JIT-compilable and vmappable. The algorithm solves the augmented KKT system:
+#+LATEX: \label{sec-jax-ipm}
+
+The pure-JAX IPM implemented a primal-dual barrier method that was fully JIT-compilable and vmappable. It solved the augmented KKT system:
 
 \begin{equation}
 \begin{bmatrix}
@@ -396,11 +409,11 @@ Step acceptance follows Ipopt's filter line search cite:&Wachter2006. The algori
 
 *** Carry-Based =while_loop=
 
-A critical implementation detail for JAX performance: all problem data (bounds, constraint bounds, masks) is placed in the =while_loop= carry state as a =NamedTuple=, rather than captured in the closure. Closure-captured data forces JIT retracing for each new problem instance, while carry-based data allows JIT cache reuse. Problem dimensions are derived from array shapes (=c.shape[0]=, =b.shape[0]=) rather than stored as integers, since integers in the carry become JAX tracers.
+A critical implementation detail for JAX performance, recorded here because it is the kind of thing that is expensive to rediscover: all problem data (bounds, constraint bounds, masks) is placed in the =while_loop= carry state as a =NamedTuple=, rather than captured in the closure. Closure-captured data forces JIT retracing for each new problem instance, while carry-based data allows JIT cache reuse. Problem dimensions are derived from array shapes (=c.shape[0]=, =b.shape[0]=) rather than stored as integers, since integers in the carry become JAX tracers.
 
-*** Batch Solving via =jax.vmap=
+*** Batch Solving, and What Replaced It
 
-The =solve_nlp_batch= function applies =jax.vmap= over the initial point and variable bound dimensions:
+Batched node evaluation was the reason the IPM was written in JAX at all. A =solve_nlp_batch= entry point applied =jax.vmap= over the initial-point and variable-bound dimensions:
 
 #+BEGIN_SRC python
 def solve_nlp_batch(obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l, g_u, opts):
@@ -409,9 +422,9 @@ def solve_nlp_batch(obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l, g_u, opts
     return jax.vmap(_solve_single)(x0_batch, xl_batch, xu_batch)
 #+END_SRC
 
-This solves all $k$ node relaxations simultaneously, providing approximately $k$-fold parallelism on hardware with sufficient FLOP throughput. The objective and constraint functions are shared across the batch; only the starting points and variable bounds vary per instance.
+solving all $k$ node relaxations at once for roughly $k$-fold parallelism on hardware with sufficient FLOP throughput, with the objective and constraint functions shared across the batch and only the starting points and bounds varying per instance.
 
-At the root node of the B&B tree, multi-start solving uses 5 diverse starting points (midpoint, lower-quarter, upper-quarter, and 2 random) solved simultaneously via =vmap=. On non-root nodes, the solver warm-starts from the parent node's solution clipped to the child's tightened bounds.
+The interface survived the backend. =solve_nlp_batch= is now POUNCE's, dispatching the same $(node, start)$ pairs into Rust, and the contribution stands on the batching rather than on the framework that first expressed it. The batching /policy/ is likewise unchanged: at the root node, multi-start solving uses 5 diverse starting points (midpoint, lower-quarter, upper-quarter, and 2 random) solved together; on non-root nodes the solver warm-starts from the parent's solution clipped to the child's tightened bounds.
 
 ** POUNCE: A Memory-Safe IPM in Rust
    :PROPERTIES:
@@ -462,15 +475,15 @@ POUNCE ships PyO3 bindings cite:&pyo3 that discopt drives directly. A =PyNlpProb
 let result = py.allow_threads(|| pounce::solve(&problem, &opts));
 #+END_SRC
 
-This means the heavy linear algebra in the IPM iteration runs without GIL contention, while the JAX-compiled gradient and Hessian evaluations use Python callbacks through the GIL.
+This means the heavy linear algebra in the IPM iteration runs without GIL contention. The callback proxy is itself now bypassed on the default path: for models that originate from (or can be emitted to) an =.nl=, POUNCE parses the problem into its own AD-backed representation once and differentiates natively, so the per-iteration Rust $\to$ Python boundary crossing disappears from the node loop entirely.
 
 *** Licensing
 
-Because POUNCE is a source-level translation of Ipopt (EPL-2.0), it is distributed under the Eclipse Public License 2.0 in its own repository (https://github.com/jkitchin/pounce). POUNCE replaced the earlier in-repo =ripopt= crate, which has been extracted into this standalone companion project. EPL-2.0 is not viral: code that /depends on/ POUNCE does not need to adopt EPL-2.0. discopt depends on POUNCE only through its Python bindings; we have additionally implemented a pure Python version in jax of the Ipopt algorithm in discopt, and have adopted the EPL-2.0 license for the entire discopt repository to avoid confusion and ensure that all components are covered by the same license.
+Because POUNCE is a source-level translation of Ipopt (EPL-2.0), it is distributed under the Eclipse Public License 2.0 in its own repository (https://github.com/jkitchin/pounce). POUNCE replaced the earlier in-repo =ripopt= crate, which has been extracted into this standalone companion project. EPL-2.0 is not viral: code that /depends on/ POUNCE does not need to adopt EPL-2.0. discopt depends on POUNCE only through its Python bindings; the retired pure-JAX IPM of Section ref:sec-jax-ipm was also a re-implementation of the same algorithm, and we have adopted the EPL-2.0 license for the entire discopt repository to avoid confusion and ensure that all components are covered by the same license.
 
 ** Ipopt via cyipopt
 
-The third backend uses the industry-standard Ipopt solver cite:&Wachter2006 via cyipopt Python bindings. This serves as the correctness reference: any discrepancy between the pure-JAX IPM or POUNCE and Ipopt on a well-conditioned problem indicates a bug in the former. Ipopt's advantage is its mature sparse linear algebra (MUMPS, MA27/MA57) which scales better on large, sparse problems ($n > 1000$). Its disadvantage is the Fortran/C++ dependency chain and inability to batch or differentiate through the solve.
+The second backend uses the industry-standard Ipopt solver cite:&Wachter2006 via cyipopt Python bindings. This serves as the correctness reference: any discrepancy between POUNCE and Ipopt on a well-conditioned problem indicates a bug in the former. Ipopt's advantage is its mature sparse linear algebra (MUMPS, MA27/MA57) which scales better on large, sparse problems ($n > 1000$). Its disadvantage is the Fortran/C++ dependency chain and inability to batch or differentiate through the solve.
 
 * Pure-Rust LP/MILP Simplex Engine
   :PROPERTIES:
@@ -492,9 +505,9 @@ The quality of convex relaxations at B&B nodes directly determines solver effici
 
 ** McCormick Relaxation Compiler
 
-The relaxation compiler implements 21 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =sigmoid=, =softplus=, =sign=, =min=, and =max=.
+The relaxation compiler implements 28 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =atan=, =asin=, =acos=, =sinh=, =cosh=, =tanh=, =sigmoid=, =softplus=, entropy, =sign=, =min=, and =max=.
 
-Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The compiler produces pure =jax.numpy= functions compatible with =jax.jit= and =jax.vmap=, enabling batch relaxation evaluation over multiple B&B nodes.
+Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The envelope algebra exists in two implementations over the same rules: the default uniform factorable pass emits =numpy= arrays and constraint rows straight into the Rust simplex, while a =jax.numpy= implementation compatible with =jax.jit= and =jax.vmap= backs the differentiable and learned-relaxation subsystems. A default solve loads only the former; keeping both is what allows a relaxation to be differentiated through without making every solve depend on a tracing framework.
 
 *A uniform factorable relaxation engine.* The per-operator relaxation table above is now driven by a single /uniform/ factorable relaxation pass rather than a scattered per-operator dispatch. The earlier design attached bespoke code to each operator and to a "federation" of specialised claimers; that machinery was consolidated into one compositional walk that lifts every intermediate factor of the expression DAG, attaches its rigorous $(cv, cc)$ envelope from the shared rule table, and assembles a single McCormick LP over the lifted variables. The consolidation deleted a large body of production-dead specialisation code while leaving the bound bit-for-bit identical on the certifying panel (a bound-neutral refactor in the sense of Section ref:sec-soundness), and it is the substrate on which the composite atoms and cut separators below compose. The resulting LP relaxation is solved on the in-house Rust revised simplex of Section ref:sec-lp-engine, not an external LP library, so an entire node --- lift, relax, and solve --- stays inside the hardened engine. A companion /adaptive/ node-NLP policy (graduated default-on) tunes how aggressively each node's relaxation is re-solved.
 
@@ -512,12 +525,15 @@ For general twice-differentiable functions where McCormick relaxations are loose
 L_{\alpha}(x) = f(x) - \sum_{i=1}^n \alpha_i (x_i - x_i^l)(x_i^u - x_i)
 \end{equation}
 
-The parameters $\alpha_i$ are chosen such that $L_\alpha$ is convex: $\alpha_i \ge \max(0, -\lambda_{\min}(\nabla^2 f) / 2)$ where $\lambda_{\min}$ is the minimum eigenvalue of the Hessian. discopt provides two estimation methods:
+The parameters $\alpha_i$ are chosen such that $L_\alpha$ is convex: $\alpha_i \ge \max(0, -\lambda_{\min}(\nabla^2 f) / 2)$ where $\lambda_{\min}$ is the minimum eigenvalue of the Hessian. The distinction that matters here is /rigorous versus sampled/, and the default is rigorous.
 
-- *Eigenvalue method*: exact computation via =jax.hessian= and =jnp.linalg.eigvalsh= at sampled points (accurate but requires $O(n^3)$ per sample)
-- *Gershgorin method*: conservative estimate from Hessian diagonal dominance (faster, slightly looser bounds, zero soundness violations in testing)
+The per-node $\alpha$ used by the solver is computed from a sound interval enclosure of the Hessian with a per-row interval Gershgorin bound: for row $i$,
+\begin{equation}
+\lambda_{\min} \;\ge\; \underline{H_{ii}} - \sum_{j \ne i} \max\!\left(|\underline{H_{ij}}|,\, |\overline{H_{ij}}|\right),
+\end{equation}
+giving $\alpha_i = \max(0, -\tfrac{1}{2}\,\mathrm{gersh}_i)$, valid over the /whole/ box rather than at sampled points. Variables that appear only linearly get $\alpha_i = 0$, so the perturbation is applied only where it is needed. Where the interval Hessian is unbounded the routine returns $+\infty$ and abstains --- no \alpha BB relaxation is emitted --- rather than returning a number it cannot justify. This is =numpy= and interval arithmetic throughout, with no JAX import; the earlier arrangement, in which the per-node bound reached into a JAX module to get its $\alpha$, was what dragged the whole framework onto an otherwise framework-free solve.
 
-The JAX-native \alpha BB estimation uses =jax.vmap= over sample points, providing 10--100\times speedup over the finite-difference fallback used for =.nl= file models.
+Sampled estimators remain available for exploratory use --- an eigenvalue method via =jax.hessian= and =jnp.linalg.eigvalsh= at sampled points, and a sampled Gershgorin variant, both =jax.vmap='d over sample points for a 10--100\times speedup over a finite-difference fallback --- but sampling cannot certify a bound over a box, so they do not gate a dual bound.
 
 ** Piecewise McCormick Relaxations
 
@@ -611,7 +627,7 @@ Soundness is maintained at every iteration by the McCormick guarantee on the MIL
 LB_k \;\le\; \min_{x \in \mathcal X^{\mathrm{MINLP}}} f(x) \;\le\; UB_k \quad \text{for all } k,
 \end{equation}
 
-so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._relax.milp_relaxation=. The MILP itself is solved by the self-hosted pure-Rust simplex engine (Section ref:sec-lp-engine), and the NLP subproblem by any of the three NLP backends (default =pounce=; cyipopt is selected automatically when available).
+so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._relax.milp_relaxation=. The MILP itself is solved by the self-hosted pure-Rust simplex engine (Section ref:sec-lp-engine), and the NLP subproblem by either NLP backend (default =pounce=; cyipopt is selected automatically when available).
 
 Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes.
 
@@ -732,9 +748,9 @@ x_{k+1,0} &= \sum_{l=0}^{K} \ell_l(1) \, x_{k,l},
 
 where $\ell_l$ are Lagrange basis polynomials on the collocation nodes. Radau IIA (1--5 points) and Gauss-Legendre schemes are supported, along with automatic state augmentation for second-order ODEs and index-1 DAEs with algebraic constraints enforced at each collocation point. Piecewise-constant controls $u_k$ and integral objectives $\int L(x, u, t)\,dt$ via Gauss quadrature cover standard optimal-control formulations. A finite-difference backend (=FDBuilder=) provides backward, forward, and central Euler stencils as a simpler alternative for users who prefer explicit time-stepping.
 
-This transcription approach requires no changes to the existing DAG compiler, JAX backend, or solver infrastructure: the collocation constraints are standard algebraic expressions built from existing operators, so they inherit JIT compilation, =jax.vmap= batching, and the differentiable-solve machinery of the Differentiable Optimization section without special-casing. For a 30-element, 3-point Radau discretization of $\dot{x} = -x$ with $x(0) = 1$, the solution matches =exp(-t)= to within $10^{-4}$ absolute error on $[0, 10]$. The vectorized collocation evaluator (introduced in a recent NMPC-oriented perf update) computes stage-residuals for all elements and collocation points in a single JAX-batched kernel, eliminating Python-level loops over the horizon.
+This transcription approach requires no changes to the DAG compiler or solver infrastructure: the collocation constraints are standard algebraic expressions built from existing operators, so a transcribed model takes the ordinary relaxation and AD-tape path, and is equally available to the differentiable-solve machinery of the Differentiable Optimization section, without special-casing in either direction. For a 30-element, 3-point Radau discretization of $\dot{x} = -x$ with $x(0) = 1$, the solution matches =exp(-t)= to within $10^{-4}$ absolute error on $[0, 10]$. The vectorized collocation evaluator (introduced in a recent NMPC-oriented perf update) computes stage-residuals for all elements and collocation points in a single array-shaped kernel, eliminating Python-level loops over the horizon.
 
-Because collocation reduces a dynamic problem to a structured sparse NLP, the same transcription machinery supports dynamic parameter estimation (Section ref:sec-estimate) and dynamic experiment design (Section ref:sec-doe): the parameter vector $\theta$ enters $f, h$ as an ordinary unknown, and the FIM through the dynamics is computed by the same JAX autodiff used for gradients.
+Because collocation reduces a dynamic problem to a structured sparse NLP, the same transcription machinery supports dynamic parameter estimation (Section ref:sec-estimate) and dynamic experiment design (Section ref:sec-doe): the parameter vector $\theta$ enters $f, h$ as an ordinary unknown, and the FIM through the dynamics is computed by the same parametric autodiff used for the sensitivities of Section ref:sec-diff.
 
 * Parameter Estimation
   :PROPERTIES:
@@ -748,7 +764,7 @@ The =discopt.estimate= module estimates unknown model parameters from experiment
 \hat{\theta} = \arg\min_{\theta \in \Theta} \sum_{i=1}^{N} \left( \frac{y_i^{\mathrm{obs}} - y_i^{\mathrm{model}}(\theta; d_i)}{\sigma_i} \right)^2,
 \end{equation}
 
-where $d_i$ are design conditions (sampling times, input concentrations, etc.) for observation $i$, $\Theta$ is a parameter box, and $y_i^{\mathrm{model}}$ is any discopt expression, including one produced by the DAE transcription of Section ref:sec-dyn. Because the objective is an ordinary discopt expression, estimation reuses the full NLP stack: the pure-JAX IPM, POUNCE, or cyipopt.
+where $d_i$ are design conditions (sampling times, input concentrations, etc.) for observation $i$, $\Theta$ is a parameter box, and $y_i^{\mathrm{model}}$ is any discopt expression, including one produced by the DAE transcription of Section ref:sec-dyn. Because the objective is an ordinary discopt expression, estimation reuses the full NLP stack: POUNCE or cyipopt, over the same AD tape.
 
 Users declare an =Experiment= by subclassing a thin interface and providing =create_model(**kwargs)= returning an =ExperimentModel= that tags which variables are unknown parameters, which are design inputs, which expressions are responses, and the per-response measurement error. The same =Experiment= object is reused across estimation, FIM computation, and optimal experimental design, ensuring the three share a single source of truth.
 
@@ -901,7 +917,7 @@ The audit also produced affirmative /soundness confirmations/ where the review f
 
 ** NLP Backend Comparison
 
-We compare the three NLP backends on 5 test problems spanning unconstrained quadratics to constrained portfolio optimization. Table ref:tab-nlp-backends reports objectives and wall-clock timing. All timings were collected on an Apple M4 Pro (CPU backend, JAX 0.8.2) and represent single-solve wall-clock time including model compilation.
+This comparison is the measurement that decided the architecture, and we report it in the configuration in which it was taken --- when all three backends still existed --- rather than re-running it on a tree from which one has been removed. Five test problems span unconstrained quadratics to constrained portfolio optimization; Table ref:tab-nlp-backends reports objectives and wall-clock timing, collected on an Apple M4 Pro (CPU backend, JAX 0.8.2), as single-solve wall-clock time including model compilation. The =IPM= column is the pure-JAX IPM of Section ref:sec-jax-ipm, which has since been retired; POUNCE and Ipopt are the two backends that remain.
 
 #+NAME: tab-nlp-backends
 #+CAPTION: NLP backend comparison. All backends achieve identical objectives (to solver tolerance). Timings on Apple M4 Pro, CPU.
@@ -918,8 +934,10 @@ We compare the three NLP backends on 5 test problems spanning unconstrained quad
 Key observations:
 - All three backends produce *identical optimal objectives* to solver tolerance ($10^{-6}$), confirming correctness across the Rust, JAX, and C++ implementations.
 - POUNCE is competitive with Ipopt (total 0.17s vs 0.20s), and faster on Rosenbrock (0.082s vs 0.114s) and sum-of-squares (0.049s vs 0.070s).
-- The pure-JAX IPM includes JIT compilation overhead on first evaluation; subsequent solves of similarly-structured problems benefit from cached JIT traces.
+- The pure-JAX IPM includes JIT compilation overhead on first evaluation; subsequent solves of similarly-structured problems benefit from cached JIT traces. Its total, $2.30$~s, is an order of magnitude above both alternatives, and the cold-start component does not amortize in a spatial B&B whose nodes keep changing shape.
 - On a quartic constrained NLP ($n=10$), POUNCE (0.334s) and the JAX IPM (0.795s) agree to $6.5 \times 10^{-15}$ in objective value, confirming numerical equivalence.
+
+Read together, these are a retirement notice. The JAX IPM was correct --- agreement with Ipopt to $10^{-15}$ is as strong a statement as this panel can make --- and it was uniformly the slowest, while POUNCE delivered the same algorithm at Ipopt's speed with no C or Fortran dependency. Once a Rust implementation existed, the JAX one bought only differentiability, and differentiability is supplied more cheaply by implicit differentiation of the KKT system at the solution (Section ref:sec-diff) than by making the whole solve traceable. It was removed, along with the JAX LP and QP IPMs, and the derivative evaluator followed; Section ref:sec-discussion reports what that cost and what it bought.
 
 ** MINLP Correctness
 
@@ -947,22 +965,22 @@ The honest headline is therefore: discopt's certificate is *sound everywhere it 
 # TODO(#466): the $\approx 200$-instance BARON/SCIP head-to-head figures ($\approx 180$ each vs discopt's $\approx 120$) are the owner's recent measured run; before submission, pin these counts to the exact benchmark artifact (results JSON + oracle) and replace the "$\approx$" figures with the exact per-solver certified/feasible/violation tallies and a comparison table.
 
 #+NAME: tab-minlplib
-#+CAPTION: MINLPLib smoke test results (10 instances, 60s time limit). Best known objectives from MINLPLib.
+#+CAPTION: MINLPLib smoke test results (9 instances, 60s time limit, v0.8.0, Apple M4 Pro). Best known objectives from MINLPLib. Reproduced by the manuscript smoke-test notebook.
 | Instance | $n$ | $m$ | Status   | $f^*$      | Best Known | Time (s) | Nodes  |
 |----------+-----+-----+----------+------------+------------+----------+--------|
-| chance   |   4 |   3 | optimal  | 29.421     | 29.894     |    0.244 |      0 |
-| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.258 |      0 |
-| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.010 |      1 |
-| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    0.176 |      3 |
-| gear     |   4 |   0 | feasible | 2.3e-11    | 0.000      |   60.000 | 25,153 |
-| nvs01    |   3 |   3 | feasible | -4.904     | 12.470     |   60.731 |  7,787 |
-| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.036 |     11 |
-| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.078 |      9 |
-| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.022 |      9 |
+| chance   |   4 |   3 | optimal  | 29.894     | 29.894     |    0.033 |      0 |
+| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.198 |     23 |
+| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.189 |      5 |
+| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    0.331 |      5 |
+| gear     |   4 |   0 | optimal  | 0.000      | 0.000      |    0.147 |     31 |
+| nvs01    |   3 |   3 | optimal  | 12.470     | 12.470     |    0.289 |      3 |
+| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.025 |      3 |
+| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.047 |      5 |
+| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.168 |      5 |
 
-Of the 9 solvable instances, 7 reach optimal status (matching known optima to $10^{-3}$), while 2 reach feasible solutions at the time limit. The =gear= instance finds a near-zero objective ($2.3 \times 10^{-11}$, matching the known optimum $0.0$) but, *at the time of this smoke test*, could not prove optimality because the =.nl= import path did not yet build convex relaxations; instance =nvs01= reached a local optimum for the same reason. The JAX computation accounts for 92--99.9% of solver time, with Rust tree management contributing $< 1\%$ and Python overhead $< 2\%$.
+All 9 instances now certify global optimality, and every certified objective matches the MINLPLib oracle to the $10^{-3}$ reporting tolerance; the notebook that produces this table asserts the comparison on all 9 rows and reports the executed comparison count, so a silently-skipped check cannot read as a pass. Every instance closes in well under one second, against a 60~s budget.
 
-Subsequent to this table, the =.nl= import path was given the full relaxation and dual-bound machinery of Sections ref:sec-relax and ref:sec-cuts, so the solver now closes the gap and certifies global optimality on the majority of these instances rather than stopping at a feasible point. We have validated this expanded path head-to-head against BARON cite:&Tawarmalani2005 on the subset of MINLPLib instances with a proven global optimum, matching the known optimum (to the $10^{-4}$ correctness tolerance) with zero incorrect results; the residual cases where discopt finds the optimum but does not yet prove it are concentrated in high-degree factorable products whose lifted relaxation is loose, consistent with the limitation noted in the Discussion.
+Earlier revisions of this table were taken before the =.nl= import path carried the relaxation and dual-bound machinery of Sections ref:sec-relax and ref:sec-cuts. At that point =gear= and =nvs01= stopped at a feasible point (=nvs01= at a local optimum of the wrong sign), and =chance= was reported as optimal at $29.421$ against a known optimum of $29.894$. Those numbers are superseded by the run above --- the node counts in this table are single-digit to low-tens where they were previously in the thousands, which is the relaxation doing the work rather than enumeration. We have separately validated the expanded path head-to-head against BARON cite:&Tawarmalani2005 on the subset of MINLPLib instances with a proven global optimum, matching the known optimum (to the $10^{-4}$ correctness tolerance) with zero incorrect results; the residual cases where discopt finds the optimum but does not yet prove it are concentrated in high-degree factorable products whose lifted relaxation is loose, consistent with the limitation noted in the Discussion.
 
 ** Neural Network Embedding Validation
 
@@ -983,17 +1001,19 @@ Table ref:tab-piecewise reports piecewise McCormick gap reduction. Additionally:
 
 ** Performance
 
-*Algebraic coefficient extraction.* For LP and QP subproblems, walking the expression DAG directly to extract coefficient matrices avoids JAX tracing and autodiff:
+*Algebraic coefficient extraction.* For LP and QP subproblems, walking the expression DAG directly to extract coefficient matrices avoids expression-level autodiff altogether. Measured against the then-current generic path, which traced through JAX:
 - LP ($n=100$): 3.5s \to 0.20s warm (17\times speedup)
 - QP ($n=100$): 65.7s \to 0.29s warm (226\times speedup)
 
-*Batch evaluation via =vmap=.* For batch size 512 with $n_{\mathrm{vars}} = 50$, =jax.vmap= achieves approximately 29.6\times speedup over sequential evaluation.
+*Batch evaluation.* For batch size 512 with $n_{\mathrm{vars}} = 50$, =jax.vmap= achieved approximately 29.6\times speedup over sequential evaluation --- the result that motivated batched node dispatch in the first place, and the reason the batch interface was kept when the backend beneath it moved to Rust.
 
 *Interop overhead.* Rust \leftrightarrow Python array transfer via PyO3/numpy: sub-microsecond for small batches, 0.03--0.14% overhead relative to solver time (well under the 5% performance gate).
 
-*Time breakdown.* Across the MINLPLib smoke test, JAX numerical computation dominates at 92--99.9% of wall time. Rust tree management accounts for 0.05--7.3%, and Python orchestration overhead is 0.02--0.6%. This confirms that the multi-language architecture introduces negligible overhead.
+*Time breakdown.* An earlier revision of this paper reported that JAX numerical computation dominated at 92--99.9% of wall time, with Rust tree management at 0.05--7.3% and Python orchestration at 0.02--0.6%. That measurement is *superseded and retracted*: it described a build in which every nonlinear solve routed its derivatives through the JAX evaluator, and the default path no longer does. Re-measured on the v0.8.0 tree over ten =.nl= instances (three repeats each, interleaved, Apple M4 Pro), JAX accounts for $0.00\%$ of wall time on every one --- =jax= never enters =sys.modules= during a default solve. The remainder divides between the Rust layer ($1.5$--$98.5\%$) and Python orchestration ($1.0$--$84.0\%$), and that split is governed by how much search the instance actually needs rather than by a language boundary: on a short solve the fixed cost of import, =.nl= parsing, and model construction dominates (=alan=, 21 nodes: $84.0\%$ Python, $8.0\%$ Rust), while on the one instance in the set that does substantial search the Rust engine dominates (=tanksize=, 17,095 nodes: $98.5\%$ Rust, $1.0\%$ Python). The claim that the multi-language architecture introduces negligible /interop/ overhead is unchanged and separately measured above; what is corrected is which layer the work is in.
 
-*JAX-free linear and quadratic paths.* The 92--99.9% JAX share above is specific to nonlinear models. Because JAX import and first-trace compilation impose a fixed cold-start cost (~0.5--1 s) that dominates small solves, the LP, MILP, QP, and MIQP paths are now kept JAX-free: the relaxation compiler, NLP evaluator, and $\alpha$BB modules are imported lazily and only when a genuinely nonlinear relaxation is built. MIQP node relaxations are solved as quadratic programs through POUNCE rather than the JAX QP IPM, so an integer-quadratic solve never touches JAX. The result is that a purely linear or quadratic model pays none of the cold-start tax that the differentiable nonlinear path requires.
+*Where JAX is, and is not.* The derivative evaluator on the default path is an AD tape built by POUNCE, which supplies $f$, $\nabla f$, $g$, $J$, and the Lagrangian Hessian with no JAX at all. It graduated to default-ON under the flag discipline of Section ref:sec-soundness after agreeing with the JAX evaluator over 66 corpus instances to $5.5 \times 10^{-16}$ ($f$), $3.8 \times 10^{-16}$ ($\nabla f$), $3.1 \times 10^{-15}$ ($J$), and $7.8 \times 10^{-13}$ (Lagrangian Hessian) --- against pre-registered bars of $10^{-10}$ on the gradient and Jacobian and $10^{-8}$ on the Hessian. The JAX evaluator remains in the tree behind =DISCOPT_NLP_EVAL=jax=. Measuring that opt-out arm on the same ten instances puts the JAX share at $3.4$--$12.9\%$: an order of magnitude below the retracted figure /even with JAX switched on/, because the dominant cost was never the derivative evaluation. Node counts are identical between the two arms on nine of the ten instances (=tanksize= differs, 17,095 against 17,203, which is why swapping AD engines was treated as bound-changing rather than as a refactor), and the tape arm is faster on every instance that loads JAX at all.
+
+*JAX-free linear and quadratic paths.* Independently of the evaluator default, the LP, MILP, QP, and MIQP paths import no relaxation machinery at all: the relaxation compiler, NLP evaluator, and $\alpha$BB modules are loaded lazily and only when a genuinely nonlinear relaxation is built, and MIQP node relaxations are solved as quadratic programs through POUNCE. A purely linear or quadratic model therefore pays none of the cold-start cost (${\sim}0.5$--$1$~s of import and first-trace compilation) that the optional differentiable path still requires.
 
 *Simplex pivoting.* The Rust dual simplex used for LP and MILP node relaxations replaces Dantzig pricing with dual Devex reference-weight pricing cite:&Harris1973, a steepest-edge approximation that reduces the dual iteration count, and replaces the single-breakpoint dual ratio test with a bound-flipping (long-step) ratio test that resolves more infeasibility per pivot by flipping finite-bounded nonbasic variables to their opposite bound as it walks the breakpoints. Both are standard ingredients of production simplex codes and are paired with the LP equilibration and shared-factorization reuse described earlier to keep the LU well-conditioned across a node's strong-branching probes.
 
@@ -1004,19 +1024,21 @@ Table ref:tab-piecewise reports piecewise McCormick gap reduction. Additionally:
   :CUSTOM_ID: sec-discussion
   :END:
 
+#+LATEX: \label{sec-discussion}
+
 discopt demonstrates that a modern, multi-language MINLP solver can provide capabilities absent from existing monolithic solvers: differentiability, batch evaluation, and memory safety. Several limitations and directions for future work deserve discussion.
 
-*Limitations.* The pure-JAX IPM uses dense linear algebra, which limits scalability to problems with $n \lesssim 5000$ variables. For larger problems, the sparse IPM backend (using scipy sparse factorization) or Ipopt should be used. The =.nl= import path now constructs convex relaxations and surfaces a valid dual bound (the earlier smoke-test table predates this capability), so global optimality can be certified on many imported MINLPLib instances; the remaining gap is concentrated in high-degree factorable structure, where the lifted relaxation can be loose or expensive to build. The JAX Metal backend (Apple GPU) is currently broken in JAX 0.8.2, so GPU acceleration is CPU-only on macOS.
+*Limitations.* POUNCE uses dense linear algebra, which limits scalability to problems with $n \lesssim 5000$ variables; for larger problems Ipopt, with its mature sparse factorizations, should be used. The =.nl= import path now constructs convex relaxations and surfaces a valid dual bound (the earlier smoke-test table predates this capability), so global optimality can be certified on many imported MINLPLib instances; the remaining gap is concentrated in high-degree factorable structure, where the lifted relaxation can be loose or expensive to build. The JAX Metal backend (Apple GPU) is currently broken in JAX 0.8.2, so the optional differentiable and learned-relaxation subsystems are CPU-only on macOS; the default solve path does not use JAX and is unaffected. More broadly, the retirement documented in Section ref:sec-nlp-backends has a cost worth naming: discopt no longer has an end-to-end traceable solve. Differentiability is now supplied at the solution point by implicit differentiation rather than by differentiating through the iterations, which covers decision-focused learning but forecloses, say, unrolling the barrier trajectory.
 
-*Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength --- solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. The head-to-head of Section ref:sec-experiments is candid about the standing: on /coverage/ of a hard $\approx 200$-instance MINLPLib panel under a fixed $60$~s budget, BARON and SCIP each certify on the order of $180$ instances to discopt's $\approx 120$, and discopt's shortfall is a per-node wall-clock / gap-closure gap on a serial engine rather than an unsound bound. What discopt establishes instead is (i) /soundness parity/ --- zero correctness violations against both mature baselines across the whole panel --- and (ii) a complementary capability set absent from monolithic solvers: differentiability, batch node evaluation, memory safety, and Python-native modeling. Closing the coverage gap is active performance work (issues #727, #723, #282); the multi-backend architecture also lets users start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to POUNCE or Ipopt for production performance.
+*Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength --- solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. The head-to-head of Section ref:sec-experiments is candid about the standing: on /coverage/ of a hard $\approx 200$-instance MINLPLib panel under a fixed $60$~s budget, BARON and SCIP each certify on the order of $180$ instances to discopt's $\approx 120$, and discopt's shortfall is a per-node wall-clock / gap-closure gap on a serial engine rather than an unsound bound. What discopt establishes instead is (i) /soundness parity/ --- zero correctness violations against both mature baselines across the whole panel --- and (ii) a complementary capability set absent from monolithic solvers: differentiability, batch node evaluation, memory safety, and Python-native modeling. Closing the coverage gap is active performance work (issues #727, #723, #282); the two-backend seam lets a user cross-check a suspect solve against Ipopt without changing a line of the model.
 
 *Command-line interface and literature monitoring.* discopt provides a command-line interface (=discopt=) installable via =pip=, with subcommands for searching arXiv and OpenAlex APIs and writing structured reports. These subcommands output JSON, enabling integration with scripting workflows and CI pipelines. A companion "discoptbot" agent uses the CLI to periodically scan for new publications relevant to the solver's algorithmic components (spatial B&B, McCormick relaxations, GNN branching, GPU-accelerated IPM), score them by relevance, and produce structured literature reports. This automated monitoring helps maintain awareness of algorithmic advances that could inform future solver development.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending POUNCE with sparse linear algebra to compete with Ipopt on large problems, and addressing the per-solve POUNCE-versus-Ipopt gap localised in the performance re-profile; (3) deeper integration of learned relaxations with online training during the B&B search; (4) meta-learning of solver parameters through the differentiable solver, and extending the bilevel module (Section ref:sec-bilevel) to integer and nonconvex lower levels beyond the current convex-KKT reduction; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the uncertainty stack (Sections ref:sec-arch, ref:sec-stochastic) beyond the current affine decision rules and two-stage recourse --- to bilinear coefficient uncertainty, polynomial or piecewise-linear recourse policies, multistage (nested-Benders / SDDP) recourse, and a full single-level distributionally-robust reformulation over moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004;&Bertsimas2010.
+*Future work.* Key directions include: (1) GPU-accelerated batch node evaluation, which the retirement of the JAX IPM leaves as an open question rather than a solved one --- the batching interface survives in POUNCE, but a Rust backend does not inherit an XLA GPU path for free; (2) extending POUNCE with sparse linear algebra to compete with Ipopt on large problems, and addressing the per-solve POUNCE-versus-Ipopt gap localised in the performance re-profile; (3) deeper integration of learned relaxations with online training during the B&B search; (4) meta-learning of solver parameters through the differentiable solver, and extending the bilevel module (Section ref:sec-bilevel) to integer and nonconvex lower levels beyond the current convex-KKT reduction; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the uncertainty stack (Sections ref:sec-arch, ref:sec-stochastic) beyond the current affine decision rules and two-stage recourse --- to bilinear coefficient uncertainty, polynomial or piecewise-linear recourse policies, multistage (nested-Benders / SDDP) recourse, and a full single-level distributionally-robust reformulation over moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004;&Bertsimas2010.
 
 * Conclusion
 
-We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, POUNCE (a memory-safe Rust translation of Ipopt, developed as a separate companion project), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. The neural network embedding module enables optimization over trained ML surrogates by formulating feedforward networks as MINLP constraints with big-M, full-space, and reduced-space strategies. POUNCE eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
+We have presented discopt, a hybrid Rust/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides two interchangeable NLP backends---POUNCE (a memory-safe Rust translation of Ipopt, developed as a separate companion project) and Ipopt via cyipopt---producing identical results on benchmark problems. A third, a pure-JAX interior point method, was the project's original solver and was retired once POUNCE matched Ipopt's speed: the honest summary of that experiment is that building the numerical core in an autodiff framework was not what made the solver differentiable, and the framework's cost was paid on every solve while its benefit was needed on few. The default path is now Rust and =numpy= end to end, and JAX is an optional dependency of the differentiable and learned-relaxation subsystems rather than a layer of the solver. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. The neural network embedding module enables optimization over trained ML surrogates by formulating feedforward networks as MINLP constraints with big-M, full-space, and reduced-space strategies. POUNCE eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
 
 The system is open-source: discopt is available under the EPL-2.0 License, and POUNCE is available as a separate companion project (https://github.com/jkitchin/pounce) under the EPL-2.0 License.
 
