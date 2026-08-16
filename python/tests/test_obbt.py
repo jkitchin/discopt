@@ -1004,7 +1004,7 @@ class TestCascadeAuxGraduatedDefault:
         monkeypatch.setattr(obbt_mod, "obbt_tighten_root", _spy)
         m = self._stub_model()
         lb, ub = np.array([0.5, 0.5]), np.array([4.0, 4.0])
-        kw = dict(rounds=1, deadline=None, prefer_pounce=False, superposition=False)
+        kw = dict(rounds=1, deadline=None, prefer_pounce=False)
 
         # Default (env unset) -> cascade ON (the graduated default).
         monkeypatch.delenv("DISCOPT_OBBT_CASCADE_AUX", raising=False)

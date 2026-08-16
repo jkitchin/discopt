@@ -50,9 +50,11 @@ compound — but relaxation strength must come first."* Both halves are now
 measured, on the canonical config node (LINE1, OBBT-tightened, `x0=2, x3=1`):
 
 **Pre-RLT (falsification records, §6 of the performance plan):** flow
-subdivision, piecewise partitioning (LP *and* MILP), RLT/PSD/superposition cuts,
-and OBBT-with-known-optimum-cutoff **all leave the bound at 12658.06 exactly** —
-zero movement, every lever.
+subdivision, piecewise partitioning (LP *and* MILP), RLT/PSD cuts, and
+OBBT-with-known-optimum-cutoff **all leave the bound at 12658.06 exactly** —
+zero movement, every lever. (The superposition arm of that table was retracted by
+#1035: the switch had been inert since #632, so it re-measured the baseline. See
+the footnote in `performance-plan.md` §6.)
 
 **Post-RLT (`ex1252_compounding_probe.py`):**
 

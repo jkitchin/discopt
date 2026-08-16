@@ -107,7 +107,6 @@ def test_nested_division_lift_engages(xb, yb):
         relaxer._terms,
         relaxer._disc,
         bound_override=(np.asarray(lb), np.asarray(ub)),
-        superposition=relaxer._superposition,
     )
     # 2 original variables; the lift adds a reciprocal aux and a product aux.
     assert len(milp._c) > 2, "nested-division lift did not engage (no aux columns)"
@@ -170,7 +169,6 @@ def test_negative_numerator_ratio_lifts_soundly():
         relaxer._terms,
         relaxer._disc,
         bound_override=(np.asarray(lb), np.asarray(ub)),
-        superposition=relaxer._superposition,
     )
     # The ratio-of-products lift adds a pure-ratio aux column (issue #185).
     assert len(milp._c) > 2, "negative-numerator ratio should lift via the #185 path"
