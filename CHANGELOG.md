@@ -10,6 +10,72 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS and Windows wheels covered only Python 3.12** (`fix(release)`, #1056,
+  closes #1055). `pyproject.toml` declares `requires-python = ">=3.10"`, but the
+  release workflow's macOS and Windows jobs passed no interpreter list, so maturin
+  built against the runner's `setup-python` version alone. v0.8.0 published 11
+  wheels covering 4 of 12 platform/version combinations off Linux; `pip install
+  discopt` on macOS or Windows under 3.10, 3.11 or 3.13 fell through to the sdist
+  and failed on a missing Rust toolchain, which reads as a broken package rather
+  than a missing wheel. Present since at least v0.7.0, whose file list has the
+  identical shape.
+
+  Fixed with `abi3` rather than by extending the interpreter matrix: pyo3 gains
+  `abi3-py310`, so **one** wheel per platform serves every supported interpreter.
+  The artifact count drops 12 → 6 and the build matrix shrinks instead of
+  quadrupling. Verified by building a single `cp310-abi3` wheel and solving the
+  same model on 3.10, 3.11, 3.12 and 3.13 — identical objective to the bit on all
+  four.
+
+  The stable ABI routes the Python↔Rust boundary through the limited API, and this
+  solver crosses that boundary per B&B node, so the cost was measured rather than
+  assumed: 5 interleaved reps over a 6-instance panel plus 3 reps on
+  `clay0303hfsg`. Node counts are identical on every instance (bound-neutral, per
+  `CLAUDE.md` verification regime 1); wall-clock difference is within noise. Full
+  numbers in #1056.
+
+- **The release could publish an incomplete artifact set with every job green**
+  (`fix(release)`, #1056). Nothing checked *what* was built, only that building
+  and uploading succeeded — which is why the gap above survived a release.
+  `.github/scripts/check_wheel_coverage.py` now runs on the collected artifacts
+  before the PyPI upload and fails if a platform is missing, if a wheel is not
+  `abi3`, or if the `abi3` floor has drifted from `requires-python` (bumping one
+  without the other would publish wheels claiming support they were never built
+  against). The guard was tested against the real v0.8.0 file list, which it
+  rejects, and against this release's, which it accepts.
+
+- **`discopt install-skills` crashed on Python 3.10** (`fix(skills)`, #1056).
+  `discopt/skills/__init__.py` imported `Traversable` from
+  `importlib.resources.abc`, which exists only on 3.11+, so `import
+  discopt.skills` raised `ModuleNotFoundError` on the 3.10 floor
+  `requires-python` promises. The name is used only in annotations and the module
+  already has `from __future__ import annotations`, so the import moved under
+  `if TYPE_CHECKING:` with a `sys.version_info` split (3.10 reaches the same class
+  as `importlib.abc.Traversable`). Found while fixing the wheel gap above: until
+  the `abi3` change, no macOS or Windows user could install on 3.10 at all, so a
+  3.10-only crash could not surface there.
+
+- **The correctness tier could not be collected on Python 3.10** (`fix(tests)`,
+  #1056). `python/tests/_optima.py` — the reference-optima oracle shared by every
+  soundness suite — did a bare `import tomllib` (3.11+), making six test modules
+  collection errors on 3.10. It now falls back to `tomli`, matching
+  `discopt/profiles.py`, and raises a pointed error if neither parser is present
+  rather than degrading to an empty registry, which would silently turn every
+  soundness assertion into a no-op. `tomli` is now declared in the `dev` extra
+  under a `python_version < "3.11"` marker.
+
+- **Nothing checked that shipped code runs on the oldest supported Python**
+  (`test`, #1056). Both 3.10 breaks above survived because all seven CI jobs run
+  3.12. `python/tests/test_requires_python_floor.py` AST-scans `python/discopt/`
+  and `python/tests/` for module-scope imports of stdlib modules or names newer
+  than the `requires-python` floor, ignoring those guarded by `try`/`except`,
+  `TYPE_CHECKING`, or a `sys.version_info` branch. It runs on any interpreter, so
+  it does not need a 3.10 job to catch the next one. A companion test feeds the
+  scanner a known violation plus three correctly-guarded imports, so a broken
+  scanner cannot pass vacuously.
+
 ## [0.8.0] - 2026-08-16
 
 ### Changed
