@@ -2619,6 +2619,119 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     return max_viol <= tol
 
 
+# Tolerance shared by the two conditions of :func:`_weakly_active_crossover` —
+# the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), which is also
+# the stationarity tolerance the examiner holds a reported point to.
+_CROSSOVER_TOL = 1e-6
+
+
+def _weakly_active_crossover(x, lb, ub, mult_lower, mult_upper, grad, tol=_CROSSOVER_TOL):
+    """Return ``{index: bound_value}`` for coordinates to place ON a bound (#1043).
+
+    An interior-point method stops a barrier distance ``d ~ mu / lambda`` inside
+    each active bound. Where the bound is only *weakly* active — the objective
+    gradient vanishes on it, so ``lambda -> 0`` — that distance is large even
+    though the IPM's own complementarity ``lambda * d`` is tiny and its
+    convergence test is satisfied. The returned point then carries a first-order
+    residual of order ``d`` in that coordinate while the solver correctly reports
+    ``Solve_Succeeded``: nothing is wrong with the NLP solve, the iterate is
+    simply not the vertex.
+
+    This is a class, not an instance quirk. The periodicity reduction in
+    ``_relax/nonlinear_bound_tightening.py`` maps a doubly-infinite periodic-only
+    variable to exactly ``[-pi, pi]``, and a periodic function attains its
+    extrema at the period boundary — so the reduction *systematically* places the
+    optimum ON the bound it creates, which is exactly the weakly-active case.
+    Measured on ``nlp_001_010`` (``min ... + cos(y)``, ``y`` reduced to
+    ``[-pi, pi]``): the polish stopped at ``y = -3.14138899`` with
+    ``lambda = 2.037e-04`` and ``d = 2.037e-04`` — complementarity 4.15e-08
+    (converged), stationarity 2.037e-04 (the examiner's only failing check).
+
+    The repair is a crossover: put the coordinate on the bound. Three conditions,
+    each load-bearing:
+
+    1. ``lambda > 0`` and ``lambda * d <= tol`` — the IPM's own certificate that
+       the bound is active; it is precisely the quantity its complementarity test
+       measured. Note this is *nearly* vacuous at convergence, since an inactive
+       finite bound carries ``lambda ~ mu / d`` and therefore
+       ``lambda * d ~ mu``; what it rejects is an unconverged coordinate the
+       barrier is still pushing away from a strongly-priced bound.
+    2. ``|df/dx_j| * d <= tol`` — moving to the bound perturbs the objective by
+       a first-order-negligible amount. This also caps the move: with (3) it
+       forces ``d < tol / |df/dx_j| < 1``.
+    3. ``|df/dx_j| > tol`` — there is an actual stationarity defect at this
+       coordinate to repair. Without it, any variable absent from the objective
+       (``df/dx_j == 0``) satisfies (1) and (2) at *every* finite bound no matter
+       how distant, and would be relocated for no reason.
+
+    Condition 1 alone selects gross moves: at ``nlp_008_010``'s incumbent ``z``
+    sits 0.54 from its lower bound with ``lambda = 4.5e-09``, so
+    ``lambda * d = 2.4e-09`` passes (1) while snapping ``z`` would be a wholesale
+    relocation; (2) rejects it with ``|g| * d = 0.47``. On ``nlp_001_010``'s own
+    ``y``, (2) is what rejects the far side: the *upper* bound ``y <= pi`` also
+    passes (1) with ``lambda * d = 9.1e-09``, and only ``|g| * d = 1.3e-03``
+    rules it out. Measured selectivity: ``nlp_001_010 -> {1: -pi}``,
+    ``nlp_008_010 -> {}``.
+
+    The caller must still verify the snapped point (feasibility, objective not
+    worse) before adopting it — this function only nominates candidates.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        The point returned by the NLP solve.
+    lb, ub : np.ndarray
+        The box that solve was given (so the multipliers refer to these bounds).
+    mult_lower, mult_upper : np.ndarray or None
+        Bound multipliers from the same solve. ``None`` disables the test.
+    grad : np.ndarray or None
+        Objective gradient at *x*. ``None`` disables the test.
+    tol : float
+        Shared threshold for both conditions.
+
+    Returns
+    -------
+    dict[int, float]
+        Index -> bound value, empty when no coordinate qualifies.
+    """
+    out: dict[int, float] = {}
+    if mult_lower is None or mult_upper is None or grad is None:
+        return out
+    xv = np.asarray(x, dtype=np.float64).ravel()
+    lo = np.asarray(lb, dtype=np.float64).ravel()
+    hi = np.asarray(ub, dtype=np.float64).ravel()
+    ml = np.asarray(mult_lower, dtype=np.float64).ravel()
+    mu = np.asarray(mult_upper, dtype=np.float64).ravel()
+    gv = np.asarray(grad, dtype=np.float64).ravel()
+    if not (xv.size == lo.size == hi.size == ml.size == mu.size == gv.size):
+        return out
+    if not (np.all(np.isfinite(xv)) and np.all(np.isfinite(gv))):
+        return out
+    for j in range(xv.size):
+        if abs(gv[j]) <= tol:
+            # (3): nothing to repair here — leave the coordinate where the NLP
+            # solve put it.
+            continue
+        for bnd, lam, sign in ((lo[j], ml[j], 1.0), (hi[j], mu[j], -1.0)):
+            # 1e15 mirrors the "infinite bound" convention used throughout the
+            # solver (the 1e20 sentinel and anything near it is not a bound).
+            if not np.isfinite(bnd) or abs(bnd) >= 1e15:
+                continue
+            d = sign * (xv[j] - bnd)
+            if not (d > tol):
+                # Already on the bound (nothing to do), or outside it (a bound
+                # relaxation the caller owns — never "snap" a point inward).
+                continue
+            if not (np.isfinite(lam) and lam > 0.0):
+                continue
+            if lam * d > tol:
+                continue
+            if abs(gv[j]) * d > tol:
+                continue
+            out[j] = float(bnd)
+    return out
+
+
 # The absolute tolerance the NLP-BB exit gate (#954) holds a returned incumbent
 # to: the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), the same
 # figure ``_matrix_solution_feasible`` enforces on the matrix paths (#952) and
@@ -13319,6 +13432,20 @@ def solve_model(
         # validation time; POUNCE (or cyipopt) converges them tightly. This is
         # a single solve at the end of the search. Best-effort and guarded so a
         # divergent re-solve can never change the reported optimum.
+        # #1043(b): the certificate invariant ``bound <= incumbent`` binds the
+        # polish too. Both mechanisms below can move the reported point (the
+        # widened box lets it leave the reduced region; the crossover snap moves
+        # it onto a bound), so no polished objective is adopted below the tree's
+        # rigorous dual bound — a super-optimal "improvement" is a defect being
+        # surfaced, never something to report. A missing/sentinel/non-finite
+        # bound imposes no floor.
+        _glb_polish = stats.get("global_lower_bound")
+        _min_accept_obj = -np.inf
+        if _glb_polish is not None:
+            _glb_polish = float(_glb_polish)
+            if np.isfinite(_glb_polish) and abs(_glb_polish) < _SENTINEL_THRESHOLD:
+                _min_accept_obj = _glb_polish - 1e-6 * (1.0 + abs(_glb_polish))
+
         try:
             _fix_lb = lb.copy()
             _fix_ub = ub.copy()
@@ -13327,6 +13454,28 @@ def solve_model(
                     _val = float(round(float(sol_flat[_off + _k])))
                     _fix_lb[_off + _k] = _val
                     _fix_ub[_off + _k] = _val
+            # #1043(b): the polish's product is the reported POINT, so it must be
+            # solved over the box the MODEL declares, not over ``lb``/``ub``,
+            # which carry FBBT/OBBT/root reductions. A reduction can place a
+            # bound exactly ON the optimum — the periodicity reduction maps a
+            # doubly-infinite periodic-only variable to ``[-pi, pi]``, and a
+            # periodic function attains its extrema at the period boundary — and
+            # an interior-point polish then stops a barrier distance inside it.
+            # Measured on ``nlp_008_010``: polishing in the declared box drops
+            # the examiner's stationarity residual from 1.331e-06 (fail) to
+            # 7.84e-10. Only free columns are widened, so the integer assignment
+            # fixed above is untouched. This is the primal analogue of #1037's
+            # ``_duals_against_declared_box``: a quantity pinned to a bound only
+            # bound tightening created is not a KKT quantity of the declared
+            # model. Where no such bound exists the widening is a no-op.
+            _decl_bounds = getattr(evaluator, "variable_bounds", None)
+            if _decl_bounds is not None:
+                _decl_lb = np.asarray(_decl_bounds[0], dtype=np.float64).ravel()
+                _decl_ub = np.asarray(_decl_bounds[1], dtype=np.float64).ravel()
+                if _decl_lb.size == _fix_lb.size and _decl_ub.size == _fix_ub.size:
+                    _free_cols = _fix_lb < _fix_ub  # integer-fixed columns have lb == ub
+                    _fix_lb = np.where(_free_cols, _decl_lb, _fix_lb)
+                    _fix_ub = np.where(_free_cols, _decl_ub, _fix_ub)
             _polish_opts = dict(opts)
             # The polished point IS the reported solution when it is adopted below,
             # so this is an incumbent producer and takes the incumbent options
@@ -13354,6 +13503,48 @@ def solve_model(
                 for _off, _sz in zip(int_offsets, int_sizes):
                     for _k in range(int(_sz)):
                         _refined[_off + _k] = round(float(sol_flat[_off + _k]))
+                # #1043(b): place the polished point ON any bound it stopped a
+                # barrier distance short of while the IPM's own complementarity
+                # certified that bound active (see ``_weakly_active_crossover``).
+                # Widening the box above removes the spurious bounds; this
+                # handles the ones the DECLARED model really has, where there is
+                # no wider box to move to — ``nlp_001_010``'s ``y >= -pi`` is
+                # written back into ``model._variables`` by the periodicity
+                # reduction, so it IS the declared bound by the time the polish
+                # runs. Adopted only when the snapped point is feasible, no
+                # worse, and not below the tree's rigorous dual bound; the move
+                # is first-order-negligible by construction (condition 2), so
+                # this can never be an "improvement" that hides an infeasible
+                # relocation. Measured: stationarity 2.037e-04 -> 1.22e-16.
+                _snap = _weakly_active_crossover(
+                    _refined,
+                    _fix_lb,
+                    _fix_ub,
+                    _polished.bound_multipliers_lower,
+                    _polished.bound_multipliers_upper,
+                    (
+                        evaluator.evaluate_gradient(_refined)
+                        if _polished.bound_multipliers_lower is not None
+                        and _polished.bound_multipliers_upper is not None
+                        else None
+                    ),
+                )
+                if _snap:
+                    _cand = _refined.copy()
+                    for _j, _bv in _snap.items():
+                        _cand[_j] = _bv
+                    _cobj = float(evaluator.evaluate_objective(_cand))
+                    if (
+                        np.isfinite(_cobj)
+                        and _cobj <= _pobj + 1e-12 * (1.0 + abs(_pobj))
+                        and _cobj >= _min_accept_obj
+                        and (
+                            not cl_list
+                            or _check_constraint_feasibility(evaluator, _cand, cl_list, cu_list)
+                        )
+                    ):
+                        _refined = _cand
+                        _pobj = _cobj
                 # Two reasons to adopt the integer-fixed continuous completion:
                 #   (a) purification — objective ~unchanged, just tighter continuous
                 #       values (the original behavior, always safe), and
@@ -13378,13 +13569,16 @@ def solve_model(
                 # fractional power of a ratio jumped 176.17 -> 0.0). There we keep
                 # only the always-safe purification (unchanged objective).
                 _improved = _model_is_convex and _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
-                _accept = _unchanged or (
-                    _improved
-                    and (
-                        not cl_list
-                        or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                _accept = (
+                    _unchanged
+                    or (
+                        _improved
+                        and (
+                            not cl_list
+                            or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                        )
                     )
-                )
+                ) and _pobj >= _min_accept_obj
                 if _accept:
                     sol_flat = _refined
                     x_dict = _unpack_solution(model, sol_flat)
