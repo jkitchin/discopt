@@ -3952,6 +3952,206 @@ def _unpack_bound_duals(
     return out
 
 
+# Stationarity residual a declared-box refit must meet before its multipliers
+# are reported: the declared ``abs=1e-6``, with a relative forgiveness on the
+# gradient scale so a large-coefficient model is not refused for being large.
+_DECLARED_DUAL_STAT_TOL = 1e-6
+# Complementary-slackness budget for the reported multipliers, judged against
+# the box the model declares. Matches ``examiner.PRIMAL_CS_TOL`` — the check
+# that exposed #1037 — so the solver holds itself to what the examiner asserts.
+_DECLARED_DUAL_CS_TOL = 1e-7
+
+
+def _duals_against_declared_box(
+    *,
+    model: Model,
+    evaluator,
+    x_flat: np.ndarray,
+    declared_lb: np.ndarray,
+    declared_ub: np.ndarray,
+    solved_lb: np.ndarray,
+    solved_ub: np.ndarray,
+    constraint_duals: Optional[dict[str, np.ndarray]],
+    bound_duals_lower: Optional[dict[str, np.ndarray]],
+    bound_duals_upper: Optional[dict[str, np.ndarray]],
+    active_tol: float = 1e-6,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Report duals of the model the USER DECLARED, not of the presolved one (#1037).
+
+    The backends solve a box that presolve (FBBT / nonlinear tightening) may have
+    shrunk. When a *derived* bound is active at the returned point, the backend
+    hangs a bound multiplier on it — but that bound is not a constraint of the
+    user's model, so neither is its multiplier. The reported duals then satisfy
+    KKT for the tightened problem and violate it for the declared one:
+
+        min −x  s.t.  x²+y² ≤ 1,  x,y ∈ [−2,2]
+
+    FBBT derives x ∈ [−1,1]; the optimum x=1 sits on the derived bound, the split
+    ``2μ + z_U = 1`` is degenerate, and the backend returned μ=0.204, z_U=0.592.
+    On the declared box the answer is unique — x=1 is strictly interior to [−2,2],
+    so complementary slackness forces z_U=0 and hence μ=0.5. The error is not a
+    perturbation: which of the infinitely many degenerate splits comes back is
+    arbitrary, so μ can be off by any factor.
+
+    So: when the reported multipliers are not admissible for the declared model,
+    refit them against the DECLARED active set — the same routine the examiner
+    has been validating on exactly this question. When they are admissible they
+    are returned untouched, which is the common case and costs one O(n) pass.
+
+    The trigger is the defect itself, not its cause: a multiplier is admissible
+    for the declared model only if it satisfies complementary slackness against
+    the DECLARED bounds, ``|λ_j| · |x_j − bound_j| ≤ cs_tol``. That one test
+    catches every way a multiplier can end up on something the user did not
+    declare, and it is exactly the examiner check that exposed this issue. Two
+    causes are known to trip it:
+
+    * a presolve-derived bound, as above;
+    * the ±1e20 *infinity sentinel* standing in for "no bound at all". A
+      variable declared unbounded has no bound to price, so its multiplier is
+      exactly zero; the interior-point backends return residue there (measured:
+      λ=3.8e-05 on ``nlp_cvx_102_010``), and against a 1e20 "bound" that residue
+      is a CS violation of 3.8e+15. No sentinel special-case is needed — a point
+      1e20 away from a bound is not at it, so the refit's active set already
+      excludes it and the refitted multiplier is 0.
+
+    Refuses rather than guesses (CLAUDE.md §3): if the refit cannot meet
+    stationarity at the declared active set, all three families come back
+    ``None`` with a warning naming the variable. A dual that does not satisfy
+    the user's own KKT system is worse than no dual, because nothing downstream
+    can tell it is wrong.
+    """
+    if bound_duals_lower is None and bound_duals_upper is None:
+        # With no bound multipliers there is nothing that can sit on a bound the
+        # user did not declare, and the row duals alone cannot violate CS here.
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    declared_lb = np.asarray(declared_lb, dtype=float)
+    declared_ub = np.asarray(declared_ub, dtype=float)
+    x_flat = np.asarray(x_flat, dtype=float)
+    n = x_flat.size
+    if not (declared_lb.size == declared_ub.size == n):  # pragma: no cover - layout mismatch
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    is_int = np.zeros(n, dtype=bool)
+    offset = 0
+    for v in model._variables:
+        sz = int(v.size)
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            is_int[offset : offset + sz] = True
+        offset += sz
+    if offset != n:  # pragma: no cover - layout mismatch
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+    is_continuous = ~is_int
+
+    def _flat(named):
+        if named is None:
+            return np.zeros(n)
+        parts = []
+        for v in model._variables:
+            if v.name not in named:
+                return None
+            arr = np.asarray(named[v.name], dtype=float).reshape(-1)
+            if arr.size != int(v.size):
+                return None
+            parts.append(arr)
+        return np.concatenate(parts) if parts else np.zeros(0)
+
+    lam_lb = _flat(bound_duals_lower)
+    lam_ub = _flat(bound_duals_upper)
+    if lam_lb is None or lam_ub is None or lam_lb.size != n or lam_ub.size != n:
+        # Cannot line the multipliers up with the variables, so cannot judge
+        # them; leave the caller's values alone rather than guess.
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    # Integer columns are excluded: their bound multipliers price the *fixing*
+    # of the integer, not bound activity in the declared model, and the callers
+    # already zero them (the examiner likewise drops them from stationarity).
+    cs_lb = np.where(is_continuous, np.abs(lam_lb) * np.abs(x_flat - declared_lb), 0.0)
+    cs_ub = np.where(is_continuous, np.abs(lam_ub) * np.abs(declared_ub - x_flat), 0.0)
+    bad_lb = cs_lb > _DECLARED_DUAL_CS_TOL
+    bad_ub = cs_ub > _DECLARED_DUAL_CS_TOL
+    if not (bad_lb.any() or bad_ub.any()):
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    from discopt._dual_recovery import recover_multipliers, row_metadata
+
+    sense_arr, rhs_arr, _labels = row_metadata(evaluator)
+    body = evaluator.evaluate_constraints(x_flat) if sense_arr.size else np.empty(0, dtype=float)
+    jac = evaluator.evaluate_jacobian(x_flat) if sense_arr.size else np.empty((0, n), dtype=float)
+    grad = evaluator.evaluate_gradient(x_flat)
+
+    rec = recover_multipliers(
+        grad=grad,
+        jac=jac,
+        body=np.asarray(body, dtype=float),
+        sense_arr=sense_arr,
+        rhs_arr=rhs_arr,
+        x_flat=x_flat,
+        lb=declared_lb,
+        ub=declared_ub,
+        is_continuous=is_continuous,
+        active_tol=active_tol,
+    )
+
+    # Name the offenders, and say whether presolve is the cause — that is the
+    # difference between "your bound was derived" and "you never had a bound".
+    flat_names: list[str] = []
+    for v in model._variables:
+        sz = int(v.size)
+        flat_names.extend([f"{v.name}[{i}]" if sz > 1 else v.name for i in range(sz)])
+    solved_lb = np.asarray(solved_lb, dtype=float)
+    solved_ub = np.asarray(solved_ub, dtype=float)
+    _has_solved_box = solved_lb.size == n and solved_ub.size == n
+
+    def _why(j: int, is_lower: bool) -> str:
+        declared = declared_lb[j] if is_lower else declared_ub[j]
+        cs = cs_lb[j] if is_lower else cs_ub[j]
+        cause = ""
+        if _has_solved_box:
+            derived = solved_lb[j] if is_lower else solved_ub[j]
+            if derived != declared:
+                cause = f", presolve derived {derived:.6g}"
+        return (
+            f"{flat_names[j]}.{'lb' if is_lower else 'ub'}"
+            f"(declared {declared:.6g}{cause}, CS {cs:.3e})"
+        )
+
+    names = [_why(int(j), True) for j in np.nonzero(bad_lb)[0]]
+    names += [_why(int(j), False) for j in np.nonzero(bad_ub)[0]]
+    where = ", ".join(names[:5]) + (" …" if len(names) > 5 else "")
+
+    tol = _DECLARED_DUAL_STAT_TOL * (1.0 + (float(np.max(np.abs(grad))) if grad.size else 0.0))
+    if not rec.ok or rec.residual_max > tol:
+        logger.warning(
+            "Duals withheld (#1037): the backend's multipliers violate complementary "
+            "slackness against the box your model declares at %s, so they are duals "
+            "of a different problem. Refitting against the declared active set did "
+            "not reach stationarity (residual %.3e > %.3e%s), so no duals are "
+            "reported rather than wrong ones.",
+            where,
+            rec.residual_max,
+            tol,
+            "" if rec.ok else f"; {rec.detail}",
+        )
+        return None, None, None
+
+    logger.info(
+        "Duals refitted against the declared box (#1037): the backend's multipliers "
+        "violated complementary slackness at %s; refit stationarity residual %.3e.",
+        where,
+        rec.residual_max,
+    )
+    return (
+        _unpack_constraint_duals(evaluator, rec.mu_full),
+        _unpack_bound_duals(model, rec.lam_lb_full),
+        _unpack_bound_duals(model, rec.lam_ub_full),
+    )
+
+
 def _strong_branch_lp(
     evaluator,
     solution: np.ndarray,
@@ -14034,6 +14234,25 @@ def _solve_continuous(
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
     bound_duals_upper = _unpack_bound_duals(model, nlp_result.bound_multipliers_upper)
 
+    # #1037: the NLP above ran on ``lb``/``ub``, which the nonlinear tightening
+    # may have shrunk below what the model declares (``raw_lb``/``raw_ub``). A
+    # multiplier on a bound that only the tightening created is not a multiplier
+    # of the user's model; refit against the declared box when that happened.
+    # No-op when it did not, which is the usual case.
+    if nlp_result.x is not None:
+        constraint_duals, bound_duals_lower, bound_duals_upper = _duals_against_declared_box(
+            model=model,
+            evaluator=evaluator,
+            x_flat=np.asarray(nlp_result.x, dtype=float),
+            declared_lb=np.asarray(raw_lb, dtype=float),
+            declared_ub=np.asarray(raw_ub, dtype=float),
+            solved_lb=lb,
+            solved_ub=ub,
+            constraint_duals=constraint_duals,
+            bound_duals_lower=bound_duals_lower,
+            bound_duals_upper=bound_duals_upper,
+        )
+
     _gap_certified = True
 
     # Convex single-NLP certificate gate (issue #849). On the convexity-CERTIFIED
@@ -15403,6 +15622,29 @@ def _solve_nlp_bb(
                                 bound_duals_lower[v.name] = np.zeros_like(bound_duals_lower[v.name])
                             if bound_duals_upper is not None and v.name in bound_duals_upper:
                                 bound_duals_upper[v.name] = np.zeros_like(bound_duals_upper[v.name])
+
+                # #1037: the recover solve ran on the FBBT-tightened ``lb``/``ub``
+                # (with integers fixed). A multiplier sitting on a bound that only
+                # FBBT created is not a multiplier of the declared model, so refit
+                # against ``_declared_box`` when that happened. Integer columns are
+                # excluded by the helper, so the fixing above is not mistaken for a
+                # spurious tightening. No-op when presolve changed nothing.
+                (
+                    constraint_duals,
+                    bound_duals_lower,
+                    bound_duals_upper,
+                ) = _duals_against_declared_box(
+                    model=model,
+                    evaluator=evaluator,
+                    x_flat=sol_flat,
+                    declared_lb=_declared_box[:, 0],
+                    declared_ub=_declared_box[:, 1],
+                    solved_lb=lb,
+                    solved_ub=ub,
+                    constraint_duals=constraint_duals,
+                    bound_duals_lower=bound_duals_lower,
+                    bound_duals_upper=bound_duals_upper,
+                )
 
                 # The refined primal was already adopted above, from the
                 # incumbent-options solve, and this recover ran *at* that point —
