@@ -241,7 +241,12 @@ def run_root_presolve(
         elif d["pass_name"] == "reduction_constraints":
             rc_total["bounds_tightened"] += int(d.get("bounds_tightened", 0))
             rc_total["vars_fixed_to_zero"].extend(idx for idx, _ in (d.get("vars_fixed", []) or []))
-            rc_total["constraints_made_redundant"].extend(d.get("constraints_removed", []) or [])
+            # #1053: these rows are *detected* redundant, not removed --
+            # `reduction_constraints` is a BoundsOnly pass. They moved
+            # from `constraints_removed` (which now means "actually
+            # gone", and drives the orchestrator's fixed point) to
+            # `redundant_constraints`.
+            rc_total["constraints_made_redundant"].extend(d.get("redundant_constraints", []) or [])
     if eliminate:
         stats["elimination"] = elim_total
     if aggregate:

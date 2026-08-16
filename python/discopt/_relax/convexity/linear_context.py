@@ -28,6 +28,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._relax.convexity.lattice import Sign, is_strict, sign_from_bounds
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -270,6 +271,35 @@ class LinearContext:
             hi = f + _LP_ENCLOSURE_MARGIN * (1.0 + abs(f)) + const
         # Intersect with the box-only enclosure; LP errors / margins only widen.
         return max(lo, lo_box), min(hi, hi_box)
+
+    def affine_sign(self, coeffs: np.ndarray, const: float) -> Sign:
+        """Sign of ``coeffs · x + const`` over the relaxation.
+
+        Callers that need only the sign — every caller today, since a
+        DCP domain rule asks "is this argument strictly positive?", not
+        "how large is it?" — should use this instead of
+        :meth:`affine_range`. When the free box-only enclosure already
+        yields a *strict* sign, the LP pair is skipped.
+
+        This is exact, not an approximation. :meth:`affine_range`
+        intersects its LP result with the same box enclosure, so the
+        refined interval is a subset of the box interval; a subset of a
+        strictly-positive interval is strictly positive, and ``POS`` /
+        ``NEG`` / ``ZERO`` are the strongest labels the lattice has.
+        The LP therefore cannot produce a different answer — it can
+        only cost time.
+
+        #1053: it costs a lot. On MINLPLib `hda` (722 vars) the
+        classifier made 12 ``affine_range`` calls at ~1.05 s each,
+        21% of a 60 s solve. All 12 were already box-conclusive
+        (``POS``), and all 12 LP-refined signs matched the box sign
+        exactly.
+        """
+        lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
+        box_sign = sign_from_bounds(lo_box + const, hi_box + const)
+        if is_strict(box_sign):
+            return box_sign
+        return sign_from_bounds(*self.affine_range(coeffs, const))
 
 
 def _box_range(coeffs: np.ndarray, lb: np.ndarray, ub: np.ndarray) -> tuple[float, float]:

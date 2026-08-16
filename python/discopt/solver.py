@@ -7872,12 +7872,17 @@ def solve_model(
             )
 
             # Cap presolve to a fraction of the time limit, further clamped to
-            # the time actually left. Without a cap the Rust orchestrator runs
-            # to its iteration cap (16 sweeps, ~1s each on large models), which
-            # on its own can overrun a tight ``time_limit`` before search starts
-            # (e.g. contvar: 17.5s of presolve under a 15s budget). The Rust
-            # side honours ``time_limit_ms`` between sweeps, so the overrun is
-            # bounded by a single sweep.
+            # the time actually left. The Rust side honours ``time_limit_ms``
+            # between sweeps, so an overrun is bounded by a single sweep.
+            #
+            # This cap used to be load-bearing rather than a safety net: the
+            # orchestrator ran to its 16-sweep iteration cap on most models
+            # because `made_progress()` counted detections and last-bit noise
+            # as progress, so the fixed point was unreachable (#1053). With
+            # that fixed, 23 of the 66 in-repo corpus instances now stop at
+            # `NoProgress` instead of the cap and total root-presolve wall over
+            # the corpus fell 58.5s -> 15.4s. Keep the cap anyway — a model
+            # whose passes genuinely keep finding work must not starve search.
             _presolve_budget_s = min(
                 min(max(0.25 * float(time_limit), 2.0), 30.0), _remaining_budget()
             )

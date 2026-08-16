@@ -62,6 +62,9 @@ def make_python_delta(pass_name: str, pass_iter: int = 0) -> dict:
         "aux_constraints_introduced": 0,
         "constraints_removed": [],
         "constraints_rewritten": [],
+        # #1053: rows proved redundant but left in the model. Reported,
+        # never counted as progress -- see `delta_made_progress`.
+        "redundant_constraints": [],
         "vars_fixed": [],
         "vars_aggregated": [],
         "work_units": 0,
@@ -75,6 +78,13 @@ def delta_made_progress(delta: dict) -> bool:
     Mirrors ``PresolveDelta::made_progress`` on the Rust side. Used by
     the orchestrator wrapper to detect a fixed point across Rust and
     Python passes.
+
+    Only fields recording an *actual change* to the model or the bounds
+    belong here. A field holding something a pass merely *detected* --
+    ``redundant_constraints``, implications, cliques -- is re-derived
+    identically on the next sweep from unchanged inputs, so counting it
+    makes this predicate permanently true and the fixed point
+    unreachable. That is #1053; keep detections out.
     """
     return (
         int(delta.get("bounds_tightened", 0)) > 0
@@ -103,6 +113,8 @@ class PresolveDelta:
     aux_constraints_introduced: int = 0
     constraints_removed: list[int] = field(default_factory=list)
     constraints_rewritten: list[int] = field(default_factory=list)
+    #: Rows proved redundant but not removed (#1053). Not progress.
+    redundant_constraints: list[int] = field(default_factory=list)
     vars_fixed: list[tuple[int, float]] = field(default_factory=list)
     vars_aggregated: list[dict] = field(default_factory=list)
     work_units: int = 0
@@ -117,6 +129,7 @@ class PresolveDelta:
             "aux_constraints_introduced": self.aux_constraints_introduced,
             "constraints_removed": list(self.constraints_removed),
             "constraints_rewritten": list(self.constraints_rewritten),
+            "redundant_constraints": list(self.redundant_constraints),
             "vars_fixed": list(self.vars_fixed),
             "vars_aggregated": list(self.vars_aggregated),
             "work_units": self.work_units,

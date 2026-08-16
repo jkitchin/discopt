@@ -207,3 +207,50 @@ def test_report_populates_root_gap_ratio(tmp_path):
     assert "4" in text
     assert "discopt root_gap populated: **1/1**" in text
     assert "BARON root_gap populated: **1/1**" in text
+
+
+# --------------------------------------------------------------------------- #
+# #1053: "infeasible" on an instance with a published global is a false claim
+# --------------------------------------------------------------------------- #
+# Measured on `hda`: BARON 25.12.10 under the full CMU floating-network license
+# returns `19 Infeasible - No Solution` in 0.27 s ("Problem solved during
+# preprocessing / Lower bound is infinity"), while the same build with bound
+# tightening disabled (`LBTTDo 0 / OBTTDo 0 / TDo 0 / MDo 0`) returns
+# -5964.5341 — the published optimum. Before this, the row scored `n/a`,
+# indistinguishable from an honest out-of-time miss.
+
+
+@pytest.mark.parametrize("status", ["19 Infeasible - No Solution", "4 Infeasible", "infeasible"])
+def test_infeasibility_claim_against_known_global_is_a_violation(status):
+    assert classify(status, None, -5964.534084, maximize=False) == VIOLATION
+
+
+@pytest.mark.parametrize("status", ["5 Locally Infeasible", "6 Intermediate Infeasible"])
+def test_local_infeasibility_is_not_an_infeasibility_claim(status):
+    """A local search failing to find a point does not assert none exists."""
+    assert classify(status, None, -5964.534084, maximize=False) == NA
+
+
+def test_infeasibility_claim_without_an_oracle_is_not_judged():
+    """No published global → the claim may well be true. Not a violation."""
+    assert classify("19 Infeasible - No Solution", None, None, maximize=False) == NA
+
+
+def test_timeout_without_incumbent_is_still_na():
+    """ANTI-VACUITY CONTROL: the honest miss must stay `n/a`.
+
+    Without this, classifying *every* objective-less row as VIOLATION would
+    pass the tests above while destroying the distinction they exist to make.
+    """
+    assert classify("time_limit", None, -5964.534084, maximize=False) == NA
+
+
+def test_report_names_a_false_infeasibility_claim(tmp_path):
+    d = SolverRun(status="time_limit", objective=None)
+    b = SolverRun(status="19 Infeasible - No Solution", wall_time=0.27)
+    row = Row("hda", known=-5964.534084, discopt=d, baron=b, maximize=False)
+    md = write_baron_report([row], tl=60, out_dir=tmp_path, ts="T")
+    text = md.read_text()
+    assert "false infeasibility claims" in text
+    assert "hda" in text and "19 Infeasible - No Solution" in text
+    assert "scored VIOLATION, not a miss" in text
