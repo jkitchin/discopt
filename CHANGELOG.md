@@ -739,6 +739,14 @@ The release procedure that produces these entries is documented in
   `incremental_mccormick`; `cutting_planes`, `multilinear_separation`,
   `psd_cuts`) and zero `jax` modules are imported.
 
+  `ROADMAP.md` gets a note rather than an edit. Its phase tables record each task
+  as completed at the time — "T8 NLP evaluator … via JAX", "T17 GPU-batched IPM:
+  Pure-JAX IPM solver", "T7 HiGHS LP wrapper", "T5 … 19 relaxation functions" —
+  and four of those no longer describe the tree (the tape evaluator, the retired
+  IPM, the in-house Rust simplex, and 28 relaxation functions). Back-editing a
+  historical record would erase what actually happened, so the rows stand and a
+  header block states which ones are superseded and that the tree wins.
+
   A re-audit of `manuscript/fact_check_report.md` (headed "Status: ALL ERRORS
   FIXED", 2026-02-15) found four of its six items still unfixed, including a
   McCormick relaxation count that was wrong in both the report and the
