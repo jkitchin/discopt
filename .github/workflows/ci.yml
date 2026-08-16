@@ -3,9 +3,13 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main, feature/mip-nlp-solver]
+    branches: [main, "release/**", feature/mip-nlp-solver]
   pull_request:
-    branches: [main, feature/mip-nlp-solver]
+    # `release/**` is here because a release branch accumulates PRs before it
+    # merges to main (RELEASE.md §9). Without it those PRs get no CI at all,
+    # and the release lands on main having been validated only as one big
+    # merge — the opposite of what the checklist is for.
+    branches: [main, "release/**", feature/mip-nlp-solver]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 # NO `schedule:` trigger. A nightly re-run of the slow correctness lane is a

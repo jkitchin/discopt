@@ -706,6 +706,53 @@ The release procedure that produces these entries is documented in
   exist (`mip_nlp_method="lp_nlp_bb"`, which needs `milp_solver="gurobi"`, and
   `add_regularization`/`level_coef`), and the section now says so.
 
+- **The manuscript's "hybrid Rust/JAX/Python" framing retracted and rewritten**
+  (`docs`, #1049). `manuscript/discopt.org` reported that JAX numerical
+  computation was 92–99.9% of solve wall time. Re-measured on this tree — ten
+  `.nl` corpus instances, three repeats, subprocess-isolated, `discopt.__file__`
+  and `__version__` asserted in every child, interleaved arms, spreads reported:
+
+  | | JAX share of wall | Rust | Python |
+  |---|---|---|---|
+  | default path | **0.00% on all ten** | 1.5–98.5% | 1.0–84.0% |
+  | `DISCOPT_NLP_EVAL=jax` | 3.4–12.9% | — | — |
+
+  Even with JAX deliberately switched on it never exceeds 12.9%, so the retired
+  figure was not merely stale — it was wrong about where the work happens. The
+  Rust/Python split tracks how much search an instance needs, not a language
+  boundary: `alan` (21 nodes) is 84.0% Python because import, `.nl` parse and
+  model build dominate a 0.2 s solve; `tanksize` (17,095 nodes) is 98.5% Rust.
+  Node counts matched between arms on 9 of 10.
+
+  The paper is retitled to "hybrid Rust/Python", §5 is rewritten around the
+  uniform factorable pass and the AD tape that actually run, contributions 2 and
+  3 are recast (batched node evaluation is POUNCE's Rust `solve_nlp_batch`, not
+  `jax.vmap`; the pure-JAX IPM is reported as retired, with the measurement that
+  retired it), and the αBB section now leads with the *rigorous* interval-Hessian
+  Gershgorin bound rather than the sampled `jax.hessian` estimator — a soundness
+  distinction, since sampling cannot certify a bound over a box.
+
+  The same stale claim was corrected in `README.md`, `docs/intro.md` and
+  `CLAUDE.md`. README additionally asserted that the relaxation layer "still uses
+  JAX for envelope evaluation and cut separation"; measured over eight nonlinear
+  instances, both of those run (`uniform_relax`, `mccormick_lp`,
+  `incremental_mccormick`; `cutting_planes`, `multilinear_separation`,
+  `psd_cuts`) and zero `jax` modules are imported.
+
+  `ROADMAP.md` gets a note rather than an edit. Its phase tables record each task
+  as completed at the time — "T8 NLP evaluator … via JAX", "T17 GPU-batched IPM:
+  Pure-JAX IPM solver", "T7 HiGHS LP wrapper", "T5 … 19 relaxation functions" —
+  and four of those no longer describe the tree (the tape evaluator, the retired
+  IPM, the in-house Rust simplex, and 28 relaxation functions). Back-editing a
+  historical record would erase what actually happened, so the rows stand and a
+  header block states which ones are superseded and that the tree wins.
+
+  A re-audit of `manuscript/fact_check_report.md` (headed "Status: ALL ERRORS
+  FIXED", 2026-02-15) found four of its six items still unfixed, including a
+  McCormick relaxation count that was wrong in both the report and the
+  manuscript (`mccormick.py` defines 28 `relax_*` functions). All are fixed and
+  the report's header now records what it actually asserted versus verified.
+
 - **All 62 documentation notebooks re-executed** (`docs`). Their committed
   outputs dated from 2026-04-25 and `docs/_config.yml` has
   `execute_notebooks: "off"`, so nothing had re-run them in three and a half
@@ -749,6 +796,16 @@ The release procedure that produces these entries is documented in
   touch that module.
 
 ### Fixed
+
+- **`docs/notebooks/benchmark_dashboard.ipynb` crashed on a clean clone**
+  (`docs`, #1049). `results/` is gitignored, so a fresh checkout has none, and
+  the dashboard's third code cell built `pd.DataFrame([])` — a frame with *no
+  columns* — then immediately indexed `df["status"]`, raising `KeyError`. Every
+  other cell already degraded gracefully; this one line sat upstream of all of
+  them, so `make notebooks` failed at 2 of 9 cells. Passing `columns=`
+  explicitly yields an empty-but-typed frame: 9 of 9 cells now execute on an
+  empty `results/`, and 9 of 9 on a populated one, still loading the same 5
+  categories / 107 rows / four solvers as before.
 
 - **The benchmark layer profile could not report a measured zero** (`fix`). Both
   producers of the Rust/JAX/Python time fractions —
