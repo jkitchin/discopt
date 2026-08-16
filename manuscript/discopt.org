@@ -947,22 +947,22 @@ The honest headline is therefore: discopt's certificate is *sound everywhere it 
 # TODO(#466): the $\approx 200$-instance BARON/SCIP head-to-head figures ($\approx 180$ each vs discopt's $\approx 120$) are the owner's recent measured run; before submission, pin these counts to the exact benchmark artifact (results JSON + oracle) and replace the "$\approx$" figures with the exact per-solver certified/feasible/violation tallies and a comparison table.
 
 #+NAME: tab-minlplib
-#+CAPTION: MINLPLib smoke test results (10 instances, 60s time limit). Best known objectives from MINLPLib.
+#+CAPTION: MINLPLib smoke test results (9 instances, 60s time limit, v0.8.0, Apple M4 Pro). Best known objectives from MINLPLib. Reproduced by the manuscript smoke-test notebook.
 | Instance | $n$ | $m$ | Status   | $f^*$      | Best Known | Time (s) | Nodes  |
 |----------+-----+-----+----------+------------+------------+----------+--------|
-| chance   |   4 |   3 | optimal  | 29.421     | 29.894     |    0.244 |      0 |
-| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.258 |      0 |
-| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.010 |      1 |
-| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    0.176 |      3 |
-| gear     |   4 |   0 | feasible | 2.3e-11    | 0.000      |   60.000 | 25,153 |
-| nvs01    |   3 |   3 | feasible | -4.904     | 12.470     |   60.731 |  7,787 |
-| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.036 |     11 |
-| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.078 |      9 |
-| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.022 |      9 |
+| chance   |   4 |   3 | optimal  | 29.894     | 29.894     |    0.033 |      0 |
+| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.198 |     23 |
+| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.189 |      5 |
+| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    0.331 |      5 |
+| gear     |   4 |   0 | optimal  | 0.000      | 0.000      |    0.147 |     31 |
+| nvs01    |   3 |   3 | optimal  | 12.470     | 12.470     |    0.289 |      3 |
+| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.025 |      3 |
+| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.047 |      5 |
+| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.168 |      5 |
 
-Of the 9 solvable instances, 7 reach optimal status (matching known optima to $10^{-3}$), while 2 reach feasible solutions at the time limit. The =gear= instance finds a near-zero objective ($2.3 \times 10^{-11}$, matching the known optimum $0.0$) but, *at the time of this smoke test*, could not prove optimality because the =.nl= import path did not yet build convex relaxations; instance =nvs01= reached a local optimum for the same reason. The JAX computation accounts for 92--99.9% of solver time, with Rust tree management contributing $< 1\%$ and Python overhead $< 2\%$.
+All 9 instances now certify global optimality, and every certified objective matches the MINLPLib oracle to the $10^{-3}$ reporting tolerance; the notebook that produces this table asserts the comparison on all 9 rows and reports the executed comparison count, so a silently-skipped check cannot read as a pass. Every instance closes in well under one second, against a 60~s budget.
 
-Subsequent to this table, the =.nl= import path was given the full relaxation and dual-bound machinery of Sections ref:sec-relax and ref:sec-cuts, so the solver now closes the gap and certifies global optimality on the majority of these instances rather than stopping at a feasible point. We have validated this expanded path head-to-head against BARON cite:&Tawarmalani2005 on the subset of MINLPLib instances with a proven global optimum, matching the known optimum (to the $10^{-4}$ correctness tolerance) with zero incorrect results; the residual cases where discopt finds the optimum but does not yet prove it are concentrated in high-degree factorable products whose lifted relaxation is loose, consistent with the limitation noted in the Discussion.
+Earlier revisions of this table were taken before the =.nl= import path carried the relaxation and dual-bound machinery of Sections ref:sec-relax and ref:sec-cuts. At that point =gear= and =nvs01= stopped at a feasible point (=nvs01= at a local optimum of the wrong sign), and =chance= was reported as optimal at $29.421$ against a known optimum of $29.894$. Those numbers are superseded by the run above --- the node counts in this table are single-digit to low-tens where they were previously in the thousands, which is the relaxation doing the work rather than enumeration. We have separately validated the expanded path head-to-head against BARON cite:&Tawarmalani2005 on the subset of MINLPLib instances with a proven global optimum, matching the known optimum (to the $10^{-4}$ correctness tolerance) with zero incorrect results; the residual cases where discopt finds the optimum but does not yet prove it are concentrated in high-degree factorable products whose lifted relaxation is loose, consistent with the limitation noted in the Discussion.
 
 ** Neural Network Embedding Validation
 
