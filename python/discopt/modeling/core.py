@@ -4763,7 +4763,32 @@ class Model:
                         else:
                             result.bound = max(result.bound, _fb.bound)
                     result.node_count = (result.node_count or 0) + _fb.node_count
-                if _fb is not None and _fb.objective is not None:
+                # #1038: ``solve_lp_spatial_bb`` neither receives nor consults
+                # ``lazy_constraints``/``incumbent_callback``, so its primal is
+                # unscreened by the user's gate. "Only ever fills in a MISSING
+                # incumbent" is exactly the hole when a callback is in play: the
+                # incumbent may be missing *because the user vetoed every point
+                # the primary found*, and this branch then reinstated the vetoed
+                # point as ``optimal`` — the #748 defect, one layer above the
+                # tree (measured on the #748 reproduction: the primary correctly
+                # returned ``unknown``/no incumbent and this branch overwrote it
+                # with the rejected x=1). Take the fallback's BOUND (merged
+                # above — a dual bound over the un-cut relaxation is still valid
+                # for the more constrained problem) but never its primal.
+                if (
+                    _fb is not None
+                    and _fb.objective is not None
+                    and (lazy_constraints is not None or incumbent_callback is not None)
+                ):
+                    import logging as _logging
+
+                    _logging.getLogger(__name__).info(
+                        "#844 LP-spatial fallback found a primal, but a "
+                        "lazy_constraints/incumbent_callback is active and that engine "
+                        "cannot consult it — discarding the unscreened primal (#1038); "
+                        "its dual bound is kept."
+                    )
+                elif _fb is not None and _fb.objective is not None:
                     from discopt.solver import _unpack_solution
 
                     result.status = _fb.status

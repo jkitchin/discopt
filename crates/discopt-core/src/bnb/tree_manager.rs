@@ -10,6 +10,12 @@ use crate::bnb::branching::{
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
 
+/// Any imported bound at or above this is the orchestrator's *failure/exclusion
+/// sentinel* (`INFEASIBILITY_SENTINEL = 1e30` in `python/discopt/constants.py`),
+/// not a bound the relaxation proved. Mirrors `SENTINEL_THRESHOLD` there; keep
+/// the two in sync.
+pub(crate) const SENTINEL_THRESHOLD: f64 = 1e29;
+
 /// A batch of nodes exported for relaxation evaluation.
 #[derive(Debug)]
 pub struct ExportBatch {
@@ -469,7 +475,10 @@ impl TreeManager {
                 // and the floored `local_lower_bound` is only the inherited
                 // parent bound (valid for pruning, but the solution is an
                 // untrusted placeholder). See `PendingResult::bound_trusted`.
-                bound_trusted: r.lower_bound.is_finite(),
+                // The `1e30` failure/exclusion sentinel is finite but is equally
+                // not a proved bound (#1038) — a point carrying it must never be
+                // promoted to the incumbent, so it is untrusted here too.
+                bound_trusted: r.lower_bound.is_finite() && r.lower_bound < SENTINEL_THRESHOLD,
                 certified_infeasible: r.certified_infeasible,
             }));
     }
@@ -545,6 +554,20 @@ impl TreeManager {
             // subtree, and promoting it would inject a FALSE incumbent whose
             // "objective" is the parent's lower bound at an unverified point;
             // #598.)
+            // A node the orchestrator SENTINELLED (`INFEASIBILITY_SENTINEL` =
+            // 1e30) carries no bound its relaxation proved — it is how the Python
+            // side says "this node is excluded": the relaxation failed, or a user
+            // callback (`lazy_constraints` cut / `incumbent_callback` returning
+            // False) rejected the integer point it found. That exclusion is
+            // handled through `bound_trusted` (see `import_results`), NOT here:
+            // `trusted` governs ROUTING (branch vs fathom-as-unresolved), and a
+            // sentinelled node must keep routing exactly as before — it still
+            // spatially branches, and it must not flip `bound_unresolved`, which
+            // would discard the whole tree bound where the Python orchestrator
+            // deliberately keeps it via `_taint_floor_internal` (solver.py's
+            // "instead of discarding the entire tree bound", DECOMP-1). Widening
+            // `trusted` was measured to cost `m3` its certificate (bound
+            // 37.7999997 → none) for no soundness gain.
             let trusted = node_lb.is_finite();
             let int_feasible = trusted
                 && (result.is_feasible
@@ -580,6 +603,15 @@ impl TreeManager {
                     // path described above. Fall through to branching; if no
                     // branch direction remains, the no-decision arm below
                     // fathoms it into `unresolved_floor` (#598).
+                    //
+                    // #1038 routes here too: a node the orchestrator sentinelled
+                    // because a user callback VETOED its integer point is
+                    // `bound_trusted == false`, so it can neither be fathomed
+                    // here nor promoted below. Before that, 1e30 was *finite* and
+                    // read as a proved bound, and step 1 above cannot cut it
+                    // before the first incumbent exists (`1e30 >= +inf` is
+                    // false) — so the vetoed point became the incumbent and was
+                    // reported `optimal`.
                 }
             }
 
@@ -824,7 +856,7 @@ impl TreeManager {
                 // trusted (finite-bound) node here IS resolved and stays certifiable.
                 if !trusted {
                     self.bound_unresolved = true;
-                } else if !result.bound_trusted {
+                } else if !result.bound_trusted && node_lb < SENTINEL_THRESHOLD {
                     // The node's own relaxation FAILED (raw import -inf) but a
                     // valid finite bound for its box was inherited from an
                     // ancestor (`import_results` floor), and no branch direction
@@ -834,6 +866,16 @@ impl TreeManager {
                     // close if this removed subtree is provably within tolerance
                     // of the incumbent, which keeps a gap-closed exit rigorous
                     // without pinning the whole tree bound at -inf.
+                    //
+                    // A SENTINELLED node (#1038) is excluded from this floor: its
+                    // `node_lb` is 1e30, not a bound anything proved, and
+                    // `update_global_lower_bound` caps the floor at the incumbent
+                    // — so flooring at 1e30 would collapse the global bound ONTO
+                    // the incumbent and certify the very subtree that was removed
+                    // without proof. The orchestrator already accounts for these
+                    // nodes rigorously, flooring the reported bound at their
+                    // pop-time bound (`_taint_floor_internal`, solver.py) and
+                    // barring an `infeasible` verdict (`_nonrigorous_fathom`).
                     self.unresolved_floor = self.unresolved_floor.min(node_lb);
                 }
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
@@ -1237,6 +1279,77 @@ mod tests {
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.pruned, 0, "an UNPROVEN sentinel must not prune");
+    }
+
+    /// #1038: a sentinelled node whose solution happens to be integer-feasible
+    /// must never be promoted to the incumbent, even with no incumbent yet.
+    ///
+    /// This is how a `incumbent_callback` veto (and a `lazy_constraints` cut) is
+    /// communicated: the orchestrator rewrites the node's bound to 1e30. That
+    /// value is finite, so the node used to pass the `trusted`/`bound_trusted`
+    /// checks and — because `1e30 >= +inf` is false, so the bound-cut in step 1
+    /// could not fire before the first incumbent — was fathomed AND promoted,
+    /// making the VETOED point the incumbent and reporting it `optimal`.
+    #[test]
+    fn sentinelled_integer_node_is_never_promoted_to_the_incumbent() {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        assert_eq!(tm.incumbent_value, f64::INFINITY, "no incumbent yet");
+
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1e30,   // the orchestrator's exclusion sentinel
+            solution: vec![3.0], // INTEGER-feasible, and the excluded point
+            is_feasible: true,
+            certified_infeasible: false,
+        }]);
+        let stats = tm.process_evaluated();
+
+        assert_eq!(
+            stats.incumbent_updates, 0,
+            "a sentinelled (callback-excluded) point must not become the incumbent"
+        );
+        assert!(
+            tm.incumbent_solution.is_none(),
+            "no incumbent solution may be recorded from a sentinelled node, got {:?}",
+            tm.incumbent_solution
+        );
+        assert_eq!(
+            tm.incumbent_value,
+            f64::INFINITY,
+            "the sentinel must not become the incumbent value"
+        );
+        // The fix is confined to TRUST, not routing: the node still branches, so
+        // its subtree is explored rather than silently removed (#927), and the
+        // tree bound is not discarded — the orchestrator's `_taint_floor_internal`
+        // is what keeps a sentinelled node's bound honest.
+        assert_eq!(
+            stats.fathomed, 1,
+            "every integer variable is fixed here, so the node has no branch direction \
+             and is fathomed — the point is that it is fathomed WITHOUT being promoted"
+        );
+        assert!(
+            !tm.bound_unresolved,
+            "a sentinelled node must not discard the whole tree bound (measured: it costs \
+             m3 its certificate); the Python taint floor accounts for it"
+        );
+        assert_eq!(
+            tm.unresolved_floor,
+            f64::INFINITY,
+            "the 1e30 sentinel must never enter the unresolved floor — capped at the \
+             incumbent it would certify the unproven subtree"
+        );
     }
 
     #[test]
