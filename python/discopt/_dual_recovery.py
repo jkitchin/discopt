@@ -160,9 +160,21 @@ def recover_multipliers(
         is_le = sense_arr == "<="
         is_ge = sense_arr == ">="
         is_eq = sense_arr == "=="
-        active_le = is_le & (np.abs(signed) <= active_tol)
-        active_ge = is_ge & (np.abs(signed) <= active_tol)
-        row_select = np.where(active_le | active_ge | is_eq)[0]
+        # Row activity is judged RELATIVE to the row's own scale, using the same
+        # row_scale the examiner uses for scaled primal feasibility:
+        # max(1, |rhs|, max|J_row| * max(1, |x|)). An absolute test measures the
+        # row in whatever units it happens to be written in, so multiplying a
+        # constraint through by 1000 -- which changes nothing about the problem
+        # -- makes a binding row read as inactive: the NLP's own convergence
+        # slack is scaled up with it. That empties the active set and the
+        # multiplier of a genuinely binding row is lost.
+        if jac.size:
+            jac_scale = np.max(np.abs(jac) * np.maximum(1.0, np.abs(x_flat))[None, :], axis=1)
+        else:
+            jac_scale = np.zeros(body.size)
+        row_scale = np.maximum(np.maximum(np.abs(rhs_arr), jac_scale), 1.0)
+        near = np.abs(signed) <= active_tol * row_scale
+        row_select = np.where((is_le & near) | (is_ge & near) | is_eq)[0]
     else:
         row_select = np.zeros(0, dtype=int)
 
