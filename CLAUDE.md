@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend (in-house primal/dual simplex, B&B tree management, FBBT/presolve), JAX (automatic differentiation, NLP relaxations, GPU acceleration), and Python orchestration. This repository contains the testing and benchmarking framework that validates correctness and measures performance against solvers like BARON, Couenne, SCIP, and HiGHS.
+discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend (in-house primal/dual simplex, B&B tree management, FBBT/presolve, the POUNCE AD tape), a numpy relaxation layer, and Python orchestration. **JAX is not on the default solve path** — it is an optional dependency of the differentiable-solve and learned-relaxation subsystems, and a default solve imports zero `jax` modules (measured). Do not plan work against "the JAX layer"; see the `_relax/` note under Architecture. This repository contains the testing and benchmarking framework that validates correctness and measures performance against solvers like BARON, Couenne, SCIP, and HiGHS.
 
 ## Development Philosophy (read this first)
 
