@@ -9,5 +9,9 @@ license = "EPL-2.0"
 repository = "https://github.com/discopt-org/discopt"
 
 [workspace.dependencies]
-pyo3 = { version = "0.23", features = ["extension-module"] }
+# abi3-py310 builds against CPython's stable ABI, so ONE wheel per platform
+# covers every supported interpreter. The floor must track `requires-python` in
+# pyproject.toml -- if that moves to >=3.11, this becomes abi3-py311.
+# `.github/scripts/check_wheel_coverage.py` fails the release if the two drift.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 numpy = "0.23"

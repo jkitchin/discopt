@@ -19,9 +19,22 @@ Examples
 
 from __future__ import annotations
 
+import sys
 from importlib.resources import files
-from importlib.resources.abc import Traversable
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    # ``Traversable`` appears here only in annotations, and PEP 563 (the
+    # ``__future__`` import above) makes those strings -- so this never executes
+    # at runtime. It has to be guarded because ``importlib.resources.abc`` is
+    # 3.11+, while ``requires-python`` promises 3.10: until #1055 this was an
+    # unconditional import, and ``import discopt.skills`` (hence
+    # ``discopt install-skills``) raised ModuleNotFoundError on 3.10. On 3.10 the
+    # same class is reachable as ``importlib.abc.Traversable``.
+    if sys.version_info >= (3, 11):
+        from importlib.resources.abc import Traversable
+    else:
+        from importlib.abc import Traversable
 
 _PACKAGE = "discopt.skills"
 
