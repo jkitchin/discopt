@@ -991,3 +991,59 @@ class TestIssue748MilpMiqpCallbackDispatch:
         assert not (res.status == "infeasible" and res.gap_certified), (
             "feasible model falsely certified infeasible"
         )
+
+    def test_vetoed_root_is_never_certified_optimal(self):
+        """#1038: the veto must survive BOTH re-entry paths, not just the tree.
+
+        The same reproduction, pinned harder. Two independent defects let the
+        rejected point back out and each is invisible to the assertion above
+        whenever the other is fixed:
+
+        1. The Rust tree treated the orchestrator's ``1e30`` exclusion sentinel
+           as a *trusted* bound (1e30 is finite). Before the first incumbent the
+           bound-cut cannot fire (``1e30 >= +inf`` is false), so the sentinelled,
+           integer-feasible node was fathomed AND promoted — the vetoed point
+           became the incumbent with objective 1e30, reported as ``optimal``.
+        2. ``Model.solve``'s #844 no-incumbent LP-spatial fallback re-solved the
+           model with an engine that never sees the callback and overwrote the
+           honest ``unknown`` with the same vetoed point.
+
+        A run that returns no ``x`` passes the sibling test vacuously, so assert
+        the certificate directly: a solve whose only cheap optimum was vetoed may
+        not come back ``optimal``, and may not come back certified.
+        """
+        m = discopt.Model("milp1038_veto_root")
+        x = m.binary("x")
+        y = m.binary("y")
+        m.minimize(x + 2 * y)
+        m.subject_to(x + y >= 1)
+
+        seen = []
+
+        def veto_x1(ctx, model, sol):
+            xv = float(np.ravel(sol["x"])[0])
+            seen.append(xv)
+            return xv < 0.5
+
+        res = m.solve(incumbent_callback=veto_x1, time_limit=30)
+
+        # The gate must actually have run — otherwise this test proves nothing
+        # (CLAUDE.md §6).
+        assert seen, "incumbent_callback was never invoked; the test measured nothing"
+        assert any(v > 0.5 for v in seen), (
+            f"the callback never saw the x=1 point it exists to veto: {seen}"
+        )
+
+        if res.x is not None:
+            assert round(float(np.ravel(res.x["x"])[0])) == 0, (
+                f"vetoed x=1 point returned (status {res.status}, obj {res.objective})"
+            )
+            return  # an accepted point WAS found; certifying it is legitimate
+
+        # No accepted incumbent: the result must be honest about it.
+        assert res.status != "optimal", (
+            f"no acceptable incumbent exists, yet status is optimal (obj {res.objective})"
+        )
+        assert not res.gap_certified, (
+            "a callback rejection is a non-rigorous fathom — it can never certify"
+        )
