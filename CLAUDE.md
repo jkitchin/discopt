@@ -202,6 +202,56 @@ python discopt_benchmarks/run_benchmarks.py --gate phase1     # Check phase gate
 python discopt_benchmarks/run_benchmarks.py --suite comparison --solvers discopt,baron
 ```
 
+#### The 3-way head-to-head (discopt vs BARON vs SCIP) — run it THIS way
+
+This is the standard pre-release comparison. It has been re-derived from scratch
+several times and gotten wrong the same way each time, so the procedure is fixed
+here. **BARON and SCIP do not go through the same harness.** There is no single
+command that produces a valid three-way table.
+
+**Step 1 — discopt and SCIP, via the benchmark runner.** SCIP is fully licensed
+and reads `.nl` directly, so it runs in-harness:
+
+```bash
+python -u discopt_benchmarks/run_benchmarks.py --suite global50 \
+    --solvers discopt,scip --report --output <out>.json
+```
+
+**Step 2 — BARON, via GAMS only.** `/Applications/AMPL/baron` is **DEMO-LICENSED
+(10 variables, 10 constraints)** and silently refuses anything larger. The full
+CMU floating-network license lives inside GAMS, which reads `.gms`, not `.nl`:
+
+```bash
+python -u -m discopt_benchmarks.scripts.global_opt_baron_vs_discopt \
+    --time-limit 60 --instances "<comma-separated names>" --out-dir <dir>
+```
+
+That script fetches `minlplib.org/gms/<name>.gms` (the canonical GAMS source, so
+there is no `.nl → .gms` conversion-fidelity risk), runs
+`gams <name>.gms minlp=baron optcr=0 optca=1e-9 reslim=<T>`, parses the `.lst`,
+and runs **discopt interleaved on the same instances** — so its discopt column is
+the one to compare BARON against, not the column from step 1.
+
+**The failure signature to watch for.** Demo-licensed BARON returns in ~0.03 s
+with `nodes=0` and no objective. A panel run against it reports something like
+"BARON 31/50" — which reads as a solver result but is just "19 instances exceeded
+10 variables". The 31 successes are a size-biased subset, not a comparison. Before
+believing any BARON number, confirm the license is not demo:
+
+```bash
+grep "Floating Network License" <run>.lst   # full license
+# vs. "Sorry, a demo license is limited to 10 variables and 10 constraints"
+```
+
+Measured 2026-08-16 on the global50 panel at 60 s/instance: demo BARON solved
+31/50; the same binary under GAMS with the full license solved `flay03m`
+(26 vars, 24 cons) to optimality in 0.32 s after the demo had refused it outright.
+
+Report **median time over solved instances** and **total wall over all
+instances** alongside SGM — a solved-only statistic flatters whichever solver
+times out most, since its slowest instances leave the population. Both columns
+are in the runner's summary table.
+
 **Benchmark instance corpus**: `~/Dropbox/projects/discopt-minlp-benchmark/` holds
 the full MINLPLib snapshot — ~4,800 `.nl` instances (`minlplib/nl/`), reference
 optima/dual bounds (`minlplib.solu`), problem-type/size metadata

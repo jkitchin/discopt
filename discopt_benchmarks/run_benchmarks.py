@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -555,10 +556,10 @@ def _run_benchmark(args):
 
     n_instances = len(results.get_instances())
     print(f"\nSuite: {args.suite} ({n_instances} instances, {time_limit}s limit)")
-    print("-" * 70)
+    print("-" * 88)
     print(f"{'Solver':<15s} {'Solved':>8s} {'Proved':>8s} {'Incorrect':>10s} "
-          f"{'SGM(s)':>10s} {'Med Gap':>10s}")
-    print("-" * 70)
+          f"{'SGM(s)':>10s} {'Med(s)':>10s} {'Total(s)':>10s} {'Med Gap':>10s}")
+    print("-" * 88)
     for solver_name in results.get_solvers():
         solver_results = results.get_results(solver_name)
         n_solved = solved_count(solver_results)
@@ -569,15 +570,25 @@ def _run_benchmark(args):
         gap_stats = final_gap_stats(solver_results)
         med_gap = gap_stats["median"]
 
+        # Med(s) is over SOLVED instances only -- same population as SGM, so the
+        # two columns are comparable. Total(s) is over EVERY instance including
+        # timeouts and errors: it answers "how long did this panel cost", which a
+        # solved-only statistic hides precisely when a solver times out most.
+        med_time = statistics.median(times) if times else float("nan")
+        total_time = sum(r.wall_time for r in solver_results)
+
         sgm_str = f"{sgm:.2f}" if sgm < 1e6 else "inf"
+        med_time_str = f"{med_time:.2f}" if med_time == med_time else "N/A"
+        total_str = f"{total_time:.1f}"
         gap_str = f"{med_gap:.2%}" if med_gap == med_gap else "N/A"
         solved_str = f"{n_solved}/{n_instances}"
         proved_str = f"{n_proved}/{n_instances}"
         print(
             f"{solver_name:<15s} {solved_str:>8s} {proved_str:>8s}"
-            f" {n_incorrect:>10d} {sgm_str:>10s} {gap_str:>10s}"
+            f" {n_incorrect:>10d} {sgm_str:>10s} {med_time_str:>10s}"
+            f" {total_str:>10s} {gap_str:>10s}"
         )
-    print("-" * 70)
+    print("-" * 88)
 
     # Append to history
     try:
