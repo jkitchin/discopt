@@ -109,7 +109,7 @@ extract var info ─► root FBBT presolve ─► root infeasible? ─► return
    └─ choose per-node BOUND MODE  _mc_mode:
         "auto" ─► has relaxable nonlinearity / branchable?  ─► "lp"
         │                                  pure-discrete fallback ─► "none"
-        "lp"  ─► build MccormickLPRelaxer( superposition, psd_cuts, rlt_cuts, rlt_level1 )
+        "lp"  ─► build MccormickLPRelaxer( psd_cuts, rlt_cuts, rlt_level1 )
         │          RLT resolution:  rlt switch → rlt_level1 (build-time, root bound)
         │                                      + rlt_cuts   (per-node separation)
         │                           auto: engage level1 when n_vars ≤ _AUTO_RLT_LEVEL1_MAX_VARS

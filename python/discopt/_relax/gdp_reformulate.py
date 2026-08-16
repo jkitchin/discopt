@@ -11,6 +11,7 @@ original model is returned unchanged (zero overhead).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import numpy as np
 
@@ -1077,24 +1078,46 @@ def _reformulate_disjunction_hull(
                 )
                 rhs_expr = _wrap(con.rhs) * y_k
             else:
-                # Nonlinear: perspective form with clamped y_k
-                # f(v_k / y_clamp) * y_clamp where y_clamp = y_k + eps.
+                # Nonlinear: the Furman-Sawaya-Grossmann eps-perspective
+                # (Furman2020 in docs/references.bib), for g(x) = body - rhs <= 0:
                 #
-                # The eps clamp avoids division by zero at y_k = 0 but makes the
-                # perspective only an O(eps) approximation at the integer faces:
-                # at y_k = 0 the disaggregated vars are pinned to 0 by the
-                # bound-linking constraints, yet the body evaluates to
-                # f(0) * eps != 0 instead of exactly 0. The constraints are kept
-                # exact here (so KKT verification sees them tight at the optimum);
-                # the eps-scale residual is absorbed downstream by the feasibility
-                # tolerance in constraint-based bound tightening, which must not
-                # certify infeasibility from a violation below the solver's
-                # feasibility tolerance (issue #27a).
-                y_clamp = y_k + _wrap(eps)
+                #     yhat * g(v_k / yhat) - eps * g(0) * (1 - y_k) <= 0,
+                #     yhat = (1 - eps) * y_k + eps.
+                #
+                # Both pieces are load-bearing, and the previous form
+                # (``yhat = y_k + eps`` with no g(0) term) had NEITHER, so it was
+                # exact at NEITHER integer face:
+                #
+                #   y_k = 0: the disaggregated vars are pinned to 0 by the bound
+                #     linking rows, so the body evaluates to eps * g(0), not 0.
+                #     Whenever g(0) != 0 that is a HARD violation of a row the
+                #     model states as an equality -- the "off" disjunct can never
+                #     actually be off. The -eps*g(0)*(1-y_k) term cancels it
+                #     exactly.
+                #   y_k = 1: yhat was 1 + eps, so the row read
+                #     g(v/(1+eps)) * (1+eps) -- an O(eps) DISTORTION of the
+                #     selected disjunct's own constraint. Scaling eps into the
+                #     y_k coefficient makes yhat exactly 1 there.
+                #
+                # #1043: this is not a tolerance nicety. The residuals make the
+                # reformulated model infeasible in exact arithmetic, and the
+                # rigorous machinery downstream (FBBT / the McCormick LP, which
+                # must be exact to be sound) then proves it empty and reports
+                # ``infeasible`` for a feasible model -- the worst-class error.
+                # Measured on ``max x s.t. if_else(x>=0, exp(x)-1, log(-x+3)) <= 1,
+                # x in [-10,10]``: at the true optimum x = log 2 the old rows are
+                # violated by 1.0986e-08 = eps*log(3) (the off disjunct) and
+                # 3.86e-09 (the on disjunct). Shrinking eps does not help --
+                # the model is still exactly infeasible at eps = 1e-14 -- which is
+                # why only cancelling the terms, not making them small, fixes it.
+                g0 = _body_at_zero(con.body, all_vars) - float(np.max(con.rhs))
+                y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
                 persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
                 subst_body = _substitute_vars(con.body, persp_map)
                 hull_body = subst_body * y_clamp
-                rhs_expr = _wrap(con.rhs) * y_k
+                if g0 != 0.0:
+                    hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
+                rhs_expr = _wrap(con.rhs) * y_clamp
 
             if con.sense == "<=":
                 new_cons.append(
@@ -1133,6 +1156,101 @@ def _reformulate_disjunction_hull(
                 )
 
     return new_vars, new_cons
+
+
+class HullPerspectiveOriginError(ValueError):
+    """``g(0)`` is not finite, so the hull perspective cannot be formed.
+
+    Raised by :func:`_body_at_zero`. See its docstring for why this is a refusal
+    rather than a fallback value.
+    """
+
+
+def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
+    """Evaluate a disjunct constraint body with every disjunct variable at 0.
+
+    The Furman-Sawaya-Grossmann perspective needs ``g(0)`` to cancel the residual
+    the eps clamp leaves on a de-selected disjunct (#1043). ``g(0)`` is a property
+    of the *function*, not of the box: at ``y_k = 0`` the bound-linking rows pin
+    every disaggregated variable to exactly 0, so ``g(0)`` is the value the row
+    actually takes there, whether or not 0 lies inside the disjunct's own bounds.
+
+    Refuses loudly (CLAUDE.md §3) when the body is not finite at the origin --
+    ``log(0)``, ``1/0``, ``sqrt`` of a negative -- because there is no sound
+    numeric substitute. A fabricated finite ``g(0)`` would leave an uncancelled
+    eps-scale residual on the off disjunct, which is exactly the false-infeasible
+    class this function exists to close. The old formulation did not refuse: it
+    emitted ``f(0) * eps`` = NaN/-inf straight into the row.
+    """
+    _UN: dict[str, Callable[[float], float]] = {
+        "neg": lambda a: -a,
+        "-": lambda a: -a,
+        "abs": abs,
+        "exp": np.exp,
+        "log": np.log,
+        "sqrt": np.sqrt,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "tanh": np.tanh,
+    }
+    _BIN: dict[str, Callable[[float, float], float]] = {
+        "+": lambda a, b: a + b,
+        "-": lambda a, b: a - b,
+        "*": lambda a, b: a * b,
+        "/": lambda a, b: a / b,
+        "**": lambda a, b: a**b,
+        "^": lambda a, b: a**b,
+    }
+    _NARY: dict[str, Callable[..., float]] = {"max": max, "min": min}
+
+    def _walk(e: Expression) -> float:
+        if isinstance(e, Variable):
+            if e.name not in all_vars:
+                raise HullPerspectiveOriginError(
+                    f"variable {e.name!r} appears in a disjunct body but was not "
+                    "collected as a disjunct variable"
+                )
+            return 0.0
+        if isinstance(e, Constant):
+            return float(np.max(e.value))
+        if isinstance(e, IndexExpression):
+            return _walk(e.base)
+        if isinstance(e, UnaryOp):
+            if e.op not in _UN:
+                raise HullPerspectiveOriginError(f"unsupported unary op {e.op!r}")
+            return float(_UN[e.op](_walk(e.operand)))
+        if isinstance(e, BinaryOp):
+            if e.op not in _BIN:
+                raise HullPerspectiveOriginError(f"unsupported binary op {e.op!r}")
+            return float(_BIN[e.op](_walk(e.left), _walk(e.right)))
+        if isinstance(e, FunctionCall):
+            args = [_walk(a) for a in e.args]
+            if e.func_name in _NARY:
+                return float(_NARY[e.func_name](*args))
+            if e.func_name not in _UN or len(args) != 1:
+                raise HullPerspectiveOriginError(f"unsupported function {e.func_name!r}")
+            return float(_UN[e.func_name](args[0]))
+        raise HullPerspectiveOriginError(f"unsupported expression node {type(e).__name__}")
+
+    with np.errstate(all="raise"):
+        try:
+            val = _walk(expr)
+        except (FloatingPointError, ValueError, ZeroDivisionError, OverflowError) as exc:
+            if isinstance(exc, HullPerspectiveOriginError):
+                raise
+            raise HullPerspectiveOriginError(
+                f"the disjunct body is not finite at the origin ({exc}); the hull "
+                "perspective needs g(0) to cancel the eps residual on a de-selected "
+                "disjunct. Reformulate this disjunction with method='big-m'."
+            ) from exc
+    if not np.isfinite(val):
+        raise HullPerspectiveOriginError(
+            f"the disjunct body evaluates to {val} at the origin; the hull "
+            "perspective needs a finite g(0) to cancel the eps residual on a "
+            "de-selected disjunct. Reformulate this disjunction with method='big-m'."
+        )
+    return val
 
 
 def _hull_linear_substitute(

@@ -2619,6 +2619,119 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     return max_viol <= tol
 
 
+# Tolerance shared by the two conditions of :func:`_weakly_active_crossover` —
+# the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), which is also
+# the stationarity tolerance the examiner holds a reported point to.
+_CROSSOVER_TOL = 1e-6
+
+
+def _weakly_active_crossover(x, lb, ub, mult_lower, mult_upper, grad, tol=_CROSSOVER_TOL):
+    """Return ``{index: bound_value}`` for coordinates to place ON a bound (#1043).
+
+    An interior-point method stops a barrier distance ``d ~ mu / lambda`` inside
+    each active bound. Where the bound is only *weakly* active — the objective
+    gradient vanishes on it, so ``lambda -> 0`` — that distance is large even
+    though the IPM's own complementarity ``lambda * d`` is tiny and its
+    convergence test is satisfied. The returned point then carries a first-order
+    residual of order ``d`` in that coordinate while the solver correctly reports
+    ``Solve_Succeeded``: nothing is wrong with the NLP solve, the iterate is
+    simply not the vertex.
+
+    This is a class, not an instance quirk. The periodicity reduction in
+    ``_relax/nonlinear_bound_tightening.py`` maps a doubly-infinite periodic-only
+    variable to exactly ``[-pi, pi]``, and a periodic function attains its
+    extrema at the period boundary — so the reduction *systematically* places the
+    optimum ON the bound it creates, which is exactly the weakly-active case.
+    Measured on ``nlp_001_010`` (``min ... + cos(y)``, ``y`` reduced to
+    ``[-pi, pi]``): the polish stopped at ``y = -3.14138899`` with
+    ``lambda = 2.037e-04`` and ``d = 2.037e-04`` — complementarity 4.15e-08
+    (converged), stationarity 2.037e-04 (the examiner's only failing check).
+
+    The repair is a crossover: put the coordinate on the bound. Three conditions,
+    each load-bearing:
+
+    1. ``lambda > 0`` and ``lambda * d <= tol`` — the IPM's own certificate that
+       the bound is active; it is precisely the quantity its complementarity test
+       measured. Note this is *nearly* vacuous at convergence, since an inactive
+       finite bound carries ``lambda ~ mu / d`` and therefore
+       ``lambda * d ~ mu``; what it rejects is an unconverged coordinate the
+       barrier is still pushing away from a strongly-priced bound.
+    2. ``|df/dx_j| * d <= tol`` — moving to the bound perturbs the objective by
+       a first-order-negligible amount. This also caps the move: with (3) it
+       forces ``d < tol / |df/dx_j| < 1``.
+    3. ``|df/dx_j| > tol`` — there is an actual stationarity defect at this
+       coordinate to repair. Without it, any variable absent from the objective
+       (``df/dx_j == 0``) satisfies (1) and (2) at *every* finite bound no matter
+       how distant, and would be relocated for no reason.
+
+    Condition 1 alone selects gross moves: at ``nlp_008_010``'s incumbent ``z``
+    sits 0.54 from its lower bound with ``lambda = 4.5e-09``, so
+    ``lambda * d = 2.4e-09`` passes (1) while snapping ``z`` would be a wholesale
+    relocation; (2) rejects it with ``|g| * d = 0.47``. On ``nlp_001_010``'s own
+    ``y``, (2) is what rejects the far side: the *upper* bound ``y <= pi`` also
+    passes (1) with ``lambda * d = 9.1e-09``, and only ``|g| * d = 1.3e-03``
+    rules it out. Measured selectivity: ``nlp_001_010 -> {1: -pi}``,
+    ``nlp_008_010 -> {}``.
+
+    The caller must still verify the snapped point (feasibility, objective not
+    worse) before adopting it — this function only nominates candidates.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        The point returned by the NLP solve.
+    lb, ub : np.ndarray
+        The box that solve was given (so the multipliers refer to these bounds).
+    mult_lower, mult_upper : np.ndarray or None
+        Bound multipliers from the same solve. ``None`` disables the test.
+    grad : np.ndarray or None
+        Objective gradient at *x*. ``None`` disables the test.
+    tol : float
+        Shared threshold for both conditions.
+
+    Returns
+    -------
+    dict[int, float]
+        Index -> bound value, empty when no coordinate qualifies.
+    """
+    out: dict[int, float] = {}
+    if mult_lower is None or mult_upper is None or grad is None:
+        return out
+    xv = np.asarray(x, dtype=np.float64).ravel()
+    lo = np.asarray(lb, dtype=np.float64).ravel()
+    hi = np.asarray(ub, dtype=np.float64).ravel()
+    ml = np.asarray(mult_lower, dtype=np.float64).ravel()
+    mu = np.asarray(mult_upper, dtype=np.float64).ravel()
+    gv = np.asarray(grad, dtype=np.float64).ravel()
+    if not (xv.size == lo.size == hi.size == ml.size == mu.size == gv.size):
+        return out
+    if not (np.all(np.isfinite(xv)) and np.all(np.isfinite(gv))):
+        return out
+    for j in range(xv.size):
+        if abs(gv[j]) <= tol:
+            # (3): nothing to repair here — leave the coordinate where the NLP
+            # solve put it.
+            continue
+        for bnd, lam, sign in ((lo[j], ml[j], 1.0), (hi[j], mu[j], -1.0)):
+            # 1e15 mirrors the "infinite bound" convention used throughout the
+            # solver (the 1e20 sentinel and anything near it is not a bound).
+            if not np.isfinite(bnd) or abs(bnd) >= 1e15:
+                continue
+            d = sign * (xv[j] - bnd)
+            if not (d > tol):
+                # Already on the bound (nothing to do), or outside it (a bound
+                # relaxation the caller owns — never "snap" a point inward).
+                continue
+            if not (np.isfinite(lam) and lam > 0.0):
+                continue
+            if lam * d > tol:
+                continue
+            if abs(gv[j]) * d > tol:
+                continue
+            out[j] = float(bnd)
+    return out
+
+
 # The absolute tolerance the NLP-BB exit gate (#954) holds a returned incumbent
 # to: the repo's declared ``abs=1e-6`` (CLAUDE.md "Key Constraints"), the same
 # figure ``_matrix_solution_feasible`` enforces on the matrix paths (#952) and
@@ -3950,6 +4063,206 @@ def _unpack_bound_duals(
     if offset != len(mult_x):
         return None
     return out
+
+
+# Stationarity residual a declared-box refit must meet before its multipliers
+# are reported: the declared ``abs=1e-6``, with a relative forgiveness on the
+# gradient scale so a large-coefficient model is not refused for being large.
+_DECLARED_DUAL_STAT_TOL = 1e-6
+# Complementary-slackness budget for the reported multipliers, judged against
+# the box the model declares. Matches ``examiner.PRIMAL_CS_TOL`` — the check
+# that exposed #1037 — so the solver holds itself to what the examiner asserts.
+_DECLARED_DUAL_CS_TOL = 1e-7
+
+
+def _duals_against_declared_box(
+    *,
+    model: Model,
+    evaluator,
+    x_flat: np.ndarray,
+    declared_lb: np.ndarray,
+    declared_ub: np.ndarray,
+    solved_lb: np.ndarray,
+    solved_ub: np.ndarray,
+    constraint_duals: Optional[dict[str, np.ndarray]],
+    bound_duals_lower: Optional[dict[str, np.ndarray]],
+    bound_duals_upper: Optional[dict[str, np.ndarray]],
+    active_tol: float = 1e-6,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Report duals of the model the USER DECLARED, not of the presolved one (#1037).
+
+    The backends solve a box that presolve (FBBT / nonlinear tightening) may have
+    shrunk. When a *derived* bound is active at the returned point, the backend
+    hangs a bound multiplier on it — but that bound is not a constraint of the
+    user's model, so neither is its multiplier. The reported duals then satisfy
+    KKT for the tightened problem and violate it for the declared one:
+
+        min −x  s.t.  x²+y² ≤ 1,  x,y ∈ [−2,2]
+
+    FBBT derives x ∈ [−1,1]; the optimum x=1 sits on the derived bound, the split
+    ``2μ + z_U = 1`` is degenerate, and the backend returned μ=0.204, z_U=0.592.
+    On the declared box the answer is unique — x=1 is strictly interior to [−2,2],
+    so complementary slackness forces z_U=0 and hence μ=0.5. The error is not a
+    perturbation: which of the infinitely many degenerate splits comes back is
+    arbitrary, so μ can be off by any factor.
+
+    So: when the reported multipliers are not admissible for the declared model,
+    refit them against the DECLARED active set — the same routine the examiner
+    has been validating on exactly this question. When they are admissible they
+    are returned untouched, which is the common case and costs one O(n) pass.
+
+    The trigger is the defect itself, not its cause: a multiplier is admissible
+    for the declared model only if it satisfies complementary slackness against
+    the DECLARED bounds, ``|λ_j| · |x_j − bound_j| ≤ cs_tol``. That one test
+    catches every way a multiplier can end up on something the user did not
+    declare, and it is exactly the examiner check that exposed this issue. Two
+    causes are known to trip it:
+
+    * a presolve-derived bound, as above;
+    * the ±1e20 *infinity sentinel* standing in for "no bound at all". A
+      variable declared unbounded has no bound to price, so its multiplier is
+      exactly zero; the interior-point backends return residue there (measured:
+      λ=3.8e-05 on ``nlp_cvx_102_010``), and against a 1e20 "bound" that residue
+      is a CS violation of 3.8e+15. No sentinel special-case is needed — a point
+      1e20 away from a bound is not at it, so the refit's active set already
+      excludes it and the refitted multiplier is 0.
+
+    Refuses rather than guesses (CLAUDE.md §3): if the refit cannot meet
+    stationarity at the declared active set, all three families come back
+    ``None`` with a warning naming the variable. A dual that does not satisfy
+    the user's own KKT system is worse than no dual, because nothing downstream
+    can tell it is wrong.
+    """
+    if bound_duals_lower is None and bound_duals_upper is None:
+        # With no bound multipliers there is nothing that can sit on a bound the
+        # user did not declare, and the row duals alone cannot violate CS here.
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    declared_lb = np.asarray(declared_lb, dtype=float)
+    declared_ub = np.asarray(declared_ub, dtype=float)
+    x_flat = np.asarray(x_flat, dtype=float)
+    n = x_flat.size
+    if not (declared_lb.size == declared_ub.size == n):  # pragma: no cover - layout mismatch
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    is_int = np.zeros(n, dtype=bool)
+    offset = 0
+    for v in model._variables:
+        sz = int(v.size)
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            is_int[offset : offset + sz] = True
+        offset += sz
+    if offset != n:  # pragma: no cover - layout mismatch
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+    is_continuous = ~is_int
+
+    def _flat(named):
+        if named is None:
+            return np.zeros(n)
+        parts = []
+        for v in model._variables:
+            if v.name not in named:
+                return None
+            arr = np.asarray(named[v.name], dtype=float).reshape(-1)
+            if arr.size != int(v.size):
+                return None
+            parts.append(arr)
+        return np.concatenate(parts) if parts else np.zeros(0)
+
+    lam_lb = _flat(bound_duals_lower)
+    lam_ub = _flat(bound_duals_upper)
+    if lam_lb is None or lam_ub is None or lam_lb.size != n or lam_ub.size != n:
+        # Cannot line the multipliers up with the variables, so cannot judge
+        # them; leave the caller's values alone rather than guess.
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    # Integer columns are excluded: their bound multipliers price the *fixing*
+    # of the integer, not bound activity in the declared model, and the callers
+    # already zero them (the examiner likewise drops them from stationarity).
+    cs_lb = np.where(is_continuous, np.abs(lam_lb) * np.abs(x_flat - declared_lb), 0.0)
+    cs_ub = np.where(is_continuous, np.abs(lam_ub) * np.abs(declared_ub - x_flat), 0.0)
+    bad_lb = cs_lb > _DECLARED_DUAL_CS_TOL
+    bad_ub = cs_ub > _DECLARED_DUAL_CS_TOL
+    if not (bad_lb.any() or bad_ub.any()):
+        return constraint_duals, bound_duals_lower, bound_duals_upper
+
+    from discopt._dual_recovery import recover_multipliers, row_metadata
+
+    sense_arr, rhs_arr, _labels = row_metadata(evaluator)
+    body = evaluator.evaluate_constraints(x_flat) if sense_arr.size else np.empty(0, dtype=float)
+    jac = evaluator.evaluate_jacobian(x_flat) if sense_arr.size else np.empty((0, n), dtype=float)
+    grad = evaluator.evaluate_gradient(x_flat)
+
+    rec = recover_multipliers(
+        grad=grad,
+        jac=jac,
+        body=np.asarray(body, dtype=float),
+        sense_arr=sense_arr,
+        rhs_arr=rhs_arr,
+        x_flat=x_flat,
+        lb=declared_lb,
+        ub=declared_ub,
+        is_continuous=is_continuous,
+        active_tol=active_tol,
+    )
+
+    # Name the offenders, and say whether presolve is the cause — that is the
+    # difference between "your bound was derived" and "you never had a bound".
+    flat_names: list[str] = []
+    for v in model._variables:
+        sz = int(v.size)
+        flat_names.extend([f"{v.name}[{i}]" if sz > 1 else v.name for i in range(sz)])
+    solved_lb = np.asarray(solved_lb, dtype=float)
+    solved_ub = np.asarray(solved_ub, dtype=float)
+    _has_solved_box = solved_lb.size == n and solved_ub.size == n
+
+    def _why(j: int, is_lower: bool) -> str:
+        declared = declared_lb[j] if is_lower else declared_ub[j]
+        cs = cs_lb[j] if is_lower else cs_ub[j]
+        cause = ""
+        if _has_solved_box:
+            derived = solved_lb[j] if is_lower else solved_ub[j]
+            if derived != declared:
+                cause = f", presolve derived {derived:.6g}"
+        return (
+            f"{flat_names[j]}.{'lb' if is_lower else 'ub'}"
+            f"(declared {declared:.6g}{cause}, CS {cs:.3e})"
+        )
+
+    names = [_why(int(j), True) for j in np.nonzero(bad_lb)[0]]
+    names += [_why(int(j), False) for j in np.nonzero(bad_ub)[0]]
+    where = ", ".join(names[:5]) + (" …" if len(names) > 5 else "")
+
+    tol = _DECLARED_DUAL_STAT_TOL * (1.0 + (float(np.max(np.abs(grad))) if grad.size else 0.0))
+    if not rec.ok or rec.residual_max > tol:
+        logger.warning(
+            "Duals withheld (#1037): the backend's multipliers violate complementary "
+            "slackness against the box your model declares at %s, so they are duals "
+            "of a different problem. Refitting against the declared active set did "
+            "not reach stationarity (residual %.3e > %.3e%s), so no duals are "
+            "reported rather than wrong ones.",
+            where,
+            rec.residual_max,
+            tol,
+            "" if rec.ok else f"; {rec.detail}",
+        )
+        return None, None, None
+
+    logger.info(
+        "Duals refitted against the declared box (#1037): the backend's multipliers "
+        "violated complementary slackness at %s; refit stationarity residual %.3e.",
+        where,
+        rec.residual_max,
+    )
+    return (
+        _unpack_constraint_duals(evaluator, rec.mu_full),
+        _unpack_bound_duals(model, rec.lam_lb_full),
+        _unpack_bound_duals(model, rec.lam_ub_full),
+    )
 
 
 def _strong_branch_lp(
@@ -8475,7 +8788,6 @@ def solve_model(
                 ub,
                 rounds=_obbt_rounds,
                 deadline=time.perf_counter() + _obbt_budget,
-                superposition=(relaxation_arithmetic == "superposition"),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
             )
@@ -9033,7 +9345,6 @@ def solve_model(
         try:
             _mc_lp_relaxer = MccormickLPRelaxer(
                 model,
-                superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=psd_cuts,
                 rlt_cuts=_eff_rlt_cuts,
                 rlt_level1=_eff_rlt_level1,
@@ -12936,7 +13247,6 @@ def solve_model(
                         deadline=time.perf_counter() + _rf_budget,
                         tol=1e-6,
                         prefer_pounce=nlp_solver == "pounce",
-                        superposition=(relaxation_arithmetic == "superposition"),
                         measure_bound=False,
                     )
                     if _rf_res.infeasible:
@@ -13119,6 +13429,20 @@ def solve_model(
         # validation time; POUNCE (or cyipopt) converges them tightly. This is
         # a single solve at the end of the search. Best-effort and guarded so a
         # divergent re-solve can never change the reported optimum.
+        # #1043(b): the certificate invariant ``bound <= incumbent`` binds the
+        # polish too. Both mechanisms below can move the reported point (the
+        # widened box lets it leave the reduced region; the crossover snap moves
+        # it onto a bound), so no polished objective is adopted below the tree's
+        # rigorous dual bound — a super-optimal "improvement" is a defect being
+        # surfaced, never something to report. A missing/sentinel/non-finite
+        # bound imposes no floor.
+        _glb_polish = stats.get("global_lower_bound")
+        _min_accept_obj = -np.inf
+        if _glb_polish is not None:
+            _glb_polish = float(_glb_polish)
+            if np.isfinite(_glb_polish) and abs(_glb_polish) < _SENTINEL_THRESHOLD:
+                _min_accept_obj = _glb_polish - 1e-6 * (1.0 + abs(_glb_polish))
+
         try:
             _fix_lb = lb.copy()
             _fix_ub = ub.copy()
@@ -13127,6 +13451,28 @@ def solve_model(
                     _val = float(round(float(sol_flat[_off + _k])))
                     _fix_lb[_off + _k] = _val
                     _fix_ub[_off + _k] = _val
+            # #1043(b): the polish's product is the reported POINT, so it must be
+            # solved over the box the MODEL declares, not over ``lb``/``ub``,
+            # which carry FBBT/OBBT/root reductions. A reduction can place a
+            # bound exactly ON the optimum — the periodicity reduction maps a
+            # doubly-infinite periodic-only variable to ``[-pi, pi]``, and a
+            # periodic function attains its extrema at the period boundary — and
+            # an interior-point polish then stops a barrier distance inside it.
+            # Measured on ``nlp_008_010``: polishing in the declared box drops
+            # the examiner's stationarity residual from 1.331e-06 (fail) to
+            # 7.84e-10. Only free columns are widened, so the integer assignment
+            # fixed above is untouched. This is the primal analogue of #1037's
+            # ``_duals_against_declared_box``: a quantity pinned to a bound only
+            # bound tightening created is not a KKT quantity of the declared
+            # model. Where no such bound exists the widening is a no-op.
+            _decl_bounds = getattr(evaluator, "variable_bounds", None)
+            if _decl_bounds is not None:
+                _decl_lb = np.asarray(_decl_bounds[0], dtype=np.float64).ravel()
+                _decl_ub = np.asarray(_decl_bounds[1], dtype=np.float64).ravel()
+                if _decl_lb.size == _fix_lb.size and _decl_ub.size == _fix_ub.size:
+                    _free_cols = _fix_lb < _fix_ub  # integer-fixed columns have lb == ub
+                    _fix_lb = np.where(_free_cols, _decl_lb, _fix_lb)
+                    _fix_ub = np.where(_free_cols, _decl_ub, _fix_ub)
             _polish_opts = dict(opts)
             # The polished point IS the reported solution when it is adopted below,
             # so this is an incumbent producer and takes the incumbent options
@@ -13154,6 +13500,48 @@ def solve_model(
                 for _off, _sz in zip(int_offsets, int_sizes):
                     for _k in range(int(_sz)):
                         _refined[_off + _k] = round(float(sol_flat[_off + _k]))
+                # #1043(b): place the polished point ON any bound it stopped a
+                # barrier distance short of while the IPM's own complementarity
+                # certified that bound active (see ``_weakly_active_crossover``).
+                # Widening the box above removes the spurious bounds; this
+                # handles the ones the DECLARED model really has, where there is
+                # no wider box to move to — ``nlp_001_010``'s ``y >= -pi`` is
+                # written back into ``model._variables`` by the periodicity
+                # reduction, so it IS the declared bound by the time the polish
+                # runs. Adopted only when the snapped point is feasible, no
+                # worse, and not below the tree's rigorous dual bound; the move
+                # is first-order-negligible by construction (condition 2), so
+                # this can never be an "improvement" that hides an infeasible
+                # relocation. Measured: stationarity 2.037e-04 -> 1.22e-16.
+                _snap = _weakly_active_crossover(
+                    _refined,
+                    _fix_lb,
+                    _fix_ub,
+                    _polished.bound_multipliers_lower,
+                    _polished.bound_multipliers_upper,
+                    (
+                        evaluator.evaluate_gradient(_refined)
+                        if _polished.bound_multipliers_lower is not None
+                        and _polished.bound_multipliers_upper is not None
+                        else None
+                    ),
+                )
+                if _snap:
+                    _cand = _refined.copy()
+                    for _j, _bv in _snap.items():
+                        _cand[_j] = _bv
+                    _cobj = float(evaluator.evaluate_objective(_cand))
+                    if (
+                        np.isfinite(_cobj)
+                        and _cobj <= _pobj + 1e-12 * (1.0 + abs(_pobj))
+                        and _cobj >= _min_accept_obj
+                        and (
+                            not cl_list
+                            or _check_constraint_feasibility(evaluator, _cand, cl_list, cu_list)
+                        )
+                    ):
+                        _refined = _cand
+                        _pobj = _cobj
                 # Two reasons to adopt the integer-fixed continuous completion:
                 #   (a) purification — objective ~unchanged, just tighter continuous
                 #       values (the original behavior, always safe), and
@@ -13178,13 +13566,16 @@ def solve_model(
                 # fractional power of a ratio jumped 176.17 -> 0.0). There we keep
                 # only the always-safe purification (unchanged objective).
                 _improved = _model_is_convex and _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
-                _accept = _unchanged or (
-                    _improved
-                    and (
-                        not cl_list
-                        or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                _accept = (
+                    _unchanged
+                    or (
+                        _improved
+                        and (
+                            not cl_list
+                            or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                        )
                     )
-                )
+                ) and _pobj >= _min_accept_obj
                 if _accept:
                     sol_flat = _refined
                     x_dict = _unpack_solution(model, sol_flat)
@@ -14033,6 +14424,25 @@ def _solve_continuous(
     constraint_duals = _unpack_constraint_duals(evaluator, nlp_result.multipliers)
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
     bound_duals_upper = _unpack_bound_duals(model, nlp_result.bound_multipliers_upper)
+
+    # #1037: the NLP above ran on ``lb``/``ub``, which the nonlinear tightening
+    # may have shrunk below what the model declares (``raw_lb``/``raw_ub``). A
+    # multiplier on a bound that only the tightening created is not a multiplier
+    # of the user's model; refit against the declared box when that happened.
+    # No-op when it did not, which is the usual case.
+    if nlp_result.x is not None:
+        constraint_duals, bound_duals_lower, bound_duals_upper = _duals_against_declared_box(
+            model=model,
+            evaluator=evaluator,
+            x_flat=np.asarray(nlp_result.x, dtype=float),
+            declared_lb=np.asarray(raw_lb, dtype=float),
+            declared_ub=np.asarray(raw_ub, dtype=float),
+            solved_lb=lb,
+            solved_ub=ub,
+            constraint_duals=constraint_duals,
+            bound_duals_lower=bound_duals_lower,
+            bound_duals_upper=bound_duals_upper,
+        )
 
     _gap_certified = True
 
@@ -15403,6 +15813,29 @@ def _solve_nlp_bb(
                                 bound_duals_lower[v.name] = np.zeros_like(bound_duals_lower[v.name])
                             if bound_duals_upper is not None and v.name in bound_duals_upper:
                                 bound_duals_upper[v.name] = np.zeros_like(bound_duals_upper[v.name])
+
+                # #1037: the recover solve ran on the FBBT-tightened ``lb``/``ub``
+                # (with integers fixed). A multiplier sitting on a bound that only
+                # FBBT created is not a multiplier of the declared model, so refit
+                # against ``_declared_box`` when that happened. Integer columns are
+                # excluded by the helper, so the fixing above is not mistaken for a
+                # spurious tightening. No-op when presolve changed nothing.
+                (
+                    constraint_duals,
+                    bound_duals_lower,
+                    bound_duals_upper,
+                ) = _duals_against_declared_box(
+                    model=model,
+                    evaluator=evaluator,
+                    x_flat=sol_flat,
+                    declared_lb=_declared_box[:, 0],
+                    declared_ub=_declared_box[:, 1],
+                    solved_lb=lb,
+                    solved_ub=ub,
+                    constraint_duals=constraint_duals,
+                    bound_duals_lower=bound_duals_lower,
+                    bound_duals_upper=bound_duals_upper,
+                )
 
                 # The refined primal was already adopted above, from the
                 # incumbent-options solve, and this recover ran *at* that point —
