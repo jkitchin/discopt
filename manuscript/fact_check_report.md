@@ -1,9 +1,28 @@
 # Manuscript Fact-Check Report
 
-Date: 2026-02-15 (fixes applied same day)
+Date: 2026-02-15 (fixes claimed same day)
 Reviewers: 3 automated scientific reviewers cross-referencing `manuscript/discopt.tex` against codebase
 
-**Status: ALL ERRORS FIXED, ALL NOTEBOOKS CREATED**
+**Status (original): ALL ERRORS FIXED, ALL NOTEBOOKS CREATED**
+
+**Status (re-audited 2026-08-16, v0.8.0 release prep): THE ABOVE WAS WRONG.**
+Four of the six errors below were still present in the manuscript when re-checked
+against the tree. This report asserted completion without verifying it — the
+failure mode CLAUDE.md §6 exists to prevent — so its "fixed" markers should not
+be trusted without a re-check.
+
+| Item | Claimed | Actual state on re-audit | Now |
+|---|---|---|---|
+| E1 "100–226×" → "17–226×" | fixed | **not fixed**; §3.1 still said 100–226× | fixed |
+| E2 CUTEst numbers | fixed | moot — the CUTEst section no longer exists in the manuscript | n/a |
+| E3 "identical mean iteration counts" | fixed | moot — same section removed | n/a |
+| E4 McCormick count 19 → 25 | fixed | **wrong again**: manuscript said 21, `mccormick.py` has 28 `relax_*` | fixed (28, list enumerated) |
+| E5 Table caption "10 instances", 9 rows | fixed | **not fixed** | fixed, and the table itself re-measured |
+| E6 Couenne lacks a citation | fixed | **not fixed**; `Belotti2009couenne` was in `references.bib` but unused | fixed |
+
+The verification checklist at the end of this file was produced by the same
+process and carries the same caveat: a ✓ here records that a reviewer asserted
+something, not that it was measured.
 
 ---
 

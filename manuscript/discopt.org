@@ -19,7 +19,7 @@ We present discopt, a hybrid Rust/Python solver for mixed-integer nonlinear prog
 
 Mixed-integer nonlinear programming (MINLP) is a powerful framework for optimization problems involving both discrete choices and nonlinear relationships, with applications spanning process synthesis, network design, scheduling, and machine learning pipeline optimization [[cite:&Belotti2013;&Grossmann2021]]. The dominant algorithmic paradigm for deterministic global MINLP is spatial branch and bound (sBB), which enumerates a search tree of progressively tighter variable-bound regions, solving a convex relaxation at each node cite:&Land1960;&Dakin1965;&Smith1999.
 
-State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne, SCIP cite:&Bestuzheva2023, and Bonmin cite:&Bonami2008 are monolithic C, C++, or Fortran codebases that have accumulated decades of numerical hardening. While effective, this architecture creates three gaps in the current solver ecosystem.
+State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne cite:&Belotti2009couenne, SCIP cite:&Bestuzheva2023, and Bonmin cite:&Bonami2008 are monolithic C, C++, or Fortran codebases that have accumulated decades of numerical hardening. While effective, this architecture creates three gaps in the current solver ecosystem.
 
 *Gap 1: No differentiable MINLP.* Recent work on differentiable optimization has produced layers for quadratic programs (OptNet cite:&Amos2017), convex programs (cvxpylayers cite:&Agrawal2019), and decision-focused learning for combinatorial problems cite:&Elmachtoub2022;&Wilder2019;&Mandi2020. However, none of these approaches handle nonconvex MINLP. Differentiating through an MINLP solver would enable end-to-end learning of cost parameters from decision outcomes---a capability with broad applications in process optimization and operations research.
 
@@ -505,7 +505,7 @@ The quality of convex relaxations at B&B nodes directly determines solver effici
 
 ** McCormick Relaxation Compiler
 
-The relaxation compiler implements 21 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =sigmoid=, =softplus=, =sign=, =min=, and =max=.
+The relaxation compiler implements 28 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =atan=, =asin=, =acos=, =sinh=, =cosh=, =tanh=, =sigmoid=, =softplus=, entropy, =sign=, =min=, and =max=.
 
 Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The envelope algebra exists in two implementations over the same rules: the default uniform factorable pass emits =numpy= arrays and constraint rows straight into the Rust simplex, while a =jax.numpy= implementation compatible with =jax.jit= and =jax.vmap= backs the differentiable and learned-relaxation subsystems. A default solve loads only the former; keeping both is what allows a relaxation to be differentiated through without making every solve depend on a tracing framework.
 
