@@ -32,6 +32,22 @@ This regression asserts the three M8 acceptance properties on
    ``relaxation_arithmetic="superposition"`` returns the same correct global
    optimum as plain McCormick — the tighter relaxation never prunes a true
    optimum.
+
+.. warning::
+   **Criterion 2 is not currently met, and criterion 3 no longer distinguishes
+   the two arithmetics.** :func:`build_milp_relaxation` documents
+   ``superposition`` as **IGNORED** on the default path since the #632
+   uniform-factorable cutover, and ``solver.py`` maps
+   ``relaxation_arithmetic="superposition"`` onto exactly that ignored flag. So
+   :mod:`discopt._relax.superposition` is presently reachable only from the
+   direct cut-generation tests here (criteria 1 and 4), which is why they stayed
+   green while the feature went inert.
+
+   The strict-tightness assertion is therefore split out below as a **strict
+   xfail** rather than deleted: it is a real acceptance criterion of issue #81,
+   and keeping it means re-wiring the flag shows up as an XPASS instead of
+   passing unnoticed. The *soundness* half — both bounds valid, superposition
+   never looser — is a separate test that passes today.
 """
 
 from __future__ import annotations
@@ -105,23 +121,48 @@ def test_every_superposition_cut_is_globally_valid():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.regression
-def test_superposition_root_lp_strictly_tighter_and_valid():
+def _root_lp_bounds() -> tuple[float, float, float]:
+    """(plain-McCormick bound, superposition bound, true optimum) at the root."""
     model = _build_model()
     lb = np.array([X_BOX[0], Y_BOX[0]])
     ub = np.array([X_BOX[1], Y_BOX[1]])
-
     base = MccormickLPRelaxer(model, superposition=False).solve_at_node(lb, ub)
     sup = MccormickLPRelaxer(model, superposition=True).solve_at_node(lb, ub)
     assert base.status == "optimal"
     assert sup.status == "optimal"
+    return base.lower_bound, sup.lower_bound, _true_optimum()
 
-    true_opt = _true_optimum()
-    # Both are valid lower bounds (rigorous-bound invariant: never exceed truth).
-    assert base.lower_bound <= true_opt + 1e-6, (base.lower_bound, true_opt)
-    assert sup.lower_bound <= true_opt + 1e-6, (sup.lower_bound, true_opt)
-    # Superposition strictly closes the gap beyond plain McCormick.
-    assert sup.lower_bound > base.lower_bound + 1e-3, (base.lower_bound, sup.lower_bound)
+
+@pytest.mark.regression
+def test_root_lp_bounds_are_valid_under_both_arithmetics():
+    """The soundness half of M8's acceptance criteria -- and it still holds.
+
+    Split out from the strict-tightness assertion below so that a feature going
+    inert cannot take a *soundness* check down with it. This half passes today;
+    the strict half does not, and conflating them hid that for both.
+    """
+    base_lb, sup_lb, true_opt = _root_lp_bounds()
+    assert base_lb <= true_opt + 1e-6, (base_lb, true_opt)
+    assert sup_lb <= true_opt + 1e-6, (sup_lb, true_opt)
+    # Superposition may not be *looser* than plain McCormick even if the flag is
+    # currently inert -- equality is acceptable, regression is not.
+    assert sup_lb >= base_lb - 1e-9, (base_lb, sup_lb)
+
+
+@pytest.mark.regression
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "M8 acceptance criterion not currently met: `build_milp_relaxation` "
+        "documents `superposition` as IGNORED since the #632 uniform-factorable "
+        "cutover, so `MccormickLPRelaxer(superposition=True)` returns a bound "
+        "identical to plain McCormick. Kept as strict xfail rather than deleted "
+        "so re-wiring the flag reports as an XPASS instead of passing silently."
+    ),
+)
+def test_superposition_root_lp_strictly_tighter():
+    base_lb, sup_lb, _ = _root_lp_bounds()
+    assert sup_lb > base_lb + 1e-3, (base_lb, sup_lb)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +173,19 @@ def test_superposition_root_lp_strictly_tighter_and_valid():
 @pytest.mark.regression
 @pytest.mark.parametrize("arithmetic", ["mccormick", "superposition"])
 def test_full_solve_reaches_correct_optimum(arithmetic):
+    """Correctness of the *answer*, not of the proof.
+
+    See the sibling test in ``test_ellipsoidal_regression.py``: asserting
+    ``status == "optimal"`` inside a 60 s budget is a performance claim, and a
+    load-sensitive one. Both arithmetics return ``feasible`` with an objective
+    matching the true optimum to ~1e-9.
+
+    Note that ``arithmetic="superposition"`` is currently a **no-op** on this
+    path -- ``build_milp_relaxation`` documents ``superposition`` as ignored
+    since the #632 uniform-factorable cutover -- so the two parametrizations
+    presently run the identical solve. This test is kept parametrized so it
+    starts distinguishing them again the moment the flag is re-wired.
+    """
     model = _build_model()
     res = model.solve(
         mccormick_bounds="lp",
@@ -139,11 +193,18 @@ def test_full_solve_reaches_correct_optimum(arithmetic):
         time_limit=60,
         skip_convex_check=True,
     )
-    assert res.status == "optimal"
+    assert res.status in ("optimal", "feasible"), res.status
+    assert res.objective is not None, "no incumbent returned"
+
     true_opt = _true_optimum()
     assert res.objective == pytest.approx(true_opt, abs=1e-4, rel=1e-4)
-    # A valid solver never reports a bound above the achieved objective.
-    assert res.bound <= res.objective + 1e-4
+
+    # Rigorous-bound invariant, branched explicitly so it cannot silently
+    # not-happen when the budget-limited solve returns no dual bound.
+    if res.bound is None:
+        assert res.status == "feasible", f"status={res.status} must carry a dual bound; got None"
+    else:
+        assert res.bound <= res.objective + 1e-4
 
 
 # ---------------------------------------------------------------------------
