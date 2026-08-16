@@ -1,6 +1,6 @@
 # Development Roadmap
 
-discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7 track future extensions; many items in 5-7 are already shipped (see status columns).
+discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8 track ongoing and future extensions; many items in 5-8 are already shipped (see status columns).
 
 ## Phase 1: Working Solver (complete)
 
@@ -70,12 +70,13 @@ New problem types to make discopt competitive across the full optimization lands
 | SOCP support                      | Planned | Second-order cone constraints, conic solver integration (SCS/Clarabel)       |
 | Semidefinite programming (SDP)    | Planned | Matrix variables, PSD cone constraint, MOSEK/SCS backend                     |
 | Conic programming (general)       | Planned | Exponential cone, power cone for entropy/GP formulations                     |
-| Stochastic programming            | Planned | Two-stage/multi-stage recourse, scenario trees, chance constraints, SAA/CVaR |
+| Stochastic programming            | Done    | `discopt.stochastic`: extensive form, L-shaped, progressive hedging, multistage, SAA, risk measures (CVaR), and distributionally-robust variants |
 | Robust optimization               | Done    | Box/ellipsoidal/polyhedral uncertainty sets, adjustable robust counterparts  |
 | Multi-objective optimization      | Done    | Weighted sum, AUGMECON2 ε-constraint, weighted Tchebycheff, NBI, NNC via `discopt.mo`; hypervolume / IGD / spread / ε indicators. Evolutionary/Bayesian/interactive methods remain future work. |
-| Bilevel optimization              | Planned | KKT reformulation to MPEC, cutting plane methods                             |
-| Complementarity problems (MPEC)   | Planned | Scholtes relaxation, penalty methods for equilibrium constraints             |
-| Geometric programming             | Planned | Posynomial/signomial programs, log-transformation to convex form             |
+| Bilevel optimization              | Done    | `discopt.bilevel`: KKT and strong-duality reformulations of the follower, including certified/convex-NLP followers |
+| Complementarity problems (MPEC)   | Done    | `Model.complementarity(x, y)` (elementwise over vectors/arrays) via GDP disjunction (default), Scholtes regularization, or SOS1 |
+| Derivative-free optimization      | Done    | `solver="direct"` (DIRECT sampling search over black-box `dm.custom` bodies) and `solver="surrogate"` (model-based search for expensive black boxes); both explicitly **non-certifying**, and a governed DIRECT variant runs as a root primal heuristic (v0.8.0) |
+| Geometric programming             | Done    | `discopt.gp`: posynomial detection with an exact log-space convex reformulation (auto-routed), plus GP-structured MINLPs via integer B&B over exact convex log-space node relaxations (`solver="gp-minlp"`) |
 
 ## Phase 6: Solver and Algorithm Improvements
 

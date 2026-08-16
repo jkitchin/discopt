@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.7.1.dev0"
+version = "0.8.0"
 description = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
