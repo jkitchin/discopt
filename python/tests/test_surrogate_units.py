@@ -132,6 +132,14 @@ def test_rbf_singular_design_falls_back_to_least_squares_loudly(caplog):
     fallback is recorded on the object *and* logged (CLAUDE.md §3/§7). The driver
     loop never creates this situation — the evaluation cache refuses duplicates —
     but a caller using ``RBFSurrogate`` directly can.
+
+    The flag is checked *and* so is the fit, because the two can come apart. On a
+    LAPACK that declines to raise on this system, ``scipy.linalg.solve`` returned a
+    finite vector with ``||x|| = 1.5e33`` that missed its own right-hand side by a
+    residual of 2e17 — a surrogate mispredicting its own design points by 2.6e17
+    while reporting only "accuracy is degraded". Asserting the flag alone passed on
+    the platforms where the exception did fire, so the numeric assertion below is
+    the part that actually pins the behavior down.
     """
     Z = _design(8, 2, seed=6)
     Z[3] = Z[2]
@@ -140,6 +148,12 @@ def test_rbf_singular_design_falls_back_to_least_squares_loudly(caplog):
         rbf = RBFSurrogate().fit(Z, y)
     assert rbf.used_least_squares
     assert any("singular" in rec.message for rec in caplog.records), caplog.text
+
+    # The duplicated row carries a different ``y``, so no interpolant can do better
+    # than splitting the difference (0.5). Anything beyond ~1 means the coefficients
+    # are garbage regardless of what the flags say.
+    err = np.abs(rbf.predict(Z) - y).max()
+    assert err <= 1.0, f"least-squares refit still mispredicts its own design by {err:.3e}"
 
 
 def test_rbf_kernel_takes_the_zero_limit_rather_than_producing_a_nan():
