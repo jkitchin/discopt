@@ -1820,7 +1820,6 @@ def obbt_tighten_root(
     min_width: float = 1e-6,
     eps: float = 1e-7,
     incumbent_cutoff: Optional[float] = None,
-    superposition: bool = False,
     prefer_pounce: bool = False,
     cascade_aux: bool = False,
     top_k: Optional[int] = None,
@@ -1968,7 +1967,7 @@ def obbt_tighten_root(
         # (it never calls ``solve_at_node``), so skip the incremental fast-path
         # structure build + its row-for-row validation (a wasted handful of cold
         # builds — they re-derive the relaxation only to validate it).
-        relaxer = MccormickLPRelaxer(model, superposition=superposition, build_incremental=False)
+        relaxer = MccormickLPRelaxer(model, build_incremental=False)
         if not relaxer.has_relaxable_nonlinearity:
             return RootObbtResult(lb, ub, 0, 0, 0.0)
 
@@ -2023,7 +2022,6 @@ def obbt_tighten_root(
                     relaxer._terms,
                     relaxer._disc,
                     bound_override=(lb, ub),
-                    superposition=relaxer._superposition,
                 )
             except Exception as exc:  # noqa: BLE001 - keeps the tightening found so far
                 # Capability-disabling: without an envelope there is no OBBT round
@@ -2073,7 +2071,6 @@ def obbt_tighten_root(
                                 relaxer._terms,
                                 relaxer._disc,
                                 bound_override=(lb, ub),
-                                superposition=relaxer._superposition,
                             )
                             _apply_carried_aux(milp)
                         except Exception as exc:  # noqa: BLE001 - keeps the bounds already found
@@ -2507,7 +2504,6 @@ def measure_discarded_aux_tightening(
     time_limit_per_lp: float = 0.2,
     incumbent_cutoff: Optional[float] = None,
     deadline: Optional[float] = None,
-    superposition: bool = False,
 ) -> Optional[AuxTighteningReport]:
     """Measure the OBBT tightening of the lifted aux columns that #208 discards.
 
@@ -2532,7 +2528,7 @@ def measure_discarded_aux_tightening(
         # (it never calls ``solve_at_node``), so skip the incremental fast-path
         # structure build + its row-for-row validation (a wasted handful of cold
         # builds — they re-derive the relaxation only to validate it).
-        relaxer = MccormickLPRelaxer(model, superposition=superposition, build_incremental=False)
+        relaxer = MccormickLPRelaxer(model, build_incremental=False)
         if not relaxer.has_relaxable_nonlinearity:
             return None
         milp, _ = build_milp_relaxation(
@@ -2540,7 +2536,6 @@ def measure_discarded_aux_tightening(
             relaxer._terms,
             relaxer._disc,
             bound_override=(lb, ub),
-            superposition=relaxer._superposition,
         )
         n_orig = relaxer._n_orig
         n_total = len(milp._bounds)

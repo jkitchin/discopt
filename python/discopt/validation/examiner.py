@@ -23,8 +23,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from scipy.optimize import lsq_linear
 
+from discopt._dual_recovery import recover_multipliers, row_metadata
 from discopt.modeling.core import Model, ObjectiveSense, VarType
 
 PRIMAL_FEAS_TOL = 1e-6
@@ -379,19 +379,8 @@ def assert_examined(result, model: Model, name: str, **kwargs) -> None:
 
 
 def _row_metadata(evaluator):
-    senses: list[str] = []
-    rhss: list[float] = []
-    labels: list[str] = []
-    for c, sz in zip(evaluator._source_constraints, evaluator._constraint_flat_sizes):
-        sz = int(sz)
-        senses.extend([c.sense] * sz)
-        rhss.extend([float(c.rhs)] * sz)
-        cname = getattr(c, "name", None) or repr(c.body)[:40]
-        if sz > 1:
-            labels.extend([f"{cname}[{i}]" for i in range(sz)])
-        else:
-            labels.append(str(cname))
-    return np.asarray(senses), np.asarray(rhss, dtype=float), labels
+    # Shared with the solver's declared-box dual reporting (#1037).
+    return row_metadata(evaluator)
 
 
 def _flatten_solver_duals(result, model: Model, evaluator):
@@ -778,37 +767,39 @@ def _recover_and_check_kkt(
             "residual": 0.0,
         }
 
-    grad_c = grad[cont_idx]
-    jac_c = jac[:, cont_idx] if jac.size else np.empty((0, cont_idx.size))
     lb_c = lb[cont_idx]
     ub_c = ub[cont_idx]
     x_c = x_flat[cont_idx]
     cont_names = [var_names[i] for i in cont_idx]
 
-    if body.size:
-        signed = body - rhs_arr
-        is_le = sense_arr == "<="
-        is_ge = sense_arr == ">="
-        is_eq = sense_arr == "=="
-        active_le = is_le & (np.abs(signed) <= active_tol)
-        active_ge = is_ge & (np.abs(signed) <= active_tol)
-        active_rows = active_le | active_ge | is_eq
-        row_select = np.where(active_rows)[0]
-    else:
-        row_select = np.zeros(0, dtype=int)
-
-    lb_active = np.where(np.isfinite(lb_c) & (x_c - lb_c <= active_tol))[0]
-    ub_active = np.where(np.isfinite(ub_c) & (ub_c - x_c <= active_tol))[0]
-
+    # The fit itself lives in :mod:`discopt._dual_recovery`; this function is the
+    # reporting wrapper around it. The solver calls the same routine to report
+    # duals against the box the user DECLARED when presolve solved a tightened
+    # one (#1037) — one implementation, so the two cannot drift apart.
+    rec = recover_multipliers(
+        grad=grad,
+        jac=jac,
+        body=body,
+        sense_arr=sense_arr,
+        rhs_arr=rhs_arr,
+        x_flat=x_flat,
+        lb=lb,
+        ub=ub,
+        is_continuous=is_continuous,
+        active_tol=active_tol,
+    )
+    row_select = rec.row_select
+    lb_active = rec.lb_active
+    ub_active = rec.ub_active
     n_mu = row_select.size
     n_llb = lb_active.size
     n_lub = ub_active.size
     n_unknowns = n_mu + n_llb + n_lub
 
     if n_unknowns == 0:
-        residual = grad_c
-        max_r = float(np.max(np.abs(residual))) if residual.size else 0.0
-        norm_r = float(np.linalg.norm(residual))
+        max_r = rec.residual_max
+        norm_r = rec.residual_norm
+        residual = rec.stat_resid
         worst = int(np.argmax(np.abs(residual))) if residual.size else 0
         return {
             "checks": [
@@ -831,41 +822,8 @@ def _recover_and_check_kkt(
             "recovered_lam_ub_full": np.zeros(x_flat.size),
         }
 
-    cols = []
-    var_lb_y: list[float] = []
-    var_ub_y: list[float] = []
-    if n_mu:
-        sub_sense = sense_arr[row_select]
-        sub_jac = jac_c[row_select, :].copy()
-        flip = sub_sense == ">="
-        sub_jac[flip, :] *= -1.0
-        cols.append(sub_jac.T)
-        for s in sub_sense:
-            var_lb_y.append(-np.inf if s == "==" else 0.0)
-            var_ub_y.append(np.inf)
-    if n_llb:
-        I_lb = np.zeros((cont_idx.size, n_llb))
-        for k, j in enumerate(lb_active):
-            I_lb[j, k] = -1.0
-        cols.append(I_lb)
-        var_lb_y.extend([0.0] * n_llb)
-        var_ub_y.extend([np.inf] * n_llb)
-    if n_lub:
-        I_ub = np.zeros((cont_idx.size, n_lub))
-        for k, j in enumerate(ub_active):
-            I_ub[j, k] = 1.0
-        cols.append(I_ub)
-        var_lb_y.extend([0.0] * n_lub)
-        var_ub_y.extend([np.inf] * n_lub)
-
-    A = np.concatenate(cols, axis=1) if cols else np.zeros((cont_idx.size, 0))
-    b = -grad_c
-
-    try:
-        sol = lsq_linear(A, b, bounds=(np.asarray(var_lb_y), np.asarray(var_ub_y)))
-        y = sol.x
-    except Exception as e:
-        msg = f"dual recovery failed: {e}"
+    if not rec.ok:
+        msg = rec.detail
         return {
             "checks": [
                 CheckResult(
@@ -896,9 +854,9 @@ def _recover_and_check_kkt(
             "recovered_lam_ub_full": None,
         }
 
-    stat_resid = A @ y - b
-    stat_max = float(np.max(np.abs(stat_resid))) if stat_resid.size else 0.0
-    stat_norm = float(np.linalg.norm(stat_resid))
+    stat_resid = rec.stat_resid
+    stat_max = rec.residual_max
+    stat_norm = rec.residual_norm
     worst_var = int(np.argmax(np.abs(stat_resid))) if stat_resid.size else 0
     stationarity = CheckResult(
         name=f"stationarity{suffix}",
@@ -913,9 +871,9 @@ def _recover_and_check_kkt(
         ),
     )
 
-    mu = y[:n_mu] if n_mu else np.zeros(0)
-    lam_lb = y[n_mu : n_mu + n_llb] if n_llb else np.zeros(0)
-    lam_ub = y[n_mu + n_llb :] if n_lub else np.zeros(0)
+    mu = rec.mu_act
+    lam_lb = rec.lam_lb_act
+    lam_ub = rec.lam_ub_act
 
     cs_p = np.zeros(cont_idx.size)
     for k, j in enumerate(lb_active):
@@ -952,30 +910,16 @@ def _recover_and_check_kkt(
     else:
         dual_cs = CheckResult(name=f"dual_cs{suffix}", passed=True, tolerance=dual_cs_tol)
 
-    # Pack recovered duals into full-length vectors aligned with the
-    # evaluator's row order and the model's variable order, so the cross-check
-    # against solver-supplied duals can compare element-wise.
-    mu_full = np.zeros(jac.shape[0]) if jac.size else np.zeros(0)
-    if n_mu:
-        # mu_act is in "flipped to ≤ form"; un-flip ">=" rows back to original sign.
-        sub_sense = sense_arr[row_select]
-        mu_signed = mu.copy()
-        mu_signed[sub_sense == ">="] *= -1.0
-        mu_full[row_select] = mu_signed
-    lam_lb_full = np.zeros(x_flat.size)
-    lam_ub_full = np.zeros(x_flat.size)
-    for k, j in enumerate(lb_active):
-        lam_lb_full[cont_idx[j]] = lam_lb[k]
-    for k, j in enumerate(ub_active):
-        lam_ub_full[cont_idx[j]] = lam_ub[k]
-
+    # The full-length vectors (aligned with the evaluator's row order and the
+    # model's variable order, so the cross-check against solver-supplied duals
+    # can compare element-wise) are packed by the shared recovery routine.
     return {
         "checks": [stationarity, primal_cs, dual_cs],
         "n_active_cons": int(n_mu),
         "n_active_bounds": int(n_llb + n_lub),
         "recovered": True,
         "residual": stat_norm,
-        "recovered_mu_full": mu_full,
-        "recovered_lam_lb_full": lam_lb_full,
-        "recovered_lam_ub_full": lam_ub_full,
+        "recovered_mu_full": rec.mu_full,
+        "recovered_lam_lb_full": rec.lam_lb_full,
+        "recovered_lam_ub_full": rec.lam_ub_full,
     }

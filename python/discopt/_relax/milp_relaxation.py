@@ -1670,21 +1670,6 @@ def _decompose_product(
     return scalar[0], var_indices
 
 
-# Univariate functions whose superposition cuts are supported: smooth on any
-# box the lifted aux already validated, so the Chebyshev kernel encloses them
-# rigorously. ``abs`` (non-smooth) and ``tan`` (poles) are deliberately omitted.
-_SUPERPOSITION_FUNCS = {
-    "exp",
-    "log",
-    "log2",
-    "log10",
-    "sqrt",
-    "reciprocal",
-    "sin",
-    "cos",
-}
-
-
 def _linear_constraint_forms(model: Model, n_vars: int) -> list[tuple[np.ndarray, float]]:
     """Return each *linear* model constraint as ``(coeff, const)`` meaning the
     valid inequality ``coeff . x + const <= 0``.
@@ -2461,7 +2446,6 @@ def build_milp_relaxation(
     convhull_ebd: bool = False,
     convhull_ebd_encoding: str = "gray",
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
-    superposition: bool = False,
     rlt_level1: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
@@ -2476,8 +2460,8 @@ def build_milp_relaxation(
         the following parameters are currently **IGNORED** on the default path and
         kept only for signature compatibility: ``terms``, ``incumbent``, ``oa_cuts``
         (OA/Kelley tangents are added lazily by the separators at ``solve_at_node``,
-        not pre-seeded here), ``convhull_ebd``/``convhull_ebd_encoding``,
-        ``superposition``. ``disc_state`` is now **consumed** again (#640 S8): its
+        not pre-seeded here), ``convhull_ebd``/``convhull_ebd_encoding``.
+        ``disc_state`` is now **consumed** again (#640 S8): its
         partition breakpoints drive sound piecewise-McCormick refinement of every
         bilinear/monomial/univariate atom depending on a partitioned variable, so
         the AMP adaptive-partition loop tightens the node bound as it refines. Only

@@ -101,7 +101,6 @@ def test_cross_term_sqrt_lift_engages(xb, yb, zb):
         relaxer._terms,
         relaxer._disc,
         bound_override=(np.asarray(lb), np.asarray(ub)),
-        superposition=relaxer._superposition,
     )
     # 3 original variables; a lifted cross-term sqrt adds product + sqrt aux cols.
     assert len(milp._c) > 3, "cross-term sqrt lift did not engage (no aux columns)"

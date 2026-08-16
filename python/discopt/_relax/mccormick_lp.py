@@ -390,7 +390,6 @@ class MccormickLPRelaxer:
         self,
         model: Model,
         *,
-        superposition: bool = False,
         backend: str = "simplex",
         psd_cuts: bool = False,
         rlt_cuts: bool = False,
@@ -399,8 +398,6 @@ class MccormickLPRelaxer:
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
-        # Opt-in M8 superposition cuts for bilinear-of-nonlinear products.
-        self._superposition = superposition
         # Opt-in per-node PSD (moment) cut separation (W2e): enforce the lifted
         # moment matrix M = [[1, x^T],[x, X]] >= 0 by separating dense clique cuts
         # at each node, tightening the bound toward the SDP relaxation.
@@ -1376,7 +1373,6 @@ class MccormickLPRelaxer:
                     np.asarray(node_lb, dtype=np.float64),
                     np.asarray(node_ub, dtype=np.float64),
                 ),
-                superposition=self._superposition,
                 rlt_level1=self._rlt_applicable,
                 build_deadline=_eff_build_deadline,
             )

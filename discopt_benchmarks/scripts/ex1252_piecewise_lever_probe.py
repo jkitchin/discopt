@@ -12,7 +12,7 @@ path), whether partitioning/strengthening actually moves ex1252's dual bound.
 
 RESULT (recorded in `docs/dev/performance-plan.md` §6): at the canonical loosest
 node the bound is pinned at **12658.06** across *every* available lever —
-subdividing `x6`, subdividing `x12`, RLT cuts, level-1 RLT, PSD cuts, superposition,
+subdividing `x6`, subdividing `x12`, RLT cuts, level-1 RLT, PSD cuts,
 and OBBT+cutoff. Two corrections to the issue's framing fall out:
 
 1. **`x6` is not the lever, and neither is any flow.** At the *root* the flows are
@@ -116,7 +116,6 @@ def run() -> None:
     print(f"  rlt_cuts=True              : {_bound(r, lb, ub, rlt_cuts=True)}")
     print(f"  rlt_level1=True            : {_bound(r, lb, ub, rlt_level1=True)}")
     print(f"  psd_cuts=True              : {_bound(r, lb, ub, psd_cuts=True)}")
-    print(f"  superposition=True         : {_bound(r, lb, ub, superposition=True)}")
 
     # Root cause: the objective's x15 coupling relaxes to its lower bound, so the
     # bound is exactly the constant term regardless of the (nonzero) relaxed x15.

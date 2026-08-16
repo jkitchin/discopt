@@ -227,7 +227,6 @@ def run_root_fixpoint(
     obbt_rounds: int = 3,
     obbt_stage_frac: float = 0.85,
     prefer_pounce: bool = True,
-    superposition: bool = False,
     measure_bound: bool = True,
 ) -> RootReduceResult:
     """Iterate the R1 reduce stages {S2 cutoff-FBBT, S3 cutoff-OBBT} to a fixpoint.
@@ -312,7 +311,6 @@ def run_root_fixpoint(
                     rounds=obbt_rounds,
                     deadline=obbt_deadline,
                     prefer_pounce=prefer_pounce,
-                    superposition=superposition,
                 )
                 result.stage_time["obbt"] += time.perf_counter() - t0
                 if obbt_infeas:
@@ -364,7 +362,6 @@ def _stage_obbt(
     rounds: int,
     deadline: Optional[float],
     prefer_pounce: bool,
-    superposition: bool,
 ) -> tuple[np.ndarray, np.ndarray, bool, int]:
     """S3: cutoff-aware OBBT/DBBT over the McCormick envelope (the R1 primary lever).
 
@@ -399,7 +396,6 @@ def _stage_obbt(
             rounds=rounds,
             deadline=deadline,
             incumbent_cutoff=cutoff,
-            superposition=superposition,
             prefer_pounce=prefer_pounce,
             cascade_aux=cascade_aux,
         )
