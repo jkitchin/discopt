@@ -57,7 +57,6 @@ def _solve_lp(m, r, lb, ub):
         r._terms,
         r._disc,
         bound_override=(np.asarray(lb, float), np.asarray(ub, float)),
-        superposition=r._superposition,
         rlt_level1=r._rlt_applicable,
     )
     milp._integrality = None

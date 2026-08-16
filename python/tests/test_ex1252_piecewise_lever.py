@@ -7,7 +7,7 @@ reproduced by ``discopt_benchmarks/scripts/ex1252_piecewise_lever_probe.py``.
 
 With #707's integer-multilinear reform applied, the reformed-ex1252 loosest-node
 bound equals the objective's constant term (``6329.03·x0·x3·x18 = 12658.06``) and
-does not move under RLT / level-1 RLT / PSD / superposition — because the reformed
+does not move under RLT / level-1 RLT / PSD — because the reformed
 ``x15·(x0·x3·x18)`` objective aux relaxes to its lower bound (the relaxed ``x15`` is
 nonzero, yet its ``1800·x15`` cost contributes 0). Tightening the cubic rows that
 *define* ``x15`` (direction #1) cannot lift the bound while that coupling is loose.
@@ -81,9 +81,8 @@ def _bound(r, lb, ub, **kw):
         {"rlt_cuts": True},
         {"rlt_level1": True},
         {"psd_cuts": True},
-        {"superposition": True},
     ],
-    ids=["baseline", "rlt_cuts", "rlt_level1", "psd_cuts", "superposition"],
+    ids=["baseline", "rlt_cuts", "rlt_level1", "psd_cuts"],
 )
 def test_every_lever_inert_at_loosest_node(loosest_node, opts):
     """No available strengthener lifts the bound off the objective-constant floor.

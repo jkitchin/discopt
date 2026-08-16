@@ -8788,7 +8788,6 @@ def solve_model(
                 ub,
                 rounds=_obbt_rounds,
                 deadline=time.perf_counter() + _obbt_budget,
-                superposition=(relaxation_arithmetic == "superposition"),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
             )
@@ -9346,7 +9345,6 @@ def solve_model(
         try:
             _mc_lp_relaxer = MccormickLPRelaxer(
                 model,
-                superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=psd_cuts,
                 rlt_cuts=_eff_rlt_cuts,
                 rlt_level1=_eff_rlt_level1,
@@ -13249,7 +13247,6 @@ def solve_model(
                         deadline=time.perf_counter() + _rf_budget,
                         tol=1e-6,
                         prefer_pounce=nlp_solver == "pounce",
-                        superposition=(relaxation_arithmetic == "superposition"),
                         measure_bound=False,
                     )
                     if _rf_res.infeasible:

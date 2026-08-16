@@ -708,8 +708,17 @@ panel green for 3 consecutive nightlies before default-on.
 > | subdivide `x6` / subdivide `x12` (halves) | 12658.06 (from the #707 probe: 12658.1 both) |
 > | RLT cuts / level-1 RLT | 12658.06 |
 > | PSD (moment) cuts | 12658.06 |
-> | superposition cuts | 12658.06 |
+> | superposition cuts | 12658.06 [^superposition-inert] |
 > | OBBT + optimum cutoff | 12658 (the #707 record) |
+>
+> [^superposition-inert]: Retracted as a measurement (#1035). The `superposition`
+>     switch this row toggled had been inert since the #632 cutover —
+>     `build_milp_relaxation` accepted the parameter and never read it — so this
+>     arm re-measured the baseline rather than a superposition-cut relaxation. The
+>     *conclusion* (the bound is pinned at 12658.06) stands on the other rows; the
+>     superposition lever was never actually tested. #1035 deleted the switch and
+>     the unreachable cut generator with it, so the arm is not re-runnable as
+>     written.
 >
 > Two corrections to the issue's framing fall out. **(1) `x6` is not the lever, and
 > neither is any flow.** At the *root* the flows are wide but the objective relaxes
