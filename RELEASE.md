@@ -32,7 +32,19 @@ The next planned release is **`v0.8.0`** (minor bump on top of `v0.7.0`).
       `tests/test_correctness.py` and `tests/test_interop.py` that have never
       executed (#1050) -- not optional-dependency gates. Benchmark-level
       correctness is therefore *not* covered here; the real gate is the next item.
-- [ ] `pytest python/tests/test_correctness.py -v` -- **`incorrect_count == 0`**. Non-negotiable per `CLAUDE.md`.
+- [ ] `pytest python/tests/ -m "correctness" -v` -- **`incorrect_count == 0`**.
+      Non-negotiable per `CLAUDE.md`. **The `-m` is required, not optional.**
+      `pyproject.toml`'s `addopts` defaults to
+      `-m 'not slow and not correctness and not ...'`, so the obvious command
+      `pytest python/tests/test_correctness.py -v` collects 83 items, deselects all
+      83, and exits 5 ("no tests collected") having asserted nothing. Passing `-m`
+      overrides that filter and selects the real 498-test tier.
+- [ ] Dispatch the **slow** correctness lane in CI: `gh workflow run ci.yml --ref
+      release/vX.Y.Z`. The `python-correctness-slow` job is `workflow_dispatch`-only
+      and its own comment in `ci.yml` says to run it "deliberately, before a release
+      or when touching the certificate path" -- it is the only lane that exercises
+      `-m "correctness and slow"`, which neither the PR jobs nor a default local
+      `pytest` run reaches.
 - [ ] `make bench-smoke` -- smoke benchmark passes.
 - [ ] Phase gates relevant to this release. Each `--gate phaseN` check reads the matching suite's most recent results in `results/`, so run `--suite phaseN` first. These runs are expensive (each suite uses a 3600 s per-instance time limit) and are typically a CI-only step for patch releases:
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase1 && python discopt_benchmarks/run_benchmarks.py --gate phase1`
