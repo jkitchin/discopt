@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 
@@ -230,13 +231,26 @@ def solve_discopt(
     *,
     max_nodes: int = 2_000_000,
     gap_tol: float = 1e-4,
-    time_limit_s: float = 0.0,
+    time_limit_s: float | None = None,
 ) -> DiscoptRun:
     """Solve via the Rust simplex B&B engine with the given lever config.
 
     ``obj`` is the engine's incumbent (a value-maximizing objective is reported
     here in the engine's *minimize -value* sign, so the achieved knapsack value
     is ``-obj``).
+
+    ``time_limit_s=None`` (the default) means **no limit**. It must not be
+    ``0.0``: ``solve_milp_py`` takes ``Option<f64>`` where ``None``/``+inf``
+    mean no limit and ``Some(0.0)`` is an *already-elapsed* deadline that stops
+    at the first poll. This default used to be ``0.0`` under the older
+    "0 means unlimited" convention, which was deliberately retired when that
+    collapse was found to launch the B&B unbounded on an exhausted budget (see
+    ``parse_budget_secs`` in ``lp_bindings.rs`` and the #928 tests). After the
+    convention flipped, the stale default silently inverted: every solve here
+    stopped after **one node** and reported ``node_limit`` with no incumbent.
+    That is what made five tests in ``test_milp_node_efficiency.py`` look like
+    engine capability failures -- ``mdk90x12`` "unclosable in 2M nodes" in fact
+    closes in 281 nodes and under a second.
     """
     from discopt._rust import solve_milp_py
 
@@ -252,7 +266,7 @@ def solve_discopt(
         0.0,
         int(max_nodes),
         float(gap_tol),
-        time_limit_s=float(time_limit_s),
+        time_limit_s=math.inf if time_limit_s is None else float(time_limit_s),
         **cfg,
     )
     wall = time.perf_counter() - t0
