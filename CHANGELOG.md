@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-16
 
 ### Changed
 
@@ -57,7 +57,53 @@ The release procedure that produces these entries is documented in
   No default moved. Details and the falsification record in
   `docs/dev/performance-plan.md` §18f.
 
+### Removed
+
+- **The inert `superposition` knob** (`fix(relax)`, #1046, closes #1035).
+  `build_milp_relaxation` accepted a `superposition` parameter and never read
+  it — the #632 uniform-factorable cutover stopped consuming it — so
+  `relaxation_arithmetic="superposition"` quietly returned the plain McCormick
+  relaxation. The generator behind it, `discopt._relax.superposition`, was
+  reachable only from its own tests. Per `CLAUDE.md` §3 (*no dead flags*) the
+  switch is deleted rather than re-wired: an accepted-and-ignored knob is worse
+  than no knob, because a measurement taken with it set reads as a measurement
+  of the feature. `relaxation_arithmetic` itself is unaffected — its live values
+  (`mccormick`, `chebyshev`, `taylor`, `ellipsoidal`, `alphabb`) never included
+  `superposition`. One consequence recorded in `docs/dev/performance-plan.md`
+  §6: the `superposition cuts` row of the ex1252 lever table measured the
+  baseline and is retracted.
+
 ### Fixed
+
+- **A GDP disjunction could be declared `infeasible` when it was not**
+  (`fix(gdp)`, #1044, closes part of #1043). The hull reformulation's perspective
+  function was not exact at both integer faces, so a disjunct that admitted a
+  feasible point could have it cut away and the root node returned
+  `infeasible` in a single node. A false `infeasible` is a hard-gate violation
+  under `CLAUDE.md` §1 — the certificate is wrong, not merely loose — and this
+  was the most serious defect fixed in this release.
+
+- **The solver reported multipliers of the presolved model, not the declared
+  one** (`fix(duals)`, #1042, closes #1037). Bound and row multipliers were
+  handed back in the presolved space, so a user reading `result` got duals that
+  did not correspond to the model they wrote. Row activity is now judged
+  relative to row scale as well. This took `python/tests/test_minlptests.py`
+  from **79 failed / 46 passed to 4 failed / 121 passed**.
+
+- **The reported incumbent could be a barrier-interior point rather than a
+  stationary one** (`fix(correctness)`, #1045, closes #1043). Two causes, both
+  in the terminal incumbent polish: the polish ran in the *reduced*
+  (FBBT/OBBT/root) box, where a reduction can place a bound exactly on the
+  optimum; and an interior-point method stops a distance `~ mu/lambda` inside a
+  *weakly* active bound, which the periodicity reduction creates systematically
+  (it maps a doubly-infinite periodic-only variable to exactly `[-pi, pi]`, and
+  a periodic function attains its extrema at the period boundary). The polish
+  now runs over the declared box for free columns and crosses over onto weakly
+  active bounds, guarded by feasibility, objective-not-worse, and a dual-bound
+  floor so the `bound <= incumbent` invariant binds the polish too. Measured:
+  stationarity 1.331e-06 -> 7.84e-10 on `nlp_008_010`, and 2.037e-04 -> 1.22e-16
+  on `nlp_001_010`. With #1042 and #1044 this brings `test_minlptests.py` to
+  **125/125**.
 
 - **The primal simplex could return a false `Unbounded` on a bounded LP**
   (`fix(lp)`, #1008). The ratio test now certifies the primal ray before the
@@ -2309,7 +2355,8 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jkitchin/discopt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jkitchin/discopt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jkitchin/discopt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jkitchin/discopt/compare/v0.4.0...v0.5.0

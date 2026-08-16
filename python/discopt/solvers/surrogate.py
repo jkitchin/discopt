@@ -328,6 +328,25 @@ _U_LIMIT = 8.0
 #: corners.
 _DOMAIN_EPS = 1e-12
 
+#: Relative residual above which an RBF "solution" is rejected and refit by least
+#: squares. Applied as ``||A x - rhs|| <= tol * (1 + ||rhs||)`` on the standardized
+#: system, so it is scale-free.
+#:
+#: Set from the measured distribution, not from a rule of thumb. Over the 310 fits
+#: the five-function convergence panel performs (branin, six_hump_camel, ackley_2,
+#: hartman_3, goldstein_price), the relative residual of a healthy ``solve`` has
+#: median 2.8e-13, 99th percentile 5.7e-6 and maximum 8.4e-6 — routinely far worse
+#: than the ~1e-15 an "eps-sized" intuition suggests, because these systems are
+#: genuinely ill-conditioned by 60 points. A rank-deficient design, by contrast,
+#: measures 5.3e+16. That leaves 21 orders of magnitude of daylight, so 1e-3 sits
+#: ~120x above anything healthy and ~5e19x below the failure it exists to catch.
+#: (``sqrt(eps)`` was tried first and was wrong in the dangerous direction: it fired
+#: on ordinary 49-to-69-point fits, turning a rare guard into the common path.)
+#:
+#: Falling back can never make the residual worse — ``lstsq`` returns the
+#: minimum-norm least-squares solution, which minimizes exactly this quantity.
+_RBF_RESIDUAL_TOL = 1e-3
+
 #: Above this dimension a surrogate method degrades sharply — the design needed to
 #: pin down a response surface grows with dimension, and the acquisition's own
 #: global optimization gets harder at the same time. Warn, never refuse.
@@ -514,9 +533,7 @@ class RBFSurrogate:
             # loss of accuracy in the object the whole search then trusts, so the
             # warning is captured and re-reported as a fact about this fit
             # (CLAUDE.md §7) rather than left to whatever warning filter happens
-            # to be installed. The result is still used: for a near-singular
-            # interpolation system a least-squares solve is not better, and
-            # forcing a ridge here would silently change the interpolant.
+            # to be installed.
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 sol = solve(A, rhs, assume_a="sym")
@@ -533,6 +550,25 @@ class RBFSurrogate:
                     )
             if not np.all(np.isfinite(sol)):
                 raise LinAlgError("non-finite RBF coefficients")
+            # Finite is not the same as solved. On a rank-deficient system LAPACK's
+            # symmetric factorization can return a finite vector that does not
+            # satisfy ``A x = rhs`` at all, so the only trustworthy test is the
+            # residual itself -- not whether an exception was raised, and not a
+            # conditioning threshold. Measured on a design with one duplicated row
+            # (rank 10 of 11): ``solve`` returned a finite solution with
+            # ||x|| = 1.5e33 and residual 2.0e17, and the resulting surrogate
+            # mispredicted its *own* design points by 2.6e17. ``lstsq`` on the same
+            # system gave ||x|| = 38, residual 0.31, and reproduced the design
+            # values to 0.5 -- the best achievable, since the duplicated row
+            # carries a different y. This check is what makes the fallback below
+            # reachable on a LAPACK that declines to raise; an earlier version
+            # keyed the fallback on the exception alone and so was silently
+            # platform-dependent.
+            resid = float(np.linalg.norm(A @ sol - rhs))
+            if resid > _RBF_RESIDUAL_TOL * (1.0 + float(np.linalg.norm(rhs))):
+                raise LinAlgError(
+                    f"RBF solution does not satisfy its own system (residual {resid:.3e})"
+                )
         except (LinAlgError, ValueError) as exc:
             # Never swallowed: a degenerate design (duplicate or collinear points)
             # is a real event and the caller must be able to see it happened.

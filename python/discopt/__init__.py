@@ -25,7 +25,7 @@ solvers
     NLP solver backends: POUNCE (pure-Rust Ipopt port, the default) and cyipopt (Ipopt).
 """
 
-__version__ = "0.7.1.dev0"
+__version__ = "0.8.0"
 
 # Allow external distributions (e.g. the ``discopt-aggregation`` plugin) to
 # contribute submodules under the ``discopt`` namespace from a separate location
