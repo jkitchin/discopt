@@ -103,6 +103,13 @@ docs/notebooks/*.xlsx
 # stray solver listing files (GAMS/BARON .lst) — not part of the repo
 *.lst
 
+# GAMS scratch directories. A `gams` invocation creates one per run in the CWD,
+# named <pid-ish digits><letter> (225a, 225b, ...), and it contains `gamslice.dat`
+# — the machine's GAMS *license file*. A blanket `git add -A` after a BARON run
+# stages it. Ignore the whole shape, and the license file by name wherever it lands.
+[0-9][0-9][0-9][a-z]/
+gamslice.dat
+
 # scratchpad run logs (keep the harnesses, drop the outputs)
 scratchpad/*_out*.txt
 scratchpad/*.log
