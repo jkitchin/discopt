@@ -432,10 +432,15 @@ GAMS.framework/Resources/baron, which reads only `.bar` and answers a `.nl` \
 argument with a usage message and rc=0. CAVEAT: the AMPL bundle's BARON is \
 DEMO-LICENSED (10 variables, 10 constraints) -- it refuses anything larger, \
 which `_reject_non_result` now records as ERROR rather than a silent non-solve. \
-BARON at corpus scale is available only through GAMS (fully licensed here), and \
-that needs a .nl -> .gms bridge which does not exist yet; until it does, \
-`geomean_ratio_vs_baron` and `root_gap_ratio_vs_baron` are NOT producible on \
-this machine and must not be reported as measured."""
+BARON at corpus scale is available only through GAMS (fully licensed here). \
+DO NOT use this entry for a BARON comparison -- it yields a size-biased subset \
+(demo BARON "solved" 31/50 on global50, where the other 19 merely exceeded 10 \
+variables) that reads like a solver result. The bridge to full-license BARON \
+EXISTS: `discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py` fetches the \
+canonical `minlplib.org/gms/<name>.gms` and drives `gams ... minlp=baron`, so \
+no .nl -> .gms conversion is involved. `geomean_ratio_vs_baron` and \
+`root_gap_ratio_vs_baron` are producible ONLY through that script, never through \
+this entry. See the 3-way head-to-head procedure in CLAUDE.md."""
 
 [solvers.couenne]
 command = "/Applications/AMPL/couenne"
