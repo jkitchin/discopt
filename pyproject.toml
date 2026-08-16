@@ -89,6 +89,12 @@ dev = [
     # (Also in the `gams` extra, for gamsconfig.yaml merging.)
     "pyyaml>=6",
     "pytest-xdist",
+    # `python/tests/_optima.py` -- the reference-optima oracle for every
+    # correctness suite -- needs a TOML parser, and stdlib `tomllib` is 3.11+.
+    # Without this the correctness tier is a *collection error* on the 3.10 floor
+    # that `requires-python` promises, which is how #1055 stayed invisible: no
+    # CI job runs 3.10, so nothing ever tried.
+    "tomli>=2; python_version < '3.11'",
     # Pin the lint/typecheck toolchain to the exact versions in
     # .pre-commit-config.yaml (the single source of truth CI also runs), so a
     # local `pip install -e .[dev]` cannot drift from CI.

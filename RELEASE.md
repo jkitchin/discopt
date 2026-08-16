@@ -147,9 +147,16 @@ directly; always re-export from org.
 - [ ] `git checkout main && git pull`.
 - [ ] `git tag -a vX.Y.Z -m "discopt vX.Y.Z"` -- annotated tag on the merge commit.
 - [ ] `git push origin vX.Y.Z` -- this triggers `.github/workflows/release.yml`.
-- [ ] Watch the release workflow: wheels build for Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), and Windows (x64); sdist built; PyPI upload succeeds.
-- [ ] Verify on PyPI that `https://pypi.org/project/discopt/X.Y.Z/` exists and lists the expected wheels.
-- [ ] In a clean virtualenv: `pip install discopt==X.Y.Z` then `python -c "import discopt; print(discopt.__version__)"`.
+- [ ] Watch the release workflow: one `abi3` wheel builds per platform -- Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), Windows (x64) -- sdist built; the **Verify wheel coverage** step passes; PyPI upload succeeds.
+- [ ] Verify on PyPI that `https://pypi.org/project/discopt/X.Y.Z/` exists and lists **6 files**: five `cp3NN-abi3` wheels plus the sdist.
+      *Green build jobs are not evidence of coverage.* v0.8.0 published with macOS
+      and Windows wheels for 3.12 only against `requires-python = ">=3.10"`, and
+      every job was green (#1055). The workflow now runs
+      `.github/scripts/check_wheel_coverage.py` on the collected artifacts before
+      uploading; if that step is ever removed or skipped, check the file list by
+      hand:
+      `curl -s -H "User-Agent: <you>" https://pypi.org/pypi/discopt/X.Y.Z/json | python -c "import json,sys; [print(u['filename']) for u in json.load(sys.stdin)['urls']]"`
+- [ ] In a clean virtualenv: `pip install discopt==X.Y.Z` then `python -c "import discopt; print(discopt.__version__)"`. Do this on the **oldest** supported Python, not the newest -- an ABI gap shows up there first.
 
 ## 11. GitHub Release
 

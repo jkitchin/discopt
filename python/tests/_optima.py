@@ -22,7 +22,22 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 -- stdlib tomllib arrived in 3.11.
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError as exc:  # pragma: no cover - env misconfiguration
+        # Deliberately fatal rather than degrading to an empty registry: this
+        # module feeds the *reference optima* to the correctness suites, and a
+        # silently empty registry turns every soundness assertion into a no-op
+        # that reports a pass (CLAUDE.md 6). `tomli` is in the `dev` extra.
+        raise ModuleNotFoundError(
+            "the reference-optima registry needs a TOML parser: Python < 3.11 has "
+            "no stdlib `tomllib`, and `tomli` is not installed. Install the dev "
+            "extra (`pip install -e '.[dev]'`) -- do not skip these tests, they "
+            "are the correctness oracle."
+        ) from exc
 
 _REGISTRY_PATH = Path(__file__).parent / "data" / "known_optima.toml"
 
