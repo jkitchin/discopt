@@ -12,13 +12,13 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use discopt_core::bnb::milp_driver::{
-    solve_milp_hooked as core_solve_milp_hooked, MilpCheckpoint, MilpDebugControl, MilpDebugHook,
-    MilpDebugState, MilpOptions, MilpStatus,
+    solve_milp_lazy_hooked as core_solve_milp_lazy_hooked, MilpCheckpoint, MilpDebugControl,
+    MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpOptions, MilpStatus,
 };
 use discopt_core::lp::aggregation::separate_aggregation_mir;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
-use discopt_core::lp::gomory::separate_gomory;
+use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
     solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc,
@@ -915,6 +915,95 @@ impl MilpDebugHook for PyMilpHook {
     }
 }
 
+/// Python-side lazy-constraint separator for the MILP driver (#1060).
+///
+/// This is what makes single-tree LP/NLP branch-and-bound possible without a
+/// commercial MILP backend: the driver offers every integer-feasible point to
+/// `callback` before it can become the incumbent, and folds the rows a veto
+/// returns into the shared matrix.
+///
+/// **Callback contract.** `callback(x: np.ndarray) -> list[(coeffs, rhs)]`,
+/// where `x` has length `n_struct` and each returned row means
+/// `coeffs · x <= rhs` and must be **globally valid** — it is added to the
+/// shared relaxation, not to one node. An empty list accepts the point.
+///
+/// The driver's internal cut form is `coeffs · x >= rhs`, so each row is
+/// negated on the way in.
+///
+/// A callback that raises, or returns something that does not match the
+/// contract, yields [`MilpLazyVerdict::Failed`]: the search stops uncertified
+/// and the error is stashed in `pending` for `run_milp_hooked` to re-raise.
+/// Constraints the caller asked for but that were never enforced must not be
+/// silently dropped (CLAUDE.md §7) — unlike the debug hook, which is
+/// inspection-only and can safely continue after an error.
+struct PyMilpLazyHook {
+    callback: Py<PyAny>,
+    /// Structural width; a returned row may not be longer (a longer row would
+    /// spill into the driver's slack columns and mean something else entirely).
+    n_struct: usize,
+    pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl PyMilpLazyHook {
+    /// Record the first failure only — later ones are consequences of it.
+    fn fail(&self, e: PyErr) -> MilpLazyVerdict {
+        let mut slot = self.pending.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(e);
+        }
+        MilpLazyVerdict::Failed
+    }
+}
+
+impl MilpLazyHook for PyMilpLazyHook {
+    fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+        Python::with_gil(|py| {
+            let arr = PyArray1::from_slice(py, x);
+            let ret = match self.callback.bind(py).call1((arr,)) {
+                Ok(r) => r,
+                Err(e) => return self.fail(e),
+            };
+            // `list[(coeffs, rhs)]`; a numpy row extracts through the sequence
+            // protocol, so both plain lists and arrays are accepted.
+            let rows: Vec<(Vec<f64>, f64)> = match ret.extract() {
+                Ok(r) => r,
+                Err(e) => {
+                    return self.fail(PyValueError::new_err(format!(
+                        "lazy_callback must return a sequence of (coeffs, rhs) pairs \
+                         meaning `coeffs @ x <= rhs`; got {ret:?} ({e})"
+                    )))
+                }
+            };
+            if rows.is_empty() {
+                return MilpLazyVerdict::Accept;
+            }
+            let mut cuts = Vec::with_capacity(rows.len());
+            for (coeffs, rhs) in rows {
+                if coeffs.len() > self.n_struct {
+                    return self.fail(PyValueError::new_err(format!(
+                        "lazy_callback returned a row of length {} over {} structural \
+                         columns; a longer row would address the driver's slack columns",
+                        coeffs.len(),
+                        self.n_struct
+                    )));
+                }
+                if !rhs.is_finite() || coeffs.iter().any(|v| !v.is_finite()) {
+                    return self.fail(PyValueError::new_err(
+                        "lazy_callback returned a row with a non-finite entry; such a \
+                         row cannot be added to the relaxation soundly",
+                    ));
+                }
+                // `coeffs @ x <= rhs`  ==>  `(-coeffs) @ x >= -rhs`.
+                cuts.push(GomoryCut {
+                    coeffs: coeffs.iter().map(|v| -v).collect(),
+                    rhs: -rhs,
+                });
+            }
+            MilpLazyVerdict::Reject(cuts)
+        })
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
@@ -978,7 +1067,7 @@ pub fn solve_milp_py<'py>(
     // Fully sparse driver (T3b5): build the working CSC from the dense numpy matrix
     // once and delegate. The CSC entry `solve_milp_csc_py` skips this densify.
     let csc = SparseCols::from_dense(&a_owned, m, n);
-    run_milp_hooked(
+    let (status, x, obj, bound, nodes, lp_iters, _lazy_calls, _lazy_requeues) = run_milp_hooked(
         py,
         csc,
         m,
@@ -1009,7 +1098,12 @@ pub fn solve_milp_py<'py>(
         initial_incumbent,
         time_limit_s,
         debug_hook,
-    )
+        // No lazy separator on this entry point: it keeps the historical
+        // 6-tuple return and the driver's untouched path. `solve_milp_lazy_csc_py`
+        // is the entry that takes one.
+        None,
+    )?;
+    Ok((status, x, obj, bound, nodes, lp_iters))
 }
 
 /// CSC-input MILP entry (docs/dev/sparse-milp-plan.md T4): the constraint matrix is
@@ -1074,6 +1168,141 @@ pub fn solve_milp_csc_py<'py>(
         .map(|&v| v as usize)
         .collect();
     let csc = SparseCols::from_csc(col_ptr_v, row_idx_v, vals_v);
+    let (status, x, obj, bound, nodes, lp_iters, _lazy_calls, _lazy_requeues) = run_milp_hooked(
+        py,
+        csc,
+        m,
+        n,
+        c_owned,
+        l_owned,
+        u_owned,
+        b_owned,
+        int_cols,
+        n_struct,
+        obj_const,
+        max_nodes,
+        gap_tol,
+        tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        initial_incumbent,
+        time_limit_s,
+        debug_hook,
+        // No lazy separator on this entry point: it keeps the historical
+        // 6-tuple return and the driver's untouched path. `solve_milp_lazy_csc_py`
+        // is the entry that takes one.
+        None,
+    )?;
+    Ok((status, x, obj, bound, nodes, lp_iters))
+}
+
+/// CSC-input MILP entry **with a lazy-constraint separator** (#1060).
+///
+/// Identical to [`solve_milp_csc_py`] except that `lazy_callback` is called with
+/// every integer-feasible point the search finds, before that point can become
+/// the incumbent:
+///
+/// ```text
+/// lazy_callback(x: np.ndarray) -> list[(coeffs, rhs)]      # coeffs @ x <= rhs
+/// ```
+///
+/// An empty return accepts the point. A non-empty return **rejects** it: the
+/// rows are added to the shared relaxation (they must be globally valid) and the
+/// node is put back in the search — not fathomed, since a veto is not a proof
+/// that the box is empty. This is what lets the Python OA layer run a
+/// Quesada-Grossmann single tree on the in-house simplex instead of requiring a
+/// commercial backend's lazy-constraint callbacks.
+///
+/// A callback that raises propagates out of this function, and the search stops
+/// without a certificate rather than returning a result built against
+/// constraints that were never enforced.
+///
+/// Returns [`solve_milp_csc_py`]'s tuple plus `(lazy_calls, lazy_requeues)` —
+/// the anti-vacuity counters (CLAUDE.md §6). `lazy_calls == 0` means the
+/// separator never saw a point, which is NOT the same as it having accepted
+/// everything and must not be reported as convergence.
+#[pyfunction]
+#[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub, integer_cols, n_struct,
+                    lazy_callback,
+                    obj_const=0.0, max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
+                    cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
+                    max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
+                    node_propagation=false, reduced_cost_fixing=true,
+                    sb_max_cands=6, sb_node_budget=48,
+                    initial_incumbent=None, time_limit_s=None, debug_hook=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_milp_lazy_csc_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'py, i64>,
+    row_idx: PyReadonlyArray1<'py, i64>,
+    vals: PyReadonlyArray1<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integer_cols: PyReadonlyArray1<'py, i64>,
+    n_struct: usize,
+    lazy_callback: Py<PyAny>,
+    obj_const: f64,
+    max_nodes: usize,
+    gap_tol: f64,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
+    time_limit_s: Option<f64>,
+    debug_hook: Option<Py<PyAny>>,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    f64,
+    usize,
+    usize,
+    usize,
+    usize,
+)> {
+    if !lazy_callback.bind(py).is_callable() {
+        return Err(PyValueError::new_err("lazy_callback must be callable"));
+    }
+    let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
+    let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
+    let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
+    let c_owned: Vec<f64> = c.as_slice()?.to_vec();
+    let b_owned: Vec<f64> = b.as_slice()?.to_vec();
+    let l_owned: Vec<f64> = lb.as_slice()?.to_vec();
+    let u_owned: Vec<f64> = ub.as_slice()?.to_vec();
+    let int_cols: Vec<usize> = integer_cols
+        .as_slice()?
+        .iter()
+        .map(|&v| v as usize)
+        .collect();
+    let csc = SparseCols::from_csc(col_ptr_v, row_idx_v, vals_v);
     run_milp_hooked(
         py,
         csc,
@@ -1105,6 +1334,7 @@ pub fn solve_milp_csc_py<'py>(
         initial_incumbent,
         time_limit_s,
         debug_hook,
+        Some(lazy_callback),
     )
 }
 
@@ -1144,7 +1374,17 @@ fn run_milp_hooked<'py>(
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: Option<f64>,
     debug_hook: Option<Py<PyAny>>,
-) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
+    lazy_callback: Option<Py<PyAny>>,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    f64,
+    usize,
+    usize,
+    usize,
+    usize,
+)> {
     let opts = MilpOptions {
         n_struct,
         integer_cols: int_cols,
@@ -1193,9 +1433,17 @@ fn run_milp_hooked<'py>(
         pending: std::sync::Mutex::new(None),
     });
     let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
+    // Same shape for the lazy separator (#1060): absent means the driver runs
+    // its untouched, bound-neutral path.
+    let lazy = lazy_callback.map(|cb| PyMilpLazyHook {
+        callback: cb,
+        n_struct,
+        pending: std::sync::Mutex::new(None),
+    });
+    let lazy_ref: Option<&dyn MilpLazyHook> = lazy.as_ref().map(|h| h as &dyn MilpLazyHook);
     let res = py.allow_threads(|| {
-        let r = core_solve_milp_hooked(
-            csc, m, n, &c_owned, &l_owned, &u_owned, &b_owned, obj_const, &opts, hook_ref,
+        let r = core_solve_milp_lazy_hooked(
+            csc, m, n, &c_owned, &l_owned, &u_owned, &b_owned, obj_const, &opts, hook_ref, lazy_ref,
         );
         // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
         // (no-op otherwise). solve_milp has returned, so its function-scoped phase
@@ -1208,6 +1456,14 @@ fn run_milp_hooked<'py>(
     // then propagates as the exception the caller expects, instead of being
     // silently converted into a normal-looking partial result.
     if let Some(h) = hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
+    // A separator that raised (or broke its contract) propagates: the search
+    // already stopped uncertified, and returning its partial result as a normal
+    // one would hide constraints that were never enforced (CLAUDE.md §7).
+    if let Some(h) = lazy.as_ref() {
         if let Some(err) = h.pending.lock().unwrap().take() {
             return Err(err);
         }
@@ -1226,5 +1482,7 @@ fn run_milp_hooked<'py>(
         res.bound,
         res.nodes,
         res.lp_iters,
+        res.lazy_calls,
+        res.lazy_requeues,
     ))
 }

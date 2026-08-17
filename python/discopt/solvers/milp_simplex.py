@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import NamedTuple, Optional, Union, cast
+from collections.abc import Iterable
+from typing import Callable, NamedTuple, Optional, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -529,31 +530,43 @@ def _farkas_certified_std(
     return False
 
 
-def solve_milp(
-    c: np.ndarray,
-    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
-    b_ub: Optional[np.ndarray] = None,
-    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
-    b_eq: Optional[np.ndarray] = None,
-    bounds: Optional[list[tuple[float, float]]] = None,
-    integrality: Optional[np.ndarray] = None,
-    time_limit: Optional[float] = None,
-    gap_tolerance: float = 1e-4,
-    max_nodes: int = 1_000_000,
-) -> MILPResult:
-    """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds, integrality``
-    with the Rust warm-started-simplex B&B.
+class _StdForm(NamedTuple):
+    """The engine's standard form ``[A_ub | I] z = b``, built column-major.
 
-    Mirrors :func:`discopt.solvers.milp_pounce.solve_milp`. The returned
-    ``objective`` is the engine's dual lower bound (see module docstring).
+    ``n`` structural columns come first, then one slack per row; ``lb``/``ub``/``c``
+    are over all ``n + m`` columns. ``lp_kwargs`` carries the pure-LP
+    short-circuit described in :func:`_marshal_std_form`.
     """
-    try:
-        from discopt._rust import solve_milp_csc_py
-    except ImportError as err:  # pragma: no cover - exercised via the selector
-        raise SimplexBackendUnavailable(
-            "discopt._rust.solve_milp_csc_py is unavailable; build the Rust extension"
-        ) from err
 
+    m: int
+    n: int
+    col_ptr: np.ndarray
+    row_idx: np.ndarray
+    vals: np.ndarray
+    b: np.ndarray
+    lb: np.ndarray
+    ub: np.ndarray
+    c: np.ndarray
+    int_cols: np.ndarray
+    lp_kwargs: dict
+
+
+def _marshal_std_form(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_ub: Optional[np.ndarray],
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_eq: Optional[np.ndarray],
+    bounds: Optional[list[tuple[float, float]]],
+    integrality: Optional[np.ndarray],
+) -> _StdForm:
+    """Marshal ``A_ub x <= b_ub, A_eq x == b_eq`` into the driver's CSC standard form.
+
+    Shared verbatim by :func:`solve_milp` and :func:`solve_milp_with_lazy_cuts` so
+    the two entry points cannot drift: a lazy-cut row is written in the *caller's*
+    ``x`` space, which only means anything if both paths lay the columns out the
+    same way (structural first, then one slack per row).
+    """
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
 
@@ -617,10 +630,6 @@ def solve_milp(
     else:
         int_cols = np.zeros(0, dtype=np.int64)
 
-    # Interactive debugger: install the Rust checkpoint hook only when a debugger
-    # is attached now, so the pure-Rust search stays bound-neutral otherwise.
-    from discopt import debug as _debug
-
     # Pure-LP short-circuit (THRU-2b): when there are no integer columns this is a
     # plain LP, yet the MILP driver still runs its integer-search machinery — root
     # cut rounds, GMI, primal heuristics, strong branching. With no integer
@@ -647,18 +656,67 @@ def solve_milp(
         if _pure_lp
         else {}
     )
+    return _StdForm(
+        m=m,
+        n=n,
+        col_ptr=csc_col_ptr,
+        row_idx=csc_row_idx,
+        vals=csc_vals,
+        b=np.ascontiguousarray(b_vec),
+        lb=np.ascontiguousarray(lb_std),
+        ub=np.ascontiguousarray(ub_std),
+        c=np.ascontiguousarray(c_std),
+        int_cols=np.ascontiguousarray(int_cols),
+        lp_kwargs=_lp_kwargs,
+    )
+
+
+def solve_milp(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[list[tuple[float, float]]] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    max_nodes: int = 1_000_000,
+) -> MILPResult:
+    """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds, integrality``
+    with the Rust warm-started-simplex B&B.
+
+    Mirrors :func:`discopt.solvers.milp_pounce.solve_milp`. The returned
+    ``objective`` is the engine's dual lower bound (see module docstring).
+    """
+    try:
+        from discopt._rust import solve_milp_csc_py
+    except ImportError as err:  # pragma: no cover - exercised via the selector
+        raise SimplexBackendUnavailable(
+            "discopt._rust.solve_milp_csc_py is unavailable; build the Rust extension"
+        ) from err
+
+    c_arr = np.asarray(c, dtype=np.float64).ravel()
+    n = c_arr.shape[0]
+    std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
+    m = std.m
+    _lp_kwargs = std.lp_kwargs
+
+    # Interactive debugger: install the Rust checkpoint hook only when a debugger
+    # is attached now, so the pure-Rust search stays bound-neutral otherwise.
+    from discopt import debug as _debug
 
     status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
-        np.ascontiguousarray(c_std),
+        std.c,
         m,
         n + m,  # total columns: structural + one slack per row
-        csc_col_ptr,
-        csc_row_idx,
-        csc_vals,
-        np.ascontiguousarray(b_vec),
-        np.ascontiguousarray(lb_std),
-        np.ascontiguousarray(ub_std),
-        np.ascontiguousarray(int_cols),
+        std.col_ptr,
+        std.row_idx,
+        std.vals,
+        std.b,
+        std.lb,
+        std.ub,
+        std.int_cols,
         n,  # n_struct: structural columns precede the slacks
         0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
         int(max_nodes),
@@ -699,6 +757,211 @@ def solve_milp(
         objective=float(obj) if np.isfinite(obj) else None,
         bound=float(bound) if np.isfinite(bound) else None,
         node_count=int(nodes),
+    )
+
+
+def solve_milp_with_lazy_cuts(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[list[tuple[float, float]]] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    max_nodes: int = 1_000_000,
+    lazy_callback: Optional[Callable[[np.ndarray], object]] = None,
+    node_callback: Optional[Callable[[np.ndarray], object]] = None,
+    terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
+    mip_start: Optional[np.ndarray] = None,
+) -> MILPResult:
+    """Single-tree MILP solve with a lazy-constraint separator, on the Rust simplex.
+
+    The in-house counterpart of :func:`discopt.solvers.gurobi.solve_milp_with_lazy_cuts`
+    (issue #1060): ``lazy_callback`` is called with every integer-feasible point the
+    search finds, before that point can become the incumbent, and returns an iterable
+    of ``(coefficients, rhs)`` rows in ``coefficients @ x <= rhs`` form. An empty
+    return (or ``None``) accepts the point; a non-empty return rejects it, adds the
+    rows to the shared relaxation, and puts the node **back in the search** — a veto
+    is not a proof that the box is empty, so the node is re-queued rather than
+    fathomed.
+
+    Not supported here, and refused rather than silently dropped:
+
+    ``node_callback``
+        Gurobi's MIPNODE user cuts fire at *fractional* node relaxations. The Rust
+        driver's hook fires only at integer-feasible points, so there is nothing to
+        map it onto; accepting and ignoring it would silently disable the caller's
+        cut strategy.
+    ``terminate_callback``
+        The driver enforces ``time_limit`` itself. A callback that can never fire
+        would make ``callback_stats["terminated"]`` a lie.
+
+    ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
+    ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
+    count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
+    the search). ``mipsol_calls == 0`` means the separator never saw a point — NOT
+    that it accepted everything (CLAUDE.md §6).
+    """
+    try:
+        from discopt._rust import solve_milp_lazy_csc_py
+    except ImportError as err:  # pragma: no cover - exercised via the selector
+        raise SimplexBackendUnavailable(
+            "discopt._rust.solve_milp_lazy_csc_py is unavailable; build the Rust extension"
+        ) from err
+
+    if lazy_callback is None:
+        raise ValueError(
+            "solve_milp_with_lazy_cuts requires lazy_callback; use solve_milp for a "
+            "plain MILP solve"
+        )
+    if node_callback is not None:
+        raise NotImplementedError(
+            "the simplex lazy-cut backend has no MIPNODE equivalent: its separator "
+            "fires only at integer-feasible points, so node_callback (fractional "
+            "user cuts) cannot be honoured. Use milp_solver='gurobi' for that."
+        )
+    if terminate_callback is not None:
+        raise NotImplementedError(
+            "the simplex lazy-cut backend enforces time_limit in the driver and has "
+            "no callback-termination hook; pass time_limit instead of "
+            "terminate_callback."
+        )
+
+    c_arr = np.asarray(c, dtype=np.float64).ravel()
+    n = c_arr.shape[0]
+    std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
+    m = std.m
+
+    # Separator invocations and vetoes, counted on this side too so the caller's
+    # anti-vacuity check does not depend on the binding's bookkeeping alone.
+    stats: dict[str, object] = {
+        "mipsol_calls": 0,
+        "mipnode_calls": 0,
+        "lazy_cuts": 0,
+        "node_cuts": 0,
+        "terminated": False,
+        "terminate_context": None,
+    }
+
+    def _separate(x_full: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        stats["mipsol_calls"] = int(cast(int, stats["mipsol_calls"])) + 1
+        # The driver works in standard form and hands over `[structural | slacks]`.
+        # The caller's contract is the master's own variable vector, exactly as the
+        # Gurobi wrapper delivers it, so trim the slacks rather than leaking a
+        # layout the caller never declared.
+        x_arr = np.asarray(x_full, dtype=np.float64).ravel()
+        if x_arr.shape[0] < n:
+            raise ValueError(
+                f"driver returned a {x_arr.shape[0]}-vector for a master with {n} "
+                "structural columns"
+            )
+        rows = lazy_callback(x_arr[:n])
+        if rows is None:
+            return []
+        if not isinstance(rows, Iterable):
+            raise TypeError(
+                "lazy_callback must return None or an iterable of (coefficients, rhs) "
+                f"rows, got {type(rows).__name__}"
+            )
+        out: list[tuple[np.ndarray, float]] = []
+        for coeffs, rhs in rows:
+            row = np.asarray(coeffs, dtype=np.float64).ravel()
+            if row.shape[0] != n:
+                raise ValueError(
+                    f"lazy_callback returned a row with {row.shape[0]} coefficients "
+                    f"but the master has {n} variables"
+                )
+            out.append((row, float(rhs)))
+        stats["lazy_cuts"] = int(cast(int, stats["lazy_cuts"])) + len(out)
+        return out
+
+    # A caller-supplied start is a plain incumbent candidate: the driver validates
+    # it against the constraints AND offers it to the separator before seeding, so
+    # an infeasible or lazily-excluded start cannot prune the true optimum.
+    seed = None
+    if mip_start is not None:
+        seed_arr = np.asarray(mip_start, dtype=np.float64).ravel()
+        if seed_arr.shape[0] == n:
+            seed = np.ascontiguousarray(np.concatenate([seed_arr, np.zeros(m)]))
+
+    from discopt import debug as _debug
+
+    t0 = time.perf_counter()
+    (
+        status,
+        x_full,
+        obj,
+        bound,
+        nodes,
+        _iters,
+        lazy_calls,
+        lazy_requeues,
+    ) = solve_milp_lazy_csc_py(
+        std.c,
+        m,
+        n + m,
+        std.col_ptr,
+        std.row_idx,
+        std.vals,
+        std.b,
+        std.lb,
+        std.ub,
+        std.int_cols,
+        n,
+        _separate,
+        0.0,  # obj_const
+        int(max_nodes),
+        float(gap_tolerance),
+        time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
+        initial_incumbent=seed,
+        debug_hook=_debug.rust_hook(),
+        **std.lp_kwargs,
+    )
+    wall_time = time.perf_counter() - t0
+    # The binding counts calls the driver actually made; this side counts calls it
+    # actually served. A mismatch means a call was lost between the two and the
+    # separator's veto may not have been applied — report the driver's count and
+    # let the discrepancy surface rather than papering over it.
+    stats["driver_lazy_calls"] = int(lazy_calls)
+    stats["lazy_requeues"] = int(lazy_requeues)
+
+    if status == "infeasible":
+        return MILPResult(
+            status=SolveStatus.INFEASIBLE,
+            node_count=int(nodes),
+            wall_time=wall_time,
+            callback_stats=stats,
+        )
+    if status == "unbounded":
+        return MILPResult(
+            status=SolveStatus.UNBOUNDED,
+            node_count=int(nodes),
+            wall_time=wall_time,
+            callback_stats=stats,
+        )
+
+    x_struct = np.asarray(x_full, dtype=np.float64)[:n]
+    if status == "optimal":
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=x_struct,
+            objective=float(obj),
+            bound=float(obj),
+            gap=0.0,
+            node_count=int(nodes),
+            wall_time=wall_time,
+            callback_stats=stats,
+        )
+    return MILPResult(
+        status=SolveStatus.ITERATION_LIMIT,
+        x=x_struct,
+        objective=float(obj) if np.isfinite(obj) else None,
+        bound=float(bound) if np.isfinite(bound) else None,
+        node_count=int(nodes),
+        wall_time=wall_time,
+        callback_stats=stats,
     )
 
 

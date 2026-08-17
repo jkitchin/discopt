@@ -1119,6 +1119,22 @@ impl TreeManager {
         }
     }
 
+    /// Return an exported node to the open frontier without importing a result.
+    ///
+    /// The single-tree lazy-constraint path (#1060) calls this when a user
+    /// separator vetoes the integer point a node's relaxation found: the node
+    /// keeps its (parent-inherited) lower bound and is re-solved against the
+    /// cut-augmented matrix on a later batch. The caller MUST NOT also import a
+    /// `NodeResult` for it — `import_results` asserts `Evaluated` status and
+    /// would queue a `PendingResult` for a node that is open again.
+    ///
+    /// Re-opening rather than sentinelling is what keeps this sound: the veto
+    /// says "this *point* is not acceptable", never "this *box* is empty", and
+    /// the sentinel spells the latter (see `NodePool::reopen`).
+    pub fn requeue_node(&mut self, node_id: NodeId) {
+        self.pool.reopen(node_id);
+    }
+
     /// Inject an externally-found incumbent (e.g. from a primal heuristic).
     ///
     /// Updates the incumbent only if `obj_val` is strictly better than the
