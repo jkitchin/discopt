@@ -878,6 +878,117 @@ def test_qp_tape_terms_are_in_the_models_own_sense_for_a_maximize_objective():
     assert float(res["D"]) == pytest.approx(4.0)
 
 
+# --------------------------------------------------------------------------
+# The decomposition solvers (#1063). Everything above measures ``Model.solve()``,
+# which goes through ``solver._make_evaluator``. Ten call sites in
+# ``solvers/``, ``validation/``, ``decomposition/`` and ``nn/`` reached PAST that
+# funnel and constructed ``NLPEvaluator(model)`` directly -- the JAX evaluator, by
+# name. So every assertion in this file could pass while the OA / GOA / LP-NLP-BB
+# / GDPopt-LOA / AMP / GBD / sIPOPT / MPEC paths each paid a cold XLA compile.
+#
+# It is not merely a slow path: ``jit_concat_constraints`` was measured at 3m0.5s
+# on a cold process for ``squfl015-060`` against a 60 s budget, i.e. OA could not
+# return an answer at all. ``_tape_nlp_evaluator.make_evaluator`` is the canonical
+# funnel and its own docstring already said callers must not reach past it.
+#
+# ``_relax/differentiable*.py`` and ``_relax/pounce_layer.py`` still construct it
+# directly and are deliberately excluded: those ARE the differentiable-solve
+# subsystem, where JAX is the point.
+# --------------------------------------------------------------------------
+
+_DECOMP_DRIVER = """
+import sys
+import discopt.modeling as dm
+from discopt.solvers.mip_nlp import solve_mip_nlp
+
+m = dm.Model("oa_convex_minlp")
+x = m.continuous("x", lb=0.2, ub=4.0)
+y = m.continuous("y", lb=0.2, ub=4.0)
+b = m.binary("b")
+m.subject_to(dm.exp(x) + y * y <= 20.0)
+m.subject_to(x + y + b >= 2.0)
+m.minimize(x * x + y + 2.0 * b)
+
+# ``milp_solver`` is an lp_nlp_bb-only option and the other methods reject
+# unknown keys outright, so it is passed only where it is accepted.
+extra = {{"milp_solver": "simplex"}} if "{method}" == "lp_nlp_bb" else {{}}
+r = solve_mip_nlp(m, method="{method}", time_limit=120, **extra)
+print("STATUS:" + str(r.status))
+print("OBJ:" + (repr(float(r.objective)) if r.objective is not None else "None"))
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("JAXMODS:" + str(len(leaked)))
+print("LEAKED:" + ",".join(leaked[:8]))
+"""
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("method", ["oa", "goa", "lp_nlp_bb"])
+def test_decomposition_paths_do_not_import_jax(method):
+    """The MIP-NLP family must stay JAX-free, like ``Model.solve()`` already is.
+
+    ``_decompose_model`` is shared by all three, so one leaked constructor there
+    covered the whole family. The status/objective assertions are the vacuity
+    control (CLAUDE.md §6): a path that errored out early would import no jax
+    either, and would make ``JAXMODS == 0`` meaningless.
+    """
+    res = _run_raw(_DECOMP_DRIVER.format(method=method))
+    assert res["STATUS"] in {"optimal", "feasible"}, f"{method} did no real work: {res}"
+    assert res["OBJ"] != "None", f"{method} returned no incumbent, so the check is vacuous: {res}"
+    assert res["JAXMODS"] == "0", (
+        f"{method} imported {res['JAXMODS']} jax modules ({res.get('LEAKED', '?')}) "
+        f"-- a call site is reaching past make_evaluator again (#1063)"
+    )
+
+
+@pytest.mark.unit
+def test_no_shipped_module_outside_the_differentiable_subsystem_builds_the_jax_evaluator():
+    """The structural guard: one grep, so a NEW bypass fails a build.
+
+    The behavioural test above only covers the three paths it exercises; GBD,
+    sIPOPT, MPEC, GDPopt-LOA, the examiner and ``nn.trainable`` each had the same
+    bypass and none of them is on that route. A source scan is normally the wrong
+    instrument here (this file's own header says to assert on ``sys.modules``, not
+    on a grep) -- but the failure being guarded is a *constructor call by name*,
+    which is exactly what a grep does see, and it is the only check that scales to
+    every module at once.
+    """
+    import pathlib
+    import re
+
+    import discopt
+
+    # Word-boundary anchored: ``TapeNLPEvaluator(`` contains ``NLPEvaluator(`` as a
+    # substring, and a plain ``in`` test flags the tape backend's own constructor.
+    ctor = re.compile(r"\bNLPEvaluator\(")
+    root = pathlib.Path(discopt.__file__).parent
+    # These ARE the JAX subsystem: relaxing an opaque callable needs AD through
+    # it, so they construct the JAX evaluator on purpose.
+    allowed = {
+        "_relax/differentiable.py",
+        "_relax/differentiable_solve.py",
+        "_relax/pounce_layer.py",
+    }
+    offenders = []
+    scanned = 0
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel in allowed or rel == "_relax/nlp_evaluator.py":
+            continue
+        scanned += 1
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or not ctor.search(line):
+                continue
+            offenders.append(f"{rel}:{i}: {stripped}")
+
+    # Vacuity control: an empty scan would pass while checking nothing.
+    assert scanned > 50, f"the scan covered only {scanned} modules -- it is not looking at the tree"
+    assert not offenders, (
+        "these modules construct the JAX NLPEvaluator directly instead of going "
+        "through discopt._tape_nlp_evaluator.make_evaluator (#1063):\n  " + "\n  ".join(offenders)
+    )
+
+
 @pytest.mark.correctness
 def test_lp_tape_rung_declines_a_nonlinear_body():
     """The affine gate must refuse to linearise a nonlinear body.

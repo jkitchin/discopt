@@ -1023,10 +1023,10 @@ def _solve_milp_with_oa_recovery(
 def _check_constraints(x: np.ndarray, model: Model, tol: float = 1e-4) -> bool:
     """Return True if all constraints are satisfied at x."""
     try:
-        from discopt._relax.nlp_evaluator import NLPEvaluator
+        from discopt._tape_nlp_evaluator import make_evaluator
         from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
-        evaluator = NLPEvaluator(model)
+        evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
         if evaluator.n_constraints == 0:
             return True
         g = np.array(evaluator.evaluate_constraints(x))
@@ -2303,9 +2303,9 @@ def _solve_amp_impl(
         check_partition_convergence,
         initialize_partitions,
     )
-    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt._relax.partition_selection import pick_partition_vars
     from discopt._relax.term_classifier import classify_nonlinear_terms
+    from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     assert model._objective is not None
@@ -2437,7 +2437,7 @@ def _solve_amp_impl(
         )
     if root_changed or nonlinear_bt_stats.n_tightened > 0:
         _apply_flat_bounds_to_model(model, flat_lb, flat_ub)
-    evaluator = NLPEvaluator(model)
+    evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
     presolve_incumbent, presolve_incumbent_obj = _presolve_incumbent_from_initial_point(

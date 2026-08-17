@@ -584,7 +584,7 @@ def train(
     NLPResult
         The local solve result; ``.x`` is the trained point.
     """
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.warm_start import validate_initial_solution
 
     if backend == "auto":
@@ -600,7 +600,11 @@ def train(
     if initial_solution is not None:
         x0 = validate_initial_solution(model, initial_solution)
 
-    evaluator = NLPEvaluator(model, gauss_newton=gauss_newton)
+    # #1063: route through the canonical funnel. ``gauss_newton`` travels on the
+    # model (that is what the evaluator-cache fingerprint keys on and what both
+    # backends read), rather than as a ctor kwarg only the JAX evaluator accepts.
+    model._gauss_newton_hessian = bool(gauss_newton)
+    evaluator = make_evaluator(model)
     if x0 is None:
         lb, ub = evaluator.variable_bounds
         x0 = 0.5 * (np.clip(lb, -100.0, 100.0) + np.clip(ub, -100.0, 100.0))
