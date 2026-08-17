@@ -2633,11 +2633,22 @@ def test_mip_nlp_reserved_methods_raise(method, issue):
         solve_mip_nlp(_binary_model(f"{method}_reserved"), method=method)
 
 
-def test_mip_nlp_method_lp_nlp_bb_requires_gurobi_backend():
+def test_mip_nlp_method_lp_nlp_bb_runs_on_the_native_simplex_backend():
+    """#1060: the single-tree path no longer requires Gurobi.
+
+    This asserted ``RuntimeError: requires milp_solver='gurobi'`` until the
+    in-house simplex grew a lazy-cut callback; the restriction it guarded is
+    gone, so the test now pins the replacement behavior (the request is served,
+    not refused).
+    """
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
-    with pytest.raises(RuntimeError, match="requires milp_solver='gurobi'"):
-        solve_mip_nlp(_binary_model("lp_nlp_bb_backend"), method="lp_nlp_bb", milp_solver="simplex")
+    result = solve_mip_nlp(
+        _binary_model("lp_nlp_bb_backend"), method="lp_nlp_bb", milp_solver="simplex"
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.0, abs=1e-6)
 
 
 def test_mip_nlp_method_lp_nlp_bb_alias_routes_to_single_tree_solver(monkeypatch):
