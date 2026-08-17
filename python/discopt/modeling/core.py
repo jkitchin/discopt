@@ -2047,6 +2047,11 @@ class SolveResult:
         True if the reported optimality gap is mathematically certified.
         False when NLP-BB is used on a nonconvex problem (heuristic mode),
         where the NLP objective is not a valid lower bound.
+    algorithm_route : Optional[str]
+        Why an algorithm other than the default branch-and-bound ran, when the
+        solver chose it automatically (#1059). ``None`` when no automatic
+        routing happened -- either the caller named ``solver=`` explicitly, or
+        the router declined and the default path ran.
     """
 
     status: str
@@ -2129,6 +2134,13 @@ class SolveResult:
     # Structured MIP-NLP decomposition trace. Populated by solver="mip-nlp"
     # paths when iteration/provenance data is available.
     mip_nlp_trace: Optional[dict[str, object]] = None
+
+    # Why an algorithm other than the default branch-and-bound ran (#1059).
+    # ``None`` means no automatic routing took place — either the caller named a
+    # solver explicitly, or the router declined and the default path ran. When
+    # populated it is a human-readable reason, e.g.
+    # ``"mip-nlp/oa: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE)"``.
+    algorithm_route: Optional[str] = None
 
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None

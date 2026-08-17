@@ -40,6 +40,7 @@ _SCALAR_FIELDS = (
     "subnlp_calls",
     "subnlp_feasible",
     "subnlp_incumbent_updates",
+    "algorithm_route",
 )
 _DICT_ARRAY_FIELDS = (
     "x",
