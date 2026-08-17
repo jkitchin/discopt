@@ -315,7 +315,19 @@ def _affine_lower_bound(expr: Expression, model: Model) -> Optional[float]:
     if vec.size != lo_box.size:
         return None
     # min of c·x = Σ (c>0 ? c·lb : c·ub); guard infinities that actually matter.
-    contrib = np.where(vec >= 0.0, vec * lo_box, vec * hi_box)
+    #
+    # Pick the minimizing endpoint FIRST, then multiply only where the
+    # coefficient is nonzero (#1065). Multiplying before selecting evaluates
+    # both ``vec * lo_box`` and ``vec * hi_box`` in full — so a variable that
+    # does not appear in this affine form at all (``c == 0``) but is declared
+    # unbounded produces ``0 * inf = NaN``, which fails the finiteness guard and
+    # throws away a perfectly good bound (plus a RuntimeWarning into user
+    # output). The docstring's contract is an unbounded *contributing* variable;
+    # a zero coefficient does not contribute. The big-M/GDP families (syn/rsyn,
+    # squfl — see #1061) declare ``lb=0, ub=inf`` on most continuous variables,
+    # so nearly every affine form there hit this.
+    endpoint = np.where(vec >= 0.0, lo_box, hi_box)
+    contrib = np.multiply(vec, endpoint, where=vec != 0.0, out=np.zeros_like(vec))
     if not np.all(np.isfinite(contrib)):
         return None
     return float(const) + float(np.sum(contrib))
