@@ -27,7 +27,7 @@ import warnings
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import numpy as np
 
@@ -3773,14 +3773,42 @@ def solve_feasibility_pump(
     )
 
 
-def _require_lp_nlp_bb_gurobi_backend(milp_solver: str) -> None:
-    if not isinstance(milp_solver, str) or milp_solver.strip().lower() != "gurobi":
+def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
+    """Pick the single-tree MILP backend for LP/NLP branch-and-bound.
+
+    Returns ``"gurobi"`` or ``"simplex"``. Until #1060 this raised for anything
+    but Gurobi, because the single tree needs a *persistent lazy-constraint
+    callback* and only Gurobi's had one. The in-house Rust MILP driver now has
+    one too (``solve_milp_lazy_csc_py``), so ``"auto"`` and ``"simplex"`` resolve
+    to it and the method no longer requires a commercial license.
+
+    ``"pounce"`` still refuses: the POUNCE matrix-MILP B&B exposes no separator
+    hook, and silently substituting a different backend would hide that the
+    caller's choice was ignored.
+
+    The SHOT profile also still requires Gurobi. Its ESH/hyperplane strategy adds
+    user cuts at *fractional* node relaxations (Gurobi MIPNODE); the Rust hook
+    fires only at integer-feasible points, so there is nothing to map it onto,
+    and accepting the request while dropping those cuts would report a SHOT run
+    that never ran SHOT's cut generation.
+    """
+    backend = milp_solver.strip().lower() if isinstance(milp_solver, str) else ""
+    if backend == "gurobi":
+        return "gurobi"
+    if shot_profile:
         raise RuntimeError(
-            "mip_nlp_method='lp_nlp_bb' requires milp_solver='gurobi' because "
-            "LP/NLP branch-and-bound uses single-tree lazy constraint callbacks. "
-            "Backends 'auto', 'pounce', and 'simplex' do not expose the "
-            "required persistent lazy-cut capability."
+            "mip_nlp_method='lp_nlp_bb' with mip_nlp_profile='shot' requires "
+            "milp_solver='gurobi': the SHOT profile separates hyperplanes at "
+            "fractional node relaxations (MIPNODE user cuts), which the in-house "
+            f"simplex backend does not expose. Got milp_solver={milp_solver!r}."
         )
+    if backend in {"auto", "simplex"}:
+        return "simplex"
+    raise RuntimeError(
+        "mip_nlp_method='lp_nlp_bb' requires a MILP backend with a lazy-constraint "
+        "callback: 'gurobi' or 'simplex' (also reachable as 'auto'). Backend "
+        f"{milp_solver!r} exposes no separator hook."
+    )
 
 
 def _format_lazy_master_cut(
@@ -3819,7 +3847,7 @@ def solve_lp_nlp_bb(
     oa_penalty_factor: float = 1000.0,
     add_no_good_cuts: bool = False,
     feasibility_norm: str = "L_infinity",
-    milp_solver: str = "gurobi",
+    milp_solver: str = "auto",
     integer_to_binary: bool = False,
     mip_nlp_profile: str = "default",
     mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
@@ -3828,12 +3856,16 @@ def solve_lp_nlp_bb(
     """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
 
     This is a single-tree OA method: the MILP master is solved once, and each
-    integer incumbent triggers a fixed-integer NLP solve inside a Gurobi lazy
+    integer incumbent triggers a fixed-integer NLP solve inside a lazy
     constraint callback. Lazy rows are generated through the same OA and
     feasibility-cut helpers used by the multi-tree OA method. ``max_iterations``
     only caps the optional feasibility-pump initializer on this path; the main
-    single-tree search is delegated to Gurobi and is controlled by
+    single-tree search is delegated to the MILP backend and is controlled by
     ``time_limit`` and ``gap_tolerance``.
+
+    ``milp_solver`` selects that backend: ``"simplex"`` (the in-house Rust MILP
+    driver, also reached by the default ``"auto"``) or ``"gurobi"``. See
+    :func:`_resolve_lp_nlp_bb_backend` for what each one supports.
     """
     if kwargs:
         raise ValueError(
@@ -3845,8 +3877,13 @@ def solve_lp_nlp_bb(
             "max_slack, milp_solver, mip_nlp_profile, mip_nlp_shot_config, "
             "oa_penalty_factor."
         )
-    _require_lp_nlp_bb_gurobi_backend(milp_solver)
     t_start = time.perf_counter()
+    shot_config = mip_nlp_shot_config if mip_nlp_profile == "shot" else None
+    shot_profile = shot_config is not None
+    shot_cut_strategy = shot_config.cut_strategy if shot_config is not None else "oa"
+    # Resolve (and refuse) the single-tree backend before any model work, so an
+    # unsupported request costs a message rather than a decomposition.
+    lazy_backend = _resolve_lp_nlp_bb_backend(milp_solver, shot_profile=shot_profile)
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
     fp_config = _normalize_fp_config(
@@ -3893,9 +3930,6 @@ def solve_lp_nlp_bb(
             "disabling certified bound/gap reporting and skipping objective OA cuts"
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
-    shot_config = mip_nlp_shot_config if mip_nlp_profile == "shot" else None
-    shot_profile = shot_config is not None
-    shot_cut_strategy = shot_config.cut_strategy if shot_config is not None else "oa"
     cut_provenance = MIPNLPCutProvenance()
     callback_events: list[dict[str, object]] = []
 
@@ -4283,8 +4317,17 @@ def solve_lp_nlp_bb(
         )
         return rows
 
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.gurobi import solve_milp_with_lazy_cuts
+    from discopt.solvers import MILPResult, SolveStatus
+
+    solve_milp_with_lazy_cuts: Callable[..., MILPResult]
+    if lazy_backend == "gurobi":
+        from discopt.solvers.gurobi import (
+            solve_milp_with_lazy_cuts as solve_milp_with_lazy_cuts,
+        )
+    else:
+        from discopt.solvers.milp_simplex import (
+            solve_milp_with_lazy_cuts as solve_milp_with_lazy_cuts,
+        )
 
     master_mip_start = None
     if shot_profile and incumbent is not None:
@@ -4298,7 +4341,7 @@ def solve_lp_nlp_bb(
     def callback_terminate(_snapshot: dict[str, object]) -> bool:
         return (time.perf_counter() - t_start) >= float(time_limit)
 
-    master_result = solve_milp_with_lazy_cuts(
+    lazy_kwargs: dict[str, object] = dict(
         c=master.c,
         A_ub=master.A_ub,
         b_ub=master.b_ub,
@@ -4309,10 +4352,14 @@ def solve_lp_nlp_bb(
         time_limit=remaining,
         gap_tolerance=gap_tolerance,
         lazy_callback=lazy_callback,
-        node_callback=node_callback if shot_profile else None,
-        terminate_callback=callback_terminate,
         mip_start=master_mip_start,
     )
+    if lazy_backend == "gurobi":
+        # MIPNODE user cuts and the wall-clock poll are Gurobi-only; the native
+        # driver has no fractional-node hook and enforces `time_limit` itself.
+        lazy_kwargs["node_callback"] = node_callback if shot_profile else None
+        lazy_kwargs["terminate_callback"] = callback_terminate
+    master_result = solve_milp_with_lazy_cuts(**lazy_kwargs)  # type: ignore[arg-type]
     wall_time = time.perf_counter() - t_start
 
     bound = None
@@ -4354,6 +4401,7 @@ def solve_lp_nlp_bb(
         "schema_version": 1,
         "solver": "mip-nlp",
         "method": "lp_nlp_bb",
+        "milp_backend": lazy_backend,
         "profile": mip_nlp_profile,
         "shot_options": (
             mip_nlp_shot_config.as_trace_dict() if mip_nlp_shot_config is not None else {}

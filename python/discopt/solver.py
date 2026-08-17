@@ -6226,10 +6226,12 @@ def solve_model(
         plus initialization option ``init_strategy`` may be passed as top-level
         aliases and take precedence over duplicate keys in ``mip_nlp_options``.
         ``solution_pool``
-        currently requires ``milp_solver="gurobi"``. For
-        ``mip_nlp_method="lp_nlp_bb"``, ``milp_solver="gurobi"`` is also
-        required because the single-tree LP/NLP branch-and-bound variant uses
-        lazy master callbacks.
+        currently requires ``milp_solver="gurobi"``.
+        ``mip_nlp_method="lp_nlp_bb"`` runs on ``milp_solver="simplex"``
+        (also reached by ``"auto"``) or ``"gurobi"``: the single tree needs a
+        lazy-constraint callback, which those two backends provide and
+        ``"pounce"`` does not. Combining it with ``mip_nlp_profile="shot"``
+        still requires ``"gurobi"`` for the fractional-node (MIPNODE) cuts.
         Experimental SHOT-parity controls are accepted only with
         ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
         ``cut_strategy``, ``objective_epigraph``, ``anti_epigraph``,

@@ -4253,8 +4253,9 @@ class Model:
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
             ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"``
             is reserved until its dedicated implementation lands. The
-            LP/NLP-BB method uses single-tree lazy OA cuts and currently
-            requires ``milp_solver="gurobi"``. Top-level OA/ECP options such
+            LP/NLP-BB method uses single-tree lazy OA cuts and runs on
+            ``milp_solver="simplex"`` (the default via ``"auto"``) or
+            ``"gurobi"``. Top-level OA/ECP options such
             as ``equality_relaxation``,
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
             ``add_slack``, ``max_slack``, ``oa_penalty_factor``,

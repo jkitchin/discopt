@@ -11,7 +11,7 @@
 //! Python by a single PyO3 entry. MINLP/MIQP/NLP are untouched (they keep the
 //! POUNCE/JAX path); only linear MILP reaches here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::node::NodeId;
@@ -72,6 +72,20 @@ pub struct MilpResult {
     pub nodes: usize,
     /// Total simplex pivots across all node solves.
     pub lp_iters: usize,
+    /// Number of times a [`MilpLazyHook`] separator was actually invoked.
+    ///
+    /// Zero whenever no hook was attached. With a hook attached it is the
+    /// anti-vacuity counter (CLAUDE.md §6): a caller that wires a separator in
+    /// and gets `lazy_calls == 0` back learns that the separator never saw a
+    /// point, which is a different failure from "the separator accepted
+    /// everything" and must not be reported as one.
+    pub lazy_calls: usize,
+    /// Number of times a node was re-queued because the separator vetoed its
+    /// integral relaxation solution. Zero without a hook. Together with
+    /// `lazy_calls` this distinguishes "the separator accepted everything" from
+    /// "the separator re-searched boxes", which is the signal the OA caller
+    /// needs to tell a converged single-tree run from a vacuous one.
+    pub lazy_requeues: usize,
 }
 
 /// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
@@ -146,6 +160,53 @@ pub trait MilpDebugHook: Sync {
     /// end the search gracefully.
     fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl;
 }
+
+/// What a [`MilpLazyHook`] says about an integer-feasible point.
+#[derive(Debug, Clone)]
+pub enum MilpLazyVerdict {
+    /// No lazy constraint is violated: adopt the point exactly as an unhooked
+    /// search would.
+    Accept,
+    /// The point violates a lazy constraint. Each returned row is a
+    /// **globally valid** `coeffs · x ≥ rhs` (coefficients indexed by
+    /// structural column; trailing columns are implicitly zero) that cuts this
+    /// point off. Never empty — an empty separation is [`Self::Accept`].
+    Reject(Vec<GomoryCut>),
+    /// The separator itself failed (e.g. the Python callable raised). The
+    /// search stops and the result is reported uncertified. A failed separator
+    /// must never be treated as "no cut" — that silently drops a constraint
+    /// the caller believes is being enforced (CLAUDE.md §7).
+    Failed,
+}
+
+/// A lazy-constraint separator attached to the Rust MILP search: the native
+/// equivalent of a Gurobi `MIPSOL` callback, and the mechanism single-tree
+/// LP/NLP branch-and-bound (`mip_nlp_method="lp_nlp_bb"`) runs on (#1060).
+///
+/// `separate` is called with each integer-feasible **structural** point the
+/// search finds — a node relaxation that came out integral, a primal
+/// heuristic's candidate, or a caller-supplied seed — *before* that point can
+/// become the incumbent. Must be `Sync`: the solve runs under
+/// `Python::allow_threads`, and the Python adapter re-acquires the GIL.
+///
+/// **Zero effect when absent:** every fire-site is gated on `Option::is_some`,
+/// so a `None` hook leaves the search bit-for-bit identical (bound-neutral).
+pub trait MilpLazyHook: Sync {
+    /// Separate `x` (length `n_struct`) against the caller's lazy constraints.
+    fn separate(&self, x: &[f64]) -> MilpLazyVerdict;
+}
+
+/// How many times one node may be re-solved after a lazy veto before the search
+/// gives up on refining it.
+///
+/// Each veto folds in a cut that provably separates the vetoed point, so a
+/// node's re-solve cannot return the same point and the loop terminates on any
+/// well-behaved separator (finite outer approximation). The cap only bounds a
+/// pathological one — a separator that vetoes without separating. Exhausting it
+/// sentinels the node, which is a *non-rigorous* fathom, so the driver also
+/// drops certification (see the call site): the result may then be `Feasible`,
+/// never a false `Optimal`.
+const LAZY_REQUEUE_CAP: u32 = 1000;
 
 /// Options for the MILP driver.
 pub struct MilpOptions {
@@ -309,6 +370,30 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
 /// solve (all fire-sites short-circuit).
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_hooked(
+    csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+) -> MilpResult {
+    solve_milp_lazy_hooked(csc_w, m, n, c, l, u, b, obj_const, opts, hook, None)
+}
+
+/// [`solve_milp_hooked`] plus an optional lazy-constraint separator (#1060).
+///
+/// `lazy` turns the driver into a single-tree lazy-cut engine: every
+/// integer-feasible point is offered to the separator before it can become the
+/// incumbent, and the globally-valid rows a veto returns are folded into the
+/// shared matrix at the batch boundary — the same mechanism the node cut pool
+/// already uses. A vetoed node is **re-queued**, not fathomed. When `lazy` is
+/// `None` this is exactly [`solve_milp_hooked`].
+#[allow(clippy::too_many_arguments)]
+pub fn solve_milp_lazy_hooked(
     mut csc_w: SparseCols,
     m: usize,
     n: usize,
@@ -319,6 +404,7 @@ pub fn solve_milp_hooked(
     obj_const: f64,
     opts: &MilpOptions,
     hook: Option<&dyn MilpDebugHook>,
+    lazy: Option<&dyn MilpLazyHook>,
 ) -> MilpResult {
     crate::profile::init_from_env();
     crate::profile::reset();
@@ -362,6 +448,8 @@ pub fn solve_milp_hooked(
                 bound: f64::INFINITY,
                 nodes: 0,
                 lp_iters: 0,
+                lazy_calls: 0,
+                lazy_requeues: 0,
             };
         }
         (pr.l, pr.u)
@@ -384,6 +472,38 @@ pub fn solve_milp_hooked(
     let mut m_w = m;
     let mut n_w = n;
 
+    // --- Lazy separation state (only live when `lazy` is Some) ---
+    // Cuts a lazy separator produced, awaiting the next batch-boundary fold.
+    // Kept apart from the node-cut pool because a lazy cut is not optional: it
+    // is the only thing that stops the vetoed point from coming back, so it is
+    // exempt from the pool's `node_cut_cap` budget.
+    let mut lazy_pending: Vec<GomoryCut> = Vec::new();
+    let mut lazy_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
+    // Per-node lazy re-solve counts, against `LAZY_REQUEUE_CAP`.
+    let mut lazy_requeues: HashMap<NodeId, u32> = HashMap::new();
+    // Set when the separator itself failed; the search stops uncertified.
+    let mut lazy_failed = false;
+    // Executed separator calls, for the caller's anti-vacuity check (§6).
+    let mut lazy_calls: usize = 0;
+    // Total re-queue events across all nodes (the per-node counts above are
+    // consumed by the cap; this one is reported).
+    let mut lazy_requeue_events: usize = 0;
+    // Dedup + record a batch of separator rows into `lazy_pending`. Returns how
+    // many were new (a fully-duplicate veto cannot make progress, so the caller
+    // counts on the re-queue cap to break the loop).
+    macro_rules! stage_lazy_cuts {
+        ($cuts:expr) => {{
+            let mut fresh = 0usize;
+            for cut in $cuts {
+                if lazy_sigs.insert(cut_signature(&cut)) {
+                    lazy_pending.push(cut);
+                    fresh += 1;
+                }
+            }
+            fresh
+        }};
+    }
+
     // --- Caller-seeded incumbent: validate, then inject before the search ---
     // Runs on the pre-cut matrix (all rows are original rows here) with the
     // presolve-tightened bounds (FBBT never cuts a feasible point, so a
@@ -394,7 +514,32 @@ pub fn solve_milp_hooked(
         if let Some((sx, sobj)) =
             validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
         {
-            tm.inject_incumbent(sx, sobj + obj_const);
+            // A seed is an integer-feasible point like any other, so it goes to
+            // the separator first: seeding an incumbent the caller's lazy
+            // constraints exclude would prune the tree against a point that is
+            // not actually feasible. A vetoed seed is simply not seeded (seeding
+            // is an optimization), but its cuts are kept — they are globally
+            // valid and the first batch boundary folds them in.
+            let accept = match lazy {
+                None => true,
+                Some(h) => {
+                    lazy_calls += 1;
+                    match h.separate(&sx) {
+                        MilpLazyVerdict::Accept => true,
+                        MilpLazyVerdict::Reject(cuts) => {
+                            let _ = stage_lazy_cuts!(cuts);
+                            false
+                        }
+                        MilpLazyVerdict::Failed => {
+                            lazy_failed = true;
+                            false
+                        }
+                    }
+                }
+            };
+            if accept {
+                tm.inject_incumbent(sx, sobj + obj_const);
+            }
         }
     }
 
@@ -778,7 +923,7 @@ pub fn solve_milp_hooked(
 
         // --- sequential reduce: apply tree mutations in batch order ---
         let mut hit_unbounded = false;
-        for (k, out) in outputs.into_iter().enumerate() {
+        for (k, mut out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
             if out.deferred {
@@ -821,7 +966,31 @@ pub fn solve_milp_hooked(
                 tm.set_node_basis(id, Some(basis));
             }
             if let Some((cand, cobj)) = out.incumbent {
-                tm.inject_incumbent(cand, cobj);
+                // A heuristic candidate is an integer-feasible point, so it goes
+                // through the separator on the same terms as a node's own
+                // integral relaxation. Nothing to re-queue here: the candidate is
+                // not this node's LP solution, so vetoing it leaves the node's
+                // own result (fractional, or handled below) untouched.
+                let accept = match lazy {
+                    None => true,
+                    Some(h) => {
+                        lazy_calls += 1;
+                        match h.separate(&cand) {
+                            MilpLazyVerdict::Accept => true,
+                            MilpLazyVerdict::Reject(cuts) => {
+                                let _ = stage_lazy_cuts!(cuts);
+                                false
+                            }
+                            MilpLazyVerdict::Failed => {
+                                lazy_failed = true;
+                                false
+                            }
+                        }
+                    }
+                };
+                if accept {
+                    tm.inject_incumbent(cand, cobj);
+                }
             }
             if let Some(v) = out.branch_hint {
                 tm.set_branch_hint(id, v);
@@ -842,7 +1011,69 @@ pub fn solve_milp_hooked(
             if !out.found_cuts.is_empty() && pool_sigs.len() < node_cut_cap {
                 pending_cuts.extend(dedup_new_cuts(out.found_cuts, &mut pool_sigs, node_cut_cap));
             }
+            // Lazy separation of this node's OWN relaxation solution. The point
+            // has to be screened here, before `import_results`, because
+            // `process_evaluated` fathoms an integer-feasible node and promotes
+            // its solution to the incumbent in one step — after that the point
+            // is already the answer.
+            //
+            // The predicate must match the one `process_evaluated` uses
+            // (`result.is_feasible || is_integer_feasible(solution)`), or a point
+            // it treats as integral would slip past unseparated.
+            if let Some(h) = lazy {
+                let integral = out.result.lower_bound.is_finite()
+                    && (out.result.is_feasible
+                        || solution_is_integral(&out.result.solution, &is_int));
+                if integral {
+                    lazy_calls += 1;
+                    match h.separate(&out.result.solution) {
+                        MilpLazyVerdict::Accept => {}
+                        MilpLazyVerdict::Reject(cuts) => {
+                            let _ = stage_lazy_cuts!(cuts);
+                            let seen = lazy_requeues.entry(id).or_insert(0);
+                            *seen += 1;
+                            if *seen <= LAZY_REQUEUE_CAP {
+                                lazy_requeue_events += 1;
+                                // Re-open the node instead of importing a result.
+                                // The cuts fold in at this batch's boundary, so
+                                // the re-solve runs against a matrix that
+                                // excludes the vetoed point. The node keeps its
+                                // parent-inherited bound meanwhile — valid, just
+                                // not sharpened by this evaluation.
+                                // The node's optimal basis was already
+                                // stored above, so the re-solve warm-starts from
+                                // it through the dual simplex once the new cut
+                                // rows are appended (`extend_basis`).
+                                tm.requeue_node(id);
+                                continue;
+                            }
+                            // Cap exhausted: a separator that keeps vetoing
+                            // without making progress. Fall back to the sentinel
+                            // (the node is excluded) — which is a NON-RIGOROUS
+                            // fathom, so certification is dropped: this run may
+                            // report `Feasible`, never a false `Optimal`.
+                            out.result.lower_bound = INFEAS_SENTINEL;
+                            out.result.is_feasible = false;
+                            gap_certified = false;
+                            search_incomplete = true;
+                        }
+                        MilpLazyVerdict::Failed => {
+                            lazy_failed = true;
+                        }
+                    }
+                }
+            }
             results.push(out.result);
+        }
+        if lazy_failed {
+            // A separator that raised leaves constraints unenforced; continuing
+            // would report a result built against a model the caller did not
+            // ask for. Stop, uncertified (CLAUDE.md §7).
+            gap_certified = false;
+            search_incomplete = true;
+            tm.import_results(&results);
+            tm.process_evaluated();
+            break 'search;
         }
         if hit_unbounded {
             unbounded = true;
@@ -867,6 +1098,14 @@ pub fn solve_milp_hooked(
             break 'search;
         }
         dbg_iter += 1;
+
+        // Lazy cuts join the fold unconditionally — after the node-cut dedup
+        // above and outside the `node_cut_cap` budget, because dropping one
+        // would leave the vetoed point in the relaxation and the node would be
+        // re-queued forever against a matrix that never changed.
+        if !lazy_pending.is_empty() {
+            pending_cuts.append(&mut lazy_pending);
+        }
 
         // Fold this batch's newly-found global cuts into the shared matrix.
         // Stored node bases are extended lazily on their next solve, so children
@@ -925,6 +1164,8 @@ pub fn solve_milp_hooked(
         bound,
         nodes: stats.total_nodes,
         lp_iters,
+        lazy_calls,
+        lazy_requeues: lazy_requeue_events,
     }
 }
 
@@ -2432,6 +2673,37 @@ fn frac(v: f64) -> f64 {
     f.min(1.0 - f)
 }
 
+/// Integrality screen for the lazy separator, deliberately identical to the one
+/// `TreeManager::process_evaluated` applies (`branching::is_integer_feasible`
+/// over the tree's `integer_vars`, tolerance `INTEGRALITY_TOL`).
+///
+/// It is re-derived here over the structural mask rather than borrowed from the
+/// tree because `int_info` is moved into `TreeManager::new`. The two must agree:
+/// a point the tree treats as integer-feasible but this screen skips would be
+/// promoted to the incumbent without ever reaching the separator. The driver's
+/// `is_int` is built from the same `opts.integer_cols`, and every `VarBranchInfo`
+/// the driver constructs has `size == 1`, so the predicates coincide.
+///
+/// `INT_TOL` here and `branching::INTEGRALITY_TOL` there are both 1e-5; the
+/// latter is private to that module, so the agreement is pinned by
+/// `lazy_screen_matches_tree_integrality_predicate` in the tests below rather
+/// than by a shared constant.
+fn solution_is_integral(solution: &[f64], is_int: &[bool]) -> bool {
+    for (j, &it) in is_int.iter().enumerate() {
+        if !it {
+            continue;
+        }
+        // Matches `is_integer_feasible`'s short-circuit on a truncated solution.
+        if j >= solution.len() {
+            return false;
+        }
+        if frac(solution[j]) > INT_TOL {
+            return false;
+        }
+    }
+    true
+}
+
 fn midpoint(lb: &[f64], ub: &[f64]) -> Vec<f64> {
     lb.iter()
         .zip(ub)
@@ -3773,5 +4045,294 @@ mod sparse_milp_diff {
             let (_col_ptr, _row_idx, vals) = sp.raw();
             assert_eq!(vals.len(), dense_nnz, "{}: csc nnz != dense nnz", case.name);
         }
+    }
+}
+
+/// #1060: the lazy-constraint separator hook that makes single-tree LP/NLP-BB
+/// possible without a commercial MILP backend.
+///
+/// The properties pinned here are the ones the OA caller depends on: a vetoed
+/// point never becomes the answer, a vetoed node stays in the search instead of
+/// being fathomed, a separator that cannot make progress costs the certificate
+/// rather than producing a false one, and `lazy: None` is inert.
+#[cfg(test)]
+mod lazy_separation {
+    use super::*;
+    use crate::bnb::branching::is_integer_feasible;
+    use crate::lp::simplex::sparse::SparseCols;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Binary knapsack: `min -10x0 -9x1 -8x2 -x3` s.t. `5(x0+x1+x2+x3) + s = 9`,
+    /// all four structural columns binary. The budget admits exactly one item,
+    /// so the unconstrained optimum is `x0 = 1`, obj `-10`; with `x0` excluded
+    /// it is `x1 = 1`, obj `-9`.
+    struct Knapsack {
+        a: Vec<f64>,
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+    }
+
+    impl Knapsack {
+        fn new() -> Self {
+            Knapsack {
+                a: vec![5.0, 5.0, 5.0, 5.0, 1.0],
+                m: 1,
+                n: 5,
+                c: vec![-10.0, -9.0, -8.0, -1.0, 0.0],
+                l: vec![0.0; 5],
+                u: vec![1.0, 1.0, 1.0, 1.0, INF],
+                b: vec![9.0],
+            }
+        }
+
+        fn opts(&self) -> MilpOptions {
+            MilpOptions {
+                n_struct: 4,
+                integer_cols: vec![0, 1, 2, 3],
+                max_nodes: 100_000,
+                time_limit_s: None,
+                gap_tol: 1e-9,
+                root_cuts: 16,
+                cut_rounds: 3,
+                gmi_cuts: true,
+                cut_select: true,
+                node_cuts: true,
+                max_pool_cuts: 500,
+                heuristics: true,
+                presolve: true,
+                strong_branch: true,
+                node_propagation: true,
+                reduced_cost_fixing: true,
+                sb_max_cands: 8,
+                sb_node_budget: 1024,
+                initial_incumbent: None,
+                simplex: SimplexOptions::default(),
+            }
+        }
+
+        fn solve_with(&self, lazy: Option<&dyn MilpLazyHook>) -> MilpResult {
+            solve_milp_lazy_hooked(
+                SparseCols::from_dense(&self.a, self.m, self.n),
+                self.m,
+                self.n,
+                &self.c,
+                &self.l,
+                &self.u,
+                &self.b,
+                0.0,
+                &self.opts(),
+                None,
+                lazy,
+            )
+        }
+    }
+
+    /// Rejects any point that uses item 0, returning the globally valid row
+    /// `x0 ≤ 0` in the driver's `coeffs · x ≥ rhs` form (`-x0 ≥ 0`).
+    struct VetoItemZero {
+        calls: AtomicUsize,
+    }
+
+    impl MilpLazyHook for VetoItemZero {
+        fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if x.first().copied().unwrap_or(0.0) > 0.5 {
+                let mut coeffs = vec![0.0; 4];
+                coeffs[0] = -1.0;
+                MilpLazyVerdict::Reject(vec![GomoryCut { coeffs, rhs: 0.0 }])
+            } else {
+                MilpLazyVerdict::Accept
+            }
+        }
+    }
+
+    /// Rejects every point and returns nothing that separates it — the
+    /// pathological separator the re-queue cap exists for.
+    struct VetoEverythingUselessly {
+        calls: AtomicUsize,
+    }
+
+    impl MilpLazyHook for VetoEverythingUselessly {
+        fn separate(&self, _x: &[f64]) -> MilpLazyVerdict {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            MilpLazyVerdict::Reject(Vec::new())
+        }
+    }
+
+    /// A separator that raised on the Python side.
+    struct SeparatorFails {
+        calls: AtomicUsize,
+    }
+
+    impl MilpLazyHook for SeparatorFails {
+        fn separate(&self, _x: &[f64]) -> MilpLazyVerdict {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            MilpLazyVerdict::Failed
+        }
+    }
+
+    /// The headline behaviour: the separator sees the MILP optimum, vetoes it,
+    /// and the driver returns the best point that survives the cut — still with
+    /// a certificate, because the veto was resolved by a genuine cut and not by
+    /// removing a box.
+    #[test]
+    fn veto_of_the_optimum_returns_the_next_best_certified_point() {
+        let k = Knapsack::new();
+        let baseline = k.solve_with(None);
+        assert_eq!(baseline.status, MilpStatus::Optimal, "baseline status");
+        assert!(
+            (baseline.obj - (-10.0)).abs() < 1e-6,
+            "baseline obj {}",
+            baseline.obj
+        );
+        assert_eq!(
+            baseline.lazy_calls, 0,
+            "no hook must mean no separator call"
+        );
+
+        let hook = VetoItemZero {
+            calls: AtomicUsize::new(0),
+        };
+        let r = k.solve_with(Some(&hook));
+        assert_eq!(r.status, MilpStatus::Optimal, "vetoed solve status");
+        assert!((r.obj - (-9.0)).abs() < 1e-6, "vetoed solve obj {}", r.obj);
+        assert!(
+            r.x[0] < 0.5,
+            "the vetoed item is still in the answer: {:?}",
+            r.x
+        );
+        // Anti-vacuity (CLAUDE.md §6): a pass here must mean the separator ran.
+        let fired = hook.calls.load(Ordering::SeqCst);
+        assert!(fired > 0, "separator never fired");
+        assert_eq!(r.lazy_calls, fired, "reported lazy_calls != actual calls");
+        assert!(
+            r.lazy_requeues > 0,
+            "the node fire-site never re-queued: the veto was resolved somewhere \
+             else, so this test does not exercise the mechanism it claims to"
+        );
+        assert_eq!(baseline.lazy_requeues, 0, "no hook must mean no re-queue");
+    }
+
+    /// A separator that keeps vetoing without ever separating must cost the
+    /// certificate, never produce a false `Optimal`. This is the property that
+    /// makes the re-queue cap safe (CLAUDE.md §1).
+    #[test]
+    fn a_separator_that_never_makes_progress_loses_the_certificate() {
+        let k = Knapsack::new();
+        let hook = VetoEverythingUselessly {
+            calls: AtomicUsize::new(0),
+        };
+        let r = k.solve_with(Some(&hook));
+        assert_ne!(
+            r.status,
+            MilpStatus::Optimal,
+            "a search that excluded a box it never proved empty must not certify"
+        );
+        assert!(
+            hook.calls.load(Ordering::SeqCst) > 0,
+            "separator never fired"
+        );
+        assert_eq!(r.lazy_calls, hook.calls.load(Ordering::SeqCst));
+        assert!(
+            r.lazy_requeues >= LAZY_REQUEUE_CAP as usize,
+            "the cap was never reached ({} re-queues), so this test did not \
+             exercise the exhaustion path",
+            r.lazy_requeues
+        );
+    }
+
+    /// A separator failure is surfaced, not swallowed (CLAUDE.md §7): the search
+    /// stops and returns uncertified rather than reporting a result computed
+    /// against constraints that were never enforced.
+    #[test]
+    fn separator_failure_stops_the_search_uncertified() {
+        let k = Knapsack::new();
+        let hook = SeparatorFails {
+            calls: AtomicUsize::new(0),
+        };
+        let r = k.solve_with(Some(&hook));
+        assert_ne!(
+            r.status,
+            MilpStatus::Optimal,
+            "failed separator must not certify"
+        );
+        assert!(
+            hook.calls.load(Ordering::SeqCst) > 0,
+            "separator never fired"
+        );
+    }
+
+    /// `lazy: None` must be inert — same status, objective, bound and node count
+    /// as the plain CSC entry point (CLAUDE.md §5, bound-neutral regime).
+    #[test]
+    fn lazy_none_is_bound_neutral() {
+        let k = Knapsack::new();
+        let with_none = k.solve_with(None);
+        let plain = solve_milp_csc(
+            &SparseCols::from_dense(&k.a, k.m, k.n),
+            k.m,
+            k.n,
+            &k.c,
+            &k.l,
+            &k.u,
+            &k.b,
+            0.0,
+            &k.opts(),
+        );
+        assert_eq!(with_none.status, plain.status, "status drift");
+        assert_eq!(with_none.nodes, plain.nodes, "node-count drift");
+        assert!((with_none.obj - plain.obj).abs() < 1e-12, "obj drift");
+        assert!((with_none.bound - plain.bound).abs() < 1e-12, "bound drift");
+    }
+
+    /// The separator's integrality screen must agree with the one
+    /// `TreeManager::process_evaluated` uses, or a point the tree promotes to
+    /// the incumbent could bypass separation entirely. Compared directly against
+    /// `branching::is_integer_feasible` on the same mask.
+    #[test]
+    fn lazy_screen_matches_tree_integrality_predicate() {
+        let is_int = vec![true, false, true, true];
+        let vars: Vec<VarBranchInfo> = (0..is_int.len())
+            .filter(|&j| is_int[j])
+            .map(|j| VarBranchInfo {
+                offset: j,
+                size: 1,
+                is_integer: true,
+            })
+            .collect();
+        // Integral, fractional on an integer column, fractional only on the
+        // continuous column, at-tolerance either side, and negative values.
+        let points: Vec<Vec<f64>> = vec![
+            vec![0.0, 0.5, 1.0, 3.0],
+            vec![0.5, 0.5, 1.0, 3.0],
+            vec![0.0, 0.5, 1.4, 3.0],
+            vec![1.0 - 1e-6, 0.5, 1.0, 3.0],
+            vec![1.0 + 1e-6, 0.5, 1.0, 3.0],
+            vec![1.0 - 1e-3, 0.5, 1.0, 3.0],
+            vec![-2.0, -0.25, -3.0, 0.0],
+            vec![-2.25, 0.0, 0.0, 0.0],
+        ];
+        let mut compared = 0usize;
+        for p in &points {
+            assert_eq!(
+                solution_is_integral(p, &is_int),
+                is_integer_feasible(p, &vars),
+                "screen disagrees with the tree on {p:?}"
+            );
+            compared += 1;
+        }
+        // A truncated solution is rejected by both.
+        let short = vec![0.0, 0.5];
+        assert_eq!(
+            solution_is_integral(&short, &is_int),
+            is_integer_feasible(&short, &vars),
+            "screen disagrees with the tree on a truncated solution"
+        );
+        compared += 1;
+        assert_eq!(compared, 9, "integrality-screen comparison count");
     }
 }

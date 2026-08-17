@@ -50,6 +50,7 @@ const FRAC_MIN: f64 = 1e-3;
 const MAX_ABS_COEFF: f64 = 1e7;
 
 /// A generated cut `coeffs · x ≥ rhs` over the standard-form variables.
+#[derive(Debug, Clone)]
 pub struct GomoryCut {
     /// Dense length-`n` coefficient vector.
     pub coeffs: Vec<f64>,

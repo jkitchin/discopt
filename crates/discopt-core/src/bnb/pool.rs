@@ -185,6 +185,42 @@ impl NodePool {
             .count()
     }
 
+    /// Return an already-exported node to the open frontier so it is selected
+    /// and re-evaluated again.
+    ///
+    /// This exists for the lazy-constraint separator (#1060). When a user
+    /// separator VETOES the integer point a node's relaxation found, the node
+    /// must be re-solved against the cut-augmented matrix — **not** excluded.
+    /// Excluding it is the `_INFEASIBILITY_SENTINEL` path, a documented
+    /// *non-rigorous* fathom (#748): it removes a box that was never proven to
+    /// contain no acceptable point, so single-tree outer approximation built on
+    /// it would silently drop the optimum. Re-opening keeps the box in the
+    /// search; the cut that vetoed the point is globally valid and is folded
+    /// into the shared matrix before the next selection, so the re-solve cannot
+    /// return the same point.
+    ///
+    /// `select_next` consumed this node's heap entry, so a fresh one is pushed.
+    /// Any stale entry left behind is skipped by the usual lazy-deletion rule
+    /// once the node leaves `Pending` again.
+    pub fn reopen(&mut self, id: NodeId) {
+        let node = &mut self.nodes[id.0];
+        node.status = NodeStatus::Pending;
+        let lower_bound = node.local_lower_bound;
+        let estimate = if node.best_estimate.is_finite() {
+            node.best_estimate
+        } else {
+            lower_bound
+        };
+        let depth = node.depth;
+        self.open.push(HeapEntry {
+            node_id: id,
+            lower_bound,
+            estimate,
+            depth,
+            strategy: self.strategy,
+        });
+    }
+
     /// Mark a node as pruned.
     pub fn prune(&mut self, id: NodeId) {
         self.nodes[id.0].status = NodeStatus::Pruned;
