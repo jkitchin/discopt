@@ -2190,6 +2190,7 @@ def test_amp_rejects_nonfinite_direct_initial_point(bad_value):
 def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
     """A finite start with NaN objective is not a valid AMP incumbent."""
     import discopt._relax.nlp_evaluator as nlp_eval
+    import discopt._tape_nlp_evaluator as tape_eval
     from discopt._relax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
@@ -2197,7 +2198,19 @@ def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
     x = m.continuous("x", lb=0.0, ub=1.0)
     m.minimize(x)
 
-    monkeypatch.setattr(nlp_eval.NLPEvaluator, "evaluate_objective", lambda self, x_flat: np.nan)
+    # #1063: AMP goes through ``make_evaluator``, which hands back the tape
+    # evaluator, so patching only the JAX class silently patched a class this
+    # path never instantiates -- the NaN never appeared and the test read as a
+    # pass for the wrong reason. Patch whichever backend the funnel returns, and
+    # count the calls so the patch cannot go un-exercised again (CLAUDE.md §6).
+    n_nan_evals = []
+
+    def _nan_objective(self, x_flat):
+        n_nan_evals.append(1)
+        return np.nan
+
+    monkeypatch.setattr(nlp_eval.NLPEvaluator, "evaluate_objective", _nan_objective)
+    monkeypatch.setattr(tape_eval.TapeNLPEvaluator, "evaluate_objective", _nan_objective)
     monkeypatch.setattr(
         amp_mod,
         "_solve_milp_with_oa_recovery",
@@ -2219,6 +2232,7 @@ def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
         time_limit=1.0,
     )
 
+    assert n_nan_evals, "the NaN objective was never evaluated -- this test asserted nothing"
     assert result.status == "error"
     assert result.objective is None
     assert result.x is None
