@@ -538,6 +538,58 @@ def _check_constraint_feasibility(
     return bool(np.all(viol <= tol + rtol * scale))
 
 
+# --- The false-primal screen (#772 / #815 / #1061) ---------------------------
+#
+# Two call sites ask the same question with the same intended meaning: is this
+# point GROSSLY infeasible in the original problem -- wrong in a way no converged
+# solve could ever produce? They are the final incumbent guard in
+# ``modeling/core.py`` and the single-NLP source screen in ``solver.py``. Both
+# used to spell the answer inline as ``tol=1e-3``, and both therefore inherited
+# ``rtol``'s ACCEPTANCE default of 1e-9.
+#
+# That combination is not "loose". It loosens only the ABSOLUTE leg (1000x, from
+# 1e-6 to 1e-3) while leaving the RELATIVE leg at the value calibrated for
+# accepting an incumbent, so on a row whose terms are large the screen collapses
+# to an absolute-only test -- exactly the scale blindness the docstring above
+# describes for prob07. Measured on nvs05 (#1061): row 2 has scale
+# ``sum_j |J_2j|*|x_j| = 73674``, and a point whose RELATIVE residual on that row
+# is 2.8e-8 -- converged by IPOPT's own default tolerance, and 1e-7 per component
+# away from the point the very same solver certifies as optimal -- carries an
+# absolute residual of 2.06e-3 and read as a false primal. The default path sits
+# at 1.34e-4 on that row, a factor of 7.5 from tripping: a landmine, not a margin.
+#
+# So the screen loosens BOTH legs by the same 1000x, which is what "the same test,
+# a thousand times looser" actually means. On a well-scaled row (scale ~1) the
+# behaviour is unchanged at ``1e-3``; on nvs05's row 2 the threshold becomes
+# ``1e-3 + 1e-6*73674 = 0.075``, still an order of magnitude below the smallest
+# genuine false primal on record (the #770 violations were 0.4-17.6) and four
+# orders of magnitude tighter than a mutation-scale error, whose residual is
+# comparable to the row's OWN magnitude rather than 1e-8 of it.
+#
+# Defined once, here, because the two sites must never drift apart: solver.py's
+# comment already says it uses "the SAME loose check" as core.py's, and the only
+# thing keeping that true was that both had the same literal typed into them.
+FALSE_PRIMAL_ATOL = 1e-3
+FALSE_PRIMAL_RTOL = 1e-6
+
+
+def passes_false_primal_screen(evaluator: NLPEvaluator, x: np.ndarray) -> bool:
+    """Is ``x`` free of any GROSS infeasibility in ``evaluator``'s problem?
+
+    The deliberately-loose screen used to refuse a false primal (#772/#815). It is
+    not a feasibility test -- :func:`_check_constraint_feasibility` at its default
+    tolerances is -- and must never be used as one: it is calibrated to flag only
+    a violation no converged solve could produce, so that it can never withhold a
+    point that is feasible within the solver's own tolerance.
+
+    Scale-aware in both legs (see the note above); returns ``True`` when the point
+    passes, i.e. when there is no reason to suspect a false primal.
+    """
+    return _check_constraint_feasibility(
+        evaluator, x, tol=FALSE_PRIMAL_ATOL, rtol=FALSE_PRIMAL_RTOL
+    )
+
+
 def subnlp(
     model: Model,
     x_relax: np.ndarray,

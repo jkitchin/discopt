@@ -14716,18 +14716,17 @@ def _solve_continuous(
     # at an all-10 point violating the distance-defining equalities by ~9.5, and
     # this path would otherwise report it as objective=594). Reporting that point
     # as an incumbent is a false primal. Verify feasibility HERE, at the source,
-    # with the SAME loose check the final incumbent-verification guard (#772) uses
-    # (abs tol 1e-3 — it can only flag a gross violation, never a point feasible
-    # within the solver's own tolerance), and withhold an infeasible point so a
+    # with the SAME loose check the final incumbent-verification guard (#772) uses —
+    # literally the same function now (#1061), so the two can only ever agree; it can
+    # only flag a gross violation, never a point feasible within the solver's own
+    # tolerance — and withhold an infeasible point so a
     # bogus incumbent never propagates. This only ever removes a bad incumbent;
     # the path carries no valid dual bound when it is not "optimal", so refusing
     # here can never loosen a bound below truth (soundness is untouched).
     if x_dict is not None and nlp_result.x is not None:
-        from discopt._relax.primal_heuristics import (
-            _check_constraint_feasibility as _cc_feas_verify,
-        )
+        from discopt._relax.primal_heuristics import passes_false_primal_screen
 
-        if not _cc_feas_verify(evaluator, np.asarray(nlp_result.x, dtype=np.float64), tol=1e-3):
+        if not passes_false_primal_screen(evaluator, np.asarray(nlp_result.x, dtype=np.float64)):
             logger.warning(
                 "continuous NLP returned an infeasible point (status=%s, obj=%s); "
                 "withholding the incumbent — no feasible solution was found.",
