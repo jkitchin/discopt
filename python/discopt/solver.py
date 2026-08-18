@@ -12642,6 +12642,7 @@ def solve_model(
                 _enum_seed = result_sols[_enum_cands[0][0]]
             else:
                 _enum_seed = 0.5 * (np.clip(lb, -_SPC, _SPC) + np.clip(ub, -_SPC, _SPC))
+            _enum_stats: dict = {}
             try:
                 _enum_results = enumerate_binary_seeds_subnlp(
                     model,
@@ -12649,11 +12650,13 @@ def solve_model(
                     backend=_subnlp_backend_fn,
                     nlp_options=subnlp_options,
                     evaluator=evaluator,
+                    stats=_enum_stats,
                 )
             except Exception as _e:
                 logger.debug("enumerate_binary_seeds_subnlp raised: %s", _e)
                 _enum_results = []
-            _subnlp_calls += len(_enum_results)
+            # #1062: attempts, not feasible points. See the GDP config call site.
+            _subnlp_calls += int(_enum_stats.get("attempted", 0))
             for _x_en, _obj_en in _enum_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_en) and _obj_en < _SENTINEL_THRESHOLD:
@@ -12699,6 +12702,7 @@ def solve_model(
                 if _cfg_cands
                 else 0.5 * (np.clip(lb, -_SPC, _SPC) + np.clip(ub, -_SPC, _SPC))
             )
+            _cfg_stats: dict = {}
             try:
                 _cfg_results = one_hot_config_subnlp(
                     model,
@@ -12707,6 +12711,7 @@ def solve_model(
                     nlp_options=subnlp_options,
                     evaluator=evaluator,
                     deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
+                    stats=_cfg_stats,
                 )
             except Exception as _e:
                 logger.debug("one_hot_config_subnlp raised: %s", _e)
@@ -12715,8 +12720,17 @@ def solve_model(
             # showing no change is ambiguous between "the constructor ran and
             # found nothing" and "the gate never opened" — the §6 vacuity trap,
             # where an instrument that measured nothing reads as a clean result.
-            logger.info("GDP config subNLP: %d feasible point(s)", len(_cfg_results))
-            _subnlp_calls += len(_cfg_results)
+            logger.info(
+                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                int(_cfg_stats.get("attempted", 0)),
+                len(_cfg_results),
+            )
+            # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
+            # came back feasible. ``len(_cfg_results)`` conflated the two, so a
+            # model where every configuration is infeasible reported
+            # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
+            # running, which is the exact reading that named this issue.
+            _subnlp_calls += int(_cfg_stats.get("attempted", 0))
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
@@ -15370,6 +15384,7 @@ def _solve_nlp_bb(
                 if _gdp_config_primal_enabled() and tree.incumbent() is None:
                     logger.info("GDP config subNLP (nlp-bb): entering disjunct selection")
                     _cfg_found = []
+                    _cfg_stats: dict = {}
                     try:
                         from discopt._relax.primal_heuristics import one_hot_config_subnlp
 
@@ -15380,11 +15395,19 @@ def _solve_nlp_bb(
                             deadline=_gdp_config_deadline(
                                 t_start + time_limit, time.perf_counter()
                             ),
+                            stats=_cfg_stats,
                         )
                     except Exception as _e:  # pragma: no cover - defensive
                         logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
-                    logger.info("GDP config subNLP: %d feasible point(s)", len(_cfg_found))
-                    _subnlp_calls += len(_cfg_found)
+                    logger.info(
+                        "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                        int(_cfg_stats.get("attempted", 0)),
+                        len(_cfg_found),
+                    )
+                    # #1062: attempts, not feasible points -- see the spatial call
+                    # site. This path is the one every convexity-certified MINLP
+                    # takes, so it is where ``subnlp_calls=0`` was read from.
+                    _subnlp_calls += int(_cfg_stats.get("attempted", 0))
                     for _cfg_x, _ in _cfg_found:
                         _subnlp_feasible += 1
                         # Re-verified here by this path's own standard, exactly as

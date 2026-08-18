@@ -1311,6 +1311,7 @@ def enumerate_binary_seeds_subnlp(
     evaluator: Optional[NLPEvaluator] = None,
     max_binaries: int = 4,
     integer_tol: float = 1e-5,
+    stats: Optional[dict] = None,
 ) -> list[tuple[np.ndarray, float]]:
     """Root primal heuristic: enumerate every 0/1 assignment of the binaries.
 
@@ -1352,12 +1353,19 @@ def enumerate_binary_seeds_subnlp(
         max_binaries: Maximum number of binaries to enumerate over; above this
             the enumeration is skipped entirely.
         integer_tol: Integrality tolerance forwarded to :func:`subnlp`.
+        stats: Optional dict, filled with ``{"attempted": n}`` -- the number of
+            sub-NLP solves actually issued. The return value carries only the
+            *feasible* points, so a caller counting ``len(result)`` as sub-NLP
+            calls reports 0 on a model where every fixing is infeasible, which
+            is indistinguishable from never having run (#1062, CLAUDE.md 6).
 
     Returns:
         Every feasible ``(x, obj)`` found across the enumerated seeds (possibly
         empty). The caller injects each as an incumbent candidate and lets the
         B&B tree keep the best, so this is agnostic to the objective sense.
     """
+    if stats is not None:
+        stats["attempted"] = 0
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask):
         return []
@@ -1387,11 +1395,13 @@ def enumerate_binary_seeds_subnlp(
     base_seeds = [zero_start, x_relax]
 
     results: list[tuple[np.ndarray, float]] = []
+    attempted = 0
     for combo in itertools.product((0.0, 1.0), repeat=len(binary_idx)):
         for base in base_seeds:
             seed = base.copy()
             for idx, value in zip(binary_idx, combo):
                 seed[idx] = value
+            attempted += 1
             found = subnlp(
                 model,
                 seed,
@@ -1402,6 +1412,8 @@ def enumerate_binary_seeds_subnlp(
             )
             if found is not None:
                 results.append(found)
+    if stats is not None:
+        stats["attempted"] = attempted
     return results
 
 
@@ -1503,6 +1515,7 @@ def one_hot_config_subnlp(
     max_configs: int = 256,
     integer_tol: float = 1e-5,
     deadline: Optional[float] = None,
+    stats: Optional[dict] = None,
 ) -> list[tuple[np.ndarray, float]]:
     """Root primal *constructor* for disjunctive (GDP) models: pick one disjunct
     per disjunction, then solve the fixed-integer sub-NLP.
@@ -1583,11 +1596,19 @@ def one_hot_config_subnlp(
         integer_tol: Integrality tolerance forwarded to :func:`subnlp`.
         deadline: Absolute ``perf_counter`` deadline; the loop stops before
             starting a configuration that cannot finish inside it.
+        stats: Optional dict, filled with ``{"attempted": n}`` -- the number of
+            sub-NLP solves this call and its dive actually issued. The caller
+            needs this because the return value carries only the *feasible*
+            points: counting those as sub-NLP calls reports 0 on exactly the
+            models where the heuristic worked hardest and found nothing, which
+            is the vacuous instrument #1062 is named after (CLAUDE.md 6).
 
     Returns:
         Every feasible ``(x, obj)`` found (possibly empty). The caller injects
         each as an incumbent candidate, so this is agnostic to objective sense.
     """
+    if stats is not None:
+        stats["attempted"] = 0
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask):
         return []
@@ -1740,6 +1761,8 @@ def one_hot_config_subnlp(
         stop,
         len(results),
     )
+    if stats is not None:
+        stats["attempted"] = attempted
     if not groups:
         return results
     # Spend what is left of the budget on the dive, which re-solves between choices
@@ -1772,6 +1795,7 @@ def one_hot_config_subnlp(
     # left and nothing more, so the heuristic's total budget is unchanged. When the
     # wave spends the whole envelope the dive polls the expired deadline and returns
     # immediately, which is the syn20m02m row above.
+    _dive_stats: dict = {}
     results.extend(
         one_hot_config_dive(
             model,
@@ -1781,8 +1805,11 @@ def one_hot_config_subnlp(
             evaluator=evaluator,
             integer_tol=integer_tol,
             deadline=deadline,
+            stats=_dive_stats,
         )
     )
+    if stats is not None:
+        stats["attempted"] = attempted + int(_dive_stats.get("attempted", 0))
     return results
 
 
@@ -1797,6 +1824,7 @@ def one_hot_config_dive(
     max_restarts: int = 64,
     max_level_solves: int = 4000,
     seed: int = 0,
+    stats: Optional[dict] = None,
 ) -> list[tuple[np.ndarray, float]]:
     """Root primal constructor for GDPs that *re-solves* between disjunct choices.
 
@@ -1903,6 +1931,9 @@ def one_hot_config_dive(
     # first completed batch_processing.
     priority: list[int] = []
     level_solves = 0
+    # Sub-NLP solves issued below. Distinct from ``level_solves``, which counts
+    # *relaxation* solves: the caller's ``subnlp_calls`` must report the former.
+    subnlp_attempts = 0
     restarts = 0
     dead_ends = 0
     repairs = 0
@@ -2053,6 +2084,7 @@ def one_hot_config_dive(
             # point (better once the configuration is nearly settled).
             found = None
             for x0 in (seed_x, x_cur):
+                subnlp_attempts += 1
                 found = subnlp(
                     model,
                     np.clip(x0, lb0, ub0),
@@ -2075,15 +2107,18 @@ def one_hot_config_dive(
     # the deadline cut it, or every configuration was genuinely infeasible.
     logger.debug(
         "one_hot_config_dive: %d group(s), %d restart(s), %d dead end(s), %d local "
-        "repair(s), %d relaxation solve(s) (%s), %d feasible",
+        "repair(s), %d relaxation solve(s), %d sub-NLP solve(s) (%s), %d feasible",
         n_groups,
         restarts,
         dead_ends,
         repairs,
         level_solves,
+        subnlp_attempts,
         stop,
         len(results),
     )
+    if stats is not None:
+        stats["attempted"] = subnlp_attempts
     return results
 
 
