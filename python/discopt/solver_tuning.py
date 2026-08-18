@@ -138,6 +138,38 @@ class SolverTuning:
     graduation_gate cert-neutrality eligible=YES; nvs05 gains its first full
     rigorous certificate (``optimal``, bound 5.47057)."""
 
+    # --- #1064 structured-convex engine for node-bound recovery -----------------
+    structured_node_recovery: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_STRUCTURED_NODE_RECOVERY", default=False)
+    )
+    """Solve ``_pounce_recover_node_bound``'s re-solve with POUNCE's *structured
+    convex* engine (``pounce.solve_qp``) instead of the generic callback TNLP
+    path (``qp_pounce.solve_qp`` → ``pounce.Problem(problem_obj=_QPCallbacks)``)
+    (``DISCOPT_STRUCTURED_NODE_RECOVERY``, default OFF pending the §5 panel;
+    ``=0`` keeps the callback path).
+
+    This is the same migration ``_solve_node_lp_pounce`` already carries, and
+    for the same measured reason: the callback path hides the linear structure,
+    so POUNCE's presolve cannot engage and its IPM runs ~100 iterations where
+    the structured path presolves/scales and converges in ~20. Node-bound
+    recovery was left behind when the MILP node path was moved over, which is
+    why a *node* QP costs ~8 ms while recovering the *same* problem costs
+    8-33 s.
+
+    Measured (#1064 entry experiment 4, same fixings, both arms at each node,
+    4 comparisons/instance): squfl015-060 21.8x, squfl025-040 19.4x,
+    squfl020-150 5.9x. Verdicts agreed 4/4 on the first two, and objectives
+    where both returned ``optimal`` agreed to 2.8e-7 / 4.8e-7 relative. On
+    squfl020-150 the callback arm returned *no answer at all* (limit, ~32 s) on
+    all four, where the structured arm settled every one in ~5.5 s (3
+    Phase-1-certified infeasible, 1 optimal) — so the disagreement is the legacy
+    path failing to answer, not a soundness split.
+
+    Soundness is unchanged: an ``optimal`` result from the structured convex IPM
+    is KKT-valid (the property ``_solve_node_lp_pounce`` already relies on) and
+    ``primal_infeasible`` is Phase-1-certified; anything else stays ``None`` so
+    the caller keeps the node open and never prunes on an unsettled solve."""
+
     # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
     lp_iterative_refinement: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)

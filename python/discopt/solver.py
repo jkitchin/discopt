@@ -18137,6 +18137,96 @@ def _solve_milp_gurobi(
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
+def _structured_node_recovery(
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    Q: Optional[np.ndarray] = None,
+):
+    """Re-solve a node relaxation with POUNCE's structured convex LP/QP engine.
+
+    Same contract as :func:`_pounce_recover_node_bound` — ``("optimal", bound,
+    x)``, ``("infeasible", None, None)``, or ``None`` — but over
+    ``pounce.solve_qp``'s native ``min ½x'Px + c'x s.t. Gx <= h, Ax = b,
+    lb <= x <= ub`` form rather than the callback TNLP wrapper. ``P=None``
+    degenerates to the LP case, so this serves both callers.
+
+    The structured form is what lets POUNCE presolve and scale; the callback
+    path cannot, and takes ~100 IPM iterations where this takes ~20 (see
+    :func:`_solve_node_lp_pounce`, which was migrated for exactly this reason).
+    Measured on the recovery path (#1064): 5.9-32.9x on squfl015-060 /
+    020-150 / 025-040, with the callback arm returning *no* answer at all on
+    every squfl020-150 attempt that this path settled.
+
+    Soundness carries over unchanged from the existing structured call sites:
+    ``optimal`` from the convex IPM is KKT-valid, ``primal_infeasible`` is
+    Phase-1-certified, and every other status returns ``None`` so the caller
+    keeps the node open. The returned point is checked against its own box and
+    rows before being handed back, so a drifted iterate cannot seed a spurious
+    bound or incumbent.
+    """
+    try:
+        import pounce
+
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE, _snap_inverted_bounds
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+
+    lb_n, ub_n = _snap_inverted_bounds(
+        np.asarray(node_lb, dtype=np.float64), np.asarray(node_ub, dtype=np.float64)
+    )
+    A_ub_m = None if A_ub is None else np.asarray(A_ub, dtype=np.float64)
+    b_ub_m = None if b_ub is None else np.asarray(b_ub, dtype=np.float64)
+    A_eq_m = None if A_eq is None else np.asarray(A_eq, dtype=np.float64)
+    b_eq_m = None if b_eq is None else np.asarray(b_eq, dtype=np.float64)
+    try:
+        res = pounce.solve_qp(
+            P=None if Q is None else np.asarray(Q, dtype=np.float64),
+            c=np.asarray(c, dtype=np.float64),
+            G=A_ub_m,
+            h=b_ub_m,
+            A=A_eq_m,
+            b=b_eq_m,
+            lb=lb_n,
+            ub=ub_n,
+        )
+    except Exception as e:
+        logger.debug("POUNCE structured node recovery failed: %s", e)
+        return None
+
+    if res.status == "primal_infeasible":
+        return ("infeasible", None, None)
+    if res.status != "optimal" or res.x is None or not np.isfinite(res.obj):
+        return None
+
+    x_sol = np.asarray(res.x, dtype=np.float64)
+    # Soundness gate, mirroring _solve_node_lp_pounce: an optimum must respect
+    # its own box and rows. An off-bound point can still be integral (a binary
+    # at -1) and would otherwise pass as an incumbent.
+    tol = 1e-5
+    if x_sol.shape[0] != lb_n.shape[0]:
+        return None
+    if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+        logger.debug("structured node recovery violates variable bounds; rejecting")
+        return None
+    if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
+        if not bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m)))):
+            logger.debug("structured node recovery violates inequality rows; rejecting")
+            return None
+    if A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
+        if not bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m)))):
+            logger.debug("structured node recovery violates equality rows; rejecting")
+            return None
+    return ("optimal", float(res.obj) + float(obj_const), x_sol)
+
+
 def _pounce_recover_node_bound(
     node_lb: np.ndarray,
     node_ub: np.ndarray,
@@ -18174,6 +18264,18 @@ def _pounce_recover_node_bound(
         return None
     if not POUNCE_AVAILABLE:
         return None
+
+    # #1064: prefer POUNCE's *structured convex* engine. ``_pounce_solve`` above
+    # is the generic callback TNLP path, which hides the linear structure from
+    # POUNCE's presolve — the same defect ``_solve_node_lp_pounce`` was migrated
+    # off (see its docstring, ~100 IPM iterations vs ~20). Recovery was left
+    # behind, which is why re-solving a node costs 8-33 s while *solving* it in
+    # the batch path costs ~8 ms. Structured first, callback as the fallback, so
+    # a structured decline still gets the legacy answer (§3: legacy path intact).
+    if _tuning().structured_node_recovery:
+        rec = _structured_node_recovery(node_lb, node_ub, c, obj_const, A_ub, b_ub, A_eq, b_eq, Q=Q)
+        if rec is not None:
+            return rec
 
     time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
     kwargs = dict(
