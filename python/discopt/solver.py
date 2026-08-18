@@ -14958,6 +14958,21 @@ def _solve_nlp_bb(
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
 
+    # Sub-NLP heuristic accounting (#1062). ``solve_model`` keeps these three
+    # counters and reports them on its SolveResult; this path did not, so every
+    # solve routed here — every convexity-certified MINLP, since solve_model
+    # auto-selects NLP-BB for them and returns — reported subnlp_calls=0 no
+    # matter how much sub-NLP work ran. On the syn/rsyn family the root
+    # ``one_hot_config_subnlp`` constructor calls ``subnlp`` 48 times per solve
+    # and the result still read 0, which made #1062's headline metric a §6
+    # vacuous instrument: it could not distinguish "the heuristic is disabled"
+    # from "the counter is not wired". Same convention as solve_model's copies —
+    # one call per sub-NLP the constructor solved, one ``feasible`` per point it
+    # returned, one ``incumbent_update`` per point actually injected here.
+    _subnlp_calls = 0
+    _subnlp_feasible = 0
+    _subnlp_incumbent_updates = 0
+
     # Root-node certification instrumentation (cert:T0.1); see solve_model's
     # spatial-path snapshot for the rationale.
     _root_time: Optional[float] = None
@@ -15369,7 +15384,9 @@ def _solve_nlp_bb(
                     except Exception as _e:  # pragma: no cover - defensive
                         logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
                     logger.info("GDP config subNLP: %d feasible point(s)", len(_cfg_found))
+                    _subnlp_calls += len(_cfg_found)
                     for _cfg_x, _ in _cfg_found:
+                        _subnlp_feasible += 1
                         # Re-verified here by this path's own standard, exactly as
                         # RENS and diving results are, rather than trusted because
                         # the heuristic said so.
@@ -15386,6 +15403,7 @@ def _solve_nlp_bb(
                         ):
                             tree.inject_incumbent(_cfg_sol, _cfg_obj)
                             _root_incumbent = True
+                            _subnlp_incumbent_updates += 1
                             logger.info("GDP config subNLP incumbent: obj=%.6g", _cfg_obj)
 
                 # --- RENS (Relaxation Enforced Neighborhood Search), primary ---
@@ -16195,6 +16213,9 @@ def _solve_nlp_bb(
         root_time=_root_time,
         nlp_bb=True,
         gap_certified=_gap_certified,
+        subnlp_calls=_subnlp_calls,
+        subnlp_feasible=_subnlp_feasible,
+        subnlp_incumbent_updates=_subnlp_incumbent_updates,
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
