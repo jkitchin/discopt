@@ -2149,8 +2149,11 @@ class SolveResult:
     # on) found the returned incumbent INFEASIBLE in the ORIGINAL problem — a
     # false primal, which can only arise from an unsound presolve mutation or a
     # heuristic bug. When True, the incumbent (``x``/``objective``) has been
-    # withheld and ``gap_certified`` forced False (a false primal is never
-    # reported as a valid or certified solution). This should never be True on
+    # withheld, ``gap_certified`` forced False, and ``status`` set to ``"error"``
+    # (a false primal is never reported as a valid, certified, or *optimal*
+    # solution -- leaving the status at ``"optimal"`` with no incumbent claims a
+    # proven optimum that does not exist). ``bound`` is retained: only the primal
+    # was invalidated. This should never be True on
     # correct solver code; it exists so such a bug cannot silently escape as a
     # false result (regression guard for the #770/#772 class).
     incumbent_verification_failed: bool = False
@@ -4540,9 +4543,23 @@ class Model:
                     build_evaluator(self, _jax_evaluator),
                     [v.name for v in self._variables],
                 )
-            except Exception as _snap_exc:  # pragma: no cover - defensive
-                _logging.getLogger("discopt.solver").debug(
-                    "incumbent-verification snapshot skipped: %s", _snap_exc
+            except Exception as _snap_exc:
+                # Same §7 point as the verification handler below: without the
+                # snapshot the false-primal guard cannot run at all, so this is a
+                # disabled soundness check, not a skipped nicety. Non-fatal, but
+                # never silent.
+                _logging.getLogger("discopt.solver").error(
+                    "INCUMBENT-VERIFICATION SNAPSHOT FAILED: %s: %s. The false-primal "
+                    "guard cannot run on this solve.",
+                    type(_snap_exc).__name__,
+                    _snap_exc,
+                )
+                _warnings.warn(
+                    f"incumbent-verification snapshot failed "
+                    f"({type(_snap_exc).__name__}: {_snap_exc}); the false-primal "
+                    f"guard is disabled for this solve",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
 
         # Install a process-global wall-clock deadline that JAX-compiled
@@ -4858,9 +4875,36 @@ class Model:
                     result.x = None
                     result.objective = None
                     result.gap = None
-            except Exception as _ver_exc:  # pragma: no cover - defensive
-                _logging.getLogger("discopt.solver").debug(
-                    "incumbent verification skipped: %s", _ver_exc
+                    # The status must stop asserting what the guard just withdrew.
+                    # Clearing ``x``/``objective`` while leaving ``status="optimal"``
+                    # reports a PROVEN OPTIMUM WITH NO SOLUTION -- a caller that keys
+                    # on the status (every gate and panel in this repo does) reads a
+                    # certificate that the guard has already refused to stand behind.
+                    # Observed under ``DISCOPT_PRESOLVE_BOUND_PROPAGATION=1`` on
+                    # nvs05: ``status='optimal'``, ``objective=None``, 3/3 reps.
+                    # This is not a limit termination -- an unsound mutation was
+                    # detected -- so it reports as an error and refuses loudly
+                    # (CLAUDE.md §1/§3). ``bound`` is untouched: only the PRIMAL was
+                    # shown to be invalid, and the dual bound remains rigorous.
+                    result.status = "error"
+            except Exception as _ver_exc:
+                # A swallowed exception here does not "skip verification" -- it
+                # DELETES the soundness guard while leaving every caller believing
+                # it ran, which is exactly the failure CLAUDE.md §7 is written from.
+                # The solve is still returned (a broken checker must not break a
+                # correct solve), but silently is not an option.
+                _logging.getLogger("discopt.solver").error(
+                    "INCUMBENT VERIFICATION DID NOT RUN: %s: %s. The false-primal "
+                    "guard was skipped, so this incumbent is UNSCREENED.",
+                    type(_ver_exc).__name__,
+                    _ver_exc,
+                )
+                _warnings.warn(
+                    f"incumbent verification did not run "
+                    f"({type(_ver_exc).__name__}: {_ver_exc}); the returned incumbent "
+                    f"is unscreened by the false-primal guard",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
 
         if llm:

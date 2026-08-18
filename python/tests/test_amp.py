@@ -3541,10 +3541,19 @@ def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch
             1,
         ),
     )
+    # The stub incumbent must be FEASIBLE in this model. The original stub,
+    # (-0.6, 0.3, 0.5) with objective -0.33, violates ``x**2 <= y**2 + z**2`` by
+    # 0.02 -- 20x the false-primal guard's 1e-3 tolerance -- and its declared
+    # objective did not match the point either (the true value there is -0.385).
+    # The guard therefore withheld the incumbent on every run of this test; the
+    # status assertion below only passed because a withheld false primal used to
+    # keep reporting ``status="optimal"`` (#1061). (-0.5, 0.3, 0.5) is feasible
+    # with margin (slacks 1.99 / 0.09 / 0.05) and -0.285 is its true objective,
+    # so the test now exercises bound restoration rather than the guard.
     monkeypatch.setattr(
         amp_mod,
         "_solve_best_nlp_candidate",
-        lambda *args, **kwargs: (np.array([-0.6, 0.3, 0.5], dtype=np.float64), -0.33),
+        lambda *args, **kwargs: (np.array([-0.5, 0.3, 0.5], dtype=np.float64), -0.285),
     )
 
     m = Model("issue_63_bound_restore")
