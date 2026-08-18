@@ -726,6 +726,11 @@ def solve_gp(model: Model, **solve_kwargs) -> Optional[SolveResult]:
         wall_time=log_result.wall_time,
         convex_fast_path=certified,
         gap_certified=certified,
+        # If the log-space solve's false-primal guard withheld its incumbent, the
+        # caller of ``solve_gp`` must be told. Dropping this flag here hid a
+        # detected false primal behind an ordinary-looking x-space result: the
+        # status propagated but the reason did not (#1061).
+        incumbent_verification_failed=log_result.incumbent_verification_failed,
         _model=model,
     )
     return result
