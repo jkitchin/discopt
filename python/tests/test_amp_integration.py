@@ -1969,25 +1969,42 @@ class TestCurrentCodeWeaknesses:
 
     def test_constraint_check_rejects_eval_failure(self, monkeypatch):
         """Constraint evaluation errors must reject the candidate point."""
-        import discopt._relax.nlp_evaluator as nlp_eval
+        import discopt._tape_nlp_evaluator as tape_eval
         from discopt.solvers import amp as amp_mod
+
+        # #1063/#1072: ``_check_constraints`` builds its evaluator through
+        # ``make_evaluator``, the canonical funnel, which returns the *tape*
+        # evaluator by default. Patching ``nlp_evaluator.NLPEvaluator`` -- as
+        # this test used to -- replaced a class AMP never instantiates, so
+        # ``BrokenEvaluator`` was never constructed, nothing raised, and the
+        # real evaluator happily reported the point feasible. The test then read
+        # as a failure of the code under test rather than of its own mock.
+        # Patch the funnel itself, and count the constructions so the patch
+        # cannot go un-exercised again (CLAUDE.md §6).
+        n_built = []
 
         class BrokenEvaluator:
             def __init__(self, model):
+                n_built.append(1)
                 self.n_constraints = 1
                 self.constraint_bounds = (np.array([0.0]), np.array([1.0]))
 
             def evaluate_constraints(self, x):
                 raise RuntimeError("boom")
 
-        monkeypatch.setattr(nlp_eval, "NLPEvaluator", BrokenEvaluator)
+        monkeypatch.setattr(tape_eval, "make_evaluator", lambda model, **kw: BrokenEvaluator(model))
 
         m = Model("broken_eval")
         x = m.continuous("x", lb=0, ub=1)
         m.subject_to(x >= 0)
         m.minimize(x)
 
-        assert amp_mod._check_constraints(np.array([0.5]), m) is False
+        result = amp_mod._check_constraints(np.array([0.5]), m)
+        assert n_built, (
+            "the broken evaluator was never constructed — the patch missed the "
+            "path under test and this assertion would pass for the wrong reason"
+        )
+        assert result is False
 
     def test_solve_model_signature_exposes_solver_parameter(self):
         """solve_model should expose the backend selector in its signature."""
@@ -2317,6 +2334,7 @@ class TestCurrentCodeWeaknesses:
     def test_amp_does_not_accept_start_with_nonfinite_objective(self, monkeypatch):
         """A finite start with NaN objective is not a valid AMP incumbent."""
         import discopt._relax.nlp_evaluator as nlp_eval
+        import discopt._tape_nlp_evaluator as tape_eval
         from discopt._relax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
@@ -2324,11 +2342,21 @@ class TestCurrentCodeWeaknesses:
         x = m.continuous("x", lb=0.0, ub=1.0)
         m.minimize(x)
 
-        monkeypatch.setattr(
-            nlp_eval.NLPEvaluator,
-            "evaluate_objective",
-            lambda self, x_flat: np.nan,
-        )
+        # #1063/#1072: AMP goes through ``make_evaluator``, which hands back the
+        # tape evaluator, so patching only the JAX class silently patched a class
+        # this path never instantiates -- the NaN never appeared and the start
+        # was accepted, making the test read as a solver bug rather than a stale
+        # mock. Patch whichever backend the funnel returns, and count the calls
+        # so the patch cannot go un-exercised again (CLAUDE.md §6).
+        # ``test_amp.py`` carries the same fix for its copy of this test.
+        n_nan_evals = []
+
+        def _nan_objective(self, x_flat):
+            n_nan_evals.append(1)
+            return np.nan
+
+        monkeypatch.setattr(nlp_eval.NLPEvaluator, "evaluate_objective", _nan_objective)
+        monkeypatch.setattr(tape_eval.TapeNLPEvaluator, "evaluate_objective", _nan_objective)
         monkeypatch.setattr(
             amp_mod,
             "_solve_milp_with_oa_recovery",
@@ -2349,6 +2377,7 @@ class TestCurrentCodeWeaknesses:
             time_limit=1.0,
         )
 
+        assert n_nan_evals, "the NaN objective was never evaluated — this test asserted nothing"
         assert result.status == "error"
         assert result.objective is None
         assert result.x is None
