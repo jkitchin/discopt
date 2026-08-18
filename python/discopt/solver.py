@@ -18681,6 +18681,111 @@ def _pounce_snap_incumbent(
     return None
 
 
+# #1064: round-fix-resolve tries at most this many candidate roundings per
+# invocation — round-to-nearest, then one retry with the most fractional
+# coordinate flipped. Anything deeper is a dive, which is a separate mechanism.
+_ROUND_MAX_TRIES = 2
+
+
+def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
+    """Round to the nearest integer that actually lies inside ``[lo, hi]``.
+
+    Rounding to nearest and *then* clamping would silently move a coordinate off
+    an integer when the box edge is fractional, so the clamp is to the integers
+    ``ceil(lo)``/``floor(hi)``. Returns ``None`` when some coordinate's box holds
+    no integer at all — there is nothing to fix it to, and pretending otherwise
+    would hand the re-solve an empty box and read as "the rounding was
+    infeasible".
+    """
+    ilo = np.ceil(lo - 1e-9)
+    ihi = np.floor(hi + 1e-9)
+    if np.any(ilo > ihi + 1e-9):
+        return None
+    return np.clip(np.round(vals), ilo, ihi)
+
+
+def _pounce_round_incumbent(
+    x_relax: np.ndarray,
+    int_offsets,
+    int_sizes,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Round a *fractional* relaxation point into an incumbent (round-fix-resolve).
+
+    :func:`_pounce_snap_incumbent` only purifies points already integral to
+    within ``_SNAP_TOL``; a genuinely fractional relaxation optimum is left
+    alone. A search that never lands near-integral therefore never produces an
+    incumbent at all — which is #1064's actual symptom: squfl020-150 and
+    squfl025-040 run their whole budget with **zero** snap re-solves, no primal
+    bound, and nothing to prune against.
+
+    This rounds every integer coordinate to the nearest integer inside its node
+    box, fixes them, and asks for the continuous completion — the same
+    fix-and-resolve step the snap path uses, applied to a point that is not
+    already integral. A rounded point can be genuinely infeasible (measured on
+    squfl025-040: of 7 forced fixings, 2 optimal / 3 Phase-1 infeasible / 2
+    unsettled), so a non-optimal verdict is retried once with the *most
+    fractional* coordinate rounded the other way — the one coordinate the
+    rounding was least entitled to decide.
+
+    Returns ``(objective, x)`` in minimization form, or ``None``. This can only
+    ever produce an upper bound: it never prunes, never tightens a node bound,
+    and never decertifies. A wrong guess costs time, not correctness.
+    """
+    idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not idx:
+        return None
+    x = np.asarray(x_relax, dtype=np.float64)
+    vals = x[idx]
+    if not np.all(np.isfinite(vals)):
+        return None
+    fl0 = np.asarray(node_lb, dtype=np.float64)
+    fu0 = np.asarray(node_ub, dtype=np.float64)
+    base = _round_into_box(vals, fl0[idx], fu0[idx])
+    if base is None:
+        return None
+
+    # Most fractional coordinate: the one the round-to-nearest decided on the
+    # weakest evidence. Ordered by distance to the nearest integer.
+    order = np.argsort(-np.abs(vals - np.round(vals)))
+
+    for attempt in range(_ROUND_MAX_TRIES):
+        cand = base.copy()
+        if attempt > 0:
+            if attempt - 1 >= order.shape[0]:
+                break
+            k = int(order[attempt - 1])
+            # Flip to the other side of the fractional value, then re-clamp; if
+            # the flip leaves the box it is not a distinct candidate.
+            other = np.floor(vals[k]) if cand[k] > vals[k] else np.ceil(vals[k])
+            flipped = _round_into_box(
+                np.array([other]), fl0[idx[k] : idx[k] + 1], fu0[idx[k] : idx[k] + 1]
+            )
+            if flipped is None or float(flipped[0]) == float(cand[k]):
+                break
+            cand[k] = float(flipped[0])
+        fl = fl0.copy()
+        fu = fu0.copy()
+        fl[idx] = cand
+        fu[idx] = cand
+        rec = _pounce_recover_node_bound(
+            fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
+        )
+        if rec is not None and rec[0] == "optimal":
+            return rec[1], rec[2]
+    return None
+
+
 # Reduced costs below this are treated as zero (basic / degenerate -> no fix).
 _RCF_RC_TOL = 1e-7
 
@@ -20754,9 +20859,17 @@ def _solve_miqp_bb(
             ),
         )
 
+    # #1064: round-fix-resolve is a *first incumbent* mechanism, so it is spent
+    # only while the tree has none, and it is capped so a family where every
+    # rounding is infeasible cannot eat the search. Both are counted, not
+    # assumed: ``_round_attempts`` is what the regression test asserts on.
+    _ROUND_ATTEMPT_CAP = 64
+    _round_attempts = 0
+
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
+        nonlocal _round_attempts
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -20773,6 +20886,35 @@ def _solve_miqp_bb(
             time_limit,
             Q=_Q_m,
         )
+        how = "snapped"
+        if (
+            inc is None
+            and _tuning().round_fix_resolve
+            and tree.incumbent() is None
+            and _round_attempts < _ROUND_ATTEMPT_CAP
+        ):
+            # The snap path declined, i.e. this point is genuinely fractional.
+            # With no incumbent in hand there is no primal bound at all, so a
+            # rounded completion is strictly better than nothing — and it can
+            # only ever supply an upper bound (see _pounce_round_incumbent).
+            _round_attempts += 1
+            inc = _pounce_round_incumbent(
+                x_row,
+                int_offsets,
+                int_sizes,
+                node_lb_i,
+                node_ub_i,
+                _c_m,
+                float(qp_data.obj_const),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                t_start,
+                time_limit,
+                Q=_Q_m,
+            )
+            how = "rounded"
         if inc is not None:
             x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
             # #952: an injected incumbent goes straight into the tree as a
@@ -20784,7 +20926,8 @@ def _solve_miqp_bb(
                 tree.inject_incumbent(x_inc, float(inc[0]))
             else:
                 logger.debug(
-                    "MIQP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                    "MIQP-BB: rejected a %s incumbent outside its rows/box (%s)",
+                    how,
                     _matrix_solution_violations(
                         x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
                     ),

@@ -170,6 +170,34 @@ class SolverTuning:
     ``primal_infeasible`` is Phase-1-certified; anything else stays ``None`` so
     the caller keeps the node open and never prunes on an unsettled solve."""
 
+    # --- #1064 round-fix-resolve primal heuristic (first incumbent) -------------
+    round_fix_resolve: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROUND_FIX_RESOLVE", default=False)
+    )
+    """Round a *fractional* MIQP node relaxation point to the nearest integers,
+    fix them, and re-solve for the continuous completion, so a search that never
+    lands near-integral can still obtain a first incumbent
+    (``DISCOPT_ROUND_FIX_RESOLVE``, default OFF pending the §5 panel).
+
+    The existing purification (``_pounce_snap_incumbent``) only accepts points
+    already integral to within ``_SNAP_TOL`` = 1e-4. On squfl020-150 and
+    squfl025-040 (#1064) that gate never opens: both run a full 120 s budget with
+    **zero** snap re-solves and finish with no incumbent, hence no primal bound
+    and nothing to prune against. Rounding is the missing step, not a faster
+    engine.
+
+    Spent only while ``tree.incumbent() is None`` and capped at 64 attempts per
+    solve, so a family where every rounding is infeasible cannot consume the
+    search. A rounded point can be genuinely infeasible — measured on
+    squfl025-040, 7 forced fixings split 2 optimal / 3 Phase-1 infeasible / 2
+    unsettled — so a non-optimal verdict is retried once with the most fractional
+    coordinate rounded the other way.
+
+    This can only ever produce an *upper* bound: it never prunes, never tightens
+    a node bound, and never decertifies, and the completed point is run through
+    the same ``_node_point_feasible`` gate as a snapped one before injection. A
+    wrong guess costs time, not correctness."""
+
     # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
     lp_iterative_refinement: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)
