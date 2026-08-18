@@ -465,7 +465,7 @@ def build_convex_spec(model, bounds=None) -> Optional[dict]:
 def _build(model, bounds) -> dict:
     from discopt._relax.gdp_reformulate import reformulate_gdp
     from discopt._relax.model_utils import flat_variable_bounds
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.modeling.core import VarType
 
     m = reformulate_gdp(model, method="big-m")
@@ -482,7 +482,7 @@ def _build(model, bounds) -> dict:
                 is_int[k] = True
             k += 1
 
-    ev = NLPEvaluator(m)
+    ev = make_evaluator(m)  # #1063: canonical funnel, not the JAX ctor
     senses = [c.sense if isinstance(c.sense, str) else c.sense.value for c in m._constraints]
     if m._objective is None or m._objective.sense.name not in ("MAXIMIZE", "MINIMIZE"):
         raise NotConvexKernel("no usable objective")

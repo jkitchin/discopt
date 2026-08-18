@@ -335,7 +335,7 @@ def solve_mpec(
         raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', or 'gdp'")
 
     # Scholtes regularization homotopy via local NLP solves.
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.solvers.nlp_backend import get_nlp_solver
 
     t = model.parameter("_mpec_t", value=t0)
@@ -354,8 +354,12 @@ def solve_mpec(
     tv = t0
     for _ in range(max_iter):
         t.value = np.asarray(tv, dtype=np.float64)
-        # Rebuild the evaluator so the updated parameter value is compiled in.
-        evaluator = NLPEvaluator(model)
+        # Re-request the evaluator so the updated parameter value is compiled in.
+        # #1063: the canonical funnel, not the JAX ctor. The cache fingerprint
+        # excludes ``Parameter.value`` on purpose, but ``TapeNLPEvaluator``
+        # snapshots values and rebuilds when they move, so the homotopy still sees
+        # the current ``t``.
+        evaluator = make_evaluator(model)
         try:
             result = backend(evaluator, x_cur, options=opts)
         except Exception as e:

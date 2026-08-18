@@ -248,10 +248,10 @@ def check_feasibility(
 
     # Constraint feasibility (requires evaluator)
     try:
-        from discopt._relax.nlp_evaluator import NLPEvaluator
+        from discopt._tape_nlp_evaluator import make_evaluator
         from discopt.modeling.core import Constraint
 
-        evaluator = NLPEvaluator(model)
+        evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
         if evaluator.n_constraints > 0:
             cons = evaluator.evaluate_constraints(x_flat)
             idx = 0

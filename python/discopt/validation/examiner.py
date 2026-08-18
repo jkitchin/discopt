@@ -151,7 +151,7 @@ def examine(
 
         model = reformulate_gdp(model)
 
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
 
     parts: list[np.ndarray] = []
     is_integer_mask: list[bool] = []
@@ -167,9 +167,9 @@ def examine(
     is_integer = np.asarray(is_integer_mask, dtype=bool)
     is_continuous = ~is_integer
 
-    evaluator = NLPEvaluator(model)
+    evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
     lb, ub = evaluator.variable_bounds
-    assert model._objective is not None  # NLPEvaluator() raises otherwise
+    assert model._objective is not None  # the evaluator ctor raises otherwise
     obj_sense = model._objective.sense
 
     sense_arr, rhs_arr, row_labels = _row_metadata(evaluator)

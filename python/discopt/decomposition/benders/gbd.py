@@ -266,7 +266,7 @@ def solve_gbd(
     """
     from discopt._relax.convexity import classify_oa_cut_convexity
     from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.modeling.core import Constraint
     from discopt.solvers.lp_backend import get_milp_solver
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
@@ -320,7 +320,7 @@ def solve_gbd(
             "has none. Solve it directly with Model.solve()."
         )
 
-    evaluator = NLPEvaluator(model)
+    evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
     n_vars = evaluator.n_variables
     lb_all, ub_all = flat_bounds(model)
 

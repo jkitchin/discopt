@@ -22,7 +22,9 @@ relative value drift 2.51e-16 and gradient drift 6.64e-15, with zero unsupported
 nodes encountered.
 """
 
+import contextlib
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -206,6 +208,102 @@ def test_deeply_shared_chain_stays_linear_in_distinct_nodes():
     # Not a performance claim — a non-termination guard, three orders above the
     # ~0.13 s measured, so it cannot fail on a loaded machine (CLAUDE.md §9).
     assert elapsed < 60.0, f"lowering a {depth}-deep shared chain took {elapsed:.1f}s"
+
+
+@contextlib.contextmanager
+def _recursion_limit(limit):
+    """Pin ``sys.getrecursionlimit()`` for the block.
+
+    The frame budget is the quantity under test, and it is not the same here as
+    in production: a plain interpreter allows 1000 frames, while this suite runs
+    at 3000 (``pyproject.toml``). A test that sized its chain off the ambient
+    limit would silently stop being a regression test the day that setting moved.
+    Lowering the limit is also the safe direction — raising it trades a clean
+    ``RecursionError`` for a C-stack overflow.
+    """
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(limit)
+    try:
+        yield limit
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+@pytest.mark.unit
+def test_wide_flat_sum_lowers_without_a_python_frame_chain():
+    """A term-per-variable objective must lower, however many terms it has (#1063).
+
+    ``test_deeply_shared_chain_stays_linear_in_distinct_nodes`` above is deep in
+    *distinct nodes* but only 30 levels; this one is the shape a real ``.nl``
+    file has. AMPL writes an objective as one left-deep ``+`` chain, so the DAG's
+    depth tracks the MODEL SIZE rather than the modeller's nesting:
+    ``squfl015-060``'s objective measures 903 levels over 4556 nodes.
+
+    Lowering used to be recursive at three Python frames per level, so it aborted
+    at roughly a third of ``getrecursionlimit()`` — and with ``RecursionError``,
+    which is not what ``try_build`` catches, so it escaped the tape/JAX fallback
+    and took down the caller outright. ``make_evaluator`` therefore could not
+    build an evaluator for ``squfl015-060`` at all, which is what put the OA path
+    on the JAX evaluator and its 3m0.5s cold compile.
+
+    Why this was not caught: the in-repo 61-file corpus tops out at depth 89
+    (``heatexch_gen3``), a quarter of what it takes to reach the limit.
+    """
+    n_terms = 900
+    limit = 1000  # the production default, and 3 * 900 frames does not fit in it
+
+    m = Model("wide_flat_sum")
+    xs = [m.continuous(f"x{i}", lb=0.0, ub=2.0) for i in range(n_terms)]
+    coeffs = [1.0 + (i % 7) * 0.25 for i in range(n_terms)]
+    expr = coeffs[0] * xs[0]
+    for c, v in zip(coeffs[1:], xs[1:]):
+        expr = expr + c * v
+
+    with _recursion_limit(limit):
+        # The control that makes this a regression test and not a smoke test: at
+        # three frames per level the recursive lowering could not have returned.
+        assert 3 * n_terms > limit
+        tape = compile_to_nl_expr(expr, m)
+    pt = [0.5 + 0.001 * i for i in range(n_terms)]
+    value = tape.eval(pt)
+    grad = np.asarray(tape.gradient(pt), dtype=float)
+
+    expected = float(np.dot(coeffs, pt))
+    assert abs(value - expected) / max(1.0, abs(expected)) <= 1e-12, f"{value} vs {expected}"
+    np.testing.assert_allclose(grad, np.asarray(coeffs), rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.unit
+def test_wide_flat_sum_reaches_the_tape_evaluator_not_the_jax_fallback():
+    """The same shape, through the funnel the solvers actually call (#1063).
+
+    Asserting on the concrete class matters: ``make_evaluator`` falls back to the
+    JAX evaluator whenever the tape declines, so a lowering that still failed
+    would return a *working* evaluator here and the check would pass while
+    measuring the opposite of what it claims.
+    """
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator, make_evaluator
+
+    n_terms = 600
+    limit = 1000  # 600 squared terms is 2 nodes per level; 3 frames each does not fit
+
+    m = Model("wide_flat_sum_evaluator")
+    xs = [m.continuous(f"x{i}", lb=0.0, ub=2.0) for i in range(n_terms)]
+    body = xs[0] * xs[0]
+    for v in xs[1:]:
+        body = body + v * v
+    m.minimize(body)
+    m.subject_to(sum(xs[1:], xs[0]) <= float(n_terms))
+
+    with _recursion_limit(limit):
+        assert 3 * n_terms > limit
+        ev = make_evaluator(m)
+    assert isinstance(ev, TapeNLPEvaluator), (
+        f"the funnel fell back to {type(ev).__name__}; the tape still cannot lower this shape"
+    )
+    pt = np.full(n_terms, 0.5)
+    assert float(ev.evaluate_objective(pt)) == pytest.approx(0.25 * n_terms)
+    np.testing.assert_allclose(np.asarray(ev.evaluate_gradient(pt), dtype=float), np.ones(n_terms))
 
 
 @pytest.mark.unit

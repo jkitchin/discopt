@@ -3,9 +3,14 @@ sIPOPT-style parametric sensitivity analysis for discopt models.
 
 Provides :func:`pounce_sensitivity` which:
   1. Solves the NLP with POUNCE (pure-Rust Ipopt port).
-  2. Builds the KKT matrix at the optimal solution using JAX-compiled derivatives.
+  2. Builds the KKT matrix at the optimal solution using the NLP evaluator's
+     second derivatives.
   3. Computes ∂x*/∂p and ∂λ*/∂p via finite-difference perturbation of parameter
-     values (recompiling NLPEvaluator for each perturbation direction).
+     values. The evaluator is re-requested for each perturbation direction; the
+     tape evaluator snapshots ``Parameter.value`` and rebuilds itself when a value
+     moves (``_tape_nlp_evaluator._params_changed``), so the derivatives belong to
+     the perturbed values even though the cache is keyed on structure alone (see
+     ``_evaluator_cache.evaluator_fingerprint``).
   4. Returns a :class:`SensitivityResult` that supports fast first-order
      predictions without re-solving.
 
@@ -21,7 +26,7 @@ from typing import Optional
 
 import numpy as np
 
-from discopt._relax.nlp_evaluator import NLPEvaluator
+from discopt._tape_nlp_evaluator import make_evaluator
 from discopt.solvers.nlp_pounce import solve_nlp
 
 
@@ -177,7 +182,7 @@ def pounce_sensitivity(
     opts = dict(options or {})
     opts.setdefault("print_level", 0)
 
-    evaluator = NLPEvaluator(model)
+    evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
     n = evaluator.n_variables
     m_cons = evaluator.n_constraints
     lb, ub = evaluator.variable_bounds
@@ -208,14 +213,17 @@ def pounce_sensitivity(
         orig = float(param.value)
 
         param.value = np.float64(orig + eps)
-        ev_p = NLPEvaluator(model)
+        # Requested AFTER the value moves, and every ``ev_p`` result is consumed
+        # before the next perturbation, so an evaluator shared with ``ev_m`` (the
+        # cache is keyed on structure) still reports the right derivatives.
+        ev_p = make_evaluator(model)
         lag_p = ev_p.evaluate_gradient(x_star)
         if m_cons > 0:
             lag_p = lag_p + ev_p.evaluate_jacobian(x_star).T @ lambda_star
             cons_p = ev_p.evaluate_constraints(x_star)
 
         param.value = np.float64(orig - eps)
-        ev_m = NLPEvaluator(model)
+        ev_m = make_evaluator(model)
         lag_m = ev_m.evaluate_gradient(x_star)
         if m_cons > 0:
             lag_m = lag_m + ev_m.evaluate_jacobian(x_star).T @ lambda_star

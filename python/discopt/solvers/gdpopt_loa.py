@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import (
     Constraint,
     Model,
@@ -21,6 +20,12 @@ from discopt.modeling.core import (
 )
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import optimality_gap
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # #1063: type-only. ``_relax/nlp_evaluator`` imports jax at module scope, so a
+    # runtime import here put JAX in ``sys.modules`` merely by importing this
+    # module — before any evaluator was even built.
+    from discopt._relax.nlp_evaluator import NLPEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +69,9 @@ def solve_gdpopt_loa(
 
     # 2. Build NLP evaluator for the reformulated model
     from discopt._relax.convexity import classify_oa_cut_convexity
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
 
-    evaluator = NLPEvaluator(reformulated)
+    evaluator = make_evaluator(reformulated)  # #1063: canonical funnel, not the JAX ctor
     oa_convexity = classify_oa_cut_convexity(reformulated)
     n_vars = evaluator.n_variables
     n_cons = evaluator.n_constraints
@@ -456,7 +461,7 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
         opts = pounce_option_defaults()
         opts.update(pounce_incumbent_options())
         opts.update({"max_iter": 200})
-        result = solve_nlp(cast(NLPEvaluator, proxy), x0, options=opts)
+        result = solve_nlp(cast("NLPEvaluator", proxy), x0, options=opts)
 
         from discopt.solvers import SolveStatus
 
@@ -526,7 +531,7 @@ def _fixed_subproblem_rigorously_infeasible(evaluator, sub_lb, sub_ub, tol: floa
 class _BoundsProxy:
     """Wraps an NLPEvaluator with overridden variable bounds."""
 
-    def __init__(self, evaluator: NLPEvaluator, new_lb, new_ub) -> None:
+    def __init__(self, evaluator: "NLPEvaluator", new_lb, new_ub) -> None:
         self._eval = evaluator
         self._lb = np.asarray(new_lb, dtype=np.float64)
         self._ub = np.asarray(new_ub, dtype=np.float64)

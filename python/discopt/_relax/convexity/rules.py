@@ -342,48 +342,139 @@ def classify_expr_info(
     if _cache is None:
         _cache = {}
 
-    # Deadline guard: abort a pathological classification (exponential
-    # transient-subexpression exploration) promptly. Sound because an aborted
-    # classification reports UNKNOWN, routing the model to the spatial Branch
-    # and Bound / McCormick relaxation — a valid, if looser, treatment.
-    deadline = _cache.get(_DEADLINE_KEY)
-    if deadline is not None:
-        counter = _cache[_VISIT_COUNT_KEY]
-        counter[0] += 1
-        if counter[0] % _DEADLINE_CHECK_STRIDE == 0 and time.perf_counter() > deadline:
-            raise ConvexityBudgetExceeded(
-                f"convexity classification exceeded its time budget after "
-                f"{counter[0]} expression visits"
-            )
+    _tick_deadline(_cache)
 
     eid = id(expr)
     cached = _cache.get(eid)
     if cached is not None:
         return cached  # type: ignore[no-any-return]
 
-    # Structural memoization: collapse the exponential re-classification of
-    # ``from_nl``-rebuilt, structurally-identical-but-distinct nodes. A hash
-    # collision is resolved by an exact structural-equality check, so reuse
-    # can never substitute a wrong curvature (see module note above).
-    struct_cache = _cache.get(_STRUCT_CACHE_KEY)
+    # Classify the whole subtree on an EXPLICIT stack, deepest node first, so
+    # this module holds no Python frame per DAG level. ``.nl`` writes an
+    # objective as one left-deep ``+`` chain, so DAG depth tracks *model size*:
+    # ``squfl015-060``'s objective is 903 levels deep, and at three frames per
+    # level (``classify_expr_info``/``_classify_impl``/``_classify_binary``)
+    # the recursive form exhausted CPython's 1000-frame default at roughly node
+    # 330 — a ``RecursionError`` that aborted the OA path outright (issue #1063).
+    #
+    # ``_classify_impl`` is unchanged and still calls ``classify_expr_info`` on
+    # its children; because the driver builds children first, those calls are
+    # memo hits that return without descending.
+    _classify_subtree(expr, model, _cache)
+    return cast(ExprInfo, _cache[eid])
+
+
+def _tick_deadline(cache: dict) -> None:
+    """Charge one expression visit against the classification deadline.
+
+    Deadline guard: abort a pathological classification (exponential
+    transient-subexpression exploration) promptly. Sound because an aborted
+    classification reports UNKNOWN, routing the model to the spatial Branch
+    and Bound / McCormick relaxation — a valid, if looser, treatment.
+    """
+    deadline = cache.get(_DEADLINE_KEY)
+    if deadline is None:
+        return
+    counter = cache[_VISIT_COUNT_KEY]
+    counter[0] += 1
+    if counter[0] % _DEADLINE_CHECK_STRIDE == 0 and time.perf_counter() > deadline:
+        raise ConvexityBudgetExceeded(
+            f"convexity classification exceeded its time budget after "
+            f"{counter[0]} expression visits"
+        )
+
+
+def _classify_children(expr: Expression) -> tuple[Expression, ...]:
+    """The sub-expressions classification descends into, in visit order.
+
+    This must stay in sync with the ``classify_expr_info`` call sites in
+    ``_classify_impl``/``_classify_binary``/``_classify_function_call``/
+    ``_classify_matmul``; it is what lets the driver warm a node's children
+    before the node itself. ``IndexExpression`` yields its base only when the
+    base is not a ``Variable``, matching the branch in ``_classify_impl`` that
+    reads the per-index bound instead of recursing.
+
+    A node type missing here is not a correctness bug — ``_classify_impl``
+    still reaches its children, only recursively — but it reintroduces a frame
+    chain for that shape, so the coverage is asserted by a test.
+    """
+    if isinstance(expr, IndexExpression):
+        return () if isinstance(expr.base, Variable) else (expr.base,)
+    if isinstance(expr, UnaryOp):
+        return (expr.operand,)
+    if isinstance(expr, BinaryOp):
+        return (expr.left, expr.right)
+    if isinstance(expr, FunctionCall):
+        return tuple(expr.args)
+    if isinstance(expr, SumExpression):
+        return (expr.operand,)
+    if isinstance(expr, SumOverExpression):
+        return tuple(expr.terms)
+    if isinstance(expr, MatMulExpression):
+        return (expr.left, expr.right)
+    return ()
+
+
+def _warm_bottom_up(root: Expression, memo: dict, compute: Callable[[Expression], object]) -> None:
+    """Fill ``memo`` for every node under ``root``, deepest first.
+
+    ``_is_polynomial_impl`` and ``_struct_hash`` are self-recursive over this
+    same DAG and memoised by ``id``. Calling them in post-order makes every
+    child lookup a hit, so each call returns after one level instead of holding
+    a frame per level — the rules themselves are reused verbatim rather than
+    re-implemented iteratively, so there is one definition of each.
+    """
+    stack: list[tuple[Expression, bool]] = [(root, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if id(node) in memo:
+            continue
+        if not expanded:
+            stack.append((node, True))
+            for child in reversed(_classify_children(node)):
+                if id(child) not in memo:
+                    stack.append((child, False))
+            continue
+        compute(node)
+
+
+def _classify_shortcut(expr: Expression, cache: dict) -> Optional[ExprInfo]:
+    """Reuse a structurally identical node's info, or ``None`` to classify.
+
+    Structural memoization: collapse the exponential re-classification of
+    ``from_nl``-rebuilt, structurally-identical-but-distinct nodes. A hash
+    collision is resolved by an exact structural-equality check, so reuse
+    can never substitute a wrong curvature (see module note above).
+    """
+    struct_cache = cache.get(_STRUCT_CACHE_KEY)
     if struct_cache is None:
         struct_cache = {}
-        _cache[_STRUCT_CACHE_KEY] = struct_cache
-    hash_cache = _cache.get(_STRUCT_HASH_KEY)
+        cache[_STRUCT_CACHE_KEY] = struct_cache
+    hash_cache = cache.get(_STRUCT_HASH_KEY)
     if hash_cache is None:
         hash_cache = {}
-        _cache[_STRUCT_HASH_KEY] = hash_cache
+        cache[_STRUCT_HASH_KEY] = hash_cache
 
     from .patterns import _expr_struct_eq
 
-    struct_key = _struct_hash(expr, hash_cache)
-    bucket = struct_cache.get(struct_key)
-    if bucket is not None:
-        for cand_expr, cand_info in bucket:
-            if _expr_struct_eq(expr, cand_expr):
-                _cache[eid] = cand_info
-                return cast(ExprInfo, cand_info)
+    bucket = struct_cache.get(_struct_hash(expr, hash_cache))
+    if bucket is None:
+        return None
+    for cand_expr, cand_info in bucket:
+        if _expr_struct_eq(expr, cand_expr):
+            cache[id(expr)] = cand_info
+            return cast(ExprInfo, cand_info)
+    return None
 
+
+def _classify_node(
+    expr: Expression, model: Optional[Model], cache: dict, under_poly: bool
+) -> ExprInfo:
+    """Classify one node whose children are already in ``cache``.
+
+    ``under_poly`` is the ancestor context the recursive form kept in
+    ``_cache[_UNDER_POLY_KEY]``; the driver carries it on its stack instead.
+    """
     # Whole-expression quadratic fallback: when the recursive walker leaves a
     # polynomial at UNKNOWN (e.g. an intermediate bilinear node defeats local
     # reasoning), the full quadratic form may still classify via eigendecomposition
@@ -397,17 +488,18 @@ def classify_expr_info(
     # of such a node, ``_UNDER_POLY_KEY`` is set so descendants skip their own
     # redundant eigendecomposition. Skipping is sound: it can only forgo a
     # convexity proof (-> spatial B&B), never assert a false one.
-    under_poly = _cache.get(_UNDER_POLY_KEY, False)
-    maximal_poly = (not under_poly) and model is not None and _is_polynomial(expr, _cache)
+    maximal_poly = (not under_poly) and model is not None and _is_polynomial(expr, cache)
 
-    if maximal_poly:
-        _cache[_UNDER_POLY_KEY] = True
-        try:
-            info = _classify_impl(expr, model, _cache)
-        finally:
-            _cache[_UNDER_POLY_KEY] = False
-    else:
-        info = _classify_impl(expr, model, _cache)
+    # The flag is set for the duration of ``_classify_impl`` so that a child the
+    # driver did not pre-warm (a node shape absent from ``_classify_children``)
+    # still sees the ancestor context the recursive form gave it. Restoring
+    # ``under_poly`` matches both arms of the original: the maximal arm reset the
+    # flag to False, which is what ``under_poly`` is whenever ``maximal_poly``.
+    cache[_UNDER_POLY_KEY] = under_poly or maximal_poly
+    try:
+        info = _classify_impl(expr, model, cache)
+    finally:
+        cache[_UNDER_POLY_KEY] = under_poly
 
     if maximal_poly and model is not None and info.curvature == Curvature.UNKNOWN:
         from .patterns import quadratic_curvature
@@ -415,12 +507,52 @@ def classify_expr_info(
         qc = quadratic_curvature(expr, model)
         if qc is not None and qc != Curvature.UNKNOWN:
             info = ExprInfo(qc, info.sign)
-    _cache[eid] = info
-    if bucket is None:
-        bucket = []
-        struct_cache[struct_key] = bucket
-    bucket.append((expr, info))
+
+    cache[id(expr)] = info
+    hash_cache = cache[_STRUCT_HASH_KEY]
+    cache[_STRUCT_CACHE_KEY].setdefault(_struct_hash(expr, hash_cache), []).append((expr, info))
     return info
+
+
+def _classify_subtree(root: Expression, model: Optional[Model], cache: dict) -> None:
+    """Populate ``cache[id(root)]`` by classifying ``root``'s DAG bottom-up.
+
+    Visits nodes in exactly the order the recursive form did — the shortcut is
+    consulted on the way *down* (so a structural-cache hit still prunes the
+    subtree beneath it) and a node is classified on the way back *up*.
+    """
+    poly_memo = cache.get(_POLY_PRED_KEY)
+    if poly_memo is None:
+        poly_memo = {}
+        cache[_POLY_PRED_KEY] = poly_memo
+    hash_cache = cache.get(_STRUCT_HASH_KEY)
+    if hash_cache is None:
+        hash_cache = {}
+        cache[_STRUCT_HASH_KEY] = hash_cache
+
+    # Warm the two self-recursive predicates first: the driver calls both at
+    # *expand* time, when descendants are not yet classified, so they would
+    # otherwise recurse the full depth on their own.
+    _warm_bottom_up(root, poly_memo, lambda n: _is_polynomial_impl(n, poly_memo))
+    _warm_bottom_up(root, hash_cache, lambda n: _struct_hash(n, hash_cache))
+
+    # (node, ancestor under_poly context, children already pushed)
+    stack: list[tuple[Expression, bool, bool]] = [(root, cache.get(_UNDER_POLY_KEY, False), False)]
+    while stack:
+        node, under_poly, expanded = stack.pop()
+        if id(node) in cache:
+            continue
+        if expanded:
+            _classify_node(node, model, cache, under_poly)
+            continue
+        if _classify_shortcut(node, cache) is not None:
+            continue
+        maximal_poly = (not under_poly) and model is not None and _is_polynomial(node, cache)
+        child_ctx = under_poly or maximal_poly
+        stack.append((node, under_poly, True))
+        for child in reversed(_classify_children(node)):
+            if id(child) not in cache:
+                stack.append((child, child_ctx, False))
 
 
 # ──────────────────────────────────────────────────────────────────────

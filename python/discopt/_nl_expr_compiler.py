@@ -323,22 +323,90 @@ def compile_to_nl_expr(expr: Expression, model: Model) -> Any:
     return arr.reshape(-1)[0]
 
 
+def _children(expr: Expression, model: Model) -> tuple[Expression, ...]:
+    """The sub-expressions :func:`_lower_uncached` will ``rec()`` into, in order.
+
+    Kept deliberately in lockstep with the ``rec`` calls below — including
+    :class:`IndexExpression`, where the base is lowered *only* when the static
+    scalar-slot fast path misses. Pre-lowering it unconditionally would rebuild
+    the whole base array for every ``x[i]`` leaf, which is the O(size * leaves)
+    cost issue #654 removed.
+
+    A node type missing here is not a correctness bug: :func:`_lower` still
+    reaches its children through ``rec``, only recursively. It costs depth
+    robustness for that shape, nothing else.
+    """
+    if isinstance(expr, BinaryOp):
+        return (expr.left, expr.right)
+    if isinstance(expr, UnaryOp):
+        return (expr.operand,)
+    if isinstance(expr, FunctionCall):
+        return tuple(expr.args)
+    if isinstance(expr, SumExpression):
+        return (expr.operand,)
+    if isinstance(expr, SumOverExpression):
+        return tuple(expr.terms)
+    if isinstance(expr, IndexExpression):
+        return () if _static_scalar_slot(expr, model) is not None else (expr.base,)
+    if isinstance(expr, MatMulExpression):
+        return (expr.left, expr.right)
+    return ()
+
+
 def _lower(
     expr: Expression, model: Model, E: Any, memo: dict[int, Any], budget: _Budget
 ) -> np.ndarray:
+    """Lower ``expr``, memoizing every node, with an EXPLICIT stack.
+
+    Not recursion. An ``.nl`` file's objective is one left-deep operator chain
+    with a term per variable, so the DAG's depth grows with the model rather than
+    with the modeler's nesting: ``squfl015-060``'s objective measures 903 levels
+    over 4556 nodes. ``_lower``/``_lower_uncached``/``rec`` is three frames per
+    level, so CPython's 1000-frame default aborts the build at roughly 330 —
+    ``RecursionError``, not ``UnsupportedForTape``, so it escaped
+    :func:`try_build`'s fallback and took down the whole caller. That made
+    ``make_evaluator`` unusable on the very models the OA path is for (#1063),
+    while the JAX evaluator, which lowers the same DAG without a Python-frame
+    chain, built it in 0.37 s.
+
+    Raising the recursion limit is not the fix: the frames are real C-stack
+    frames, so a limit high enough for a 100k-term ``.nl`` objective trades a
+    clean exception for a hard interpreter crash. The traversal below is
+    post-order — children complete before their parent — so every ``rec`` call
+    inside :func:`_lower_uncached` is a memo hit and the frame chain stays flat.
+    Sibling order matches the recursive form exactly, which keeps ``budget``
+    charging (and so the node named in an overflow message) unchanged.
+    """
     key = id(expr)
     hit = memo.get(key)
     if hit is not None:
         return cast(np.ndarray, hit)
-    built = _lower_uncached(expr, model, E, memo, budget)
-    if not isinstance(built, np.ndarray):
-        # numpy returns a bare scalar, not a 0-d array, whenever every operand of
-        # an elementwise op is 0-d -- so `x[0] * x[1]` comes back as an `NlExpr`.
-        # Normalizing here rather than at each of the dozen construction sites is
-        # what lets every branch above assume `.shape` and `.size` exist.
-        built = _wrap_scalar(built)
-    memo[key] = built
-    return built
+
+    stack: list[tuple[Expression, bool]] = [(expr, False)]
+    while stack:
+        node, expanded = stack.pop()
+        node_key = id(node)
+        if node_key in memo:
+            continue
+        if not expanded:
+            # Push the node back under its children so it is built after them;
+            # `reversed` so siblings pop left-to-right, as `rec` visits them.
+            stack.append((node, True))
+            for child in reversed(_children(node, model)):
+                if id(child) not in memo:
+                    stack.append((child, False))
+            continue
+        built = _lower_uncached(node, model, E, memo, budget)
+        if not isinstance(built, np.ndarray):
+            # numpy returns a bare scalar, not a 0-d array, whenever every operand
+            # of an elementwise op is 0-d -- so `x[0] * x[1]` comes back as an
+            # `NlExpr`. Normalizing here rather than at each of the dozen
+            # construction sites is what lets every branch above assume `.shape`
+            # and `.size` exist.
+            built = _wrap_scalar(built)
+        memo[node_key] = built
+
+    return cast(np.ndarray, memo[key])
 
 
 def _lower_uncached(

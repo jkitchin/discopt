@@ -1178,9 +1178,16 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
     """Separate model into linear/nonlinear constraints, identify integers."""
     from discopt._relax.convexity import classify_oa_cut_convexity
     from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
-    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
 
-    evaluator = NLPEvaluator(model)
+    # #1063: go through the canonical funnel, NOT ``NLPEvaluator(model)``.
+    # ``_relax/nlp_evaluator`` imports jax at module scope, so constructing it
+    # directly puts JAX in ``sys.modules`` and pays a cold XLA compile — measured
+    # at 3m0.5s for ``jit_concat_constraints`` on squfl015-060 against a 60 s
+    # budget, i.e. the OA path could not return at all. ``make_evaluator`` hands
+    # back the tape evaluator (default-ON since #75) and only falls back to JAX
+    # when the model is not tape-representable.
+    evaluator = make_evaluator(model)
     oa_convexity = classify_oa_cut_convexity(model)
     n_vars = evaluator.n_variables
     n_cons = evaluator.n_constraints
