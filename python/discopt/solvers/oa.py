@@ -22,6 +22,7 @@ References:
 from __future__ import annotations
 
 import logging
+import math
 import time
 import warnings
 from collections import Counter
@@ -46,6 +47,40 @@ if TYPE_CHECKING:
     from discopt._relax.nlp_evaluator import NLPEvaluator
 
 logger = logging.getLogger(__name__)
+
+#: While OA holds no incumbent, the fraction of the remaining budget the master
+#: MILP is allowed to consume (#1062). OA's product with no incumbent is nothing
+#: at all, and the master is entitled to stop at its own time limit and still
+#: return a perfectly good integer assignment — but the fixed-integer NLP that
+#: turns that assignment into an incumbent runs *after* the candidate loop's
+#: ``elapsed >= time_limit`` check. Handing the master 100% of the budget
+#: therefore makes OA discard the answer it is holding. Measured on ``rsyn0840m``
+#: at 60 s: master 60.34 s (100% of the solve), fixed-NLP calls 0, obj None —
+#: against ``rsyn0805m`` on the same route, whose master takes 0.14 s and which
+#: reaches a proved optimum in 1.2 s.
+_MASTER_NO_INCUMBENT_BUDGET_FRAC = 0.9
+
+
+def _master_time_budget(remaining: float, *, has_incumbent: bool) -> float:
+    """Time limit for one master MILP solve, reserving room for the fixed NLP.
+
+    Once an incumbent exists OA has something to return, so the master may use
+    everything that is left. Until then it may not, or a master that exhausts
+    the budget leaves OA reporting ``status=unknown, obj=None`` while a usable
+    integer assignment sits in ``master_result.x``.
+
+    The reserve is a *fraction* rather than a constant so it never starves as
+    the budget shrinks, and it is a no-op whenever the master finishes early —
+    which is the common case. Stopping the master early costs only master
+    optimality, not soundness: a MILP master truncated at its time limit still
+    yields a valid dual bound for a relaxation of the MINLP.
+    """
+    if has_incumbent:
+        return remaining
+    if not math.isfinite(remaining) or remaining <= 0.0:
+        return remaining
+    return remaining * _MASTER_NO_INCUMBENT_BUDGET_FRAC
+
 
 _INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary", "fp"})
 _REGULARIZATION_MODES = {
@@ -6550,7 +6585,9 @@ def solve_oa(
             decomp.obj_coeffs,
             decomp.obj_is_linear,
             master_bound_valid,
-            time_limit=time_limit - elapsed,
+            time_limit=_master_time_budget(
+                time_limit - elapsed, has_incumbent=incumbent is not None
+            ),
             gap_tolerance=gap_tolerance,
             add_slack=add_slack,
             max_slack=max_slack,
