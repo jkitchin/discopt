@@ -164,3 +164,44 @@ def test_a_misaligned_box_is_dropped_rather_than_misapplied():
     propagate_bounds_to_model(model, repr_, stats)
     # Falls back to the repr-only box, which leaves the bound infinite.
     assert np.any(_flat_ub(model) >= INF), "a misaligned box was applied anyway"
+
+
+def _repr_ub(repr_):
+    """Every upper bound the Rust repr currently carries, flattened."""
+    blocks = [
+        np.asarray(repr_.var_ub(bi), dtype=np.float64).reshape(-1)
+        for bi in range(repr_.n_var_blocks)
+    ]
+    return np.concatenate(blocks)
+
+
+@pytest.mark.smoke
+def test_the_repr_and_the_model_are_left_agreeing_about_the_box():
+    """Writing the box into only one of the two views costs bound, not saves it.
+
+    ``model`` and ``model_repr`` are read by different consumers downstream, so a
+    box installed in the model alone leaves them disagreeing.  Measured on
+    MINLPLib ``4stufen``: the model-only write produced a root bound of 20282.42
+    against 20712.17 for no propagation at all, while applying the identical box
+    to both views produced 20712.43.  A smaller box cannot weaken a relaxation --
+    the disagreement was doing it, not the box.
+    """
+    model = _bigm_model()
+    repr_, stats = run_root_presolve(
+        model_to_repr(model, getattr(model, "_builder", None)),
+        eliminate=True,
+        fbbt=True,
+        time_limit_ms=10_000,
+    )
+    # The premise of the test: the repr starts out *not* carrying the box.
+    before = _repr_ub(repr_)
+    assert np.any(before >= INF), "repr already carried a finite box — nothing to reconcile"
+
+    propagate_bounds_to_model(model, repr_, stats)
+
+    after = _repr_ub(repr_)
+    assert np.all(after <= before + 1e-12), "reconciliation loosened a repr bound"
+    assert np.any(after < before - 1e-12), "the repr was never updated with the box"
+
+    # And the two views must now agree: no model bound tighter than the repr's.
+    assert np.all(_flat_ub(model) <= after + 1e-9), "model and repr still disagree about the box"

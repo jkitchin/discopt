@@ -407,6 +407,20 @@ def propagate_bounds_to_model(model, model_repr, presolve_stats: dict | None = N
         if changed:
             block.lb = flat_py_lb.reshape(py_lb.shape)
             block.ub = flat_py_ub.reshape(py_ub.shape)
+        if box_lo is not None and box_hi is not None:
+            # Keep the repr's box in step with the model's. Downstream the two
+            # are read by different consumers, and letting them disagree costs
+            # bound rather than saving it: on 4stufen the model-only write gave
+            # a root bound of 20282.42 against 20712.17 with no propagation at
+            # all, while applying the identical box to both views gave 20712.43.
+            # The box is not the problem -- a smaller box cannot weaken a
+            # relaxation -- the disagreement is. ``tighten_var_bounds`` is
+            # intersection-only (it returns the count that strictly tightened),
+            # so this cannot loosen the repr, and it preserves the structural
+            # work presolve did to the repr that rebuilding it would discard.
+            # Confined to the #1061 path: without ``presolve_stats`` the repr is
+            # left exactly as the historical behaviour left it.
+            model_repr.tighten_var_bounds(bi, flat_py_lb, flat_py_ub)
     return n_tightened
 
 
