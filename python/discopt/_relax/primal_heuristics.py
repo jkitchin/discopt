@@ -1538,18 +1538,25 @@ def one_hot_config_subnlp(
     skips, and the whole path is additionally deadline-bounded — in practice the
     deadline, not ``max_configs``, is what stops it.
 
-    **When this search returns nothing, control passes to**
-    :func:`one_hot_config_dive` **with the remaining budget** (#993). Both searches
-    here rank disjuncts from one static point and never re-solve, which measurably
-    cannot reach the answer on the harder nonlinear GDPs: on syngas the proven
-    configuration is 3 demotions from the argmax (plan 743 of 256) and on
-    batch_processing 15 of 29 (C(29,15) ~ 7.7e7). The dive re-solves the relaxation
-    between choices, which is what makes those reachable. Ordering is deliberate —
-    the wave is far cheaper when it works (0.018 s/plan on cstr) so it goes first,
-    and the dive only pays for models the wave cannot solve. The wave hands over
+    **When this search finishes, control passes to** :func:`one_hot_config_dive`
+    **with whatever budget is left, and the two point sets are merged** (#993,
+    #1062). Both searches here rank disjuncts from one static point and never
+    re-solve, which measurably cannot reach the answer on the harder nonlinear
+    GDPs: on syngas the proven configuration is 3 demotions from the argmax (plan
+    743 of 256) and on batch_processing 15 of 29 (C(29,15) ~ 7.7e7). The dive
+    re-solves the relaxation between choices, which is what makes those reachable.
+    Ordering is deliberate — the wave is far cheaper when it works (0.018 s/plan on
+    cstr) so it goes first, and the dive gets the remainder. The wave hands over
     after ``_WAVE_SOLVE_CAP`` sub-NLP solves: measured, an uncapped wave consumes
     the entire grant on precisely the models the dive is for, so the two searches
     would compete for one budget and the cheaper-but-useless one would always win.
+
+    The handover is **not** conditioned on the wave having failed. It was until
+    #1062, and that gate is what made the dive unreachable in practice: on the
+    syn/rsyn family the wave always returns a feasible-but-poor plan, so
+    "the wave found nothing" never fired and the better search never ran. Merging
+    rather than substituting means the caller can only end up with a superset of
+    the candidates it had before.
 
     ``max_configs`` is deliberately large. Measured on cstr, a fixed-integer
     sub-NLP here costs **0.018 s** (384 plans in 7 s), and the feasible plans sit
@@ -1733,23 +1740,50 @@ def one_hot_config_subnlp(
         stop,
         len(results),
     )
-    if results or not groups:
+    if not groups:
         return results
-    # The wave found nothing. Spend what is left of the budget on the dive, which
-    # re-solves between choices and can therefore reach configurations no wave
-    # around a single point can (see this function's docstring, #993). Called from
-    # HERE rather than from the solver's three call sites so that no path can be
-    # left unwired — that omission is exactly how #823 shipped a flag that was dead
-    # on the model class it targeted.
-    return one_hot_config_dive(
-        model,
-        x_relax,
-        backend=backend,
-        nlp_options=nlp_options,
-        evaluator=evaluator,
-        integer_tol=integer_tol,
-        deadline=deadline,
+    # Spend what is left of the budget on the dive, which re-solves between choices
+    # and can therefore reach configurations no wave around a single point can (see
+    # this function's docstring, #993). Called from HERE rather than from the
+    # solver's three call sites so that no path can be left unwired — that omission
+    # is exactly how #823 shipped a flag that was dead on the model class it
+    # targeted.
+    #
+    # This used to be gated on the wave having found *nothing* (``if results or not
+    # groups``). That gate made the dive unreachable on the class it was written
+    # for: the wave nearly always returns a feasible-but-poor plan, so "the wave
+    # found nothing" almost never happens, and the better search never ran (#1062).
+    # Measured on syn/rsyn at the production envelope (9 s shared by both searches,
+    # i.e. what ``_gdp_config_deadline`` grants at a 60 s limit), wave best vs. the
+    # two of them together, internal minimise convention:
+    #
+    #   rsyn0805m  -321.96 -> -1267.38 (dive 6.9 s)
+    #   syn40m       +0.95 ->   -23.16 (dive 3.1 s)
+    #   rsyn0840m   -11.06 ->   -92.11 (dive 5.5 s)
+    #   syn20m02m  -636.72 ->  -636.72 (wave used the whole envelope; dive got 0 s)
+    #
+    # The dive is *added*, never substituted: its points are appended to the wave's
+    # and the caller keeps the best, so this can only widen the candidate set. Both
+    # searches return points from :func:`subnlp`, which re-verifies integer- and
+    # constraint-feasibility, so neither can propose an infeasible incumbent and
+    # neither touches the dual bound.
+    #
+    # Cost is bounded by the caller's own ``deadline`` — the dive gets what the wave
+    # left and nothing more, so the heuristic's total budget is unchanged. When the
+    # wave spends the whole envelope the dive polls the expired deadline and returns
+    # immediately, which is the syn20m02m row above.
+    results.extend(
+        one_hot_config_dive(
+            model,
+            x_relax,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            integer_tol=integer_tol,
+            deadline=deadline,
+        )
     )
+    return results
 
 
 def one_hot_config_dive(
