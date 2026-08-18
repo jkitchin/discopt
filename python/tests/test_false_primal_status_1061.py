@@ -49,29 +49,30 @@ def _nonlinear_model(name="false_primal_guard"):
 def _force_guard_verdict(monkeypatch, feasible: bool):
     """Force the GUARD's feasibility verdict, leaving every other caller real.
 
-    ``_check_constraint_feasibility`` has ~35 call sites; patching it wholesale
-    also rewires the solver's own primal screens, which withhold the incumbent
-    earlier and leave the guard nothing to act on (the first draft of this test
-    did exactly that and never reached the code under test). The guard is the
-    only caller in ``modeling/core.py``, so dispatch on the calling frame and
-    let everyone else through untouched.
+    Patching ``_check_constraint_feasibility`` (~35 call sites) wholesale also
+    rewires the solver's own primal screens, which withhold the incumbent earlier
+    and leave the guard nothing to act on -- the first draft of this test did
+    exactly that and never reached the code under test. ``passes_false_primal_screen``
+    is the narrow entry point instead: only the final guard and the single-NLP
+    source screen call it, and dispatching on the calling frame keeps the latter
+    real, so the solver still screens its own points normally.
 
     Returns a dict whose ``n`` counts guard calls actually intercepted (§6).
     """
     import discopt._relax.primal_heuristics as ph
 
-    real = ph._check_constraint_feasibility
+    real = ph.passes_false_primal_screen
     calls = {"n": 0}
     here = "modeling/core.py"
 
-    def _dispatch(evaluator, *args, **kwargs):
+    def _dispatch(evaluator, x):
         caller = inspect.currentframe().f_back
         if caller is not None and caller.f_code.co_filename.replace("\\", "/").endswith(here):
             calls["n"] += 1
             return feasible
-        return real(evaluator, *args, **kwargs)
+        return real(evaluator, x)
 
-    monkeypatch.setattr(ph, "_check_constraint_feasibility", _dispatch)
+    monkeypatch.setattr(ph, "passes_false_primal_screen", _dispatch)
     return calls
 
 
@@ -127,19 +128,19 @@ def test_a_broken_guard_is_loud_rather_than_silent(monkeypatch):
     """
     import discopt._relax.primal_heuristics as ph
 
-    real = ph._check_constraint_feasibility
+    real = ph.passes_false_primal_screen
     seen = {"n": 0}
 
-    def _explode(evaluator, *args, **kwargs):
+    def _explode(evaluator, x):
         caller = inspect.currentframe().f_back
         if caller is not None and caller.f_code.co_filename.replace("\\", "/").endswith(
             "modeling/core.py"
         ):
             seen["n"] += 1
             raise RuntimeError("guard is broken")
-        return real(evaluator, *args, **kwargs)
+        return real(evaluator, x)
 
-    monkeypatch.setattr(ph, "_check_constraint_feasibility", _explode)
+    monkeypatch.setattr(ph, "passes_false_primal_screen", _explode)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         res = _nonlinear_model().solve(time_limit=30)

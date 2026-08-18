@@ -4846,14 +4846,18 @@ class Model:
         # primal — the worst error class (CLAUDE.md §1). It cannot happen on correct
         # solver code, but if an unsound presolve mutation or a heuristic bug ever
         # produces one, this guard refuses to return it: withhold the incumbent and
-        # decertify, loudly. The check is deliberately LOOSE (abs tol 1e-3) so it can
-        # never flag an incumbent that is feasible within the solver's own tolerance
-        # — only a gross violation (the #770 violations were 0.4–17.6) trips it.
+        # decertify, loudly. The check is deliberately LOOSE so it can never flag an
+        # incumbent that is feasible within the solver's own tolerance — only a gross
+        # violation (the #770 violations were 0.4–17.6) trips it. That looseness lives
+        # in ``passes_false_primal_screen``, shared with the single-NLP source screen
+        # in ``solver.py`` so the two cannot drift; spelling it inline as ``tol=1e-3``
+        # loosened only the absolute leg and made the screen scale-blind on
+        # large-magnitude rows (#1061).
         if _verify_snap is not None and result.x is not None:
             try:
                 import numpy as _np
 
-                from discopt._relax.primal_heuristics import _check_constraint_feasibility
+                from discopt._relax.primal_heuristics import passes_false_primal_screen
 
                 _snap_ev, _snap_names = _verify_snap
                 _flat = _np.concatenate(
@@ -4862,7 +4866,7 @@ class Model:
                         for _n in _snap_names
                     ]
                 )
-                if not _check_constraint_feasibility(_snap_ev, _flat, tol=1e-3):
+                if not passes_false_primal_screen(_snap_ev, _flat):
                     _logging.getLogger("discopt.solver").error(
                         "FALSE PRIMAL DETECTED: the reported incumbent (objective=%s) is "
                         "INFEASIBLE in the original problem. This indicates an unsound presolve "
