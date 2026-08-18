@@ -18137,6 +18137,96 @@ def _solve_milp_gurobi(
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
+def _structured_node_recovery(
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    Q: Optional[np.ndarray] = None,
+):
+    """Re-solve a node relaxation with POUNCE's structured convex LP/QP engine.
+
+    Same contract as :func:`_pounce_recover_node_bound` — ``("optimal", bound,
+    x)``, ``("infeasible", None, None)``, or ``None`` — but over
+    ``pounce.solve_qp``'s native ``min ½x'Px + c'x s.t. Gx <= h, Ax = b,
+    lb <= x <= ub`` form rather than the callback TNLP wrapper. ``P=None``
+    degenerates to the LP case, so this serves both callers.
+
+    The structured form is what lets POUNCE presolve and scale; the callback
+    path cannot, and takes ~100 IPM iterations where this takes ~20 (see
+    :func:`_solve_node_lp_pounce`, which was migrated for exactly this reason).
+    Measured on the recovery path (#1064): 5.9-32.9x on squfl015-060 /
+    020-150 / 025-040, with the callback arm returning *no* answer at all on
+    every squfl020-150 attempt that this path settled.
+
+    Soundness carries over unchanged from the existing structured call sites:
+    ``optimal`` from the convex IPM is KKT-valid, ``primal_infeasible`` is
+    Phase-1-certified, and every other status returns ``None`` so the caller
+    keeps the node open. The returned point is checked against its own box and
+    rows before being handed back, so a drifted iterate cannot seed a spurious
+    bound or incumbent.
+    """
+    try:
+        import pounce
+
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE, _snap_inverted_bounds
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+
+    lb_n, ub_n = _snap_inverted_bounds(
+        np.asarray(node_lb, dtype=np.float64), np.asarray(node_ub, dtype=np.float64)
+    )
+    A_ub_m = None if A_ub is None else np.asarray(A_ub, dtype=np.float64)
+    b_ub_m = None if b_ub is None else np.asarray(b_ub, dtype=np.float64)
+    A_eq_m = None if A_eq is None else np.asarray(A_eq, dtype=np.float64)
+    b_eq_m = None if b_eq is None else np.asarray(b_eq, dtype=np.float64)
+    try:
+        res = pounce.solve_qp(
+            P=None if Q is None else np.asarray(Q, dtype=np.float64),
+            c=np.asarray(c, dtype=np.float64),
+            G=A_ub_m,
+            h=b_ub_m,
+            A=A_eq_m,
+            b=b_eq_m,
+            lb=lb_n,
+            ub=ub_n,
+        )
+    except Exception as e:
+        logger.debug("POUNCE structured node recovery failed: %s", e)
+        return None
+
+    if res.status == "primal_infeasible":
+        return ("infeasible", None, None)
+    if res.status != "optimal" or res.x is None or not np.isfinite(res.obj):
+        return None
+
+    x_sol = np.asarray(res.x, dtype=np.float64)
+    # Soundness gate, mirroring _solve_node_lp_pounce: an optimum must respect
+    # its own box and rows. An off-bound point can still be integral (a binary
+    # at -1) and would otherwise pass as an incumbent.
+    tol = 1e-5
+    if x_sol.shape[0] != lb_n.shape[0]:
+        return None
+    if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+        logger.debug("structured node recovery violates variable bounds; rejecting")
+        return None
+    if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
+        if not bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m)))):
+            logger.debug("structured node recovery violates inequality rows; rejecting")
+            return None
+    if A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
+        if not bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m)))):
+            logger.debug("structured node recovery violates equality rows; rejecting")
+            return None
+    return ("optimal", float(res.obj) + float(obj_const), x_sol)
+
+
 def _pounce_recover_node_bound(
     node_lb: np.ndarray,
     node_ub: np.ndarray,
@@ -18174,6 +18264,18 @@ def _pounce_recover_node_bound(
         return None
     if not POUNCE_AVAILABLE:
         return None
+
+    # #1064: prefer POUNCE's *structured convex* engine. ``_pounce_solve`` above
+    # is the generic callback TNLP path, which hides the linear structure from
+    # POUNCE's presolve — the same defect ``_solve_node_lp_pounce`` was migrated
+    # off (see its docstring, ~100 IPM iterations vs ~20). Recovery was left
+    # behind, which is why re-solving a node costs 8-33 s while *solving* it in
+    # the batch path costs ~8 ms. Structured first, callback as the fallback, so
+    # a structured decline still gets the legacy answer (§3: legacy path intact).
+    if _tuning().structured_node_recovery:
+        rec = _structured_node_recovery(node_lb, node_ub, c, obj_const, A_ub, b_ub, A_eq, b_eq, Q=Q)
+        if rec is not None:
+            return rec
 
     time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
     kwargs = dict(
@@ -18576,6 +18678,111 @@ def _pounce_snap_incumbent(
     )
     if rec is not None and rec[0] == "optimal":
         return rec[1], rec[2]
+    return None
+
+
+# #1064: round-fix-resolve tries at most this many candidate roundings per
+# invocation — round-to-nearest, then one retry with the most fractional
+# coordinate flipped. Anything deeper is a dive, which is a separate mechanism.
+_ROUND_MAX_TRIES = 2
+
+
+def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
+    """Round to the nearest integer that actually lies inside ``[lo, hi]``.
+
+    Rounding to nearest and *then* clamping would silently move a coordinate off
+    an integer when the box edge is fractional, so the clamp is to the integers
+    ``ceil(lo)``/``floor(hi)``. Returns ``None`` when some coordinate's box holds
+    no integer at all — there is nothing to fix it to, and pretending otherwise
+    would hand the re-solve an empty box and read as "the rounding was
+    infeasible".
+    """
+    ilo = np.ceil(lo - 1e-9)
+    ihi = np.floor(hi + 1e-9)
+    if np.any(ilo > ihi + 1e-9):
+        return None
+    return np.clip(np.round(vals), ilo, ihi)
+
+
+def _pounce_round_incumbent(
+    x_relax: np.ndarray,
+    int_offsets,
+    int_sizes,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Round a *fractional* relaxation point into an incumbent (round-fix-resolve).
+
+    :func:`_pounce_snap_incumbent` only purifies points already integral to
+    within ``_SNAP_TOL``; a genuinely fractional relaxation optimum is left
+    alone. A search that never lands near-integral therefore never produces an
+    incumbent at all — which is #1064's actual symptom: squfl020-150 and
+    squfl025-040 run their whole budget with **zero** snap re-solves, no primal
+    bound, and nothing to prune against.
+
+    This rounds every integer coordinate to the nearest integer inside its node
+    box, fixes them, and asks for the continuous completion — the same
+    fix-and-resolve step the snap path uses, applied to a point that is not
+    already integral. A rounded point can be genuinely infeasible (measured on
+    squfl025-040: of 7 forced fixings, 2 optimal / 3 Phase-1 infeasible / 2
+    unsettled), so a non-optimal verdict is retried once with the *most
+    fractional* coordinate rounded the other way — the one coordinate the
+    rounding was least entitled to decide.
+
+    Returns ``(objective, x)`` in minimization form, or ``None``. This can only
+    ever produce an upper bound: it never prunes, never tightens a node bound,
+    and never decertifies. A wrong guess costs time, not correctness.
+    """
+    idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not idx:
+        return None
+    x = np.asarray(x_relax, dtype=np.float64)
+    vals = x[idx]
+    if not np.all(np.isfinite(vals)):
+        return None
+    fl0 = np.asarray(node_lb, dtype=np.float64)
+    fu0 = np.asarray(node_ub, dtype=np.float64)
+    base = _round_into_box(vals, fl0[idx], fu0[idx])
+    if base is None:
+        return None
+
+    # Most fractional coordinate: the one the round-to-nearest decided on the
+    # weakest evidence. Ordered by distance to the nearest integer.
+    order = np.argsort(-np.abs(vals - np.round(vals)))
+
+    for attempt in range(_ROUND_MAX_TRIES):
+        cand = base.copy()
+        if attempt > 0:
+            if attempt - 1 >= order.shape[0]:
+                break
+            k = int(order[attempt - 1])
+            # Flip to the other side of the fractional value, then re-clamp; if
+            # the flip leaves the box it is not a distinct candidate.
+            other = np.floor(vals[k]) if cand[k] > vals[k] else np.ceil(vals[k])
+            flipped = _round_into_box(
+                np.array([other]), fl0[idx[k] : idx[k] + 1], fu0[idx[k] : idx[k] + 1]
+            )
+            if flipped is None or float(flipped[0]) == float(cand[k]):
+                break
+            cand[k] = float(flipped[0])
+        fl = fl0.copy()
+        fu = fu0.copy()
+        fl[idx] = cand
+        fu[idx] = cand
+        rec = _pounce_recover_node_bound(
+            fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
+        )
+        if rec is not None and rec[0] == "optimal":
+            return rec[1], rec[2]
     return None
 
 
@@ -20652,9 +20859,17 @@ def _solve_miqp_bb(
             ),
         )
 
+    # #1064: round-fix-resolve is a *first incumbent* mechanism, so it is spent
+    # only while the tree has none, and it is capped so a family where every
+    # rounding is infeasible cannot eat the search. Both are counted, not
+    # assumed: ``_round_attempts`` is what the regression test asserts on.
+    _ROUND_ATTEMPT_CAP = 64
+    _round_attempts = 0
+
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
+        nonlocal _round_attempts
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -20671,6 +20886,35 @@ def _solve_miqp_bb(
             time_limit,
             Q=_Q_m,
         )
+        how = "snapped"
+        if (
+            inc is None
+            and _tuning().round_fix_resolve
+            and tree.incumbent() is None
+            and _round_attempts < _ROUND_ATTEMPT_CAP
+        ):
+            # The snap path declined, i.e. this point is genuinely fractional.
+            # With no incumbent in hand there is no primal bound at all, so a
+            # rounded completion is strictly better than nothing — and it can
+            # only ever supply an upper bound (see _pounce_round_incumbent).
+            _round_attempts += 1
+            inc = _pounce_round_incumbent(
+                x_row,
+                int_offsets,
+                int_sizes,
+                node_lb_i,
+                node_ub_i,
+                _c_m,
+                float(qp_data.obj_const),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                t_start,
+                time_limit,
+                Q=_Q_m,
+            )
+            how = "rounded"
         if inc is not None:
             x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
             # #952: an injected incumbent goes straight into the tree as a
@@ -20682,7 +20926,8 @@ def _solve_miqp_bb(
                 tree.inject_incumbent(x_inc, float(inc[0]))
             else:
                 logger.debug(
-                    "MIQP-BB: rejected a snapped incumbent outside its rows/box (%s)",
+                    "MIQP-BB: rejected a %s incumbent outside its rows/box (%s)",
+                    how,
                     _matrix_solution_violations(
                         x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
                     ),
