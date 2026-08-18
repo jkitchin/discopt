@@ -268,10 +268,34 @@ def run_root_presolve(
     if fbbt:
         stats["fbbt"] = {"lb": raw["bounds_lo"], "ub": raw["bounds_hi"]}
 
+    # The orchestrator's final box, and whether it is safe to adopt as a
+    # *declared* model box (#1061).
+    #
+    # ``raw["bounds_lo"/"bounds_hi"]`` is the orchestrator's ``ctx.bounds``: the
+    # accumulated result of every bound-deriving pass, aligned with the returned
+    # repr's blocks. The Rust side deliberately does not write it into the repr
+    # (see the NOTE at the end of ``presolve::orchestrator::run``), so
+    # ``propagate_bounds_to_model`` -- which reads only the repr -- has never
+    # seen it. On the MINLPLib syn/rsyn class that made root bound tightening a
+    # complete no-op: FBBT derives a finite upper bound for all 83-169
+    # unbounded continuous variables and every one of them was discarded.
+    #
+    # Most passes here are *feasibility*-based: their bounds hold for every
+    # feasible point, so narrowing the declared box to them excludes nothing.
+    # ``reduced_cost_fixing`` and ``reduction_constraints`` are not -- they are
+    # cutoff/incumbent-derived, valid only for finding an *optimal* point. Those
+    # must never become declared bounds (a later re-solve against a different
+    # cutoff would read them as a false infeasibility), so they are flagged and
+    # ``propagate_bounds_to_model`` refuses them outright rather than quietly
+    # applying a box it cannot justify.
+    stats["bounds_lo"] = raw["bounds_lo"]
+    stats["bounds_hi"] = raw["bounds_hi"]
+    stats["bounds_optimality_derived"] = bool(reduced_cost or reduction_constraints)
+
     return new_repr, stats
 
 
-def propagate_bounds_to_model(model, model_repr) -> int:
+def propagate_bounds_to_model(model, model_repr, presolve_stats: dict | None = None) -> int:
     """Push tightened per-element bounds from ``model_repr`` back into ``model``.
 
     This is the bridge that lets the Rust-side presolve outcome influence
@@ -281,8 +305,22 @@ def propagate_bounds_to_model(model, model_repr) -> int:
     reformulation have no Python-side counterpart and are silently
     skipped.
 
+    ``presolve_stats`` is the second element of :func:`run_root_presolve`'s
+    return value. Pass it to also adopt the orchestrator's *own* final box
+    (``bounds_lo``/``bounds_hi``), which the Rust side deliberately keeps out of
+    the repr and which this function therefore could not see (#1061). Omitting
+    it preserves the historical repr-only behaviour exactly.
+
     Returns the number of *scalar elements* whose ``lb`` or ``ub`` was
     strictly tightened. Equal-or-looser updates are ignored.
+
+    Raises:
+        ValueError: if ``presolve_stats`` carries an optimality-derived box.
+            Those bounds are valid only for locating an optimum, not for the
+            feasible region, so adopting them as *declared* bounds could
+            manufacture a false infeasibility on a later re-solve. Refusing is
+            the intended behaviour (CLAUDE.md §3): silently skipping would make
+            an enabled tightening look applied when it was not.
     """
     import numpy as np
 
@@ -315,6 +353,33 @@ def propagate_bounds_to_model(model, model_repr) -> int:
             return 0
         block_iter = [(py_blocks[bi], bi) for bi in range(len(py_blocks))]
 
+    # The orchestrator's own final box, one interval per surviving block, indexed
+    # by the same ``bi`` as ``model_repr.var_lb(bi)`` (#1061). A block interval is
+    # a valid *outer* bound for every element of its block -- the engine seeds a
+    # block from the element-wise union of its bounds (``seed_block_interval``,
+    # C-31) -- so stamping it onto every scalar slot and intersecting can only
+    # tighten and never excludes a feasible point. This is the same expansion
+    # ``tightening.fbbt_box`` performs.
+    box_lo = box_hi = None
+    if presolve_stats:
+        if presolve_stats.get("bounds_optimality_derived"):
+            raise ValueError(
+                "refusing to propagate an optimality-derived presolve box into the "
+                "model's declared bounds: reduced_cost_fixing / reduction_constraints "
+                "bounds hold only for locating an optimum, not for the feasible "
+                "region (#1061)"
+            )
+        lo_raw = presolve_stats.get("bounds_lo")
+        hi_raw = presolve_stats.get("bounds_hi")
+        if lo_raw is not None and hi_raw is not None:
+            box_lo = np.asarray(lo_raw, dtype=np.float64)
+            box_hi = np.asarray(hi_raw, dtype=np.float64)
+            if box_lo.size != model_repr.n_var_blocks or box_hi.size != model_repr.n_var_blocks:
+                # Misaligned arrays would stamp one block's interval onto another,
+                # which is unsound rather than merely useless. Drop the box; the
+                # repr-derived tightening below still applies.
+                box_lo = box_hi = None
+
     for block, bi in block_iter:
         py_lb = np.asarray(block.lb, dtype=np.float64)
         py_ub = np.asarray(block.ub, dtype=np.float64)
@@ -322,6 +387,9 @@ def propagate_bounds_to_model(model, model_repr) -> int:
         rust_ub = np.asarray(model_repr.var_ub(bi), dtype=np.float64)
         if rust_lb.size != py_lb.size or rust_ub.size != py_ub.size:
             continue
+        if box_lo is not None and box_hi is not None:
+            rust_lb = np.maximum(rust_lb, box_lo[bi])
+            rust_ub = np.minimum(rust_ub, box_hi[bi])
         flat_py_lb = py_lb.reshape(-1).copy()
         flat_py_ub = py_ub.reshape(-1).copy()
         changed = False

@@ -1678,6 +1678,53 @@ def _node_probe_max_vars() -> int:
 _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
 
 
+def _presolve_bound_propagation_enabled() -> bool:
+    """Whether root presolve's own box is adopted as the model's declared bounds.
+
+    **Default OFF** (CLAUDE.md §5 regime 2: bound-changing) — opt in with
+    ``DISCOPT_PRESOLVE_BOUND_PROPAGATION=1``.
+
+    The Rust orchestrator accumulates every pass's bound tightening in
+    ``ctx.bounds`` and deliberately does **not** write it into the returned repr
+    (see the NOTE closing ``presolve::orchestrator::run``: mutating the repr's
+    declared bounds can flip an inactive bound to active and change LP duals).
+    It hands the box back to the caller instead. ``propagate_bounds_to_model``,
+    the one caller whose job is to deliver it, read only the repr — so the box
+    was computed and dropped on every solve.
+
+    Measured on the MINLPLib syn/rsyn class (#1061), root presolve terminating
+    ``NoProgress`` with ``n_tightened=0``:
+
+    ============  =============  ==========  ===========================
+    instance      inf ub before  inf ub kept  ``stats`` entries tighter
+    ============  =============  ==========  ===========================
+    ``syn40m``    83             83           87 of 130
+    ``rsyn0840m`` 169            169          -
+    ``syn20m02m`` 122            122          -
+    ``rsyn0805m`` 99             99           91 of 161
+    ============  =============  ==========  ===========================
+
+    The FBBT kernel run directly on the *identical* repr drives every one of
+    those to a finite bound (83/169/122/99 -> 0), and ``stats['fbbt']['ub']``
+    already holds them. Nothing needed deriving; it needed delivering.
+
+    Root dual-bound ratio against the reference optimum, 1-node solves
+    (OFF -> ON): ``syn40m`` 27.084x -> 15.643x, ``rsyn0840m`` 8.534x -> 6.185x,
+    ``syn20m02m`` 2.788x -> 2.646x, ``rsyn0805m`` 1.629x unchanged. The OFF
+    column reproduces the ratios #1061 published (27.1/8.5/2.8/1.6), which is
+    what makes the ON column comparable to them.
+
+    Only feasibility-derived bounds are eligible: ``propagate_bounds_to_model``
+    raises on an optimality-derived box rather than adopting one.
+    """
+    return os.environ.get("DISCOPT_PRESOLVE_BOUND_PROPAGATION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _in_tree_presolve_global_calls() -> int:
     """Firings of the in-tree presolve kernel on the global spatial B&B path."""
     return _IN_TREE_PRESOLVE_GLOBAL_CALLS
@@ -8023,7 +8070,15 @@ def solve_model(
                 fbbt=True,
                 time_limit_ms=int(_presolve_budget_s * 1000),
             )
-            n_tightened = propagate_bounds_to_model(model, _model_repr)
+            # #1061: hand the orchestrator's own box over as well. Without the
+            # stats argument this call sees only the repr, which the Rust side
+            # deliberately leaves untightened, so every bound presolve derived
+            # was discarded here.
+            n_tightened = propagate_bounds_to_model(
+                model,
+                _model_repr,
+                _presolve_stats if _presolve_bound_propagation_enabled() else None,
+            )
             elim = _presolve_stats.get("elimination", {})
             poly = _presolve_stats.get("polynomial", {})
             if elim.get("variables_fixed", 0) > 0 or n_tightened > 0:
