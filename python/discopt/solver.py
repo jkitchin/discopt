@@ -5180,6 +5180,28 @@ def _route_is_better(a: Optional[float], b: Optional[float], is_maximize: bool) 
     return float(a) > float(b) if is_maximize else float(a) < float(b)
 
 
+def _bound_crosses_objective(bound: float, objective: Optional[float], is_maximize: bool) -> bool:
+    """Would reporting ``bound`` against ``objective`` be an invalid certificate?
+
+    For a minimize model the dual bound is a *lower* bound and must not exceed
+    the incumbent; for a maximize model it is an *upper* bound and must not fall
+    below it. The slack is the same scale-aware rounding allowance the solvers
+    share (:func:`discopt.solvers._gap.bound_inversion_tolerance`), so this
+    agrees with OA, AMP and the LOA path on what counts as noise rather than a
+    real crossing.
+    """
+    if objective is None or not np.isfinite(objective):
+        return False
+    from discopt.solvers._gap import bound_inversion_tolerance
+
+    slack = bound_inversion_tolerance(float(bound), float(objective))
+    return (
+        float(objective) - float(bound) > slack
+        if is_maximize
+        else float(bound) - float(objective) > slack
+    )
+
+
 def _gap_is_closed(result, tol: float = 1e-6) -> bool:
     """Did ``result`` come back with a *closed*, certified optimality gap?
 
@@ -5261,6 +5283,19 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         and l_b is not None
         and np.isfinite(l_b)
         and (w_b is None or not np.isfinite(w_b) or (l_b < w_b if is_maximize else l_b > w_b))
+        # ...and only if it does not cross the incumbent it would be reported
+        # against. A dual bound past the winner's own objective is a broken
+        # certificate (CLAUDE.md §1: ``bound <= incumbent`` for min sense), and
+        # the two sides ran different algorithms, so a crossing here means one
+        # of them is wrong and this merge cannot tell which. Keep the winner's
+        # own self-consistent bound. Measured on ``fac2``: OA returned a
+        # ``gap_certified=True`` lower bound of 331845337.44 against the merged
+        # incumbent 331837498.18 -- 7839 above the true optimum -- and without
+        # this guard the merge published it. The root cause is fixed in
+        # ``oa.py`` (``_certified_bound_inverted``); this is the second line of
+        # defence, because the merge is the last code to touch the bound before
+        # the caller sees it.
+        and not _bound_crosses_objective(float(l_b), winner.objective, is_maximize)
     ):
         winner.bound = float(l_b)
     obj, bnd = winner.objective, winner.bound
