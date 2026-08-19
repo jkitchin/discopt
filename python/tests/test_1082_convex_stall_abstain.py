@@ -39,15 +39,27 @@ TLS2_OPT = 5.3
 
 @pytest.mark.unit
 class TestFlagDefault:
-    """The flag is off unless asked for, and reads the documented spellings."""
+    """The flag is ON since the §5 panel, and reads the documented spellings.
 
-    def test_default_off(self, monkeypatch):
+    The opt-out arms are the load-bearing half now: §5 graduates a flag by
+    flipping the default while keeping the legacy path intact, so a regression
+    that made ``=0`` a no-op would remove the escape hatch the policy requires
+    -- invisibly, since the ON arm would keep passing.
+    """
+
+    def test_default_on(self, monkeypatch):
         monkeypatch.delenv(ABSTAIN_ENV, raising=False)
-        assert _convex_stall_abstain_enabled() is False
+        assert _convex_stall_abstain_enabled() is True
 
-    def test_empty_value_is_off(self, monkeypatch):
+    def test_empty_value_does_not_switch_off_the_graduated_default(self, monkeypatch):
+        """#993's rule: an empty env value must not switch off a graduated default.
+
+        ``os.environ.get(name, "")`` cannot distinguish unset from set-empty, so
+        a graduated flag that treats ``""`` as false silently reverts for anyone
+        whose shell exports the variable empty -- which is how #993 shipped.
+        """
         monkeypatch.setenv(ABSTAIN_ENV, "")
-        assert _convex_stall_abstain_enabled() is False
+        assert _convex_stall_abstain_enabled() is True
 
     def test_zero_is_off(self, monkeypatch):
         monkeypatch.setenv(ABSTAIN_ENV, "0")

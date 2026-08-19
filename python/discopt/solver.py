@@ -414,8 +414,9 @@ _PER_NODE_OBBT_TOPK = 20
 
 def _convex_stall_abstain_enabled() -> bool:
     """Whether a stalled convex node ABSTAINS from its bound instead of
-    decertifying the whole solve (env flag, **default OFF** pending the §5
-    differential panel).
+    decertifying the whole solve (``DISCOPT_CONVEX_STALL_ABSTAIN``, **default
+    ON** since the §5 panel recorded below; ``=0`` restores the decertifying
+    behaviour and the legacy path is retained intact).
 
     A convex node NLP that returns ``ITERATION_LIMIT`` is not KKT, so its
     objective is not a valid lower bound (roadmap P0.3). ``_solve_nlp_bb``
@@ -441,8 +442,15 @@ def _convex_stall_abstain_enabled() -> bool:
     ``feasible``/uncertified/159 nodes. A boosted re-solve does NOT rescue the
     node (4x ``max_iter`` returns ``ITERATION_LIMIT`` again, objective moving in
     the 7th digit), so a polish-retry is not the fix — abstention is.
+
+    Graduation evidence (2026-08-19, §5 regime 2, 69 instances x 60 s): unsound=0,
+    cert_regressions=0, bound tighter on 3 and looser on 2, nodes fewer on 2 and
+    more on 3, total wall 1195.1 s vs 1210.6 s OFF — cert-clean AND net-positive.
     """
-    return os.environ.get("DISCOPT_CONVEX_STALL_ABSTAIN", "").strip().lower() in (
+    raw = os.environ.get("DISCOPT_CONVEX_STALL_ABSTAIN", "").strip().lower()
+    if raw == "":
+        return True
+    return raw in (
         "1",
         "true",
         "yes",
