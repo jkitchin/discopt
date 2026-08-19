@@ -2146,6 +2146,22 @@ class MccormickLPRelaxer:
                 return res
             n_total = len(milp._c)
 
+            # Perspective strengthening (#1064). Resolved ONCE per node, before
+            # the round loop appends anything: a semicontinuity read off the
+            # original rows stays true no matter what cuts are added later, and
+            # re-scanning a growing matrix eight times would cost more than the
+            # separation it feeds.
+            indicators: dict[int, int] = {}
+            if _tuning().perspective_cuts:
+                from discopt._relax.perspective import (
+                    perspective_reference,
+                    semicontinuous_indicators,
+                )
+
+                indicators = semicontinuous_indicators(
+                    milp._A_ub, milp._b_ub, milp._bounds, self._orig_integrality
+                )
+
             def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
                 R = np.asarray(rows, dtype=np.float64)
                 b = np.asarray(rhs, dtype=np.float64)
@@ -2188,6 +2204,38 @@ class MccormickLPRelaxer:
                     # sound, just looser at this point (dropping a cut only loosens).
                     if abs(x0) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
                         continue
+                    # Perspective form when ``x`` is switched off by a binary
+                    # (#1064): ``s >= 2 z x - z^2 y`` with ``z = x0/y0``. Valid at
+                    # both integral ``y`` -- at ``y=1`` it is the tangent at ``z``,
+                    # at ``y=0`` semicontinuity gives ``x=0`` so it reads ``s>=0``
+                    # -- and its violation at the LP point is ``x0^2/y0 - s``
+                    # against the plain tangent's ``x0^2 - s``. See
+                    # :mod:`discopt._relax.perspective`.
+                    y_col = indicators.get(base)
+                    z = None
+                    if y_col is not None and y_col < x.size:
+                        z = perspective_reference(x0, float(x[y_col]))
+                        if z is not None and abs(z) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+                            z = None  # same conditioning guard as the tangent
+                    if z is not None:
+                        y0 = float(x[y_col])
+                        cut_at_point = 2.0 * z * x0 - z * z * min(y0, 1.0)
+                        if cut_at_point - s > tol * max(1.0, abs(cut_at_point)):
+                            row = np.zeros(n_total)
+                            # Row form is ``A_ub @ v <= b``, and the cut is
+                            # ``s >= 2 z x - z^2 y``, i.e. ``2 z x - z^2 y - s <= 0``
+                            # -- so the indicator coefficient is NEGATIVE. With the
+                            # sign flipped the row asserts ``s >= 2 z x + z^2 y``,
+                            # which is not valid: on the textbook instance in
+                            # ``test_1064_perspective_cuts`` it cut the optimum
+                            # ``(x, y, s) = (2, 1, 4)`` off and lifted the root
+                            # bound from -2.89 to 0, above the true optimum -1.
+                            row[base] += 2.0 * z
+                            row[aux] += -1.0
+                            row[y_col] += -(z * z)
+                            rows.append(row)
+                            rhs.append(0.0)
+                            continue
                     # Separate only where the convex underestimator is slack:
                     # the LP put ``s`` below the true parabola at ``x0``.
                     if x0 * x0 - s > tol * max(1.0, abs(x0 * x0)):

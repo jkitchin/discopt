@@ -488,6 +488,21 @@ class SolverTuning:
     )
     """Edge-concave aggregation cuts (``DISCOPT_EDGE_CONCAVE``, default on)."""
 
+    perspective_cuts: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_PERSPECTIVE_CUTS", default=False)
+    )
+    """Perspective-strengthen the univariate-square tangents (``DISCOPT_PERSPECTIVE_CUTS``).
+
+    For a semicontinuous ``x`` (some binary ``y`` with ``y = 0 => x = 0``, read
+    off a variable-upper-bound row), the tangent ``s >= 2*z*x - z**2`` is replaced
+    by the Frangioni-Gentile perspective cut ``s >= 2*z*x - z**2 * y``, which is
+    valid at both integral values of ``y`` and dominates the tangent wherever
+    ``y < 1``. See :mod:`discopt._relax.perspective` for the derivation.
+
+    Bound-changing (CLAUDE.md §5): default-off behind this flag until a
+    corpus-wide differential panel graduates it.
+    """
+
     # --- cost-aware PSD moment-cut gate (THRU-2a; G1.3 graduated default-ON) ----
     psd_cost_gate: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_PSD_COST_GATE", default=True)
