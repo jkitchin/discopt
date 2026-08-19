@@ -15,6 +15,7 @@ import math
 import os
 import time
 import weakref
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
@@ -5012,20 +5013,116 @@ def _classify_model_convexity(
 _CONVEX_MINLP_ROUTE_CLASSES = frozenset({"miqp", "miqcp", "miqcqp", "minlp"})
 
 
+#: Options :func:`solve_model` accepts that the MIP-NLP solver family cannot
+#: honour, paired with the predicate that decides whether the caller actually
+#: set one. Single source of truth for two consumers: the ``solver="mip-nlp"``
+#: block warns about every entry it is about to drop, and the #1059 auto-route
+#: *refuses to fire at all* when any entry is set.
+#:
+#: The route needs this because "the caller expressed no preference" is a
+#: stronger condition than ``solver is None``. ``m.solve(nlp_bb=True,
+#: node_callback=cb)`` names an engine and asks to observe its nodes; silently
+#: routing it to a decomposition that does neither answers a question the caller
+#: did not ask. Under an explicit ``solver="mip-nlp"`` the same drop is the
+#: caller's own trade and only warrants a warning -- hence one table, two
+#: severities.
+_MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
+    ("threads", lambda v: v != 1),
+    ("deterministic", lambda v: v is not True),
+    ("batch_size", lambda v: v != 16),
+    ("strategy", lambda v: v != "best_first"),
+    ("ipopt_options", lambda v: v is not None),
+    ("sparse", lambda v: v is not None),
+    ("cutting_planes", lambda v: v is not False),
+    ("psd_cuts", lambda v: v is not False),
+    ("rlt_cuts", lambda v: v is not False),
+    ("rlt", lambda v: v != "auto"),
+    ("cuts", lambda v: v != "auto"),
+    ("partitions", lambda v: v != 0),
+    ("use_learned_relaxations", lambda v: v is not False),
+    ("mccormick_bounds", lambda v: v != "auto"),
+    ("decomposition", lambda v: v is not None),
+    ("lagrangian_bound", lambda v: v is not False),
+    ("lagrangian_frequency", lambda v: v != 1),
+    ("skip_convex_check", lambda v: v is not False),
+    ("nlp_bb", lambda v: v is not None),
+    ("lazy_constraints", lambda v: v is not None),
+    ("incumbent_callback", lambda v: v is not None),
+    ("node_callback", lambda v: v is not None),
+    ("presolve", lambda v: v is not True),
+    ("presolve_polynomial", lambda v: v is not False),
+    ("presolve_reverse_ad", lambda v: v is not False),
+    # PF1 (#632): default is now 1; treat only an override as caller intent, so
+    # a default solve on the mip-nlp path stays quiet and stays routable.
+    ("in_tree_presolve_stride", lambda v: v != 1),
+    ("eigenvalue_root_bound", lambda v: v is not False),
+    ("relaxation_arithmetic", lambda v: v != "mccormick"),
+    ("subnlp_enabled", lambda v: v is not True),
+    ("subnlp_backend", lambda v: v != "auto"),
+    ("subnlp_frequency", lambda v: v != 20),
+    ("subnlp_max_calls", lambda v: v != 200),
+    ("subnlp_options", lambda v: v is not None),
+    ("root_cut_rounds", lambda v: v is not None),
+    ("root_cut_max", lambda v: v is not None),
+)
+
+
+def _mip_nlp_ignored_options(values: Mapping[str, Any]) -> list[str]:
+    """Which of ``values`` would the MIP-NLP family silently drop?
+
+    ``values`` maps option name -> the value the caller passed to
+    :func:`solve_model`. Names absent from the mapping are not consulted, so a
+    caller can ask about a subset.
+    """
+    return [
+        name for name, is_set in _MIP_NLP_IGNORED_OPTIONS if name in values and is_set(values[name])
+    ]
+
+
 def _convex_minlp_route_enabled() -> bool:
     """Is the #1059 convexity-certified MINLP auto-route switched on?
 
-    **Default OFF.** Routing a model to a different algorithm is bound-changing
-    under CLAUDE.md §5 regime 2, so it ships behind ``DISCOPT_CONVEX_MINLP_ROUTE``
-    until a corpus-wide differential panel clears both bars (cert-clean AND
-    net-positive). ``DISCOPT_CONVEX_MINLP_ROUTE=0`` stays the opt-out after any
-    future graduation, and the spatial branch-and-bound path is left untouched
-    beneath it either way. Read per call, not cached at import, so a test can
-    flip it without reloading the module.
+    **Default ON since the #1059 graduation panel.** Routing a model to a
+    different algorithm is bound-changing under CLAUDE.md §5 regime 2, so it
+    shipped default-OFF until a corpus-wide differential panel cleared both
+    bars. It did, over 75 instances at a 60 s limit -- the in-repo MINLPLib
+    corpus plus a ``syn``/``rsyn`` supplement, because the in-repo corpus holds
+    exactly one ``syn`` instance and no ``rsyn``, i.e. it does not exercise the
+    class the route exists for. Control arm = the shipping default; test arm =
+    the shipping default plus the route:
+
+    ==========================  ==================
+    criterion                   result
+    ==========================  ==================
+    unsound bounds                               0
+    certification regressions                    0
+    dual bound tighter / looser              8 / 3
+    nodes fewer / more                      27 / 1
+    incumbent gained / lost                  2 / 0
+    objective better / worse                 6 / 2
+    total wall OFF / ON            1561.6 / 1469.6
+    ==========================  ==================
+
+    Cert-clean AND net-positive, so it graduates. The wins are not marginal:
+    ``rsyn0805m`` 1206.21 -> 1296.1206 (the oracle optimum), ``syn15m03m``
+    2035.37 -> 3850.1818 (optimum 3850.181775), ``syn20m02m`` 636.72 ->
+    1752.1332 (optimum 1752.133203), and new incumbents on ``squfl020-150`` and
+    ``squfl025-040``, which had returned nothing at all after 600 s (#1064).
+
+    All three "looser bound" rows were ``squfl``, and all three were the merge
+    discarding the fallback's tighter-but-uncertified bound -- fixed separately
+    in :func:`_merge_route_and_fallback` (``squfl025-040``: 76.87 -> 127.07),
+    so the graduated configuration is strictly better on that column than the
+    panel that cleared it.
+
+    ``DISCOPT_CONVEX_MINLP_ROUTE=0`` is the opt-out, and the spatial
+    branch-and-bound path is left untouched beneath it either way. Read per
+    call, not cached at import, so a test can flip it without reloading the
+    module.
     """
     raw = os.environ.get("DISCOPT_CONVEX_MINLP_ROUTE")
     if raw is None:
-        return False
+        return True
     return raw.strip() != "0"
 
 
@@ -6968,6 +7065,47 @@ def solve_model(
         except Exception as _gc_exc:  # pragma: no cover - defensive
             logger.debug("g-convex cut presolve skipped: %s", _gc_exc)
 
+    # Snapshot of every option the MIP-NLP family cannot honour, taken before
+    # dispatch so both consumers see the caller's values: the auto-route below
+    # refuses when any is set, and the solver='mip-nlp' block warns.
+    _mip_nlp_option_values: dict[str, Any] = {
+        "threads": threads,
+        "deterministic": deterministic,
+        "batch_size": batch_size,
+        "strategy": strategy,
+        "ipopt_options": ipopt_options,
+        "sparse": sparse,
+        "cutting_planes": cutting_planes,
+        "psd_cuts": psd_cuts,
+        "rlt_cuts": rlt_cuts,
+        "rlt": rlt,
+        "cuts": cuts,
+        "partitions": partitions,
+        "use_learned_relaxations": use_learned_relaxations,
+        "mccormick_bounds": mccormick_bounds,
+        "decomposition": decomposition,
+        "lagrangian_bound": lagrangian_bound,
+        "lagrangian_frequency": lagrangian_frequency,
+        "skip_convex_check": skip_convex_check,
+        "nlp_bb": nlp_bb,
+        "lazy_constraints": lazy_constraints,
+        "incumbent_callback": incumbent_callback,
+        "node_callback": node_callback,
+        "presolve": presolve,
+        "presolve_polynomial": presolve_polynomial,
+        "presolve_reverse_ad": presolve_reverse_ad,
+        "in_tree_presolve_stride": in_tree_presolve_stride,
+        "eigenvalue_root_bound": eigenvalue_root_bound,
+        "relaxation_arithmetic": relaxation_arithmetic,
+        "subnlp_enabled": subnlp_enabled,
+        "subnlp_backend": subnlp_backend,
+        "subnlp_frequency": subnlp_frequency,
+        "subnlp_max_calls": subnlp_max_calls,
+        "subnlp_options": subnlp_options,
+        "root_cut_rounds": root_cut_rounds,
+        "root_cut_max": root_cut_max,
+    }
+
     # --- Solver-family dispatch ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
@@ -6996,11 +7134,28 @@ def solve_model(
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
-    # Only when the caller expressed no preference. An explicit solver= (including
-    # solver="bb") is always honoured, so this can never override a user's choice.
+    # Only when the caller expressed no preference -- neither an explicit
+    # solver= (including solver="bb"), nor any option this family would drop.
     _auto_route_reason: Optional[str] = None
     if _solver is None:
-        _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
+        # "No preference" is stronger than ``solver is None``. ``nlp_bb=True``
+        # names an engine; ``node_callback=`` asks to watch that engine's nodes;
+        # ``subnlp_frequency=`` tunes a heuristic only the spatial path runs. The
+        # MIP-NLP family honours none of them, so routing such a call silently
+        # answers a different question than the one asked -- CLAUDE.md §3. Found
+        # by the smoke suite the moment this route went default-ON: nine tests
+        # that pass ``nlp_bb=True``/``node_callback=`` got routed away from the
+        # loop they were written to exercise, and their callbacks never fired.
+        _caller_set = _mip_nlp_ignored_options(_mip_nlp_option_values)
+        if _caller_set:
+            _auto_route_method = None
+            _auto_route_reason = (
+                "not routed: caller set options the MIP-NLP family ignores ("
+                + ", ".join(_caller_set)
+                + ")"
+            )
+        else:
+            _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
@@ -7086,49 +7241,10 @@ def solve_model(
                 f"Unknown gdp_method={gdp_method!r} for solver='mip-nlp'. Choose one of: {allowed}."
             )
 
-        ignored_mip_nlp_options = []
-
-        def _note_ignored_mip_nlp(name: str, should_warn: bool) -> None:
-            if should_warn:
-                ignored_mip_nlp_options.append(name)
-
-        _note_ignored_mip_nlp("threads", threads != 1)
-        _note_ignored_mip_nlp("deterministic", deterministic is not True)
-        _note_ignored_mip_nlp("batch_size", batch_size != 16)
-        _note_ignored_mip_nlp("strategy", strategy != "best_first")
-        _note_ignored_mip_nlp("ipopt_options", ipopt_options is not None)
-        _note_ignored_mip_nlp("sparse", sparse is not None)
-        _note_ignored_mip_nlp("cutting_planes", cutting_planes is not False)
-        _note_ignored_mip_nlp("psd_cuts", psd_cuts is not False)
-        _note_ignored_mip_nlp("rlt_cuts", rlt_cuts is not False)
-        _note_ignored_mip_nlp("rlt", rlt != "auto")
-        _note_ignored_mip_nlp("cuts", cuts != "auto")
-        _note_ignored_mip_nlp("partitions", partitions != 0)
-        _note_ignored_mip_nlp("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored_mip_nlp("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored_mip_nlp("decomposition", decomposition is not None)
-        _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
-        _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
-        _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
-        _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
-        _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
-        _note_ignored_mip_nlp("incumbent_callback", incumbent_callback is not None)
-        _note_ignored_mip_nlp("node_callback", node_callback is not None)
-        _note_ignored_mip_nlp("presolve", presolve is not True)
-        _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
-        _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
-        # PF1 (#632): default is now 1; warn only when the user overrode it, so a
-        # default solve on the mip-nlp path stays quiet.
-        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 1)
-        _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
-        _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
-        _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
-        _note_ignored_mip_nlp("subnlp_backend", subnlp_backend != "auto")
-        _note_ignored_mip_nlp("subnlp_frequency", subnlp_frequency != 20)
-        _note_ignored_mip_nlp("subnlp_max_calls", subnlp_max_calls != 200)
-        _note_ignored_mip_nlp("subnlp_options", subnlp_options is not None)
-        _note_ignored_mip_nlp("root_cut_rounds", root_cut_rounds is not None)
-        _note_ignored_mip_nlp("root_cut_max", root_cut_max is not None)
+        # Every entry the caller set is dropped by this family. Under an
+        # explicit solver='mip-nlp' that is the caller's own trade, so warn;
+        # the #1059 auto-route consults the same table and refuses instead.
+        ignored_mip_nlp_options = _mip_nlp_ignored_options(_mip_nlp_option_values)
         if kwargs:
             ignored_mip_nlp_options.extend(sorted(kwargs))
         if ignored_mip_nlp_options:
