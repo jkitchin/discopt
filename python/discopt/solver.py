@@ -5273,14 +5273,36 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
 
     winner = route if route_wins else fallback
     loser = fallback if route_wins else route
-    # Keep the tighter dual bound, but only one the losing side actually
-    # *certified* -- an uncertified bound is not a proof and must never be
-    # reported as one. Reported sense: a maximize model's bound is an UPPER bound
-    # (tighter = smaller), a minimize model's is a LOWER bound (tighter = larger).
+    # Keep the tighter dual bound from EITHER side.
+    #
+    # This used to require ``loser.gap_certified``, on the reading that "an
+    # uncertified bound is not a proof". That reading conflates two different
+    # things and cost real bound quality. ``gap_certified`` says the *gap* is
+    # valid, not that the *bound* is -- the same "certified is not closed"
+    # confusion :func:`_route_result_is_certified` documents, one merge later. A
+    # time-limited spatial B&B returns ``gap_certified=False`` with a perfectly
+    # valid global dual bound, and the NON-routed path reports exactly that bound
+    # to the caller. Gating on it here therefore made routing strictly worse on
+    # the dual side than not routing at all. Measured on ``squfl025-040`` at a
+    # 60 s limit (``scratchpad/merge_probe.py``):
+    #
+    # ====================  =====  ======  ======
+    # side                   obj    bound   nodes
+    # ====================  =====  ======  ======
+    # route (OA, 30.2 s)    423.98   76.87       0
+    # fallback (B&B, 29.8s) 1139.53 127.40     991
+    # ====================  =====  ======  ======
+    #
+    # The route wins on the incumbent and the fallback wins on the bound; the old
+    # gate published 76.87 and discarded 127.40, so 991 nodes of proof were
+    # thrown away. What actually makes a bound unsafe to publish is *crossing the
+    # incumbent it is reported against*, and that is checked below.
+    #
+    # Reported sense: a maximize model's bound is an UPPER bound (tighter =
+    # smaller), a minimize model's is a LOWER bound (tighter = larger).
     w_b, l_b = winner.bound, loser.bound
     if (
-        bool(getattr(loser, "gap_certified", False))
-        and l_b is not None
+        l_b is not None
         and np.isfinite(l_b)
         and (w_b is None or not np.isfinite(w_b) or (l_b < w_b if is_maximize else l_b > w_b))
         # ...and only if it does not cross the incumbent it would be reported
@@ -5301,6 +5323,15 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     obj, bnd = winner.objective, winner.bound
     if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
         winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
+    # ``node_count`` is a WORK statistic, not part of the answer, so it belongs to
+    # the solve rather than to whichever side won it. Reporting only the winner's
+    # made a routed ``squfl025-040`` say ``nodes=0`` after 61 s in which the
+    # fallback explored 991 -- a false statistic, and the one that first made this
+    # regression look like a skipped fallback.
+    _w_nodes = getattr(winner, "node_count", None)
+    _l_nodes = getattr(loser, "node_count", None)
+    if _w_nodes is not None or _l_nodes is not None:
+        winner.node_count = int(_w_nodes or 0) + int(_l_nodes or 0)
     return winner
 
 

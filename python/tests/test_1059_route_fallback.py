@@ -186,20 +186,32 @@ class TestRouteFallbackMerge:
         merged = _merge_route_and_fallback(route, fb, True)
         assert merged.bound == pytest.approx(100.0)
 
-    def test_an_uncertified_fallback_bound_is_not_adopted_by_the_route(self):
-        """An uncertified bound is not a proof and must not be reported as one."""
+    # RETRACTION (CLAUDE.md §11). These two tests previously asserted the
+    # opposite -- that an uncertified loser's bound is "not a proof" and must be
+    # discarded. That policy was never measured, and when it was it proved
+    # costly: on ``squfl025-040`` at a 60 s limit the route returned
+    # ``obj=423.98 bound=76.87`` (certified) while the fallback returned
+    # ``obj=1139.53 bound=127.40`` over 991 nodes (uncertified), and the old
+    # gate published 76.87. ``gap_certified`` means the *gap* is valid, not that
+    # the *bound* is; a time-limited B&B bound is valid and the non-routed path
+    # reports exactly it. The real hazard is a bound that crosses the incumbent,
+    # which ``_bound_crosses_objective`` still refuses -- see
+    # ``test_a_crossing_loser_bound_is_still_refused`` in
+    # ``test_1059_merge_keeps_tighter_bound.py``.
+
+    def test_an_uncertified_fallback_bound_is_adopted_when_tighter(self):
         route = _sr(obj=5.0, bound=10.0, gap_certified=True)
         fb = _sr(obj=1.0, bound=6.0, gap_certified=False)
         merged = _merge_route_and_fallback(route, fb, True)
         assert merged is route
-        assert merged.bound == pytest.approx(10.0)
+        assert merged.bound == pytest.approx(6.0)
 
-    def test_an_uncertified_route_bound_is_not_adopted_by_the_fallback(self):
+    def test_an_uncertified_route_bound_is_adopted_when_tighter(self):
         route = _sr(obj=1.0, bound=6.0, gap_certified=False)
         fb = _sr(obj=5.0, bound=10.0, gap_certified=True)
         merged = _merge_route_and_fallback(route, fb, True)
         assert merged is fb
-        assert merged.bound == pytest.approx(10.0)
+        assert merged.bound == pytest.approx(6.0)
 
     def test_a_closed_certified_fallback_is_never_displaced(self, caplog):
         """A certificate outranks a better number.
