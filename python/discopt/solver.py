@@ -412,6 +412,44 @@ _PER_NODE_OBBT_ROUNDS = 3
 _PER_NODE_OBBT_TOPK = 20
 
 
+def _convex_stall_abstain_enabled() -> bool:
+    """Whether a stalled convex node ABSTAINS from its bound instead of
+    decertifying the whole solve (env flag, **default OFF** pending the §5
+    differential panel).
+
+    A convex node NLP that returns ``ITERATION_LIMIT`` is not KKT, so its
+    objective is not a valid lower bound (roadmap P0.3). ``_solve_nlp_bb``
+    handles that by importing the invalid objective anyway and setting
+    ``_gap_certified = False`` for the entire solve. That is sound but far more
+    conservative than it needs to be: ONE stalled node out of hundreds destroys a
+    certificate the rest of the search earned.
+
+    ``solve_model``'s spatial path already does the precise thing, and this
+    brings ``_solve_nlp_bb`` in line with it. The node abstains — it imports
+    ``-inf``, which ``TreeManager::import_results`` floors at the node's
+    *inherited parent bound* (valid: a child box is contained in its parent's)
+    and records as ``bound_trusted=False``. An untrusted node is branched, never
+    fathomed and never promoted to the incumbent, so no unproven subtree is
+    closed and the tree's ``global_lower_bound`` stays valid. Certification is
+    then dropped only in the case that genuinely lacks a proof: an untrusted node
+    fathomed with no branch direction left, which the tree reports as
+    ``bound_unresolved`` (#598/#467).
+
+    Measured entry experiment (tls2, in-repo corpus): seeding the solver with its
+    own proven optimum moved the search onto a node whose NLP stalls, and that
+    single node took the run from ``optimal``/certified/255 nodes to
+    ``feasible``/uncertified/159 nodes. A boosted re-solve does NOT rescue the
+    node (4x ``max_iter`` returns ``ITERATION_LIMIT`` again, objective moving in
+    the 7th digit), so a polish-retry is not the fix — abstention is.
+    """
+    return os.environ.get("DISCOPT_CONVEX_STALL_ABSTAIN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _obbt_topk_enabled() -> bool:
     """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
@@ -15163,6 +15201,13 @@ def _solve_nlp_bb(
     # fathomed on non-convergence; otherwise feasibility is genuinely UNKNOWN.
     _unconverged_fathom = False
 
+    # #1059 follow-on: whether a stalled (non-KKT) convex node abstains from its
+    # bound instead of decertifying the whole solve. ``_stall_abstained`` counts
+    # the nodes that actually abstained, so a panel can tell "this arm changed
+    # nothing" from "this arm never fired" (CLAUDE.md §6).
+    _stall_abstain = _convex_stall_abstain_enabled()
+    _stall_abstained = 0
+
     # --- NLP-BB loop ---
     # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
     # a true KKT solver, so its converged objective is a reliable lower bound
@@ -15426,7 +15471,17 @@ def _solve_nlp_bb(
             # not a valid lower bound, so decertify the gap rather than trust
             # it — leaving bound/incumbent untouched (roadmap P0.3).
             if _model_is_convex and not bool(np.all(_batch_trusted)):
-                _gap_certified = False
+                if _stall_abstain:
+                    # Abstain instead: import ``-inf`` for the untrusted nodes so
+                    # each one keeps its inherited parent bound (valid) and is
+                    # branched rather than fathomed. Certification is decided at
+                    # result build from the tree's ``bound_unresolved``.
+                    _untrusted = ~np.asarray(_batch_trusted, dtype=bool)
+                    result_lbs = np.asarray(result_lbs, dtype=np.float64)
+                    result_lbs[_untrusted] = -np.inf
+                    _stall_abstained += int(np.count_nonzero(_untrusted))
+                else:
+                    _gap_certified = False
             # Constraint feasibility post-check
             if cl_list:
                 for i in range(n_batch):
@@ -15508,18 +15563,34 @@ def _solve_nlp_bb(
                     # (the serial IPM path polishes; POUNCE does not), so the
                     # objective is not a valid lower bound — decertify the gap
                     # (roadmap P0.3) while still using it as a branching point.
+                    _serial_abstain = False
                     if _model_is_convex and nlp_result.status == SolveStatus.ITERATION_LIMIT:
-                        _gap_certified = False
+                        if _stall_abstain:
+                            _serial_abstain = True
+                        else:
+                            _gap_certified = False
                     # Constraint feasibility check
                     if cl_list and not _check_constraint_feasibility(
                         evaluator, nlp_result.x, cl_list, cu_list
                     ):
-                        nlp_lb = _INFEASIBILITY_SENTINEL
-                        # The solver returned OPTIMAL/ITERATION_LIMIT yet the
-                        # iterate violates constraints — this is non-convergence
-                        # (a stall), not a SolveStatus.INFEASIBLE proof. Fathoming
-                        # it cannot certify global infeasibility.
-                        _unconverged_fathom = True
+                        if _serial_abstain:
+                            # A stalled convex node whose iterate also violates
+                            # constraints proves nothing either way. The legacy
+                            # arm below EXCLUDES it (sentinel), and the tree
+                            # prunes an excluded node without a proof — which is
+                            # precisely why that arm must decertify. Abstaining
+                            # keeps the node instead: it imports at its inherited
+                            # parent bound, stays untrusted, and is branched, so
+                            # the subtree is still searched and nothing unproven
+                            # is closed.
+                            pass
+                        else:
+                            nlp_lb = _INFEASIBILITY_SENTINEL
+                            # The solver returned OPTIMAL/ITERATION_LIMIT yet the
+                            # iterate violates constraints — this is non-convergence
+                            # (a stall), not a SolveStatus.INFEASIBLE proof. Fathoming
+                            # it cannot certify global infeasibility.
+                            _unconverged_fathom = True
                     # For nonconvex: reset non-integer-feasible to -inf
                     elif not _model_is_convex:
                         sol_is_int_feas = True
@@ -15536,6 +15607,12 @@ def _solve_nlp_bb(
                     # Guard: NaN lower bounds corrupt the Rust B&B tree.
                     if not np.isfinite(nlp_lb):
                         nlp_lb = _INFEASIBILITY_SENTINEL
+                    if _serial_abstain:
+                        # Applied AFTER the NaN guard, which would otherwise
+                        # rewrite the abstention's ``-inf`` into the exclusion
+                        # sentinel and undo it.
+                        nlp_lb = -np.inf
+                        _stall_abstained += 1
                     result_lbs[i] = nlp_lb
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
@@ -16033,6 +16110,24 @@ def _solve_nlp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+
+    # #1059 follow-on: an abstaining node kept only its inherited parent bound
+    # and was branched, so the search stayed complete and the tree bound stayed
+    # valid — certification survives. The one case that genuinely proves nothing
+    # is an untrusted node the tree had to fathom with no branch direction left;
+    # it reports that as ``bound_unresolved`` (#598/#467), which is exactly the
+    # gate ``solve_model``'s spatial path already applies. Decertify on that and
+    # on nothing else. The counter makes a no-op arm distinguishable from an arm
+    # that never fired (CLAUDE.md §6).
+    if _stall_abstain and _stall_abstained:
+        logger.info(
+            "Convex stall abstention: %d node(s) fell back to their inherited "
+            "parent bound (DISCOPT_CONVEX_STALL_ABSTAIN); tree bound_unresolved=%s",
+            _stall_abstained,
+            stats.get("bound_unresolved"),
+        )
+    if _stall_abstain and bool(stats.get("bound_unresolved", False)):
+        _gap_certified = False
     # #933: capture the tree-bound taint state NOW, before the exit-status logic
     # below overwrites ``_gap_certified`` on limit exits. "The exit is not
     # certified" (no incumbent at a time/node limit) says nothing about whether
