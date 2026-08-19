@@ -19021,9 +19021,10 @@ def _pounce_snap_incumbent(
 
 
 # #1064: round-fix-resolve tries at most this many candidate roundings per
-# invocation — round-to-nearest, then one retry with the most fractional
-# coordinate flipped. Anything deeper is a dive, which is a separate mechanism.
-_ROUND_MAX_TRIES = 2
+# invocation — round-to-nearest, then round-the-fractional-coordinates-up, then
+# a retry with the most fractional coordinate flipped (see _round_candidates).
+# Anything deeper is a dive, which is a separate mechanism.
+_ROUND_MAX_TRIES = 3
 
 # #1064: fraction of the solve's time limit that round-fix-resolve may spend in
 # total. Each attempt is a POUNCE re-solve whose cost varies by orders of
@@ -19032,7 +19033,13 @@ _ROUND_MAX_TRIES = 2
 # of the wall, turning a certified optimum (1335 nodes, 15.5 s) into a
 # time_limit with no incumbent at all (63 nodes). A first-incumbent heuristic
 # that can consume the whole budget is not a heuristic.
-_ROUND_TIME_FRAC = 0.1
+# Raised 0.1 -> 0.2 with the candidate ladder (#1064): one invocation on
+# squfl015-060 needs ~12 s of a 60 s budget to walk past the infeasible
+# round-to-nearest rung to the one that works, and 0.1 starved it -- the
+# in-solve run still produced no incumbent while the mechanism demonstrably
+# succeeds when called directly. 0.2 still caps the slay05h pathology that
+# motivated the budget (31 attempts / 66.5 s of a 60 s solve) at 12 s.
+_ROUND_TIME_FRAC = 0.2
 
 # Backstop on the attempt count, for a family where each rounding is cheap
 # enough that the time budget above would allow an unbounded number of them.
@@ -19054,6 +19061,55 @@ def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
     if np.any(ilo > ihi + 1e-9):
         return None
     return np.clip(np.round(vals), ilo, ihi)
+
+
+def _round_candidates(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
+    """Yield integer fixings to try, in the order they are worth trying.
+
+    1. **Round to nearest** — the maximum-likelihood fixing.
+    2. **Round the fractional coordinates up** (#1064). Round-to-nearest fails
+       systematically, not occasionally, on *switch* structure: a row
+       ``x - u*y <= 0`` with ``y`` binary drives ``y`` to ``max_j x_j`` in the
+       relaxation, so every ``y`` comes back small and fractional and nearest
+       sends the whole switch vector to zero. Fixing there forces ``x = 0``,
+       which contradicts any covering row ``sum_i x_i = 1`` and makes the
+       re-solve *infeasible*. Measured on all three squfl instances of #1064:
+       every binary fractional in ``[0.010, 0.263]``, nearest -> 0 open ->
+       ``primal_infeasible``; rounding up -> feasible on all three.
+       Raising an integer coordinate relaxes every row in which it carries a
+       negative coefficient, which is exactly the switch/VUB/big-M indicator
+       pattern — so this is a structural direction, not a family-specific one.
+    3. **Flip the most fractional coordinate** — the single coordinate the
+       round-to-nearest decided on the weakest evidence.
+
+    Duplicates are suppressed, so a candidate that coincides with an earlier one
+    does not burn an attempt (or a slice of the time budget) re-solving it.
+    """
+    base = _round_into_box(vals, lo, hi)
+    if base is None:
+        return
+    seen = [base]
+    yield base
+
+    # ``vals`` may already be integral in places; ceil of an integer is itself,
+    # so the epsilon keeps 2.0 from becoming 3.0.
+    up = _round_into_box(np.ceil(vals - 1e-9), lo, hi)
+    if up is not None and not any(np.array_equal(up, c) for c in seen):
+        seen.append(up)
+        yield up
+
+    order = np.argsort(-np.abs(vals - np.round(vals)))
+    for k in order[: max(0, _ROUND_MAX_TRIES)]:
+        k = int(k)
+        cand = base.copy()
+        other = np.floor(vals[k]) if cand[k] > vals[k] else np.ceil(vals[k])
+        flipped = _round_into_box(np.array([other]), lo[k : k + 1], hi[k : k + 1])
+        if flipped is None or float(flipped[0]) == float(cand[k]):
+            continue
+        cand[k] = float(flipped[0])
+        if not any(np.array_equal(cand, c) for c in seen):
+            seen.append(cand)
+            yield cand
 
 
 def _pounce_round_incumbent(
@@ -19086,9 +19142,9 @@ def _pounce_round_incumbent(
     fix-and-resolve step the snap path uses, applied to a point that is not
     already integral. A rounded point can be genuinely infeasible (measured on
     squfl025-040: of 7 forced fixings, 2 optimal / 3 Phase-1 infeasible / 2
-    unsettled), so a non-optimal verdict is retried once with the *most
-    fractional* coordinate rounded the other way — the one coordinate the
-    rounding was least entitled to decide.
+    unsettled), so a non-optimal verdict falls through the candidate ladder in
+    :func:`_round_candidates` — nearest, then all fractional coordinates rounded
+    *up*, then the most fractional coordinate flipped.
 
     Returns ``(objective, x)`` in minimization form, or ``None``. This can only
     ever produce an upper bound: it never prunes, never tightens a node bound,
@@ -19103,35 +19159,30 @@ def _pounce_round_incumbent(
         return None
     fl0 = np.asarray(node_lb, dtype=np.float64)
     fu0 = np.asarray(node_ub, dtype=np.float64)
-    base = _round_into_box(vals, fl0[idx], fu0[idx])
-    if base is None:
-        return None
 
-    # Most fractional coordinate: the one the round-to-nearest decided on the
-    # weakest evidence. Ordered by distance to the nearest integer.
-    order = np.argsort(-np.abs(vals - np.round(vals)))
-
-    for attempt in range(_ROUND_MAX_TRIES):
-        cand = base.copy()
-        if attempt > 0:
-            if attempt - 1 >= order.shape[0]:
-                break
-            k = int(order[attempt - 1])
-            # Flip to the other side of the fractional value, then re-clamp; if
-            # the flip leaves the box it is not a distinct candidate.
-            other = np.floor(vals[k]) if cand[k] > vals[k] else np.ceil(vals[k])
-            flipped = _round_into_box(
-                np.array([other]), fl0[idx[k] : idx[k] + 1], fu0[idx[k] : idx[k] + 1]
-            )
-            if flipped is None or float(flipped[0]) == float(cand[k]):
-                break
-            cand[k] = float(flipped[0])
+    # Fair-share the invocation's budget across the ladder. Without this a
+    # single slow candidate consumes everything and the later rungs are never
+    # reached: measured on squfl015-060, the round-to-nearest fixing is
+    # *infeasible* and Phase 1 needs ~8 s to prove it, so the rung that actually
+    # works (round up, 1025.73) never ran inside the solve even though it takes
+    # ~4 s on its own. A ladder whose last rung is unreachable is not a ladder.
+    for attempt, cand in enumerate(_round_candidates(vals, fl0[idx], fu0[idx])):
+        if attempt >= _ROUND_MAX_TRIES:
+            break
+        left = float(time_limit) - (time.perf_counter() - t_start)
+        # Floor each share at the same 0.5 s :func:`_pounce_recover_node_bound`
+        # already floors its own limit at. Without the floor an exhausted budget
+        # turns the whole ladder into a silent no-op that still reports "no
+        # feasible rounding" (CLAUDE.md §6) -- and the attempt cap, not the
+        # clock, is what bounds this loop.
+        share = max(0.5, left / float(max(1, _ROUND_MAX_TRIES - attempt)))
+        cand_tl = (time.perf_counter() - t_start) + share
         fl = fl0.copy()
         fu = fu0.copy()
         fl[idx] = cand
         fu[idx] = cand
         rec = _pounce_recover_node_bound(
-            fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
+            fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, cand_tl, Q=Q
         )
         if rec is not None and rec[0] == "optimal":
             return rec[1], rec[2]

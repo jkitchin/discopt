@@ -101,9 +101,13 @@ def test_retry_flips_the_most_fractional_coordinate_when_rounding_is_infeasible(
 
 
 def test_retry_is_bounded():
-    """The retry budget is one flip, not a dive -- an unbounded search here would
-    spend the solve's whole budget on a single node."""
-    assert S._ROUND_MAX_TRIES == 2
+    """The ladder is a few fixings, not a dive -- an unbounded search here would
+    spend the solve's whole budget on a single node.
+
+    Raised 2 -> 3 when the all-fractional-up rung was added (see the ladder tests
+    below); the cap is what bounds the loop, so it is pinned rather than derived.
+    """
+    assert S._ROUND_MAX_TRIES == 3
 
 
 def test_no_integer_variables_declines():
@@ -253,3 +257,159 @@ _ROUND_ATTEMPT_CAP_REF = 64
 def test_attempt_cap_is_still_a_backstop():
     assert S._ROUND_ATTEMPT_CAP == _ROUND_ATTEMPT_CAP_REF
     assert 0.0 < S._ROUND_TIME_FRAC < 1.0
+
+
+# --- The candidate ladder (#1064: switch structure) ---------------------------
+#
+# Round-to-nearest fails *systematically* on switch structure. A row
+# ``x - u*y <= 0`` with binary ``y`` drives ``y`` to ``max_j x_j`` in the
+# relaxation, so every switch comes back small and fractional; nearest sends the
+# whole vector to zero, which forces ``x = 0`` and contradicts any covering row.
+# Measured on all three squfl instances of #1064: every binary fractional in
+# [0.010, 0.263], nearest -> 0 open -> primal_infeasible; rounding up -> feasible
+# on all three (squfl015-060 obj 1025.73, squfl025-040 obj 1139.53).
+
+
+def test_ladder_offers_an_all_up_rung_for_a_fractional_switch_vector():
+    """The rung that rescues squfl must exist: every fractional switch -> 1."""
+    vals = np.array([0.0431, 0.2629, 0.0103, 0.1698])
+    lo = np.zeros(4)
+    hi = np.ones(4)
+    cands = list(S._round_candidates(vals, lo, hi))
+    assert cands, "ladder produced nothing"
+    # Round-to-nearest opens none of them -- the failure mode under test.
+    assert np.array_equal(cands[0], np.zeros(4))
+    # Some rung opens all of them. Without it squfl has no feasible fixing.
+    assert any(np.array_equal(c, np.ones(4)) for c in cands), (
+        f"no all-up rung in ladder: {[c.tolist() for c in cands]}"
+    )
+
+
+def test_ladder_respects_the_node_box():
+    """The all-up rung must not leave the node box."""
+    vals = np.array([0.4, 0.6])
+    lo = np.zeros(2)
+    hi = np.array([0.0, 1.0])  # first coordinate is fixed to 0 by the box
+    for c in S._round_candidates(vals, lo, hi):
+        assert c[0] == 0.0, f"candidate left the box: {c}"
+        assert lo[1] <= c[1] <= hi[1]
+
+
+def test_ladder_suppresses_duplicate_candidates():
+    """A duplicate rung would burn an attempt (and a slice of the budget)."""
+    # Already integral: nearest, ceil and any flip all coincide.
+    vals = np.array([1.0, 0.0])
+    cands = list(S._round_candidates(vals, np.zeros(2), np.ones(2)))
+    seen = {tuple(c.tolist()) for c in cands}
+    assert len(seen) == len(cands), f"duplicates in ladder: {cands}"
+
+
+def test_ladder_is_bounded_by_max_tries():
+    """An unbounded ladder would be a dive, which is a different mechanism."""
+    rng = np.random.default_rng(0)
+    vals = rng.uniform(0.05, 0.95, size=40)
+    cands = list(S._round_candidates(vals, np.zeros(40), np.ones(40)))
+    # The generator may offer a few more than the cap; the consumer stops at
+    # _ROUND_MAX_TRIES, so what matters is that it is finite and small.
+    assert 0 < len(cands) <= 2 + S._ROUND_MAX_TRIES
+
+
+def test_all_up_rung_produces_an_incumbent_where_nearest_is_infeasible():
+    """End-to-end on the UFL shape: nearest is infeasible, the ladder recovers.
+
+    This is #1064's floor -- a feasible incumbent -- on the structure that
+    produced the bug, without naming an instance.
+    """
+    import time as _time
+
+    m, data = _ufl_switch_case()
+    res = S._pounce_round_incumbent(
+        data["x_relax"],
+        data["int_offsets"],
+        data["int_sizes"],
+        data["lb"],
+        data["ub"],
+        data["c"],
+        0.0,
+        data["A_ub"],
+        data["b_ub"],
+        data["A_eq"],
+        data["b_eq"],
+        _time.perf_counter(),
+        60.0,
+        Q=data["Q"],
+    )
+    assert res is not None, "ladder failed to produce any incumbent"
+    obj, x = res
+    assert np.isfinite(obj)
+    # The returned point must actually satisfy the rows it was fixed against.
+    if data["A_ub"] is not None and len(data["b_ub"]):
+        assert np.all(data["A_ub"] @ x <= data["b_ub"] + 1e-6)
+    if data["A_eq"] is not None and len(data["b_eq"]):
+        assert np.all(np.abs(data["A_eq"] @ x - data["b_eq"]) <= 1e-6)
+    # And the switches must be integral.
+    idx = [
+        j
+        for off, sz in zip(data["int_offsets"], data["int_sizes"])
+        for j in range(off, off + int(sz))
+    ]
+    assert np.all(np.abs(x[idx] - np.round(x[idx])) <= 1e-6)
+
+
+def _ufl_switch_case(n_i=4, n_j=8):
+    """A minimal uncapacitated-facility-location shape in raw matrix form.
+
+    Variables: x_ij (n_i*n_j continuous), then y_i (n_i binary).
+    Rows: x_ij - y_i <= 0 (VUB switches), sum_i x_ij == 1 (covering).
+    Objective: separable convex quadratic in x plus a linear facility cost.
+    The relaxation optimum spreads x evenly, so every y_i is small-fractional --
+    the exact configuration where round-to-nearest is infeasible.
+    """
+    n = n_i * n_j + n_i
+
+    def xi(i, j):
+        return i * n_j + j
+
+    def yi(i):
+        return n_i * n_j + i
+
+    A_ub = np.zeros((n_i * n_j, n))
+    b_ub = np.zeros(n_i * n_j)
+    for i in range(n_i):
+        for j in range(n_j):
+            A_ub[xi(i, j), xi(i, j)] = 1.0
+            A_ub[xi(i, j), yi(i)] = -1.0
+    A_eq = np.zeros((n_j, n))
+    b_eq = np.ones(n_j)
+    for j in range(n_j):
+        for i in range(n_i):
+            A_eq[j, xi(i, j)] = 1.0
+    Q = np.zeros((n, n))
+    for i in range(n_i):
+        for j in range(n_j):
+            Q[xi(i, j), xi(i, j)] = 2.0
+    c = np.zeros(n)
+    for i in range(n_i):
+        c[yi(i)] = 1.0
+    lb = np.zeros(n)
+    ub = np.ones(n)
+    # Relaxation point: x spread evenly across facilities, y_i = max_j x_ij.
+    x_relax = np.zeros(n)
+    for i in range(n_i):
+        for j in range(n_j):
+            x_relax[xi(i, j)] = 1.0 / n_i
+    for i in range(n_i):
+        x_relax[yi(i)] = 1.0 / n_i
+    return None, {
+        "x_relax": x_relax,
+        "int_offsets": [yi(i) for i in range(n_i)],
+        "int_sizes": [1] * n_i,
+        "lb": lb,
+        "ub": ub,
+        "c": c,
+        "A_ub": A_ub,
+        "b_ub": b_ub,
+        "A_eq": A_eq,
+        "b_eq": b_eq,
+        "Q": Q,
+    }
