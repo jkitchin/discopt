@@ -134,14 +134,34 @@ def test_box_with_no_integer_declines():
     assert S._round_into_box(np.array([0.5]), np.array([0.2]), np.array([0.9])) is None
 
 
-def test_flag_defaults_off_and_is_env_settable(monkeypatch):
-    """§5: default OFF pending the panel, with a working opt-in."""
+def test_flag_defaults_on_and_the_opt_out_still_works(monkeypatch):
+    """§5: default ON since the graduation panel, and ``=0`` must still opt out.
+
+    The opt-out arm is the load-bearing half. §5 graduates a flag by flipping
+    the default while *keeping the legacy path intact*, so a regression that
+    silently made ``=0`` a no-op would remove the escape hatch the policy
+    requires -- and would do it invisibly, since the ON arm would keep passing.
+    """
     monkeypatch.delenv("DISCOPT_ROUND_FIX_RESOLVE", raising=False)
-    assert SolverTuning().round_fix_resolve is False
+    assert SolverTuning().round_fix_resolve is True
     monkeypatch.setenv("DISCOPT_ROUND_FIX_RESOLVE", "1")
     assert SolverTuning().round_fix_resolve is True
     monkeypatch.setenv("DISCOPT_ROUND_FIX_RESOLVE", "0")
     assert SolverTuning().round_fix_resolve is False
+
+
+def test_structured_node_recovery_defaults_on_and_the_opt_out_still_works(monkeypatch):
+    """The other half of the graduated pair, same contract.
+
+    ``round_fix_resolve`` alone cannot answer on the largest #1064 instance --
+    all three ladder rungs return ``None`` on the callback path -- so the pair
+    is what graduated, and both defaults have to hold for the measured result
+    to be the one that ships.
+    """
+    monkeypatch.delenv("DISCOPT_STRUCTURED_NODE_RECOVERY", raising=False)
+    assert SolverTuning().structured_node_recovery is True
+    monkeypatch.setenv("DISCOPT_STRUCTURED_NODE_RECOVERY", "0")
+    assert SolverTuning().structured_node_recovery is False
 
 
 def _ufl_model(n_i=6, n_j=12):

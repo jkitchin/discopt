@@ -140,13 +140,13 @@ class SolverTuning:
 
     # --- #1064 structured-convex engine for node-bound recovery -----------------
     structured_node_recovery: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_STRUCTURED_NODE_RECOVERY", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_STRUCTURED_NODE_RECOVERY", default=True)
     )
     """Solve ``_pounce_recover_node_bound``'s re-solve with POUNCE's *structured
     convex* engine (``pounce.solve_qp``) instead of the generic callback TNLP
     path (``qp_pounce.solve_qp`` → ``pounce.Problem(problem_obj=_QPCallbacks)``)
-    (``DISCOPT_STRUCTURED_NODE_RECOVERY``, default OFF pending the §5 panel;
-    ``=0`` keeps the callback path).
+    (``DISCOPT_STRUCTURED_NODE_RECOVERY``, default **ON** since the §5 panel
+    below; ``=0`` keeps the callback path, which is retained intact).
 
     This is the same migration ``_solve_node_lp_pounce`` already carries, and
     for the same measured reason: the callback path hides the linear structure,
@@ -168,16 +168,34 @@ class SolverTuning:
     Soundness is unchanged: an ``optimal`` result from the structured convex IPM
     is KKT-valid (the property ``_solve_node_lp_pounce`` already relies on) and
     ``primal_infeasible`` is Phase-1-certified; anything else stays ``None`` so
-    the caller keeps the node open and never prunes on an unsettled solve."""
+    the caller keeps the node open and never prunes on an unsettled solve.
+
+    Graduation evidence (2026-08-19, §5 regime 2, 69 instances x 60 s, in-repo
+    corpus plus the three squfl instances the corpus lacks). This flag does NOT
+    graduate on its own: alone it is cert-clean (unsound=0, cert_regressions=0)
+    but **not** net-positive — 0 incumbents gained, bound tighter on 1 and
+    looser on 5 — which is the ``DISCOPT_CUT_INHERIT`` case exactly. It
+    graduates as half of a *pair*, because it is what lets
+    ``round_fix_resolve``'s re-solve answer at all on the largest instance:
+    with this flag OFF, all 3 rungs of the rounding ladder return ``None``
+    after 14-18 s each on squfl020-150; with it ON, rung 1 certifies infeasible
+    in 5.5 s and rung 2 returns optimal in 0.13 s. The paired arm
+    (``ROUND_FIX_RESOLVE`` + this) scores unsound=0, cert_regressions=0,
+    3 incumbents gained / 0 lost, bound tighter 3 / looser 2, nodes fewer 9 /
+    more 3, total wall 1196.7 s vs 1210.6 s OFF — cert-clean AND net-positive,
+    and better than ``ROUND_FIX_RESOLVE`` alone on every axis, so the pair is
+    the shipping configuration.""" ""
 
     # --- #1064 round-fix-resolve primal heuristic (first incumbent) -------------
     round_fix_resolve: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_ROUND_FIX_RESOLVE", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_ROUND_FIX_RESOLVE", default=True)
     )
     """Round a *fractional* MIQP node relaxation point to the nearest integers,
     fix them, and re-solve for the continuous completion, so a search that never
     lands near-integral can still obtain a first incumbent
-    (``DISCOPT_ROUND_FIX_RESOLVE``, default OFF pending the §5 panel).
+    (``DISCOPT_ROUND_FIX_RESOLVE``, default **ON** since the §5 panel recorded
+    under ``structured_node_recovery`` above; ``=0`` restores the old
+    snap-only behaviour).
 
     The existing purification (``_pounce_snap_incumbent``) only accepts points
     already integral to within ``_SNAP_TOL`` = 1e-4. On squfl020-150 and
