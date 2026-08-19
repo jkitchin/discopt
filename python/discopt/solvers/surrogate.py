@@ -846,6 +846,8 @@ def _mirror_box(source: Model, target: Model) -> list:
     for v in source._variables:
         lb = np.asarray(v.lb, dtype=np.float64)
         ub = np.asarray(v.ub, dtype=np.float64)
+        lb_arg: float | np.ndarray
+        ub_arg: float | np.ndarray
         if v.shape == ():
             lb_arg, ub_arg = float(lb.reshape(-1)[0]), float(ub.reshape(-1)[0])
         else:

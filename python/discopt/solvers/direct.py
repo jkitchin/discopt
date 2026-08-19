@@ -372,7 +372,7 @@ class _DirectSearch:
         coordinate" without disturbing the unit-cube geometry that makes the
         centre-vertex distance scale-free.
         """
-        x = self.lb + u * self.width
+        x: np.ndarray = self.lb + u * self.width
         if self.integer_mask.any():
             x = x.copy()
             x[self.integer_mask] = np.clip(

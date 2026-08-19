@@ -55,7 +55,8 @@ class DecisionTree:
     @property
     def leaves(self) -> np.ndarray:
         """Indices of leaf nodes."""
-        return np.where(self.feature == _LEAF_MARKER)[0]
+        idx: np.ndarray = np.where(self.feature == _LEAF_MARKER)[0]
+        return idx
 
     @property
     def n_leaves(self) -> int:
