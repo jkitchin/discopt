@@ -12739,9 +12739,9 @@ def solve_model(
                         _x_sn, _obj_sn = _sn
                         _subnlp_feasible += 1
                         if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                            _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                            _subnlp_incumbent_updates += 1
-                            logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
+                            if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
+                                _subnlp_incumbent_updates += 1
+                                logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
 
             _cands_sn = [
                 (i, float(result_lbs[i]))
@@ -12781,9 +12781,9 @@ def solve_model(
                     _x_sn, _obj_sn = _sn
                     _subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                        _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                        _subnlp_incumbent_updates += 1
-                        logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
+                        if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
+                            _subnlp_incumbent_updates += 1
+                            logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
             else:
                 _try_idxs = (
                     [i for i, _ in _cands_sn] if iteration == 0 else [i for i, _ in _cands_sn[:1]]
@@ -12838,9 +12838,9 @@ def solve_model(
                     _x_sn, _obj_sn = _sn
                     _subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                        _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                        _subnlp_incumbent_updates += 1
-                        logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
+                        if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
+                            _subnlp_incumbent_updates += 1
+                            logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
         # --- Root binary-seed enumeration (deterministic disjunct cover) ---
         # A single nearest-rounding subnlp lands in whichever disjunct the
@@ -12907,9 +12907,9 @@ def solve_model(
             for _x_en, _obj_en in _enum_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_en) and _obj_en < _SENTINEL_THRESHOLD:
-                    _inject_incumbent(_x_en.copy(), float(_obj_en))
-                    _subnlp_incumbent_updates += 1
-                    logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
+                    if _inject_incumbent(_x_en.copy(), float(_obj_en)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
             if _enum_had_inc:
                 _enum_inc1 = tree.incumbent()
                 _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
@@ -12981,9 +12981,9 @@ def solve_model(
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
-                    _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf))
-                    _subnlp_incumbent_updates += 1
-                    logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+                    if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
 
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
@@ -13036,8 +13036,8 @@ def solve_model(
                     logger.debug("integer_box_search raised: %s", _e)
                     _bx = None
                 if _bx is not None and np.isfinite(_bx[1]) and _bx[1] < _inc_box[1] - 1e-9:
-                    _inject_incumbent(_bx[0].copy(), float(_bx[1]))
-                    _subnlp_incumbent_updates += 1
+                    if _inject_incumbent(_bx[0].copy(), float(_bx[1])):
+                        _subnlp_incumbent_updates += 1
                     _last_box_inc_obj = float(_bx[1])
                     logger.info("Box-search incumbent: obj=%.6g (iter=%d)", _bx[1], iteration)
 
@@ -15709,10 +15709,11 @@ def _solve_nlp_bb(
                             and _cfg_feas
                             and _is_integer_feasible_solution(_cfg_sol, int_offsets, int_sizes)
                         ):
-                            tree.inject_incumbent(_cfg_sol, _cfg_obj)
+                            _adopted = tree.inject_incumbent(_cfg_sol, _cfg_obj)
                             _root_incumbent = True
-                            _subnlp_incumbent_updates += 1
-                            logger.info("GDP config subNLP incumbent: obj=%.6g", _cfg_obj)
+                            if _adopted:
+                                _subnlp_incumbent_updates += 1
+                                logger.info("GDP config subNLP incumbent: obj=%.6g", _cfg_obj)
 
                 # --- RENS (Relaxation Enforced Neighborhood Search), primary ---
                 # Solve the relaxation's rounding neighbourhood EXACTLY (fix the
