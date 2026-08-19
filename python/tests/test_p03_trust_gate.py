@@ -172,20 +172,60 @@ class TestCallerDecertifies:
         assert r.gap_certified is True
         assert abs(r.objective - _OPT) < 1e-3
 
-    def test_batch_untrusted_node_decertifies(self, monkeypatch):
-        """An untrusted batch node decertifies the gap but keeps the answer."""
+    @staticmethod
+    def _untrust_first_batch_node(monkeypatch):
+        """Simulate an unpolishable non-KKT convex node in every batch."""
         orig = S._solve_batch_pounce
 
         def wrap(*a, **k):
             ids, lbs, sols, feas, trusted = orig(*a, **k)
             trusted = np.asarray(trusted).copy()
-            trusted[0] = False  # simulate an unpolishable non-KKT convex node
+            trusted[0] = False
             return ids, lbs, sols, feas, trusted
 
         # POUNCE is the NLP-node batch engine; force batching on this small model.
         monkeypatch.setattr(S, "_POUNCE_BATCH_MIN_VARS", 1)
         monkeypatch.setattr(S, "_solve_batch_pounce", wrap)
+
+    def test_batch_untrusted_node_abstains_and_keeps_a_true_certificate(self, monkeypatch):
+        """An untrusted batch node abstains; the gap stays certified and is TRUE.
+
+        Before #1082 a single untrusted node decertified the whole solve (the
+        behaviour the opt-out test below still pins). Under the graduated
+        ``DISCOPT_CONVEX_STALL_ABSTAIN`` default the node instead imports
+        ``-inf`` floored at its parent's bound. A child's feasible region is a
+        subset of its parent's, so the inherited value is a valid lower bound
+        for that subtree and the global bound stays sound — which is why the
+        solve may legitimately certify.
+
+        This test therefore does not merely flip the old assertion. It checks
+        the certificate is *true*: the reported bound must not cross either the
+        incumbent or the independently known optimum. If abstention ever
+        certified a bound above the optimum, that is a false certificate and
+        these assertions fail rather than being relaxed.
+        """
+        monkeypatch.delenv("DISCOPT_CONVEX_STALL_ABSTAIN", raising=False)
+        self._untrust_first_batch_node(monkeypatch)
         r = _convex_minlp().solve(nlp_solver="pounce", time_limit=60, batch_size=8)
+
+        assert r.gap_certified is True
+        assert abs(r.objective - _OPT) < 1e-2
+        # The certificate invariant, both halves. These are the soundness
+        # assertions; the `gap_certified` check above is only the contract.
+        assert r.bound <= r.objective + 1e-6
+        assert r.bound <= _OPT + 1e-6
+
+    def test_the_opt_out_restores_the_decertifying_behaviour(self, monkeypatch):
+        """`=0` still gives the pre-#1082 contract, exactly as graduated.
+
+        §5 requires a graduated flag to keep its opt-out and its legacy path
+        intact, so the old behaviour stays under test rather than being
+        deleted along with the old default.
+        """
+        monkeypatch.setenv("DISCOPT_CONVEX_STALL_ABSTAIN", "0")
+        self._untrust_first_batch_node(monkeypatch)
+        r = _convex_minlp().solve(nlp_solver="pounce", time_limit=60, batch_size=8)
+
         assert r.gap_certified is False
         assert r.status == "feasible"
         # Bounds were untouched, so the incumbent is still correct.
