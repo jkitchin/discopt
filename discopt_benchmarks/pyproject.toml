@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "discopt-benchmarks"
 version = "0.2.0"
 description = "Testing and benchmarking framework for discopt"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.24",
     "pytest>=7.4",
@@ -70,7 +70,7 @@ disallow_untyped_defs = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
