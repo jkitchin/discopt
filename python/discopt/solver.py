@@ -19025,6 +19025,19 @@ def _pounce_snap_incumbent(
 # coordinate flipped. Anything deeper is a dive, which is a separate mechanism.
 _ROUND_MAX_TRIES = 2
 
+# #1064: fraction of the solve's time limit that round-fix-resolve may spend in
+# total. Each attempt is a POUNCE re-solve whose cost varies by orders of
+# magnitude across instances, so the attempt *count* cap below bounds nothing on
+# its own -- measured on slay05h at T=60 s: 31 attempts, 0 hits, 66.5 s = 98.3%
+# of the wall, turning a certified optimum (1335 nodes, 15.5 s) into a
+# time_limit with no incumbent at all (63 nodes). A first-incumbent heuristic
+# that can consume the whole budget is not a heuristic.
+_ROUND_TIME_FRAC = 0.1
+
+# Backstop on the attempt count, for a family where each rounding is cheap
+# enough that the time budget above would allow an unbounded number of them.
+_ROUND_ATTEMPT_CAP = 64
+
 
 def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
     """Round to the nearest integer that actually lies inside ``[lo, hi]``.
@@ -21202,13 +21215,17 @@ def _solve_miqp_bb(
     # only while the tree has none, and it is capped so a family where every
     # rounding is infeasible cannot eat the search. Both are counted, not
     # assumed: ``_round_attempts`` is what the regression test asserts on.
-    _ROUND_ATTEMPT_CAP = 64
     _round_attempts = 0
+    # The real bound is time, not calls (see _ROUND_TIME_FRAC). Both are
+    # counted, not assumed: the regression test asserts on _round_attempts and
+    # on the seconds actually spent here.
+    _round_budget = _ROUND_TIME_FRAC * float(time_limit)
+    _round_secs = 0.0
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
-        nonlocal _round_attempts
+        nonlocal _round_attempts, _round_secs
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -21231,12 +21248,22 @@ def _solve_miqp_bb(
             and _tuning().round_fix_resolve
             and tree.incumbent() is None
             and _round_attempts < _ROUND_ATTEMPT_CAP
+            and _round_secs < _round_budget
         ):
             # The snap path declined, i.e. this point is genuinely fractional.
             # With no incumbent in hand there is no primal bound at all, so a
             # rounded completion is strictly better than nothing — and it can
             # only ever supply an upper bound (see _pounce_round_incumbent).
             _round_attempts += 1
+            # Bound this single attempt by whatever is left of the heuristic's
+            # budget as well as by the solve deadline: _pounce_recover_node_bound
+            # derives its own limit as ``time_limit - (now - t_start)``, so
+            # handing it the global limit lets one attempt run to the deadline.
+            _t_round = time.perf_counter()
+            _round_tl = min(
+                float(time_limit),
+                (_t_round - t_start) + max(0.0, _round_budget - _round_secs),
+            )
             inc = _pounce_round_incumbent(
                 x_row,
                 int_offsets,
@@ -21250,9 +21277,10 @@ def _solve_miqp_bb(
                 _A_eq_m,
                 _b_eq_m,
                 t_start,
-                time_limit,
+                _round_tl,
                 Q=_Q_m,
             )
+            _round_secs += time.perf_counter() - _t_round
             how = "rounded"
         if inc is not None:
             x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
