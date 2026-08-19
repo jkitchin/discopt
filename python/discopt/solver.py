@@ -5131,45 +5131,142 @@ _CONVEX_ROUTE_BUDGET_FRACTION = 0.5
 _CONVEX_ROUTE_FALLBACK_FLOOR_S = 1.0
 
 
-def _route_result_is_certified(result) -> bool:
-    """Did an auto-routed solve come back with an actual certificate?
+def _route_result_is_certified(result, gap_tolerance: float) -> bool:
+    """Did an auto-routed solve come back having actually *finished* the model?
 
-    This is the #1059 fallback predicate, and it is deliberately strict: a
-    ``feasible`` status with no dual bound is exactly the failure mode the
-    graduation panel found (``alan``, ``clay0303hfsg``, ``tls2`` all lost their
-    certificate to the route), so anything short of ``gap_certified`` or a
-    terminal infeasible/unbounded verdict counts as "did not certify" and hands
-    the remaining budget to the default path.
+    This is the #1059 fallback predicate. "Finished" means the route can be
+    returned as the caller's answer with no further work worth doing: a closed
+    optimality gap, or a terminal infeasible/unbounded verdict.
+
+    ``gap_certified`` alone is **not** that test, and reading it as one was a
+    measured defect. ``SolveResult.gap_certified`` means "the reported gap is
+    mathematically valid", not "the reported gap is closed" -- OA sets it from
+    ``bound_valid and final_gap is not None``. So a time-limited OA run on
+    ``syn40m`` came back ``status="feasible"``, ``gap_certified=True``, gap
+    **80.8%**, and was treated as a certificate: the route returned after
+    30.2 s of a 60 s budget and the 29.8 s reserved for the fallback was thrown
+    away. Measured 2026-08-19 at ``DISCOPT_CONVEX_MINLP_ROUTE=1``,
+    ``time_limit=60``: ``obj=55.713 bound=290.611 gap_certified=True wall=30.17``.
+
+    The gap must therefore be closed to the caller's own ``gap_tolerance``, on
+    top of being certified. A result carrying no gap at all is not finished
+    either -- that is the ``feasible``-with-no-dual-bound failure the graduation
+    panel found on ``alan``/``clay0303hfsg``/``tls2``.
     """
     if result is None:
         return False
-    if bool(getattr(result, "gap_certified", False)):
-        return True
     # An infeasibility or unboundedness verdict is a certificate too, and there
     # is nothing for a fallback to improve on it.
-    return getattr(result, "status", None) in ("infeasible", "unbounded")
+    if getattr(result, "status", None) in ("infeasible", "unbounded"):
+        return True
+    if not bool(getattr(result, "gap_certified", False)):
+        return False
+    gap = getattr(result, "gap", None)
+    if gap is None or not np.isfinite(gap):
+        return False
+    return float(gap) <= float(gap_tolerance)
 
 
-def _route_incumbent_seed(model: Model, result) -> Optional[np.ndarray]:
-    """Flatten an auto-routed result's incumbent into an ``initial_point``.
+def _route_is_better(a: Optional[float], b: Optional[float], is_maximize: bool) -> bool:
+    """Is objective ``a`` strictly better than ``b`` in the model's own sense?
 
-    The fallback must never be *worse* than the route it replaces. Passing the
-    routed incumbent in as the fallback's starting point is what guarantees that:
-    ``solve_model`` injects a finite, verified ``initial_point`` into the tree
-    before the search begins, so the fallback starts from the route's answer and
-    can only tighten it. Returns ``None`` (leave the caller's own seed alone)
-    when there is no usable point.
+    ``None`` means "no incumbent", which loses to any finite value and ties with
+    itself. Non-finite values are treated as no incumbent.
     """
-    x = getattr(result, "x", None)
-    if x is None:
-        return None
-    from discopt.mo.utils import _flatten_solution
+    if a is None or not np.isfinite(a):
+        return False
+    if b is None or not np.isfinite(b):
+        return True
+    return float(a) > float(b) if is_maximize else float(a) < float(b)
 
-    flat = _flatten_solution(model, x) if isinstance(x, dict) else np.asarray(x, dtype=np.float64)
-    flat = np.asarray(flat, dtype=np.float64).reshape(-1)
-    if flat.size == 0 or not np.all(np.isfinite(flat)):
-        return None
-    return flat
+
+def _gap_is_closed(result, tol: float = 1e-6) -> bool:
+    """Did ``result`` come back with a *closed*, certified optimality gap?
+
+    Distinct from ``gap_certified``, which asserts only that the reported gap is
+    mathematically valid -- see :func:`_route_result_is_certified`.
+    """
+    if result is None or not bool(getattr(result, "gap_certified", False)):
+        return False
+    gap = getattr(result, "gap", None)
+    return gap is not None and np.isfinite(gap) and float(gap) <= tol
+
+
+def _merge_route_and_fallback(route, fallback, is_maximize: bool):
+    """Return the better of an auto-routed result and the fallback that followed.
+
+    This is the #1059 "the fallback can never be worse than the route" contract,
+    made true *by construction*. It used to be delegated to
+    ``_route_incumbent_seed``, which handed the routed point to the fallback as
+    ``initial_point`` on the theory that a warm-started tree "can only tighten
+    it". **That theory is false and was measured false.** ``initial_point`` is
+    not merely an incumbent floor: the tree's primal heuristics search the
+    *neighbourhood of the incumbent*, so a poor routed point redirects them.
+    Measured on ``rsyn0840m`` at a 60 s limit (internal minimize sense; the
+    model is a maximize):
+
+    ==========================  ===========
+    arm                         reported obj
+    ==========================  ===========
+    default path, 60 s          211.020
+    default path, 30 s          70.351
+    route + seeded fallback     **-11.413**
+    route + unseeded fallback   70.351
+    ==========================  ===========
+
+    The seeded run's log shows exactly the mechanism: the warm start pins the
+    incumbent at internal 11.413, after which fractional diving and LNS RINS
+    report 16.712, 60.227, 56.240, 51.240, 41.159 -- every one of them worse.
+    Unseeded, the same search reaches internal -70.351. The seed cost 82 units
+    of objective and bought nothing on the instances where the routed point was
+    good (``syn40m``: the seeded fallback returned the routed 55.713 unchanged).
+
+    So the route no longer steers the fallback at all. It is run, the fallback is
+    run on the remainder, and the better of the two is returned -- which is what
+    the contract always claimed. Both dual bounds are valid (the route only fires
+    on a model certified convex at the root, and only a ``gap_certified`` routed
+    bound is carried), so the tighter of the two is kept regardless of which
+    incumbent wins.
+    """
+    if route is None:
+        return fallback
+    if fallback is None:
+        return route
+
+    route_wins = _route_is_better(route.objective, fallback.objective, is_maximize)
+    # A certificate outranks a better number. If the fallback closed the gap and
+    # the route did not, no feasible point can legitimately beat it -- so a route
+    # objective that appears to is evidence of an inconsistency somewhere, not a
+    # better answer, and trading a proof for it would be exactly the kind of
+    # silent certificate loss the fallback exists to prevent.
+    if route_wins and _gap_is_closed(fallback) and not _gap_is_closed(route):
+        logger.warning(
+            "#1059 route objective %.10g appears to beat the fallback's CERTIFIED "
+            "%.10g; keeping the certified result. This should be impossible and "
+            "indicates a bound or feasibility inconsistency worth investigating.",
+            route.objective,
+            fallback.objective,
+        )
+        route_wins = False
+
+    winner = route if route_wins else fallback
+    loser = fallback if route_wins else route
+    # Keep the tighter dual bound, but only one the losing side actually
+    # *certified* -- an uncertified bound is not a proof and must never be
+    # reported as one. Reported sense: a maximize model's bound is an UPPER bound
+    # (tighter = smaller), a minimize model's is a LOWER bound (tighter = larger).
+    w_b, l_b = winner.bound, loser.bound
+    if (
+        bool(getattr(loser, "gap_certified", False))
+        and l_b is not None
+        and np.isfinite(l_b)
+        and (w_b is None or not np.isfinite(w_b) or (l_b < w_b if is_maximize else l_b > w_b))
+    ):
+        winner.bound = float(l_b)
+    obj, bnd = winner.objective, winner.bound
+    if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
+        winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
+    return winner
 
 
 # Size gate for the auto cut policy: above this many scalar variables the
@@ -6081,6 +6178,18 @@ def solve_model_accepted_kwargs(solver: Optional[str] = None) -> frozenset[str]:
 #: solve (``Model.solve`` runs ``solve_model`` more than once).
 _ROUTE_FALLBACK_NOTE: list[str] = []
 
+#: Companion rail to :data:`_ROUTE_FALLBACK_NOTE`: the result the #1059
+#: auto-route produced before it handed over, as ``(SolveResult, is_maximize)``.
+#:
+#: The fallback runs on the remaining budget only, so it can come back with a
+#: worse incumbent or a looser bound than the route already had.
+#: :func:`_merge_route_and_fallback` returns the better of the two; this rail is
+#: how the routed result reaches it, since the fallback falls through to the
+#: default path's ~67 return sites and can reach none of them. Same
+#: list-not-scalar discipline as the note: the wrapper restores the exact depth
+#: it entered at, so a raised exception cannot leak state into the next solve.
+_ROUTE_FALLBACK_STATE: list[tuple["SolveResult", bool]] = []
+
 
 def _stamp_layer_timing(fn: _F) -> _F:
     """Stamp the layer profile onto whatever ``SolveResult`` the solve produced.
@@ -6102,6 +6211,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
         before = _timing.snapshot()
         started = time.perf_counter()
         _route_depth = len(_ROUTE_FALLBACK_NOTE)
+        _state_depth = len(_ROUTE_FALLBACK_STATE)
         try:
             result = fn(*args, **kwargs)
         finally:
@@ -6111,12 +6221,32 @@ def _stamp_layer_timing(fn: _F) -> _F:
                 else None
             )
             del _ROUTE_FALLBACK_NOTE[_route_depth:]
+            _route_state = (
+                _ROUTE_FALLBACK_STATE[_state_depth]
+                if len(_ROUTE_FALLBACK_STATE) > _state_depth
+                else None
+            )
+            del _ROUTE_FALLBACK_STATE[_state_depth:]
         elapsed = time.perf_counter() - started
         # #1059: a solve that fell back off the auto-route must say so, otherwise
         # it is indistinguishable from one that was never routed -- the exact
         # invisibility the issue was filed about.
         if _route_note is not None and isinstance(result, SolveResult):
             result.algorithm_route = _route_note
+        # #1059: the fallback must never be worse than the route it replaced.
+        # Done here rather than at the fallback site for the same reason as the
+        # note: the fallback falls through to the default path's return sites.
+        if _route_state is not None and isinstance(result, SolveResult):
+            _rr, _rr_is_max = _route_state
+            _merged = _merge_route_and_fallback(_rr, result, _rr_is_max)
+            if _merged is not result:
+                # The route won. Its ``wall_time`` covers only the routed solve;
+                # the caller was charged for the fallback too, so report the
+                # whole call rather than the winning half of it.
+                _merged.wall_time = elapsed
+            result = _merged
+            if _route_note is not None:
+                result.algorithm_route = _route_note
         # ``stream=True`` yields an iterator of SolveUpdate, not a SolveResult;
         # leave anything that is not a SolveResult untouched rather than guessing.
         if not isinstance(result, SolveResult):
@@ -6983,7 +7113,7 @@ def solve_model(
         _route_remaining = time_limit - _route_elapsed
         if (
             _auto_route_reason is None
-            or _route_result_is_certified(_mip_nlp_result)
+            or _route_result_is_certified(_mip_nlp_result, gap_tolerance)
             or _route_remaining < _CONVEX_ROUTE_FALLBACK_FLOOR_S
         ):
             return _mip_nlp_result
@@ -6994,8 +7124,9 @@ def solve_model(
         # a certificate the caller is left holding an uncertified point that the
         # spatial path would often have proven optimal (the panel: ``alan``
         # uncertified 3.000 after 180 s vs certified 2.925 in 0.18 s). So spend
-        # the remainder of the budget on the path that certifies, seeded with
-        # whatever the route did find so the fallback can only improve on it.
+        # the remainder of the budget on the path that certifies, and return the
+        # better of the two -- see ``_merge_route_and_fallback`` for why the
+        # route deliberately does NOT warm-start the fallback any more.
         logger.info(
             "Convex MINLP auto-route did not certify (status=%s, gap_certified=%s) "
             "after %.2f s; falling back to the default path with %.2f s remaining",
@@ -7004,9 +7135,6 @@ def solve_model(
             _route_elapsed,
             _route_remaining,
         )
-        _route_seed = _route_incumbent_seed(_pre_route_model, _mip_nlp_result)
-        if _route_seed is not None and initial_point is None:
-            initial_point = _route_seed
         model = _pre_route_model
         _solver = None
         # ``time_limit`` is deliberately NOT reduced. The default path measures
@@ -7021,6 +7149,20 @@ def solve_model(
             f"{_auto_route_reason}; did not certify in {_route_elapsed:.2f}s "
             f"(status={getattr(_mip_nlp_result, 'status', None)}) -> fell back to the "
             f"default path with {_route_remaining:.2f}s"
+        )
+        # #1059: hand the routed result forward so the wrapper can return the
+        # better of the two. This is the "never worse than the route" contract;
+        # ``_merge_route_and_fallback`` documents why it is a merge rather than a
+        # warm start. Carried on the same rail as the note, for the same reason:
+        # the fallback cannot reach the default path's ~67 return sites.
+        from discopt.modeling.core import ObjectiveSense as _RouteObjSense
+
+        _ROUTE_FALLBACK_STATE.append(
+            (
+                _mip_nlp_result,
+                _pre_route_model._objective is not None
+                and _pre_route_model._objective.sense == _RouteObjSense.MAXIMIZE,
+            )
         )
         # Fall through to the default spatial / NLP branch-and-bound below.
 
