@@ -138,3 +138,118 @@ def test_flag_defaults_off_and_is_env_settable(monkeypatch):
     assert SolverTuning().round_fix_resolve is True
     monkeypatch.setenv("DISCOPT_ROUND_FIX_RESOLVE", "0")
     assert SolverTuning().round_fix_resolve is False
+
+
+def _ufl_model(n_i=6, n_j=12):
+    """Uncapacitated-facility-location shape -- the #1064 class.
+
+    Binary ``y_i``, continuous ``x_ij``, VUB links ``x_ij <= y_i``, covering
+    equalities ``sum_i x_ij == 1``, convex quadratic objective. This routes to
+    ``_solve_miqp_bb`` and reaches the round gate, which is what makes the
+    assertions below about the gate meaningful.
+    """
+    from discopt import Model
+
+    m = Model("ufl")
+    y = m.binary("y", shape=(n_i,))
+    x = m.continuous("x", shape=(n_i, n_j), lb=0.0, ub=1.0)
+    rng = np.random.default_rng(0)
+    serve = rng.uniform(1.0, 9.0, size=(n_i, n_j))
+    opens = rng.uniform(5.0, 15.0, size=n_i)
+    for i in range(n_i):
+        for j in range(n_j):
+            m.subject_to(x[i, j] <= y[i])
+    for j in range(n_j):
+        m.subject_to(sum(x[i, j] for i in range(n_i)) == 1)
+    m.minimize(
+        sum(opens[i] * y[i] for i in range(n_i))
+        + sum(serve[i, j] * x[i, j] * x[i, j] for i in range(n_i) for j in range(n_j))
+    )
+    return m
+
+
+_STUB_SLEEP = 0.3
+_STUB_TIME_LIMIT = 10.0
+
+
+def _run_with_declining_stub(monkeypatch, frac):
+    """Solve the UFL fixture with a stub that always declines and costs time.
+
+    Standing in for the expensive ``_pounce_recover_node_bound`` re-solve keeps
+    the bound under test the *budget* rather than POUNCE's convergence.
+    """
+    import time as _time
+
+    seen = {"calls": 0, "limits": []}
+
+    def _stub(*args, **kwargs):
+        seen["calls"] += 1
+        # Signature: (..., t_start, time_limit, Q=None) -- time_limit is arg 13.
+        seen["limits"].append(float(args[12]))
+        _time.sleep(_STUB_SLEEP)
+        return None
+
+    monkeypatch.setattr(S, "_pounce_round_incumbent", _stub)
+    monkeypatch.setattr(S, "_ROUND_TIME_FRAC", frac)
+    monkeypatch.setenv("DISCOPT_ROUND_FIX_RESOLVE", "1")
+
+    t0 = _time.perf_counter()
+    S.solve_model(_ufl_model(), time_limit=_STUB_TIME_LIMIT)
+    seen["wall"] = _time.perf_counter() - t0
+    # The probe must have fired, or every assertion downstream is vacuous.
+    assert seen["calls"] > 0, (
+        "round-fix-resolve never ran: this model no longer reaches the MIQP "
+        "round gate, so the budget is untested -- fix the fixture, not the bound"
+    )
+    return seen
+
+
+def test_round_fix_resolve_is_bounded_by_a_time_budget(monkeypatch):
+    """The heuristic may not spend the solve.
+
+    ``_ROUND_ATTEMPT_CAP`` caps the *number* of attempts, but each attempt is up
+    to two ``_pounce_recover_node_bound`` calls -- a full POUNCE re-solve whose
+    cost varies by orders of magnitude across instances -- so a count cap bounds
+    nothing. Measured on slay05h at T=60 s before this budget existed: 31
+    attempts, 0 hits, 66.5 s = 98.3% of the wall, turning a certified optimum
+    (1335 nodes, 15.5 s) into a time_limit with no incumbent (63 nodes).
+    """
+    budget = S._ROUND_TIME_FRAC * _STUB_TIME_LIMIT
+    seen = _run_with_declining_stub(monkeypatch, S._ROUND_TIME_FRAC)
+
+    assert seen["calls"] < _ROUND_ATTEMPT_CAP_REF
+    spent = seen["calls"] * _STUB_SLEEP
+    assert spent <= budget + _STUB_SLEEP + 0.5, (
+        f"spent {spent:.2f}s of a {budget:.2f}s budget over {seen['calls']} attempts"
+    )
+    # Each attempt is handed the budget's deadline, not the solve's: passing the
+    # global limit lets a single attempt run all the way to the deadline.
+    assert max(seen["limits"]) < _STUB_TIME_LIMIT
+    assert seen["wall"] < _STUB_TIME_LIMIT + 5.0
+
+
+def test_the_time_budget_is_what_bounds_the_spend(monkeypatch):
+    """Neutralising only the budget restores the unbounded behaviour.
+
+    Without this arm the test above would pass on any solve that happens to make
+    few attempts, and would not show that the *budget* is the binding constraint
+    rather than the attempt cap or the search finishing early.
+    """
+    default_frac = S._ROUND_TIME_FRAC
+    budgeted = _run_with_declining_stub(monkeypatch, default_frac)
+    unbudgeted = _run_with_declining_stub(monkeypatch, 1e6)
+
+    assert unbudgeted["calls"] > 2 * budgeted["calls"], (
+        f"budget frac made no difference: {budgeted['calls']} attempts budgeted "
+        f"vs {unbudgeted['calls']} unbudgeted"
+    )
+    # Unbudgeted, the stub alone outruns the solve's own time limit.
+    assert unbudgeted["calls"] * _STUB_SLEEP > _STUB_TIME_LIMIT * default_frac
+
+
+_ROUND_ATTEMPT_CAP_REF = 64
+
+
+def test_attempt_cap_is_still_a_backstop():
+    assert S._ROUND_ATTEMPT_CAP == _ROUND_ATTEMPT_CAP_REF
+    assert 0.0 < S._ROUND_TIME_FRAC < 1.0
