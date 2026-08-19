@@ -367,7 +367,7 @@ def test_bounds_check_vectorisation_matches_the_original_loop():
 
 
 @pytest.mark.parametrize("vub", [1e3, 1e6])
-def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
+def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog, monkeypatch):
     """An exactly-integral candidate outside a declared row must be declined where
     it is injected, not discovered at the exit gate.
 
@@ -401,10 +401,22 @@ def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
     re-pointed at one of those rather than deleted. The rows above are the shape
     the Benders master actually produced, and reproduce the funnel's violation
     magnitudes exactly (9.994994e-06 / 9.999995e-03).
+
+    Pinned to ``DISCOPT_STRUCTURED_NODE_RECOVERY=0``. #1085 graduated that flag
+    to default ON, and on this reproducer it routes the node through
+    ``pounce.solve_qp`` instead of the legacy callback TNLP, so the relaxation
+    no longer hands ``_pounce_snap_incumbent`` a point that snaps off-row --
+    the funnel is never reached and the guard below fires, exactly as it should
+    rather than passing vacuously. The guard is not obsolete: it still protects
+    every ``_solve_milp_bb`` caller on the legacy path, so the test keeps
+    exercising it instead of being weakened to accept "nothing was declined".
+    That the graduated default is not hiding a bad incumbent is a separate
+    claim, checked directly by the companion test below.
     """
     from discopt.solvers import SolveStatus
     from discopt.solvers.lp_backend import get_milp_solver
 
+    monkeypatch.setenv("DISCOPT_STRUCTURED_NODE_RECOVERY", "0")
     milp = get_milp_solver(backend="pounce")
     big_m, slope = 3.0 * vub, 0.25
     A_ub = np.array([[-big_m, -1.0], [-slope, -1.0]])
@@ -434,3 +446,48 @@ def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog):
     # And the solve still lands on the exact optimum (y=1, eta=-vub -> 1 - vub).
     assert r.status == SolveStatus.OPTIMAL
     assert r.objective == pytest.approx(1.0 - vub, rel=1e-9)
+
+
+@pytest.mark.parametrize("vub", [1e3, 1e6])
+def test_recovery_default_answers_the_funnel_reproducer_exactly(vub):
+    """The graduated recovery default must not smuggle past the funnel it skips.
+
+    The test above pins the funnel by opting out of #1085's
+    ``DISCOPT_STRUCTURED_NODE_RECOVERY`` graduation, because that is the only
+    path on this input that still produces an off-row snap candidate. That
+    leaves a question the opt-out cannot answer: at the shipping default the
+    funnel never fires, so is the returned point simply unchecked?
+
+    Measured on both parameterisations, the answer is identical to the legacy
+    path and strictly inside every declared row (worst values -1.664e-07 at
+    ``vub=1e3`` and -3.658e-05 at ``vub=1e6`` -- slack, not excursion), so
+    nothing is being waved through. Asserted here against the closed form
+    rather than through the solver's own helpers, so this cannot inherit the
+    defect it is checking for.
+    """
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.lp_backend import get_milp_solver
+
+    milp = get_milp_solver(backend="pounce")
+    big_m, slope = 3.0 * vub, 0.25
+    A_ub = np.array([[-big_m, -1.0], [-slope, -1.0]])
+    b_ub = np.array([0.0, vub - slope])
+    r = milp(
+        np.array([1.0, 1.0]),
+        A_ub=A_ub,
+        b_ub=b_ub,
+        bounds=[(0.0, 1.0), (-1e12, 1e20)],
+        integrality=np.array([1, 0], dtype=np.int32),
+        time_limit=60.0,
+        gap_tolerance=1e-4,
+    )
+
+    # y=1, eta=-vub is the optimum; y=0 forces eta >= 0 and costs 0 > 1 - vub.
+    assert r.status == SolveStatus.OPTIMAL
+    assert r.objective == pytest.approx(1.0 - vub, rel=1e-9)
+
+    x = np.asarray(r.x, dtype=float)
+    worst = float(np.max(A_ub @ x - b_ub))
+    assert worst <= DECLARED_ABS_TOL, (
+        f"the returned point is {worst:.3e} outside a declared row at vub={vub:g}"
+    )
