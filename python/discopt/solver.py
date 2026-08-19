@@ -5067,6 +5067,65 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     )
 
 
+#: Fraction of the caller's time limit the #1059 auto-route may spend before the
+#: fallback takes over. The §5 graduation panel measured the failure this bounds:
+#: on ``alan`` (a 9-variable convex MIQP) the routed OA path burned the ENTIRE
+#: 180 s budget and returned an uncertified 3.000, where the default spatial path
+#: certifies 2.925 in 0.18 s -- reproducibly, 3/3 reps. Handing OA the whole
+#: budget leaves nothing to recover with, so the route is budgeted and the
+#: remainder is reserved for the path that is known to certify. Half is the split
+#: because the same panel's Arm B -- the ``syn``/``rsyn`` class the route exists
+#: for -- certifies through OA well inside it (``syn40m`` 59.2 s, ``syn20m02m``
+#: 23.5 s, ``rsyn0805m`` 9.8 s, all measured at a 60 s limit).
+_CONVEX_ROUTE_BUDGET_FRACTION = 0.5
+
+#: Below this many seconds a fallback solve cannot do anything useful, so the
+#: routed (uncertified) result is returned as-is rather than being replaced by a
+#: fallback that is itself out of time.
+_CONVEX_ROUTE_FALLBACK_FLOOR_S = 1.0
+
+
+def _route_result_is_certified(result) -> bool:
+    """Did an auto-routed solve come back with an actual certificate?
+
+    This is the #1059 fallback predicate, and it is deliberately strict: a
+    ``feasible`` status with no dual bound is exactly the failure mode the
+    graduation panel found (``alan``, ``clay0303hfsg``, ``tls2`` all lost their
+    certificate to the route), so anything short of ``gap_certified`` or a
+    terminal infeasible/unbounded verdict counts as "did not certify" and hands
+    the remaining budget to the default path.
+    """
+    if result is None:
+        return False
+    if bool(getattr(result, "gap_certified", False)):
+        return True
+    # An infeasibility or unboundedness verdict is a certificate too, and there
+    # is nothing for a fallback to improve on it.
+    return getattr(result, "status", None) in ("infeasible", "unbounded")
+
+
+def _route_incumbent_seed(model: Model, result) -> Optional[np.ndarray]:
+    """Flatten an auto-routed result's incumbent into an ``initial_point``.
+
+    The fallback must never be *worse* than the route it replaces. Passing the
+    routed incumbent in as the fallback's starting point is what guarantees that:
+    ``solve_model`` injects a finite, verified ``initial_point`` into the tree
+    before the search begins, so the fallback starts from the route's answer and
+    can only tighten it. Returns ``None`` (leave the caller's own seed alone)
+    when there is no usable point.
+    """
+    x = getattr(result, "x", None)
+    if x is None:
+        return None
+    from discopt.mo.utils import _flatten_solution
+
+    flat = _flatten_solution(model, x) if isinstance(x, dict) else np.asarray(x, dtype=np.float64)
+    flat = np.asarray(flat, dtype=np.float64).reshape(-1)
+    if flat.size == 0 or not np.all(np.isfinite(flat)):
+        return None
+    return flat
+
+
 # Size gate for the auto cut policy: above this many scalar variables the
 # per-node cut-separation overhead (eigh / extra LP re-solves) outweighs the
 # typical bound gain, so the policy declines to enable cuts (sound: a no-op).
@@ -5963,6 +6022,20 @@ def solve_model_accepted_kwargs(solver: Optional[str] = None) -> frozenset[str]:
     return frozenset(allowed)
 
 
+#: Note left by the #1059 route fallback for the decorator below to stamp onto
+#: ``SolveResult.algorithm_route``.
+#:
+#: The fallback decides mid-function that the auto-route failed and then falls
+#: through to the default path, whose ~67 return sites it has no way to reach.
+#: Threading a field through all of them is precisely the accounting bug
+#: ``_stamp_layer_timing`` was written to remove (see its docstring), so the note
+#: rides the same rail: set once, stamped once, in the one place every return
+#: passes through. A list, not a scalar, so the wrapper can restore the exact
+#: depth it entered at and a raised exception cannot leak a note into the next
+#: solve (``Model.solve`` runs ``solve_model`` more than once).
+_ROUTE_FALLBACK_NOTE: list[str] = []
+
+
 def _stamp_layer_timing(fn: _F) -> _F:
     """Stamp the layer profile onto whatever ``SolveResult`` the solve produced.
 
@@ -5982,8 +6055,22 @@ def _stamp_layer_timing(fn: _F) -> _F:
     def wrapper(*args, **kwargs):
         before = _timing.snapshot()
         started = time.perf_counter()
-        result = fn(*args, **kwargs)
+        _route_depth = len(_ROUTE_FALLBACK_NOTE)
+        try:
+            result = fn(*args, **kwargs)
+        finally:
+            _route_note = (
+                _ROUTE_FALLBACK_NOTE[_route_depth]
+                if len(_ROUTE_FALLBACK_NOTE) > _route_depth
+                else None
+            )
+            del _ROUTE_FALLBACK_NOTE[_route_depth:]
         elapsed = time.perf_counter() - started
+        # #1059: a solve that fell back off the auto-route must say so, otherwise
+        # it is indistinguishable from one that was never routed -- the exact
+        # invisibility the issue was filed about.
+        if _route_note is not None and isinstance(result, SolveResult):
+            result.algorithm_route = _route_note
         # ``stream=True`` yields an iterator of SolveUpdate, not a SolveResult;
         # leave anything that is not a SolveResult untouched rather than guessing.
         if not isinstance(result, SolveResult):
@@ -6811,26 +6898,85 @@ def solve_model(
 
         from discopt._relax.gdp_reformulate import reformulate_gdp
 
+        # #1059 fallback: keep the caller's model. ``reformulate_gdp`` is what the
+        # MIP-NLP family needs, but if the route does not certify we hand the
+        # remaining budget back to the default path, and that path must see the
+        # model it was called with rather than a big-M reformulation of it.
+        _pre_route_model = model
         model = reformulate_gdp(model, method=resolved_gdp_method)
 
+        # An EXPLICIT solver="mip-nlp" gets the whole budget: the caller chose the
+        # algorithm and there is no fallback to reserve for. Only the auto-route
+        # is budgeted.
+        _route_budget = time_limit
+        if _auto_route_reason is not None:
+            _route_budget = max(
+                time_limit * _CONVEX_ROUTE_BUDGET_FRACTION,
+                min(time_limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S),
+            )
+        _route_t0 = time.perf_counter()
         _mip_nlp_result = solve_mip_nlp(
             model,
             method=mip_nlp_method,
             mip_nlp_options=mip_nlp_options,
-            time_limit=time_limit,
+            time_limit=_route_budget,
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
             initial_point=initial_point,
             **mip_nlp_kwargs,
         )
+        _route_elapsed = time.perf_counter() - _route_t0
         # #1059: record WHY this algorithm ran. Only set on the auto-route, so an
         # explicit solver="mip-nlp" leaves the field None (the caller already
         # knows what they asked for) and the field reads as "the router chose
         # this" wherever it is populated.
         if _auto_route_reason is not None and _mip_nlp_result is not None:
             _mip_nlp_result.algorithm_route = _auto_route_reason
-        return _mip_nlp_result
+
+        _route_remaining = time_limit - _route_elapsed
+        if (
+            _auto_route_reason is None
+            or _route_result_is_certified(_mip_nlp_result)
+            or _route_remaining < _CONVEX_ROUTE_FALLBACK_FLOOR_S
+        ):
+            return _mip_nlp_result
+
+        # --- #1059: the auto-route did not certify -- fall back to the default path ---
+        #
+        # The route is a *decision*, not a commitment. When it comes back without
+        # a certificate the caller is left holding an uncertified point that the
+        # spatial path would often have proven optimal (the panel: ``alan``
+        # uncertified 3.000 after 180 s vs certified 2.925 in 0.18 s). So spend
+        # the remainder of the budget on the path that certifies, seeded with
+        # whatever the route did find so the fallback can only improve on it.
+        logger.info(
+            "Convex MINLP auto-route did not certify (status=%s, gap_certified=%s) "
+            "after %.2f s; falling back to the default path with %.2f s remaining",
+            getattr(_mip_nlp_result, "status", None),
+            getattr(_mip_nlp_result, "gap_certified", None),
+            _route_elapsed,
+            _route_remaining,
+        )
+        _route_seed = _route_incumbent_seed(_pre_route_model, _mip_nlp_result)
+        if _route_seed is not None and initial_point is None:
+            initial_point = _route_seed
+        model = _pre_route_model
+        _solver = None
+        # ``time_limit`` is deliberately NOT reduced. The default path measures
+        # its own elapsed from ``_solve_t0`` (``t_start = _solve_t0``), which was
+        # taken before the route ran, and ``model._solve_deadline`` is anchored
+        # there too -- so the route's wall is already charged against the
+        # caller's budget. Subtracting it a second time double-charges: measured
+        # on ``alan`` at a 60 s limit, the fallback saw 30 s elapsed against a
+        # 29.9 s limit and returned ``time_limit`` after 1 node with no
+        # incumbent, which is the failure this whole change exists to remove.
+        _ROUTE_FALLBACK_NOTE.append(
+            f"{_auto_route_reason}; did not certify in {_route_elapsed:.2f}s "
+            f"(status={getattr(_mip_nlp_result, 'status', None)}) -> fell back to the "
+            f"default path with {_route_remaining:.2f}s"
+        )
+        # Fall through to the default spatial / NLP branch-and-bound below.
 
     # --- Surrogate (model-based) derivative-free search (no certificate) ---
     #
