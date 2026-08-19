@@ -19,7 +19,17 @@ repos:
         # errors are cross-file, so run on the whole package, not per changed file.
         files: ^python/discopt/
         pass_filenames: false
-        additional_dependencies: [numpy, scipy, jax, jaxlib]
+        # Pinned, not floating. Unpinned stub packages made CI a function of
+        # the upstream release calendar: numpy 2.5 (which needs Python 3.12)
+        # shipped a `type` statement in its stubs, and every PR went red at
+        # `numpy/__init__.pyi:737: Type statement is only supported in Python
+        # 3.12 and greater` without a line of repo code changing. Bump these
+        # deliberately, with the typecheck re-run, rather than by surprise.
+        additional_dependencies:
+          - numpy==2.5.2
+          - scipy==1.18.0
+          - jax==0.11.1
+          - jaxlib==0.11.1
         args: [python/discopt/, --ignore-missing-imports]
   - repo: local
     hooks:

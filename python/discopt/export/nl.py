@@ -26,7 +26,7 @@ from __future__ import annotations
 import io
 import math
 from pathlib import Path
-from typing import Union, cast
+from typing import Any, Union, cast
 
 import numpy as np
 
@@ -130,6 +130,17 @@ _FUNC_OPCODES: dict[str, int] = {
     "tanh": _OP_TANH,
     "abs": _OP_ABS,
 }
+
+
+def _elem(arr: np.ndarray, idx: Any) -> Expression:
+    """Read one element out of an ``object``-dtype array of expressions.
+
+    ``ndarray`` is not generic over its ``object`` payload, so numpy's stubs
+    type every element access as another array. These arrays only ever hold
+    :class:`Expression` nodes; the cast records that once instead of silencing
+    the checker at each of the five call sites.
+    """
+    return cast(Expression, arr[idx])
 
 
 class _NLWriter:
@@ -639,7 +650,7 @@ class _NLWriter:
     def _sum_axis(self, arr: np.ndarray, axis: int | None) -> np.ndarray:
         """Symbolic reduction (``+``) of an object array along ``axis``."""
         if axis is None:
-            return self._obj0(self._sum_terms([arr[idx] for idx in np.ndindex(arr.shape)]))
+            return self._obj0(self._sum_terms([_elem(arr, idx) for idx in np.ndindex(arr.shape)]))
         moved = np.moveaxis(arr, axis, 0)
         out_shape = moved.shape[1:]
         out = np.empty(out_shape, dtype=object)
@@ -685,7 +696,7 @@ class _NLWriter:
             operand = self._scalarize(expr.operand)
             out = np.empty(operand.shape, dtype=object)
             for idx in np.ndindex(operand.shape):
-                out[idx] = UnaryOp(expr.op, operand[idx])
+                out[idx] = UnaryOp(expr.op, _elem(operand, idx))
             return out
 
         if isinstance(expr, BinaryOp):
@@ -694,7 +705,7 @@ class _NLWriter:
             )
             out = np.empty(left.shape, dtype=object)
             for idx in np.ndindex(left.shape):
-                out[idx] = BinaryOp(expr.op, left[idx], right[idx])
+                out[idx] = BinaryOp(expr.op, _elem(left, idx), _elem(right, idx))
             return out
 
         if isinstance(expr, FunctionCall):
@@ -703,7 +714,7 @@ class _NLWriter:
             shape = bargs[0].shape
             out = np.empty(shape, dtype=object)
             for idx in np.ndindex(shape):
-                out[idx] = FunctionCall(expr.func_name, *[b[idx] for b in bargs])
+                out[idx] = FunctionCall(expr.func_name, *[_elem(b, idx) for b in bargs])
             return out
 
         if isinstance(expr, MatMulExpression):
@@ -718,7 +729,7 @@ class _NLWriter:
             shape = bterms[0].shape
             out = np.empty(shape, dtype=object)
             for idx in np.ndindex(shape):
-                out[idx] = self._sum_terms([b[idx] for b in bterms])
+                out[idx] = self._sum_terms([_elem(b, idx) for b in bterms])
             return out
 
         # Opaque scalar leaf (e.g. Parameter): leave intact.

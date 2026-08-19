@@ -363,8 +363,8 @@ def estimate_parameters(
     # Extract estimated parameters
     params = {}
     for name, var in em.unknown_parameters.items():
-        val = result.value(var)
-        params[name] = float(np.asarray(val).flat[0])
+        raw = np.asarray(result.value(var))
+        params[name] = float(raw.flat[0])
 
     # Compute FIM at the solution for covariance estimation. Per-response
     # replication counts come from the observed data so that repeated

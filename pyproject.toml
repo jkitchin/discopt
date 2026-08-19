@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "discopt"
 version = "0.8.1.dev0"
 description = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{name = "John Kitchin"}]
 license = {text = "EPL-2.0"}
 readme = "README.md"
@@ -23,8 +23,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Eclipse Public License 2.0 (EPL-2.0)",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering",
@@ -89,12 +87,6 @@ dev = [
     # (Also in the `gams` extra, for gamsconfig.yaml merging.)
     "pyyaml>=6",
     "pytest-xdist",
-    # `python/tests/_optima.py` -- the reference-optima oracle for every
-    # correctness suite -- needs a TOML parser, and stdlib `tomllib` is 3.11+.
-    # Without this the correctness tier is a *collection error* on the 3.10 floor
-    # that `requires-python` promises, which is how #1055 stayed invisible: no
-    # CI job runs 3.10, so nothing ever tried.
-    "tomli>=2; python_version < '3.11'",
     # Pin the lint/typecheck toolchain to the exact versions in
     # .pre-commit-config.yaml (the single source of truth CI also runs), so a
     # local `pip install -e .[dev]` cannot drift from CI.
@@ -138,14 +130,14 @@ include = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 extend-exclude = ["adversary/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
