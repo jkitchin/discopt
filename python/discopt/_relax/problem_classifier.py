@@ -365,7 +365,7 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
             raise _NotLinearError(f"variable slot {i} outside the model's {n} flat slots")
         terms[i] = terms.get(i, 0.0) + v
 
-    def _walk(node, scale=1.0, allow_array=False):
+    def _walk(root, root_scale=1.0, root_allow_array=False):
         # ``allow_array`` is True only inside a ``sum(...)`` reduction, where a
         # size>1 (sub)expression contributes a single scalar row (its element sum
         # with a *uniform* scale). Outside a sum, encountering a size>1 array node
@@ -373,133 +373,148 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
         # extractor would collapse it to one summed row (C-29), certifying an
         # infeasible point. Refuse instead so extract_lp_data() routes the body to
         # the per-component autodiff extractor (one LP row per element).
+        #
+        # **Iterative, not recursive (#1064).** A ``.nl`` body is a left-leaning
+        # ``((((a+b)+c)+d)+...)`` chain one node deep per term, so a recursive walk
+        # needs one Python frame per term and dies on ordinary corpus instances:
+        # ``sporttournament40``, ``edgecross24-057`` and 15 others raised
+        # ``RecursionError`` here, which the caller reports as "this row is not
+        # linear" -- indistinguishable from a genuinely nonlinear row. Children are
+        # pushed in reverse so they pop in source order, keeping the floating-point
+        # accumulation into ``terms``/``const`` bit-identical (CLAUDE.md §5 regime 1).
         nonlocal const
 
-        if isinstance(node, Constant):
-            val = node.value
-            if val.ndim == 0 or val.size == 1:
-                const += scale * float(val.reshape(()))
-            else:
-                raise _NotLinearError("Array constant in unexpected position")
-            return
+        stack: list[tuple[object, float, bool]] = [(root, root_scale, root_allow_array)]
+        while stack:
+            node, scale, allow_array = stack.pop()
 
-        if isinstance(node, Variable):
-            offset = _compute_var_offset(node, model)
-            if node.size == 1:
-                _add(offset, scale)
-            elif allow_array:
-                # Inside sum(): sum(scale * x) = scale * Σ x_j (uniform scale).
-                for j in range(node.size):
-                    _add(offset + j, scale)
-            else:
-                raise _NotLinearError(
-                    "Array variable in scalar position (vector-valued body); "
-                    "routing to the per-component extractor"
-                )
-            return
-
-        if isinstance(node, IndexExpression):
-            if isinstance(node.base, Variable):
-                var = node.base
-                offset = _compute_var_offset(var, model)
-                idx = node.index
-                if isinstance(idx, (int, np.integer)):
-                    _add(offset + int(idx), scale)
-                elif (
-                    isinstance(idx, tuple)
-                    and len(idx) == 1
-                    and isinstance(idx[0], (int, np.integer))
-                ):
-                    _add(offset + int(idx[0]), scale)
+            if isinstance(node, Constant):
+                val = node.value
+                if val.ndim == 0 or val.size == 1:
+                    const += scale * float(val.reshape(()))
                 else:
-                    # Multi-dimensional index: flatten
-                    try:
-                        flat_idx = np.ravel_multi_index(
-                            idx if isinstance(idx, tuple) else (idx,), var.shape
-                        )
-                    except (TypeError, ValueError):
-                        # Sliced/partial subscript (vectorized term): this scalar
-                        # extractor cannot express it; classify as not-linear.
-                        raise _NotLinearError(f"non-scalar index {idx!r} on {var.name}") from None
-                    _add(offset + int(flat_idx), scale)
-                return
-            raise _NotLinearError(f"IndexExpression on non-variable: {type(node.base)}")
+                    raise _NotLinearError("Array constant in unexpected position")
+                continue
 
-        if isinstance(node, BinaryOp):
-            if node.op == "+":
-                _walk(node.left, scale, allow_array)
-                _walk(node.right, scale, allow_array)
-                return
-            if node.op == "-":
-                _walk(node.left, scale, allow_array)
-                _walk(node.right, -scale, allow_array)
-                return
-            if node.op == "*":
-                # One side must be a scalar constant for linearity. A size>1 array
-                # constant here raises _NotLinearError from _eval_const (the scale
-                # would differ per element), which routes to the per-component
-                # extractor rather than collapsing.
-                if _is_const_expr(node.left):
-                    cval = _eval_const(node.left)
-                    _walk(node.right, scale * cval, allow_array)
-                    return
-                if _is_const_expr(node.right):
-                    cval = _eval_const(node.right)
-                    _walk(node.left, scale * cval, allow_array)
-                    return
-                raise _NotLinearError("Product of two variable expressions")
-            if node.op == "/":
-                if _is_const_expr(node.right):
-                    cval = _eval_const(node.right)
-                    _walk(node.left, scale / cval, allow_array)
-                    return
-                raise _NotLinearError("Division by variable expression")
-            raise _NotLinearError(f"Non-linear operator: {node.op}")
+            if isinstance(node, Variable):
+                offset = _compute_var_offset(node, model)
+                if node.size == 1:
+                    _add(offset, scale)
+                elif allow_array:
+                    # Inside sum(): sum(scale * x) = scale * Σ x_j (uniform scale).
+                    for j in range(node.size):
+                        _add(offset + j, scale)
+                else:
+                    raise _NotLinearError(
+                        "Array variable in scalar position (vector-valued body); "
+                        "routing to the per-component extractor"
+                    )
+                continue
 
-        if isinstance(node, UnaryOp):
-            if node.op == "neg":
-                _walk(node.operand, -scale, allow_array)
-                return
-            raise _NotLinearError(f"Non-linear unary op: {node.op}")
+            if isinstance(node, IndexExpression):
+                if isinstance(node.base, Variable):
+                    var = node.base
+                    offset = _compute_var_offset(var, model)
+                    idx = node.index
+                    if isinstance(idx, (int, np.integer)):
+                        _add(offset + int(idx), scale)
+                    elif (
+                        isinstance(idx, tuple)
+                        and len(idx) == 1
+                        and isinstance(idx[0], (int, np.integer))
+                    ):
+                        _add(offset + int(idx[0]), scale)
+                    else:
+                        # Multi-dimensional index: flatten
+                        try:
+                            flat_idx = np.ravel_multi_index(
+                                idx if isinstance(idx, tuple) else (idx,), var.shape
+                            )
+                        except (TypeError, ValueError):
+                            # Sliced/partial subscript (vectorized term): this scalar
+                            # extractor cannot express it; classify as not-linear.
+                            raise _NotLinearError(
+                                f"non-scalar index {idx!r} on {var.name}"
+                            ) from None
+                        _add(offset + int(flat_idx), scale)
+                    continue
+                raise _NotLinearError(f"IndexExpression on non-variable: {type(node.base)}")
 
-        if isinstance(node, SumOverExpression):
-            for term in node.terms:
-                _walk(term, scale, allow_array)
-            return
+            if isinstance(node, BinaryOp):
+                if node.op == "+":
+                    stack.append((node.right, scale, allow_array))
+                    stack.append((node.left, scale, allow_array))
+                    continue
+                if node.op == "-":
+                    stack.append((node.right, -scale, allow_array))
+                    stack.append((node.left, scale, allow_array))
+                    continue
+                if node.op == "*":
+                    # One side must be a scalar constant for linearity. A size>1 array
+                    # constant here raises _NotLinearError from _eval_const (the scale
+                    # would differ per element), which routes to the per-component
+                    # extractor rather than collapsing.
+                    if _is_const_expr(node.left):
+                        cval = _eval_const(node.left)
+                        stack.append((node.right, scale * cval, allow_array))
+                        continue
+                    if _is_const_expr(node.right):
+                        cval = _eval_const(node.right)
+                        stack.append((node.left, scale * cval, allow_array))
+                        continue
+                    raise _NotLinearError("Product of two variable expressions")
+                if node.op == "/":
+                    if _is_const_expr(node.right):
+                        cval = _eval_const(node.right)
+                        stack.append((node.left, scale / cval, allow_array))
+                        continue
+                    raise _NotLinearError("Division by variable expression")
+                raise _NotLinearError(f"Non-linear operator: {node.op}")
 
-        if isinstance(node, SumExpression):
-            # sum(expr) reduces expr to a scalar: element-collapse is legitimate
-            # here (uniform scale), so allow array nodes beneath this point.
-            _walk(node.operand, scale, allow_array=True)
-            return
+            if isinstance(node, UnaryOp):
+                if node.op == "neg":
+                    stack.append((node.operand, -scale, allow_array))
+                    continue
+                raise _NotLinearError(f"Non-linear unary op: {node.op}")
 
-        if isinstance(node, MatMulExpression):
-            # Handle Constant @ Variable or Variable @ Constant
-            if isinstance(node.left, Constant) and isinstance(node.right, Variable):
-                mat = node.left.value
-                var = node.right
-                offset = _compute_var_offset(var, model)
-                # mat @ var => result is mat @ x[offset:offset+size]
-                # For 1-D mat (dot product), coefficients are mat elements
-                if mat.ndim == 1:
-                    for j in range(var.size):
-                        _add(offset + j, scale * float(mat[j]))
-                elif mat.ndim == 2:
-                    # Returns vector; this should be used inside a sum
+            if isinstance(node, SumOverExpression):
+                for term in reversed(node.terms):
+                    stack.append((term, scale, allow_array))
+                continue
+
+            if isinstance(node, SumExpression):
+                # sum(expr) reduces expr to a scalar: element-collapse is legitimate
+                # here (uniform scale), so allow array nodes beneath this point.
+                stack.append((node.operand, scale, True))
+                continue
+
+            if isinstance(node, MatMulExpression):
+                # Handle Constant @ Variable or Variable @ Constant
+                if isinstance(node.left, Constant) and isinstance(node.right, Variable):
+                    mat = node.left.value
+                    var = node.right
+                    offset = _compute_var_offset(var, model)
+                    # mat @ var => result is mat @ x[offset:offset+size]
+                    # For 1-D mat (dot product), coefficients are mat elements
+                    if mat.ndim == 1:
+                        for j in range(var.size):
+                            _add(offset + j, scale * float(mat[j]))
+                    elif mat.ndim == 2:
+                        # Returns vector; this should be used inside a sum
+                        raise _NotLinearError("MatMul returning vector in scalar context")
+                    continue
+                if isinstance(node.right, Constant) and isinstance(node.left, Variable):
+                    mat = node.right.value
+                    var = node.left
+                    offset = _compute_var_offset(var, model)
+                    if mat.ndim == 1:
+                        for j in range(var.size):
+                            _add(offset + j, scale * float(mat[j]))
+                        continue
                     raise _NotLinearError("MatMul returning vector in scalar context")
-                return
-            if isinstance(node.right, Constant) and isinstance(node.left, Variable):
-                mat = node.right.value
-                var = node.left
-                offset = _compute_var_offset(var, model)
-                if mat.ndim == 1:
-                    for j in range(var.size):
-                        _add(offset + j, scale * float(mat[j]))
-                    return
-                raise _NotLinearError("MatMul returning vector in scalar context")
-            raise _NotLinearError("MatMul between non-trivial expressions")
+                raise _NotLinearError("MatMul between non-trivial expressions")
 
-        raise _NotLinearError(f"Unhandled expression type: {type(node).__name__}")
+            raise _NotLinearError(f"Unhandled expression type: {type(node).__name__}")
 
     _walk(expr)
     return terms, const
@@ -608,154 +623,174 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
             return resolve_scalar_slot(node, model)
         return None
 
-    def _walk(node, scale=1.0, allow_array=False):
+    def _walk(root, root_scale=1.0, root_allow_array=False):
         # See _extract_linear_coefficients._walk: ``allow_array`` is True only
         # inside a sum() reduction, where a size>1 array variable legitimately
         # collapses to a single scalar term. Outside a sum, an array variable in
         # scalar position means a vector-valued body that must NOT be collapsed to
         # one row (C-29) — refuse so the caller routes to the autodiff extractor.
+        #
+        # **Iterative, not recursive (#1064).** A ``.nl`` objective is a
+        # left-leaning ``((((a+b)+c)+d)+...)`` chain one node deep per term, so a
+        # recursive walk needs one Python frame per term and dies on the ordinary
+        # case: ``squfl025-040`` (1000 terms) and ``squfl015-080`` (1200) both
+        # raised ``RecursionError`` here, which ``_extract_quadratic_coefficients``
+        # reports as "not quadratic". A genuinely convex separable MIQP therefore
+        # failed to be *recognised* as one — no Hessian, no convex route, no
+        # perspective structure — purely because its objective was long. The work
+        # stack removes the depth limit; nothing else about the walk changes.
+        #
+        # Children are pushed in reverse so they pop in source order: the
+        # accumulations into ``c``/``const``/``q_terms`` are floating-point sums,
+        # and reordering them would perturb the last ulp of every extracted
+        # coefficient — a bound-neutral change under CLAUDE.md §5 regime 1 must be
+        # bit-identical, so the order is preserved deliberately.
         nonlocal const
 
-        if isinstance(node, Constant):
-            val = node.value
-            if val.ndim == 0 or val.size == 1:
-                const += scale * float(val.reshape(()))
-            else:
-                raise _NotQuadraticError("Array constant in unexpected position")
-            return
+        stack: list[tuple[object, float, bool]] = [(root, root_scale, root_allow_array)]
+        while stack:
+            node, scale, allow_array = stack.pop()
 
-        if isinstance(node, (Variable, IndexExpression)):
-            idx = _get_var_index(node)
-            if idx is not None:
-                c[idx] += scale
-                return
-            if isinstance(node, Variable) and node.size > 1:
-                if not allow_array:
-                    raise _NotQuadraticError(
-                        "Array variable in scalar position (vector-valued body); "
-                        "routing to the per-component extractor"
-                    )
-                offset = _compute_var_offset(node, model)
-                for j in range(node.size):
-                    c[offset + j] += scale
-                return
-            raise _NotQuadraticError(f"Cannot extract index from {node}")
+            if isinstance(node, Constant):
+                val = node.value
+                if val.ndim == 0 or val.size == 1:
+                    const += scale * float(val.reshape(()))
+                else:
+                    raise _NotQuadraticError("Array constant in unexpected position")
+                continue
 
-        if isinstance(node, BinaryOp):
-            if node.op == "+":
-                _walk(node.left, scale, allow_array)
-                _walk(node.right, scale, allow_array)
-                return
-            if node.op == "-":
-                _walk(node.left, scale, allow_array)
-                _walk(node.right, -scale, allow_array)
-                return
-            if node.op == "*":
-                # Check: const * expr, expr * const, or var * var
-                if _is_const_expr(node.left):
-                    cval = _eval_const(node.left)
-                    _walk(node.right, scale * cval, allow_array)
-                    return
-                if _is_const_expr(node.right):
-                    cval = _eval_const(node.right)
-                    _walk(node.left, scale * cval, allow_array)
-                    return
-                # var * var => quadratic term
-                # Q is the Hessian: f = 0.5 x'Qx, so d²(c*xi*xj)/dxi dxj = c,
-                # but d²(c*xi²)/dxi² = 2c. We store the Hessian directly.
-                idx_l = _get_var_index(node.left)
-                idx_r = _get_var_index(node.right)
-                if idx_l is not None and idx_r is not None:
-                    if idx_l == idx_r:
-                        _qadd(idx_l, idx_r, 2.0 * scale)
-                    else:
-                        _qadd(idx_l, idx_r, scale)
-                        _qadd(idx_r, idx_l, scale)
-                    return
-                # Handle (const * var) * var or var * (const * var):
-                # e.g., (Q[i,j] * x[i]) * x[j] from left-to-right evaluation
-                cv_l = _try_extract_const_var(node.left, model)
-                if cv_l is not None and idx_r is not None:
-                    cval, idx_l2 = cv_l
-                    if idx_l2 == idx_r:
-                        _qadd(idx_l2, idx_r, 2.0 * scale * cval)
-                    else:
-                        _qadd(idx_l2, idx_r, scale * cval)
-                        _qadd(idx_r, idx_l2, scale * cval)
-                    return
-                cv_r = _try_extract_const_var(node.right, model)
-                if cv_r is not None and idx_l is not None:
-                    cval, idx_r2 = cv_r
-                    if idx_l == idx_r2:
-                        _qadd(idx_l, idx_r2, 2.0 * scale * cval)
-                    else:
-                        _qadd(idx_l, idx_r2, scale * cval)
-                        _qadd(idx_r2, idx_l, scale * cval)
-                    return
-                raise _NotQuadraticError("Product of non-simple variable expressions")
-            if node.op == "/":
-                if _is_const_expr(node.right):
-                    cval = _eval_const(node.right)
-                    _walk(node.left, scale / cval, allow_array)
-                    return
-                raise _NotQuadraticError("Division by variable expression")
-            if node.op == "**":
-                # x**2 => quadratic
-                if _is_const_expr(node.right):
-                    pval = _eval_const(node.right)
-                    if abs(pval - 2.0) < 1e-12:
-                        idx = _get_var_index(node.left)
-                        if idx is not None:
-                            _qadd(idx, idx, 2.0 * scale)  # x^2 = 0.5 * 2 * x^2
-                            return
-                    if abs(pval - 1.0) < 1e-12:
-                        _walk(node.left, scale, allow_array)
-                        return
-                    if abs(pval) < 1e-12:
-                        const += scale
-                        return
-                raise _NotQuadraticError(f"Power with exponent {node.right}")
-            raise _NotQuadraticError(f"Unknown binary op: {node.op}")
+            if isinstance(node, (Variable, IndexExpression)):
+                idx = _get_var_index(node)
+                if idx is not None:
+                    c[idx] += scale
+                    continue
+                if isinstance(node, Variable) and node.size > 1:
+                    if not allow_array:
+                        raise _NotQuadraticError(
+                            "Array variable in scalar position (vector-valued body); "
+                            "routing to the per-component extractor"
+                        )
+                    offset = _compute_var_offset(node, model)
+                    for j in range(node.size):
+                        c[offset + j] += scale
+                    continue
+                raise _NotQuadraticError(f"Cannot extract index from {node}")
 
-        if isinstance(node, UnaryOp):
-            if node.op == "neg":
-                _walk(node.operand, -scale, allow_array)
-                return
-            raise _NotQuadraticError(f"Non-linear unary op: {node.op}")
+            if isinstance(node, BinaryOp):
+                if node.op == "+":
+                    stack.append((node.right, scale, allow_array))
+                    stack.append((node.left, scale, allow_array))
+                    continue
+                if node.op == "-":
+                    stack.append((node.right, -scale, allow_array))
+                    stack.append((node.left, scale, allow_array))
+                    continue
+                if node.op == "*":
+                    # Check: const * expr, expr * const, or var * var
+                    if _is_const_expr(node.left):
+                        cval = _eval_const(node.left)
+                        stack.append((node.right, scale * cval, allow_array))
+                        continue
+                    if _is_const_expr(node.right):
+                        cval = _eval_const(node.right)
+                        stack.append((node.left, scale * cval, allow_array))
+                        continue
+                    # var * var => quadratic term
+                    # Q is the Hessian: f = 0.5 x'Qx, so d²(c*xi*xj)/dxi dxj = c,
+                    # but d²(c*xi²)/dxi² = 2c. We store the Hessian directly.
+                    idx_l = _get_var_index(node.left)
+                    idx_r = _get_var_index(node.right)
+                    if idx_l is not None and idx_r is not None:
+                        if idx_l == idx_r:
+                            _qadd(idx_l, idx_r, 2.0 * scale)
+                        else:
+                            _qadd(idx_l, idx_r, scale)
+                            _qadd(idx_r, idx_l, scale)
+                        continue
+                    # Handle (const * var) * var or var * (const * var):
+                    # e.g., (Q[i,j] * x[i]) * x[j] from left-to-right evaluation
+                    cv_l = _try_extract_const_var(node.left, model)
+                    if cv_l is not None and idx_r is not None:
+                        cval, idx_l2 = cv_l
+                        if idx_l2 == idx_r:
+                            _qadd(idx_l2, idx_r, 2.0 * scale * cval)
+                        else:
+                            _qadd(idx_l2, idx_r, scale * cval)
+                            _qadd(idx_r, idx_l2, scale * cval)
+                        continue
+                    cv_r = _try_extract_const_var(node.right, model)
+                    if cv_r is not None and idx_l is not None:
+                        cval, idx_r2 = cv_r
+                        if idx_l == idx_r2:
+                            _qadd(idx_l, idx_r2, 2.0 * scale * cval)
+                        else:
+                            _qadd(idx_l, idx_r2, scale * cval)
+                            _qadd(idx_r2, idx_l, scale * cval)
+                        continue
+                    raise _NotQuadraticError("Product of non-simple variable expressions")
+                if node.op == "/":
+                    if _is_const_expr(node.right):
+                        cval = _eval_const(node.right)
+                        stack.append((node.left, scale / cval, allow_array))
+                        continue
+                    raise _NotQuadraticError("Division by variable expression")
+                if node.op == "**":
+                    # x**2 => quadratic
+                    if _is_const_expr(node.right):
+                        pval = _eval_const(node.right)
+                        if abs(pval - 2.0) < 1e-12:
+                            idx = _get_var_index(node.left)
+                            if idx is not None:
+                                _qadd(idx, idx, 2.0 * scale)  # x^2 = 0.5 * 2 * x^2
+                                continue
+                        if abs(pval - 1.0) < 1e-12:
+                            stack.append((node.left, scale, allow_array))
+                            continue
+                        if abs(pval) < 1e-12:
+                            const += scale
+                            continue
+                    raise _NotQuadraticError(f"Power with exponent {node.right}")
+                raise _NotQuadraticError(f"Unknown binary op: {node.op}")
 
-        if isinstance(node, SumOverExpression):
-            for term in node.terms:
-                _walk(term, scale, allow_array)
-            return
+            if isinstance(node, UnaryOp):
+                if node.op == "neg":
+                    stack.append((node.operand, -scale, allow_array))
+                    continue
+                raise _NotQuadraticError(f"Non-linear unary op: {node.op}")
 
-        if isinstance(node, SumExpression):
-            # sum(expr) reduces to a scalar: array collapse legitimate below here.
-            _walk(node.operand, scale, allow_array=True)
-            return
+            if isinstance(node, SumOverExpression):
+                for term in reversed(node.terms):
+                    stack.append((term, scale, allow_array))
+                continue
 
-        if isinstance(node, MatMulExpression):
-            # Handle Constant @ Variable for linear parts of QP constraints
-            if isinstance(node.left, Constant) and isinstance(node.right, Variable):
-                mat = node.left.value
-                var = node.right
-                offset = _compute_var_offset(var, model)
-                if mat.ndim == 1:
-                    for j in range(var.size):
-                        c[offset + j] += scale * float(mat[j])
-                    return
-                raise _NotQuadraticError("MatMul returning vector")
-            if isinstance(node.right, Constant) and isinstance(node.left, Variable):
-                mat = node.right.value
-                var = node.left
-                offset = _compute_var_offset(var, model)
-                if mat.ndim == 1:
-                    for j in range(var.size):
-                        c[offset + j] += scale * float(mat[j])
-                    return
-                raise _NotQuadraticError("MatMul returning vector")
-            raise _NotQuadraticError("MatMul between non-trivial expressions")
+            if isinstance(node, SumExpression):
+                # sum(expr) reduces to a scalar: array collapse legitimate below here.
+                stack.append((node.operand, scale, True))
+                continue
 
-        raise _NotQuadraticError(f"Unhandled expression type: {type(node).__name__}")
+            if isinstance(node, MatMulExpression):
+                # Handle Constant @ Variable for linear parts of QP constraints
+                if isinstance(node.left, Constant) and isinstance(node.right, Variable):
+                    mat = node.left.value
+                    var = node.right
+                    offset = _compute_var_offset(var, model)
+                    if mat.ndim == 1:
+                        for j in range(var.size):
+                            c[offset + j] += scale * float(mat[j])
+                        continue
+                    raise _NotQuadraticError("MatMul returning vector")
+                if isinstance(node.right, Constant) and isinstance(node.left, Variable):
+                    mat = node.right.value
+                    var = node.left
+                    offset = _compute_var_offset(var, model)
+                    if mat.ndim == 1:
+                        for j in range(var.size):
+                            c[offset + j] += scale * float(mat[j])
+                        continue
+                    raise _NotQuadraticError("MatMul returning vector")
+                raise _NotQuadraticError("MatMul between non-trivial expressions")
+
+            raise _NotQuadraticError(f"Unhandled expression type: {type(node).__name__}")
 
     _walk(expr)
     return q_terms, c, const
