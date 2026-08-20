@@ -1223,6 +1223,17 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
     # back the tape evaluator (default-ON since #75) and only falls back to JAX
     # when the model is not tape-representable.
     evaluator = make_evaluator(model)
+    # #1064: the perspective strengthening of the objective epigraph cut needs
+    # the model's ``q*x**2``-over-semicontinuous-``x`` structure, which is a
+    # property of the model and not of any node, so it is read once here and
+    # carried on the evaluator -- ``_add_oa_cuts`` is reached from a dozen call
+    # sites and receives the evaluator but not the model. ``_BoundsProxy``
+    # forwards unknown attributes to the evaluator it wraps, so a bounds-scoped
+    # copy sees the same table. See ``_relax.perspective.perspective_objective_terms``.
+    if _perspective_oa_terms_enabled():
+        from discopt._relax.perspective import perspective_objective_terms
+
+        evaluator._perspective_oa_terms = perspective_objective_terms(model)
     oa_convexity = classify_oa_cut_convexity(model)
     n_vars = evaluator.n_variables
     n_cons = evaluator.n_constraints
@@ -2198,6 +2209,53 @@ def _append_master_cut(
         )
 
 
+#: #1064 §6 telemetry: how many perspective strengthenings were actually
+#: applied to objective epigraph rows this process. A panel arm that reports
+#: zero here measured the control twice, whatever the flag said.
+_PERSPECTIVE_OA_CUT_APPLIED: list[int] = [0]
+
+
+def _perspective_oa_terms_enabled() -> bool:
+    """Thin re-export so ``oa.py`` does not import ``solver.py`` (cycle)."""
+    from discopt._relax.perspective import perspective_oa_cut_enabled
+
+    return perspective_oa_cut_enabled()
+
+
+def _strengthen_objective_cut_perspective(coeffs, rhs, x_star, n_vars, terms):
+    """Perspective-strengthen an OA objective epigraph row in place-safe form.
+
+    ``coeffs``/``rhs`` are the row ``grad^T x - eta <= rhs``. For each
+    ``(x_col, y_col, q)`` whose ``x`` is semicontinuous with indicator ``y``,
+    the tangent's own constant ``-q*xbar**2`` is replaced by ``-q*xbar**2 * y``:
+    subtract ``q*xbar**2`` from the ``y`` coefficient and from ``rhs``. At
+    ``y = 1`` the two cancel and the row is unchanged; at ``y = 0``
+    semicontinuity forces ``x = 0`` and the row correctly reads ``eta >= 0``
+    instead of the tangent's slack ``eta >= -q*xbar**2``.
+
+    Returns ``(coeffs, rhs, n_applied)``. ``n_applied`` is the CLAUDE.md §6
+    executed count: a silent zero here is a strengthening that never happened,
+    which is exactly how a no-op reads as a pass.
+    """
+    applied = 0
+    for x_col, y_col, q in terms:
+        if not (0 <= x_col < n_vars and 0 <= y_col < n_vars):
+            # The master row is laid out over the model's flat columns; an index
+            # past them means the two layouts disagree and the shift would land
+            # on the wrong variable. Refuse the term rather than guess.
+            continue
+        xbar = float(x_star[x_col])
+        if not np.isfinite(xbar):
+            continue
+        shift = q * xbar * xbar
+        if not np.isfinite(shift) or shift <= 0.0:
+            continue  # xbar == 0: the tangent is already the perspective cut
+        coeffs[y_col] -= shift
+        rhs -= shift
+        applied += 1
+    return coeffs, rhs, applied
+
+
 def _add_oa_cuts(
     evaluator,
     x_star,
@@ -2316,11 +2374,24 @@ def _add_oa_cuts(
         obj_value = float(evaluator.evaluate_objective(x_star))
         obj_support = np.concatenate([np.asarray(x_star, dtype=np.float64), [obj_value]])
         obj_cut = generate_objective_oa_cut(evaluator, x_star, n_master, z_index=n_vars)
+        obj_coeffs_row = obj_cut.coeffs.copy()
+        obj_rhs = float(obj_cut.rhs)
+        # #1064: strengthen the aggregate tangent with the perspective of every
+        # separable convex square over a semicontinuous variable. Globally valid
+        # (see ``_relax.perspective``), so ``global_valid=True`` below is
+        # unchanged, and a no-op when the model has no such structure.
+        _persp_terms = getattr(evaluator, "_perspective_oa_terms", None)
+        if _persp_terms:
+            obj_coeffs_row, obj_rhs, _n_persp = _strengthen_objective_cut_perspective(
+                obj_coeffs_row, obj_rhs, x_star, n_vars, _persp_terms
+            )
+            if _n_persp:
+                _PERSPECTIVE_OA_CUT_APPLIED[0] += _n_persp
         _append_master_cut(
             oa_A_rows,
             oa_b_rows,
-            obj_cut.coeffs.copy(),
-            obj_cut.rhs,
+            obj_coeffs_row,
+            obj_rhs,
             oa_cut_relaxable,
             relaxable=False,
             cut_provenance=cut_provenance,
