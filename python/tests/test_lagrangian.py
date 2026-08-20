@@ -86,16 +86,30 @@ def test_unknown_method_raises():
         solve_lagrangian(_knapsack(), method="nope", time_limit=10)
 
 
-def test_multidim_index_rejected_cleanly():
-    """A 2-D indexed model raises a clean NotImplementedError, not a stray error."""
-    m = dm.Model("twod")
-    x = m.binary("x", shape=(2, 3))
-    m.minimize(sum(x[k, i] for k in range(2) for i in range(3)))
-    c = sum(x[0, i] for i in range(3)) >= 1
-    m.subject_to(c)
-    m.mark_coupling(c)
-    with pytest.raises(NotImplementedError):
-        solve_lagrangian(m, time_limit=10)
+def test_multidim_index_is_supported():
+    """A 2-D indexed model relaxes correctly; the old refusal was a crash.
+
+    See ``test_benders.test_multidim_index_is_supported`` for the full story:
+    ``_extract_body_coeffs`` used to raise ``TypeError`` on a tuple index and
+    ``_linear.extract_linear`` turned that into "unsupported". Asymmetric costs
+    so a wrong-column extraction cannot pass.
+    """
+    costs = [[1.0, 5.0, 9.0], [2.0, 6.0, 7.0]]
+
+    def build():
+        m = dm.Model("twod")
+        x = m.binary("x", shape=(2, 3))
+        m.minimize(sum(costs[k][i] * x[k, i] for k in range(2) for i in range(3)))
+        c = x[0, 2] + x[1, 1] >= 1
+        m.subject_to(c)
+        m.mark_coupling(c)
+        return m
+
+    mono = build().solve(time_limit=30)
+    r = solve_lagrangian(build(), time_limit=30)
+    assert mono.objective == pytest.approx(6.0, abs=1e-3)
+    assert r.objective == pytest.approx(mono.objective, abs=1e-3)
+    assert r.bound is None or r.bound <= r.objective + 1e-3
 
 
 def test_recovered_primal_is_feasible():

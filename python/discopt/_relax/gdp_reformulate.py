@@ -418,6 +418,7 @@ def _extract_body_coeffs(
     Returns (c_vec, offset) where body(x) = c_vec @ x + offset,
     or None if the expression is nonlinear.
     """
+    from discopt._flat_index import resolve_scalar_slot
     from discopt.modeling.core import (
         BinaryOp,
         Constant,
@@ -428,31 +429,21 @@ def _extract_body_coeffs(
         UnaryOp,
     )
 
-    def _var_offset(var: Variable) -> int:
-        off = 0
-        for v in model._variables:
-            if v is var or v.name == var.name:
-                return off
-            off += v.size
-        return off
-
     def _extract(e) -> tuple[dict, float] | None:
         if isinstance(e, Constant):
             return {}, float(np.sum(e.value))
         if isinstance(e, Parameter):
             return {}, float(np.sum(e.value))
-        if isinstance(e, Variable):
-            off = _var_offset(e)
-            if e.size == 1:
-                return {off: 1.0}, 0.0
-            return None
-        if isinstance(e, IndexExpression):
-            base = e.base
-            if isinstance(base, Variable):
-                idx = e.index if isinstance(e.index, int) else int(e.index)
-                off = _var_offset(base) + idx
-                return {off: 1.0}, 0.0
-            return None
+        if isinstance(e, (Variable, IndexExpression)):
+            # #941's single source of truth, which this layer was open-coding.
+            # The hand-rolled version did ``int(e.index)``, which raises
+            # TypeError on the tuple index of a 2-D variable -- crashing the
+            # whole reformulation instead of declining one row -- and took a
+            # negative index literally, returning an in-range slot belonging to
+            # a *different* variable. ``None`` means "not one scalar slot" and
+            # every caller below already falls back conservatively on it.
+            slot = resolve_scalar_slot(e, model)
+            return None if slot is None else ({slot: 1.0}, 0.0)
         if isinstance(e, UnaryOp) and e.op == "neg":
             inner = _extract(e.operand)
             if inner is None:

@@ -34,7 +34,7 @@ import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
-from discopt.solvers._gap import optimality_gap
+from discopt.solvers._gap import bound_inversion_tolerance, optimality_gap
 from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
@@ -3684,6 +3684,49 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
     return result
 
 
+#: Consecutive OA iterations with **no** movement in either bound after which the
+#: cut loop is abandoned as non-converging.
+#:
+#: OA's existing ``stalling_limit`` watches only the incumbent and defaults to
+#: ``None`` (off), so a run whose master bound never moves had no exit at all and
+#: spun until its time limit. Measured on ``alan`` (MINLPLib) with a 30 s budget::
+#:
+#:     OA iter    0: LB=0.000000 UB=3.000000 gap=100.0000% cuts=18
+#:     OA iter    1: LB=0.000000 UB=3.000000 gap=100.0000% cuts=27
+#:     ...  ~7500 iterations, +9 cuts each, neither bound ever moving
+#:
+#: The whole budget bought nothing: the caller's fallback then reproduced the
+#: default path's answer exactly (same objective, same bound, 21 nodes) having
+#: paid 30 s for the privilege.
+#:
+#: Aborting cannot weaken the reported bound -- by construction the bound has not
+#: moved for ``_OA_NO_PROGRESS_ITERATIONS`` iterations, so the value returned is
+#: the one the loop would still be holding. It only stops paying for cuts that
+#: demonstrably change nothing. Deliberately generous: a genuine OA run plateaus
+#: for a few iterations before a cut binds (``fac2`` sits at LB=2.6e8 for two
+#: iterations, then jumps to the optimum on the third).
+_OA_NO_PROGRESS_ITERATIONS = 50
+
+
+def _bounds_moved(
+    before: tuple[Optional[float], Optional[float]],
+    after: tuple[Optional[float], Optional[float]],
+) -> bool:
+    """Did either OA bound move by more than floating-point noise?
+
+    Scale-relative so a 1-ulp wobble at ``|obj| ~ 1e8`` does not read as
+    progress and reset the no-progress counter forever, which would make
+    :data:`_OA_NO_PROGRESS_ITERATIONS` unreachable on exactly the large-objective
+    models where a stalled loop is most expensive.
+    """
+    for old_value, new_value in zip(before, after):
+        if old_value is None or new_value is None:
+            return True
+        if abs(float(new_value) - float(old_value)) > 1e-9 * max(1.0, abs(float(old_value))):
+            return True
+    return False
+
+
 def _compute_gap(lb: float, ub: float) -> float:
     """OA's optimality gap — see :mod:`discopt.solvers._gap` for the semantics.
 
@@ -5014,6 +5057,11 @@ def solve_oa(
     # unsound no-good cut.
     unresolved_int_configs: set[tuple[int, ...]] = set()
     incumbent_progress: list[float] = []
+    # ``_OA_NO_PROGRESS_ITERATIONS`` bookkeeping: the (LB, UB) pair as of the end
+    # of the previous iteration, and how many consecutive iterations have left it
+    # untouched.
+    _last_progress_bounds: Optional[tuple[Optional[float], Optional[float]]] = None
+    no_progress_iterations = 0
     termination_reason = None
     incumbent_derivative_data: Optional[_DerivativeRegularizationData] = None
 
@@ -5151,6 +5199,33 @@ def solve_oa(
     def _certified_gap_converged() -> bool:
         gap_value = _certified_gap_value()
         return bool(gap_value is not None and gap_value <= gap_tolerance)
+
+    def _certified_bound_inverted() -> bool:
+        """Has the certified lower bound risen *above* the incumbent?
+
+        A dual bound past the incumbent is a broken certificate: one of the two
+        is wrong and OA cannot tell which, so neither may be reported as proved.
+        :func:`optimality_gap` already refuses to call this converged -- it
+        returns ``1.0``, documented as "nothing proved ... let the caller's
+        certification logic decline" -- but the caller did not decline: the
+        finalizer stamped ``gap_certified=bool(reported_gap is not None)``, and
+        ``1.0`` is not ``None``, so an inverted bound shipped as a certificate.
+
+        Measured on ``fac2`` (MINLPLib, optimum 331837498.2) at a 30 s limit::
+
+            OA iter 23: LB=331845337.439688 UB=331845161.424879 gap=100.0000%
+
+        The run returned ``bound=331845337.44`` with ``gap_certified=True`` --
+        a lower bound 7839 above the true optimum and 176 above its own
+        incumbent, violating the ``bound <= incumbent`` invariant. The
+        inversion threshold is :func:`bound_inversion_tolerance`, shared with
+        AMP and the LOA path so all three agree on what counts as rounding
+        rather than a real crossing.
+        """
+        lb, ub = _trace_value(certified_LB), _trace_value(UB)
+        if lb is None or ub is None:
+            return False
+        return float(lb) - float(ub) > bound_inversion_tolerance(float(lb), float(ub))
 
     def _cut_source_delta(before: dict[str, int]) -> dict[str, int]:
         after = cut_provenance.source_counts()
@@ -5398,7 +5473,9 @@ def solve_oa(
         final_heuristic_lb = _trace_value(heuristic_LB)
         final_ub = _trace_value(UB)
         has_unresolved = bool(unresolved_int_configs)
-        bound_valid = bool(final_lb is not None and not has_unresolved)
+        bound_valid = bool(
+            final_lb is not None and not has_unresolved and not _certified_bound_inverted()
+        )
         final_gap = (
             _trace_value(_compute_gap(certified_LB, UB))
             if bound_valid and final_ub is not None
@@ -7228,6 +7305,36 @@ def solve_oa(
             if stop_after_master_pool:
                 break
 
+            # Neither bound moved this iteration. Cuts are still being added, so
+            # if that holds for long enough the master is not being changed in
+            # any way that matters and the remaining budget is better spent by
+            # the caller. See ``_OA_NO_PROGRESS_ITERATIONS``.
+            _lb_now, _ub_now = _trace_value(LB), _trace_value(UB)
+            if (
+                _last_progress_bounds is not None
+                and _lb_now is not None
+                and _ub_now is not None
+                and _last_progress_bounds[0] is not None
+                and _last_progress_bounds[1] is not None
+                and not _bounds_moved(_last_progress_bounds, (_lb_now, _ub_now))
+            ):
+                no_progress_iterations += 1
+            else:
+                no_progress_iterations = 0
+            _last_progress_bounds = (_lb_now, _ub_now)
+            if no_progress_iterations >= _OA_NO_PROGRESS_ITERATIONS:
+                logger.info(
+                    "OA: no bound movement in %d consecutive iterations "
+                    "(LB=%s UB=%s, %d cuts); abandoning the cut loop",
+                    no_progress_iterations,
+                    _lb_now,
+                    _ub_now,
+                    len(oa_A_rows),
+                )
+                termination_reason = "stalling"
+                stop_after_master_pool = True
+                break
+
             if incumbent_obj is not None:
                 incumbent_progress.append(float(UB))
                 if stalling_limit is not None and len(incumbent_progress) >= stalling_limit:
@@ -7287,6 +7394,22 @@ def solve_oa(
     certified_gap = _certified_gap_value()
     bound = certified_LB if _trace_value(certified_LB) is not None else None
     reported_gap = certified_gap if bound is not None and UB < 1e19 else None
+
+    # The dual bound crossed the incumbent. Report *nothing* proved rather than
+    # a bound we know to be wrong: suppressing only the gap would still hand the
+    # caller `bound > objective`, and the #1059 route then propagated exactly
+    # that into the user's SolveResult. See ``_certified_bound_inverted``.
+    if _certified_bound_inverted():
+        logger.warning(
+            "OA: certified lower bound %s is above the incumbent %s by more "
+            "than rounding -- one of the two is wrong, so neither the bound nor "
+            "the gap is reported as certified. This is a bound-validity defect "
+            "worth investigating, not a tolerance to widen.",
+            _trace_value(certified_LB),
+            _trace_value(UB),
+        )
+        bound = None
+        reported_gap = None
     final_reason = termination_reason
     if final_reason is None:
         if wall_time >= time_limit:

@@ -17,14 +17,15 @@ Two mechanisms, tested separately:
   ``SolveResult.algorithm_route``.
 """
 
+import logging
 from pathlib import Path
 
-import numpy as np
 import pytest
-from discopt.modeling.core import Model, from_nl
+from discopt.modeling.core import Model, SolveResult, from_nl
 from discopt.solver import (
     _CONVEX_ROUTE_BUDGET_FRACTION,
-    _route_incumbent_seed,
+    _merge_route_and_fallback,
+    _route_is_better,
     _route_result_is_certified,
 )
 
@@ -42,13 +43,17 @@ def _load(name: str) -> Model:
     return m
 
 
+GAP_TOL = 1e-4
+
+
 class _Res:
     """Minimal stand-in with just the fields the predicate reads."""
 
-    def __init__(self, status=None, gap_certified=False, x=None):
+    def __init__(self, status=None, gap_certified=False, x=None, gap=0.0):
         self.status = status
         self.gap_certified = gap_certified
         self.x = x
+        self.gap = gap
 
 
 @pytest.mark.unit
@@ -56,44 +61,194 @@ class TestCertifiedPredicate:
     """``feasible`` with no bound is the failure the fallback exists for."""
 
     def test_certified_result_is_certified(self):
-        assert _route_result_is_certified(_Res("optimal", gap_certified=True)) is True
+        assert _route_result_is_certified(_Res("optimal", gap_certified=True), GAP_TOL) is True
 
     def test_feasible_without_a_certificate_is_not(self):
-        assert _route_result_is_certified(_Res("feasible", gap_certified=False)) is False
+        assert _route_result_is_certified(_Res("feasible", gap_certified=False), GAP_TOL) is False
 
     def test_optimal_without_gap_certified_is_not(self):
         """``optimal`` is a claim; ``gap_certified`` is the proof. Trust the proof."""
-        assert _route_result_is_certified(_Res("optimal", gap_certified=False)) is False
+        assert _route_result_is_certified(_Res("optimal", gap_certified=False), GAP_TOL) is False
 
     def test_infeasible_is_a_certificate(self):
-        assert _route_result_is_certified(_Res("infeasible")) is True
+        assert _route_result_is_certified(_Res("infeasible"), GAP_TOL) is True
 
     def test_unbounded_is_a_certificate(self):
-        assert _route_result_is_certified(_Res("unbounded")) is True
+        assert _route_result_is_certified(_Res("unbounded"), GAP_TOL) is True
 
     def test_none_is_not(self):
-        assert _route_result_is_certified(None) is False
+        assert _route_result_is_certified(None, GAP_TOL) is False
+
+    def test_a_valid_but_wide_gap_is_not_finished(self):
+        """The #1059 defect: ``gap_certified`` means *valid*, not *closed*.
+
+        Measured on ``syn40m`` at ``time_limit=60`` with the route on: OA came
+        back ``status="feasible"``, ``gap_certified=True``, ``gap=0.808``,
+        ``bound=290.611`` against ``obj=55.713`` -- and the predicate called it
+        a certificate, so the solver returned after 30.17 s and discarded the
+        29.8 s it had reserved for the fallback.
+        """
+        wide = _Res("feasible", gap_certified=True, gap=0.808289)
+        assert _route_result_is_certified(wide, GAP_TOL) is False
+
+    def test_a_gap_inside_tolerance_is_finished(self):
+        assert (
+            _route_result_is_certified(
+                _Res("optimal", gap_certified=True, gap=GAP_TOL / 2), GAP_TOL
+            )
+            is True
+        )
+
+    def test_a_missing_or_infinite_gap_is_not_finished(self):
+        """No gap at all is the ``alan``/``clay0303hfsg``/``tls2`` failure."""
+        assert (
+            _route_result_is_certified(_Res("feasible", gap_certified=True, gap=None), GAP_TOL)
+            is False
+        )
+        assert (
+            _route_result_is_certified(
+                _Res("feasible", gap_certified=True, gap=float("inf")), GAP_TOL
+            )
+            is False
+        )
+
+
+def _sr(obj=None, bound=None, gap_certified=False, status="feasible", gap=None):
+    """A real ``SolveResult``, so the merge is tested against the real dataclass."""
+    return SolveResult(
+        status=status, objective=obj, bound=bound, gap_certified=gap_certified, gap=gap, x={}
+    )
 
 
 @pytest.mark.unit
-class TestIncumbentSeed:
-    """The fallback starts from the route's answer, so it can only improve."""
+class TestBetterInSense:
+    def test_maximize_prefers_larger(self):
+        assert _route_is_better(2.0, 1.0, True) is True
+        assert _route_is_better(1.0, 2.0, True) is False
 
-    def test_dict_solution_is_flattened_in_model_order(self):
-        m = _load("gbd")
-        n = sum(v.size for v in m._variables)
-        x = {v.name: np.zeros(v.size) for v in m._variables}
-        seed = _route_incumbent_seed(m, _Res("feasible", x=x))
-        assert seed is not None
-        assert seed.shape == (n,)
+    def test_minimize_prefers_smaller(self):
+        assert _route_is_better(1.0, 2.0, False) is True
+        assert _route_is_better(2.0, 1.0, False) is False
 
-    def test_no_solution_gives_no_seed(self):
-        assert _route_incumbent_seed(_load("gbd"), _Res("time_limit")) is None
+    def test_no_incumbent_loses_to_any_finite_value(self):
+        assert _route_is_better(1.0, None, False) is True
+        assert _route_is_better(None, 1.0, False) is False
+        assert _route_is_better(None, None, False) is False
 
-    def test_a_nonfinite_point_is_refused(self):
-        m = _load("gbd")
-        x = {v.name: np.full(v.size, np.nan) for v in m._variables}
-        assert _route_incumbent_seed(m, _Res("feasible", x=x)) is None
+    def test_nonfinite_counts_as_no_incumbent(self):
+        assert _route_is_better(float("nan"), 1.0, False) is False
+        assert _route_is_better(1.0, float("inf"), True) is True
+
+
+@pytest.mark.unit
+class TestRouteFallbackMerge:
+    """The "never worse than the route" contract, made true by construction.
+
+    ``_route_incumbent_seed`` used to carry this contract by warm-starting the
+    fallback with the routed point. Measured on ``rsyn0840m`` at a 60 s limit,
+    that made things *worse*, not better: the default path alone returns 70.351
+    in the same 30 s the fallback had, while the seeded fallback returned
+    -11.413 -- the warm start pinned the incumbent and the primal heuristics
+    then searched its neighbourhood. Suppressing only the seed recovered 70.351
+    exactly. The merge below replaces that mechanism.
+    """
+
+    def test_the_better_incumbent_wins_on_maximize(self):
+        route, fb = _sr(obj=-11.413), _sr(obj=70.351)
+        assert _merge_route_and_fallback(route, fb, True) is fb
+
+    def test_the_route_wins_when_the_fallback_is_worse(self):
+        route, fb = _sr(obj=55.713), _sr(obj=33.197)
+        assert _merge_route_and_fallback(route, fb, True) is route
+
+    def test_the_better_incumbent_wins_on_minimize(self):
+        route, fb = _sr(obj=1.0), _sr(obj=2.0)
+        assert _merge_route_and_fallback(route, fb, False) is route
+
+    def test_a_fallback_with_no_incumbent_never_displaces_the_route(self):
+        route, fb = _sr(obj=5.0), _sr(obj=None)
+        assert _merge_route_and_fallback(route, fb, True) is route
+
+    def test_the_tighter_certified_bound_is_kept_when_the_fallback_wins(self):
+        """Measured on ``syn40m``: OA proves 290.61 in 30 s where the fallback's
+        own bound after the remaining 30 s is 1206.26 -- 4x looser on a maximize
+        model, where the bound is an upper bound and smaller is tighter."""
+        route = _sr(obj=55.713, bound=290.611, gap_certified=True)
+        fb = _sr(obj=70.0, bound=1206.261)
+        merged = _merge_route_and_fallback(route, fb, True)
+        assert merged is fb
+        assert merged.bound == pytest.approx(290.611)
+        assert merged.gap == pytest.approx((290.611 - 70.0) / 70.0)
+
+    def test_a_looser_bound_never_replaces_a_tighter_one(self):
+        route = _sr(obj=1.0, bound=1000.0, gap_certified=True)
+        fb = _sr(obj=1.0, bound=100.0, gap_certified=True)
+        merged = _merge_route_and_fallback(route, fb, True)
+        assert merged.bound == pytest.approx(100.0)
+
+    # RETRACTION (CLAUDE.md §11). These two tests previously asserted the
+    # opposite -- that an uncertified loser's bound is "not a proof" and must be
+    # discarded. That policy was never measured, and when it was it proved
+    # costly: on ``squfl025-040`` at a 60 s limit the route returned
+    # ``obj=423.98 bound=76.87`` (certified) while the fallback returned
+    # ``obj=1139.53 bound=127.40`` over 991 nodes (uncertified), and the old
+    # gate published 76.87. ``gap_certified`` means the *gap* is valid, not that
+    # the *bound* is; a time-limited B&B bound is valid and the non-routed path
+    # reports exactly it. The real hazard is a bound that crosses the incumbent,
+    # which ``_bound_crosses_objective`` still refuses -- see
+    # ``test_a_crossing_loser_bound_is_still_refused`` in
+    # ``test_1059_merge_keeps_tighter_bound.py``.
+
+    def test_an_uncertified_fallback_bound_is_adopted_when_tighter(self):
+        route = _sr(obj=5.0, bound=10.0, gap_certified=True)
+        fb = _sr(obj=1.0, bound=6.0, gap_certified=False)
+        merged = _merge_route_and_fallback(route, fb, True)
+        assert merged is route
+        assert merged.bound == pytest.approx(6.0)
+
+    def test_an_uncertified_route_bound_is_adopted_when_tighter(self):
+        route = _sr(obj=1.0, bound=6.0, gap_certified=False)
+        fb = _sr(obj=5.0, bound=10.0, gap_certified=True)
+        merged = _merge_route_and_fallback(route, fb, True)
+        assert merged is fb
+        assert merged.bound == pytest.approx(6.0)
+
+    def test_a_closed_certified_fallback_is_never_displaced(self, caplog):
+        """A certificate outranks a better number.
+
+        If the fallback proved optimality, no feasible point can beat it; a
+        route objective that appears to is an inconsistency, not an answer, and
+        swapping the proof out for it would be a silent certificate loss.
+        """
+        route = _sr(obj=9.0, bound=None, gap_certified=False)
+        fb = _sr(obj=5.0, bound=5.0, gap_certified=True, gap=0.0, status="optimal")
+        with caplog.at_level(logging.WARNING, logger="discopt.solver"):
+            merged = _merge_route_and_fallback(route, fb, True)
+        assert merged is fb
+        assert merged.gap_certified is True
+        assert any("should be impossible" in r.message for r in caplog.records), (
+            "the inconsistency must be surfaced, not silently swallowed"
+        )
+
+    def test_a_closed_certified_route_still_wins_on_objective(self):
+        """The guard is one-directional: two certificates compare normally."""
+        route = _sr(obj=9.0, bound=9.0, gap_certified=True, gap=0.0, status="optimal")
+        fb = _sr(obj=5.0, bound=5.0, gap_certified=True, gap=0.0, status="optimal")
+        assert _merge_route_and_fallback(route, fb, True) is route
+
+    def test_minimize_bound_direction(self):
+        """On minimize the bound is a LOWER bound: tighter means larger."""
+        route = _sr(obj=10.0, bound=8.0, gap_certified=True)
+        fb = _sr(obj=9.0, bound=2.0)
+        merged = _merge_route_and_fallback(route, fb, False)
+        assert merged is fb
+        assert merged.bound == pytest.approx(8.0)
+
+    def test_missing_sides_pass_through(self):
+        fb = _sr(obj=1.0)
+        assert _merge_route_and_fallback(None, fb, True) is fb
+        route = _sr(obj=1.0)
+        assert _merge_route_and_fallback(route, None, True) is route
 
 
 @pytest.mark.unit

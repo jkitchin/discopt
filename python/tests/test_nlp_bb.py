@@ -103,24 +103,50 @@ class TestNlpBbConvex:
         assert result.gap is not None
         assert result.gap <= 1e-4
 
-    def test_auto_selects_for_convex(self):
-        """When nlp_bb=None (default), convex nonlinear MINLPs auto-select NLP-BB.
-
-        Uses exp() to ensure the problem is classified as nonlinear (not MIQP),
-        so it isn't dispatched to the specialized QP solver before reaching the
-        NLP-BB auto-select logic.
-        """
+    @staticmethod
+    def _convex_exp_model():
+        """Convex nonlinear MINLP. exp() keeps it out of the MIQP class, so the
+        dispatch reaches the auto-select logic rather than the specialized QP
+        solver."""
         m = dm.Model("convex_exp")
         x = m.continuous("x", lb=0, ub=5)
         y = m.binary("y")
-
         m.minimize(dm.exp(x) + 3 * y)
         m.subject_to(x + y >= 1)
+        return m
 
-        result = m.solve()
+    def test_auto_selects_for_convex(self, monkeypatch):
+        """With the #1059 route OFF, convex nonlinear MINLPs auto-select NLP-BB.
+
+        This test's premise changed rather than broke. Auto-selection for a
+        convexity-certified MINLP is now the #1059 route, which sends the model
+        to the MIP-NLP family -- that IS the graduated default, so asserting
+        ``nlp_bb is True`` on a bare ``.solve()`` would now be asserting the
+        policy #1059 replaced. The NLP-BB auto-select is still live and still
+        reachable through the documented opt-out, which is what this pins;
+        :meth:`test_the_route_takes_precedence_by_default` pins the other side,
+        so neither policy can silently disappear.
+        """
+        monkeypatch.setenv("DISCOPT_CONVEX_MINLP_ROUTE", "0")
+        result = self._convex_exp_model().solve()
 
         assert result.nlp_bb is True
         assert result.status == "optimal"
+
+    def test_the_route_takes_precedence_by_default(self):
+        """The other side of the pair: by default the #1059 route wins.
+
+        Same model, no opt-out. It must reach the same optimum by the routed
+        path -- and it must say so, so the change of engine is visible in the
+        result rather than only in a log line.
+        """
+        result = self._convex_exp_model().solve()
+
+        assert result.status == "optimal"
+        assert result.nlp_bb is False
+        assert result.algorithm_route is not None
+        assert "mip-nlp" in result.algorithm_route
+        assert result.objective == pytest.approx(np.e, rel=1e-4)
 
     @pytest.mark.slow
     def test_matches_spatial_bb(self):

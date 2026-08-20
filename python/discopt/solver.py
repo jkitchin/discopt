@@ -15,6 +15,7 @@ import math
 import os
 import time
 import weakref
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
@@ -5012,20 +5013,116 @@ def _classify_model_convexity(
 _CONVEX_MINLP_ROUTE_CLASSES = frozenset({"miqp", "miqcp", "miqcqp", "minlp"})
 
 
+#: Options :func:`solve_model` accepts that the MIP-NLP solver family cannot
+#: honour, paired with the predicate that decides whether the caller actually
+#: set one. Single source of truth for two consumers: the ``solver="mip-nlp"``
+#: block warns about every entry it is about to drop, and the #1059 auto-route
+#: *refuses to fire at all* when any entry is set.
+#:
+#: The route needs this because "the caller expressed no preference" is a
+#: stronger condition than ``solver is None``. ``m.solve(nlp_bb=True,
+#: node_callback=cb)`` names an engine and asks to observe its nodes; silently
+#: routing it to a decomposition that does neither answers a question the caller
+#: did not ask. Under an explicit ``solver="mip-nlp"`` the same drop is the
+#: caller's own trade and only warrants a warning -- hence one table, two
+#: severities.
+_MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
+    ("threads", lambda v: v != 1),
+    ("deterministic", lambda v: v is not True),
+    ("batch_size", lambda v: v != 16),
+    ("strategy", lambda v: v != "best_first"),
+    ("ipopt_options", lambda v: v is not None),
+    ("sparse", lambda v: v is not None),
+    ("cutting_planes", lambda v: v is not False),
+    ("psd_cuts", lambda v: v is not False),
+    ("rlt_cuts", lambda v: v is not False),
+    ("rlt", lambda v: v != "auto"),
+    ("cuts", lambda v: v != "auto"),
+    ("partitions", lambda v: v != 0),
+    ("use_learned_relaxations", lambda v: v is not False),
+    ("mccormick_bounds", lambda v: v != "auto"),
+    ("decomposition", lambda v: v is not None),
+    ("lagrangian_bound", lambda v: v is not False),
+    ("lagrangian_frequency", lambda v: v != 1),
+    ("skip_convex_check", lambda v: v is not False),
+    ("nlp_bb", lambda v: v is not None),
+    ("lazy_constraints", lambda v: v is not None),
+    ("incumbent_callback", lambda v: v is not None),
+    ("node_callback", lambda v: v is not None),
+    ("presolve", lambda v: v is not True),
+    ("presolve_polynomial", lambda v: v is not False),
+    ("presolve_reverse_ad", lambda v: v is not False),
+    # PF1 (#632): default is now 1; treat only an override as caller intent, so
+    # a default solve on the mip-nlp path stays quiet and stays routable.
+    ("in_tree_presolve_stride", lambda v: v != 1),
+    ("eigenvalue_root_bound", lambda v: v is not False),
+    ("relaxation_arithmetic", lambda v: v != "mccormick"),
+    ("subnlp_enabled", lambda v: v is not True),
+    ("subnlp_backend", lambda v: v != "auto"),
+    ("subnlp_frequency", lambda v: v != 20),
+    ("subnlp_max_calls", lambda v: v != 200),
+    ("subnlp_options", lambda v: v is not None),
+    ("root_cut_rounds", lambda v: v is not None),
+    ("root_cut_max", lambda v: v is not None),
+)
+
+
+def _mip_nlp_ignored_options(values: Mapping[str, Any]) -> list[str]:
+    """Which of ``values`` would the MIP-NLP family silently drop?
+
+    ``values`` maps option name -> the value the caller passed to
+    :func:`solve_model`. Names absent from the mapping are not consulted, so a
+    caller can ask about a subset.
+    """
+    return [
+        name for name, is_set in _MIP_NLP_IGNORED_OPTIONS if name in values and is_set(values[name])
+    ]
+
+
 def _convex_minlp_route_enabled() -> bool:
     """Is the #1059 convexity-certified MINLP auto-route switched on?
 
-    **Default OFF.** Routing a model to a different algorithm is bound-changing
-    under CLAUDE.md §5 regime 2, so it ships behind ``DISCOPT_CONVEX_MINLP_ROUTE``
-    until a corpus-wide differential panel clears both bars (cert-clean AND
-    net-positive). ``DISCOPT_CONVEX_MINLP_ROUTE=0`` stays the opt-out after any
-    future graduation, and the spatial branch-and-bound path is left untouched
-    beneath it either way. Read per call, not cached at import, so a test can
-    flip it without reloading the module.
+    **Default ON since the #1059 graduation panel.** Routing a model to a
+    different algorithm is bound-changing under CLAUDE.md §5 regime 2, so it
+    shipped default-OFF until a corpus-wide differential panel cleared both
+    bars. It did, over 75 instances at a 60 s limit -- the in-repo MINLPLib
+    corpus plus a ``syn``/``rsyn`` supplement, because the in-repo corpus holds
+    exactly one ``syn`` instance and no ``rsyn``, i.e. it does not exercise the
+    class the route exists for. Control arm = the shipping default; test arm =
+    the shipping default plus the route:
+
+    ==========================  ==================
+    criterion                   result
+    ==========================  ==================
+    unsound bounds                               0
+    certification regressions                    0
+    dual bound tighter / looser              8 / 3
+    nodes fewer / more                      27 / 1
+    incumbent gained / lost                  2 / 0
+    objective better / worse                 6 / 2
+    total wall OFF / ON            1561.6 / 1469.6
+    ==========================  ==================
+
+    Cert-clean AND net-positive, so it graduates. The wins are not marginal:
+    ``rsyn0805m`` 1206.21 -> 1296.1206 (the oracle optimum), ``syn15m03m``
+    2035.37 -> 3850.1818 (optimum 3850.181775), ``syn20m02m`` 636.72 ->
+    1752.1332 (optimum 1752.133203), and new incumbents on ``squfl020-150`` and
+    ``squfl025-040``, which had returned nothing at all after 600 s (#1064).
+
+    All three "looser bound" rows were ``squfl``, and all three were the merge
+    discarding the fallback's tighter-but-uncertified bound -- fixed separately
+    in :func:`_merge_route_and_fallback` (``squfl025-040``: 76.87 -> 127.07),
+    so the graduated configuration is strictly better on that column than the
+    panel that cleared it.
+
+    ``DISCOPT_CONVEX_MINLP_ROUTE=0`` is the opt-out, and the spatial
+    branch-and-bound path is left untouched beneath it either way. Read per
+    call, not cached at import, so a test can flip it without reloading the
+    module.
     """
     raw = os.environ.get("DISCOPT_CONVEX_MINLP_ROUTE")
     if raw is None:
-        return False
+        return True
     return raw.strip() != "0"
 
 
@@ -5131,45 +5228,208 @@ _CONVEX_ROUTE_BUDGET_FRACTION = 0.5
 _CONVEX_ROUTE_FALLBACK_FLOOR_S = 1.0
 
 
-def _route_result_is_certified(result) -> bool:
-    """Did an auto-routed solve come back with an actual certificate?
+def _route_result_is_certified(result, gap_tolerance: float) -> bool:
+    """Did an auto-routed solve come back having actually *finished* the model?
 
-    This is the #1059 fallback predicate, and it is deliberately strict: a
-    ``feasible`` status with no dual bound is exactly the failure mode the
-    graduation panel found (``alan``, ``clay0303hfsg``, ``tls2`` all lost their
-    certificate to the route), so anything short of ``gap_certified`` or a
-    terminal infeasible/unbounded verdict counts as "did not certify" and hands
-    the remaining budget to the default path.
+    This is the #1059 fallback predicate. "Finished" means the route can be
+    returned as the caller's answer with no further work worth doing: a closed
+    optimality gap, or a terminal infeasible/unbounded verdict.
+
+    ``gap_certified`` alone is **not** that test, and reading it as one was a
+    measured defect. ``SolveResult.gap_certified`` means "the reported gap is
+    mathematically valid", not "the reported gap is closed" -- OA sets it from
+    ``bound_valid and final_gap is not None``. So a time-limited OA run on
+    ``syn40m`` came back ``status="feasible"``, ``gap_certified=True``, gap
+    **80.8%**, and was treated as a certificate: the route returned after
+    30.2 s of a 60 s budget and the 29.8 s reserved for the fallback was thrown
+    away. Measured 2026-08-19 at ``DISCOPT_CONVEX_MINLP_ROUTE=1``,
+    ``time_limit=60``: ``obj=55.713 bound=290.611 gap_certified=True wall=30.17``.
+
+    The gap must therefore be closed to the caller's own ``gap_tolerance``, on
+    top of being certified. A result carrying no gap at all is not finished
+    either -- that is the ``feasible``-with-no-dual-bound failure the graduation
+    panel found on ``alan``/``clay0303hfsg``/``tls2``.
     """
     if result is None:
         return False
-    if bool(getattr(result, "gap_certified", False)):
-        return True
     # An infeasibility or unboundedness verdict is a certificate too, and there
     # is nothing for a fallback to improve on it.
-    return getattr(result, "status", None) in ("infeasible", "unbounded")
+    if getattr(result, "status", None) in ("infeasible", "unbounded"):
+        return True
+    if not bool(getattr(result, "gap_certified", False)):
+        return False
+    gap = getattr(result, "gap", None)
+    if gap is None or not np.isfinite(gap):
+        return False
+    return float(gap) <= float(gap_tolerance)
 
 
-def _route_incumbent_seed(model: Model, result) -> Optional[np.ndarray]:
-    """Flatten an auto-routed result's incumbent into an ``initial_point``.
+def _route_is_better(a: Optional[float], b: Optional[float], is_maximize: bool) -> bool:
+    """Is objective ``a`` strictly better than ``b`` in the model's own sense?
 
-    The fallback must never be *worse* than the route it replaces. Passing the
-    routed incumbent in as the fallback's starting point is what guarantees that:
-    ``solve_model`` injects a finite, verified ``initial_point`` into the tree
-    before the search begins, so the fallback starts from the route's answer and
-    can only tighten it. Returns ``None`` (leave the caller's own seed alone)
-    when there is no usable point.
+    ``None`` means "no incumbent", which loses to any finite value and ties with
+    itself. Non-finite values are treated as no incumbent.
     """
-    x = getattr(result, "x", None)
-    if x is None:
-        return None
-    from discopt.mo.utils import _flatten_solution
+    if a is None or not np.isfinite(a):
+        return False
+    if b is None or not np.isfinite(b):
+        return True
+    return float(a) > float(b) if is_maximize else float(a) < float(b)
 
-    flat = _flatten_solution(model, x) if isinstance(x, dict) else np.asarray(x, dtype=np.float64)
-    flat = np.asarray(flat, dtype=np.float64).reshape(-1)
-    if flat.size == 0 or not np.all(np.isfinite(flat)):
-        return None
-    return flat
+
+def _bound_crosses_objective(bound: float, objective: Optional[float], is_maximize: bool) -> bool:
+    """Would reporting ``bound`` against ``objective`` be an invalid certificate?
+
+    For a minimize model the dual bound is a *lower* bound and must not exceed
+    the incumbent; for a maximize model it is an *upper* bound and must not fall
+    below it. The slack is the same scale-aware rounding allowance the solvers
+    share (:func:`discopt.solvers._gap.bound_inversion_tolerance`), so this
+    agrees with OA, AMP and the LOA path on what counts as noise rather than a
+    real crossing.
+    """
+    if objective is None or not np.isfinite(objective):
+        return False
+    from discopt.solvers._gap import bound_inversion_tolerance
+
+    slack = bound_inversion_tolerance(float(bound), float(objective))
+    return (
+        float(objective) - float(bound) > slack
+        if is_maximize
+        else float(bound) - float(objective) > slack
+    )
+
+
+def _gap_is_closed(result, tol: float = 1e-6) -> bool:
+    """Did ``result`` come back with a *closed*, certified optimality gap?
+
+    Distinct from ``gap_certified``, which asserts only that the reported gap is
+    mathematically valid -- see :func:`_route_result_is_certified`.
+    """
+    if result is None or not bool(getattr(result, "gap_certified", False)):
+        return False
+    gap = getattr(result, "gap", None)
+    return gap is not None and np.isfinite(gap) and float(gap) <= tol
+
+
+def _merge_route_and_fallback(route, fallback, is_maximize: bool):
+    """Return the better of an auto-routed result and the fallback that followed.
+
+    This is the #1059 "the fallback can never be worse than the route" contract,
+    made true *by construction*. It used to be delegated to
+    ``_route_incumbent_seed``, which handed the routed point to the fallback as
+    ``initial_point`` on the theory that a warm-started tree "can only tighten
+    it". **That theory is false and was measured false.** ``initial_point`` is
+    not merely an incumbent floor: the tree's primal heuristics search the
+    *neighbourhood of the incumbent*, so a poor routed point redirects them.
+    Measured on ``rsyn0840m`` at a 60 s limit (internal minimize sense; the
+    model is a maximize):
+
+    ==========================  ===========
+    arm                         reported obj
+    ==========================  ===========
+    default path, 60 s          211.020
+    default path, 30 s          70.351
+    route + seeded fallback     **-11.413**
+    route + unseeded fallback   70.351
+    ==========================  ===========
+
+    The seeded run's log shows exactly the mechanism: the warm start pins the
+    incumbent at internal 11.413, after which fractional diving and LNS RINS
+    report 16.712, 60.227, 56.240, 51.240, 41.159 -- every one of them worse.
+    Unseeded, the same search reaches internal -70.351. The seed cost 82 units
+    of objective and bought nothing on the instances where the routed point was
+    good (``syn40m``: the seeded fallback returned the routed 55.713 unchanged).
+
+    So the route no longer steers the fallback at all. It is run, the fallback is
+    run on the remainder, and the better of the two is returned -- which is what
+    the contract always claimed. Both dual bounds are valid (the route only fires
+    on a model certified convex at the root, and only a ``gap_certified`` routed
+    bound is carried), so the tighter of the two is kept regardless of which
+    incumbent wins.
+    """
+    if route is None:
+        return fallback
+    if fallback is None:
+        return route
+
+    route_wins = _route_is_better(route.objective, fallback.objective, is_maximize)
+    # A certificate outranks a better number. If the fallback closed the gap and
+    # the route did not, no feasible point can legitimately beat it -- so a route
+    # objective that appears to is evidence of an inconsistency somewhere, not a
+    # better answer, and trading a proof for it would be exactly the kind of
+    # silent certificate loss the fallback exists to prevent.
+    if route_wins and _gap_is_closed(fallback) and not _gap_is_closed(route):
+        logger.warning(
+            "#1059 route objective %.10g appears to beat the fallback's CERTIFIED "
+            "%.10g; keeping the certified result. This should be impossible and "
+            "indicates a bound or feasibility inconsistency worth investigating.",
+            route.objective,
+            fallback.objective,
+        )
+        route_wins = False
+
+    winner = route if route_wins else fallback
+    loser = fallback if route_wins else route
+    # Keep the tighter dual bound from EITHER side.
+    #
+    # This used to require ``loser.gap_certified``, on the reading that "an
+    # uncertified bound is not a proof". That reading conflates two different
+    # things and cost real bound quality. ``gap_certified`` says the *gap* is
+    # valid, not that the *bound* is -- the same "certified is not closed"
+    # confusion :func:`_route_result_is_certified` documents, one merge later. A
+    # time-limited spatial B&B returns ``gap_certified=False`` with a perfectly
+    # valid global dual bound, and the NON-routed path reports exactly that bound
+    # to the caller. Gating on it here therefore made routing strictly worse on
+    # the dual side than not routing at all. Measured on ``squfl025-040`` at a
+    # 60 s limit (``scratchpad/merge_probe.py``):
+    #
+    # ====================  =====  ======  ======
+    # side                   obj    bound   nodes
+    # ====================  =====  ======  ======
+    # route (OA, 30.2 s)    423.98   76.87       0
+    # fallback (B&B, 29.8s) 1139.53 127.40     991
+    # ====================  =====  ======  ======
+    #
+    # The route wins on the incumbent and the fallback wins on the bound; the old
+    # gate published 76.87 and discarded 127.40, so 991 nodes of proof were
+    # thrown away. What actually makes a bound unsafe to publish is *crossing the
+    # incumbent it is reported against*, and that is checked below.
+    #
+    # Reported sense: a maximize model's bound is an UPPER bound (tighter =
+    # smaller), a minimize model's is a LOWER bound (tighter = larger).
+    w_b, l_b = winner.bound, loser.bound
+    if (
+        l_b is not None
+        and np.isfinite(l_b)
+        and (w_b is None or not np.isfinite(w_b) or (l_b < w_b if is_maximize else l_b > w_b))
+        # ...and only if it does not cross the incumbent it would be reported
+        # against. A dual bound past the winner's own objective is a broken
+        # certificate (CLAUDE.md §1: ``bound <= incumbent`` for min sense), and
+        # the two sides ran different algorithms, so a crossing here means one
+        # of them is wrong and this merge cannot tell which. Keep the winner's
+        # own self-consistent bound. Measured on ``fac2``: OA returned a
+        # ``gap_certified=True`` lower bound of 331845337.44 against the merged
+        # incumbent 331837498.18 -- 7839 above the true optimum -- and without
+        # this guard the merge published it. The root cause is fixed in
+        # ``oa.py`` (``_certified_bound_inverted``); this is the second line of
+        # defence, because the merge is the last code to touch the bound before
+        # the caller sees it.
+        and not _bound_crosses_objective(float(l_b), winner.objective, is_maximize)
+    ):
+        winner.bound = float(l_b)
+    obj, bnd = winner.objective, winner.bound
+    if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
+        winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
+    # ``node_count`` is a WORK statistic, not part of the answer, so it belongs to
+    # the solve rather than to whichever side won it. Reporting only the winner's
+    # made a routed ``squfl025-040`` say ``nodes=0`` after 61 s in which the
+    # fallback explored 991 -- a false statistic, and the one that first made this
+    # regression look like a skipped fallback.
+    _w_nodes = getattr(winner, "node_count", None)
+    _l_nodes = getattr(loser, "node_count", None)
+    if _w_nodes is not None or _l_nodes is not None:
+        winner.node_count = int(_w_nodes or 0) + int(_l_nodes or 0)
+    return winner
 
 
 # Size gate for the auto cut policy: above this many scalar variables the
@@ -6081,6 +6341,18 @@ def solve_model_accepted_kwargs(solver: Optional[str] = None) -> frozenset[str]:
 #: solve (``Model.solve`` runs ``solve_model`` more than once).
 _ROUTE_FALLBACK_NOTE: list[str] = []
 
+#: Companion rail to :data:`_ROUTE_FALLBACK_NOTE`: the result the #1059
+#: auto-route produced before it handed over, as ``(SolveResult, is_maximize)``.
+#:
+#: The fallback runs on the remaining budget only, so it can come back with a
+#: worse incumbent or a looser bound than the route already had.
+#: :func:`_merge_route_and_fallback` returns the better of the two; this rail is
+#: how the routed result reaches it, since the fallback falls through to the
+#: default path's ~67 return sites and can reach none of them. Same
+#: list-not-scalar discipline as the note: the wrapper restores the exact depth
+#: it entered at, so a raised exception cannot leak state into the next solve.
+_ROUTE_FALLBACK_STATE: list[tuple["SolveResult", bool]] = []
+
 
 def _stamp_layer_timing(fn: _F) -> _F:
     """Stamp the layer profile onto whatever ``SolveResult`` the solve produced.
@@ -6102,6 +6374,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
         before = _timing.snapshot()
         started = time.perf_counter()
         _route_depth = len(_ROUTE_FALLBACK_NOTE)
+        _state_depth = len(_ROUTE_FALLBACK_STATE)
         try:
             result = fn(*args, **kwargs)
         finally:
@@ -6111,12 +6384,32 @@ def _stamp_layer_timing(fn: _F) -> _F:
                 else None
             )
             del _ROUTE_FALLBACK_NOTE[_route_depth:]
+            _route_state = (
+                _ROUTE_FALLBACK_STATE[_state_depth]
+                if len(_ROUTE_FALLBACK_STATE) > _state_depth
+                else None
+            )
+            del _ROUTE_FALLBACK_STATE[_state_depth:]
         elapsed = time.perf_counter() - started
         # #1059: a solve that fell back off the auto-route must say so, otherwise
         # it is indistinguishable from one that was never routed -- the exact
         # invisibility the issue was filed about.
         if _route_note is not None and isinstance(result, SolveResult):
             result.algorithm_route = _route_note
+        # #1059: the fallback must never be worse than the route it replaced.
+        # Done here rather than at the fallback site for the same reason as the
+        # note: the fallback falls through to the default path's return sites.
+        if _route_state is not None and isinstance(result, SolveResult):
+            _rr, _rr_is_max = _route_state
+            _merged = _merge_route_and_fallback(_rr, result, _rr_is_max)
+            if _merged is not result:
+                # The route won. Its ``wall_time`` covers only the routed solve;
+                # the caller was charged for the fallback too, so report the
+                # whole call rather than the winning half of it.
+                _merged.wall_time = elapsed
+            result = _merged
+            if _route_note is not None:
+                result.algorithm_route = _route_note
         # ``stream=True`` yields an iterator of SolveUpdate, not a SolveResult;
         # leave anything that is not a SolveResult untouched rather than guessing.
         if not isinstance(result, SolveResult):
@@ -6772,6 +7065,47 @@ def solve_model(
         except Exception as _gc_exc:  # pragma: no cover - defensive
             logger.debug("g-convex cut presolve skipped: %s", _gc_exc)
 
+    # Snapshot of every option the MIP-NLP family cannot honour, taken before
+    # dispatch so both consumers see the caller's values: the auto-route below
+    # refuses when any is set, and the solver='mip-nlp' block warns.
+    _mip_nlp_option_values: dict[str, Any] = {
+        "threads": threads,
+        "deterministic": deterministic,
+        "batch_size": batch_size,
+        "strategy": strategy,
+        "ipopt_options": ipopt_options,
+        "sparse": sparse,
+        "cutting_planes": cutting_planes,
+        "psd_cuts": psd_cuts,
+        "rlt_cuts": rlt_cuts,
+        "rlt": rlt,
+        "cuts": cuts,
+        "partitions": partitions,
+        "use_learned_relaxations": use_learned_relaxations,
+        "mccormick_bounds": mccormick_bounds,
+        "decomposition": decomposition,
+        "lagrangian_bound": lagrangian_bound,
+        "lagrangian_frequency": lagrangian_frequency,
+        "skip_convex_check": skip_convex_check,
+        "nlp_bb": nlp_bb,
+        "lazy_constraints": lazy_constraints,
+        "incumbent_callback": incumbent_callback,
+        "node_callback": node_callback,
+        "presolve": presolve,
+        "presolve_polynomial": presolve_polynomial,
+        "presolve_reverse_ad": presolve_reverse_ad,
+        "in_tree_presolve_stride": in_tree_presolve_stride,
+        "eigenvalue_root_bound": eigenvalue_root_bound,
+        "relaxation_arithmetic": relaxation_arithmetic,
+        "subnlp_enabled": subnlp_enabled,
+        "subnlp_backend": subnlp_backend,
+        "subnlp_frequency": subnlp_frequency,
+        "subnlp_max_calls": subnlp_max_calls,
+        "subnlp_options": subnlp_options,
+        "root_cut_rounds": root_cut_rounds,
+        "root_cut_max": root_cut_max,
+    }
+
     # --- Solver-family dispatch ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
@@ -6800,11 +7134,28 @@ def solve_model(
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
-    # Only when the caller expressed no preference. An explicit solver= (including
-    # solver="bb") is always honoured, so this can never override a user's choice.
+    # Only when the caller expressed no preference -- neither an explicit
+    # solver= (including solver="bb"), nor any option this family would drop.
     _auto_route_reason: Optional[str] = None
     if _solver is None:
-        _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
+        # "No preference" is stronger than ``solver is None``. ``nlp_bb=True``
+        # names an engine; ``node_callback=`` asks to watch that engine's nodes;
+        # ``subnlp_frequency=`` tunes a heuristic only the spatial path runs. The
+        # MIP-NLP family honours none of them, so routing such a call silently
+        # answers a different question than the one asked -- CLAUDE.md §3. Found
+        # by the smoke suite the moment this route went default-ON: nine tests
+        # that pass ``nlp_bb=True``/``node_callback=`` got routed away from the
+        # loop they were written to exercise, and their callbacks never fired.
+        _caller_set = _mip_nlp_ignored_options(_mip_nlp_option_values)
+        if _caller_set:
+            _auto_route_method = None
+            _auto_route_reason = (
+                "not routed: caller set options the MIP-NLP family ignores ("
+                + ", ".join(_caller_set)
+                + ")"
+            )
+        else:
+            _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
@@ -6890,49 +7241,10 @@ def solve_model(
                 f"Unknown gdp_method={gdp_method!r} for solver='mip-nlp'. Choose one of: {allowed}."
             )
 
-        ignored_mip_nlp_options = []
-
-        def _note_ignored_mip_nlp(name: str, should_warn: bool) -> None:
-            if should_warn:
-                ignored_mip_nlp_options.append(name)
-
-        _note_ignored_mip_nlp("threads", threads != 1)
-        _note_ignored_mip_nlp("deterministic", deterministic is not True)
-        _note_ignored_mip_nlp("batch_size", batch_size != 16)
-        _note_ignored_mip_nlp("strategy", strategy != "best_first")
-        _note_ignored_mip_nlp("ipopt_options", ipopt_options is not None)
-        _note_ignored_mip_nlp("sparse", sparse is not None)
-        _note_ignored_mip_nlp("cutting_planes", cutting_planes is not False)
-        _note_ignored_mip_nlp("psd_cuts", psd_cuts is not False)
-        _note_ignored_mip_nlp("rlt_cuts", rlt_cuts is not False)
-        _note_ignored_mip_nlp("rlt", rlt != "auto")
-        _note_ignored_mip_nlp("cuts", cuts != "auto")
-        _note_ignored_mip_nlp("partitions", partitions != 0)
-        _note_ignored_mip_nlp("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored_mip_nlp("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored_mip_nlp("decomposition", decomposition is not None)
-        _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
-        _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
-        _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
-        _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
-        _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
-        _note_ignored_mip_nlp("incumbent_callback", incumbent_callback is not None)
-        _note_ignored_mip_nlp("node_callback", node_callback is not None)
-        _note_ignored_mip_nlp("presolve", presolve is not True)
-        _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
-        _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
-        # PF1 (#632): default is now 1; warn only when the user overrode it, so a
-        # default solve on the mip-nlp path stays quiet.
-        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 1)
-        _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
-        _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
-        _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
-        _note_ignored_mip_nlp("subnlp_backend", subnlp_backend != "auto")
-        _note_ignored_mip_nlp("subnlp_frequency", subnlp_frequency != 20)
-        _note_ignored_mip_nlp("subnlp_max_calls", subnlp_max_calls != 200)
-        _note_ignored_mip_nlp("subnlp_options", subnlp_options is not None)
-        _note_ignored_mip_nlp("root_cut_rounds", root_cut_rounds is not None)
-        _note_ignored_mip_nlp("root_cut_max", root_cut_max is not None)
+        # Every entry the caller set is dropped by this family. Under an
+        # explicit solver='mip-nlp' that is the caller's own trade, so warn;
+        # the #1059 auto-route consults the same table and refuses instead.
+        ignored_mip_nlp_options = _mip_nlp_ignored_options(_mip_nlp_option_values)
         if kwargs:
             ignored_mip_nlp_options.extend(sorted(kwargs))
         if ignored_mip_nlp_options:
@@ -6980,10 +7292,43 @@ def solve_model(
         if _auto_route_reason is not None and _mip_nlp_result is not None:
             _mip_nlp_result.algorithm_route = _auto_route_reason
 
+        # #1059: this family returns no multipliers, but every other exit in this
+        # module does -- so without this a convex MINLP that used to come back
+        # with ``constraint_duals`` silently comes back with ``None`` once the
+        # route is default-ON. Recover them at the incumbent. Strictly additive:
+        # only fields that are ``None`` are filled, so the point, objective,
+        # bound and node count are untouched.
+        #
+        # Skipped when ``reformulate_gdp`` rewrote the model: the incumbent is
+        # then indexed by the reformulated columns, and a multiplier unpacked
+        # against the caller's model would be named after the wrong row (#941).
+        # That leaves GDP models exactly where they were -- no duals -- rather
+        # than giving them wrong ones.
+        _routed_x = getattr(_mip_nlp_result, "x", None) if _mip_nlp_result is not None else None
+        if (
+            _mip_nlp_result is not None
+            and model is _pre_route_model
+            and _routed_x is not None
+            and getattr(_mip_nlp_result, "constraint_duals", None) is None
+        ):
+            try:
+                _x_flat = np.concatenate(
+                    [np.asarray(_routed_x[v.name], dtype=float).ravel() for v in model._variables]
+                )
+                _cd, _bdl, _bdu = _recover_nlp_duals_at_incumbent(
+                    model, _x_flat, time_budget=max(0.1, min(5.0, time_limit * 0.05))
+                )
+                if _cd is not None:
+                    _mip_nlp_result.constraint_duals = _cd
+                    _mip_nlp_result.bound_duals_lower = _bdl
+                    _mip_nlp_result.bound_duals_upper = _bdu
+            except Exception as _dual_exc:  # pragma: no cover - reporting only
+                logger.debug("MIP-NLP dual recovery skipped: %s", _dual_exc)
+
         _route_remaining = time_limit - _route_elapsed
         if (
             _auto_route_reason is None
-            or _route_result_is_certified(_mip_nlp_result)
+            or _route_result_is_certified(_mip_nlp_result, gap_tolerance)
             or _route_remaining < _CONVEX_ROUTE_FALLBACK_FLOOR_S
         ):
             return _mip_nlp_result
@@ -6994,8 +7339,9 @@ def solve_model(
         # a certificate the caller is left holding an uncertified point that the
         # spatial path would often have proven optimal (the panel: ``alan``
         # uncertified 3.000 after 180 s vs certified 2.925 in 0.18 s). So spend
-        # the remainder of the budget on the path that certifies, seeded with
-        # whatever the route did find so the fallback can only improve on it.
+        # the remainder of the budget on the path that certifies, and return the
+        # better of the two -- see ``_merge_route_and_fallback`` for why the
+        # route deliberately does NOT warm-start the fallback any more.
         logger.info(
             "Convex MINLP auto-route did not certify (status=%s, gap_certified=%s) "
             "after %.2f s; falling back to the default path with %.2f s remaining",
@@ -7004,9 +7350,6 @@ def solve_model(
             _route_elapsed,
             _route_remaining,
         )
-        _route_seed = _route_incumbent_seed(_pre_route_model, _mip_nlp_result)
-        if _route_seed is not None and initial_point is None:
-            initial_point = _route_seed
         model = _pre_route_model
         _solver = None
         # ``time_limit`` is deliberately NOT reduced. The default path measures
@@ -7021,6 +7364,20 @@ def solve_model(
             f"{_auto_route_reason}; did not certify in {_route_elapsed:.2f}s "
             f"(status={getattr(_mip_nlp_result, 'status', None)}) -> fell back to the "
             f"default path with {_route_remaining:.2f}s"
+        )
+        # #1059: hand the routed result forward so the wrapper can return the
+        # better of the two. This is the "never worse than the route" contract;
+        # ``_merge_route_and_fallback`` documents why it is a merge rather than a
+        # warm start. Carried on the same rail as the note, for the same reason:
+        # the fallback cannot reach the default path's ~67 return sites.
+        from discopt.modeling.core import ObjectiveSense as _RouteObjSense
+
+        _ROUTE_FALLBACK_STATE.append(
+            (
+                _mip_nlp_result,
+                _pre_route_model._objective is not None
+                and _pre_route_model._objective.sense == _RouteObjSense.MAXIMIZE,
+            )
         )
         # Fall through to the default spatial / NLP branch-and-bound below.
 
@@ -17239,6 +17596,79 @@ def _lp_qp_unpack_duals(
         bound_duals_upper = up
 
     return constraint_duals, bound_duals_lower, bound_duals_upper
+
+
+def _recover_nlp_duals_at_incumbent(
+    model: Model,
+    x_flat: np.ndarray,
+    *,
+    time_budget: float = 5.0,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Relaxation duals at a MIP-NLP incumbent: fix the integers, re-solve, unpack.
+
+    The MIP-NLP family (OA/ECP/GOA/LP-NLP-BB) returns a point and a bound and no
+    multipliers, because its master is a MILP and its subproblems are solved on
+    an integer-fixed model it does not keep. Every other exit in this module
+    reports duals, so before #1059 a convex MINLP got them and after the route
+    went default-ON the same ``.solve()`` returned ``constraint_duals=None`` --
+    measured on both a convex MIQP and a convex ``exp()`` MINLP. A default that
+    silently drops a reported quantity is the defect class CLAUDE.md §3 forbids,
+    so the routed path recovers them the same way ``_solve_nlp_bb`` does: pin the
+    integer columns at the incumbent and re-solve the resulting convex NLP for
+    its multipliers.
+
+    Strictly additive. It does not touch the reported point, objective, bound or
+    node count -- only fields that were ``None``. The re-solve requests NO
+    ``bound_relax_factor`` override, unlike a refine solve: the product here is
+    the MULTIPLIERS, and a degenerate feasible set has no finite multiplier
+    without Ipopt's relaxation (#946).
+
+    Best-effort by design: ``(None, None, None)`` on any failure, which is the
+    status quo ante for this family, never a wrong dual.
+    """
+    n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    lb = np.asarray(lb, dtype=float)
+    ub = np.asarray(ub, dtype=float)
+    if x_flat.shape[0] != n_vars:
+        # Layout mismatch: the point is not indexed like this model's columns, so
+        # any multiplier we unpacked would be named after the wrong row (#941).
+        return None, None, None
+
+    evaluator = _make_evaluator(model)
+    fix_lb = lb.copy()
+    fix_ub = ub.copy()
+    for off, sz in zip(int_offsets, int_sizes):
+        for k in range(int(sz)):
+            val = float(round(float(x_flat[off + k])))
+            fix_lb[off + k] = val
+            fix_ub[off + k] = val
+
+    cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
+    constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
+    opts = {"max_wall_time": max(0.1, min(5.0, float(time_budget))), "print_level": 0}
+    recovered = _solve_node_nlp_kkt(evaluator, x_flat, fix_lb, fix_ub, constraint_bounds, opts)
+    if recovered.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+        return None, None, None
+
+    cd = _unpack_constraint_duals(evaluator, recovered.multipliers)
+    bdl = _unpack_bound_duals(model, recovered.bound_multipliers_lower)
+    bdu = _unpack_bound_duals(model, recovered.bound_multipliers_upper)
+    # Zero the bound multipliers on integer columns: they price the act of
+    # fixing, not bound activity in the model the user declared. Same convention
+    # as ``_solve_nlp_bb`` and ``_mip_recover_relaxation_duals``.
+    int_names = {
+        v.name for v in model._variables if v.var_type in (VarType.BINARY, VarType.INTEGER)
+    }
+    for d in (bdl, bdu):
+        if d is None:
+            continue
+        for nm in int_names & set(d):
+            d[nm] = np.zeros_like(np.asarray(d[nm], dtype=float))
+    return cd, bdl, bdu
 
 
 def _mip_recover_relaxation_duals(

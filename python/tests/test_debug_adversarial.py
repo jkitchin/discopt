@@ -551,7 +551,16 @@ def _nested_heuristic_minlp():
 
 
 def _miqp_model():
-    """Convex MIQP routing to the MIQP-BB loop (loop 4)."""
+    """Convex MIQP for the MIQP-BB loop (loop 4).
+
+    Solve it with ``solver="bb"``. Since the #1059 convex-MINLP auto-route went
+    default-ON, a bare ``.solve()`` on this model is certified convex and handed
+    to the MIP-NLP family, so it no longer enters loop 4 at all -- these tests
+    would still pass while covering a different loop than the one they name.
+    ``solver="bb"`` is the documented opt-out and reaches the same optimum
+    (0.6). Same idiom as the sibling loops here, which pin with ``nlp_bb=True``
+    and ``nlp_solver="simplex"``.
+    """
     m = do.Model("adv2_miqp")
     x = m.continuous("x", lb=-5.0, ub=5.0)
     y = m.continuous("y", lb=-5.0, ub=5.0)
@@ -637,7 +646,7 @@ def test_trace_invariants_nlp_bb_loop():
 @pytest.mark.smoke
 @pytest.mark.requires_pounce
 def test_trace_invariants_miqp_loop():
-    res, trace = _traced_solve(_miqp_model())
+    res, trace = _traced_solve(_miqp_model(), solver="bb")
     assert res.status == "optimal"
     _assert_trace_invariants(trace)
 
@@ -681,10 +690,10 @@ def test_nlp_bb_no_op_debugger_is_bound_neutral():
 @pytest.mark.smoke
 @pytest.mark.requires_pounce
 def test_miqp_no_op_debugger_is_bound_neutral():
-    base = _miqp_model().solve(time_limit=20.0)
+    base = _miqp_model().solve(time_limit=20.0, solver="bb")
     debug.attach(DebugSession(WalkFrontend()))
     try:
-        dbg = _miqp_model().solve(time_limit=20.0)
+        dbg = _miqp_model().solve(time_limit=20.0, solver="bb")
     finally:
         debug.detach()
     assert dbg.node_count == base.node_count
@@ -709,7 +718,7 @@ def test_quit_early_not_false_infeasible_nlp_bb():
 def test_quit_early_not_false_infeasible_miqp():
     debug.attach(DebugSession(QuitFrontend()))
     try:
-        res = _miqp_model().solve(time_limit=20.0)
+        res = _miqp_model().solve(time_limit=20.0, solver="bb")
     finally:
         debug.detach()
     assert res.status not in ("infeasible", "optimal"), (
@@ -750,11 +759,11 @@ def test_inject_on_nlp_bb_keeps_certificate(capsys):
 @pytest.mark.requires_pounce
 def test_inject_refused_on_miqp_loop(capsys):
     """Loop 4 wires NO validator: inject must refuse loudly, not trust."""
-    base = _miqp_model().solve(time_limit=20.0)
+    base = _miqp_model().solve(time_limit=20.0, solver="bb")
     script = ["stop-at steer", "continue", "inject 0", "continue"]
     debug.attach(debug.make_session(script=script))
     try:
-        res = _miqp_model().solve(time_limit=20.0)
+        res = _miqp_model().solve(time_limit=20.0, solver="bb")
     finally:
         debug.detach()
     err = capsys.readouterr().err

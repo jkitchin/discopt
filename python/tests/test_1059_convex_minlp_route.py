@@ -36,10 +36,17 @@ def _load(name: str) -> Model:
 
 @pytest.mark.unit
 class TestRouteFlag:
-    def test_default_is_off(self, monkeypatch):
-        """§5 regime 2: a bound-changing route ships default-OFF."""
+    def test_default_is_on_after_graduation(self, monkeypatch):
+        """§5 regime 2: default-OFF until the panel clears BOTH bars -- it did.
+
+        75 instances at 60 s (in-repo corpus + a syn/rsyn supplement, since the
+        in-repo corpus holds one ``syn`` and no ``rsyn``): 0 unsound bounds, 0
+        certification regressions, bound tighter/looser 8/3, nodes fewer/more
+        27/1, incumbent gained/lost 2/0, objective better/worse 6/2, total wall
+        1561.6 s -> 1469.6 s. Cert-clean and net-positive.
+        """
         monkeypatch.delenv(ROUTE_ENV, raising=False)
-        assert _convex_minlp_route_enabled() is False
+        assert _convex_minlp_route_enabled() is True
 
     def test_env_enables(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
@@ -52,7 +59,7 @@ class TestRouteFlag:
 
     def test_disabled_flag_declines_a_routable_model(self, monkeypatch):
         """With the flag off the router declines a model it would otherwise take."""
-        monkeypatch.delenv(ROUTE_ENV, raising=False)
+        monkeypatch.setenv(ROUTE_ENV, "0")
         method, reason = _convex_minlp_auto_route(_load("gbd"))
         assert method is None
         assert "disabled" in reason
@@ -137,7 +144,8 @@ class TestRouteDispatch:
         assert "mip-nlp/oa" in result.algorithm_route
 
     def test_route_off_leaves_the_field_unset(self, monkeypatch):
-        monkeypatch.delenv(ROUTE_ENV, raising=False)
+        """The opt-out must restore the pre-graduation behaviour exactly."""
+        monkeypatch.setenv(ROUTE_ENV, "0")
         m = _load("gbd")
         result = m.solve(time_limit=30)
         assert result.algorithm_route is None
