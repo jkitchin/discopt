@@ -900,6 +900,14 @@ struct Simplex<'a> {
     /// Pivots between exact re-derivations of `x_B`; `0` = only on refactorization.
     /// Seeded from [`xb_refresh_cadence`]; a test sets it directly.
     xb_refresh: usize,
+    /// Simplex pivots executed by this solve, reported as [`LpSolve::iters`].
+    ///
+    /// `assemble` used to hardcode `iters: 0`, so EVERY cold primal solve told the
+    /// caller it had done no work. The MILP driver sums that field into its
+    /// `lp_iters` return, which is how a run that executed 327k pivots reported
+    /// 212 iterations — an instrument that measured nothing and was believed
+    /// (CLAUDE.md §6). Purely observational: nothing reads it back.
+    total_pivots: usize,
 }
 
 impl<'a> Simplex<'a> {
@@ -957,6 +965,7 @@ impl<'a> Simplex<'a> {
             no_expand: false,
             last_xb: Vec::new(),
             xb_refresh: xb_refresh_cadence(),
+            total_pivots: 0,
         }
     }
 
@@ -2235,6 +2244,7 @@ impl<'a> Simplex<'a> {
             } else {
                 crate::profile::Ctr::Phase2Pivots
             });
+            self.total_pivots += 1;
             if bland {
                 crate::profile::incr(crate::profile::Ctr::BlandActivations);
             }
@@ -2625,7 +2635,7 @@ impl<'a> Simplex<'a> {
                 col_status,
                 basic_vars,
             },
-            iters: 0,
+            iters: self.total_pivots,
             dual,
             ray,
         }
@@ -2633,6 +2643,7 @@ impl<'a> Simplex<'a> {
 
     fn failed(self) -> LpSolve {
         let n = self.n;
+        let iters = self.total_pivots;
         LpSolve {
             status: LpStatus::Numerical,
             x: vec![0.0; n],
@@ -2641,7 +2652,7 @@ impl<'a> Simplex<'a> {
                 col_status: vec![AT_LOWER; n],
                 basic_vars: Vec::new(),
             },
-            iters: 0,
+            iters,
             dual: Vec::new(),
             ray: Vec::new(),
         }

@@ -331,6 +331,21 @@ counters!(
     EntryDense,
     EntryCols,
     EntryColsWarm,
+    // Root cut-loop accounting: rounds executed, and how many of them re-optimized
+    // from the previous round's optimal basis instead of cold-solving the augmented
+    // LP. Every round after the first must be warm; a gap between the two means the
+    // loop is paying a fresh primal phase-1 per cut round (measured on the
+    // `rsyn0840m` OA master: 14 cold root solves = 23.1 s of a 24.2 s cut loop).
+    RootCutRounds,
+    RootCutWarmReopt,
+    // Why a warm DUAL re-optimize was refused, forcing the primal fallback. On the
+    // `rsyn0840m` OA master with a real root cut pool, 588 of 589 node LPs took the
+    // primal path at 556 pivots each -- these separate "the shape is wrong" from
+    // "the basis is singular" from "the basis is dual-infeasible".
+    DualPrepRejectShape,
+    DualPrepRejectSingular,
+    DualPrepRejectDualInf,
+    DualPrepAccept,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,

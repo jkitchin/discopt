@@ -1416,6 +1416,14 @@ fn run_milp_hooked<'py>(
             // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
             warm_stall_guard: true,
             warm_stall_cap_override: None,
+            // P1.0 (measured OFF, deliberately): turning this on makes the primal
+            // emit a FULL length-`m` basis of real columns instead of dropping the
+            // slot a degenerate basic artificial occupies, which stops
+            // `PreparedDual::prepare` rejecting the node basis on shape (measured
+            // 619/620 rejections on the rsyn0840m OA master). But once the root cut
+            // loop stopped cold-solving every round, flipping it was *exactly*
+            // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
+            // (sound but not net-positive is not a graduation).
             expel_zero_artificials: false,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
