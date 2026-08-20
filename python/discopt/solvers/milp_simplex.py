@@ -568,8 +568,16 @@ def _marshal_col_bounds(
     pair means that side is open.
 
     An open side becomes the ``±_INF`` sentinel (``1e20``) — what the Rust LP layer
-    reads as unbounded; ``float("inf")`` is *not* that sentinel and is mapped here
-    too. The previous code built these arrays with
+    reads as unbounded. An **explicit** ``±inf`` is passed through untouched: that
+    is what every pre-#1060 caller already sent (measured: on the McCormick root-LP
+    path, ``None`` never occurs and ``±inf`` does), so clamping it here would be a
+    silent bound-*changing* edit riding along with a marshaling fix. It is not
+    hypothetical — clamping ``hda``'s infinite bounds to ``1e20`` moves its root LP
+    bound from ``-64675.2`` to ``-11308304.4``, 175x weaker, and moves ``contvar``'s
+    too. Narrowing the sentinel convention is its own change under CLAUDE.md §5,
+    with its own differential gate; this function only fixes ``None``.
+
+    The previous code built these arrays with
     ``np.array([hi for _, hi in bounds], dtype=np.float64)``, which turns a ``None``
     into ``nan`` **silently**: every caller holding an open-above column (169 of the
     280 columns of the ``rsyn0840m`` LP/NLP-BB master, issue #1060) had its solve
@@ -595,8 +603,8 @@ def _marshal_col_bounds(
                 "finite, None, or +/-inf (NaN is read as both open and closed by "
                 "different guards -- see issue #1008)"
             )
-        lb[j] = -_INF if lo_f <= -_INF else lo_f
-        ub[j] = _INF if hi_f >= _INF else hi_f
+        lb[j] = lo_f
+        ub[j] = hi_f
     return lb, ub
 
 

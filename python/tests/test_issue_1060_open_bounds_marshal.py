@@ -99,12 +99,20 @@ def test_lazy_cut_entry_point_shares_the_open_bound_marshal():
 
 
 @pytest.mark.smoke
-def test_infinite_bounds_map_to_the_sentinel_not_to_float_inf():
-    """``float("inf")`` is not the Rust layer's unbounded sentinel; ``1e20`` is."""
+def test_open_bound_becomes_the_sentinel_and_explicit_inf_is_passed_through():
+    """Only ``None`` is remapped; an explicit ``inf`` must reach the engine as-is.
+
+    Clamping ``±inf`` to the ``1e20`` sentinel *looks* like a tidy-up of the same
+    convention, but it is bound-changing and measurably harmful: on the McCormick
+    root-LP path ``None`` never occurs and ``±inf`` does, and clamping moves
+    ``hda``'s root bound from -64675.2 to -11308304.4 (175x weaker) and
+    ``contvar``'s from 185534.9 to 191103.6. Narrowing the sentinel convention is
+    its own change under CLAUDE.md §5; this marshal only fixes ``None`` (#1060).
+    """
     lb, ub = _marshal_col_bounds([(-np.inf, np.inf), (None, None), (-1.5, 2.5)], 3)
-    assert lb.tolist() == [-_INF, -_INF, -1.5]
-    assert ub.tolist() == [_INF, _INF, 2.5]
-    assert np.isfinite(lb).all() and np.isfinite(ub).all()
+    assert lb.tolist() == [-np.inf, -_INF, -1.5]
+    assert ub.tolist() == [np.inf, _INF, 2.5]
+    assert not np.isnan(lb).any() and not np.isnan(ub).any()
 
 
 @pytest.mark.smoke
