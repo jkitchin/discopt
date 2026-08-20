@@ -79,6 +79,45 @@ def nlpbb_root_cuts_enabled() -> bool:
     return val not in ("", "0", "false", "off", "no")
 
 
+def flat_column_terms(model) -> list:
+    """One modeling term per *flat* column, in the model's own column order.
+
+    ``generate_root_cuts`` returns each cut as a dense coefficient vector over
+    flat columns. Writing that vector back as a ``Constraint`` needs an
+    expression per column, and a block variable of size ``n`` occupies ``n``
+    consecutive columns in C order -- the same flattening the evaluator and the
+    FBBT bound vectors use (``np.concatenate([np.asarray(x[v.name]).ravel()
+    for v in model._variables])``).
+
+    Indexing ``model._variables`` directly by flat column is only correct when
+    every block is scalar. The call site used to *gate on* that
+    (``all(size == 1)``), which silently disabled the whole root-cut stage for
+    any model built with vector variables -- a modeling style, not a problem
+    class, so the restriction violated CLAUDE.md SS2. Unravelling here removes
+    it: ``.nl`` and ``.gms`` imports (all-scalar blocks) are unchanged, and
+    array-API models now get the same cuts.
+    """
+    cols: list = []
+    for v in model._variables:
+        size = int(getattr(v, "size", 1))
+        if size == 1:
+            cols.append(v)
+            continue
+        shape = getattr(v, "shape", None)
+        if shape is None:
+            shape = (size,)
+        shape = tuple(int(d) for d in shape)
+        if int(np.prod(shape)) != size:
+            raise ValueError(
+                f"variable {getattr(v, 'name', '?')!r}: shape {shape} does not "
+                f"match size {size}; cannot map flat columns"
+            )
+        for k in range(size):
+            idx = tuple(int(t) for t in np.unravel_index(k, shape))
+            cols.append(v[idx[0] if len(idx) == 1 else idx])
+    return cols
+
+
 @dataclass
 class RootCutResult:
     """Applied cuts (``alpha·x <= rhs`` each) and the final root-LP dual bound."""
