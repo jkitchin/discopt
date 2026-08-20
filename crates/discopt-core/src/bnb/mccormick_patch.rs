@@ -327,7 +327,7 @@ pub fn bilinear_rows(
     ]
 }
 
-/// The 4 envelope rows for `s = x_i^p` over a **sign-definite** box `[li,ui]`
+/// The 4 envelope rows for `s = x_i^p` over `[li,ui]`
 /// (secant + tangents at `li`, the box midpoint, and `ui`). Mirrors
 /// `incremental_mccormick._monomial_rows`; `p = 2` is the plain square.
 ///
@@ -353,6 +353,23 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
     // to the tangent at the pinned point. Guarded on EXACT zero width only — for any
     // positive width the true secant is the sound convex overestimator.
     let slope = if ui <= li { dfl } else { (fu - fl) / (ui - li) };
+    // Odd `p` on a SIGN-STRADDLING box: `x^p` is S-shaped there, so neither the
+    // convex nor the concave hull is valid and this fixed 4-row pattern cannot
+    // express the real (2-facet) hull. `_build_structure` declines the term and so
+    // does `spatial_producer`, so this is unreachable from the kernel — but the
+    // concave branch it used to fall into emitted rows that made the node LP
+    // INFEASIBLE (measured: every straddling `p = 5` probe box), which as a node
+    // result reads as "fathomed", i.e. a silently pruned optimum. Emit four vacuous
+    // `0 <= 0` rows instead: sound, merely loose, and never wrong.
+    if p % 2 == 1 && li < 0.0 && ui > 0.0 {
+        let vacuous = EnvRow {
+            cols: [i, s, 0],
+            coeffs: [0.0, 0.0, 0.0],
+            nnz: 0,
+            rhs: 0.0,
+        };
+        return [vacuous; 4];
+    }
     let convex = (p % 2 == 0) || (li >= 0.0);
     // #956: the tangent-at-`ui` rhs is `f'(ui)*ui - f(ui)`, a cancelling subtraction
     // of two same-signed quantities; at `x = ui` it disagrees with `ui^p` by ~1 ulp
@@ -572,13 +589,49 @@ pub fn bilinear_aux_bounds(li: f64, ui: f64, lj: f64, uj: f64) -> (f64, f64) {
     widen(lo, hi)
 }
 
-/// Auxiliary-variable bounds for `s = x_i^p` over a sign-definite `[li,ui]` (monotone
-/// there). Mirrors `_monomial_aux_bounds`.
+/// Auxiliary-variable bounds for `s = x_i^p` over `[li,ui]`. Mirrors
+/// `_monomial_aux_bounds` — which is itself pinned to `Interval.__pow__`, because the
+/// cold build takes this column's bounds from `evaluate_interval`.
+///
+/// The endpoint min/max this used to return is only the range of `x^p` when the box
+/// is SIGN-DEFINITE. Branching splits a straddling root box on an interior point, so
+/// a node box that straddles zero reaches here routinely, and there the endpoint form
+/// is UNSOUND: over `[-10, 10]`, `x^2` was given `[100, 100]`, and
+/// `assemble_node_lp` intersects that tighten-only into the aux column — cutting off
+/// every point with `|x| < 10`, the true optimum included. Measured before this fix:
+/// 72 of 90 straddling probe boxes cut their own pinned feasible point, and
+/// `mathopt4` returned a certified `optimal` bound of 2.49e-4 on a model whose
+/// optimum is 0.
+///
+/// `p == 2` is the exact square image; `p >= 3` is repeated interval MULTIPLICATION,
+/// deliberately looser than the exact image (`x^4` over `[-2,3]` is `[-54,81]`, not
+/// `[0,81]`) because reproducing `Interval.__pow__` — not merely being sound — is
+/// what keeps this path bound-neutral against the cold build. Do not tighten it.
+///
+/// A non-finite endpoint cannot be reproduced by the closed form (`0 * inf` is `NaN`,
+/// and `Interval` outward-rounds after every step); the producer declines an infinite
+/// root box and branching only shrinks boxes, so this is unreachable — return the
+/// non-tightening `(-inf, inf)` rather than a `NaN` that would silently disable
+/// fathoming.
 #[inline]
 pub fn monomial_aux_bounds(li: f64, ui: f64, p: i32) -> (f64, f64) {
-    let a = li.powi(p);
-    let b = ui.powi(p);
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    if !li.is_finite() || !ui.is_finite() {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    if p == 2 {
+        return square_aux_bounds(li, ui);
+    }
+    let (mut lo, mut hi) = (li, ui);
+    for _ in 0..(p - 1) {
+        let c = [lo * li, lo * ui, hi * li, hi * ui];
+        let (mut cl, mut ch) = (c[0], c[0]);
+        for &v in &c[1..] {
+            cl = cl.min(v);
+            ch = ch.max(v);
+        }
+        lo = cl;
+        hi = ch;
+    }
     // #956: widened outward (see `bilinear_aux_bounds`).
     widen(lo, hi)
 }
@@ -840,7 +893,12 @@ mod tests {
         assert_row_eq(&rows[1], &[1.0, -1.0], 0.25);
         assert_row_eq(&rows[2], &[6.0, -1.0], 9.0);
         assert_row_eq(&rows[3], &[-1.0, 1.0], 6.0);
-        assert_aux_widened(monomial_aux_bounds(-2.0, 3.0, 2), (4.0, 9.0));
+        // `[-2, 3]` STRADDLES zero, so the aux enclosure of `x^2` is `[0, 9]`, not the
+        // endpoint range `[4, 9]`. This line asserted `(4.0, 9.0)` — it encoded the
+        // defect it was named after checking, and `_monomial_aux_bounds(-2, 3, 2)`
+        // returns `(-3.55e-15, 9.0)`. The old bound pinned the aux column above every
+        // `|x| < 2`, which `assemble_node_lp` intersects tighten-only into the column.
+        assert_aux_widened(monomial_aux_bounds(-2.0, 3.0, 2), (0.0, 9.0));
     }
 
     #[test]
@@ -1401,5 +1459,127 @@ mod tests {
         assert_aux_widened(square_aux_bounds(-2.0, 3.0), (0.0, 9.0));
         assert_aux_widened(square_aux_bounds(1.0, 4.0), (1.0, 16.0));
         assert_aux_widened(square_aux_bounds(-4.0, -1.0), (1.0, 16.0));
+    }
+}
+
+/// Regression: the monomial aux bounds and envelope rows must stay sound on a
+/// SIGN-STRADDLING box. Branching splits a straddling root on an interior point, so
+/// these boxes reach the kernel at every node; the endpoint-min/max aux form that
+/// used to live here cut the true optimum out and produced a certified-`optimal`
+/// false bound on `mathopt4` (2.49e-4 against a true optimum of 0).
+#[cfg(test)]
+mod monomial_straddle_tests {
+    use super::*;
+
+    /// The aux enclosure must contain `x^p` for every `x` in the box.
+    #[test]
+    fn monomial_aux_bounds_encloses_the_whole_straddling_box() {
+        let boxes = [
+            (-10.0, 10.0),
+            (-10.0, 9.272_727_272_727_275),
+            (-2.0, 5.0),
+            (-0.5, 3.0),
+        ];
+        let mut checks = 0usize;
+        for &(li, ui) in &boxes {
+            for p in 2..=6i32 {
+                let (lo, hi) = monomial_aux_bounds(li, ui, p);
+                for k in 0..=100 {
+                    let x = li + (ui - li) * (k as f64) / 100.0;
+                    let v = x.powi(p);
+                    assert!(
+                        v >= lo - 1e-9 && v <= hi + 1e-9,
+                        "x={x} x^{p}={v} outside aux bounds [{lo}, {hi}] for box [{li}, {ui}]"
+                    );
+                    checks += 1;
+                }
+            }
+        }
+        assert!(checks > 0, "probe executed no comparisons");
+    }
+
+    /// Sign-definite boxes are unchanged: the repeated-product form collapses to the
+    /// endpoint range there, so this stays bound-NEUTRAL for every box that already
+    /// worked (CLAUDE.md §5).
+    #[test]
+    fn monomial_aux_bounds_are_bound_neutral_on_sign_definite_boxes() {
+        let mut checks = 0usize;
+        for &(li, ui) in &[(1.0, 7.0), (-7.0, -1.0), (0.0, 3.5), (-4.0, 0.0)] {
+            for p in 2..=6i32 {
+                let (lo, hi) = monomial_aux_bounds(li, ui, p);
+                let (a, b) = (li.powi(p), ui.powi(p));
+                let (elo, ehi) = if a <= b { widen(a, b) } else { widen(b, a) };
+                assert!(
+                    (lo - elo).abs() <= 1e-9 * elo.abs().max(1.0)
+                        && (hi - ehi).abs() <= 1e-9 * ehi.abs().max(1.0),
+                    "box [{li},{ui}] p={p}: got [{lo},{hi}] want [{elo},{ehi}]"
+                );
+                checks += 1;
+            }
+        }
+        assert_eq!(checks, 20, "probe executed no comparisons");
+    }
+
+    /// A non-finite endpoint must not produce a NaN bound: `NaN <= incumbent` is
+    /// always false, which silently disables fathoming (C-36 / #723).
+    #[test]
+    fn monomial_aux_bounds_do_not_return_nan_on_an_infinite_box() {
+        let mut checks = 0usize;
+        for &(li, ui) in &[
+            (f64::NEG_INFINITY, 0.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::INFINITY),
+        ] {
+            for p in 2..=5i32 {
+                let (lo, hi) = monomial_aux_bounds(li, ui, p);
+                assert!(
+                    !lo.is_nan() && !hi.is_nan(),
+                    "NaN aux bound for [{li},{ui}]^{p}"
+                );
+                assert!(lo <= hi, "inverted aux bound for [{li},{ui}]^{p}");
+                checks += 1;
+            }
+        }
+        assert_eq!(checks, 12, "probe executed no comparisons");
+    }
+
+    /// Odd `p` on a straddling box is S-shaped: neither hull is valid, so the rows
+    /// must be vacuous rather than the concave branch (which made the node LP
+    /// infeasible, i.e. silently fathomed the optimum).
+    #[test]
+    fn odd_power_on_a_straddling_box_emits_vacuous_rows() {
+        let mut checks = 0usize;
+        for &(li, ui) in &[(-10.0, 10.0), (-0.5, 3.0), (-2.0, 5.0)] {
+            for p in [3i32, 5, 7] {
+                for r in monomial_rows(0, 1, li, ui, p).iter() {
+                    assert_eq!(r.nnz, 0, "non-vacuous row for [{li},{ui}]^{p}");
+                    assert_eq!(r.rhs, 0.0);
+                    checks += 1;
+                }
+            }
+        }
+        assert_eq!(checks, 36, "probe executed no comparisons");
+    }
+
+    /// Even `p` still gets the real convex hull on a straddling box (`x^p` is convex
+    /// on all of R, #861) — the vacuous guard must not swallow it.
+    #[test]
+    fn even_power_on_a_straddling_box_keeps_its_convex_hull() {
+        let mut checks = 0usize;
+        for p in [2i32, 4, 6] {
+            let rows = monomial_rows(0, 1, -2.0, 5.0, p);
+            assert!(rows.iter().all(|r| r.nnz == 2), "even p={p} lost its rows");
+            // Every row must admit the true point (x, x^p) across the box.
+            for k in 0..=50 {
+                let x = -2.0 + 7.0 * (k as f64) / 50.0;
+                let s = x.powi(p);
+                for r in rows.iter() {
+                    let act = r.coeffs[0] * x + r.coeffs[1] * s;
+                    assert!(act <= r.rhs + 1e-6, "row cuts (x={x}, x^{p}={s})");
+                    checks += 1;
+                }
+            }
+        }
+        assert!(checks > 0, "probe executed no comparisons");
     }
 }
