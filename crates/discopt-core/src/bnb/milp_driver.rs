@@ -703,12 +703,74 @@ pub fn solve_milp_lazy_hooked(
             if total_cuts >= opts.root_cuts {
                 break;
             }
+            crate::profile::incr(crate::profile::Ctr::RootCutRounds);
             let root = {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
-                // Solve the root relaxation directly from the working CSC (T3b5: no
-                // dense matrix). Bit-identical to `solve_lp_root` (gated by
-                // `driver_matches_golden`).
-                solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &node_simplex)
+                // Re-optimize from the PREVIOUS round's optimal basis instead of
+                // re-deriving the augmented LP from scratch. Appending a cut adds a
+                // row and its surplus slack; `extend_basis` makes that slack basic,
+                // which leaves the basis nonsingular and still dual-feasible (the
+                // slack's cost is 0), so a warm DUAL re-solve is the textbook
+                // re-optimizer — it pivots in the few violated cut rows rather than
+                // running a fresh primal phase-1 over the whole matrix.
+                //
+                // The loop already kept `root_basis` for the post-loop root node; it
+                // simply never fed it back in, so every round paid a cold solve.
+                // Measured on the rsyn0840m OA master at `root_cuts=500,
+                // cut_rounds=15`: 14 cold root solves = 23.1 s of the 24.2 s cut
+                // loop, 16127 phase-1 pivots, `EntryColsWarm = 0`.
+                //
+                // Bound-safe: the LP optimum does not depend on the starting basis,
+                // and the warm solve falls back to the cold `solve_lp_root_csc` on
+                // IterLimit/Numerical exactly as the node path does. Only which
+                // optimal vertex is reached — hence which Gomory cuts are read off
+                // the basis — can differ, the same latitude the post-loop
+                // `root_warm_basis` path already has.
+                // Borrowed, not taken: a round whose LP comes back non-Optimal
+                // breaks out of the loop *without* refreshing `root_basis`, and the
+                // post-loop root node still wants the last good basis to warm-start
+                // from. Taking it here would silently cold-solve that root.
+                match root_basis.as_ref() {
+                    Some(&(ref b, basis_n)) => {
+                        crate::profile::incr(crate::profile::Ctr::RootCutWarmReopt);
+                        let b = if basis_n < n_w {
+                            extend_basis(b.clone(), n_w)
+                        } else {
+                            b.clone()
+                        };
+                        let lp = LpView {
+                            a: &[],
+                            m: m_w,
+                            n: n_w,
+                            c: &c_w,
+                            l: &l_w,
+                            u: &u_w,
+                        };
+                        let warm = solve_lp_warm_scaled_csc(
+                            &lp,
+                            &b_w,
+                            &b,
+                            &warm_root_opts(&node_simplex, m_w, n_w),
+                            &csc_w,
+                        );
+                        match warm.status {
+                            LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
+                                &csc_w,
+                                m_w,
+                                n_w,
+                                &c_w,
+                                &l_w,
+                                &u_w,
+                                &b_w,
+                                &node_simplex,
+                            ),
+                            _ => warm,
+                        }
+                    }
+                    None => {
+                        solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &node_simplex)
+                    }
+                }
             };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
@@ -3532,6 +3594,93 @@ mod tests {
     }
 
     #[test]
+    fn root_cut_rounds_reoptimize_warm_instead_of_cold_solving() {
+        // The root cut loop kept each round's optimal basis for the post-loop root
+        // node but never fed it back into the NEXT round, so every round re-derived
+        // the augmented LP with a cold primal phase-1. Measured on the rsyn0840m OA
+        // master at `root_cuts=500, cut_rounds=15`: 14 cold root solves = 23.1 s of
+        // the 24.2 s cut loop, 16127 phase-1 pivots, and the enclosing solve could
+        // never close the gap. Warm-starting the rounds makes real cut budgets
+        // affordable (same instance: 22559 nodes to a certified optimum).
+        //
+        // The invariant: however many rounds run, only the FIRST derives its basis
+        // from scratch; every later round re-optimizes from the previous round's
+        // optimum, which `RootCutWarmReopt` records.
+        //
+        // `RootCutRounds` is asserted `>= 3` so the check cannot pass vacuously on a
+        // fixture that happens to finish in one round (CLAUDE.md §6) -- with a single
+        // round `EntryCols == 1` holds with or without the fix.
+        let _g = crate::profile::test_guard();
+        // 3 knapsack rows over 8 binaries with coefficients chosen so the LP
+        // relaxation stays fractional across several GMI rounds.
+        // 8 binaries + one explicit surplus slack per row (`Σ a·x + s = b`, the
+        // standard form this driver's `LpView` takes).
+        let n = 11;
+        let a = vec![
+            7.0, 5.0, 4.0, 3.0, 9.0, 6.0, 5.0, 4.0, 1.0, 0.0, 0.0, //
+            3.0, 8.0, 6.0, 7.0, 4.0, 5.0, 9.0, 3.0, 0.0, 1.0, 0.0, //
+            6.0, 4.0, 9.0, 5.0, 3.0, 8.0, 4.0, 7.0, 0.0, 0.0, 1.0,
+        ];
+        let c = vec![
+            -9.0, -7.0, -8.0, -6.0, -10.0, -8.0, -7.0, -6.0, 0.0, 0.0, 0.0,
+        ];
+        let l = vec![0.0; n];
+        let mut u = vec![1.0; n];
+        u[8] = INF;
+        u[9] = INF;
+        u[10] = INF;
+        let lp = LpView {
+            a: &a,
+            m: 3,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let b = [15.0, 17.0, 16.0];
+        let mut o = opts(8, (0..8).collect());
+        o.root_cuts = 200;
+        o.cut_rounds = 12;
+        o.cut_select = true;
+        o.gmi_cuts = true;
+
+        // Reference optimum from the same driver with cuts switched off entirely:
+        // the cut loop may never move the certified objective.
+        let mut o_ref = opts(8, (0..8).collect());
+        o_ref.root_cuts = 0;
+        let r_ref = solve_milp(&lp, &b, 0.0, &o_ref);
+        assert_eq!(r_ref.status, MilpStatus::Optimal);
+
+        // The driver calls `profile::init_from_env()` on entry, which overwrites a
+        // bare `set_enabled(true)` with "is DISCOPT_PROFILE set?" -- so arming the
+        // counters here means arming the env var, under TEST_LOCK.
+        std::env::set_var("DISCOPT_PROFILE", "1");
+        crate::profile::reset();
+        let r = solve_milp(&lp, &b, 0.0, &o);
+        let rounds = crate::profile::counter(crate::profile::Ctr::RootCutRounds);
+        let warm_reopt = crate::profile::counter(crate::profile::Ctr::RootCutWarmReopt);
+        std::env::remove_var("DISCOPT_PROFILE");
+        crate::profile::set_enabled(false);
+        assert_eq!(r.status, MilpStatus::Optimal);
+        assert!(
+            (r.obj - r_ref.obj).abs() < 1e-6,
+            "cut loop moved the optimum: {} vs {}",
+            r.obj,
+            r_ref.obj
+        );
+        assert!(
+            rounds >= 3,
+            "fixture ran only {rounds} cut round(s); the cold-solve check would be vacuous"
+        );
+        assert_eq!(
+            warm_reopt,
+            rounds - 1,
+            "{rounds} cut rounds but only {warm_reopt} warm re-optimizes; every round \
+             after the first must start from the previous round's optimal basis"
+        );
+    }
+
+    #[test]
     fn presolve_matches_no_presolve() {
         // Equality-constrained MILP where FBBT actually fires:
         //   min -x0 - 2x1 - x2  s.t.  x0 + x1 + x2 = 3,  2x1 + x2 + s = 4,
@@ -3956,6 +4105,17 @@ mod sparse_milp_diff {
     /// sensitive discriminator: a different root-solve pivot path drifts it even when
     /// the B&B tree is a single node. A change to any value here is a red flag — the
     /// sparse path is a pure representation change and must reproduce these exactly.
+    ///
+    /// `lp_iters` was re-baselined once, for two compounding reasons, both measured
+    /// on this panel with status/nodes/obj/bound bit-identical throughout:
+    ///   1. `primal.rs` used to `assemble` every cold solve with a hardcoded
+    ///      `iters: 0`, so the primal contributed nothing to this sum (CLAUDE.md §6).
+    ///      With the honest pivot count: binary_knapsack 1 → 5, cuts_firing 1 → 8.
+    ///   2. The root cut loop now warm dual re-optimizes each round from the previous
+    ///      round's optimal basis instead of cold-solving the augmented LP, which is
+    ///      the whole point of the change: binary_knapsack 5 → 2, cuts_firing 8 → 2.
+    /// The recorded values are therefore the *real* pivot counts of the *current*
+    /// engine; the old ones were an under-report of a slower path.
     #[test]
     fn driver_matches_golden() {
         for case in panel() {
@@ -3963,7 +4123,7 @@ mod sparse_milp_diff {
             let (status, obj, bound, nodes, iters): (MilpStatus, f64, f64, usize, usize) =
                 match case.name {
                     "pure_lp" => (MilpStatus::Optimal, -1.0, -1.0, 1, 0),
-                    "binary_knapsack" => (MilpStatus::Optimal, -10.0, -10.0, 1, 1),
+                    "binary_knapsack" => (MilpStatus::Optimal, -10.0, -10.0, 1, 2),
                     "general_integer" => (MilpStatus::Optimal, -3.0, -3.0, 1, 1),
                     "infeasible" => (MilpStatus::Infeasible, f64::INFINITY, f64::INFINITY, 0, 0),
                     "unbounded" => (
@@ -3973,7 +4133,7 @@ mod sparse_milp_diff {
                         1,
                         0,
                     ),
-                    "cuts_firing_knapsack" => (MilpStatus::Optimal, -16.0, -16.0, 1, 1),
+                    "cuts_firing_knapsack" => (MilpStatus::Optimal, -16.0, -16.0, 1, 2),
                     other => panic!("unhandled case {other}"),
                 };
             assert_eq!(r.status, status, "{}: status", case.name);

@@ -519,6 +519,7 @@ impl<'a> PreparedDual<'a> {
         let _t_prep = crate::profile::Timer::new(crate::profile::Phase::DualPrepare);
         let (m, n, l, u, c) = (lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
             return None;
         }
         let tol = opts.tol;
@@ -529,6 +530,7 @@ impl<'a> PreparedDual<'a> {
         }
         let stat = start.col_status.clone();
         if stat.len() != n {
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
             return None;
         }
 
@@ -543,6 +545,7 @@ impl<'a> PreparedDual<'a> {
             })
             .collect();
         if lu.factorize_sparse(m, &cols).is_err() {
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
             return None; // singular warm basis → fall back to cold
         }
 
@@ -555,6 +558,7 @@ impl<'a> PreparedDual<'a> {
         {
             let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
             if lu.btran(&mut y).is_err() {
+                crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
                 return None;
             }
             for j in 0..n {
@@ -571,11 +575,13 @@ impl<'a> PreparedDual<'a> {
                     dj >= -tol
                 };
                 if !ok {
+                    crate::profile::incr(crate::profile::Ctr::DualPrepRejectDualInf);
                     return None; // dual-infeasible warm start → cold fallback
                 }
             }
         }
 
+        crate::profile::incr(crate::profile::Ctr::DualPrepAccept);
         Some(PreparedDual {
             m,
             n,
@@ -2057,7 +2063,20 @@ mod tests {
             col_status: vec![AT_LOWER, AT_LOWER, BASIC, BASIC],
         };
 
+        // Arm the counters so the fallback can be observed directly. `iters == 0`
+        // used to stand in for "the cold primal ran", but only because the primal
+        // hardcoded `iters: 0` for every solve -- a broken instrument doubling as a
+        // test oracle (CLAUDE.md §6). Now that it reports its real pivot count, the
+        // mechanism is asserted by name instead.
+        let _g = crate::profile::test_guard();
+        // `set_enabled` (not the env var) is what arms the counters here: nothing on
+        // this path calls `init_from_env`, so exporting `DISCOPT_PROFILE` would leave
+        // `ENABLED` false and the assertion below would read 0 for the wrong reason.
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
         let warm = solve_lp_warm(&lp, &b, &bad, &opts());
+        let rejects = crate::profile::counter(crate::profile::Ctr::DualPrepRejectDualInf);
+        crate::profile::set_enabled(false);
         let cold = solve_lp(&lp, &b, &opts());
         assert_eq!(cold.status, LpStatus::Optimal);
         assert_eq!(warm.status, LpStatus::Optimal);
@@ -2069,10 +2088,14 @@ mod tests {
             warm.obj,
             cold.obj
         );
-        // iters==0 confirms the cold fallback ran (the dual path sets iters>0).
+        // The dual-infeasible warm basis must have been REFUSED by
+        // `PreparedDual::prepare`, which is what routes the solve to the cold
+        // primal. Asserting the refusal directly (rather than inferring it from an
+        // iteration count) also proves the probe fired.
         assert_eq!(
-            warm.iters, 0,
-            "precondition should have forced cold fallback"
+            rejects, 1,
+            "precondition should have forced cold fallback: prepare refused \
+             {rejects} dual-infeasible warm starts, expected 1"
         );
     }
 
