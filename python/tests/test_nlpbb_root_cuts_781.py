@@ -200,3 +200,134 @@ def test_rsyn0805m_flag_on_sound_and_tighter(monkeypatch):
     # the composed bound is at most the root-cut LP bound (~1577.3 measured);
     # flag-off tree bound at this budget is ~1768 — require a real improvement
     assert r.bound <= 1650.0, f"root-cut bound composition ineffective: {r.bound}"
+
+
+# ── stall termination (#1062): the loop must not spend its budget for nothing ─
+
+
+def test_stalling_loop_exits_after_stall_rounds(monkeypatch):
+    """A loop that keeps FINDING cuts but never MOVES the bound must give up.
+
+    This is the #1062 regression. `chosen` cannot detect the condition — measured
+    on clay0205hfsg the loop chose cuts in 16 of 16 rounds while the root LP
+    bound sat at 0.0 the whole time, so it ran to budget exhaustion (7.4 s, a
+    quarter of the solve's entire 30 s limit) and the end-of-loop quality gate
+    then discarded every cut it had found. The cuts were never the problem — a
+    valid cut cannot loosen a valid bound — the wasted wall was.
+
+    Stubbed rather than corpus-driven so the condition is exact: the LP bound is
+    pinned to a constant and selection always yields a cut, which is precisely
+    "productive by `chosen`, stalled by the bound".
+    """
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = _build_convex_minlp("max")
+    ev = NLPEvaluator(m)
+    lb = np.array([0.0, 0.0, 0.0, 0.0])
+    ub = np.array([10.0, 10.0, 1.0, 1.0])
+    is_int = np.array([False, False, True, True])
+
+    x_fixed = np.array([1.0, 1.0, 0.5, 0.5])
+    calls = {"lp": 0, "sel": 0}
+
+    def _frozen_lp(root, cuts_a, cuts_b):
+        calls["lp"] += 1
+        return 5.0, x_fixed.copy(), None, None  # bound never moves
+
+    def _always_a_cut(candidates, x, **kw):
+        calls["sel"] += 1
+        a = np.zeros(len(x_fixed))
+        a[0] = 1.0
+        return [(a, 99.0)]
+
+    monkeypatch.setattr(rc, "_solve_lp", _frozen_lp)
+    monkeypatch.setattr(rc, "_select_cuts", _always_a_cut)
+
+    res = rc.generate_root_cuts(m, ev, lb, ub, is_int, is_int.copy(), time_budget_s=30.0)
+
+    assert calls["lp"] > 0 and calls["sel"] > 0, "stubs never ran — probe measured nothing"
+    assert res.stop_reason == "stall", f"stopped on {res.stop_reason!r}, not the stall guard"
+    assert res.improving_rounds == 0
+    assert res.rounds_run == rc.STALL_ROUNDS, (
+        f"ran {res.rounds_run} rounds on a frozen bound; the guard should stop it "
+        f"at {rc.STALL_ROUNDS}. Before #1062 this ran to ROUNDS or to the budget."
+    )
+    # ...and it did not burn the budget it was given.
+    assert res.cuts == [], "a stalled loop must still hand back nothing"
+
+
+def test_loop_never_runs_more_than_stall_rounds_past_its_last_gain(monkeypatch):
+    """General invariant, asserted on the real separators rather than stubs.
+
+    Whatever the instance, once the bound stops moving the loop is allowed at
+    most STALL_ROUNDS more rounds. This is what bounds the stage's wasted wall
+    on every instance, not just the ones in the probe set.
+    """
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    checked = 0
+    for sense in ("max", "min"):
+        m = _build_convex_minlp(sense)
+        ev = NLPEvaluator(m)
+        res = rc.generate_root_cuts(
+            m,
+            ev,
+            np.array([0.0, 0.0, 0.0, 0.0]),
+            np.array([10.0, 10.0, 1.0, 1.0]),
+            np.array([False, False, True, True]),
+            np.array([False, False, True, True]),
+            time_budget_s=30.0,
+        )
+        if res.stop_reason == "stall":
+            assert res.rounds_run <= res.improving_rounds + rc.STALL_ROUNDS, (
+                f"{sense}: {res.rounds_run} rounds but only {res.improving_rounds} "
+                f"improving — more than {rc.STALL_ROUNDS} rounds were wasted"
+            )
+        # the trace always carries the baseline plus one entry per completed round
+        assert len(res.bound_trace) <= res.rounds_run + 1
+        checked += 1
+    assert checked == 2, "invariant probe ran on nothing"
+
+
+@pytest.mark.slow
+def test_clay0205hfsg_stage_no_longer_burns_the_time_limit(monkeypatch):
+    """The measured #1062 regression, on the instance that showed it.
+
+    Before the stall guard: 16 rounds, 7.4 s against a 6.0 s budget — 25.8% of a
+    30 s solve's whole limit — and 0 cuts kept. The budget is not the fix, since
+    it was already being overrun; giving up is.
+    """
+    import time
+
+    import discopt.modeling as dm
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.modeling.core import VarType
+
+    nl = BENCH_NL / "clay0205hfsg.nl"
+    if not nl.exists():
+        pytest.skip("benchmark corpus not available")
+    m = dm.from_nl(str(nl))
+    lb = np.array([float(v.lb) for v in m._variables])
+    ub = np.array([float(v.ub) for v in m._variables])
+    is_int = np.array([v.var_type in (VarType.INTEGER, VarType.BINARY) for v in m._variables])
+
+    budget = 6.0  # what solver.py hands the stage at time_limit=30
+    t0 = time.perf_counter()
+    res = rc.generate_root_cuts(
+        m,
+        NLPEvaluator(m),
+        lb,
+        ub,
+        is_int,
+        is_int & (lb == 0.0) & (ub == 1.0),
+        time_budget_s=budget,
+    )
+    wall = time.perf_counter() - t0
+
+    assert res.improving_rounds == 0, "instance changed; it used to never move the bound"
+    assert res.stop_reason == "stall"
+    assert res.rounds_run <= rc.STALL_ROUNDS
+    assert wall < 0.25 * budget, f"stage still burned {wall:.2f}s of its {budget}s budget"
