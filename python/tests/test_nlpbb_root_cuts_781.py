@@ -5,7 +5,8 @@ Soundness gates:
     MILPs, every emitted cut must be violated at the LP vertex and satisfied
     by every integer assignment's full continuous completion (LP certificate
     per integer corner — no sampling gap);
-  * flag OFF is inert (no constraints added, no behavior change);
+  * ``DISCOPT_NLPBB_ROOT_CUTS=0`` is inert (no constraints added, no behavior
+    change) -- the legacy path §5 requires graduation to leave intact;
   * flag ON preserves the optimum and never reports an unsound bound
     (min: bound <= opt; max: bound >= opt), on both senses;
   * the slow named regression runs the real convex-synthesis instance.
@@ -35,10 +36,10 @@ OPT_RSYN0805M = 1296.120603  # minlplib.solu (maximize)
 
 
 def _flag(monkeypatch, on: bool) -> None:
-    if on:
-        monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS", "1")
-    else:
-        monkeypatch.delenv("DISCOPT_NLPBB_ROOT_CUTS", raising=False)
+    # The flag graduated default-ON (2026-08-20), so "off" has to be the explicit
+    # opt-out value -- deleting the variable now selects ON and would have turned
+    # every flag-OFF arm below into a second flag-ON arm silently.
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS", "1" if on else "0")
 
 
 # ── GMI separator: exact validity by enumeration ─────────────────────────────
@@ -177,6 +178,41 @@ def test_generate_root_cuts_direct_sound(monkeypatch):
     x_opt = np.array([float(np.atleast_1d(r.x[nm])[0]) for nm in ("f0", "f1", "y0", "y1")])
     for alpha, rhs in res.cuts:
         assert float(alpha @ x_opt) <= rhs + 1e-6, "cut removes the optimal solution"
+
+
+@pytest.mark.smoke
+def test_flag_is_default_on_with_an_opt_out():
+    """§5: the root-cut stage graduated default-ON, and the opt-out still works.
+
+    It shipped default-OFF pending its differential panel (#781). That panel was
+    re-run on 2026-08-20 -- after #1082 unblocked the sub-NLP primal heuristic on
+    convex models and #1098 made ``gap_certified`` mean the same thing on both
+    solve routes -- over 153 in-repo corpus instances at 60 s each, and passed
+    both bars: cert-clean (0 bounds above a reference optimum, 0 certification
+    regressions, proven-optimal 69 in both arms) and net-positive (dual bound
+    tighter on 22 / looser on 9, primal shortfall better on 6 / worse on 1, total
+    nodes -13.3%, wall +0.5%). Recorded in ``docs/dev/performance-plan.md`` §21.
+
+    §5 requires the ``=0`` opt-out and the legacy path to survive graduation, so
+    both halves are pinned here, not just the new default.
+    """
+    saved = os.environ.pop("DISCOPT_NLPBB_ROOT_CUTS", None)
+    try:
+        assert nlpbb_root_cuts_enabled() is True, "graduated: unset must mean ON"
+        for off in ("0", "off", "false", "no", "OFF", " no "):
+            os.environ["DISCOPT_NLPBB_ROOT_CUTS"] = off
+            assert nlpbb_root_cuts_enabled() is False, f"{off!r} must opt out"
+        # Empty is ON, not OFF, and that is the point: ``export X="$UNSET"`` exports
+        # an empty string, and a graduated default-ON path must not be switched off
+        # by an accident of shell quoting while reading in every log as "not set"
+        # (#993, same lesson on DISCOPT_GDP_CONFIG_PRIMAL).
+        for on in ("1", "true", "yes", "on", "", "  "):
+            os.environ["DISCOPT_NLPBB_ROOT_CUTS"] = on
+            assert nlpbb_root_cuts_enabled() is True, f"{on!r} must leave it ON"
+    finally:
+        os.environ.pop("DISCOPT_NLPBB_ROOT_CUTS", None)
+        if saved is not None:
+            os.environ["DISCOPT_NLPBB_ROOT_CUTS"] = saved
 
 
 # ── the real class (benchmark corpus; slow) ──────────────────────────────────

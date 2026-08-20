@@ -175,6 +175,45 @@ def test_default_solve_path_does_not_certify_a_super_optimal_incumbent():
 
 
 @pytest.mark.smoke
+def test_refine_adopts_the_more_feasible_point_over_the_lower_objective(monkeypatch):
+    """#1061: the terminal refine's adoption rule must tie-break on FEASIBILITY.
+
+    The rule was a single ±1e-4 objective window, which keeps whichever of the
+    two points is more optimistic whenever they disagree. With the root-cut
+    stage on, this fixture's node relaxation returns ``x = 2.998978`` at
+    ``y = 1 - 2.1e-8`` -- feasible only because that sliver of ``y`` buys
+    1.05e-6 of big-M slack from ``50*(1-y)``. Snapping ``y`` to 1 leaves the row
+    violated by 1.04e-6, which clears the 1e-6 exit gate on the 1e-9 term-scaled
+    forgiveness of the row's own coefficient 50. The refine (integers fixed,
+    ``bound_relax_factor=0``) returned ``x = 2.9999999931``, violation 4.8e-17 --
+    and the window rejected it at ``|dobj| = 1.02e-3``. The solve then reported
+    ``optimal`` 1.02e-3 below an exact optimum of 3.0.
+
+    Pinned with the flag set explicitly, so this stays a test of the adoption
+    rule rather than of whatever ``DISCOPT_NLPBB_ROOT_CUTS`` happens to default
+    to. Fails on the pre-fix tree with ``objective = 2.99897831539379``.
+    """
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS", "1")
+    m = dm.Model("refine_feasibility_tiebreak")
+    x = m.continuous("x", lb=1.0, ub=10.0)
+    y = m.binary("y")
+    m.subject_to((x - 3.0) ** 2 <= 50.0 * (1 - y))
+    m.subject_to(x * dm.log(x) + 5.0 <= 50.0 * y)
+    m.minimize(x)
+    res = m.solve(time_limit=60)
+
+    assert res.objective is not None
+    assert res.objective >= 3.0 - 1e-6, (
+        f"objective {res.objective!r} is below the exact optimum 3.0 -- the refine's "
+        "feasible point was rejected in favour of a violating one"
+    )
+    # And the point itself, not just its objective: the row must actually hold.
+    xv = float(np.asarray(res.x["x"]).ravel()[0])
+    yv = float(np.asarray(res.x["y"]).ravel()[0])
+    assert (xv - 3.0) ** 2 - 50.0 * (1.0 - yv) <= 1e-9, "reported point violates row 0"
+
+
+@pytest.mark.smoke
 def test_every_primal_heuristic_requests_the_incumbent_options():
     """The whole module is a point producer, so the seed is a module-wide rule.
 

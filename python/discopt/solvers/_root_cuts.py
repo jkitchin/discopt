@@ -31,8 +31,13 @@ Soundness contract (CLAUDE.md §1):
   * Everything is failure-safe: any error returns "no cuts" and the solve
     proceeds exactly as with the flag off.
 
-Default OFF (bound-changing, CLAUDE.md §5); graduation requires the Regime-2
-panel (cert-clean + net-positive).
+Default **ON** since 2026-08-20. The bound-changing Regime-2 panel (CLAUDE.md
+§5) passed both bars on 153 in-repo corpus instances -- cert-clean (0 bounds
+above a reference optimum, 0 certification regressions, proven-optimal 69 both
+arms) and net-positive (dual bound tighter on 22 / looser on 9, primal shortfall
+better on 6 / worse on 1, total nodes -13.3%, wall +0.5%). The record is
+``docs/dev/performance-plan.md`` §21; ``DISCOPT_NLPBB_ROOT_CUTS=0`` opts out and
+takes the untouched legacy path.
 """
 
 from __future__ import annotations
@@ -74,9 +79,18 @@ POOL_MAX = 4000
 
 
 def nlpbb_root_cuts_enabled() -> bool:
-    """Whether the ``DISCOPT_NLPBB_ROOT_CUTS`` opt-in flag is set (default OFF)."""
-    val = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS", "0").strip().lower()
-    return val not in ("", "0", "false", "off", "no")
+    """Whether the root cutting-plane stage runs (``DISCOPT_NLPBB_ROOT_CUTS``).
+
+    **Default ON** since the 2026-08-20 graduation panel (issues #1061/#1062;
+    ``docs/dev/performance-plan.md`` §21). Set the variable to ``0``/``off``/
+    ``false``/``no`` to opt out and take the legacy no-root-cut path.
+
+    Empty is deliberately NOT an off-value: it is what an unset variable expands
+    to, and a graduated default-ON path must not be switched off by an accident
+    of shell quoting (#993). Same shape as ``_gdp_config_primal_enabled``.
+    """
+    val = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS", "").strip().lower()
+    return val not in ("0", "false", "off", "no")
 
 
 def flat_column_terms(model) -> list:

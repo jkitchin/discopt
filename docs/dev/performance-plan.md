@@ -3437,6 +3437,11 @@ Per §5 the flag is now **default-ON**, with `DISCOPT_PERSPECTIVE_OA_CUT=0` kept
 as the opt-out and the plain-tangent path intact.
 ## 20. #1061 root cuts: `DISCOPT_NLPBB_ROOT_CUTS` is sound but not helpful — stays OFF (rejected 2026-08-20)
 
+> **Superseded by §21 (2026-08-20).** The re-run panel below — on a build with
+> the #1062 stall fix and the #1098 `gap_certified` correction — passes both §5
+> bars, and the flag is now default-ON. §20 is retained as the record of the
+> verdict *for the build it was run on* (CLAUDE.md §11), not as current policy.
+
 **Why this was run.** #1061 reports discopt's root dual bound sitting 27.1x above
 the reference optimum on `syn40m` and 8.5x on `rsyn0840m`. The root cutting-plane
 stage (#781, `DISCOPT_NLPBB_ROOT_CUTS`, default-OFF) was the nearest built lever,
@@ -3542,3 +3547,187 @@ rounds with its bound tightening 861.77 → 852.11.
 measured cause of the panel's `cert-clean` failure, which makes a re-run
 meaningful; the flag stays default-OFF until a fresh §5 panel clears **both**
 bars. Until that panel is scored, §20's verdict is the operative one.
+
+**Update (2026-08-20): that panel has now been scored — see §21.** It clears both
+bars and the flag graduated default-ON, so the sentence above ("§20's verdict is
+the operative one") no longer holds; it was correct when written and is retracted
+here rather than edited, per CLAUDE.md §11.
+
+## 21. #1061/#1062 root cuts, re-run: `DISCOPT_NLPBB_ROOT_CUTS` passes both §5 bars and graduates ON (2026-08-20)
+
+**Why this was re-run.** §20 rejected the flag on a panel that failed *both* §5
+bars. Two things changed underneath that verdict:
+
+1. **#1062's stall fix.** The convex B&B's stalled node abstained instead of
+   being excluded (#1082), which suppressed the sub-NLP primal heuristic on
+   exactly the convex models this flag targets. §20's panel predates it.
+2. **#1098's `gap_certified` narrowing.** The §20-era field carried *two*
+   meanings. On the OA/mip-nlp route it meant "the printed gap is arithmetically
+   valid" — true at a 430% open gap. On the NLP-BB route (`solver.py`) any
+   `feasible` exit cleared it, i.e. "the gap is *closed*". A differential panel
+   whose two arms take different routes therefore reads a **false certification
+   regression** whenever the flag changes which route wins.
+
+**The panel.** Flag ON vs OFF over the in-repo corpus, 6 shards, 60 s/instance,
+arms adjacent per instance (§9), threads pinned. **153 instances with complete
+pairs in both arms**; every shard reported a non-zero executed-comparison count
+and no tracebacks (§6).
+
+| gate | result |
+|---|---|
+| dual bound | tighter **22**, looser 9, flat 122 |
+| primal shortfall | better **6**, worse **1**, same 102 |
+| node count | OFF 111 702 → ON 96 860 (**−13.3%**); 58 instances >2% fewer, 2 more, 93 within 2% |
+| total wall | OFF 5744.0 s, ON 5774.8 s (**+0.5%**) |
+| bound above its reference optimum (`RAISED`) | **0 instances** |
+| certification regression (#1098 semantics) | **0 instances** |
+| proven-optimal count | OFF 69, ON 69 (no certificate lost) |
+| **CERT-CLEAN** | **PASS** |
+| **NET-POSITIVE** | **PASS** |
+
+**The two flagged regressions were artifacts, and this was verified rather than
+asserted.** The raw scorer — reading the pre-#1098 `gap_certified` straight out
+of the logs — flagged `rsyn0805m02m` and `syn40m`. Re-adjudicating all 153 pairs
+under the corrected predicate (`gap_certified == (status == "optimal")`, which is
+what #1098 makes both routes report) gives:
+
+```
+raw cert regressions (pre-#1098 logs) : ['rsyn0805m02m', 'syn40m']
+cert regressions under #1098 semantics: []
+  -> INVENTED by the loose reading    : ['rsyn0805m02m', 'syn40m']
+  -> HIDDEN by the loose reading      : []
+```
+
+The "hidden" column matters: a *narrowing* can in principle expose a regression
+the loose reading concealed (OFF stays certified, ON turns out to have been an
+open gap mislabelled). Zero were hidden, so the correction only removes false
+positives here.
+
+`syn40m` is the clearest case — the ON arm is better on **every real quantity**
+and lost only the label:
+
+| arm | route | status | objective | bound | `gap_certified` |
+|---|---|---|---|---|---|
+| OFF | OA (`mip_nlp_trace` present) | feasible | 55.713 (17.7% short) | 292.22 | True |
+| ON | NLP-BB (no `mip_nlp_trace`) | feasible | **67.71325557 = the optimum** | **187.88** | False |
+
+Turning root cuts on makes the NLP-BB answer better, so it wins route selection
+(`_route_is_better`) and inherits that route's stricter label. Confirmed by direct
+re-run of both instances × both arms on the post-#1098 build: both report
+`gap_certified=False` in *both* arms, so there is no regression, and ON is better
+on both (`syn40m` objective 55.713 → 67.713; `rsyn0805m02m` 1059.08 → 1226.09
+with a tighter bound 4386.54 → 4373.31).
+
+**Verdict.** Both bars pass, so under §5 the flag graduates default-ON, keeping
+the `DISCOPT_NLPBB_ROOT_CUTS=0` opt-out and the legacy path intact. This
+supersedes §20's rejection: §20 remains the correct verdict *for the build it was
+run on* (pre-#1062-stall-fix, pre-#1098), and is retained per §11 rather than
+edited away.
+
+### 21.1 The panel was not the last gate: the smoke suite caught a false certificate the corpus could not see
+
+Flipping the default to ON with the panel in hand failed `pytest -m smoke`
+immediately, on `test_945_nlp_box_and_gap_closure.py::
+test_default_solve_path_does_not_certify_a_super_optimal_incumbent`:
+
+```
+flag=0: status=optimal obj=2.999999998034762  super-optimal by 1.965e-09
+flag=1: status=optimal obj=2.998978315393790  super-optimal by 1.022e-03
+```
+
+on the MindtPy constraint-qualification fixture `(x-3)^2 <= 50(1-y)`, whose
+exact optimum is 3.0. This is CLAUDE.md §1's worst class — a certificate on a
+point that cannot exist — and it outranks §5: a flag does not graduate onto the
+default path while an in-repo gate demonstrates one.
+
+**Why 153 corpus instances missed it.** The corpus oracle (`minlplib.solu`) is
+compared at a relative tolerance, and the error here is 3.4e-4 relative. It is
+also structural rather than statistical: it needs an *active degenerate* row,
+where the constraint residual is quadratic in the variable error, so 1e-6 of
+violation is 1e-3 of `x`. A panel over well-posed instances has no power against
+it. The lesson generalizes past this flag: **a corpus panel is a §5 instrument,
+not a §1 one.** The §1 gates are the suites.
+
+**The chain, measured end to end** (`$SP/cq_probe{2,3,4}.py`, each printing an
+executed-comparison count per §6):
+
+1. Root cuts tighten the root LP to 2.998981, so the node-1 NLP relaxation
+   returns `x = 2.998978` at `y = 1 - 2.1e-8`. That point is genuinely feasible
+   — the sliver of `y` buys `50 * 2.1e-8 = 1.05e-6` of big-M slack, exactly
+   covering `(x-3)^2 = 1.04e-6`.
+2. `y` is integral within tolerance, so the node is integer-feasible and the
+   relaxation value equals the incumbent: gap 0 at **node 1**.
+3. Snapping `y` to 1 removes that slack: row 0 is now violated by 1.044e-6. The
+   1e-6 exit gate sees 9.938e-7 after the `1e-9 * 50` term-scaled forgiveness,
+   and passes it by 0.6%.
+4. The terminal refine (integers fixed, `bound_relax_factor=0`) returned
+   `x = 2.9999999931`, violation **4.8e-17** — the honest point — and the
+   adoption rule **rejected it**, because its objective differs from the
+   incumbent's by 1.02e-3, outside the rule's ±1e-4 window.
+
+Step 4 is the defect, and it is not specific to root cuts: the ±1e-4 objective
+window is the wrong arbiter when the two points *disagree*, because it keeps
+whichever is more optimistic — including one the refine has just shown to be
+unattainable at that integer assignment. Root cuts only supply a relaxation
+tight enough to land on the degenerate boundary, where the flaw is visible.
+
+Fixed on `feat/1061-1062-graduate-nlpbb-root-cuts`: when the objectives disagree
+beyond the window, both points are measured with the same arbiter the exit gate
+uses (`_nonlinear_point_excess`, declared rows and declared box) and a *strictly
+more feasible* point is adopted even though its objective is worse. It cannot
+admit a point the exit gate would refuse, and when the two agree within the
+window the original branch still applies — so nothing moves on a healthy solve.
+After it, flag ON reports `obj = 2.9999999931` with row 0 residual 4.7e-17, and
+`pytest -m smoke` is 1079 passed / 1 skipped / 2 xpassed.
+
+**Does this invalidate §21's panel?** No, and the direction matters: the fix can
+only ever *replace* an incumbent with a strictly more feasible one at the same
+integer assignment. It cannot loosen a bound, cannot manufacture a bound above
+an optimum, and cannot turn a certified instance uncertified. The panel's
+cert-clean verdict therefore survives the change a fortiori. Its net-positive
+column is measured on the pre-fix build and is not re-run; the fix touches only
+the terminal point of a solve, not the search.
+
+### 21.2 `rsyn0820m02m`: the row-count hypothesis is falsified, and the cost is per-node NLP effort
+
+The graduation panel's net-positive column is a population statistic, so it is
+worth naming what it is averaging over. Re-running #1062's four named instances
+plus `rsyn0820m02m` (which is **not** in the 153-instance panel) at 60 s, both
+arms adjacent per instance, found one clear loser:
+
+| instance | OFF | ON |
+|---|---|---|
+| `rsyn0820m02m` (max, opt 1092.09) | obj 244.20, 31 nodes | obj **-39.53**, **3 nodes** |
+
+**Hypothesis (stated before measuring):** the stage appends so many rows that
+per-node NLP cost collapses throughput. **Kill criterion:** if the applied cut
+count is small relative to the model's rows, the hypothesis is wrong.
+
+**Falsified.** `$SP/probe_0820.py`, `CHECKS_EXECUTED 4`:
+
+```
+rsyn0820m02m: declared rows=1074 vars=510
+root-cut stage: n_cuts=69 rounds=26 productive=26 stop='budget'
+                lp_bound=5220.25 stage_wall=10.6s
+rows after solve = 1143  (+69 cut rows, 6.4% of the model)
+result: status=feasible obj=-39.531 bound=4786.63 nodes=3 subnlp=1 wall=60.2
+stage consumed 10.6s of a 60s budget (18%)
+```
+
+69 cuts on 1074 rows cannot be a 10x throughput effect by row count. The stage's
+own wall is bounded and behaved (`max(2, min(10, 0.2*T))`, 10.6 s of 60 s), so
+the lost time is in the tree: **~1.9 s/node OFF vs ~16 s/node ON**, an ~8.5x
+per-node cost increase bought by 6.4% more rows. The cost is therefore in how
+much *effort* each node NLP spends on the cut-tightened feasible region, not in
+its size. Every round here was productive (26/26) and the loop stopped on
+budget, so the stall detector had nothing to catch — this is not the #1062 stall.
+
+No soundness consequence: the bound stays valid (4786.63 >= 1092.09) in both
+arms, and the panel's `RAISED` count is 0.
+
+**Not acted on in the graduation PR, deliberately.** Any change to the cut cap
+or the per-node effort limit is itself bound-changing and would invalidate the
+153-instance panel that the graduation rests on. Recorded here as the entry
+measurement for whoever tunes the cut stage next: the lever to test first is
+per-node NLP iteration effort under appended GMI/c-MIR rows, **not** the cut
+count.
