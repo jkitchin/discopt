@@ -166,13 +166,14 @@ def test_solve_runs_the_declared_box_pass_once(monkeypatch):
         return real(*a, **kw)
 
     monkeypatch.setattr(_solver, "_declared_box_tightening", _counting)
-    # solver="bb": the declared-box pass lives downstream of the solver-family
-    # dispatch, so it belongs to the default path. Since #1059 this model is
-    # auto-routed to the MIP-NLP family, which never reaches the pass -- so a
-    # bare .solve() here counts 0, which is a different (and separately tracked)
-    # fact about the route, not the duplicate-work property this test pins.
+    # A bare ``.solve()`` again, and deliberately so. This was briefly pinned to
+    # ``solver="bb"`` because the pass sat downstream of the solver-family
+    # dispatch and the #1059 auto-route therefore skipped it entirely -- the
+    # count was 0, not 2. The pass now runs *before* the dispatch, so every
+    # family gets it and the shared-once property this test pins is once again a
+    # property of ``solve()`` rather than of one path through it.
     with pytest.warns(UserWarning, match="very large or infinite declared bounds"):
-        m.solve(time_limit=30, solver="bb")
+        m.solve(time_limit=30)
     assert len(calls) == 1, (
         f"solve() built the declared-box tightening {len(calls)} times (expected 1)"
     )

@@ -7133,6 +7133,53 @@ def solve_model(
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
+    # --- #1059: check the declared box BEFORE dispatching to a solver family ---
+    # This block used to sit ~1700 lines below, past the point where six of the
+    # eight families return. Measured on a convex MINLP with an unbounded ``x``:
+    # ``solver="bb"``, ``nlp_bb=True`` and a route-declining option all warned;
+    # ``solver="mip-nlp"`` and a bare (auto-routed) ``.solve()`` did not. So the
+    # user-facing "very large or infinite declared bounds" warning, and the
+    # nonlinear-tightening infeasibility proof beside it, were never a property
+    # of the model -- they were a property of which family happened to run. The
+    # #1059 auto-route made that reachable from a plain ``.solve()``, which is
+    # what exposed it, but ``solver="mip-nlp"``, ``"amp"``, ``"gp"``,
+    # ``"gp-minlp"``, ``"direct"`` and ``"surrogate"`` had the same hole all
+    # along; fixing the class rather than the route is CLAUDE.md §2.
+    #
+    # Moved, not duplicated: the late call site is gone, so this still runs
+    # exactly once per solve and #863's sharing invariant is intact. Running it
+    # here also runs it on the model the *user declared*, before GDP
+    # reformulation invents auxiliary binaries that were never declared -- which
+    # is what a warning about declared bounds should be reporting on.
+    #
+    # All solver paths (LP IPM, QP IPM, NLP) use barrier methods that struggle
+    # with bounds beyond ~1e15. Both consumers below take the SAME nonlinear
+    # tightening of the SAME declared box, so it is computed once and shared
+    # (#863): measured on watercontamination0202 the second run was 39.78 s of
+    # bit-identical repeat work against a 30 s budget. See
+    # ``_declared_box_tightening``.
+    #
+    # #875: sharing halved the phase but left it unbounded -- the surviving call
+    # was still ~27 s of a 30 s time_limit, because the pass had no budget
+    # parameter. Same shape as the root presolve budget: a share of
+    # ``time_limit``, clamped to what is actually left. Truncation only weakens
+    # the box.
+    _nbt_budget_s = min(min(max(0.15 * float(time_limit), 2.0), 30.0), _remaining_budget())
+    _declared_tightening = _declared_box_tightening(
+        model, deadline=time.perf_counter() + _nbt_budget_s
+    )
+    _check_finite_bounds(model, _declared_tightening)
+    nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
+    if nonlinear_infeasibility is not None:
+        logger.info(
+            "Nonlinear bound tightening proved model infeasible: %s", nonlinear_infeasibility
+        )
+        return SolveResult(
+            status="infeasible",
+            wall_time=time.perf_counter() - _solve_t0,
+            gap_certified=True,
+        )
+
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
     # Only when the caller expressed no preference -- neither an explicit
     # solver= (including solver="bb"), nor any option this family would drop.
@@ -8833,33 +8880,9 @@ def solve_model(
     else:
         logger.info("Using Ipopt (via cyipopt)")
 
-    # --- Check for very large variable bounds ---
-    # All solver paths (LP IPM, QP IPM, NLP) use barrier methods that
-    # struggle with bounds beyond ~1e15. Check once before any dispatch.
-    # Both of these consume the SAME nonlinear tightening of the SAME declared box
-    # on an unmodified model, so run it once and share it (#863): measured on
-    # watercontamination0202 the second run was 39.78 s of bit-identical repeat work
-    # against a 30 s budget. See _declared_box_tightening.
-    #
-    # #875: sharing halved the phase but left it unbounded — the surviving call was
-    # still ~27 s of a 30 s time_limit, because the pass had no budget parameter.
-    # Same shape as the root presolve budget below: a share of ``time_limit``,
-    # clamped to what is actually left. Truncation only weakens the box.
-    _nbt_budget_s = min(min(max(0.15 * float(time_limit), 2.0), 30.0), _remaining_budget())
-    _declared_tightening = _declared_box_tightening(
-        model, deadline=time.perf_counter() + _nbt_budget_s
-    )
-    _check_finite_bounds(model, _declared_tightening)
-    nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
-    if nonlinear_infeasibility is not None:
-        logger.info(
-            "Nonlinear bound tightening proved model infeasible: %s", nonlinear_infeasibility
-        )
-        return SolveResult(
-            status="infeasible",
-            wall_time=time.perf_counter() - t_start,
-            gap_certified=True,
-        )
+    # The declared-box check that used to live here now runs before the
+    # solver-family dispatch; see "#1059: check the declared box BEFORE" above.
+    # It still runs exactly once per solve (#863) -- it was moved, not added.
 
     _pure_continuous = _is_pure_continuous(model)
     _pure_continuous_convexity_known = False
