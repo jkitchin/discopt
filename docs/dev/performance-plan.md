@@ -3731,3 +3731,143 @@ or the per-node effort limit is itself bound-changing and would invalidate the
 measurement for whoever tunes the cut stage next: the lever to test first is
 per-node NLP iteration effort under appended GMI/c-MIR rows, **not** the cut
 count.
+
+> **Falsified (2026-08-20, issue #1066 — "the throttled MILP default cut budget
+> is what leaves the convex rsyn/syn/squfl class uncertified").** After #1102
+> made the root cut loop warm dual re-optimize each round instead of cold-solving
+> the augmented LP, the Python-facing default (`root_cuts=16, cut_rounds=1,
+> cut_select=False`, set in the three pyo3 signatures at
+> `crates/discopt-python/src/lp_bindings.rs:1009/1116/1238`) looked like a
+> throttle held on for a cost that no longer exists. Entry experiment before any
+> implementation, per Dev-Philosophy #4: `/tmp/mono/ab_cutbudget.py`, 16 instances
+> drawn by *family prefix* (`rsyn`, `syn`, `clay`, `batchs`, `fac`) filtered to
+> those with a `minlplib.solu` oracle and evenly strided — never by naming
+> instances (#2) — arms interleaved per instance (#9), arm B injecting
+> `root_cuts=500, cut_rounds=15, cut_select=True` by wrapping the Rust entry point
+> so nothing but the four cut arguments differs. **Kill criterion, stated in the
+> script docstring before the run:** arm B must certify *strictly more* instances
+> than arm A with no soundness or certification regression.
+>
+> **Result: `SOLVED_OPTIMAL A=5 B=5 of 16`, `CHECKS_EXECUTED 72`, `VIOLATIONS 0`.**
+> Load gate (#9): the first attempt was **discarded** at load 73 on a 14-core box
+> — an unrelated `cargo test --workspace --release` held ~10 cores and starved the
+> probe to 26% CPU — and re-run behind a load gate; the scored run sampled
+> load1 every 60 s across its own execution: `n=23 min=3.90 median=9.59 max=12.25`.
+>
+> The budget **does** work as a cut mechanism, and that is exactly what makes the
+> negative result informative. Over the 9 instances with a nontrivial root gap,
+> arm B closes a **median 23.7%** of arm A's root gap (max 36.3% on
+> `rsyn0820m02m`, 33.7% on `rsyn0815m02m`). It is not enough to matter, because
+> the gaps it is closing are enormous:
+>
+> | instance | root gap, arm A | root gap, arm B | closed | nodes in 60 s |
+> |---|---|---|---|---|
+> | rsyn0805m02m | 57.1% | 44.7% | 21.6% | 3 |
+> | rsyn0810m02m | 165.7% | 136.7% | 17.5% | 7 |
+> | rsyn0815m02m | 147.4% | 97.7% | 33.7% | 15 |
+> | rsyn0820m02m | 338.4% | 215.5% | 36.3% | 3 |
+> | rsyn0830m02m | 399.8% | 304.5% | 23.8% | 3 |
+> | rsyn0840m02m | 516.2% | 394.0% | 23.7% | 3 |
+> | syn30m02m | 126.9% | 95.7% | 24.6% | 31 |
+> | syn40m02m | 312.7% | 312.7% | 0.0% | 15 |
+>
+> Arm B is also **not** uniformly sound-and-neutral elsewhere: it lost
+> `clay0205hfsg`'s incumbent outright (`feasible` obj 24140 → `time_limit` obj
+> `nan`, on *more* nodes: 337 vs 305), returned a `nan` dual bound on `faclay35`
+> where arm A returned a finite one, and cost 21x wall on the easy `fac1`
+> (0.1 s / 0 nodes → 2.1 s / 7 nodes) and 5.7x on `syn15m02m`. Cert-clean but
+> neither broadly helpful nor free — the `DISCOPT_CUT_INHERIT` disposition
+> exactly (Dev-Philosophy #5: sound ≠ helpful). **The default is unchanged.**
+>
+> **Re-scope — the measurement points somewhere else entirely.** The column that
+> matters in the table above is the last one. The rsyn family explores **3 nodes
+> in 60 seconds**: 0.05 nodes/s, i.e. ~20 s *per node*, and `faclay35` manages
+> 1 node in 62 s (0.02 nodes/s). No root cut of any strength closes a 394% gap
+> from three nodes; SCIP and BARON solve these same instances in 0.2–48 s. The
+> binding constraint on the #1066 class is **per-node cost on the convex-MINLP
+> route**, not cut strength, and any further work on root cut budgets for this
+> class is premature until node throughput is within an order of magnitude of the
+> reference solvers. Measured throughput on the 11 time-limited rows for whoever
+> picks this up: 0.02–0.24 nodes/s on rsyn/faclay, 0.25–0.51 on syn30/40m02m,
+> 1.77 on batchs101006m, 5.05 on clay0205hfsg.
+
+### #1066 — the per-node cost was a duplicated LU factorization (2026-08-20)
+
+Following the re-scope above ("the binding constraint on the #1066 class is
+per-node cost"), the hypothesis was that the convex-MINLP route pays a redundant
+basis factorization per node. Stated before the run: the entry experiment is a
+`DISCOPT_PROFILE` counter split of one 60 s solve of `rsyn0820m02m`; the kill
+criterion is that the LU-factorization count per warm dual solve comes out at or
+below 1.0, which would mean nothing is duplicated and the cost is intrinsic.
+
+It did not. The counters read **2.15–2.20 sparse LU factorizations per warm dual
+solve** across three reps — one full refactorization per node beyond the one the
+warm dual start already pays. The extra one was `reduced_cost_fix`
+(`bnb/milp_driver.rs`): it rebuilt the node basis' sparse LU from scratch and
+btran'd it to recover `y = B⁻ᵀc_B`, a vector **the LP solve had already computed
+from its own final factorization** and exported as `LpSolve::dual` (both the warm
+dual and the cold primal fill it on `Optimal`). A new `Phase::RedCostFix` timer —
+the pass runs *outside* `NodeLpSolve`, which is why every earlier phase split
+booked it as unaccounted wall — priced it directly.
+
+#### Retraction: the first cut of this change broke the node Farkas fathom
+
+The first implementation unscaled `sol.dual` **in place** right after the node
+solve, on the reasoning that reduced-cost fixing was "the only consumer below".
+It is not. The `LpStatus::Infeasible` arm verifies the node's Farkas ray against
+the *scaled* batch CSC (`ctx.csc`, `ctx.sb`, scaled node bounds), so an unscaled
+ray no longer matches the data it is checked against: every verification failed
+and provably empty nodes stopped being fathomed. Sound — the arm's failure path
+returns a non-pruning `-inf` bound, so no optimum can be cut — but ruinous, and
+it wedged a `pytest -m smoke` run for >20 minutes inside a single MILP solve.
+
+The numbers first recorded here (2.17/2.15 LU per warm solve, +71% throughput)
+were measured on that broken cut and are **withdrawn**; the table below replaces
+them. The A/B gate did not catch it because both arms carried the in-place
+unscale — `DISCOPT_MILP_RC_FIX_REFACTOR` only selects the dual *source*, so a
+defect in code common to both arms is invisible to it. Lesson for the next
+differential flag: an env-var A/B tests the branch, never the code the branch
+shares with its control.
+
+The shipped fix leaves `sol.dual` in solve-space and unscales a private copy at
+the reduced-cost-fixing call site. `rc_fix_dual_unscale_does_not_break_the_node_farkas_fathom`
+pins it: an LP-infeasible model with non-unit row factors that the root ray must
+refute in one node — 3 nodes with the in-place unscale restored, 1 without.
+
+#### Measurement (corrected)
+
+Interleaved A/B, same binary, three reps, `DISCOPT_MILP_RC_FIX_REFACTOR=1`
+(legacy) vs default (reuse), `rsyn0820m02m`, 60 s, thread-summed phase times.
+Load average 9.9 before / 13.0 after — elevated by an unrelated process on the
+box, which is what the `pA2` outlier is:
+
+| metric | A r1 | A r2 | A r3 | B r1 | B r2 | B r3 |
+|---|---|---|---|---|---|---|
+| `RedCostFix` ms | 103,246 | 79,893 | 105,083 | **339** | **338** | **328** |
+| node LPs (`NodeLpSolve`) | 34,239 | 18,990 | 38,335 | 59,433 | 61,266 | 58,559 |
+| `DualWarmSolves` | 37,668 | 22,499 | 41,912 | 64,241 | 66,376 | 64,019 |
+| `LuSparseFactorizations` | 81,368 | 49,551 | 89,912 | 71,373 | 73,525 | 71,167 |
+| LU per warm solve | 2.16 | 2.20 | 2.15 | **1.111** | **1.108** | **1.112** |
+| wall (s) | 60.32 | 60.50 | 60.20 | 60.31 | 60.21 | 60.23 |
+| objective | −39.531007606231725 in all six runs | | | | | |
+| MINLP nodes | 3 in all six runs | | | | | |
+
+Reduced-cost fixing went from **96.1 s of mean thread time to 335 ms** (~290x).
+Node-LP throughput rose from a median 34.2k to 59.4k in the same ~60.3 s wall,
+**+74% on medians** (+96% on means; arm A's spread is 10.2k against arm B's 1.4k,
+so the median is the number to quote). The LU-per-warm-solve ratio is the robust
+statistic here — it is a within-run ratio, immune to the load that moved arm A's
+absolute counts, and it drops 2.15–2.20 → 1.108–1.112.
+
+Wall is pinned at the limit on this instance either way, so throughput — not wall
+— is the signal; scoring time-limited and certified instances together is how a
+panel like this reads as "no change".
+
+Bound-neutrality gate (`python/tests/data/minlplib_nl`, 66 instances, 20 s each,
+scored only where BOTH arms certify): `CERTIFIED_BOTH 48`, `CHECKS_EXECUTED 96`,
+`DRIFT 0` — every certified objective within 1e-9 relative and every node count
+exactly equal.
+
+Disposition: bound-neutral (§5 regime 1), default-on, legacy path retained as the
+fallback for an empty `dual` and reachable via `DISCOPT_MILP_RC_FIX_REFACTOR=1`
+for the differential test.

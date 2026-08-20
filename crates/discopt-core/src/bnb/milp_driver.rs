@@ -1673,6 +1673,12 @@ fn solve_node(
     };
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
+        // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
+        // `LpStatus::Infeasible` arm below verifies the Farkas ray against the scaled
+        // working CSC (`ctx.csc`, `ctx.sb`, `sl`/`su`) and unscaling it there would
+        // mix coordinate systems, fail every verification, and stop the driver from
+        // fathoming provably empty nodes. Reduced-cost fixing wants the unscaled
+        // duals instead, so it unscales its own copy at the call site.
     }
     drop(_t_node);
     let sol = sol;
@@ -1718,11 +1724,26 @@ fn solve_node(
             // with any FBBT tightening already in `out.tightened`). Pure bound
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
+                let _t_rcf = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                // #1066: the solve exports the row duals in the scaled space (`ŷ`);
+                // `reduced_cost_fix` reads them against the UNSCALED working matrix
+                // `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back with the same
+                // exact power-of-two factors `unscale_x` uses. `sol.dual` itself is
+                // left scaled for the Farkas arm (see the note after the node solve).
+                let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
+                    Some(s) => {
+                        let mut d = sol.dual.clone();
+                        s.unscale_dual(&mut d);
+                        std::borrow::Cow::Owned(d)
+                    }
+                    None => std::borrow::Cow::Borrowed(&sol.dual),
+                };
                 if let Some((rl, ru)) = reduced_cost_fix(
                     ctx.csc_rc,
                     ctx.m_w,
                     ctx.c_w,
                     &sol.basis,
+                    &rc_dual,
                     sol.obj + ctx.obj_const,
                     ctx.inc_snapshot.unwrap_or(f64::INFINITY),
                     &full_l,
@@ -2223,6 +2244,16 @@ fn strong_branch(
     (best, pivots, obs)
 }
 
+/// Opt-out (`DISCOPT_MILP_RC_FIX_REFACTOR=1`) that forces reduced-cost fixing to
+/// re-derive the node duals from a fresh sparse LU instead of reusing the ones the
+/// LP solve already exported. Off by default; it exists so the reuse path and the
+/// legacy refactor path can be run against each other on the same binary (the
+/// differential test in this module, and any interleaved A/B timing per CLAUDE.md §9).
+fn rc_fix_force_refactor() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DISCOPT_MILP_RC_FIX_REFACTOR").is_ok_and(|v| v.trim() == "1"))
+}
+
 /// Reduced-cost (objective) fixing at a node. Given the node's optimal basis,
 /// its LP dual bound `node_obj` (= `z`), and the incumbent `incumbent` (= `U`,
 /// both in the engine's minimize sense), tighten each nonbasic integer
@@ -2244,6 +2275,7 @@ fn reduced_cost_fix(
     m: usize,
     c: &[f64],
     basis: &Basis,
+    dual: &[f64],
     node_obj: f64,
     incumbent: f64,
     l: &[f64],
@@ -2262,28 +2294,45 @@ fn reduced_cost_fix(
         return None; // node should be pruned anyway; nothing improving here
     }
 
-    // Node duals y = B⁻ᵀ c_B via the *sparse* LU (factorize O(nnz) + btran), the
-    // same path the dual simplex uses — not a dense m×m refactor. The earlier dense
-    // `solve_dense` was O(m³) per node: trivial on few-row knapsacks but ruinous on
-    // 800–1500-row covering LPs, where it dominated the whole solve. The basis is
-    // scaling-invariant and `sp`/`c` are unscaled, so `y` is the unscaled dual the
-    // integer bound fixing needs. A singular basis ⇒ `None` (sound: just no fixing).
-    let mut lu = FeralLU::new();
-    let cols: Vec<Vec<(usize, f64)>> = basis
-        .basic_vars
-        .iter()
-        .map(|&bv| {
-            let (rows, vals) = sp.col(bv);
-            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-        })
-        .collect();
-    if lu.factorize_sparse(m, &cols).is_err() {
-        return None;
-    }
-    let mut y: Vec<f64> = basis.basic_vars.iter().map(|&bv| c[bv]).collect();
-    if lu.btran(&mut y).is_err() || !y.iter().all(|v| v.is_finite()) {
-        return None;
-    }
+    // Node duals `y = B⁻ᵀ c_B`. The LP solve already computed exactly this vector
+    // from its own final factorization and exported it as `LpSolve::dual` (both the
+    // warm dual and the cold primal fill it on `Optimal`), so #1066 takes it as-is
+    // instead of rebuilding the basis' sparse LU from scratch. That rebuild was a
+    // second full factorization *per node* — on rsyn0820m02m it was 47% of every LU
+    // factorization in the solve — spent recomputing a value already in hand.
+    //
+    // The fallback below is not dead: `dual` is empty when the solve's own btran
+    // failed, and `DISCOPT_MILP_RC_FIX_REFACTOR=1` forces it so the two paths can be
+    // differentially tested against each other. It uses the *sparse* LU (factorize
+    // O(nnz) + btran), not a dense m×m refactor: the earlier dense `solve_dense` was
+    // O(m³) per node, trivial on few-row knapsacks but ruinous on 800–1500-row
+    // covering LPs. Either way the basis is scaling-invariant and `sp`/`c` are
+    // unscaled, so `y` is the unscaled dual the integer bound fixing needs, and a
+    // singular basis ⇒ `None` (sound: just no fixing).
+    let y: Vec<f64> =
+        if !rc_fix_force_refactor() && dual.len() == m && dual.iter().all(|v| v.is_finite()) {
+            crate::profile::incr(crate::profile::Ctr::RcFixDualReuse);
+            dual.to_vec()
+        } else {
+            crate::profile::incr(crate::profile::Ctr::RcFixRefactor);
+            let mut lu = FeralLU::new();
+            let cols: Vec<Vec<(usize, f64)>> = basis
+                .basic_vars
+                .iter()
+                .map(|&bv| {
+                    let (rows, vals) = sp.col(bv);
+                    rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                })
+                .collect();
+            if lu.factorize_sparse(m, &cols).is_err() {
+                return None;
+            }
+            let mut y: Vec<f64> = basis.basic_vars.iter().map(|&bv| c[bv]).collect();
+            if lu.btran(&mut y).is_err() || !y.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            y
+        };
 
     let mut new_l = l[..ns].to_vec();
     let mut new_u = u[..ns].to_vec();
@@ -3160,6 +3209,191 @@ pub fn solve_milp_csc(
 mod tests {
     use super::*;
 
+    // ---- #1066: reduced-cost fixing reuses the LP's own duals ----
+
+    /// A small covering-style LP with integer structurals, in the driver's working
+    /// form `A x = b, l <= x <= u` (explicit slacks), plus an incumbent loose enough
+    /// that the gap actually admits fixings.
+    fn rc_fix_fixture() -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        // min  4a + 3b + 5c   s.t.  a + b + c >= 1,  a + 2b + 4c >= 1,  0 <= . <= 3
+        // Rows carry surplus columns (coefficient -1) to reach equality form.
+        //
+        // The upper bound is 3, not 1, on purpose: with a unit box the optimum puts
+        // `b` ON its bound, so every integer column comes back nonbasic-at-bound or
+        // basic-and-skipped and reduced-cost fixing has nothing to fix. Here the
+        // optimum is `b = 1` (basic, interior), `a = c = 0` at their lower bounds
+        // with strictly positive reduced costs 1 and 2 -- so the fixing actually
+        // bites and a test over this fixture is not vacuous (CLAUDE.md §6).
+        let (ns, m) = (3usize, 2usize);
+        let n = ns + m;
+        let mut dense = vec![0.0f64; m * n];
+        let rows = [[1.0, 1.0, 1.0], [1.0, 2.0, 4.0]];
+        for (i, r) in rows.iter().enumerate() {
+            for (j, v) in r.iter().enumerate() {
+                dense[i * n + j] = *v;
+            }
+            dense[i * n + ns + i] = -1.0;
+        }
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let c = vec![4.0, 3.0, 5.0, 0.0, 0.0];
+        let b = vec![1.0, 1.0];
+        let l = vec![0.0; n];
+        let u = vec![3.0, 3.0, 3.0, INF, INF];
+        (sp, m, ns, c, b, l, u)
+    }
+
+    #[test]
+    fn rc_fix_reuses_the_solve_duals_and_matches_the_refactor_path() {
+        // The #1066 claim: the duals the LP solve exports ARE `y = B^-T c_B`, so
+        // reusing them must produce exactly the fixings the from-scratch sparse
+        // refactorization produced. If the two disagree the reuse is not a
+        // bound-neutral refactor and must not ship.
+        let (sp, m, ns, c, b, l, u) = rc_fix_fixture();
+        let n = l.len();
+        let opts = SimplexOptions::default();
+        let sol = crate::lp::simplex::solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &opts);
+        assert_eq!(sol.status, LpStatus::Optimal, "fixture LP must solve");
+        assert_eq!(
+            sol.dual.len(),
+            m,
+            "Optimal must export row duals (#1066 rests on it)"
+        );
+        let is_int = vec![true, true, true, false, false];
+
+        let mut checks = 0;
+        let mut fixed = 0;
+        // Sweep incumbents so the gap ranges from tight (fixings bite) to loose
+        // (none do): both regimes must agree, not just the one that happens to fix.
+        for k in 0..12 {
+            let incumbent = sol.obj + 0.25 * k as f64;
+            let reuse = reduced_cost_fix(
+                &sp, m, &c, &sol.basis, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int,
+                opts.tol,
+            );
+            // An empty `dual` is exactly what a failed btran leaves behind, and it
+            // is what drives the legacy from-scratch factorization branch.
+            let refac = reduced_cost_fix(
+                &sp,
+                m,
+                &c,
+                &sol.basis,
+                &[],
+                sol.obj,
+                incumbent,
+                &l,
+                &u,
+                ns,
+                &is_int,
+                opts.tol,
+            );
+            assert_eq!(
+                reuse.is_some(),
+                refac.is_some(),
+                "k={k}: the two dual sources disagree on whether anything was fixed"
+            );
+            if let (Some((rl, ru)), Some((fl, fu))) = (reuse, refac) {
+                assert_eq!(rl, fl, "k={k}: lower bounds differ between dual sources");
+                assert_eq!(ru, fu, "k={k}: upper bounds differ between dual sources");
+                fixed += 1;
+            }
+            checks += 1;
+        }
+        assert_eq!(checks, 12, "probe must have compared every incumbent");
+        // Agreement on twelve `None`s would be agreement about nothing: at least one
+        // rung must actually have produced a fixing for the comparison to mean
+        // anything (CLAUDE.md §6).
+        assert!(
+            fixed >= 1,
+            "no incumbent on the ladder produced a fixing at all"
+        );
+    }
+
+    #[test]
+    fn rc_fix_with_solve_duals_does_not_factorize() {
+        // The point of the change is the factorization it removes; without a probe
+        // for it the reuse could silently fall through to the legacy branch on every
+        // node and read exactly like a working optimization (CLAUDE.md §6).
+        //
+        // The discriminator is a deliberately SINGULAR basis: `basic_vars` is every
+        // column set to the same index, so `factorize_sparse` cannot succeed. Only
+        // the legacy branch touches `basic_vars` (the reuse branch reads `dual` and
+        // `col_status` alone), so "still returns a fixing" is proof that no
+        // factorization was attempted. This is checked on the return value rather
+        // than a `profile` counter on purpose: `ENABLED` and the counter arrays are
+        // process-global and `solve_milp` calls `init_from_env()` on entry, so any
+        // driver test on a sibling thread disarms a counter-based probe mid-flight
+        // and it reads 0 -- the exact §6 failure the counters were added to catch.
+        let (sp, m, ns, c, b, l, u) = rc_fix_fixture();
+        let n = l.len();
+        let opts = SimplexOptions::default();
+        let sol = crate::lp::simplex::solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &opts);
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert_eq!(
+            sol.dual.len(),
+            m,
+            "Optimal must export row duals (#1066 rests on it)"
+        );
+        let is_int = vec![true, true, true, false, false];
+
+        let mut singular = sol.basis.clone();
+        for bv in singular.basic_vars.iter_mut() {
+            *bv = 0;
+        }
+        // Sweep the same incumbent ladder as the sibling test: with the basis
+        // sabotaged, the legacy path can never return a fixing, while the reuse path
+        // must still return the ones the intact basis produced -- at least one of
+        // them, or the probe would pass vacuously on a ladder where nothing fixes.
+        let mut reuse_fixed = 0;
+        let mut refac_attempts = 0;
+        for k in 0..12 {
+            let incumbent = sol.obj + 0.25 * k as f64;
+            assert!(
+                reduced_cost_fix(
+                    &sp,
+                    m,
+                    &c,
+                    &singular,
+                    &[],
+                    sol.obj,
+                    incumbent,
+                    &l,
+                    &u,
+                    ns,
+                    &is_int,
+                    opts.tol,
+                )
+                .is_none(),
+                "k={k}: a singular basis must defeat the refactor path -- otherwise \
+                 this test cannot tell the two paths apart"
+            );
+            refac_attempts += 1;
+            if reduced_cost_fix(
+                &sp, m, &c, &singular, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int, opts.tol,
+            )
+            .is_some()
+            {
+                reuse_fixed += 1;
+            }
+        }
+        assert_eq!(
+            refac_attempts, 12,
+            "probe must have exercised every incumbent"
+        );
+        assert!(
+            reuse_fixed >= 1,
+            "with the solve's own duals in hand, reduced-cost fixing must produce a \
+             fixing without ever factorizing the basis (0/12 did)"
+        );
+    }
+
     // ---- #1060: the no-incumbent continuous-repair dive schedule ----
 
     #[test]
@@ -3798,6 +4032,87 @@ mod tests {
         assert!(
             !verify_farkas_infeasible(&[1.0], &a2, &b2, &l2, &u2, 1, 2),
             "a feasible box must not be certified empty by any ray"
+        );
+    }
+
+    /// #1066 regression. The driver verifies the node's Farkas ray against the
+    /// *scaled* batch CSC (`ctx.csc`, `ctx.sb`, scaled node bounds), so `sol.dual`
+    /// must stay in solve-space coordinates all the way to that arm. An earlier cut
+    /// of the reduced-cost-fixing change unscaled `sol.dual` in place right after
+    /// the node solve; the ray then no longer matched the matrix it was checked
+    /// against, every verification failed, and provably empty nodes stopped being
+    /// fathomed — sound (the bound only ever got weaker) but ruinous, turning a
+    /// one-node refutation into a full branch-out. Pinned here on node count.
+    ///
+    /// The model is LP-infeasible but not row-wise infeasible (`x0 + x1 >= 1.5` and
+    /// `x0 + x1 <= 0.5` with `x0, x1` binary), with presolve and node propagation
+    /// off so nothing but the LP's own certificate can refute it, and a 1e8 value
+    /// range so `Scaling::from_sparse` actually returns `Some` — asserted in the
+    /// fixture, because without it the scaled path is never entered and the test
+    /// proves nothing.
+    #[test]
+    fn rc_fix_dual_unscale_does_not_break_the_node_farkas_fathom() {
+        // The two refuting rows carry deliberately non-unit magnitudes (2^-10 and
+        // 2^10) so equilibration gives them non-unit ROW factors — without that the
+        // scaled and unscaled rays coincide on exactly the rows the certificate
+        // uses and the coupling under test is invisible. A third, harmless row adds
+        // the 1e8 entry that pushes the dynamic range past `SCALE_TRIGGER` (1e6).
+        let k0 = 2f64.powi(-10);
+        let k1 = 2f64.powi(10);
+        let a = [
+            k0, k0, 0.0, -k0, 0.0, 0.0, // x0 + x1 - s0 = 1.5  (x0 + x1 >= 1.5)
+            k1, k1, 0.0, 0.0, k1, 0.0, // x0 + x1 + s1 = 0.5  (x0 + x1 <= 0.5)
+            0.0, 0.0, 1e8, 0.0, 0.0, 1.0, // 1e8·x2 + s2 = 1e8    (feasible; sets the range)
+        ];
+        let b = [1.5 * k0, 0.5 * k1, 1e8];
+        let c = [0.0; 6];
+        let l = [0.0; 6];
+        let u = [1.0, 1.0, 1.0, INF, INF, INF];
+        assert!(
+            Scaling::from_sparse(&SparseCols::from_dense(&a, 3, 6), 3, 6).is_some(),
+            "fixture must actually trigger equilibration or the scaled path is untested"
+        );
+        let lp = LpView {
+            a: &a,
+            m: 3,
+            n: 6,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let o = MilpOptions {
+            n_struct: 3,
+            integer_cols: vec![0, 1, 2],
+            max_nodes: 5_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 1,
+            gmi_cuts: false,
+            cut_select: false,
+            node_cuts: false,
+            max_pool_cuts: 0,
+            heuristics: false,
+            presolve: false,
+            node_propagation: false,
+            strong_branch: false,
+            reduced_cost_fixing: true,
+            sb_max_cands: 0,
+            sb_node_budget: 0,
+            initial_incumbent: None,
+            simplex: SimplexOptions::default(),
+        };
+        let r = solve_milp(&lp, &b, 0.0, &o);
+        assert_eq!(
+            r.status,
+            MilpStatus::Infeasible,
+            "status (nodes {})",
+            r.nodes
+        );
+        assert_eq!(
+            r.nodes, 1,
+            "the ROOT ray must refute the model outright; branching at all means the \
+             scaled certificate was checked in the wrong coordinates"
         );
     }
 
