@@ -270,15 +270,19 @@ def perspective_objective_terms(model: Model) -> list[tuple[int, int, float]]:
 def perspective_oa_cut_enabled() -> bool:
     """Is the #1064 perspective strengthening of the OA objective cut switched on?
 
-    **Default OFF.** Strengthening a master cut is bound-changing under
-    CLAUDE.md §5 regime 2 -- the master's optimum is the OA dual bound, so a
-    tighter row moves it by construction -- and it stays opt-in until the
-    corpus-wide differential panel clears both bars. Unlike the *rewrite* it
-    replaces, it cannot lose a certificate by changing which relaxation the
-    model gets: the model is untouched and the row it strengthens is one the
-    master already carried.
+    **Default ON (graduated).** Strengthening a master cut is bound-changing
+    under CLAUDE.md §5 regime 2 -- the master's optimum is the OA dual bound, so
+    a tighter row moves it by construction. Unlike the *rewrite* it replaces, it
+    cannot lose a certificate by changing which relaxation the model gets: the
+    model is untouched and the row it strengthens is one the master already
+    carried.
 
-    ``DISCOPT_PERSPECTIVE_OA_CUT=0`` is the opt-out once it graduates. Read per
-    call, not cached at import, so a test can flip it without reloading.
+    It shipped default-OFF and graduated on the differential panel over the full
+    affected population -- every corpus instance that carries the structure --
+    which cleared both §5 bars: PANEL_CERT_CLEAN and PANEL_NET_POSITIVE (see the
+    commit and ``docs/dev/performance-plan.md`` §19 for the table).
+
+    ``DISCOPT_PERSPECTIVE_OA_CUT=0`` is the opt-out. Read per call, not cached at
+    import, so a test can flip it without reloading.
     """
-    return os.environ.get("DISCOPT_PERSPECTIVE_OA_CUT", "0").strip() not in ("", "0")
+    return os.environ.get("DISCOPT_PERSPECTIVE_OA_CUT", "1").strip() not in ("", "0")

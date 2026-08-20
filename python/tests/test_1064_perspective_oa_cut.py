@@ -211,15 +211,17 @@ class TestCutStrengthening:
 
 
 class TestFlag:
-    def test_default_off(self, monkeypatch):
+    def test_default_on_after_graduation(self, monkeypatch):
+        """Graduated default-ON on the §5 panel over the full affected population."""
         monkeypatch.delenv("DISCOPT_PERSPECTIVE_OA_CUT", raising=False)
-        assert perspective_oa_cut_enabled() is False
+        assert perspective_oa_cut_enabled() is True
 
     def test_opt_in(self, monkeypatch):
         monkeypatch.setenv("DISCOPT_PERSPECTIVE_OA_CUT", "1")
         assert perspective_oa_cut_enabled() is True
 
-    def test_zero_is_off(self, monkeypatch):
+    def test_zero_is_the_opt_out(self, monkeypatch):
+        """The opt-out must survive graduation -- §5 requires the legacy path stay reachable."""
         monkeypatch.setenv("DISCOPT_PERSPECTIVE_OA_CUT", "0")
         assert perspective_oa_cut_enabled() is False
 
