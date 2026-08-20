@@ -62,17 +62,48 @@ def test_exhausted_budget_is_a_limit_not_infeasible():
 
     DIRECT cannot prove infeasibility. Claiming it would be exactly the kind of
     false certificate the contract exists to prevent, so this pins the negative.
+
+    The infeasible row is deliberately *opaque* -- wrapped in a ``custom`` call
+    the bound-tightening pass cannot read. It used to be the plain algebraic
+    ``x[0] + x[1] >= 10.0``, which since the declared-box check moved above the
+    solver-family dispatch is proved infeasible before DIRECT ever starts. That
+    proof is sound and belongs to presolve, not to DIRECT (see
+    ``test_a_sound_presolve_proof_short_circuits_before_direct_runs``), but it
+    means the algebraic form no longer exercises DIRECT's own exit -- the thing
+    this test is about. Hiding the row behind a black box restores that.
     """
     model = dm.Model("no_feasible_point")
     x = model.continuous("x", shape=2, lb=0.0, ub=1.0)
     model.minimize(dm.custom(lambda v: v[0] + v[1], name="lin")(x))
-    # A constraint no point in the box satisfies.
-    model.subject_to(x[0] + x[1] >= 10.0)
+    # A constraint no point in the box satisfies, opaque to bound tightening.
+    model.subject_to(dm.custom(lambda v: v[0] + v[1], name="sumc")(x) >= 10.0)
     result = model.solve(solver="direct", max_evals=200, time_limit=_TIME_LIMIT)
     assert result.status != "infeasible", result.status
     assert result.status in ("iteration_limit", "time_limit"), result.status
     assert result.objective is None
     assert result.gap_certified is False
+
+
+@pytest.mark.smoke
+def test_a_sound_presolve_proof_short_circuits_before_direct_runs():
+    """The other side: a *provable* infeasibility must not be spent on 200 evals.
+
+    ``x in [0,1]^2`` with ``x[0] + x[1] >= 10`` is infeasible by inspection, and
+    bound tightening says so
+    (``separable_quadratic_upper_bound ... minimum separable quadratic activity
+    exceeds the upper bound``). Since that check runs before the solver-family
+    dispatch, ``solver="direct"`` now returns the proof instead of searching a
+    box with nothing in it. This is not DIRECT claiming infeasibility -- the
+    certificate is algebraic and holds whatever the black-box objective does --
+    so ``gap_certified`` is legitimately ``True``.
+    """
+    model = dm.Model("provably_infeasible")
+    x = model.continuous("x", shape=2, lb=0.0, ub=1.0)
+    model.minimize(dm.custom(lambda v: v[0] + v[1], name="lin")(x))
+    model.subject_to(x[0] + x[1] >= 10.0)
+    result = model.solve(solver="direct", max_evals=200, time_limit=_TIME_LIMIT)
+    assert result.status == "infeasible"
+    assert result.gap_certified is True
 
 
 @pytest.mark.smoke
