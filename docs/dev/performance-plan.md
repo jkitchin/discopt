@@ -3496,3 +3496,49 @@ property of the big-M relaxation itself. The lever that *does* move #1061 turned
 out to be elsewhere entirely — a free-column pricing defect in the simplex that
 silently disabled OBBT's exact-LP oracle on this whole class — and it ships on its
 own branch (`fix/1061-phase1-open-column`), not here.
+
+### 20.1 Amendment: the `clay*` looseners were a *budget* sink, not a bound effect (#1062, 2026-08-20)
+
+§20's REJECT verdict stands as the record of the flag *as it stood on that
+panel*. What it could not say is **why** `clay0303hfsg` lost `gap_certified` under
+the flag, and the answer turns out not to be about the cuts at all.
+
+A valid cut cannot loosen a valid dual bound, so "the flag produced looser
+bounds" was never explicable by the cuts' arithmetic. The entry experiment
+(hypothesis, prediction and kill criterion fixed in advance —
+`scratchpad/entry_1062_budget.py`) measured the *stage*, not the bound, at
+`time_limit=30` (stage budget 6.0 s):
+
+| instance | rounds | improving | cuts kept | wall | % of TL | stop |
+|---|---|---|---|---|---|---|
+| clay0205hfsg | 16 | **0** | **0** | 7.43 s | **25.8%** | budget |
+| clay0303hfsg | 19 | **0** | **0** | 2.39 s | 8.0% | no_cuts |
+| syn40m | 20 | 18 | 61 | 1.12 s | 3.7% | no_cuts |
+| rsyn0840m | 30 | **30** | 69 | 3.50 s | 11.4% | **rounds cap** |
+
+The loop broke only on budget, the round cap, a dead LP, or a round selecting no
+cuts. None detects the case that costs: cuts keep being **found** while the bound
+never **moves**. `productive_rounds` counts rounds that *chose* cuts — 16 of 16 on
+`clay0205hfsg` — so it reads as fully productive throughout. Both `clay*` hold
+their root LP bound at exactly `0.0` in every trace entry and then have every cut
+discarded by the end-of-loop quality gate. `clay0205hfsg` spent a quarter of the
+whole solve's time limit to hand back nothing, and overran its own 6.0 s budget
+(the budget check sits at the loop top, so a round starting under budget runs to
+completion). **The flag's looser bounds were time-starved bounds.**
+
+The same table shows the converse defect: `rsyn0840m` stopped on `ROUNDS = 30`
+while improving in 30 of 30 rounds, 43% of its budget unspent. The round cap was
+binding precisely on the instances the stage helps.
+
+Both are fixed on `fix/1062-root-cut-stall` (a two-round stall guard against the
+quality gate's own tolerance; the cap demoted to a runaway backstop; per-round
+`bound_trace` / `improving_rounds` / `stop_reason` on `RootCutResult`, which the
+loop previously lacked entirely). After it: `clay0205hfsg` 7.43 s → **0.10 s**,
+`clay0303hfsg` 2.39 s → **0.10 s**, both with identical output; `syn40m`
+unchanged at bound 366.4403; `rsyn0840m` runs to natural cut exhaustion at 36
+rounds with its bound tightening 861.77 → 852.11.
+
+**Status.** This does *not* retroactively graduate the flag. It removes the
+measured cause of the panel's `cert-clean` failure, which makes a re-run
+meaningful; the flag stays default-OFF until a fresh §5 panel clears **both**
+bars. Until that panel is scored, §20's verdict is the operative one.

@@ -45,7 +45,22 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-ROUNDS = 30
+# Round cap. This is a runaway backstop, NOT the working terminator: the stage is
+# bounded by its wall budget and by STALL_ROUNDS below. It used to be 30, which
+# was the *binding* limit on exactly the instances the stage helps — measured on
+# rsyn0840m the loop stopped on the cap with the bound improving in 30 of 30
+# rounds and 43% of its wall budget still unspent (2778.18 -> 861.77 and still
+# falling). Raising it only lets a *productive* loop keep going; an unproductive
+# one now exits after STALL_ROUNDS.
+ROUNDS = 200
+# Consecutive rounds allowed to miss the quality gate's per-unit tolerance before
+# the loop gives up. Measured separation on the probe set is total: the two
+# instances the stage regressed (clay0205hfsg, clay0303hfsg) improved in 0 of 16
+# and 0 of 19 rounds, with the root LP bound pinned at 0.0 from the first round;
+# the two it helped improved in 18 of 20 and 30 of 30. There is no instance in
+# between, so 2 is well clear of both. 2 rather than 1 because a round's cuts can
+# need the NEXT re-convergence to pay off.
+STALL_ROUNDS = 2
 OA_TOL = 1e-6
 OA_MAX_ITERS = 60
 CUT_VIOL_TOL = 1e-6
@@ -111,6 +126,16 @@ class RootCutResult:
     lp_bound: float | None = None  # in the model's objective sense
     rounds_run: int = 0
     productive_rounds: int = 0
+    #: Root LP bound after each round's OA re-convergence, in the model's sense.
+    #: ``productive_rounds`` counts rounds that CHOSE cuts, which is not the same
+    #: thing and is useless as a progress signal: measured on clay0205hfsg the
+    #: loop chose cuts in 16 of 16 rounds and the end-of-loop quality gate then
+    #: discarded every one. The trace is what says whether the bound MOVED.
+    bound_trace: list = field(default_factory=list)
+    #: Rounds whose bound gain cleared the quality gate's own per-unit tolerance.
+    improving_rounds: int = 0
+    #: Why the loop stopped: "budget" | "rounds" | "no_lp" | "no_cuts" | "stall".
+    stop_reason: str = ""
 
 
 # ── linearised root view ─────────────────────────────────────────────────────
@@ -500,12 +525,21 @@ def generate_root_cuts(
     applied: list = []
     productive = 0
     rounds = 0
+    trace: list = [b0]
+    improving = 0
+    stalled = 0
+    stop_reason = "rounds"
+    # Per-round progress is judged against the SAME tolerance the end-of-loop
+    # quality gate uses, so "not improving" here means "on track to be
+    # discarded there" rather than a second, unrelated notion of progress.
+    gate_tol = 1e-6 * max(1.0, abs(b0))
     t0 = _time.perf_counter()
     lb_s = np.where(np.isfinite(root.lb_sep), root.lb_sep, 0.0)
     ub_s = np.where(np.isfinite(root.ub_sep), root.ub_sep, 1e5)
 
     for _rnd in range(ROUNDS):
         if _time.perf_counter() - t0 > time_budget_s:
+            stop_reason = "budget"
             break
         rounds += 1
         a_all = np.vstack([root.A_le] + ([np.array(cuts_a)] if cuts_a else []))
@@ -543,9 +577,28 @@ def generate_root_cuts(
 
         new_obj, x, duals, h = oa_converge()
         if x is None:
+            stop_reason = "no_lp"
             break
+        prev_obj = obj
         obj = new_obj
+        trace.append(obj)
+        round_gain = (prev_obj - obj) if root.sense_max else (obj - prev_obj)
+        if round_gain > gate_tol:
+            improving += 1
+            stalled = 0
+        else:
+            stalled += 1
         if not chosen:
+            stop_reason = "no_cuts"
+            break
+        # Stall exit. Cuts keep being FOUND on these instances — clay0205hfsg
+        # chose cuts in 16 of 16 rounds — they just never move the bound, so
+        # `chosen` cannot detect it and the loop ran to budget exhaustion before
+        # the end-of-loop gate discarded every cut. That cost a quarter of the
+        # whole solve's time limit for nothing, which is the regression, not the
+        # cuts' arithmetic (a valid cut cannot loosen a valid bound).
+        if stalled >= STALL_ROUNDS:
+            stop_reason = "stall"
             break
 
     # Quality gate: keep the stage's output only when the cutting loop actually
@@ -555,10 +608,22 @@ def generate_root_cuts(
     # bound and their per-node row cost is pure regression; skipping them makes
     # the flag a no-op there (trivially sound).
     if obj is None or b0 is None:
-        return RootCutResult(rounds_run=rounds, productive_rounds=productive)
+        return RootCutResult(
+            rounds_run=rounds,
+            productive_rounds=productive,
+            bound_trace=trace,
+            improving_rounds=improving,
+            stop_reason=stop_reason,
+        )
     gain = (b0 - obj) if root.sense_max else (obj - b0)
-    if gain <= 1e-6 * max(1.0, abs(b0)):
-        return RootCutResult(rounds_run=rounds, productive_rounds=productive)
+    if gain <= gate_tol:
+        return RootCutResult(
+            rounds_run=rounds,
+            productive_rounds=productive,
+            bound_trace=trace,
+            improving_rounds=improving,
+            stop_reason=stop_reason,
+        )
 
     # Keep only the cuts binding at the final LP optimum: they carry the final
     # bound; slack cuts only bloat every node NLP. (Validity is unaffected —
@@ -571,4 +636,7 @@ def generate_root_cuts(
         lp_bound=obj,
         rounds_run=rounds,
         productive_rounds=productive,
+        bound_trace=trace,
+        improving_rounds=improving,
+        stop_reason=stop_reason,
     )
