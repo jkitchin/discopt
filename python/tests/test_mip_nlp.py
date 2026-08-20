@@ -876,7 +876,13 @@ def test_mip_nlp_shot_convex_bounding_filters_local_cuts(monkeypatch):
     assert trace["final_lb"] == pytest.approx(-2.0)
     assert trace["heuristic_lb"] == pytest.approx(-1.0)
     assert result.bound == pytest.approx(-2.0)
-    assert result.gap_certified is True
+    # This scenario stops at ``max_iterations=1`` with incumbent 0.0 against a
+    # bound of -2.0 -- a wide-open gap. ``gap_certified`` means the gap is
+    # CLOSED, so it must be False here; the rigour of the bound is a separate
+    # question and is asserted directly below (that is what this test is about).
+    assert result.gap is not None and result.gap > 1e-4
+    assert result.gap_certified is False
+    assert trace["master_bound_valid"] is True
 
 
 def test_mip_nlp_shot_convex_bounding_skips_nonrigorous_no_good_cuts(monkeypatch):
