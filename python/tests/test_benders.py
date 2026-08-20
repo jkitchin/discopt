@@ -147,15 +147,51 @@ def test_nonlinear_recourse_dispatches_to_gbd():
     assert r.bound is not None and r.bound <= r.objective + 1e-3
 
 
-def test_multidim_index_rejected_cleanly():
-    """A 2-D indexed model raises a clean NotImplementedError, not a stray error."""
+def test_multidim_index_is_supported():
+    """A 2-D indexed model decomposes correctly.
+
+    This test used to assert ``NotImplementedError``. That refusal was not a
+    design decision: ``_extract_body_coeffs`` open-coded ``int(e.index)``, which
+    *crashed* on a tuple index, and ``_linear.extract_linear`` normalized the
+    crash into a clean "unsupported construct" error. Delegating to
+    ``_flat_index.resolve_scalar_slot`` (#941's single source of truth) removed
+    the crash, so the 2-D path is now reachable -- and correct.
+
+    The objective coefficients are deliberately asymmetric: with all-ones costs
+    every column permutation gives the same optimum, so a wrong-column
+    extraction would pass unnoticed. Here the answer pins the C-order layout.
+    """
+    costs = [[1.0, 5.0, 9.0], [2.0, 6.0, 7.0]]
+
+    def build():
+        m = dm.Model("twod")
+        x = m.binary("x", shape=(2, 3))
+        m.first_stage(x)
+        m.minimize(sum(costs[k][i] * x[k, i] for k in range(2) for i in range(3)))
+        m.subject_to(x[0, 2] + x[1, 1] >= 1)
+        return m
+
+    mono = build().solve(time_limit=30)
+    r = solve_benders(build(), time_limit=30)
+    assert mono.status == "optimal"
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(mono.objective, abs=ABS_TOL)
+    assert r.objective == pytest.approx(6.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-3
+
+
+def test_multidim_extraction_names_the_right_columns():
+    """The flat objective vector must follow the C-order layout, not a guess."""
+    from discopt.decomposition._linear import extract_linear
+
+    costs = [[1.0, 5.0, 9.0], [2.0, 6.0, 7.0]]
     m = dm.Model("twod")
     x = m.binary("x", shape=(2, 3))
-    m.first_stage(x)
-    m.minimize(sum(x[k, i] for k in range(2) for i in range(3)))
-    m.subject_to(sum(x[0, i] for i in range(3)) >= 1)
-    with pytest.raises(NotImplementedError):
-        solve_benders(m, time_limit=10)
+    m.minimize(sum(costs[k][i] * x[k, i] for k in range(2) for i in range(3)))
+    m.subject_to(x[0, 2] + x[1, 1] >= 1)
+
+    lin = extract_linear(m)
+    assert np.allclose(lin.c, np.array([1.0, 5.0, 9.0, 2.0, 6.0, 7.0]))
 
 
 @pytest.mark.slow

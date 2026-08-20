@@ -232,8 +232,13 @@ def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
     state = _patch_offrow_tree(monkeypatch, slice(2, 5), -1e-3)
 
     m = _panel_model(0)
+    # solver="bb" is load-bearing since #1059: the panel model is convexity-
+    # certified, so a bare .solve() is auto-routed to the MIP-NLP family and
+    # never enters the MIQP-BB loop whose exit gate this test covers. Without
+    # it the test passes vacuously in one direction and DID-NOT-RAISE in the
+    # other -- it stops measuring the gate rather than finding it broken.
     with pytest.raises(RuntimeError, match="MIQP-BB returned an infeasible point labeled"):
-        m.solve(time_limit=60)
+        m.solve(time_limit=60, solver="bb")
 
     assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
 

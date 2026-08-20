@@ -190,15 +190,24 @@ def test_hook_flag_noops_on_maximize_end_to_end():
     assert on.objective == pytest.approx(best, abs=1e-3)
 
 
-def test_try_build_disabled_for_multidim_index():
-    """2D-indexed models aren't supported by the linear extractor -> clean no-op."""
+def test_try_build_now_supports_multidim_index():
+    """2-D models build a bounder; the extractor's old refusal was a crash.
+
+    ``_extract_body_coeffs`` raised ``TypeError`` on a tuple index until it was
+    delegated to ``_flat_index.resolve_scalar_slot`` (#941). ``try_build``
+    returned ``None`` because of that, not because the mechanism cannot handle
+    a 2-D model -- and the bound it produces here is valid.
+    """
     m = dm.Model("twod")
     x = m.binary("x", shape=(2, 3))
-    m.minimize(sum(x[k, i] for k in range(2) for i in range(3)))
-    c = sum(x[0, i] for i in range(3)) <= 1
+    m.minimize(sum((k * 3 + i + 1) * x[k, i] for k in range(2) for i in range(3)))
+    c = x[0, 2] + x[1, 1] >= 1
     m.subject_to(c)
     m.mark_coupling(c)
-    assert LagrangianNodeBounder.try_build(m) is None
+
+    bounder = LagrangianNodeBounder.try_build(m)
+    assert bounder is not None
+    assert m.solve(time_limit=30).objective == pytest.approx(3.0, abs=1e-3)
 
 
 # ── End-to-end on a clean instance (base solver correct) ──

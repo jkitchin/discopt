@@ -7292,6 +7292,39 @@ def solve_model(
         if _auto_route_reason is not None and _mip_nlp_result is not None:
             _mip_nlp_result.algorithm_route = _auto_route_reason
 
+        # #1059: this family returns no multipliers, but every other exit in this
+        # module does -- so without this a convex MINLP that used to come back
+        # with ``constraint_duals`` silently comes back with ``None`` once the
+        # route is default-ON. Recover them at the incumbent. Strictly additive:
+        # only fields that are ``None`` are filled, so the point, objective,
+        # bound and node count are untouched.
+        #
+        # Skipped when ``reformulate_gdp`` rewrote the model: the incumbent is
+        # then indexed by the reformulated columns, and a multiplier unpacked
+        # against the caller's model would be named after the wrong row (#941).
+        # That leaves GDP models exactly where they were -- no duals -- rather
+        # than giving them wrong ones.
+        _routed_x = getattr(_mip_nlp_result, "x", None) if _mip_nlp_result is not None else None
+        if (
+            _mip_nlp_result is not None
+            and model is _pre_route_model
+            and _routed_x is not None
+            and getattr(_mip_nlp_result, "constraint_duals", None) is None
+        ):
+            try:
+                _x_flat = np.concatenate(
+                    [np.asarray(_routed_x[v.name], dtype=float).ravel() for v in model._variables]
+                )
+                _cd, _bdl, _bdu = _recover_nlp_duals_at_incumbent(
+                    model, _x_flat, time_budget=max(0.1, min(5.0, time_limit * 0.05))
+                )
+                if _cd is not None:
+                    _mip_nlp_result.constraint_duals = _cd
+                    _mip_nlp_result.bound_duals_lower = _bdl
+                    _mip_nlp_result.bound_duals_upper = _bdu
+            except Exception as _dual_exc:  # pragma: no cover - reporting only
+                logger.debug("MIP-NLP dual recovery skipped: %s", _dual_exc)
+
         _route_remaining = time_limit - _route_elapsed
         if (
             _auto_route_reason is None
@@ -17563,6 +17596,79 @@ def _lp_qp_unpack_duals(
         bound_duals_upper = up
 
     return constraint_duals, bound_duals_lower, bound_duals_upper
+
+
+def _recover_nlp_duals_at_incumbent(
+    model: Model,
+    x_flat: np.ndarray,
+    *,
+    time_budget: float = 5.0,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Relaxation duals at a MIP-NLP incumbent: fix the integers, re-solve, unpack.
+
+    The MIP-NLP family (OA/ECP/GOA/LP-NLP-BB) returns a point and a bound and no
+    multipliers, because its master is a MILP and its subproblems are solved on
+    an integer-fixed model it does not keep. Every other exit in this module
+    reports duals, so before #1059 a convex MINLP got them and after the route
+    went default-ON the same ``.solve()`` returned ``constraint_duals=None`` --
+    measured on both a convex MIQP and a convex ``exp()`` MINLP. A default that
+    silently drops a reported quantity is the defect class CLAUDE.md §3 forbids,
+    so the routed path recovers them the same way ``_solve_nlp_bb`` does: pin the
+    integer columns at the incumbent and re-solve the resulting convex NLP for
+    its multipliers.
+
+    Strictly additive. It does not touch the reported point, objective, bound or
+    node count -- only fields that were ``None``. The re-solve requests NO
+    ``bound_relax_factor`` override, unlike a refine solve: the product here is
+    the MULTIPLIERS, and a degenerate feasible set has no finite multiplier
+    without Ipopt's relaxation (#946).
+
+    Best-effort by design: ``(None, None, None)`` on any failure, which is the
+    status quo ante for this family, never a wrong dual.
+    """
+    n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    lb = np.asarray(lb, dtype=float)
+    ub = np.asarray(ub, dtype=float)
+    if x_flat.shape[0] != n_vars:
+        # Layout mismatch: the point is not indexed like this model's columns, so
+        # any multiplier we unpacked would be named after the wrong row (#941).
+        return None, None, None
+
+    evaluator = _make_evaluator(model)
+    fix_lb = lb.copy()
+    fix_ub = ub.copy()
+    for off, sz in zip(int_offsets, int_sizes):
+        for k in range(int(sz)):
+            val = float(round(float(x_flat[off + k])))
+            fix_lb[off + k] = val
+            fix_ub[off + k] = val
+
+    cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
+    constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
+    opts = {"max_wall_time": max(0.1, min(5.0, float(time_budget))), "print_level": 0}
+    recovered = _solve_node_nlp_kkt(evaluator, x_flat, fix_lb, fix_ub, constraint_bounds, opts)
+    if recovered.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+        return None, None, None
+
+    cd = _unpack_constraint_duals(evaluator, recovered.multipliers)
+    bdl = _unpack_bound_duals(model, recovered.bound_multipliers_lower)
+    bdu = _unpack_bound_duals(model, recovered.bound_multipliers_upper)
+    # Zero the bound multipliers on integer columns: they price the act of
+    # fixing, not bound activity in the model the user declared. Same convention
+    # as ``_solve_nlp_bb`` and ``_mip_recover_relaxation_duals``.
+    int_names = {
+        v.name for v in model._variables if v.var_type in (VarType.BINARY, VarType.INTEGER)
+    }
+    for d in (bdl, bdu):
+        if d is None:
+            continue
+        for nm in int_names & set(d):
+            d[nm] = np.zeros_like(np.asarray(d[nm], dtype=float))
+    return cd, bdl, bdu
 
 
 def _mip_recover_relaxation_duals(
