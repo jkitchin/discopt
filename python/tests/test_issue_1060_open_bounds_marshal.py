@@ -144,3 +144,59 @@ def test_finite_bounds_are_unchanged_bound_neutral():
     )
     assert res.status == SolveStatus.OPTIMAL
     assert res.objective == pytest.approx(-6.0, abs=1e-6)
+
+
+# --- the second #1060 marshal defect: the mip_start seed --------------------
+#
+# ``solve_milp_with_lazy_cuts`` padded ``mip_start`` to ``n + m`` with zero
+# slacks -- the standard-form layout of every other array it marshals, but the
+# wrong length for the seed. ``validate_seed_incumbent`` requires exactly
+# ``n_struct`` and rejects anything else *silently* (an unprovable seed must
+# never prune the optimum), so every mip_start on this path was discarded with
+# no diagnostic. The observable is the driver's pre-search separator call: a
+# validated seed is offered to the lazy separator before the search starts.
+
+
+@pytest.mark.smoke
+def test_mip_start_reaches_the_driver_and_is_offered_to_the_separator():
+    """A length-``n`` seed must actually seed; before the fix it was dropped."""
+    seen: list[np.ndarray] = []
+
+    def _accept_everything(x):
+        seen.append(np.asarray(x, dtype=np.float64).copy())
+        return None
+
+    res = _skip_without_backend(
+        solve_milp_with_lazy_cuts,
+        _C,
+        _A_UB,
+        _B_UB,
+        bounds=[(0.0, None), (0.0, None)],
+        integrality=_INTEGRALITY,
+        lazy_callback=_accept_everything,
+        mip_start=np.array([1.0, 1.0]),  # feasible (sum 2 <= 3.5), objective -3
+    )
+    assert seen, "lazy separator never saw an integer-feasible point"
+    # The seed is the *first* point the separator sees: it is offered before the
+    # search begins. With the old zero-padded seed this first call was some
+    # node's LP solution instead, never (1, 1).
+    assert seen[0].shape == (2,)
+    np.testing.assert_allclose(seen[0], [1.0, 1.0])
+    # Seeding is an optimization, never a certificate change.
+    assert res.status == SolveStatus.OPTIMAL
+    assert res.objective == pytest.approx(-6.0, abs=1e-6)
+
+
+@pytest.mark.smoke
+def test_mip_start_of_the_wrong_length_is_refused_loudly():
+    """A wrong-length seed is a caller bug; silent-drop hid #1060 for good."""
+    with pytest.raises(ValueError, match="mip_start has 3 entries"):
+        solve_milp_with_lazy_cuts(
+            _C,
+            _A_UB,
+            _B_UB,
+            bounds=[(0.0, None), (0.0, None)],
+            integrality=_INTEGRALITY,
+            lazy_callback=lambda x: None,
+            mip_start=np.array([1.0, 1.0, 0.0]),
+        )

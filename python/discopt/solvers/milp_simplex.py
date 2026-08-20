@@ -924,11 +924,28 @@ def solve_milp_with_lazy_cuts(
     # A caller-supplied start is a plain incumbent candidate: the driver validates
     # it against the constraints AND offers it to the separator before seeding, so
     # an infeasible or lazily-excluded start cannot prune the true optimum.
+    #
+    # The seed is a **structural** point of length ``n_struct``: that is what
+    # ``validate_seed_incumbent`` checks (`if seed.len() != ns { return None }`)
+    # and it derives the slack activity itself from the row residuals. This used
+    # to pad the seed to ``n + m`` with zero slacks, which is the standard-form
+    # layout of every *other* array here but the wrong length for the seed -- so
+    # the validator dropped it on the length test and every ``mip_start`` on this
+    # path was silently ignored (#1060). Rejection there is deliberately silent
+    # (a seed that cannot be proven feasible must never prune the optimum), which
+    # is exactly why a marshaling mistake could not announce itself. A wrong
+    # length is a caller bug, not an unverifiable point, so it is refused here
+    # instead of being quietly dropped downstream.
     seed = None
     if mip_start is not None:
         seed_arr = np.asarray(mip_start, dtype=np.float64).ravel()
-        if seed_arr.shape[0] == n:
-            seed = np.ascontiguousarray(np.concatenate([seed_arr, np.zeros(m)]))
+        if seed_arr.shape[0] != n:
+            raise ValueError(
+                f"mip_start has {seed_arr.shape[0]} entries but the master has {n} "
+                "structural variables; supply a point over the structural columns "
+                "only (the driver derives the slacks from the row residuals)"
+            )
+        seed = np.ascontiguousarray(seed_arr)
 
     from discopt import debug as _debug
 
