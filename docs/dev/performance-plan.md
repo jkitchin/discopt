@@ -3296,3 +3296,86 @@ named, delivered upstream, and it is worth taking because the LP layer is now
 genuinely fast rather than because the solver got faster. §16's conclusion stands
 unchanged: discopt's gap to BARON is node-NLP and Python marshaling (69% and
 82.5% respectively per `baron-gap-plan.md` §1.3), not LU throughput.
+
+## 19. #1064 `squfl` primal gap: the structure was never *seen*, and the model rewrite trades the certificate for the incumbent (2026-08-19)
+
+The `squfl` family (separable quadratic uncapacitated facility location) returned
+incumbents 69–115% above optimum at 600 s. The issue framed this as "no incumbent
+after 600 s"; that headline was already resolved by earlier work — every instance
+now returns a feasible point — so the residual was *quality*, and it root-caused to
+two things, neither of them the relaxation.
+
+### 19.1 The recursion limit was silently reclassifying models (fixed)
+
+A `.nl` body is a left-leaning `((((a+b)+c)+d)+…)` chain, one AST node per term.
+`_extract_quadratic_terms._walk` and `_extract_linear_coefficients_sparse._walk`
+both recursed once per term, so a long body raised `RecursionError` — and the
+callers report that as *"not quadratic"* / *"not linear"*, which is
+indistinguishable from a genuinely nonlinear body. A convex separable MIQP
+therefore lost its Hessian and its semicontinuity structure **purely because it was
+long**, with no diagnostic anywhere.
+
+Measured over all 1610 MINLPLib `.nl` instances: 2 hit the quadratic walk
+(`squfl025-040` at 1000 terms, `squfl015-080` at 1200), **17** hit the linear one
+(`sporttournament30`…`40`, `edgecross10-060`…`24-057`, `autocorr_bern*`, `ibs2`).
+After the work-stack rewrite the same scan reports `ERRORS 0`.
+
+This is the §6 lesson in a production code path rather than an instrument: the
+failure mode was not a wrong answer, it was a *capability that silently did not
+exist*, reported as a legitimate classification.
+
+Bit-identity (§5 regime 1) was preserved deliberately — children are pushed onto
+the work stack in reverse so they pop in source order, keeping the floating-point
+accumulation order unchanged. SHA-256 over the extracted `(Q, c, const)` and
+`(terms, const)` matches on every corpus instance the recursive walk could process
+at all; the only hashes that move are the ones that previously raised (`ibs2` goes
+from `{ok: 1810, RecursionError: 1}` to `{ok: 1811}`).
+
+### 19.2 The OA objective cut was the plain tangent; perspective-strengthening it is where the primal gain is
+
+The OA master's objective epigraph row is the aggregate tangent
+`grad^T x − eta <= rhs`. It discards the perspective of every separable convex
+square over a semicontinuous variable. For binary `y` with a model row `x <= u*y`,
+`y = 0` forces `x = 0`, so the Frangioni–Gentile cut `eta >= 2q z x − q z² y` is
+valid using **only** `y ∈ {0,1}` — no box enters, so it is globally valid and safe
+to keep across nodes (unlike anything read off a node relaxation's rows).
+
+In row form, strengthening term `i` subtracts `q_i x̄_i²` from *both*
+`coeffs[y_col_i]` and `rhs`. At `y_i = 1` the two cancel and the row is identical to
+the plain tangent; at `y_i = 0` it reads `eta >= 0` instead of `eta >= −q x̄²`.
+
+Measured at 60 s, interleaved, with a §6 counter proving the strengthening fired.
+**Same bound and same node count on both arms** — the gain is purely primal:
+
+| instance | applied | obj OFF → ON | bound | nodes | gap OFF → ON |
+|---|---|---|---|---|---|
+| squfl010-025 | 5750 | 214.111 → 214.111 | 214.111 | 371 | −0.0% → −0.0% (optimal both) |
+| squfl015-060 | 9000 | 619.389 → 375.591 | 307.514 | 1055 | 68.9% → **2.4%** |
+| squfl015-080 | 10800 | 821.264 → 465.460 | 296.717 | 703 | 104.0% → **15.6%** |
+| squfl025-040 | 11000 | 423.980 → 233.818 | 127.705 | 1023 | 114.9% → **18.5%** |
+
+Structure population: exactly **20 of 1610** corpus instances (§2 — the fix is to
+the class, and every other instance is a provable no-op because the detector
+returns an empty term list).
+
+### 19.3 FALSIFIED: the model rewrite. It is strictly better on the primal and strictly worse on the certificate
+
+The obvious formulation-level move is to lift `q x²` to `q s` and add `x² <= s y`.
+Its primal effect is larger than the cut's — 68.9% → 0.00%, 114.8% → 0.00%,
+114.9% → 0.05% — and it is tempting for exactly that reason.
+
+It is not shipped. The lifted row `x² <= s y` is a **nonconvex** quadratic
+constraint, so the rewritten model leaves the convex relaxation and routes to the
+spatial path. The dual bound came out **looser on every** `squfl` instance. That is
+a certification regression under §5, and §1 settles it: a change that improves the
+incumbent while degrading the certificate is a regression, however large the primal
+number looks. The primal-only figure is the trap here — read alone it reports a
+1000× improvement on a change that makes the solver worse at its actual job.
+
+### 19.4 FALSIFIED: a spatial row separator for the same structure
+
+A separator that added perspective rows at the node relaxation was built and
+measured `sep_calls = 0` / `nodes_via_mccormick = 0` on reformed models — it never
+fired, because the reformed model does not reach the McCormick path where the
+separator was installed. Dropped rather than relocated, since §19.3 removes the
+reformulation it depended on.
