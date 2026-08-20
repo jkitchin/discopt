@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Callable, NamedTuple, Optional, Union, cast
 
 import numpy as np
@@ -44,6 +44,12 @@ under-estimate (and the Farkas test a rigorous proof). Mirrors the constant in
 :func:`discopt._relax.obbt._ns_safe_lp_lower_bound`."""
 
 _INF = 1e20  # discopt's effective-infinity sentinel for free variable bounds.
+
+# A column bound list in the scipy/``milp_pounce`` shape: ``None`` on a side means
+# that side is open (issue #1060). ``Sequence`` rather than ``list`` so the common
+# ``list[tuple[float, float]]`` of a fully-bounded caller still type-checks --
+# ``list`` is invariant, ``Sequence`` is not.
+BoundList = Sequence[tuple[Optional[float], Optional[float]]]
 
 _U64 = 2.0**-53  # float64 unit roundoff
 
@@ -551,13 +557,56 @@ class _StdForm(NamedTuple):
     lp_kwargs: dict
 
 
+def _marshal_col_bounds(
+    bounds: Optional[BoundList],
+    n: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Marshal a scipy-style ``[(lo, hi), ...]`` list into the engine's bound arrays.
+
+    Mirrors :func:`discopt.solvers.milp_pounce.solve_milp`'s documented contract:
+    ``bounds=None`` means ``(0, +inf)`` per variable, and ``None`` on one side of a
+    pair means that side is open.
+
+    An open side becomes the ``±_INF`` sentinel (``1e20``) — what the Rust LP layer
+    reads as unbounded; ``float("inf")`` is *not* that sentinel and is mapped here
+    too. The previous code built these arrays with
+    ``np.array([hi for _, hi in bounds], dtype=np.float64)``, which turns a ``None``
+    into ``nan`` **silently**: every caller holding an open-above column (169 of the
+    280 columns of the ``rsyn0840m`` LP/NLP-BB master, issue #1060) had its solve
+    rejected by the #1008 NaN guard from deep inside the driver, reported against a
+    standard-form column index that does not name the offending variable. NaN is
+    refused here instead — loudly, and in the caller's own index space (§3).
+    """
+    if bounds is None:
+        return np.zeros(n, dtype=np.float64), np.full(n, _INF, dtype=np.float64)
+    if len(bounds) != n:
+        raise ValueError(
+            f"bounds has {len(bounds)} entries but c has {n} columns; "
+            "one (lo, hi) pair per structural variable is required"
+        )
+    lb = np.empty(n, dtype=np.float64)
+    ub = np.empty(n, dtype=np.float64)
+    for j, (lo, hi) in enumerate(bounds):
+        lo_f = -_INF if lo is None else float(lo)
+        hi_f = _INF if hi is None else float(hi)
+        if np.isnan(lo_f) or np.isnan(hi_f):
+            raise ValueError(
+                f"bounds[{j}] = ({lo!r}, {hi!r}) contains NaN; an LP bound must be "
+                "finite, None, or +/-inf (NaN is read as both open and closed by "
+                "different guards -- see issue #1008)"
+            )
+        lb[j] = -_INF if lo_f <= -_INF else lo_f
+        ub[j] = _INF if hi_f >= _INF else hi_f
+    return lb, ub
+
+
 def _marshal_std_form(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
     b_ub: Optional[np.ndarray],
     A_eq: Optional[Union[np.ndarray, sp.spmatrix]],
     b_eq: Optional[np.ndarray],
-    bounds: Optional[list[tuple[float, float]]],
+    bounds: Optional[BoundList],
     integrality: Optional[np.ndarray],
 ) -> _StdForm:
     """Marshal ``A_ub x <= b_ub, A_eq x == b_eq`` into the driver's CSC standard form.
@@ -614,14 +663,9 @@ def _marshal_std_form(
     csc_row_idx = np.ascontiguousarray(a_std_sp.indices, dtype=np.int64)
     csc_vals = np.ascontiguousarray(a_std_sp.data, dtype=np.float64)
 
-    if bounds is not None:
-        lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
-        ub = np.array([hi for _, hi in bounds], dtype=np.float64)
-    else:
-        lb = np.zeros(n, dtype=np.float64)
-        ub = np.full(n, 1e20, dtype=np.float64)
+    lb, ub = _marshal_col_bounds(bounds, n)
     lb_std = np.concatenate([lb, np.zeros(m)])
-    ub_std = np.concatenate([ub, np.full(m, 1e20)])
+    ub_std = np.concatenate([ub, np.full(m, _INF)])
     c_std = np.concatenate([c_arr, np.zeros(m)])
 
     if integrality is not None:
@@ -677,7 +721,7 @@ def solve_milp(
     b_ub: Optional[np.ndarray] = None,
     A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
     b_eq: Optional[np.ndarray] = None,
-    bounds: Optional[list[tuple[float, float]]] = None,
+    bounds: Optional[BoundList] = None,
     integrality: Optional[np.ndarray] = None,
     time_limit: Optional[float] = None,
     gap_tolerance: float = 1e-4,
@@ -766,7 +810,7 @@ def solve_milp_with_lazy_cuts(
     b_ub: Optional[np.ndarray] = None,
     A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
     b_eq: Optional[np.ndarray] = None,
-    bounds: Optional[list[tuple[float, float]]] = None,
+    bounds: Optional[BoundList] = None,
     integrality: Optional[np.ndarray] = None,
     time_limit: Optional[float] = None,
     gap_tolerance: float = 1e-4,
@@ -969,7 +1013,7 @@ def solve_lp_warm_std(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
     b_ub: Optional[np.ndarray],
-    bounds: Optional[list[tuple[float, float]]],
+    bounds: Optional[BoundList],
     in_basis: Optional[tuple[np.ndarray, np.ndarray]] = None,
     *,
     return_cert: bool = False,
@@ -1036,14 +1080,9 @@ def solve_lp_warm_std(
     else:
         a_std = a_struct.tocsc()
 
-    if bounds is not None:
-        lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
-        ub = np.array([hi for _, hi in bounds], dtype=np.float64)
-    else:
-        lb = np.zeros(n, dtype=np.float64)
-        ub = np.full(n, 1e20, dtype=np.float64)
+    lb, ub = _marshal_col_bounds(bounds, n)
     lb_std = np.concatenate([lb, np.zeros(m)])
-    ub_std = np.concatenate([ub, np.full(m, 1e20)])
+    ub_std = np.concatenate([ub, np.full(m, _INF)])
     c_std = np.concatenate([c_arr, np.zeros(m)])
 
     # #928: a COLD solve carrying a finite deadline starts the DUAL simplex from
