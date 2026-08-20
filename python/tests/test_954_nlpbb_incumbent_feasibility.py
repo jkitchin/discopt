@@ -29,6 +29,14 @@ nonconvex and would otherwise dispatch elsewhere. 100 entered ``_solve_nlp_bb``,
     worst tolerance that would be needed to admit any returned point = 3.93e-14
     instances a 1e-6 gate would newly refuse = 0
 
+Every solve here passes ``nlp_bb=True`` for the same reason the entry panel did,
+and since #1059 it is load-bearing rather than merely explicit: the panel model is
+convexity-certified, so a bare ``.solve()`` is now auto-routed to the MIP-NLP
+family and never enters ``_solve_nlp_bb`` at all. The probes then measure nothing
+and say so -- ``the refine stub never ran`` is exactly that failure, not a
+regression in the gate. ``nlp_bb=True`` is the documented way to name this engine,
+and the route declines whenever a caller names one.
+
 So there was no live false primal, and the gate this adds refuses nothing that
 was being returned — four orders of headroom. The defect is that nothing bounded
 the excursion: its size was set by whatever the NLP backend converged to, and the
@@ -127,7 +135,7 @@ def test_returned_incumbent_is_within_declared_tolerance():
 
     for seed in range(seeds):
         m = _panel_model(seed)
-        r = m.solve(time_limit=60)
+        r = m.solve(time_limit=60, nlp_bb=True)
         assert r.status == "optimal", f"seed {seed}: status {r.status}, panel assumes optimal"
         assert r.nlp_bb, f"seed {seed} did not dispatch to NLP-BB; this panel tests that path"
         assert r.x is not None
@@ -216,7 +224,7 @@ def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
 
     m = _panel_model(0)
     with pytest.raises(RuntimeError, match="NLP-BB returned an infeasible point labeled"):
-        m.solve(time_limit=60)
+        m.solve(time_limit=60, nlp_bb=True)
 
     assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
     assert refine["n"] > 0, "the refine stub never ran; the perturbation may have been repaired"
@@ -232,7 +240,7 @@ def test_baseline_solve_is_unaffected(monkeypatch):
     refine = _disable_terminal_refine(monkeypatch)
 
     m = _panel_model(0)
-    r = m.solve(time_limit=60)
+    r = m.solve(time_limit=60, nlp_bb=True)
 
     assert refine["n"] > 0, "the refine stub never ran; this control is not comparable"
     assert r.status == "optimal", f"unperturbed solve returned {r.status}"
