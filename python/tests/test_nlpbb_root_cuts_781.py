@@ -200,3 +200,89 @@ def test_rsyn0805m_flag_on_sound_and_tighter(monkeypatch):
     # the composed bound is at most the root-cut LP bound (~1577.3 measured);
     # flag-off tree bound at this budget is ~1768 — require a real improvement
     assert r.bound <= 1650.0, f"root-cut bound composition ineffective: {r.bound}"
+
+
+# ── vector variable blocks: the stage must not silently switch itself off ────
+
+
+def _build_convex_minlp_vector() -> Model:
+    """The same fixed-charge model as ``_build_convex_minlp('min')``, written
+    with *vector* variable blocks instead of four scalars.
+
+    Identical feasible set and objective, so the two forms must get the same
+    optimum -- and, once flat columns are unravelled, the same root-cut stage.
+    """
+    m = Model("rc_vec")
+    f = m.continuous("f", shape=2, lb=0.0, ub=10.0)
+    y = m.binary("y", shape=2)
+    m.subject_to(f[0] - 8.0 * y[0] <= 0.0)
+    m.subject_to(f[1] - 8.0 * y[1] <= 0.0)
+    m.subject_to(f[0] + f[1] >= 3.0)
+    m.subject_to(f[0] * f[0] + f[1] * f[1] <= 16.0)
+    m.minimize(f[0] + 2.0 * f[1] + 2.5 * y[0] + 2.5 * y[1])
+    return m
+
+
+def test_flat_column_terms_covers_blocks_in_column_order():
+    """One term per flat column, blocks unravelled in C order.
+
+    The flat layout is ``concatenate([asarray(x[v.name]).ravel() for v in
+    model._variables])``, so a ``(2, 3)`` block owns six consecutive columns
+    row-major. Asserting the *count* alone would pass for a wrong order, so
+    each term is checked to name its own block.
+    """
+    from discopt.solvers._root_cuts import flat_column_terms
+
+    m = Model("flatmap")
+    a = m.continuous("a", lb=0.0, ub=1.0)
+    m.continuous("b", shape=(2, 3), lb=0.0, ub=1.0)
+    m.binary("c", shape=4)
+    m.minimize(a)
+
+    cols = flat_column_terms(m)
+    assert len(cols) == 1 + 6 + 4, "one term per flat column"
+    assert cols[0] is a, "scalar blocks are passed through unwrapped"
+    checks = 0
+    for j, expected in (
+        [(0, "a")] + [(1 + k, "b") for k in range(6)] + [(7 + k, "c") for k in range(4)]
+    ):
+        term = cols[j]
+        base = getattr(term, "base", term)
+        assert getattr(base, "name", None) == expected, (
+            f"flat column {j} should belong to block {expected!r}"
+        )
+        checks += 1
+    assert checks == 11, "CHECKS_EXECUTED must cover every flat column"
+
+
+def test_root_cuts_fire_on_vector_variable_blocks(monkeypatch):
+    """Regression: the stage used to be gated on ``all(size == 1)``.
+
+    That gate is a *modeling-style* restriction, not a problem-class one -- it
+    silently disabled every root cut for array-API models while reporting a
+    normal solve (CLAUDE.md §2, §6). Fails before the unravel fix (0 cuts
+    added), passes after.
+    """
+    _flag(monkeypatch, False)
+    base = _build_convex_minlp_vector().solve(time_limit=30, nlp_bb=True)
+    assert base.objective is not None
+    n_before = len(_build_convex_minlp_vector()._constraints)
+
+    _flag(monkeypatch, True)
+    m = _build_convex_minlp_vector()
+    r = m.solve(time_limit=30, nlp_bb=True)
+    added = len(m._constraints) - n_before
+    assert added > 0, "root-cut stage must reach models built from vector blocks"
+    # ...and the cuts must be sound: same optimum, dual bound below it (min).
+    assert r.objective == pytest.approx(base.objective, abs=1e-4, rel=1e-4)
+    if r.bound is not None:
+        assert r.bound <= base.objective + 1e-4
+
+
+def test_vector_and_scalar_forms_agree(monkeypatch):
+    """The two spellings of one model must reach the same optimum with cuts on."""
+    _flag(monkeypatch, True)
+    scalar = _build_convex_minlp("min").solve(time_limit=30, nlp_bb=True)
+    vector = _build_convex_minlp_vector().solve(time_limit=30, nlp_bb=True)
+    assert scalar.objective is not None and vector.objective is not None
+    assert scalar.objective == pytest.approx(vector.objective, abs=1e-4, rel=1e-4)

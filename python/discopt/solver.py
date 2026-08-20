@@ -15466,13 +15466,12 @@ def _solve_nlp_bb(
     if _model_is_convex and rens_enabled and _lns_enabled:
         try:
             from discopt.solvers._root_cuts import (
+                flat_column_terms,
                 generate_root_cuts,
                 nlpbb_root_cuts_enabled,
             )
 
-            if nlpbb_root_cuts_enabled() and all(
-                getattr(v, "size", 1) == 1 for v in model._variables
-            ):
+            if nlpbb_root_cuts_enabled():
                 from discopt.modeling.core import Constraint as _RCConstraint
 
                 _rc_is_int = np.zeros(n_vars, bool)
@@ -15486,11 +15485,11 @@ def _solve_nlp_bb(
                     model, _rc_ev, lb, ub, _rc_is_int, _rc_is_bin, time_budget_s=_rc_budget
                 )
                 jax_time += time.perf_counter() - t_jax_start
-                _rc_blocks = model._variables
+                _rc_cols = flat_column_terms(model)
                 for _rc_a, _rc_r in _rc.cuts:
                     _rc_body = None
                     for _j in np.nonzero(np.abs(_rc_a) > 1e-15)[0]:
-                        _term = float(_rc_a[_j]) * _rc_blocks[int(_j)]
+                        _term = float(_rc_a[_j]) * _rc_cols[int(_j)]
                         _rc_body = _term if _rc_body is None else _rc_body + _term
                     if _rc_body is None:
                         continue

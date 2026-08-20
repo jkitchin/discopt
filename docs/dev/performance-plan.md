@@ -3435,3 +3435,64 @@ declined", not "the panel never ran".
 
 Per §5 the flag is now **default-ON**, with `DISCOPT_PERSPECTIVE_OA_CUT=0` kept
 as the opt-out and the plain-tangent path intact.
+## 20. #1061 root cuts: `DISCOPT_NLPBB_ROOT_CUTS` is sound but not helpful — stays OFF (rejected 2026-08-20)
+
+**Why this was run.** #1061 reports discopt's root dual bound sitting 27.1x above
+the reference optimum on `syn40m` and 8.5x on `rsyn0840m`. The root cutting-plane
+stage (#781, `DISCOPT_NLPBB_ROOT_CUTS`, default-OFF) was the nearest built lever,
+and PR #1094 fixed a real defect in it: `_root_cuts` switched *itself* off on any
+model whose objective arrived as a vector block, so on that whole class the stage
+had never run at all. With the stage actually reaching those models, the §5
+graduation gate became answerable for the first time.
+
+**The panel.** Flag ON vs OFF over the in-repo corpus, 6 shards, 60 s/instance,
+**153 instances with complete pairs in both arms**.
+
+| gate | result |
+|---|---|
+| dual bound | tighter 31, looser **13**, flat 109 |
+| primal shortfall | better 4, worse **6**, same 93 |
+| total wall | OFF 3015.9 s, ON 3020.8 s (+0.2%) |
+| bound above its reference optimum (`RAISED`) | **0 instances** |
+| certification regression | **`clay0303hfsg`** (`gap_certified` True → False) |
+| **CERT-CLEAN** | **FAIL** |
+| **NET-POSITIVE** | **FAIL** |
+
+**Both bars fail, and they fail for different reasons.** Soundness in the narrow
+sense holds — no bound in the ON arm rose above its reference optimum in 153
+pairs, so the cuts are valid. But §5's cert-clean bar is broader than "no false
+bound": `clay0303hfsg` regresses from `gap_certified=True` to uncertified, which
+is a certificate lost, and that alone disqualifies the flag.
+
+**The looseners are a coherent family, not scatter.** Every large regression is
+`clay*`:
+
+| instance | dual bound OFF → ON |
+|---|---|
+| `clay0205hfsg` | 1889.99 → **26.89** |
+| `clay0304m` | 39347.56 → **6545.0** |
+| `clay0303hfsg` | 26669.11 → **19513.27** |
+| `clay0304hfsg` | 3915.87 → **1840.0** |
+
+plus two primal losses on the same family (`clay0205m` 0.0% → 233.4% short,
+`clay0304m` 0.0% → 4.62% short). A cut round cannot *loosen* a valid dual bound
+on its own; what it does is spend root budget and move the trajectory, and on
+`clay*` that trade is severely negative. The gains, meanwhile, are real but small
+and concentrated in the `fo*`/`m*`/`no*` families (e.g. `fo9_ar2_1` 14.34 → 20.38,
+`fo7_ar3_1` 8.08 → 11.10) — 31 tighter against 13 looser is not the broad win §5
+asks for, and the primal column is net *negative*.
+
+**Verdict: `DISCOPT_NLPBB_ROOT_CUTS` stays default-OFF.** This is the
+`DISCOPT_CUT_INHERIT` shape exactly — sound is not the same as helpful — and §5
+says a cert-clean-but-neutral flag stays off. Here it is not even cert-clean. PR
+#1094's fix ships on its own merits (the stage silently disabling itself on
+vector-block models is a defect whether or not the flag ever graduates) and
+carries `Contributes to #1061`, not `Closes`.
+
+**What this does NOT establish.** It does not say root cuts are the wrong idea for
+the syn/rsyn class; it says *this* implementation, at this budget, is not ready to
+default on. And it leaves #1061's headline untouched: the 27.1x on `syn40m` is a
+property of the big-M relaxation itself. The lever that *does* move #1061 turned
+out to be elsewhere entirely — a free-column pricing defect in the simplex that
+silently disabled OBBT's exact-LP oracle on this whole class — and it ships on its
+own branch (`fix/1061-phase1-open-column`), not here.
