@@ -15446,7 +15446,7 @@ def _solve_nlp_bb(
             gap_certified=_gap_certified,
         )
 
-    # --- Root cutting-plane stage (#781, DISCOPT_NLPBB_ROOT_CUTS, default-OFF) ---
+    # --- Root cutting-plane stage (#781, DISCOPT_NLPBB_ROOT_CUTS, default-ON) ---
     # Generates integrality-valid cuts (GMI from the HiGHS tableau + c-MIR +
     # cover under pooled top-K selection) over the OA root LP and appends them
     # as model constraints BEFORE the evaluator/tree are built, so every node
@@ -16636,7 +16636,6 @@ def _solve_nlp_bb(
                 and nlp_refined.x is not None
                 and np.all(np.isfinite(nlp_refined.x))
                 and nlp_refined.objective is not None
-                and abs(float(nlp_refined.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
             ):
                 refined = np.asarray(nlp_refined.x, dtype=float).copy()
                 # Keep integer columns pinned at their (rounded) incumbent
@@ -16644,9 +16643,69 @@ def _solve_nlp_bb(
                 for off, sz in zip(int_offsets, int_sizes):
                     for k in range(int(sz)):
                         refined[off + k] = round(float(sol_flat[off + k]))
-                sol_flat = refined
-                x_dict = _unpack_solution(model, sol_flat)
-                obj_val = float(nlp_refined.objective)
+                # --- adoption rule (#1061) ---
+                # The original rule was a single ±1e-4 objective window: adopt
+                # only a refined point whose objective essentially matches the
+                # incumbent's. That window is the wrong arbiter when the two
+                # points DISAGREE, because it silently keeps whichever one is
+                # more optimistic -- including one the refine has just shown to
+                # be unattainable at this integer assignment.
+                #
+                # Measured on the MindtPy constraint-qualification fixture
+                # ``(x-3)^2 <= 50(1-y)`` (exact optimum 3.0) with the root-cut
+                # stage on: the node relaxation returned x = 2.998978 at
+                # y = 1-2.1e-8 -- feasible only because that sliver of y buys
+                # 1.05e-6 of big-M slack. Snapping y to 1 leaves the row
+                # violated by 1.04e-6, which clears the 1e-6 exit gate on the
+                # 1e-9 term-scaled forgiveness of the row's own ``50``. The
+                # refine (bound_relax_factor=0, integers fixed) returned
+                # x = 2.9999999931 -- violation 4.8e-17 -- and the window
+                # REJECTED it at |Δobj| = 1.02e-3, so the solve reported
+                # ``optimal`` at 1.02e-3 BELOW an exact optimum: CLAUDE.md §1's
+                # worst class, a certificate on a point that cannot exist.
+                #
+                # So the tie-break is feasibility, not objective proximity: a
+                # STRICTLY more feasible point wins even when its objective is
+                # worse, because the incumbent's advantage was bought with
+                # constraint violation. Both excesses come from the same arbiter
+                # the exit gate uses (declared rows, declared box), so this
+                # cannot admit a point the gate below refuses. When the two
+                # points agree to within the window, the original branch still
+                # applies and nothing moves.
+                _ref_obj = float(nlp_refined.objective)
+                _adopt = abs(_ref_obj - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
+                if not _adopt:
+                    _inc_exc, _, _ = _nonlinear_point_excess(
+                        evaluator,
+                        sol_flat,
+                        cl_list,
+                        cu_list,
+                        n_rows=_declared_rows,
+                        box=_declared_box,
+                    )
+                    _ref_exc, _, _ = _nonlinear_point_excess(
+                        evaluator,
+                        refined,
+                        cl_list,
+                        cu_list,
+                        n_rows=_declared_rows,
+                        box=_declared_box,
+                    )
+                    _adopt = _ref_exc < _inc_exc and _ref_exc <= _NLPBB_EXIT_ABS_TOL
+                    if _adopt:
+                        logger.info(
+                            "NLP-BB: adopting the refined incumbent on FEASIBILITY "
+                            "(excess %.3e -> %.3e) though its objective is %.6g vs "
+                            "%.6g; the incumbent's edge was constraint violation.",
+                            _inc_exc,
+                            _ref_exc,
+                            _ref_obj,
+                            obj_val,
+                        )
+                if _adopt:
+                    sol_flat = refined
+                    x_dict = _unpack_solution(model, sol_flat)
+                    obj_val = _ref_obj
             nlp_recovered = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
             )
