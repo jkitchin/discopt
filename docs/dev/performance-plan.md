@@ -3687,3 +3687,47 @@ an optimum, and cannot turn a certified instance uncertified. The panel's
 cert-clean verdict therefore survives the change a fortiori. Its net-positive
 column is measured on the pre-fix build and is not re-run; the fix touches only
 the terminal point of a solve, not the search.
+
+### 21.2 `rsyn0820m02m`: the row-count hypothesis is falsified, and the cost is per-node NLP effort
+
+The graduation panel's net-positive column is a population statistic, so it is
+worth naming what it is averaging over. Re-running #1062's four named instances
+plus `rsyn0820m02m` (which is **not** in the 153-instance panel) at 60 s, both
+arms adjacent per instance, found one clear loser:
+
+| instance | OFF | ON |
+|---|---|---|
+| `rsyn0820m02m` (max, opt 1092.09) | obj 244.20, 31 nodes | obj **-39.53**, **3 nodes** |
+
+**Hypothesis (stated before measuring):** the stage appends so many rows that
+per-node NLP cost collapses throughput. **Kill criterion:** if the applied cut
+count is small relative to the model's rows, the hypothesis is wrong.
+
+**Falsified.** `$SP/probe_0820.py`, `CHECKS_EXECUTED 4`:
+
+```
+rsyn0820m02m: declared rows=1074 vars=510
+root-cut stage: n_cuts=69 rounds=26 productive=26 stop='budget'
+                lp_bound=5220.25 stage_wall=10.6s
+rows after solve = 1143  (+69 cut rows, 6.4% of the model)
+result: status=feasible obj=-39.531 bound=4786.63 nodes=3 subnlp=1 wall=60.2
+stage consumed 10.6s of a 60s budget (18%)
+```
+
+69 cuts on 1074 rows cannot be a 10x throughput effect by row count. The stage's
+own wall is bounded and behaved (`max(2, min(10, 0.2*T))`, 10.6 s of 60 s), so
+the lost time is in the tree: **~1.9 s/node OFF vs ~16 s/node ON**, an ~8.5x
+per-node cost increase bought by 6.4% more rows. The cost is therefore in how
+much *effort* each node NLP spends on the cut-tightened feasible region, not in
+its size. Every round here was productive (26/26) and the loop stopped on
+budget, so the stall detector had nothing to catch — this is not the #1062 stall.
+
+No soundness consequence: the bound stays valid (4786.63 >= 1092.09) in both
+arms, and the panel's `RAISED` count is 0.
+
+**Not acted on in the graduation PR, deliberately.** Any change to the cut cap
+or the per-node effort limit is itself bound-changing and would invalidate the
+153-instance panel that the graduation rests on. Recorded here as the entry
+measurement for whoever tunes the cut stage next: the lever to test first is
+per-node NLP iteration effort under appended GMI/c-MIR rows, **not** the cut
+count.
