@@ -3296,3 +3296,142 @@ named, delivered upstream, and it is worth taking because the LP layer is now
 genuinely fast rather than because the solver got faster. §16's conclusion stands
 unchanged: discopt's gap to BARON is node-NLP and Python marshaling (69% and
 82.5% respectively per `baron-gap-plan.md` §1.3), not LU throughput.
+
+## 19. #1064 `squfl` primal gap: the structure was never *seen*, and the model rewrite trades the certificate for the incumbent (2026-08-19)
+
+The `squfl` family (separable quadratic uncapacitated facility location) returned
+incumbents 69–115% above optimum at 600 s. The issue framed this as "no incumbent
+after 600 s"; that headline was already resolved by earlier work — every instance
+now returns a feasible point — so the residual was *quality*, and it root-caused to
+two things, neither of them the relaxation.
+
+### 19.1 The recursion limit was silently reclassifying models (fixed)
+
+A `.nl` body is a left-leaning `((((a+b)+c)+d)+…)` chain, one AST node per term.
+`_extract_quadratic_terms._walk` and `_extract_linear_coefficients_sparse._walk`
+both recursed once per term, so a long body raised `RecursionError` — and the
+callers report that as *"not quadratic"* / *"not linear"*, which is
+indistinguishable from a genuinely nonlinear body. A convex separable MIQP
+therefore lost its Hessian and its semicontinuity structure **purely because it was
+long**, with no diagnostic anywhere.
+
+Measured over all 1610 MINLPLib `.nl` instances: 2 hit the quadratic walk
+(`squfl025-040` at 1000 terms, `squfl015-080` at 1200), **17** hit the linear one
+(`sporttournament30`…`40`, `edgecross10-060`…`24-057`, `autocorr_bern*`, `ibs2`).
+After the work-stack rewrite the same scan reports `ERRORS 0`.
+
+This is the §6 lesson in a production code path rather than an instrument: the
+failure mode was not a wrong answer, it was a *capability that silently did not
+exist*, reported as a legitimate classification.
+
+Bit-identity (§5 regime 1) was preserved deliberately — children are pushed onto
+the work stack in reverse so they pop in source order, keeping the floating-point
+accumulation order unchanged. SHA-256 over the extracted `(Q, c, const)` and
+`(terms, const)` matches on every corpus instance the recursive walk could process
+at all; the only hashes that move are the ones that previously raised (`ibs2` goes
+from `{ok: 1810, RecursionError: 1}` to `{ok: 1811}`).
+
+### 19.2 The OA objective cut was the plain tangent; perspective-strengthening it is where the primal gain is
+
+The OA master's objective epigraph row is the aggregate tangent
+`grad^T x − eta <= rhs`. It discards the perspective of every separable convex
+square over a semicontinuous variable. For binary `y` with a model row `x <= u*y`,
+`y = 0` forces `x = 0`, so the Frangioni–Gentile cut `eta >= 2q z x − q z² y` is
+valid using **only** `y ∈ {0,1}` — no box enters, so it is globally valid and safe
+to keep across nodes (unlike anything read off a node relaxation's rows).
+
+In row form, strengthening term `i` subtracts `q_i x̄_i²` from *both*
+`coeffs[y_col_i]` and `rhs`. At `y_i = 1` the two cancel and the row is identical to
+the plain tangent; at `y_i = 0` it reads `eta >= 0` instead of `eta >= −q x̄²`.
+
+Measured at 60 s, interleaved, with a §6 counter proving the strengthening fired.
+**Same bound and same node count on both arms** — the gain is purely primal:
+
+| instance | applied | obj OFF → ON | bound | nodes | gap OFF → ON |
+|---|---|---|---|---|---|
+| squfl010-025 | 5750 | 214.111 → 214.111 | 214.111 | 371 | −0.0% → −0.0% (optimal both) |
+| squfl015-060 | 9000 | 619.389 → 375.591 | 307.514 | 1055 | 68.9% → **2.4%** |
+| squfl015-080 | 10800 | 821.264 → 465.460 | 296.717 | 703 | 104.0% → **15.6%** |
+| squfl025-040 | 11000 | 423.980 → 233.818 | 127.705 | 1023 | 114.9% → **18.5%** |
+
+Structure population: exactly **20 of 1610** corpus instances (§2 — the fix is to
+the class, and every other instance is a provable no-op because the detector
+returns an empty term list).
+
+### 19.3 FALSIFIED: the model rewrite. It is strictly better on the primal and strictly worse on the certificate
+
+The obvious formulation-level move is to lift `q x²` to `q s` and add `x² <= s y`.
+Its primal effect is larger than the cut's — 68.9% → 0.00%, 114.8% → 0.00%,
+114.9% → 0.05% — and it is tempting for exactly that reason.
+
+It is not shipped. The lifted row `x² <= s y` is a **nonconvex** quadratic
+constraint, so the rewritten model leaves the convex relaxation and routes to the
+spatial path. The dual bound came out **looser on every** `squfl` instance. That is
+a certification regression under §5, and §1 settles it: a change that improves the
+incumbent while degrading the certificate is a regression, however large the primal
+number looks. The primal-only figure is the trap here — read alone it reports a
+1000× improvement on a change that makes the solver worse at its actual job.
+
+### 19.4 FALSIFIED: a spatial row separator for the same structure
+
+A separator that added perspective rows at the node relaxation was built and
+measured `sep_calls = 0` / `nodes_via_mccormick = 0` on reformed models — it never
+fired, because the reformed model does not reach the McCormick path where the
+separator was installed. Dropped rather than relocated, since §19.3 removes the
+reformulation it depended on.
+
+### 19.5 The §5 graduation panel: `DISCOPT_PERSPECTIVE_OA_CUT` is now default-ON (2026-08-20)
+
+Twenty instances, flag OFF then ON back-to-back per instance (interleaved, §9),
+60 s each, threads pinned. Every `squfl*` in the corpus, plus the four
+non-`squfl` instances the detector fires on (`st_miqp2`, `st_miqp4`, `st_test3`,
+`meanvar-orl400_05_e_8`) and the two it does *not*
+(`watercontamination0202/0303`, `persp_applied = 0`) as the neutral control.
+All twenty are MINIMIZE, so a **higher** bound is tighter.
+
+| instance | applied | gap OFF | gap ON | bound OFF | bound ON | nodes OFF→ON |
+|---|---|---|---|---|---|---|
+| squfl010-025 | 5750 | −0.000 | −0.000 | 214.11 | 214.11 | 371→371 |
+| squfl010-040 | 8000 | −0.000 | −0.000 | 240.60 | 240.60 | 293→293 |
+| squfl010-080 | 8000 | −0.000 | −0.000 | 509.71 | 509.71 | 593→593 |
+| squfl015-060 | 9000 | 68.945 | **2.446** | 307.51 | 307.51 | 1055→1055 |
+| squfl015-080 | 10800 | 104.047 | **15.645** | 296.72 | 296.72 | 703→703 |
+| squfl020-040 | 8800 | 85.592 | **0.000** | 183.76 | **184.14** | 1503→1535 |
+| squfl020-050 | 9000 | 129.453 | **2.284** | 165.44 | 165.44 | 1151→1151 |
+| squfl020-150 | 18000 | 114.749 | **14.082** | 253.21 | **346.46** | 31→31 |
+| squfl025-025 | 8125 | 44.806 | **−0.000** | 141.58 | 141.58 | 2303→2303 |
+| squfl025-030 | 10500 | 29.997 | **0.543** | 151.04 | 151.04 | 1503→1503 |
+| squfl025-040 | 11000 | 114.854 | **18.488** | 127.70 | 127.70 | 1023→1023 |
+| squfl030-100 | 15000 | 317.248 | **14.137** | 123.89 | **189.55** | 3→3 |
+| squfl030-150 | 9000 | 243.690 | **10.209** | 158.93 | **238.17** | 3→3 |
+| squfl040-080 | 9600 | 498.274 | **35.569** | 91.49 | **132.45** | 3→3 |
+| meanvar-orl400_05_e_8 | 800 | 6.433 | 6.433 | 98.12 | 98.12 | 31→31 |
+| st_miqp2 | 11 | 0.000 | 0.000 | 2 | 2 | 0→0 |
+| st_miqp4 | 6 | 0.000 | 0.000 | −4574 | −4574 | 0→0 |
+| st_test3 | 1 | 0.000 | 0.000 | −7 | −7 | 0→0 |
+| watercontamination0202 | 0 | — | — | none | none | 0→0 |
+| watercontamination0303 | 0 | — | — | none | none | 0→0 |
+
+```
+gap: better=11 worse=0 unchanged=7
+dual bound: tighter=5 looser=0
+nodes: more=1 fewer=0
+CERT-CLEAN: PASS   NET-POSITIVE: PASS   GRADUATE: YES   CHECKS_EXECUTED 20
+```
+
+**Bar 1 (cert-clean).** No bound above its reference optimum, no `optimal →
+non-optimal` regression (the three `optimal` instances stay optimal, bit-equal),
+no dual bound loosened, no arm losing a bound the other had, and no `infeasible`
+where the OFF arm found a point. **Bar 2 (net-positive).** The gap improves on
+11 of 18 scored instances and worsens on none; five dual bounds tighten. The two
+instances #1064 reported as returning *nothing* after 600 s — `squfl020-150` and
+`squfl025-040` — both return incumbents at 60 s.
+
+The single node-count change (`squfl020-040`, 1503→1535) is expected and not a
+§5 regime-1 violation: this is a bound-*changing* flag, so the tree is allowed to
+move. `watercontamination*` applies zero cuts and is byte-identical on both arms,
+which is the §6 evidence that "no change" there means "the detector correctly
+declined", not "the panel never ran".
+
+Per §5 the flag is now **default-ON**, with `DISCOPT_PERSPECTIVE_OA_CUT=0` kept
+as the opt-out and the plain-tangent path intact.
