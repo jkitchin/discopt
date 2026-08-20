@@ -1437,8 +1437,20 @@ def test_unsafe_tan_objective_still_falls_back(caplog):
     # asymptote (unbounded below), so the engine refuses a bound rather than
     # inventing one — objective_bound_valid is False and no objective is reported.
     assert milp_model._objective_bound_valid is False
-    assert result.status == "optimal"
     assert result.objective is None
+
+    # ...and the LP status is "unbounded", which is the literal truth about this
+    # relaxation, not a softer answer. The un-envelopable tan aux is the only cost
+    # column: cost +1, bounds (-inf, +inf), appearing in NO row — so `min 1*y` over
+    # a free unconstrained y is unbounded below by definition. This assertion read
+    # "optimal" until #1061, which is exactly the mis-report uniform_relax.py's
+    # obj_bound_valid comment names ("the LP is unbounded below — yet the warm-
+    # started Rust simplex can mis-report a finite 'optimal'", issue #15): pricing
+    # tested the AT_LOWER/AT_UPPER label, and a free column parked under AT_LOWER
+    # with a positive reduced cost improves by DECREASING, so its improving
+    # direction was invisible and the loop exited "optimal". The refusal above is
+    # what kept that from becoming a false bound; now the status is right too.
+    assert result.status == "unbounded"
 
 
 def test_x_exp_objective_uses_lifted_product_relaxation(caplog):

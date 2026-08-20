@@ -987,6 +987,19 @@ impl<'a> Simplex<'a> {
     }
 
     /// Bound value a nonbasic column sits at (lower or upper).
+    /// Is column `j` **free** — open on both sides?
+    ///
+    /// The engine has no `FREE` nonbasic status: `run`'s initializer parks a
+    /// free column under `AT_LOWER` and [`Self::nb_value`] special-cases it to
+    /// sit at 0. That encoding is only half the contract, because `AT_LOWER`
+    /// also *means* "can only increase" everywhere a direction is derived from
+    /// the status. A free column can move BOTH ways, so every such site has to
+    /// ask this question instead of reading `stat` alone (#1061).
+    #[inline]
+    fn is_free(&self, j: usize) -> bool {
+        self.lb[j] <= -INF && self.ub[j] >= INF
+    }
+
     fn nb_value(&self, j: usize) -> f64 {
         match self.stat[j] {
             AT_UPPER => self.ub[j],
@@ -1471,7 +1484,14 @@ impl<'a> Simplex<'a> {
                 let at_lower = self.stat[j] == AT_LOWER;
                 // A column at its lower bound can only increase (dir +1); at upper only
                 // decrease (dir −1). Skip if the reducing direction is not available.
-                if (dir_by_sign > 0.0 && at_lower) || (dir_by_sign < 0.0 && !at_lower) {
+                // A FREE column is parked under `AT_LOWER` but is open on both sides, so
+                // both directions are available to it — the same status-vs-freedom
+                // conflation the pricing loop had (#1061); without this it is skipped
+                // whenever the artificial needs it to move DOWN.
+                let available = self.is_free(j)
+                    || (dir_by_sign > 0.0 && at_lower)
+                    || (dir_by_sign < 0.0 && !at_lower);
+                if available {
                     best = arj.abs();
                     q = Some(j);
                     q_dir = dir_by_sign;
@@ -1988,6 +2008,7 @@ impl<'a> Simplex<'a> {
             // choose entering: Devex (max dⱼ²/γⱼ over improving cols), with a
             // Bland's-rule fallback (first improving) once a stall is detected.
             let mut enter: Option<usize> = None;
+            let mut enter_dj = 0.0f64;
             let mut best_score = 0.0f64;
             let _t_sweep = crate::profile::Timer::new(crate::profile::Phase::PriceSweep);
             for j in 0..self.na {
@@ -1995,17 +2016,37 @@ impl<'a> Simplex<'a> {
                     continue;
                 }
                 let dj = cost[j] - self.col_dot(j, &y, art_sign);
-                let improving = (self.stat[j] == AT_LOWER && dj < -self.tol)
-                    || (self.stat[j] == AT_UPPER && dj > self.tol);
+                // A free column sits at 0 under an `AT_LOWER` label and may move
+                // in EITHER direction, so it improves on any nonzero reduced
+                // cost. Reading the label alone (`AT_LOWER` ⇒ only `dj < 0`
+                // improves) made a free column with `dj > 0` invisible to
+                // pricing, and the loop below then exited "optimal" with that
+                // improving direction untaken (#1061). Two ways that surfaced:
+                // in phase 1 the artificials stopped short of zero, so a
+                // FEASIBLE LP looked infeasible, the Farkas ray rightly refused
+                // to certify it, and the solve returned `Numerical` — which is
+                // what silently disabled `bootstrap_finite_bounds` on every
+                // model carrying free columns; in phase 2 the same premature
+                // exit would certify a non-optimal point as `Optimal`, i.e. a
+                // relaxation "lower bound" ABOVE the true LP optimum, which the
+                // feasibility-only audit in `assemble` cannot catch.
+                let improving = if self.is_free(j) {
+                    dj.abs() > self.tol
+                } else {
+                    (self.stat[j] == AT_LOWER && dj < -self.tol)
+                        || (self.stat[j] == AT_UPPER && dj > self.tol)
+                };
                 if improving {
                     if bland {
                         enter = Some(j);
+                        enter_dj = dj;
                         break;
                     }
                     let score = dj * dj / gamma[j];
                     if score > best_score {
                         best_score = score;
                         enter = Some(j);
+                        enter_dj = dj;
                     }
                 }
             }
@@ -2021,7 +2062,22 @@ impl<'a> Simplex<'a> {
                     return Ok(()); // optimal
                 }
             };
-            let dir = if self.stat[q] == AT_LOWER { 1.0 } else { -1.0 };
+            // Direction of travel. For a bounded column the status fixes it
+            // (at lower ⇒ up, at upper ⇒ down); for a free column the status
+            // carries no such information, so take the descent direction from
+            // the sign of its reduced cost — `dj < 0` improves by increasing,
+            // `dj > 0` by decreasing.
+            let dir = if self.is_free(q) {
+                if enter_dj < 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else if self.stat[q] == AT_LOWER {
+                1.0
+            } else {
+                -1.0
+            };
 
             // direction α = B⁻¹ A_q
             let mut alpha = self.column(q, art_sign);
@@ -2599,6 +2655,83 @@ mod tests {
     fn solve(a: &[f64], m: usize, n: usize, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> LpSolve {
         let lp = LpView { a, m, n, c, l, u };
         solve_lp(&lp, b, &SimplexOptions::default())
+    }
+
+    /// #1061: a **free** column must be priced in both directions.
+    ///
+    /// The engine parks a free column under `AT_LOWER` and lets `nb_value` sit it
+    /// at 0, but `AT_LOWER` elsewhere *means* "may only increase". Pricing read the
+    /// label, so a free column whose reduced cost was POSITIVE — improving by
+    /// decreasing — was never selected and the loop exited "optimal" with an
+    /// improving direction still on the table.
+    ///
+    /// Both columns here are free and neither is a row singleton, so the crash
+    /// basis cannot pre-empt phase 1: both rows start with a basic artificial. At
+    /// that basis the phase-1 duals give x0 a reduced cost of +2, the only
+    /// improving move. Before the fix phase 1 stopped with the artificials at 5 and
+    /// 3, the Farkas ray (rightly) refused to certify a FEASIBLE LP infeasible, and
+    /// the solve came back `Numerical`. The system has one solution, so `Optimal`
+    /// here is not a tolerance judgement: x0 = -4, x1 = -1.
+    #[test]
+    fn a_free_column_with_a_positive_reduced_cost_still_prices_in() {
+        // row 0:  x0 + x1 = -5
+        // row 1:  x0 - x1 = -3
+        let a = [1.0, 1.0, 1.0, -1.0];
+        let c = [1.0, 0.0];
+        let l = [-INF, -INF];
+        let u = [INF, INF];
+        let b = [-5.0, -3.0];
+        let sol = solve(&a, 2, 2, &b, &c, &l, &u);
+        assert_eq!(
+            sol.status,
+            LpStatus::Optimal,
+            "feasible LP with a free column must solve, got {:?}",
+            sol.status
+        );
+        assert!(
+            (sol.x[0] - (-4.0)).abs() < 1e-9,
+            "x0 = {}, want -4",
+            sol.x[0]
+        );
+        assert!(
+            (sol.x[1] - (-1.0)).abs() < 1e-9,
+            "x1 = {}, want -1",
+            sol.x[1]
+        );
+        assert!(
+            (sol.obj - (-4.0)).abs() < 1e-9,
+            "obj = {}, want -4",
+            sol.obj
+        );
+    }
+
+    /// The same conflation seen from the objective side — and the reason this is a
+    /// SOUNDNESS bug, not just a stalled solve.
+    ///
+    /// `x0` is free and appears in both rows, so the crash basis cannot pick it up;
+    /// the two slacks are row singletons, crash in, and leave phase 1 with nothing
+    /// to do. Phase 2 therefore starts with `x0` nonbasic at 0 carrying reduced cost
+    /// +1 — improving only by DECREASING. Reading the `AT_LOWER` label, pricing saw
+    /// no improving column and returned `Optimal` at 0, while the true optimum is
+    /// -10. `assemble`'s audit checks feasibility alone and 0 IS feasible, so the
+    /// wrong value was certified: a relaxation lower bound 10 above the LP optimum,
+    /// which is exactly what lets a branch-and-bound prune the true optimum.
+    #[test]
+    fn phase_two_must_not_certify_optimal_with_a_free_column_still_improving() {
+        // row 0:  x0 + s0 = 0        row 1:  x0 + s1 = 0
+        // x0 free, s0, s1 in [0, 10]  =>  min x0 = -10.
+        let a = [1.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let c = [1.0, 0.0, 0.0];
+        let l = [-INF, 0.0, 0.0];
+        let u = [INF, 10.0, 10.0];
+        let b = [0.0, 0.0];
+        let sol = solve(&a, 2, 3, &b, &c, &l, &u);
+        assert_eq!(sol.status, LpStatus::Optimal, "status {:?}", sol.status);
+        assert!(
+            (sol.obj - (-10.0)).abs() < 1e-9,
+            "obj = {}, want -10 (the premature exit certifies 0)",
+            sol.obj
+        );
     }
 
     /// The #956 T2′ exact-`x_B` refresh must be a pure accuracy change: it replaces
