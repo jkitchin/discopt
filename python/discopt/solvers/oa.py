@@ -4553,6 +4553,17 @@ def solve_lp_nlp_bb(
         if master_bound_valid and bound is not None
         else ("heuristic" if bound is not None else "unavailable")
     )
+    # ``gap_certified`` means the gap is CLOSED and rests on a valid bound -- not
+    # merely that the printed gap is arithmetically well-formed. The looser
+    # reading (``master_bound_valid`` alone) reported ``gap_certified=True``
+    # alongside a 424% open gap on ``syn40m``, which ``result_io.summary_text``
+    # renders with no "(uncertified)" marker, and which the NLP-BB path spells
+    # the opposite way (``solver.py``: any ``feasible`` exit clears it). One
+    # field with two meanings is what made a cross-route comparison meaningless.
+    # Bound validity keeps its own signal in ``master_bound_valid`` /
+    # ``bound_validity``; this narrows ``gap_certified`` only, and only ever
+    # from True to False.
+    gap_is_certified = bool(master_bound_valid and gap is not None and gap <= gap_tolerance)
     single_tree_trace: dict[str, object] = {
         "schema_version": 1,
         "solver": "mip-nlp",
@@ -4590,7 +4601,7 @@ def solve_lp_nlp_bb(
         },
         "termination_reason": termination_reason,
         "master_bound_valid": bool(master_bound_valid),
-        "gap_certified": bool(master_bound_valid),
+        "gap_certified": gap_is_certified,
         "bound_validity": trace_bound_validity,
         "final_lb": _trace_value(bound),
         "final_ub": _trace_value(incumbent_obj),
@@ -4608,7 +4619,7 @@ def solve_lp_nlp_bb(
             node_count=master_result.node_count,
             mip_count=1,
             subnlp_calls=nlp_subproblem_count,
-            gap_certified=master_bound_valid,
+            gap_certified=gap_is_certified,
             mip_nlp_trace=single_tree_trace,
         )
 
@@ -4622,7 +4633,7 @@ def solve_lp_nlp_bb(
         node_count=master_result.node_count,
         mip_count=1,
         subnlp_calls=nlp_subproblem_count,
-        gap_certified=master_bound_valid,
+        gap_certified=gap_is_certified,
         mip_nlp_trace=single_tree_trace,
     )
 
@@ -5558,7 +5569,10 @@ def solve_oa(
             else None
         )
         local_cut_count = sum(1 for record in cut_provenance.records if not record.global_valid)
-        gap_certified = bool(bound_valid and final_gap is not None)
+        # Same narrowing as the single-tree builder above: a valid-but-OPEN
+        # gap is not a certificate. ``bound_valid`` remains the validity
+        # signal, still exported as ``master_bound_valid``/``bound_validity``.
+        gap_certified = bool(bound_valid and final_gap is not None and final_gap <= gap_tolerance)
         summary = {
             "mip_count": int(mip_count),
             "nlp_subproblem_count": int(nlp_subproblem_count),
@@ -7503,6 +7517,17 @@ def solve_oa(
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
+        # ``gap_certified`` must agree with ``status``: it is the field a user
+        # reads (and ``result_io.summary_text`` renders) to decide whether the
+        # reported gap is a certificate. Deriving it from ``reported_gap is not
+        # None`` instead made it True on any run that merely *had* a gap --
+        # ``syn40m`` returned ``status="feasible"`` with an 84% gap and
+        # ``gap_certified=True``, printed with no "(uncertified)" marker. The
+        # NLP-BB path already spells this the strict way (``solver.py``: a
+        # ``feasible`` exit clears it), so the loose reading also made
+        # ``gap_certified`` incomparable across the two routes. Bound validity
+        # is a separate question and keeps its own signal in the trace's
+        # ``master_bound_valid`` / ``bound_validity``.
         return SolveResult(
             status=status,
             objective=_obj_sign * incumbent_obj,
@@ -7513,7 +7538,7 @@ def solve_oa(
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,
             mip_nlp_trace=_build_mip_nlp_trace(final_reason),
-            gap_certified=bool(reported_gap is not None and not has_unresolved),
+            gap_certified=(status == "optimal"),
         )
 
     if has_unresolved:
