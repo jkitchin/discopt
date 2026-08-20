@@ -208,6 +208,85 @@ pub trait MilpLazyHook: Sync {
 /// never a false `Optimal`.
 const LAZY_REQUEUE_CAP: u32 = 1000;
 
+/// Hard cap on how many *non-root* continuous-repair dives one MILP solve may
+/// run (#1060). The dive only fires while the search has no incumbent at all, so
+/// on a model where it succeeds it stops by itself after one or two firings; the
+/// cap bounds the other case — a model where the dive can never repair anything —
+/// so a hopeless dive cannot become a per-node tax on a million-node search.
+const DIVE_NO_INCUMBENT_CAP: usize = 64;
+
+/// Batch stride for the no-incumbent dive schedule (#1060), read once from
+/// `DISCOPT_MILP_DIVE_STRIDE`.
+///
+/// `0` restores the legacy root-only dive exactly. Any `n > 0` lets the dive
+/// re-fire on the first node of every `n`-th batch **while the tree holds no
+/// incumbent** — the regime in which every node is doing bound-free work anyway,
+/// because there is nothing to prune against.
+///
+/// Why this exists: `try_dive_repair`'s own comment predicts that on a
+/// weak-relaxation (big-M) master "rounding ... finds no incumbent at all and the
+/// search runs with no bound-based pruning (tree explosion)" — and then runs the
+/// dive only at the root. Measured on the Quesada-Grossmann single-tree master
+/// for `rsyn0840m` (issue #1060): 150,193 nodes, exactly **one** integer-feasible
+/// candidate reaching the lazy callback in 60 s, final incumbent 103.5% short of
+/// the reference optimum. `rsyn0805m`, which does solve, surfaces 24.
+///
+/// Read once per process: the schedule changes which nodes are explored, so
+/// flipping it mid-solve would make an A/B measurement incomparable with itself.
+fn dive_stride() -> usize {
+    static STRIDE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *STRIDE.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_DIVE_STRIDE").unwrap_or_default();
+        parse_dive_stride(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`dive_stride`]. An unrecognized value is **refused**,
+/// not defaulted: an A/B arm whose value silently reads as the default makes the
+/// harness measure one arm twice (the `DISCOPT_LP_REFAC_INTERVAL` precedent).
+fn parse_dive_stride(raw: &str) -> Result<usize, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(DIVE_STRIDE_DEFAULT);
+    }
+    t.parse::<usize>().map_err(|_| {
+        format!("DISCOPT_MILP_DIVE_STRIDE: expected a non-negative integer, got {t:?}")
+    })
+}
+
+/// Default batch stride. Default-off (`0` = legacy root-only) until the CLAUDE.md
+/// §5 differential panel graduates it.
+const DIVE_STRIDE_DEFAULT: usize = 0;
+
+/// Does this batch get a continuous-repair dive away from the root?
+///
+/// Pure so the schedule can be asserted directly rather than inferred from a
+/// solve's node count (CLAUDE.md §6). Four independent gates, all of which must
+/// hold:
+///
+/// * `stride > 0` — the feature is on at all. `0` is the legacy root-only dive,
+///   under which this function is `false` for every batch and the driver is
+///   byte-identical to the version before the schedule existed.
+/// * `!has_incumbent` — the tree holds nothing to prune against, so every node in
+///   the batch is doing bound-free work. Once any incumbent lands, the ordinary
+///   search (warm starts, cuts, reduced-cost fixing) is strictly the better use of
+///   the budget and the schedule switches itself off.
+/// * `nonroot_dives < DIVE_NO_INCUMBENT_CAP` — a model the dive can never repair
+///   cannot turn it into a per-node tax.
+/// * `batch_index % stride == 0` — spread the budget over batches instead of
+///   spending it all in the first few.
+fn dive_batch_eligible(
+    stride: usize,
+    batch_index: usize,
+    has_incumbent: bool,
+    nonroot_dives: usize,
+) -> bool {
+    stride > 0
+        && !has_incumbent
+        && nonroot_dives < DIVE_NO_INCUMBENT_CAP
+        && batch_index % stride == 0
+}
+
 /// Options for the MILP driver.
 pub struct MilpOptions {
     /// Number of structural (model) variables; columns `[n_struct, n)` are slacks.
@@ -769,6 +848,12 @@ pub fn solve_milp_lazy_hooked(
         }};
     }
 
+    // #1060 no-incumbent dive schedule. Both counters live in the sequential
+    // driver loop (never inside the parallel node map), so the schedule is a pure
+    // function of batch order and the search stays deterministic.
+    let mut batch_index: usize = 0;
+    let mut nonroot_dives: usize = 0;
+
     'search: loop {
         if fire_dbg!(MilpCheckpoint::IterStart) {
             gap_certified = false;
@@ -866,6 +951,24 @@ pub fn solve_milp_lazy_hooked(
         // search stays deterministic.
         // `ctx` is scoped to the map so its immutable borrow of `tm` ends before
         // the mutable reduce below.
+        // #1060: does this batch get a continuous-repair dive away from the root?
+        // Only while the tree holds NO incumbent — with nothing to prune against,
+        // every node in the batch is doing bound-free work, so spending one node's
+        // budget on the one heuristic that can produce a first feasible point is
+        // the cheapest thing in the batch. The moment an incumbent exists the
+        // schedule switches off on its own.
+        let this_batch = batch_index;
+        batch_index += 1;
+        let dive_batch = dive_batch_eligible(
+            dive_stride(),
+            this_batch,
+            tm.incumbent().is_some(),
+            nonroot_dives,
+        );
+        if dive_batch {
+            nonroot_dives += 1;
+        }
+
         let outputs: Vec<NodeOutput> = {
             let ctx = NodeCtx {
                 b_w: &b_w,
@@ -905,18 +1008,42 @@ pub fn solve_milp_lazy_hooked(
                 if batch.node_ids.len() >= PAR_MIN_BATCH {
                     (0..batch.node_ids.len())
                         .into_par_iter()
-                        .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                        .map(|k| {
+                            solve_node(
+                                batch.node_ids[k],
+                                &batch.lb[k],
+                                &batch.ub[k],
+                                &ctx,
+                                dive_batch && k == 0,
+                            )
+                        })
                         .collect()
                 } else {
                     (0..batch.node_ids.len())
-                        .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                        .map(|k| {
+                            solve_node(
+                                batch.node_ids[k],
+                                &batch.lb[k],
+                                &batch.ub[k],
+                                &ctx,
+                                dive_batch && k == 0,
+                            )
+                        })
                         .collect()
                 }
             }
             #[cfg(not(feature = "parallel"))]
             {
                 (0..batch.node_ids.len())
-                    .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                    .map(|k| {
+                        solve_node(
+                            batch.node_ids[k],
+                            &batch.lb[k],
+                            &batch.ub[k],
+                            &ctx,
+                            dive_batch && k == 0,
+                        )
+                    })
                     .collect()
             }
         };
@@ -1280,7 +1407,18 @@ struct NodeOutput {
 /// separation, and strong branching. Pure given `ctx` (the immutable working LP
 /// plus a read-only tree snapshot), so it is safe to call concurrently across a
 /// batch. Returns a [`NodeOutput`] the caller folds into the tree sequentially.
-fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> NodeOutput {
+///
+/// `dive_slot` is the caller's per-node permission to run the continuous-repair
+/// dive away from the root (#1060). The caller grants it to exactly one node per
+/// eligible batch, chosen by position and not by thread order, so the schedule is
+/// the same on every run — the determinism the batch map relies on.
+fn solve_node(
+    id: NodeId,
+    lb_k: &[f64],
+    ub_k: &[f64],
+    ctx: &NodeCtx<'_>,
+    dive_slot: bool,
+) -> NodeOutput {
     // Deadline guard BEFORE the expensive LP solve. The loop-top check only stops
     // *dispatching* new batches; a single batch of N nodes whose per-node LP costs
     // ~seconds (e.g. a dense lifted McCormick relaxation) would otherwise run the
@@ -1559,18 +1697,37 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     ctx.n_w,
                     ctx.obj_const,
                 );
-                // Continuous-repair fractional dive at the root: plain rounding
-                // never re-solves the continuous variables for the rounded
-                // integer assignment, so on weak-relaxation (big-M) models it
-                // finds no incumbent at all and the search runs with no
-                // bound-based pruning (tree explosion). The dive fixes integers
-                // one at a time and re-solves between fixes, repairing the
-                // continuous variables and avoiding infeasible combinations. Run
-                // only at the root (when rounding found nothing) so its cost is
-                // bounded; the warm-started search + cuts take over thereafter.
-                if out.incumbent.is_none() && is_root {
+                // Continuous-repair fractional dive: plain rounding never
+                // re-solves the continuous variables for the rounded integer
+                // assignment, so on weak-relaxation (big-M) models it finds no
+                // incumbent at all and the search runs with no bound-based
+                // pruning (tree explosion). The dive fixes integers one at a time
+                // and re-solves between fixes, repairing the continuous variables
+                // and avoiding infeasible combinations.
+                //
+                // It runs at the root, and — when `DISCOPT_MILP_DIVE_STRIDE` is
+                // on — again on scheduled batches for as long as the tree holds
+                // NO incumbent (#1060). Root-only was the whole story before, and
+                // it leaves exactly one chance to find a first feasible point: if
+                // the root dive misses, or (on the single-tree LP/NLP-BB master)
+                // its candidate is cut off by the lazy separator, the search then
+                // runs to its node limit with nothing to prune against. The
+                // caller grants the slot to one node per eligible batch and stops
+                // granting it the moment an incumbent exists, so the cost is
+                // bounded and the warm-started search + cuts still take over.
+                //
+                // Sound at any node: the dive fixes within `[lb_k, ub_k]`, a
+                // restriction of the root box, so any point it returns is feasible
+                // for the model — and `inject_incumbent` re-validates it besides.
+                if out.incumbent.is_none() && (is_root || dive_slot) {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::DiveRepair);
                     out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis);
+                    if !is_root {
+                        crate::profile::incr(crate::profile::Ctr::DiveOffRoot);
+                        if out.incumbent.is_some() {
+                            crate::profile::incr(crate::profile::Ctr::DiveOffRootHits);
+                        }
+                    }
                 }
             }
             // Node-level cover separation: a fractional node exposes violated
@@ -2940,6 +3097,73 @@ pub fn solve_milp_csc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #1060: the no-incumbent continuous-repair dive schedule ----
+
+    #[test]
+    fn dive_stride_zero_is_the_legacy_root_only_dive() {
+        // The shipped default. Every batch must be ineligible, which is what makes
+        // an unset `DISCOPT_MILP_DIVE_STRIDE` bit-identical to the driver before
+        // the schedule existed -- the claim the golden/determinism panels below
+        // silently rest on.
+        let mut checks = 0;
+        for b in 0..64 {
+            assert!(
+                !dive_batch_eligible(0, b, false, 0),
+                "batch {b} eligible at stride 0"
+            );
+            checks += 1;
+        }
+        assert_eq!(DIVE_STRIDE_DEFAULT, 0);
+        assert_eq!(checks, 64);
+    }
+
+    #[test]
+    fn dive_schedule_stops_the_moment_an_incumbent_exists() {
+        // The whole justification for diving off-root is that there is nothing to
+        // prune against. With an incumbent in hand the ordinary search is the
+        // better use of the node budget, so the schedule must switch itself off.
+        assert!(dive_batch_eligible(8, 0, false, 0));
+        assert!(!dive_batch_eligible(8, 0, true, 0));
+        assert!(dive_batch_eligible(8, 16, false, 3));
+        assert!(!dive_batch_eligible(8, 16, true, 3));
+    }
+
+    #[test]
+    fn dive_schedule_honors_stride_and_cap() {
+        let stride = 8;
+        let eligible: Vec<usize> = (0..40)
+            .filter(|&b| dive_batch_eligible(stride, b, false, 0))
+            .collect();
+        assert_eq!(eligible, vec![0, 8, 16, 24, 32]);
+        // A model the dive can never repair must not pay for it forever.
+        assert!(!dive_batch_eligible(
+            stride,
+            0,
+            false,
+            DIVE_NO_INCUMBENT_CAP
+        ));
+        assert!(!dive_batch_eligible(
+            stride,
+            800,
+            false,
+            DIVE_NO_INCUMBENT_CAP + 5
+        ));
+    }
+
+    #[test]
+    fn dive_stride_parse_refuses_garbage_instead_of_defaulting() {
+        // An A/B arm whose value silently reads as the default makes the harness
+        // measure one arm twice (the DISCOPT_LP_REFAC_INTERVAL precedent).
+        assert_eq!(parse_dive_stride("").unwrap(), DIVE_STRIDE_DEFAULT);
+        assert_eq!(parse_dive_stride("  ").unwrap(), DIVE_STRIDE_DEFAULT);
+        assert_eq!(parse_dive_stride("0").unwrap(), 0);
+        assert_eq!(parse_dive_stride("8").unwrap(), 8);
+        assert_eq!(parse_dive_stride(" 12 ").unwrap(), 12);
+        for bad in ["-1", "eight", "1.5", "8x"] {
+            assert!(parse_dive_stride(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
 
     fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
         MilpOptions {

@@ -102,6 +102,14 @@ timed_phases!(
 
 // Pivot categorization for the cold-primal simplex (degeneracy analysis).
 counters!(
+    // #1060 continuous-repair dive schedule. `DiveOffRoot` counts dives run away
+    // from the root (the no-incumbent schedule; always 0 at the default stride 0),
+    // `DiveOffRootHits` how many of those returned a repaired incumbent. The pair
+    // is the audit: a schedule that fires and never repairs is pure overhead and
+    // must not graduate, and without a counter that case reads exactly like a
+    // schedule that never fired (CLAUDE.md §6).
+    DiveOffRoot,
+    DiveOffRootHits,
     Phase1Pivots,
     Phase2Pivots,
     DegeneratePivots,
