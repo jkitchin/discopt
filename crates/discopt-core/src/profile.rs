@@ -96,6 +96,12 @@ timed_phases!(
     // LP basis changes by one column per pivot); `LuNumeric` is `SparseLu::factor`
     // (the actual elimination). "Refactorization is 59.5% of wall" does not say
     // which half, and the two have completely different fixes.
+    // #1066: reduced-cost (objective) fixing at a node. It runs *outside* the
+    // `NodeLpSolve` timer, so a per-node cost hidden here reads as "unaccounted"
+    // wall in every previous phase split. Measured because the pass used to
+    // rebuild the node basis' sparse LU from scratch purely to recover duals the
+    // solve had already returned.
+    RedCostFix,
     LuSymbolic,
     LuNumeric,
 );
@@ -147,6 +153,15 @@ counters!(
     // — numerical breakdown / iteration cap on a *valid* warm start, i.e. the
     // "engine swap" the framework-LP-error-handling policy of #376 would try to
     // pre-empt by escalating in place). The ratio is the escalation headroom.
+    // #1066 reduced-cost fixing: how the node duals `y = B⁻ᵀc_B` were obtained.
+    // `RcFixDualReuse` = taken from the LP solve's own certificate (the basis was
+    // already factorized to produce it); `RcFixRefactor` = the fallback that
+    // rebuilds the sparse LU and btrans, taken only when the solve exported no
+    // usable dual (btran failure) or the opt-out env forces it. The pair is the
+    // audit that the reuse is actually happening (CLAUDE.md §6) — without it a
+    // silently-always-refactoring path reads exactly like a working one.
+    RcFixDualReuse,
+    RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
     // Warm dual-simplex stall-guard trips (discopt F2): a warm re-solve that hit
