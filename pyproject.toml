@@ -48,6 +48,13 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.10"]
 ipopt = ["cyipopt>=1.4"]
+# Opt-in MILP *master* engine for the MIP-NLP family (`milp_solver="highs"`,
+# issue #1060). #356 removed HiGHS from the per-node LP path and from every
+# fallback order and that stands -- nothing here is on a default path, so a tree
+# without highspy behaves exactly as before. It earns the extra on the masters
+# the in-house driver cannot close: 86.1% root-gap closure on the rsyn0840m OA
+# master against 0.0%, turning a 60 s timeout into `optimal` in 1.9 s.
+highs = ["highspy>=1.7"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.

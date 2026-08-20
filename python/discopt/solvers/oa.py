@@ -3932,11 +3932,28 @@ def solve_feasibility_pump(
 def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     """Pick the single-tree MILP backend for LP/NLP branch-and-bound.
 
-    Returns ``"gurobi"`` or ``"simplex"``. Until #1060 this raised for anything
-    but Gurobi, because the single tree needs a *persistent lazy-constraint
-    callback* and only Gurobi's had one. The in-house Rust MILP driver now has
-    one too (``solve_milp_lazy_csc_py``), so ``"auto"`` and ``"simplex"`` resolve
-    to it and the method no longer requires a commercial license.
+    Returns ``"gurobi"``, ``"simplex"`` or ``"highs"``. Until #1060 this raised for
+    anything but Gurobi, because the single tree needs a *persistent
+    lazy-constraint callback* and only Gurobi's had one. The in-house Rust MILP
+    driver now has one too (``solve_milp_lazy_csc_py``), so ``"auto"`` and
+    ``"simplex"`` resolve to it and the method no longer requires a commercial
+    license.
+
+    ``"highs"`` resolves to the HiGHS separate-and-restart master
+    (:func:`discopt.solvers.milp_highs.solve_milp_with_lazy_cuts`). HiGHS cannot
+    inject a row from inside its tree -- 1.12 declares
+    ``kCallbackMipDefineLazyConstraints`` but its callback input struct has no
+    field to hand one back -- so it separates at ``kCallbackMipImprovingSolution``
+    (the QG trigger: every integer-feasible incumbent) and rebuilds the tree when,
+    and only when, a cut is actually needed. That is not a true single tree and
+    the docstring above says so, but it is what makes the free path *finish*: the
+    in-house driver's root loop closes 0% of the ``rsyn0840m`` master's gap where
+    HiGHS closes 86.1%, and the master engine, not the tree topology, is the
+    measured gap.
+
+    ``"auto"`` deliberately does **not** pick HiGHS. Routing it there would make
+    the default depend on an optional package and would move every existing
+    caller's node counts; the opt-in keeps #356 and the current defaults intact.
 
     ``"pounce"`` still refuses: the POUNCE matrix-MILP B&B exposes no separator
     hook, and silently substituting a different backend would hide that the
@@ -3960,10 +3977,12 @@ def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
         )
     if backend in {"auto", "simplex"}:
         return "simplex"
+    if backend == "highs":
+        return "highs"
     raise RuntimeError(
         "mip_nlp_method='lp_nlp_bb' requires a MILP backend with a lazy-constraint "
-        "callback: 'gurobi' or 'simplex' (also reachable as 'auto'). Backend "
-        f"{milp_solver!r} exposes no separator hook."
+        "callback: 'gurobi', 'simplex' (also reachable as 'auto') or 'highs'. "
+        f"Backend {milp_solver!r} exposes no separator hook."
     )
 
 
@@ -4478,6 +4497,10 @@ def solve_lp_nlp_bb(
     solve_milp_with_lazy_cuts: Callable[..., MILPResult]
     if lazy_backend == "gurobi":
         from discopt.solvers.gurobi import (
+            solve_milp_with_lazy_cuts as solve_milp_with_lazy_cuts,
+        )
+    elif lazy_backend == "highs":
+        from discopt.solvers.milp_highs import (
             solve_milp_with_lazy_cuts as solve_milp_with_lazy_cuts,
         )
     else:

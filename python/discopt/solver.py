@@ -5199,10 +5199,19 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     # loaded rather than routing into an import error (CLAUDE.md §3: a loud
     # refusal beats a silent approximation, and staying on B&B is the sound
     # answer here, not an approximation at all).
+    #
+    # This asks the selector the question directly. It used to `import highspy`,
+    # which was the wrong instrument: `get_milp_solver("auto")` has not touched
+    # highspy since #356, so the gate tested a package the master would never
+    # load. It happened to be conservative (a refusal, never a false route), but
+    # it refused on machines whose master was perfectly available and routed on
+    # machines whose master was not.
     try:
-        import highspy  # noqa: F401
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        get_milp_solver()
     except ImportError:
-        return None, "not routed: no MILP backend for the OA master (highspy not installed)"
+        return None, "not routed: no MILP backend available for the OA master"
 
     return "oa", (
         f"mip-nlp/oa: {problem_class.value} certified convex at the root "
@@ -6684,7 +6693,10 @@ def solve_model(
         ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
         ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, ``obbt_time_limit``, and
         ``milp_solver``. ``milp_solver`` accepts ``"auto"``, ``"pounce"``,
-        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
+        ``"simplex"``, ``"gurobi"``, or ``"highs"``. #356 removed HiGHS from the
+        per-node LP path of spatial B&B and from every fallback order; it is back
+        only as an explicit, opt-in *master* engine (#1060), so ``"auto"`` still
+        resolves to the in-house simplex and no existing caller moves.
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
         ``mip_nlp_options``. Current implemented methods are ``"oa"``,
@@ -6701,10 +6713,17 @@ def solve_model(
         ``solution_pool``
         currently requires ``milp_solver="gurobi"``.
         ``mip_nlp_method="lp_nlp_bb"`` runs on ``milp_solver="simplex"``
-        (also reached by ``"auto"``) or ``"gurobi"``: the single tree needs a
-        lazy-constraint callback, which those two backends provide and
-        ``"pounce"`` does not. Combining it with ``mip_nlp_profile="shot"``
-        still requires ``"gurobi"`` for the fractional-node (MIPNODE) cuts.
+        (also reached by ``"auto"``), ``"gurobi"``, or ``"highs"``: the single
+        tree needs a lazy-constraint callback, which those three backends provide
+        and ``"pounce"`` does not. ``"highs"`` is the free backend that finishes
+        the hard rsyn* masters -- its root loop closes 86.1% of the ``rsyn0840m``
+        master's gap where the in-house driver closes 0%, and the acceptance pair
+        of #1060 goes from two 60 s timeouts to optimal in 1.9 s and 12.3 s.
+        HiGHS cannot inject a row from inside its tree, so it separates at each
+        integer-feasible incumbent and rebuilds; that is a restart loop, not a
+        literal single tree, but it is the same Quesada-Grossmann cut sequence.
+        Combining it with ``mip_nlp_profile="shot"`` still requires ``"gurobi"``
+        for the fractional-node (MIPNODE) cuts.
         Experimental SHOT-parity controls are accepted only with
         ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
         ``cut_strategy``, ``objective_epigraph``, ``anti_epigraph``,

@@ -9,8 +9,10 @@ selector falls back to whichever backend is importable.
 
 The matrix-LP and matrix-MILP defaults route to the self-hosted Rust simplex
 first (issue #356) — HiGHS-free, exact, and fast on the ill-conditioned lifted
-relaxations — with POUNCE as the fallback. HiGHS has been removed entirely from
-the LP/MILP path (issue #356). The Rust LP simplex surfaces
+relaxations — with POUNCE as the fallback. HiGHS is off the LP path entirely and
+off every MILP *fallback* order (issue #356); it returned in #1060 only as an
+explicit ``backend="highs"`` opt-in for the MIP-NLP master, which no default
+reaches. The Rust LP simplex surfaces
 ``dual_values``/``reduced_costs`` in HiGHS's convention, so the dual-consuming
 seams (Benders subproblem, DBBT) run on it too. ``prefer_pounce`` flips the
 preference to POUNCE-first (the POUNCE-only mode, ``nlp_solver="pounce"``).
@@ -155,6 +157,19 @@ def _milp_simplex() -> Callable | None:
         return None
 
 
+def _milp_highs() -> Callable | None:
+    # Opt-in master engine for the MIP-NLP family (issue #1060). Deliberately NOT
+    # in any fallback order: #356 took HiGHS off the per-node LP path and that
+    # stands, so `auto` still resolves to the in-house simplex and every existing
+    # caller is bit-for-bit unchanged. Like the Gurobi wrapper, this returns the
+    # callable even when `highspy` is missing so the failure is a loud, actionable
+    # error at call time rather than a silent downgrade to a 30x slower engine
+    # (CLAUDE.md §3) -- measured on rsyn0840m: 1.9 s vs 60 s and no optimum.
+    from discopt.solvers.milp_highs import solve_milp
+
+    return solve_milp
+
+
 def _milp_gurobi() -> Callable | None:
     try:
         from discopt.solvers.gurobi import solve_milp
@@ -169,7 +184,7 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
 
     ``backend`` selects the preferred engine: ``"auto"`` (**simplex-first** — the
     pure-Rust warm-started-simplex B&B — then POUNCE; or POUNCE-first under
-    ``prefer_pounce``), ``"pounce"``, ``"simplex"``, or ``"gurobi"``. The preferred
+    ``prefer_pounce``), ``"pounce"``, ``"simplex"``, ``"gurobi"``, or ``"highs"``. The preferred
     engine is tried first and the call falls back to the standard order if it is
     unavailable, so selection never fails when *any* backend is importable. An
     explicit Gurobi selection returns the optional wrapper; a missing ``gurobipy``
@@ -183,13 +198,24 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     fast on the lifted, ill-conditioned relaxations where the POUNCE IPM is slow.
     POUNCE remains as the fallback (HiGHS removed, issue #356). ``prefer_pounce``
     (the POUNCE-only mode) keeps its POUNCE-first order unchanged.
+
+    ``"highs"`` (issue #1060) is the one backend with **no** fallback order: it is
+    an explicit opt-in for the MIP-NLP *master*, never reachable from ``"auto"``,
+    so #356's routing and every existing caller's numbers are untouched. It exists
+    because the master is where the in-house engine is measurably outclassed --
+    on the ``rsyn0840m`` OA master its root loop closes 0% of the gap and it had
+    not finished one tree in 60 s, where HiGHS closes 86.1% at node 0 and finishes
+    in 92 nodes / 0.42 s. End to end that is `oa` reaching the published optimum
+    of rsyn0840m in 1.9 s instead of timing out 100x away from it.
     """
-    valid = {"auto", "pounce", "simplex", "gurobi"}
+    valid = {"auto", "pounce", "simplex", "gurobi", "highs"}
     if backend not in valid:
         raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
     base = (_milp_pounce, _milp_simplex) if prefer_pounce else (_milp_simplex, _milp_pounce)
     if backend == "simplex":
         order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
+    elif backend == "highs":
+        order = (_milp_highs,)
     elif backend == "gurobi":
         order = (_milp_gurobi, *base)
     elif backend == "pounce":
