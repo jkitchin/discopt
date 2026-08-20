@@ -55,8 +55,23 @@ PRE_COMMIT  ?= pre-commit
 PROJECT_DIR := $(shell pwd)
 RESULTS_DIR := $(PROJECT_DIR)/results
 NOTEBOOK    := docs/notebooks/benchmarks_by_class.ipynb
-EXT_SUFFIX  := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')")
+# The extension `maturin` actually emits. `crates/discopt-python` builds an
+# **abi3** wheel, so the artifact is `_rust.abi3.so` on every CPython 3.x --
+# NOT the interpreter-specific `sysconfig` EXT_SUFFIX (`.cpython-312-darwin.so`)
+# this used to ask for. Naming the wrong file made `make build` a silent no-op:
+# maturin wrote `_rust.abi3.so`, the copy-from-site-packages step found nothing
+# (an editable maturin install leaves no `.so` in purelib), and the trailing
+# `touch` then stamped a *stale* `_rust.cpython-312-darwin.so` as fresh. Python
+# prefers the interpreter-specific name over `.abi3.so`, so the stale file kept
+# shadowing every new build while `make build` reported success. Measured
+# 2026-08-19 in the primary checkout: three days and two Rust PRs of drift, with
+# `solve_milp_lazy_csc_py` (#1060's native single-tree entry) missing from the
+# module that was actually imported.
+EXT_SUFFIX  := .abi3.so
 SO_TARGET   := python/discopt/_rust$(EXT_SUFFIX)
+#: Interpreter-specific names Python would import in preference to `SO_TARGET`.
+#: Any of these left over from an older build shadows the real extension.
+SO_SHADOWS  := $(wildcard python/discopt/_rust.cpython-*.so)
 
 # Timestamp for output files
 TS := $(shell date -u +%Y-%m-%dT%H-%M-%S)
@@ -172,8 +187,18 @@ $(SO_TARGET): $(RUST_SRCS)
 		cp "$$SP/discopt/_rust$(EXT_SUFFIX)" $(SO_TARGET); \
 		echo "==> Copied .so from site-packages"; \
 	fi
-	@touch $(SO_TARGET)
-	@echo "==> Rust extension ready"
+	@# A leftover interpreter-specific build shadows $(SO_TARGET) on import and
+	@# would keep serving stale Rust after a successful rebuild. Remove it.
+	@for f in $(SO_SHADOWS); do \
+		echo "==> Removing stale shadowing extension $$f"; rm -f "$$f"; \
+	done
+	@# No `touch`: stamping a target the build did not actually produce is what
+	@# made this rule report success while the extension never changed. Fail
+	@# loudly instead, and prove the freshly built module is importable.
+	@test -f $(SO_TARGET) || { echo "ERROR: $(MATURIN) produced no $(SO_TARGET)"; exit 1; }
+	@PYTHONPATH=python $(PYTHON) -c "import discopt._rust as r; \
+	  assert r.__file__.endswith('$(EXT_SUFFIX)'), 'imported ' + r.__file__; \
+	  print('==> Rust extension ready:', r.__file__)"
 
 build: $(SO_TARGET)
 
