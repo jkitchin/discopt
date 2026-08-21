@@ -4853,7 +4853,15 @@ class Model:
         # in ``solver.py`` so the two cannot drift; spelling it inline as ``tol=1e-3``
         # loosened only the absolute leg and made the screen scale-blind on
         # large-magnitude rows (#1061).
-        if _verify_snap is not None and result.x is not None:
+        # ``result.x`` is truth-tested, not ``is not None``-tested: a solver that
+        # reports "no incumbent" as an EMPTY DICT rather than ``None`` (every
+        # no-incumbent exit of the MIP-NLP/OA route did, #1105) sails past an
+        # ``is not None`` check and reaches the ``result.x[_n]`` lookup below,
+        # which raises ``KeyError: 'x0'``. That lands in the ``except`` arm, so
+        # the user is told the incumbent is "UNSCREENED" for a solve that has no
+        # incumbent at all -- a soundness warning fired on a result where there
+        # was nothing to screen. Screening runs only when an incumbent exists.
+        if _verify_snap is not None and result.x:
             try:
                 import numpy as _np
 
@@ -4921,7 +4929,7 @@ class Model:
                     _exp_exc,
                 )
 
-        if validate and result.x is not None:
+        if validate and result.x:  # same no-incumbent guard as above (#1105)
             try:
                 from discopt.validation.examiner import examine
 

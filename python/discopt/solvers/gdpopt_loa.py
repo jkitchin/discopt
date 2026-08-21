@@ -365,7 +365,7 @@ def solve_gdpopt_loa(
             objective=None,
             bound=bound,
             gap=None,
-            x={},
+            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
             wall_time=wall_time,
             gap_certified=False,
         )
@@ -379,7 +379,7 @@ def solve_gdpopt_loa(
             objective=None,
             bound=bound,
             gap=None,
-            x={},
+            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
             wall_time=wall_time,
         )
 
@@ -391,7 +391,7 @@ def solve_gdpopt_loa(
         objective=None,
         bound=bound,
         gap=None,
-        x={},
+        x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
         wall_time=wall_time,
         gap_certified=False,
     )

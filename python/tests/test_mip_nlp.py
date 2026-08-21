@@ -982,7 +982,14 @@ def test_mip_nlp_shot_convex_bounding_skips_nonrigorous_no_good_cuts(monkeypatch
     assert trace["final_lb"] == pytest.approx(0.0)
     assert trace["heuristic_lb"] == pytest.approx(0.0)
     assert result.status == "feasible"
-    assert result.bound == pytest.approx(0.0)
+    # #1105: the general ``bound`` field no longer contradicts the validity
+    # signal published beside it. With an unresolved integer configuration the
+    # trace says ``bound_validity="uncertified"`` / ``master_bound_valid=False``,
+    # so ``bound`` is withheld and the master number stays available as the
+    # diagnostic ``trace["final_lb"]``/``["heuristic_lb"]`` asserted above. This
+    # test previously pinned the contradiction (``bound=0.0`` beside
+    # ``bound_validity="uncertified"``) that #1105 was filed about.
+    assert result.bound is None
     assert result.gap is None
     assert result.gap_certified is False
     assert result.objective == pytest.approx(1.0)
@@ -2703,6 +2710,7 @@ def test_lp_nlp_bb_lazy_callback_solves_fixed_integer_nlp(monkeypatch):
         _nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         assert initial_point is not None
         calls["subproblem"] += 1
@@ -2790,6 +2798,7 @@ def test_lp_nlp_bb_shot_callback_trace_records_node_and_incumbent_cuts(monkeypat
         _nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         assert initial_point is not None
         calls["subproblem"] += 1
@@ -3017,6 +3026,7 @@ def test_lp_nlp_bb_linear_objective_constant_offsets_certified_bound(monkeypatch
         _nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         return np.asarray(x_master, dtype=np.float64), 100.0
 
@@ -3400,6 +3410,7 @@ def test_oa_solution_pool_processes_multiple_master_candidates(monkeypatch):
         _nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         del initial_point
         x = np.asarray(x_master, dtype=float).copy()
@@ -3474,6 +3485,7 @@ def test_mip_nlp_shot_solution_pool_strategy_uses_candidate_pool(monkeypatch):
         _nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         del initial_point
         x = np.asarray(x_master, dtype=float).copy()
@@ -4427,6 +4439,7 @@ def test_oa_derivative_regularization_requires_duals_from_initial_incumbent(monk
         nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         attempt = oa_module._NLPAttempt(
             x=np.array([0.0], dtype=float),
@@ -4572,7 +4585,9 @@ def test_oa_regularization_seeds_nlp_without_replacing_master_assignment(monkeyp
     regularized_point = np.array([1.25, 1.0, 0.0, 2.0], dtype=float)
     subproblem_calls = []
 
-    def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
+    def fake_solve_nlp_relaxation(
+        evaluator, lb, ub, nlp_solver, initial_point=None, max_wall_time=None
+    ):
         return relaxation_point, 4.0
 
     def fake_add_oa_cuts(*args, **kwargs):
@@ -4592,6 +4607,7 @@ def test_oa_regularization_seeds_nlp_without_replacing_master_assignment(monkeyp
         x_master,
         nlp_solver,
         initial_point=None,
+        max_wall_time=None,
     ):
         subproblem_calls.append(
             (
@@ -4637,6 +4653,7 @@ def test_oa_derivative_regularization_seeds_nlp_from_regularized_point(monkeypat
         nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         attempt = oa_module._NLPAttempt(
             x=relaxation_point,
@@ -4666,6 +4683,7 @@ def test_oa_derivative_regularization_seeds_nlp_from_regularized_point(monkeypat
         nlp_solver,
         initial_point=None,
         return_attempt=False,
+        max_wall_time=None,
     ):
         subproblem_calls.append(
             (
@@ -4712,7 +4730,9 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     relaxation_point = np.array([0.25, 0.5, 0.5, 1.5], dtype=float)
     cut_points = []
 
-    def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
+    def fake_solve_nlp_relaxation(
+        evaluator, lb, ub, nlp_solver, initial_point=None, max_wall_time=None
+    ):
         assert np.asarray(initial_point, dtype=float).tolist() == pytest.approx(
             [1.25, 1.0, 0.0, 2.0]
         )
@@ -4732,10 +4752,11 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     )
 
     # max_iterations=0 exits before any master solve or incumbent: the search is
-    # INCONCLUSIVE (iteration limit), not a proof of infeasibility -> "unknown",
-    # not the (false) "infeasible" this used to report. The rNLP cut-injection
-    # under test is unaffected.
-    assert result.status == "unknown"
+    # INCONCLUSIVE, not a proof of infeasibility -> never "infeasible". #1105
+    # narrowed the inconclusive status from a blanket "unknown" to the named
+    # limit that stopped the loop, which is equally non-committal about
+    # feasibility. The rNLP cut-injection under test is unaffected.
+    assert result.status == "iteration_limit"
     assert cut_points[0].tolist() == pytest.approx(relaxation_point.tolist())
 
 
@@ -4792,7 +4813,9 @@ def test_oa_no_discrete_relaxation_uses_initial_point(monkeypatch):
 
     initial_point = np.array([3.0], dtype=float)
 
-    def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
+    def fake_solve_nlp_relaxation(
+        evaluator, lb, ub, nlp_solver, initial_point=None, max_wall_time=None
+    ):
         assert np.asarray(initial_point, dtype=float).tolist() == pytest.approx([3.0])
         return np.asarray(initial_point, dtype=float), 1.0
 
@@ -4829,6 +4852,7 @@ def test_oa_fixed_integer_initializers_seed_first_nlp(monkeypatch, strategy, sta
         x_master,
         nlp_solver,
         initial_point=None,
+        max_wall_time=None,
     ):
         fixed_points.append(np.asarray(x_master, dtype=float).copy())
         assert np.asarray(initial_point, dtype=float).tolist() == pytest.approx(expected_fixed)
