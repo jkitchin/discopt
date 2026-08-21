@@ -65,7 +65,7 @@ Tawarmalani, Sahinidis (2005), "A polyhedral branch-and-cut approach to
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -89,59 +89,222 @@ from discopt.modeling.core import (
 _FREE_BOUND = 1e15
 
 
+_EMPTY_NAMES: frozenset = frozenset()
+
+
+def _name_walk_children(expr):
+    """``(kind, children)`` for the variable-name walk.
+
+    ``kind`` is ``"var"`` (a scalar variable reference), ``"empty"`` (provably
+    variable-free), ``"combine"`` (the name set is the union of the children's,
+    ``None`` if any child is ``None``), or ``"opaque"`` (unrecognised node —
+    abstain with ``None``).
+
+    The isinstance ladder must stay in the same order as the semantics it
+    encodes; :func:`_collect_var_names` and :class:`VarNameIndex` both read it,
+    so the two can never drift apart.
+    """
+    if isinstance(expr, Variable):
+        return "var", ()
+    if isinstance(expr, (Constant, Parameter)):
+        return "empty", ()
+    if isinstance(expr, IndexExpression):
+        return "combine", (expr.base,)
+    if isinstance(expr, UnaryOp):
+        return "combine", (expr.operand,)
+    if isinstance(expr, BinaryOp):
+        return "combine", (expr.left, expr.right)
+    if isinstance(expr, FunctionCall):
+        return "combine", tuple(expr.args)
+    if isinstance(expr, SumExpression):
+        return "combine", (expr.operand,)
+    if isinstance(expr, SumOverExpression):
+        return "combine", tuple(expr.terms)
+    # Unknown / opaque node (CustomCall, MatMul, ...): cannot prove the
+    # variable is absent — abstain.
+    return "opaque", ()
+
+
+class WorkCounter:
+    """A deterministic work allowance shared across a family of DAG walks.
+
+    #912's rule for this layer: a pass that decides *how much* analysis to run
+    must spend a deterministic quantity, never a clock, or the search tree
+    becomes a function of machine speed. This counts elementary operations —
+    node visits and name-set element unions — so a caller can bound an analysis
+    phase without consulting ``time.perf_counter()``.
+
+    ``spend`` returns ``False`` once the allowance is gone; every caller here
+    treats that as "abstain", which is the sound direction for all of them.
+    """
+
+    __slots__ = ("remaining", "limit")
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.remaining = int(limit)
+
+    def spend(self, units: int) -> bool:
+        """Charge ``units``; ``False`` once the allowance is exhausted."""
+        if self.remaining <= 0:
+            return False
+        self.remaining -= units
+        return self.remaining > 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    @property
+    def spent(self) -> int:
+        return self.limit - max(0, self.remaining)
+
+
+class VarNameIndex:
+    """Memoized variable-name sets for every node of one expression DAG.
+
+    Built once in ``O(nodes)``; :meth:`names` and :meth:`occurs` are then ``O(1)``
+    dict lookups. The naive recursive walk allocates a fresh set at every node
+    and re-expands shared subexpressions, so an occurrence test called at each
+    level of a structural analyzer costs ``O(nodes^2)`` per variable — the
+    ``t1000`` non-termination in issue #1104 (1002 candidate names against a
+    5003-node, depth-1004 sum chain).
+
+    Two properties matter for correctness:
+
+    * **DAG-correct.** Keyed by ``id(node)``, so a subexpression reachable
+      through several parents is walked once. The index holds a reference to
+      every node it memoizes (values are ``(node, names)``), so CPython can
+      never recycle an ``id`` while the index is alive — the usual hazard of
+      ``id()``-keyed memos.
+    * **Iterative.** An explicit stack, not recursion: a depth-1004 body is
+      already close to the default recursion limit, and MINLPLib carries
+      deeper ones.
+
+    An index is valid only for expressions that are *not mutated* while it
+    lives; the analyzers here build one per constraint body and discard it.
+
+    Cost is ``O(nodes)`` in *node visits* but ``O(sum of |names| over nodes)`` in
+    element operations, because each combine node unions its children's name
+    sets — on a 1000-variable sum chain that is ~1e6 set-element ops, not 5e3.
+    An optional :class:`WorkCounter` charges those ops so a caller can bound the
+    build deterministically; when it runs out the index becomes *exhausted* and
+    reports ``None`` (opaque, the sound direction) for every node, which every
+    analyzer here already handles as "nothing provable".
+    """
+
+    __slots__ = ("_memo", "_exhausted")
+
+    _memo: Dict[int, Tuple[Any, Optional[frozenset]]]
+    _exhausted: bool
+
+    def __init__(self, root, work: Optional["WorkCounter"] = None):
+        # id(node) -> (node, names|None). The node is stored to pin the id.
+        memo: Dict[int, Tuple[Any, Optional[frozenset]]] = {}
+        self._exhausted = False
+        stack = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            key = id(node)
+            if key in memo:
+                continue
+            kind, children = _name_walk_children(node)
+            if not expanded and children:
+                # Post-order: revisit this node once every child is memoized.
+                stack.append((node, True))
+                for child in children:
+                    if id(child) not in memo:
+                        stack.append((child, False))
+                continue
+            if work is not None and not work.spend(1):
+                # Out of work units: drop the partial memo and report opaque
+                # everywhere rather than answer from an incomplete index.
+                self._exhausted = True
+                memo = {}
+                break
+            if kind == "var":
+                memo[key] = (node, frozenset((node.name,)))
+                continue
+            if kind == "empty":
+                memo[key] = (node, _EMPTY_NAMES)
+                continue
+            if kind == "opaque":
+                memo[key] = (node, None)
+                continue
+            # "combine" with no children collapses to the empty set, matching
+            # the union-over-nothing of the recursive walk.
+            acc: set = set()
+            opaque = False
+            for child in children:
+                sub = memo[id(child)][1]
+                if sub is None:
+                    opaque = True
+                    break
+                if work is not None and not work.spend(len(sub)):
+                    self._exhausted = True
+                    memo = {}
+                    stack.clear()
+                    opaque = True
+                    break
+                acc |= sub
+            if self._exhausted:
+                break
+            memo[key] = (node, None if opaque else frozenset(acc))
+        self._memo = memo
+
+    @property
+    def exhausted(self) -> bool:
+        """True when the build ran out of work units and reports opaque."""
+        return self._exhausted
+
+    def __len__(self) -> int:
+        """Number of distinct DAG nodes indexed (0 when exhausted)."""
+        return len(self._memo)
+
+    def names(self, expr) -> Optional[frozenset]:
+        """Variable names referenced by ``expr``, or ``None`` if opaque.
+
+        ``expr`` must be a node of the DAG this index was built from; a foreign
+        node raises ``KeyError`` rather than silently reporting "no variables"
+        (a wrong-but-plausible answer that would make an occurrence test unsound).
+        An *exhausted* index reports ``None`` for everything, foreign or not:
+        it has no memo left to check against, and ``None`` is the sound answer.
+        """
+        if self._exhausted:
+            return None
+        return self._memo[id(expr)][1]
+
+    def occurs(self, expr, varname: str) -> bool:
+        """True when ``varname`` *might* appear in ``expr`` (conservative)."""
+        if self._exhausted:
+            return True  # exhausted index — assume it might occur (sound)
+        names = self._memo[id(expr)][1]
+        if names is None:
+            return True  # opaque node — assume it might occur (sound)
+        return varname in names
+
+
 def _collect_var_names(expr) -> Optional[set]:
     """Return the complete set of variable names referenced by ``expr``.
 
     Returns ``None`` if an unrecognised / opaque node is encountered — the
     caller must then treat the variable of interest as *possibly* present
     (the sound direction for an occurrence test).
+
+    Returns a fresh mutable ``set`` the caller may modify. When several
+    occurrence queries are made against one expression, build a
+    :class:`VarNameIndex` once instead of calling this repeatedly.
     """
-    if isinstance(expr, Variable):
-        return {expr.name}
-    if isinstance(expr, (Constant, Parameter)):
-        return set()
-    if isinstance(expr, IndexExpression):
-        return _collect_var_names(expr.base)
-    if isinstance(expr, UnaryOp):
-        return _collect_var_names(expr.operand)
-    if isinstance(expr, BinaryOp):
-        left = _collect_var_names(expr.left)
-        right = _collect_var_names(expr.right)
-        if left is None or right is None:
-            return None
-        return left | right
-    if isinstance(expr, FunctionCall):
-        acc: set = set()
-        for a in expr.args:
-            names = _collect_var_names(a)
-            if names is None:
-                return None
-            acc |= names
-        return acc
-    if isinstance(expr, SumExpression):
-        return _collect_var_names(expr.operand)
-    if isinstance(expr, SumOverExpression):
-        acc = set()
-        for t in expr.terms:
-            names = _collect_var_names(t)
-            if names is None:
-                return None
-            acc |= names
-        return acc
-    # Unknown / opaque node (CustomCall, MatMul, ...): cannot prove the
-    # variable is absent — abstain.
-    return None
+    names = VarNameIndex(expr).names(expr)
+    return None if names is None else set(names)
 
 
 def _occurs(expr, varname: str) -> bool:
     """True when ``varname`` *might* appear in ``expr`` (conservative)."""
-    names = _collect_var_names(expr)
-    if names is None:
-        return True  # opaque node — assume it might occur (sound)
-    return varname in names
+    return VarNameIndex(expr).occurs(expr, varname)
 
 
-def _affine_coeff(expr, varname: str) -> Optional[float]:
+def _affine_coeff(expr, varname: str, index: Optional[VarNameIndex] = None) -> Optional[float]:
     """Constant coefficient of ``varname`` in ``expr``, or ``None``.
 
     Returns a float ``a`` iff ``expr`` depends on ``varname`` *only*
@@ -149,7 +312,14 @@ def _affine_coeff(expr, varname: str) -> Optional[float]:
     ``a`` a compile-time constant (``0.0`` means it does not appear). Returns
     ``None`` whenever the dependence is nonlinear, indexed, or routed
     through an unanalyzable node — a conservative abstention.
+
+    ``index`` is the memoized occurrence index for ``expr``'s DAG; it is built
+    on entry when omitted. Passing it (or letting the recursion thread it, as
+    it does here) keeps the walk ``O(nodes)`` instead of ``O(nodes^2)`` — see
+    :class:`VarNameIndex`.
     """
+    if index is None:
+        index = VarNameIndex(expr)
     if isinstance(expr, Variable):
         return 1.0 if expr.name == varname else 0.0
     if isinstance(expr, (Constant, Parameter)):
@@ -157,11 +327,11 @@ def _affine_coeff(expr, varname: str) -> Optional[float]:
     if isinstance(expr, IndexExpression):
         # An indexed reference to the target variable means the target is an
         # array element; the single-free-scalar pattern does not apply.
-        if _occurs(expr.base, varname):
+        if index.occurs(expr.base, varname):
             return None
         return 0.0
     if isinstance(expr, UnaryOp):
-        inner = _affine_coeff(expr.operand, varname)
+        inner = _affine_coeff(expr.operand, varname, index)
         if inner is None:
             return None
         if expr.op in ("-", "neg"):
@@ -169,24 +339,24 @@ def _affine_coeff(expr, varname: str) -> Optional[float]:
         if expr.op in ("+", "pos"):
             return inner
         # abs / other unary atoms are nonlinear in their argument
-        return None if _occurs(expr.operand, varname) else 0.0
+        return None if index.occurs(expr.operand, varname) else 0.0
     if isinstance(expr, BinaryOp):
         op = expr.op
         if op == "+":
-            cl = _affine_coeff(expr.left, varname)
-            cr = _affine_coeff(expr.right, varname)
+            cl = _affine_coeff(expr.left, varname, index)
+            cr = _affine_coeff(expr.right, varname, index)
             if cl is None or cr is None:
                 return None
             return cl + cr
         if op == "-":
-            cl = _affine_coeff(expr.left, varname)
-            cr = _affine_coeff(expr.right, varname)
+            cl = _affine_coeff(expr.left, varname, index)
+            cr = _affine_coeff(expr.right, varname, index)
             if cl is None or cr is None:
                 return None
             return cl - cr
         if op == "*":
-            lo = _occurs(expr.left, varname)
-            ro = _occurs(expr.right, varname)
+            lo = index.occurs(expr.left, varname)
+            ro = index.occurs(expr.right, varname)
             if lo and ro:
                 return None  # var on both sides -> nonlinear
             if not lo and not ro:
@@ -194,30 +364,32 @@ def _affine_coeff(expr, varname: str) -> Optional[float]:
             # exactly one side carries the var; the other must be a constant
             if lo:
                 k = _const_value(expr.right)
-                inner = _affine_coeff(expr.left, varname)
+                inner = _affine_coeff(expr.left, varname, index)
             else:
                 k = _const_value(expr.left)
-                inner = _affine_coeff(expr.right, varname)
+                inner = _affine_coeff(expr.right, varname, index)
             if k is None or inner is None:
                 return None
             return k * inner
         if op == "/":
             # var only allowed in the numerator, denominator must be constant
-            if _occurs(expr.right, varname):
+            if index.occurs(expr.right, varname):
                 return None
             k = _const_value(expr.right)
-            inner = _affine_coeff(expr.left, varname)
+            inner = _affine_coeff(expr.left, varname, index)
             if k is None or inner is None or k == 0.0:
                 return None
             return inner / k
         if op == "**":
             # var under a power is nonlinear; only var-free bases are fine
-            if _occurs(expr.left, varname) or _occurs(expr.right, varname):
+            if index.occurs(expr.left, varname) or index.occurs(expr.right, varname):
                 return None
             return 0.0
-        return None if (_occurs(expr.left, varname) or _occurs(expr.right, varname)) else 0.0
+        if index.occurs(expr.left, varname) or index.occurs(expr.right, varname):
+            return None
+        return 0.0
     # FunctionCall / Sum / opaque: var-free -> 0, otherwise nonlinear/unknown.
-    return None if _occurs(expr, varname) else 0.0
+    return None if index.occurs(expr, varname) else 0.0
 
 
 def _const_value(expr) -> Optional[float]:
