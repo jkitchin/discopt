@@ -7374,7 +7374,11 @@ def solve_model(
         if (
             _mip_nlp_result is not None
             and model is _pre_route_model
-            and _routed_x is not None
+            # Truth-tested, not ``is not None``: an empty dict is a no-incumbent
+            # result, and recovering duals "at the incumbent" of a solve that has
+            # none is meaningless -- it only raised a KeyError into the debug-level
+            # ``except`` below, so the miss was invisible (#1105).
+            and _routed_x
             and getattr(_mip_nlp_result, "constraint_duals", None) is None
         ):
             try:

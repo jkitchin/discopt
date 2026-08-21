@@ -876,10 +876,11 @@ class TestOARobustnessOptions:
 
         # max_iterations=1 exhausts the iteration budget with no incumbent (the
         # monkeypatched master never turns infeasible), so the search is
-        # INCONCLUSIVE, not a proof of infeasibility -> "unknown", not the
-        # (false) "infeasible" this used to report. The no-good-cut mechanism
-        # under test is unaffected.
-        assert result.status == "unknown"
+        # INCONCLUSIVE, not a proof of infeasibility -> never "infeasible". #1105
+        # narrowed the inconclusive status from a blanket "unknown" to the named
+        # limit that actually stopped the loop; it is equally non-committal about
+        # feasibility. The no-good-cut mechanism under test is unaffected.
+        assert result.status == "iteration_limit"
         assert len(no_good_calls) == expected_calls
 
     def test_multitree_no_good_cut_skips_mixed_integer_model(
@@ -932,9 +933,10 @@ class TestOARobustnessOptions:
             cycling_check=False,
         )
 
-        # Iteration budget exhausted with no incumbent -> inconclusive "unknown"
-        # (not a false "infeasible"); the mechanism under test is unaffected.
-        assert result.status == "unknown"
+        # Iteration budget exhausted with no incumbent -> inconclusive
+        # "iteration_limit" (not a false "infeasible", #1105); the mechanism
+        # under test is unaffected.
+        assert result.status == "iteration_limit"
         assert no_good_calls == []
 
     def test_multitree_no_good_cut_uses_integer_binary_expansion_when_enabled(
@@ -990,9 +992,10 @@ class TestOARobustnessOptions:
             cycling_check=False,
         )
 
-        # Iteration budget exhausted with no incumbent -> inconclusive "unknown"
-        # (not a false "infeasible"); the mechanism under test is unaffected.
-        assert result.status == "unknown"
+        # Iteration budget exhausted with no incumbent -> inconclusive
+        # "iteration_limit" (not a false "infeasible", #1105); the mechanism
+        # under test is unaffected.
+        assert result.status == "iteration_limit"
         assert len(no_good_expansions) == 1
         assert no_good_expansions[0] is not None
         assert no_good_expansions[0].bit_count == 2
@@ -1287,3 +1290,200 @@ def test_integer_to_binary_no_good_cuts_preserve_general_integer_optimum():
     assert result.gap == pytest.approx(0.0, abs=1e-9)
     assert result.x["z"] == pytest.approx(2.0, abs=INTEGRALITY_TOL)
     assert result.mip_nlp_trace["summary"]["cut_source_counts"]["integer"] >= 1
+
+
+class TestOADeadlineAndNoIncumbentContract:
+    """#1105: ``time_limit`` must bound the whole solve, and a no-incumbent exit
+    must report ``x=None`` with a status and a bound that match its own trace.
+
+    Reported against ``kondili_recipe_pr46`` (3048 cols / 3536 rows): a 60 s
+    limit returned after 133.4 s with ``status="unknown"``, ``x={}`` and
+    ``bound=0.0`` beside ``bound_validity="uncertified"``. Reproduced locally at
+    92.4 s, of which a *single* feasibility-restoration NLP -- launched with 38 s
+    of budget left -- ran 69.85 s, because no NLP subsolve in this module carried
+    a wall budget at all.
+    """
+
+    def test_every_nlp_subsolve_carries_a_share_of_the_deadline(self, monkeypatch):
+        """No NLP may be launched unbudgeted while a ``time_limit`` is in force."""
+        import discopt.solvers.oa as oa_module
+
+        m = _mindtpy_simple_minlp()
+
+        real_attempt = oa_module._solve_nlp_attempt
+        budgets: list[object] = []
+
+        def spy(*args, **kwargs):
+            budgets.append(kwargs.get("max_wall_time"))
+            return real_attempt(*args, **kwargs)
+
+        monkeypatch.setattr(oa_module, "_solve_nlp_attempt", spy)
+
+        time_limit = 30.0
+        oa_module.solve_oa(m, time_limit=time_limit, max_iterations=5)
+
+        # CLAUDE.md §6: the probe must prove it fired. An empty ``budgets`` list
+        # would otherwise pass every assertion below vacuously.
+        assert budgets, "PROBE FIRED NOTHING: solve_oa launched no NLP subsolve"
+        unbudgeted = [i for i, b in enumerate(budgets) if b is None]
+        assert not unbudgeted, (
+            f"{len(unbudgeted)} of {len(budgets)} NLP subsolves were launched with no "
+            f"wall budget (call indices {unbudgeted}); each can outlive the whole "
+            "time_limit on its own"
+        )
+        for budget in budgets:
+            assert isinstance(budget, float)
+            assert 0.0 < budget <= time_limit, budget
+        print(f"PROBE OK: {len(budgets)} budgeted NLP subsolves")
+
+    def test_expired_deadline_skips_feasibility_restoration(self, monkeypatch):
+        """The step that overran in #1105 must not start past the deadline.
+
+        The fixed NLP can consume the rest of the budget on its way to failing,
+        so the deadline is re-checked between it and feasibility restoration --
+        the exact overrun reported (69.85 s of a 60 s limit, launched with 38 s
+        left).
+        """
+        import time as _time
+
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("deadline_restoration")
+        y = m.binary("y")
+        x = m.continuous("x", lb=0, ub=2)
+        m.minimize(y + x)
+        m.subject_to(x**2 + y >= 1)
+
+        time_limit = 0.5
+        feasibility_calls: list[tuple] = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            # Fractional in y, so OA cannot accept the relaxation outright.
+            lambda *args, **kwargs: (np.array([0.5, 1.0]), 1.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                # (y, x) = (0, 0) violates x**2 + y >= 1, so the master point is
+                # never itself an incumbent -- the fixed NLP below is the only
+                # route to one, and it fails.
+                x=np.array([0.0, 0.0]),
+                objective=0.0,
+                bound=0.0,
+            ),
+        )
+
+        def _slow_failing_fixed_nlp(*args, **kwargs):
+            """Stands in for a fixed NLP that eats the remaining budget, then fails."""
+            _time.sleep(time_limit * 2.0)
+            return (None, None)
+
+        monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", _slow_failing_fixed_nlp)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_feasibility_subproblem",
+            lambda *args, **kwargs: feasibility_calls.append(args),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            time_limit=time_limit,
+            max_iterations=50,
+            feasibility_cuts=True,
+            cycling_check=False,
+        )
+
+        assert feasibility_calls == [], (
+            "feasibility restoration was started after the deadline had already "
+            "expired; that subproblem is unbounded in wall time and is what "
+            "drove the #1105 overrun"
+        )
+        trace = result.mip_nlp_trace
+        assert trace is not None
+        assert trace["termination_reason"] == "time_limit"
+        # Expectation 2 of the issue: name the limit, and report no incumbent.
+        assert result.status == "time_limit"
+        assert result.objective is None
+        assert result.x is None, (
+            "a no-incumbent exit must return x=None, not an empty dict that every "
+            "downstream consumer truth-tests as an existing incumbent"
+        )
+
+    def test_no_incumbent_result_never_contradicts_its_own_trace_bound(self, monkeypatch):
+        """``bound`` must not carry a number the trace calls uncertified.
+
+        The reporter saw ``bound=0.0`` beside ``master_bound_valid=false`` and
+        ``bound_validity="uncertified"`` and had no way to know which to trust.
+        The number stays available as ``trace["final_lb"]``.
+        """
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        # Linear objective => decomp.master_bound_valid, so the master bound is
+        # promoted to certified_LB -- the same shape as the reported instance.
+        m = dm.Model("uncertified_bound")
+        y = m.binary("y")
+        x = m.continuous("x", lb=0, ub=2)
+        m.minimize(y + x)
+        m.subject_to(x**2 + y >= 1)
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            # Fractional in y, so OA cannot accept the relaxation outright.
+            lambda *args, **kwargs: (np.array([0.5, 1.0]), 1.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                # (y, x) = (0, 0) violates x**2 + y >= 1, so the master point is
+                # never itself an incumbent -- the fixed NLP below is the only
+                # route to one, and it fails.
+                x=np.array([0.0, 0.0]),
+                objective=0.0,
+                bound=0.0,
+            ),
+        )
+        # Fixed NLP fails NON-rigorously: the configuration is neither solved nor
+        # excluded, which is what downgrades certification (C-35).
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_fixed_subproblem_rigorously_infeasible",
+            lambda *args, **kwargs: False,
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            time_limit=30.0,
+            max_iterations=3,
+            feasibility_cuts=False,
+            cycling_check=False,
+        )
+
+        trace = result.mip_nlp_trace
+        assert trace is not None
+        assert trace["summary"]["unresolved_integer_config_count"] >= 1
+        assert trace["master_bound_valid"] is False
+        assert trace["bound_validity"] == "uncertified"
+        # The master number is still there as a diagnostic...
+        assert trace["final_lb"] == pytest.approx(0.0)
+        # ...but the general ``bound`` field, which callers read as a dual
+        # certificate, no longer contradicts the validity signal beside it.
+        assert result.bound is None
+        assert result.gap is None
+        assert result.gap_certified is False
+        assert result.x is None

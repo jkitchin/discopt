@@ -1369,6 +1369,34 @@ def _is_primal_feasible(evaluator, x, tol: float = 1e-4) -> bool:
         return False
 
 
+#: Smallest wall budget handed to a subsolve. A budget of zero (or a negative
+#: one, once the deadline has already passed) is not "run instantly" to POUNCE
+#: -- it is an option value the backend may reject, which silently restores the
+#: UNBOUNDED behaviour this floor exists to prevent. Call sites that can skip
+#: the subsolve entirely check the deadline themselves; this floor only keeps a
+#: subsolve that *must* run from being handed a degenerate limit.
+_NLP_WALL_FLOOR_S = 0.1
+
+
+def _time_left(t_start: float, time_limit: float) -> float:
+    """Unfloored seconds left before ``t_start + time_limit`` (negative once past)."""
+    return float(time_limit) - (time.perf_counter() - float(t_start))
+
+
+def _remaining_wall(t_start: float, time_limit: float) -> float:
+    """Seconds left before ``t_start + time_limit``, floored at ``_NLP_WALL_FLOOR_S``.
+
+    The single source of the MIP-NLP deadline contract (#1105): every subsolve
+    launched inside a time-limited MIP-NLP region takes its wall budget from
+    here, so ``time_limit`` covers the whole run rather than each phase
+    separately. Before this existed the fixed-NLP, feasibility-restoration and
+    initialization NLPs ran with no budget at all -- on ``kondili_recipe_pr46``
+    a single feasibility subproblem launched at t=22 s ran 69.85 s against a
+    60 s limit, and the solve returned at 92.4 s (1.54x).
+    """
+    return max(_time_left(t_start, time_limit), _NLP_WALL_FLOOR_S)
+
+
 def _solve_nlp_attempt(
     evaluator,
     lb,
@@ -1376,8 +1404,17 @@ def _solve_nlp_attempt(
     nlp_solver: str,
     max_iter: int = 200,
     x0=None,
+    max_wall_time: Optional[float] = None,
 ) -> _NLPAttempt:
-    """Solve an NLP with given bounds, retaining solver multipliers."""
+    """Solve an NLP with given bounds, retaining solver multipliers.
+
+    ``max_wall_time`` is the subsolve's share of the caller's deadline, in
+    seconds. Measured on POUNCE 0.10 (``scratchpad/issue1105/probe_maxwall.py``,
+    400-var nonconvex NLP): unbounded 25.72 s, ``max_wall_time=0.5`` -> 0.517 s,
+    ``max_wall_time=2.0`` -> 2.073 s, both returning ``TIME_LIMIT``. Leaving it
+    ``None`` keeps the historical unbounded behaviour for callers with no
+    deadline of their own.
+    """
     if x0 is None:
         x0 = _default_nlp_start(lb, ub)
     else:
@@ -1400,6 +1437,8 @@ def _solve_nlp_attempt(
         opts = pounce_option_defaults()
         opts.update(pounce_incumbent_options())
         opts.update({"max_iter": max_iter})
+        if max_wall_time is not None:
+            opts["max_wall_time"] = max(float(max_wall_time), _NLP_WALL_FLOOR_S)
         result = solve_nlp(evaluator, x0, options=opts)
 
         from discopt.solvers import SolveStatus
@@ -1412,10 +1451,19 @@ def _solve_nlp_attempt(
                 status=result.status,
             )
 
-        # Accept iteration-limited results if the solution is primal feasible.
-        # The IPM may not certify dual convergence (code 4: stalled) yet still
-        # find a valid primal point, which is sufficient for OA linearization cuts.
-        if result.status == SolveStatus.ITERATION_LIMIT and result.x is not None:
+        # Accept iteration- and time-limited results if the solution is primal
+        # feasible. The IPM may not certify dual convergence (code 4: stalled)
+        # yet still find a valid primal point, which is sufficient for OA
+        # linearization cuts. ``TIME_LIMIT`` joined this set with #1105: once a
+        # subsolve carries a wall budget, stopping on the clock is the ordinary
+        # outcome, and dropping a feasible point purely because the clock (not
+        # the iteration counter) stopped it would lose incumbents the unbounded
+        # code path used to find. The point is screened by
+        # ``_is_primal_feasible`` either way, so nothing infeasible is admitted.
+        if (
+            result.status in (SolveStatus.ITERATION_LIMIT, SolveStatus.TIME_LIMIT)
+            and result.x is not None
+        ):
             if _is_primal_feasible(evaluator, result.x):
                 return _NLPAttempt(
                     x=result.x,
@@ -1430,9 +1478,19 @@ def _solve_nlp_attempt(
     return _NLPAttempt(x=None, objective=None, multipliers=None)
 
 
-def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200, x0=None):
+def _solve_nlp(
+    evaluator,
+    lb,
+    ub,
+    nlp_solver: str,
+    max_iter: int = 200,
+    x0=None,
+    max_wall_time: Optional[float] = None,
+):
     """Solve an NLP with given bounds. Returns (x, obj) or (None, None)."""
-    attempt = _solve_nlp_attempt(evaluator, lb, ub, nlp_solver, max_iter=max_iter, x0=x0)
+    attempt = _solve_nlp_attempt(
+        evaluator, lb, ub, nlp_solver, max_iter=max_iter, x0=x0, max_wall_time=max_wall_time
+    )
     return attempt.x, attempt.objective
 
 
@@ -1457,9 +1515,12 @@ def _solve_nlp_relaxation(
     nlp_solver: str,
     initial_point=None,
     return_attempt: bool = False,
+    max_wall_time: Optional[float] = None,
 ):
     """Solve the continuous NLP relaxation (all integers relaxed)."""
-    attempt = _solve_nlp_attempt(evaluator, lb, ub, nlp_solver, x0=initial_point)
+    attempt = _solve_nlp_attempt(
+        evaluator, lb, ub, nlp_solver, x0=initial_point, max_wall_time=max_wall_time
+    )
     return _maybe_return_nlp_attempt(attempt, return_attempt)
 
 
@@ -1472,6 +1533,7 @@ def _solve_nlp_subproblem(
     nlp_solver,
     initial_point=None,
     return_attempt: bool = False,
+    max_wall_time: Optional[float] = None,
 ):
     """Fix integers at master values and solve NLP subproblem."""
     sub_lb = lb.copy()
@@ -1482,8 +1544,18 @@ def _solve_nlp_subproblem(
         sub_ub[idx] = val
 
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
-    attempt = _solve_nlp_attempt(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
+    attempt = _solve_nlp_attempt(
+        proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point, max_wall_time=max_wall_time
+    )
     return _maybe_return_nlp_attempt(attempt, return_attempt)
+
+
+#: Optional ``_solve_nlp_subproblem`` keywords, in the order they are dropped
+#: when the bound implementation does not accept them (a stub or an older
+#: signature). Richest first: losing the wall budget only costs the deadline
+#: contract, losing ``return_attempt`` costs the status, losing
+#: ``initial_point`` costs the warm start.
+_FIXED_NLP_OPTIONAL_KWARGS = ("max_wall_time", "return_attempt", "initial_point")
 
 
 def _solve_fixed_nlp_subproblem_attempt(
@@ -1495,45 +1567,29 @@ def _solve_fixed_nlp_subproblem_attempt(
     nlp_solver,
     *,
     initial_point=None,
+    max_wall_time: Optional[float] = None,
 ) -> _NLPAttempt:
-    """Call the fixed-NLP helper and retain status when the implementation supports it."""
-    try:
-        result = _solve_nlp_subproblem(
-            evaluator,
-            lb,
-            ub,
-            int_indices,
-            x_master,
-            nlp_solver,
-            initial_point=initial_point,
-            return_attempt=True,
-        )
-    except TypeError as exc:
-        message = str(exc)
-        if "return_attempt" not in message and "initial_point" not in message:
-            raise
+    """Call the fixed-NLP helper and retain status when the implementation supports it.
+
+    Degrades one keyword at a time rather than all-or-nothing: a
+    ``_solve_nlp_subproblem`` that predates any of these keywords still runs,
+    and a ``TypeError`` that does not name one of the *remaining* optional
+    keywords is a real error and propagates.
+    """
+    args = (evaluator, lb, ub, int_indices, x_master, nlp_solver)
+    optional: dict[str, Any] = {"initial_point": initial_point, "return_attempt": True}
+    if max_wall_time is not None:
+        optional["max_wall_time"] = float(max_wall_time)
+    for dropped in range(len(_FIXED_NLP_OPTIONAL_KWARGS) + 1):
+        skip = _FIXED_NLP_OPTIONAL_KWARGS[:dropped]
+        kwargs = {name: value for name, value in optional.items() if name not in skip}
         try:
-            result = _solve_nlp_subproblem(
-                evaluator,
-                lb,
-                ub,
-                int_indices,
-                x_master,
-                nlp_solver,
-                initial_point=initial_point,
-            )
-        except TypeError as fallback_exc:
-            fallback_message = str(fallback_exc)
-            if "initial_point" not in fallback_message:
+            result = _solve_nlp_subproblem(*args, **kwargs)
+            break
+        except TypeError as exc:
+            remaining = _FIXED_NLP_OPTIONAL_KWARGS[dropped:]
+            if not any(name in str(exc) for name in remaining):
                 raise
-            result = _solve_nlp_subproblem(
-                evaluator,
-                lb,
-                ub,
-                int_indices,
-                x_master,
-                nlp_solver,
-            )
     return _coerce_nlp_attempt(result)
 
 
@@ -1764,6 +1820,7 @@ def _solve_feasibility_subproblem(
     x_master,
     nlp_solver,
     feasibility_norm,
+    max_wall_time: Optional[float] = None,
 ):
     """Solve feasibility problem with fixed integers.
 
@@ -1785,7 +1842,9 @@ def _solve_feasibility_subproblem(
 
     try:
         proxy = _FeasibilityEvaluator(evaluator, sub_lb, sub_ub, feasibility_norm)
-        x_feas, _obj_feas = _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver, x0=x0)
+        x_feas, _obj_feas = _solve_nlp(
+            proxy, sub_lb, sub_ub, nlp_solver, x0=x0, max_wall_time=max_wall_time
+        )
         if x_feas is not None:
             candidate = np.clip(np.asarray(x_feas, dtype=np.float64), sub_lb, sub_ub)
             candidate_merit = _constraint_violation_merit(evaluator, candidate, feasibility_norm)
@@ -2014,6 +2073,7 @@ def _run_feasibility_pump(
         decomp.ub,
         nlp_solver,
         initial_point=initial_point,
+        max_wall_time=_remaining_wall(t_start, time_limit),
     )
     if x_relax is None:
         current = _default_nlp_start(decomp.lb, decomp.ub)
@@ -2089,6 +2149,7 @@ def _run_feasibility_pump(
             projected,
             nlp_solver,
             initial_point=projected,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         iterations = iteration + 1
         if x_nlp is not None:
@@ -2105,6 +2166,7 @@ def _run_feasibility_pump(
             projected,
             nlp_solver,
             feasibility_norm,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         if x_feas is not None:
             current = x_feas
@@ -3868,6 +3930,7 @@ def solve_feasibility_pump(
             decomp.ub,
             nlp_solver,
             initial_point=initial_point,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
@@ -3885,7 +3948,7 @@ def solve_feasibility_pump(
             objective=None,
             bound=None,
             gap=None,
-            x={},
+            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
             wall_time=wall_time,
             gap_certified=False,
         )
@@ -3922,7 +3985,7 @@ def solve_feasibility_pump(
         objective=None,
         bound=None,
         gap=None,
-        x={},
+        x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
         wall_time=wall_time,
         mip_count=fp.mip_count,
         gap_certified=False,
@@ -4193,6 +4256,7 @@ def solve_lp_nlp_bb(
             decomp.ub,
             nlp_solver,
             initial_point=initial_point,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
@@ -4210,7 +4274,7 @@ def solve_lp_nlp_bb(
             objective=None,
             bound=None,
             gap=None,
-            x={},
+            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
             wall_time=wall_time,
             mip_count=0,
         )
@@ -4258,6 +4322,7 @@ def solve_lp_nlp_bb(
             decomp.ub,
             nlp_solver,
             initial_point=initial_point,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         if x_relax is not None:
             if obj_relax is not None:
@@ -4308,6 +4373,7 @@ def solve_lp_nlp_bb(
             x_seed,
             nlp_solver,
             initial_point=x_seed,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         add_oa_cuts_at(x_init if x_init is not None else x_seed)
         if x_init is not None and obj_init is not None:
@@ -4401,6 +4467,7 @@ def solve_lp_nlp_bb(
             x_master,
             nlp_solver,
             initial_point=x_master,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         if x_nlp is not None:
             fixed_nlp_status = "feasible"
@@ -4423,6 +4490,7 @@ def solve_lp_nlp_bb(
                     x_master,
                     nlp_solver,
                     feasibility_norm,
+                    max_wall_time=_remaining_wall(t_start, time_limit),
                 )
                 if x_feas is not None:
                     _add_feasibility_cuts(
@@ -4651,7 +4719,7 @@ def solve_lp_nlp_bb(
         objective=None,
         bound=(obj_sign * bound if bound is not None else None),
         gap=None,
-        x={},
+        x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
         wall_time=wall_time,
         node_count=master_result.node_count,
         mip_count=1,
@@ -6163,6 +6231,7 @@ def solve_oa(
             decomp.ub,
             nlp_solver,
             initial_point=initial_point,
+            max_wall_time=_remaining_wall(t_start, time_limit),
         )
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
@@ -6183,7 +6252,7 @@ def solve_oa(
             objective=None,
             bound=None,
             gap=None,
-            x={},
+            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
             wall_time=wall_time,
             mip_nlp_trace=_build_mip_nlp_trace("continuous_nlp_infeasible"),
         )
@@ -6217,6 +6286,7 @@ def solve_oa(
                 nlp_solver,
                 initial_point=initial_point,
                 return_attempt=True,
+                max_wall_time=_remaining_wall(t_start, time_limit),
             )
             x_relax, obj_relax = relax_attempt.x, relax_attempt.objective
         else:
@@ -6226,6 +6296,7 @@ def solve_oa(
                 decomp.ub,
                 nlp_solver,
                 initial_point=initial_point,
+                max_wall_time=_remaining_wall(t_start, time_limit),
             )
 
         if x_relax is not None:
@@ -6352,6 +6423,7 @@ def solve_oa(
                     nlp_solver,
                     initial_point=x_seed,
                     return_attempt=True,
+                    max_wall_time=_remaining_wall(t_start, time_limit),
                 )
                 x_init, obj_init = init_attempt.x, init_attempt.objective
             else:
@@ -6364,6 +6436,7 @@ def solve_oa(
                     x_seed,
                     nlp_solver,
                     initial_point=x_seed,
+                    max_wall_time=_remaining_wall(t_start, time_limit),
                 )
             x_cut = x_init if x_init is not None else x_seed
             _add_oa_cuts(
@@ -7266,6 +7339,7 @@ def solve_oa(
                 x_master,
                 nlp_solver,
                 initial_point=warm_start,
+                max_wall_time=_remaining_wall(t_start, time_limit),
             )
             x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
             nlp_status_name = _fixed_nlp_status_name(nlp_attempt)
@@ -7307,7 +7381,26 @@ def solve_oa(
                     decomp.int_indices,
                     x_master,
                 )
-                if feasibility_cuts:
+                # The fixed NLP may have consumed the rest of the budget on its
+                # way to failing, so re-check the deadline here rather than
+                # relying on the per-candidate check above: restoration is a
+                # SECOND full NLP solve, and running it past the deadline is
+                # exactly the #1105 overrun (69.85 s of a 60 s limit, launched
+                # with 38 s left). Its only product is cuts for a NEXT iteration
+                # that the deadline has already ruled out, so skipping it costs
+                # nothing.
+                restoration_time_left = _time_left(t_start, time_limit)
+                if feasibility_cuts and restoration_time_left <= _NLP_WALL_FLOOR_S:
+                    logger.info(
+                        "OA: skipping feasibility restoration at iteration %d; "
+                        "%.3f s left of the %.3f s limit",
+                        iteration,
+                        restoration_time_left,
+                        time_limit,
+                    )
+                    termination_reason = "time_limit"
+                    stop_after_master_pool = True
+                elif feasibility_cuts:
                     feasibility_subproblem_count += 1
                     x_feas = _solve_feasibility_subproblem(
                         evaluator,
@@ -7317,6 +7410,7 @@ def solve_oa(
                         x_master,
                         nlp_solver,
                         feasibility_norm,
+                        max_wall_time=_remaining_wall(t_start, time_limit),
                     )
                     if x_feas is not None:
                         _add_feasibility_cuts(
@@ -7535,6 +7629,19 @@ def solve_oa(
     has_unresolved = len(unresolved_int_configs) > 0
     if has_unresolved:
         reported_gap = None
+        # #1105: ``bound`` and the trace must not contradict each other. The
+        # trace publishes ``master_bound_valid``/``bound_validity`` computed as
+        # ``final_lb is not None and not has_unresolved and not inverted`` --
+        # so an unresolved configuration made the trace say
+        # ``master_bound_valid=false, bound_validity="uncertified"`` while the
+        # ``bound`` field still handed the caller the master number (reported
+        # on ``kondili_recipe_pr46`` as ``bound=0.0`` beside exactly those two
+        # trace fields). A consumer has no way to know which of the two to
+        # believe, and the general ``bound`` field is the one read as a dual
+        # certificate. Suppress it here and keep the number in the trace's
+        # ``final_lb``, which is where a diagnostic belongs. This only ever
+        # reports *less*, so it cannot manufacture a certificate.
+        bound = None
 
     if incumbent is not None and incumbent_obj is not None:
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
@@ -7564,23 +7671,6 @@ def solve_oa(
             gap_certified=(status == "optimal"),
         )
 
-    if has_unresolved:
-        # No feasible incumbent AND unresolved configurations: we cannot certify
-        # infeasibility (a merely-diverged subproblem is not a proof). Report an
-        # uncertified, inconclusive status instead of a false "infeasible".
-        return SolveResult(
-            status="unknown",
-            objective=None,
-            bound=(_obj_sign * bound if bound is not None else None),
-            gap=None,
-            x={},
-            wall_time=wall_time,
-            mip_count=mip_count,
-            subnlp_calls=nlp_subproblem_count,
-            mip_nlp_trace=_build_mip_nlp_trace(final_reason),
-            gap_certified=False,
-        )
-
     # No incumbent was found. A no-incumbent terminal state is only a *proof* of
     # infeasibility when the master MILP — a valid relaxation of the integer
     # feasible set carrying globally-valid OA and (rigorous) no-good cuts — was
@@ -7595,27 +7685,37 @@ def solve_oa(
     # (CLAUDE.md §1) — a solver that merely ran out of budget must never claim the
     # model is infeasible. Report "unknown" there, exactly as the C-35
     # unresolved-config path above does.
+    #
+    # C-35: if any integer configuration was left unresolved by a non-rigorous
+    # NLP failure we deliberately did NOT exclude it, so infeasibility is not
+    # proved either -- ``has_unresolved`` vetoes the "infeasible" arm as well.
     _PROVEN_INFEASIBLE_REASONS = {"master_infeasible", "master_infeasible_unrepaired"}
-    if final_reason in _PROVEN_INFEASIBLE_REASONS:
-        return SolveResult(
-            status="infeasible",
-            objective=None,
-            bound=(_obj_sign * bound if bound is not None else None),
-            gap=None,
-            x={},
-            wall_time=wall_time,
-            mip_count=mip_count,
-            subnlp_calls=nlp_subproblem_count,
-            mip_nlp_trace=_build_mip_nlp_trace(final_reason),
-            gap_certified=False,
-        )
+    # #1105: "unknown" is right for an exit whose cause we cannot name, but a
+    # solve that simply ran out of its wall-clock or iteration budget has a
+    # perfectly nameable cause, and it is the one fact the caller needs to
+    # decide whether to retry with a larger budget. Both spellings are in the
+    # ``SolveResult.status`` vocabulary and are what the B&B route already
+    # returns for the same exits, so reporting them here also makes the two
+    # routes comparable. Neither claims anything about feasibility.
+    _LIMIT_REASON_STATUS = {"time_limit": "time_limit", "iteration_limit": "iteration_limit"}
+    if final_reason in _PROVEN_INFEASIBLE_REASONS and not has_unresolved:
+        status = "infeasible"
+    else:
+        status = _LIMIT_REASON_STATUS.get(final_reason or "", "unknown")
 
+    # ``x=None``, not ``x={}``: ``SolveResult.x`` is documented as "None if no
+    # feasible solution found", and an empty dict is truthy-checked as an
+    # *existing* incumbent by every downstream consumer. ``Model.solve``'s
+    # false-primal screen indexed ``result.x["x0"]`` and raised ``KeyError``,
+    # which it then swallowed and warned that an "incumbent" was unscreened
+    # even though ``objective`` was None; the #1059 dual-recovery block reads
+    # the same dict and silently recovered nothing. (#1105)
     return SolveResult(
-        status="unknown",
+        status=status,
         objective=None,
         bound=(_obj_sign * bound if bound is not None else None),
         gap=None,
-        x={},
+        x=None,
         wall_time=wall_time,
         mip_count=mip_count,
         subnlp_calls=nlp_subproblem_count,
