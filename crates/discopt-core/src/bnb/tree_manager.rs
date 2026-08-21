@@ -491,7 +491,7 @@ impl TreeManager {
     pub fn process_evaluated(&mut self) -> ProcessingStats {
         let mut stats = ProcessingStats::default();
 
-        let pending: Vec<PendingResult> = self.pending_results.drain(..).collect();
+        let pending: Vec<PendingResult> = std::mem::take(&mut self.pending_results);
 
         for result in &pending {
             let node_lb = self.pool.get(result.node_id).local_lower_bound;
