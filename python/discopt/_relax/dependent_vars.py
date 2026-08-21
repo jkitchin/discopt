@@ -48,8 +48,6 @@ remain the correct ones to deprioritize in the lifted/solved model.
 
 from __future__ import annotations
 
-import time
-
 import numpy as np
 
 # Reuse the conservative occurrence/constant analyzers proven in the
@@ -61,7 +59,7 @@ import numpy as np
 # None even when the target variable itself appears purely affinely. The
 # isolating extractor below short-circuits on "target absent -> coefficient 0",
 # which is what the dependent-output pattern requires.
-from discopt._relax.objective_epigraph import VarNameIndex, _const_value
+from discopt._relax.objective_epigraph import VarNameIndex, WorkCounter, _const_value
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -85,8 +83,34 @@ from discopt.modeling.core import (
 _VISIT_BUDGET_PER_NODE = 1000
 _VISIT_BUDGET_FLOOR = 10_000
 
+# Deterministic work allowance for one whole call to
+# :func:`find_functionally_dependent_names`, in elementary operations (node
+# visits plus name-set element unions; see :class:`WorkCounter`).
+#
+# Why a work count and not a wall deadline: this scan runs *before* the B&B loop
+# arms ``time_limit``, so it must be bounded by something — but the set it
+# returns steers spatial branching, so bounding it with a clock would make the
+# search tree a function of machine speed, the exact defect #912 exists to
+# prevent (see ``python/tests/test_912_wall_budget_inventory.py``). A work count
+# stops the overrun of issue #1104 while keeping ``deterministic=True`` solves
+# reproducible.
+#
+# Calibration (issue #1104), measured over 406 MINLPLib instances that reach the
+# scan (the other 46 of the 452-instance corpus have no scalar continuous
+# candidate and cost nothing): median demand 805 units, p95 288k, p99 4.6M, max
+# 56.2M (``torsion100``). Observed throughput 2.8e6-3.4e7 units/s, so 20M bounds
+# the whole scan at ~7 s even at the slowest per-unit rate observed, and at ~0.6 s
+# on the instance that actually reaches the cap.
+#
+# At 20M exactly ONE of the 406 truncates -- ``torsion100``, which drops from 2
+# detected names to 0. That is a subset (verified, along with reproducibility, on
+# the 20 costliest instances), and ``torsion100`` is one of the three instances
+# the pre-#1104 scan could not finish at all. The runner-up, ``junkturn`` at
+# 9.2M, keeps 2.2x headroom.
+_SCAN_WORK_BUDGET = 20_000_000
 
-def _isolated_affine_coeffs(expr, index=None):
+
+def _isolated_affine_coeffs(expr, index=None, work=None):
     """Isolated affine coefficients of *every* variable in ``expr``, in one pass.
 
     Returns a mapping ``name -> coeff`` where ``coeff`` is a float when ``name``
@@ -121,7 +145,7 @@ def _isolated_affine_coeffs(expr, index=None):
     fast the machine is (``deterministic=True`` solves reproduce).
     """
     if index is None:
-        index = VarNameIndex(expr)
+        index = VarNameIndex(expr, work=work)
     if index.names(expr) is None:
         return None  # opaque node reachable -> nothing provable (see docstring)
 
@@ -133,6 +157,8 @@ def _isolated_affine_coeffs(expr, index=None):
         budget -= 1
         if budget < 0:
             return None  # shared-subexpression blowup -> abstain (see docstring)
+        if work is not None and not work.spend(1):
+            return None  # scan-wide work allowance gone -> abstain (see docstring)
         node, mult = stack.pop()
         names = index.names(node)
         if not names:
@@ -310,7 +336,7 @@ def _body_is_nonlinear(expr, index=None) -> bool:
     return False
 
 
-def find_functionally_dependent_names(model, deadline: float | None = None) -> set:
+def find_functionally_dependent_names(model, work_budget: int | None = None) -> set:
     """Names of continuous scalar variables pinned by a nonlinear equality.
 
     Returns the set of variable names ``x`` such that some ``==`` constraint has
@@ -322,14 +348,19 @@ def find_functionally_dependent_names(model, deadline: float | None = None) -> s
     analyzer abstains on indexed/array references, and the single-defining-
     equality pattern is per-scalar.
 
-    ``deadline`` is an optional ``time.perf_counter()`` value past which the
-    scan stops and returns what it has found so far. This runs *before* the
-    branch-and-bound loop arms ``time_limit``, so without a budget a
-    pathologically large model could overrun the user's limit before a single
-    node is explored (issue #1104). Stopping early is sound: the result feeds a
-    deprioritization with a completeness-preserving fallback, so a partial set
-    only changes branch order (the module docstring's soundness argument holds
-    for *any* subset).
+    ``work_budget`` caps the whole scan in elementary operations (default
+    :data:`_SCAN_WORK_BUDGET`); pass ``0`` to skip the scan outright. When it
+    runs out the scan stops and returns what it has found so far. A budget is
+    needed because this runs *before* the branch-and-bound loop arms
+    ``time_limit``, so an unbounded pass on a pathologically large model can
+    overrun the user's limit before a single node is explored (issue #1104).
+
+    The cap is deterministic — an operation count, not a clock — because the
+    returned set steers spatial branching: a wall deadline would make the search
+    tree a function of machine speed (#912). Stopping early is sound either way:
+    the result feeds a deprioritization with a completeness-preserving fallback,
+    so a partial set only changes branch order (the module docstring's soundness
+    argument holds for *any* subset, including the empty one).
     """
     # Candidate names: scalar continuous variables only.
     candidates: set = set()
@@ -342,20 +373,24 @@ def find_functionally_dependent_names(model, deadline: float | None = None) -> s
     if not candidates:
         return set()
 
+    work = WorkCounter(_SCAN_WORK_BUDGET if work_budget is None else work_budget)
+
     dependent: set = set()
     for c in getattr(model, "_constraints", []):
         if not isinstance(c, Constraint):
             continue
         if c.sense != "==":
             continue
-        if deadline is not None and time.perf_counter() >= deadline:
+        if work.exhausted:
             # Out of budget: return the (sound) partial set rather than overrun.
             break
         body = c.body
         # One memoized occurrence index per body serves every query below —
         # presence, nonlinearity, and the affine coefficients — so the whole
-        # constraint costs O(nodes) instead of O(candidates x nodes^2).
-        index = VarNameIndex(body)
+        # constraint costs O(nodes) instead of O(candidates x nodes^2). The
+        # index build charges the dominant cost (one unit per node plus one per
+        # unioned name), which also bounds the two O(nodes) walks below.
+        index = VarNameIndex(body, work=work)
         # Names actually present in this equality, restricted to candidates not
         # already marked. ``index.names`` is None on an opaque body; skip — we
         # cannot isolate any variable affinely there.
@@ -369,7 +404,7 @@ def find_functionally_dependent_names(model, deadline: float | None = None) -> s
         # pinned output wasteful; affine ones are presolve's job.
         if not _body_is_nonlinear(body, index):
             continue
-        coeffs = _isolated_affine_coeffs(body, index)
+        coeffs = _isolated_affine_coeffs(body, index, work=work)
         if coeffs is None:
             continue
         for name in names:

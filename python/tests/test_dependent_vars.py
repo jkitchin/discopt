@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import time
 
+import discopt._relax.dependent_vars as dv
 import discopt.modeling as dm
 import pytest
 from discopt._relax.dependent_vars import (
@@ -32,7 +33,12 @@ from discopt._relax.dependent_vars import (
     dependent_columns_for_model,
     find_functionally_dependent_names,
 )
-from discopt._relax.objective_epigraph import VarNameIndex, _collect_var_names, _occurs
+from discopt._relax.objective_epigraph import (
+    VarNameIndex,
+    WorkCounter,
+    _collect_var_names,
+    _occurs,
+)
 
 
 @pytest.fixture
@@ -248,14 +254,97 @@ class TestScanCost:
         assert names == {"z"}, "the pinned output must still be detected"
         assert wall < 10.0, f"scan took {wall:.1f}s on a 1000-term chain"
 
-    def test_expired_deadline_stops_the_scan(self):
+    def test_exhausted_work_budget_stops_the_scan(self):
         """A blown budget yields the (sound) partial set, not an overrun."""
         m = _chain_model(200)
         assert find_functionally_dependent_names(m) == {"z"}
-        expired = time.perf_counter() - 1.0
-        assert find_functionally_dependent_names(m, deadline=expired) == set()
+        assert find_functionally_dependent_names(m, work_budget=0) == set()
+        assert find_functionally_dependent_names(m, work_budget=50) == set()
 
-    def test_generous_deadline_does_not_change_the_answer(self):
+    def test_generous_work_budget_does_not_change_the_answer(self):
         m = _chain_model(200)
-        deadline = time.perf_counter() + 60.0
-        assert find_functionally_dependent_names(m, deadline=deadline) == {"z"}
+        assert find_functionally_dependent_names(m, work_budget=10**9) == {"z"}
+
+    def test_budget_is_deterministic_not_wall_clock(self):
+        """The same budget must give the same answer on any machine.
+
+        #912: this set steers spatial branching, so a clock-based cut would make
+        the search tree a function of machine speed. The exhaustion point is a
+        pure function of the model and the allowance, so the boundary is
+        reproducible — this pins that by finding it and re-checking it.
+        """
+        m = _chain_model(60)
+        full = find_functionally_dependent_names(m)
+        assert full == {"z"}
+        # Bisect for the smallest allowance that still yields the full answer.
+        lo, hi = 0, 10**7
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if find_functionally_dependent_names(m, work_budget=mid) == full:
+                hi = mid
+            else:
+                lo = mid
+        # Reproducible on both sides of the boundary, every time.
+        for _ in range(5):
+            assert find_functionally_dependent_names(m, work_budget=hi) == full
+            assert find_functionally_dependent_names(m, work_budget=lo) != full
+
+    def test_scan_work_budget_bounds_the_default_path(self):
+        """The default allowance is what the solver relies on; it must be finite
+        and must be what an un-parameterised call spends."""
+        assert 0 < dv._SCAN_WORK_BUDGET < 10**12
+        m = _chain_model(50)
+        assert find_functionally_dependent_names(m) == find_functionally_dependent_names(
+            m, work_budget=dv._SCAN_WORK_BUDGET
+        )
+
+
+@pytest.mark.unit
+class TestWorkCounter:
+    def test_spend_reports_exhaustion(self):
+        w = WorkCounter(10)
+        assert w.spend(4) and not w.exhausted
+        assert w.spend(5) and not w.exhausted
+        assert not w.spend(1) and w.exhausted
+        assert not w.spend(1), "an exhausted counter stays exhausted"
+        assert w.spent == 10
+
+    def test_exhausted_index_reports_opaque_everywhere(self, xyz):
+        """An index that ran out mid-build must not answer from a partial memo.
+
+        Reporting ``None`` (opaque) / ``True`` (might occur) is the sound
+        direction; reporting "no variables" from a half-built memo would make
+        every occurrence test silently wrong.
+        """
+        _, x, y = xyz
+        expr = x * x + y
+        idx = VarNameIndex(expr, work=WorkCounter(1))
+        assert idx.exhausted
+        assert idx.names(expr) is None
+        assert idx.occurs(expr, "x") is True
+        assert idx.occurs(expr, "not_even_a_variable") is True
+        assert len(idx) == 0
+
+    def test_unexhausted_index_is_unaffected_by_a_generous_counter(self, xyz):
+        _, x, y = xyz
+        expr = x * x + y
+        plain = VarNameIndex(expr)
+        metered = VarNameIndex(expr, work=WorkCounter(10**9))
+        assert not metered.exhausted
+        assert metered.names(expr) == plain.names(expr) == frozenset({"x", "y"})
+        assert len(metered) == len(plain)
+
+    def test_index_build_charges_more_than_one_unit_per_node(self, xyz):
+        """The charge must track the union work, not just the node count.
+
+        A per-node-only charge would under-count by the factor that actually
+        hurts: a 1000-name chain unions ~1e6 elements over ~4000 nodes.
+        """
+        m = _chain_model(200)
+        body = m._constraints[0].body
+        w = WorkCounter(10**9)
+        idx = VarNameIndex(body, work=w)
+        assert not idx.exhausted
+        assert w.spent > 10 * len(idx), (
+            f"charged {w.spent} units for {len(idx)} nodes — the union work is not being counted"
+        )

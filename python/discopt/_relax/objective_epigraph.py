@@ -125,6 +125,41 @@ def _name_walk_children(expr):
     return "opaque", ()
 
 
+class WorkCounter:
+    """A deterministic work allowance shared across a family of DAG walks.
+
+    #912's rule for this layer: a pass that decides *how much* analysis to run
+    must spend a deterministic quantity, never a clock, or the search tree
+    becomes a function of machine speed. This counts elementary operations —
+    node visits and name-set element unions — so a caller can bound an analysis
+    phase without consulting ``time.perf_counter()``.
+
+    ``spend`` returns ``False`` once the allowance is gone; every caller here
+    treats that as "abstain", which is the sound direction for all of them.
+    """
+
+    __slots__ = ("remaining", "limit")
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.remaining = int(limit)
+
+    def spend(self, units: int) -> bool:
+        """Charge ``units``; ``False`` once the allowance is exhausted."""
+        if self.remaining <= 0:
+            return False
+        self.remaining -= units
+        return self.remaining > 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    @property
+    def spent(self) -> int:
+        return self.limit - max(0, self.remaining)
+
+
 class VarNameIndex:
     """Memoized variable-name sets for every node of one expression DAG.
 
@@ -148,15 +183,25 @@ class VarNameIndex:
 
     An index is valid only for expressions that are *not mutated* while it
     lives; the analyzers here build one per constraint body and discard it.
+
+    Cost is ``O(nodes)`` in *node visits* but ``O(sum of |names| over nodes)`` in
+    element operations, because each combine node unions its children's name
+    sets — on a 1000-variable sum chain that is ~1e6 set-element ops, not 5e3.
+    An optional :class:`WorkCounter` charges those ops so a caller can bound the
+    build deterministically; when it runs out the index becomes *exhausted* and
+    reports ``None`` (opaque, the sound direction) for every node, which every
+    analyzer here already handles as "nothing provable".
     """
 
-    __slots__ = ("_memo",)
+    __slots__ = ("_memo", "_exhausted")
 
     _memo: Dict[int, Tuple[Any, Optional[frozenset]]]
+    _exhausted: bool
 
-    def __init__(self, root):
+    def __init__(self, root, work: Optional["WorkCounter"] = None):
         # id(node) -> (node, names|None). The node is stored to pin the id.
         memo: Dict[int, Tuple[Any, Optional[frozenset]]] = {}
+        self._exhausted = False
         stack = [(root, False)]
         while stack:
             node, expanded = stack.pop()
@@ -171,6 +216,12 @@ class VarNameIndex:
                     if id(child) not in memo:
                         stack.append((child, False))
                 continue
+            if work is not None and not work.spend(1):
+                # Out of work units: drop the partial memo and report opaque
+                # everywhere rather than answer from an incomplete index.
+                self._exhausted = True
+                memo = {}
+                break
             if kind == "var":
                 memo[key] = (node, frozenset((node.name,)))
                 continue
@@ -182,18 +233,32 @@ class VarNameIndex:
                 continue
             # "combine" with no children collapses to the empty set, matching
             # the union-over-nothing of the recursive walk.
-            acc: Optional[set] = set()
+            acc: set = set()
+            opaque = False
             for child in children:
                 sub = memo[id(child)][1]
                 if sub is None:
-                    acc = None
+                    opaque = True
+                    break
+                if work is not None and not work.spend(len(sub)):
+                    self._exhausted = True
+                    memo = {}
+                    stack.clear()
+                    opaque = True
                     break
                 acc |= sub
-            memo[key] = (node, None if acc is None else frozenset(acc))
+            if self._exhausted:
+                break
+            memo[key] = (node, None if opaque else frozenset(acc))
         self._memo = memo
 
+    @property
+    def exhausted(self) -> bool:
+        """True when the build ran out of work units and reports opaque."""
+        return self._exhausted
+
     def __len__(self) -> int:
-        """Number of distinct DAG nodes indexed."""
+        """Number of distinct DAG nodes indexed (0 when exhausted)."""
         return len(self._memo)
 
     def names(self, expr) -> Optional[frozenset]:
@@ -202,11 +267,17 @@ class VarNameIndex:
         ``expr`` must be a node of the DAG this index was built from; a foreign
         node raises ``KeyError`` rather than silently reporting "no variables"
         (a wrong-but-plausible answer that would make an occurrence test unsound).
+        An *exhausted* index reports ``None`` for everything, foreign or not:
+        it has no memo left to check against, and ``None`` is the sound answer.
         """
+        if self._exhausted:
+            return None
         return self._memo[id(expr)][1]
 
     def occurs(self, expr, varname: str) -> bool:
         """True when ``varname`` *might* appear in ``expr`` (conservative)."""
+        if self._exhausted:
+            return True  # exhausted index — assume it might occur (sound)
         names = self._memo[id(expr)][1]
         if names is None:
             return True  # opaque node — assume it might occur (sound)
