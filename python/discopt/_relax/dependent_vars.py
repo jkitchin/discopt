@@ -48,18 +48,20 @@ remain the correct ones to deprioritize in the lifted/solved model.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 # Reuse the conservative occurrence/constant analyzers proven in the
-# objective-defining-equality relaxation. ``_occurs`` reports "might occur" on
-# any opaque node (the safe direction), and ``_collect_var_names`` returns None
-# there. We do NOT reuse that module's ``_affine_coeff``: it is written for the
-# narrower contract "the whole body is affine in z", so a sibling term that is
-# nonlinear in *other* variables (e.g. ``4243.28/(x0*x1)``) makes it return
+# objective-defining-equality relaxation. ``VarNameIndex`` reports ``None`` for
+# an opaque node, which every query here reads as "might occur" (the safe
+# direction). We do NOT reuse that module's ``_affine_coeff``: it is written for
+# the narrower contract "the whole body is affine in z", so a sibling term that
+# is nonlinear in *other* variables (e.g. ``4243.28/(x0*x1)``) makes it return
 # None even when the target variable itself appears purely affinely. The
 # isolating extractor below short-circuits on "target absent -> coefficient 0",
 # which is what the dependent-output pattern requires.
-from discopt._relax.objective_epigraph import _collect_var_names, _const_value, _occurs
+from discopt._relax.objective_epigraph import VarNameIndex, _const_value
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -74,89 +76,166 @@ from discopt.modeling.core import (
     VarType,
 )
 
+# Traversal cap for :func:`_isolated_affine_coeffs`, in node visits per distinct
+# DAG node. A tree needs exactly one visit per node; sharing multiplies that by
+# the number of distinct paths. Measured over 149,564 equality bodies from 104
+# MINLPLib instances (issue #1104) the worst ratio was 1.0 — the parsed bodies
+# are trees — so this leaves three orders of magnitude of headroom before the
+# conservative abstention can fire.
+_VISIT_BUDGET_PER_NODE = 1000
+_VISIT_BUDGET_FLOOR = 10_000
 
-def _isolated_affine_coeff(expr, varname):
+
+def _isolated_affine_coeffs(expr, index=None):
+    """Isolated affine coefficients of *every* variable in ``expr``, in one pass.
+
+    Returns a mapping ``name -> coeff`` where ``coeff`` is a float when ``name``
+    occurs affinely with a constant coefficient, and ``None`` when it occurs
+    nonlinearly (a product carrying it twice, under a power, a nonlinear
+    unary/function, in a denominator, indexed, or inside a reduction). A name
+    absent from the mapping is provably absent from ``expr`` (coefficient 0).
+    Returns ``None`` — "no name can be proven affine here" — when ``expr``
+    contains an opaque node, since occurrence detection must then report "might
+    occur" for every name.
+
+    Unlike a whole-expression affine test, absence short-circuits: a
+    subexpression not containing a name contributes coefficient ``0`` to it
+    regardless of its own nonlinearity. This is what lets a defining equality
+    like ``x6 - sqrt(g(others)) == 0`` report ``coeff[x6] = 1`` even though ``g``
+    is highly nonlinear in the other variables.
+
+    Cost is ``O(nodes)`` on a tree: one top-down traversal carrying the
+    accumulated constant multiplier, with ``O(1)`` occurrence tests from
+    ``index``. The per-name formulation it replaces re-walked the body for each
+    candidate and re-derived occurrence at every level, which is
+    ``O(names x nodes^2)`` — the ``t1000`` non-termination of issue #1104. The
+    traversal is iterative because MINLPLib sum chains are deeper than the
+    default recursion limit.
+
+    The multiplier a node inherits depends on the path taken to reach it, so a
+    *shared* subexpression is visited once per path and the walk is O(paths),
+    not O(nodes). ``_VISIT_BUDGET_PER_NODE`` caps that at a fixed multiple of the
+    DAG size and abstains (returns ``None``) beyond it, so a pathologically
+    shared body degrades to "nothing proven here" instead of to a hang. The cap
+    is on a node counter, not a clock: the detected set must not depend on how
+    fast the machine is (``deterministic=True`` solves reproduce).
+    """
+    if index is None:
+        index = VarNameIndex(expr)
+    if index.names(expr) is None:
+        return None  # opaque node reachable -> nothing provable (see docstring)
+
+    coeffs: dict = {}
+    bad: set = set()
+    budget = _VISIT_BUDGET_PER_NODE * len(index) + _VISIT_BUDGET_FLOOR
+    stack = [(expr, 1.0)]
+    while stack:
+        budget -= 1
+        if budget < 0:
+            return None  # shared-subexpression blowup -> abstain (see docstring)
+        node, mult = stack.pop()
+        names = index.names(node)
+        if not names:
+            continue  # variable-free subtree -> contributes 0 to every name
+        if isinstance(node, Variable):
+            coeffs[node.name] = coeffs.get(node.name, 0.0) + mult
+            continue
+        if isinstance(node, IndexExpression):
+            bad |= names  # indexed occurrence -> not the scalar affine pattern
+            continue
+        if isinstance(node, UnaryOp):
+            if node.op in ("-", "neg"):
+                stack.append((node.operand, -mult))
+            elif node.op in ("+", "pos"):
+                stack.append((node.operand, mult))
+            else:
+                bad |= names  # abs / sin / exp / ... over a variable-carrying arg
+            continue
+        if isinstance(node, BinaryOp):
+            op = node.op
+            if op == "+":
+                stack.append((node.left, mult))
+                stack.append((node.right, mult))
+                continue
+            if op == "-":
+                stack.append((node.left, mult))
+                stack.append((node.right, -mult))
+                continue
+            if op == "*":
+                left_names = index.names(node.left)
+                right_names = index.names(node.right)
+                if left_names and right_names:
+                    bad |= names  # variables on both factors -> nonlinear
+                    continue
+                # Exactly one factor carries variables; the other must be a
+                # constant for any name under it to stay affine.
+                if left_names:
+                    k = _const_value(node.right)
+                    carrier = node.left
+                else:
+                    k = _const_value(node.left)
+                    carrier = node.right
+                if k is None:
+                    bad |= names
+                else:
+                    stack.append((carrier, mult * k))
+                continue
+            if op == "/":
+                if index.names(node.right):
+                    bad |= names  # variable in a denominator -> nonlinear
+                    continue
+                k = _const_value(node.right)
+                if k is None or k == 0.0:
+                    bad |= names
+                else:
+                    stack.append((node.left, mult / k))
+                continue
+            # ``**`` (variable under a power) and unrecognised binary ops.
+            bad |= names
+            continue
+        if isinstance(node, SumExpression):
+            stack.append((node.operand, mult))
+            continue
+        # SumOverExpression (a reduction carrying the name -> not a scalar
+        # coefficient), FunctionCall, or any other node over variables.
+        bad |= names
+
+    for name in bad:
+        coeffs[name] = None
+    return coeffs
+
+
+def _isolated_affine_coeff(expr, varname, index=None):
     """Constant coefficient of ``varname`` in ``expr`` if it occurs *affinely*.
 
     Returns a float ``a`` iff ``expr == a*<varname> + (terms not involving
     varname)``, where those other terms may be arbitrarily nonlinear in *other*
-    variables. Returns ``None`` when ``varname`` occurs nonlinearly (a product
-    carrying it twice, under a power, a nonlinear unary/function, in a
-    denominator, indexed, a reduction, or an opaque node) and ``0.0`` when it is
-    provably absent.
+    variables; ``None`` when ``varname`` occurs nonlinearly or unanalyzably, and
+    ``0.0`` when it is provably absent.
 
-    Unlike a whole-expression affine test, every node first short-circuits on
-    absence: a subexpression not containing ``varname`` contributes coefficient
-    ``0`` regardless of its own nonlinearity. This is what lets a defining
-    equality like ``x6 - sqrt(g(others)) == 0`` report ``coeff[x6] = 1`` even
-    though ``g`` is highly nonlinear in the other variables.
+    Thin single-name view of :func:`_isolated_affine_coeffs`; callers with more
+    than one name to test should use that directly and pay the traversal once.
     """
-    # Absent (and not opaque) -> contributes nothing. ``_occurs`` returns True
-    # on opaque nodes, so reaching past here means varname genuinely occurs.
-    if not _occurs(expr, varname):
-        return 0.0
-    if isinstance(expr, Variable):
-        return 1.0 if expr.name == varname else 0.0
-    if isinstance(expr, IndexExpression):
-        return None  # indexed occurrence -> not the scalar affine pattern
-    if isinstance(expr, UnaryOp):
-        if expr.op in ("-", "neg"):
-            inner = _isolated_affine_coeff(expr.operand, varname)
-            return None if inner is None else -inner
-        if expr.op in ("+", "pos"):
-            return _isolated_affine_coeff(expr.operand, varname)
-        return None  # abs / sin / exp / ... applied to a varname-carrying arg
-    if isinstance(expr, BinaryOp):
-        op = expr.op
-        if op in ("+", "-"):
-            cl = _isolated_affine_coeff(expr.left, varname)
-            cr = _isolated_affine_coeff(expr.right, varname)
-            if cl is None or cr is None:
-                return None
-            return cl - cr if op == "-" else cl + cr
-        if op == "*":
-            lo = _occurs(expr.left, varname)
-            ro = _occurs(expr.right, varname)
-            if lo and ro:
-                return None  # varname on both factors -> nonlinear
-            # Exactly one factor carries varname; the other must be constant.
-            if lo:
-                k = _const_value(expr.right)
-                inner = _isolated_affine_coeff(expr.left, varname)
-            else:
-                k = _const_value(expr.left)
-                inner = _isolated_affine_coeff(expr.right, varname)
-            if k is None or inner is None:
-                return None
-            return k * inner
-        if op == "/":
-            if _occurs(expr.right, varname):
-                return None  # varname in a denominator -> nonlinear
-            k = _const_value(expr.right)
-            inner = _isolated_affine_coeff(expr.left, varname)
-            if k is None or inner is None or k == 0.0:
-                return None
-            return inner / k
-        if op == "**":
-            return None  # varname occurs under a power -> nonlinear
+    coeffs = _isolated_affine_coeffs(expr, index)
+    if coeffs is None:
         return None
-    if isinstance(expr, SumExpression):
-        return _isolated_affine_coeff(expr.operand, varname)
-    if isinstance(expr, SumOverExpression):
-        return None  # reduction carrying varname -> not a scalar coefficient
-    # FunctionCall / opaque node carrying varname -> nonlinear.
-    return None
+    return coeffs.get(varname, 0.0)
+
+
+def _carries(index, node) -> bool:
+    """True when ``node`` references (or might reference) any variable."""
+    names = index.names(node)
+    if names is None:
+        return True  # opaque node — assume it could carry a variable (sound)
+    return bool(names)
 
 
 def _carries_variable(expr) -> bool:
     """True when ``expr`` references (or might reference) any variable."""
-    names = _collect_var_names(expr)
-    if names is None:
-        return True  # opaque node — assume it could carry a variable (sound)
-    return len(names) > 0
+    return _carries(VarNameIndex(expr), expr)
 
 
-def _body_is_nonlinear(expr) -> bool:
+def _body_is_nonlinear(expr, index=None) -> bool:
     """Cheap structural test: does ``expr`` contain genuine nonlinearity?
 
     A *nonlinear* node is a product of two variable-carrying factors, a division
@@ -170,43 +249,68 @@ def _body_is_nonlinear(expr) -> bool:
     and branch order on them is immaterial. Conservative: an unrecognised node
     counts as nonlinear, which can only *add* a variable to the deprioritized
     set — safe under the fallback.
+
+    ``index`` supplies ``O(1)`` variable-carrying tests (built on entry when
+    omitted); the traversal is iterative so a deep sum chain cannot exhaust the
+    recursion limit.
     """
-    if isinstance(expr, (Variable, Constant, Parameter)):
-        return False
-    if isinstance(expr, UnaryOp):
-        if expr.op in ("-", "neg", "+", "pos"):
-            return _body_is_nonlinear(expr.operand)
-        # abs / sin / cos / exp / log ... are nonlinear over a variable argument
-        return _carries_variable(expr.operand)
-    if isinstance(expr, BinaryOp):
-        op = expr.op
-        if op in ("+", "-"):
-            return _body_is_nonlinear(expr.left) or _body_is_nonlinear(expr.right)
-        if op == "*":
-            if _carries_variable(expr.left) and _carries_variable(expr.right):
+    if index is None:
+        index = VarNameIndex(expr)
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (Variable, Constant, Parameter)):
+            continue
+        if isinstance(node, UnaryOp):
+            if node.op in ("-", "neg", "+", "pos"):
+                stack.append(node.operand)
+                continue
+            # abs / sin / cos / exp / log ... are nonlinear over a variable argument
+            if _carries(index, node.operand):
                 return True
-            return _body_is_nonlinear(expr.left) or _body_is_nonlinear(expr.right)
-        if op == "/":
-            if _carries_variable(expr.right):
+            continue
+        if isinstance(node, BinaryOp):
+            op = node.op
+            if op in ("+", "-"):
+                stack.append(node.left)
+                stack.append(node.right)
+                continue
+            if op == "*":
+                if _carries(index, node.left) and _carries(index, node.right):
+                    return True
+                stack.append(node.left)
+                stack.append(node.right)
+                continue
+            if op == "/":
+                if _carries(index, node.right):
+                    return True
+                stack.append(node.left)
+                continue
+            if op == "**":
+                if _carries(index, node.left) or _carries(index, node.right):
+                    return True
+                continue
+            # Unknown binary op over variables -> treat as nonlinear (conservative).
+            if _carries(index, node.left) or _carries(index, node.right):
                 return True
-            return _body_is_nonlinear(expr.left)
-        if op == "**":
-            if _carries_variable(expr.left) or _carries_variable(expr.right):
+            continue
+        if isinstance(node, SumExpression):
+            stack.append(node.operand)
+            continue
+        if isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+            continue
+        if isinstance(node, FunctionCall):
+            if any(_carries(index, a) for a in node.args):
                 return True
-            return False
-        # Unknown binary op over variables -> treat as nonlinear (conservative).
-        return _carries_variable(expr.left) or _carries_variable(expr.right)
-    if isinstance(expr, SumExpression):
-        return _body_is_nonlinear(expr.operand)
-    if isinstance(expr, SumOverExpression):
-        return any(_body_is_nonlinear(t) for t in expr.terms)
-    if isinstance(expr, FunctionCall):
-        return any(_carries_variable(a) for a in expr.args)
-    # Opaque / unrecognised node referencing variables -> nonlinear (sound).
-    return _carries_variable(expr)
+            continue
+        # Opaque / unrecognised node referencing variables -> nonlinear (sound).
+        if _carries(index, node):
+            return True
+    return False
 
 
-def find_functionally_dependent_names(model) -> set:
+def find_functionally_dependent_names(model, deadline: float | None = None) -> set:
     """Names of continuous scalar variables pinned by a nonlinear equality.
 
     Returns the set of variable names ``x`` such that some ``==`` constraint has
@@ -217,6 +321,15 @@ def find_functionally_dependent_names(model) -> set:
     Only scalar (size-1) continuous variables are considered: the affine
     analyzer abstains on indexed/array references, and the single-defining-
     equality pattern is per-scalar.
+
+    ``deadline`` is an optional ``time.perf_counter()`` value past which the
+    scan stops and returns what it has found so far. This runs *before* the
+    branch-and-bound loop arms ``time_limit``, so without a budget a
+    pathologically large model could overrun the user's limit before a single
+    node is explored (issue #1104). Stopping early is sound: the result feeds a
+    deprioritization with a completeness-preserving fallback, so a partial set
+    only changes branch order (the module docstring's soundness argument holds
+    for *any* subset).
     """
     # Candidate names: scalar continuous variables only.
     candidates: set = set()
@@ -235,11 +348,18 @@ def find_functionally_dependent_names(model) -> set:
             continue
         if c.sense != "==":
             continue
+        if deadline is not None and time.perf_counter() >= deadline:
+            # Out of budget: return the (sound) partial set rather than overrun.
+            break
         body = c.body
+        # One memoized occurrence index per body serves every query below —
+        # presence, nonlinearity, and the affine coefficients — so the whole
+        # constraint costs O(nodes) instead of O(candidates x nodes^2).
+        index = VarNameIndex(body)
         # Names actually present in this equality, restricted to candidates not
-        # already marked. ``_collect_var_names`` returns None on an opaque body;
-        # skip — we cannot isolate any variable affinely there.
-        present = _collect_var_names(body)
+        # already marked. ``index.names`` is None on an opaque body; skip — we
+        # cannot isolate any variable affinely there.
+        present = index.names(body)
         if present is None:
             continue
         names = (present & candidates) - dependent
@@ -247,10 +367,13 @@ def find_functionally_dependent_names(model) -> set:
             continue
         # Only a genuinely nonlinear defining equality makes branching on the
         # pinned output wasteful; affine ones are presolve's job.
-        if not _body_is_nonlinear(body):
+        if not _body_is_nonlinear(body, index):
+            continue
+        coeffs = _isolated_affine_coeffs(body, index)
+        if coeffs is None:
             continue
         for name in names:
-            a = _isolated_affine_coeff(body, name)
+            a = coeffs.get(name, 0.0)
             if a is None or a == 0.0 or not np.isfinite(a):
                 continue
             dependent.add(name)

@@ -8190,11 +8190,19 @@ def solve_model(
     # the independent inputs would not (welded-beam / nvs05). Names are mapped
     # to flat columns of the live model at tree setup; deprioritization carries
     # a completeness-preserving fallback, so an empty or imperfect set is safe.
+    # That same "any subset is safe" property is what lets the scan carry a
+    # deadline: it runs before the B&B loop arms ``time_limit``, so an unbudgeted
+    # pass on a large model can blow the user's limit before a single node is
+    # explored (issue #1104 — ``t1000`` overran a 30 s limit by >30x). The budget
+    # is a small slice of the limit, clamped to the time actually left.
     _dependent_var_names: set = set()
     try:
         from discopt._relax.dependent_vars import find_functionally_dependent_names
 
-        _dependent_var_names = find_functionally_dependent_names(model)
+        _dep_budget_s = min(min(max(0.05 * float(time_limit), 1.0), 10.0), _remaining_budget())
+        _dependent_var_names = find_functionally_dependent_names(
+            model, deadline=time.perf_counter() + _dep_budget_s
+        )
     except Exception as _dep_exc:  # pragma: no cover - defensive
         logger.debug("functional-dependency detection skipped: %s", _dep_exc)
 
