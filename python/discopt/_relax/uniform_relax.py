@@ -334,6 +334,61 @@ def _curv_cos(lo: float, hi: float) -> Optional[str]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Derivatives with a VERTICAL TANGENT at an admitted endpoint (issue #1111).
+#
+# Three ``_UNIVARIATE_FN`` derivatives divide by a quantity that is exactly zero at
+# a point the domain guard admits: ``sqrt'`` at ``t = 0`` (``dom_ok`` is
+# ``lo >= 0``) and ``asin'``/``acos'`` at ``|t| = 1`` (``dom_ok`` only constrains
+# ``lo``, so ``hi = 1`` is admitted). Written as a bare ``0.5/np.sqrt(t)`` the
+# f64 division returns the mathematically correct ``+inf`` but ALSO raises
+# ``RuntimeWarning: divide by zero encountered in scalar divide`` on every affected
+# solve — which reads as a defect to a user (issue #1111, motivation 1).
+#
+# The fix is to evaluate the LIMIT explicitly rather than to lean on IEEE
+# division-by-zero — not to suppress the warning. The returned values are
+# bit-identical to what the division produced (``inf`` / ``-inf`` at the
+# singularity, ``nan`` outside the domain, the same quotient inside it), so every
+# downstream ``_finite`` verdict and every emitted row is unchanged.
+#
+# ``acosh`` gets the same treatment for uniformity even though its ``dom_ok``
+# (``lo > 1``) keeps the singular point out of every admitted box.
+# --------------------------------------------------------------------------- #
+def _dsqrt(t: float) -> float:
+    """``d/dt sqrt(t)`` = ``0.5/sqrt(t)``; ``+inf`` at the vertical tangent t=0."""
+    t = float(t)
+    if t > 0.0:
+        return 0.5 / math.sqrt(t)
+    return math.inf if t == 0.0 else math.nan
+
+
+def _dasin(t: float) -> float:
+    """``d/dt asin(t)`` = ``1/sqrt(1-t^2)``; ``+inf`` at the vertical tangents t=±1."""
+    t = float(t)
+    r = 1.0 - t * t
+    if r > 0.0:
+        return 1.0 / math.sqrt(r)
+    return math.inf if r == 0.0 else math.nan
+
+
+def _dacos(t: float) -> float:
+    """``d/dt acos(t)`` = ``-1/sqrt(1-t^2)``; ``-inf`` at the vertical tangents t=±1."""
+    t = float(t)
+    r = 1.0 - t * t
+    if r > 0.0:
+        return -1.0 / math.sqrt(r)
+    return -math.inf if r == 0.0 else math.nan
+
+
+def _dacosh(t: float) -> float:
+    """``d/dt acosh(t)`` = ``1/sqrt(t^2-1)``; ``+inf`` at the vertical tangent t=1."""
+    t = float(t)
+    r = t * t - 1.0
+    if r > 0.0:
+        return 1.0 / math.sqrt(r)
+    return math.inf if r == 0.0 else math.nan
+
+
 # name -> (f, f', curvature, domain_ok(lo) )
 _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
     "exp": (np.exp, np.exp, _curv_const("convex"), lambda lo: True),
@@ -351,7 +406,7 @@ _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
         lambda lo: lo > 0.0,
     ),
     "log1p": (np.log1p, lambda t: 1.0 / (1.0 + t), _curv_const("concave"), lambda lo: lo > -1.0),
-    "sqrt": (np.sqrt, lambda t: 0.5 / np.sqrt(t), _curv_const("concave"), lambda lo: lo >= 0.0),
+    "sqrt": (np.sqrt, _dsqrt, _curv_const("concave"), lambda lo: lo >= 0.0),
     "sin": (np.sin, np.cos, _curv_sin, lambda lo: True),
     "cos": (np.cos, lambda t: -np.sin(t), _curv_cos, lambda lo: True),
     "sinh": (np.sinh, np.cosh, _curv_by_sign(True), lambda lo: True),
@@ -360,13 +415,13 @@ _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
     "atan": (np.arctan, lambda t: 1.0 / (1.0 + t * t), _curv_by_sign(False), lambda lo: True),
     "asin": (
         np.arcsin,
-        lambda t: 1.0 / np.sqrt(1.0 - t * t),
+        _dasin,
         _curv_by_sign(True),
         lambda lo: lo > -1.0,
     ),
     "acos": (
         np.arccos,
-        lambda t: -1.0 / np.sqrt(1.0 - t * t),
+        _dacos,
         _curv_by_sign(False),
         lambda lo: lo > -1.0,
     ),
@@ -378,7 +433,7 @@ _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
     ),
     "acosh": (
         np.arccosh,
-        lambda t: 1.0 / np.sqrt(t * t - 1.0),
+        _dacosh,
         _curv_const("concave"),
         lambda lo: lo > 1.0,
     ),
@@ -1401,6 +1456,139 @@ def _interval_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dic
 
 
 # --------------------------------------------------------------------------- #
+# Vertical-tangent recovery (issue #1111) — default OFF.
+#
+# ``_emit_1d`` places tangents at ``lo``, the midpoint and ``hi``. Where ``f`` is
+# finite at an endpoint but ``f'`` DIVERGES there (a vertical tangent),
+# ``_tangent_row`` returns without emitting and the facet is silently lost, leaving
+# the envelope one-sided on that side (secant + aux interval floor only).
+#
+# Which atoms actually reach that case: ``sqrt`` at ``t = 0`` (``dom_ok`` is
+# ``lo >= 0``), and ``asin``/``acos`` at ``t = +1`` (``dom_ok`` constrains only
+# ``lo``, so ``hi = 1`` is admitted). ``acosh`` and ``log`` do NOT — their
+# ``dom_ok`` is a strict inequality (``lo > 1``, ``lo > 0``), so the singular point
+# is outside every admitted box and the endpoint derivative is finite there. (A
+# finite-but-huge derivative is deliberately out of scope; see below.)
+#
+# Dropping the facet is SOUND but loose, and ``t = 0`` is frequently the
+# interesting point rather than an
+# edge case: the conical-intersection radical of issue #1111 vanishes exactly at
+# the solution, so the box containing the answer is precisely the one that loses
+# the facet (measured there: 1 node / 1.53 s vs 0 nodes / 0.03 s for the
+# radical-free algebraic equivalent).
+#
+# Recovery: emit the tangent at an INTERIOR point ``lo + delta*width`` (or
+# ``hi - delta*width``) instead of at the endpoint.
+#
+# SOUNDNESS. For ``f`` CONCAVE on ``[lo,hi]``, *every* tangent line taken at a
+# point inside ``[lo,hi]`` lies on or above the graph over the whole box —
+# concavity gives ``f(t) <= f(t0) + f'(t0)(t - t0)`` for all ``t`` in the box, for
+# any interior ``t0`` at which ``f`` is differentiable. Convex is the mirror image.
+# The curvature verdict is already PROVEN on this box by the caller, so an interior
+# tangent point is exactly as valid as an endpoint one; nothing about the argument
+# depends on ``t0`` being a corner.
+#
+# WHY THE DIFFERENTIAL TEST IS CHEAP. This path only ever ADDS a row where
+# ``_emit_1d`` previously emitted none — it never modifies, reorders or removes an
+# existing row. So the flag-ON polytope is a SUBSET of the flag-OFF polytope, and
+# the node LP bound can only improve or stay equal. Bound monotonicity is
+# structural, not an empirical claim; what the differential test still has to
+# establish is that the added row does not cut a feasible point, which is the
+# feasible-point sampling below.
+#
+# CHOOSING ``delta`` — a geometric ladder, scale-free. Walk
+# ``delta = 0.5 * 8**-k`` from the smallest step outward and take the FIRST
+# (i.e. the tightest, closest to the endpoint) whose ``|f'(t0)|`` is finite and
+# within ``kappa`` times the box's own slope scale ``max(|secant slope|,
+# |f'(mid)|)``. The cap is RELATIVE to the box, never an absolute constant, so the
+# choice is invariant under rescaling ``f`` or the box. The ladder tops out at
+# ``delta = 1/16`` so it can never coincide with the midpoint tangent that is
+# already emitted, and it runs ONLY when an endpoint tangent was actually dropped —
+# instances that never hit the singular case pay nothing.
+#
+# NOT IN SCOPE: an endpoint whose derivative is finite-but-huge. Moving that
+# tangent inward would LOOSEN a row that exists today.
+# --------------------------------------------------------------------------- #
+#: Ladder depth: ``delta`` ranges over ``0.5*8**-k`` for ``k = 20 … 1``
+#: (``5.5e-19 … 1/16``), smallest first.
+_SINGULAR_TANGENT_LADDER = 20
+#: Default cap on ``|f'(t0)|`` as a multiple of the box's slope scale. A tangent
+#: ~100x steeper than the secant is about the numerical limit worth emitting; the
+#: outward-rounding guard (``envelope_1d_slack``) grows linearly with ``|slope|``,
+#: so an uncapped near-vertical tangent buys tightness with rounding slack.
+_SINGULAR_TANGENT_KAPPA = 100.0
+
+
+def _singular_tangent_enabled() -> bool:
+    """``DISCOPT_SINGULAR_TANGENT=1`` enables vertical-tangent recovery (#1111).
+
+    Default OFF: with the flag unset this module emits exactly the rows it did
+    before #1111 (the endpoint facet stays dropped).
+    """
+    return os.environ.get("DISCOPT_SINGULAR_TANGENT") == "1"
+
+
+def _singular_tangent_kappa() -> float:
+    """Slope cap multiplier; ``DISCOPT_SINGULAR_TANGENT_KAPPA`` overrides it.
+
+    A measurement knob for the §5 panel (the issue asks whether a tighter or
+    looser cap is better), not a user-facing tuning parameter.
+    """
+    raw = os.environ.get("DISCOPT_SINGULAR_TANGENT_KAPPA")
+    if not raw:
+        return _SINGULAR_TANGENT_KAPPA
+    try:
+        val = float(raw)
+    except ValueError:
+        return _SINGULAR_TANGENT_KAPPA
+    return val if math.isfinite(val) and val > 0.0 else _SINGULAR_TANGENT_KAPPA
+
+
+def _interior_tangent_point(
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    lo: float,
+    hi: float,
+    slope: float,
+    edge: int,
+) -> Optional[float]:
+    """Tangent point replacing a dropped vertical-tangent facet, or ``None``.
+
+    ``edge`` is ``-1`` for the ``lo`` endpoint and ``+1`` for ``hi``. Returns the
+    smallest-``delta`` ladder point whose slope is finite and within
+    ``kappa * max(|slope|, |f'(mid)|)``, or ``None`` when no ladder point
+    qualifies (then the facet stays dropped, exactly as before #1111).
+    """
+    width = hi - lo
+    if not (width > 0.0):
+        return None
+    # Slope scale of THIS box: the secant, plus the midpoint derivative (a second
+    # box-intrinsic slope, which covers a box whose secant happens to be flat).
+    try:
+        gm = float(fp(0.5 * (lo + hi)))
+    except (ValueError, ArithmeticError):
+        gm = 0.0
+    scale = abs(slope)
+    if math.isfinite(gm):
+        scale = max(scale, abs(gm))
+    if not (scale > 0.0) or not math.isfinite(scale):
+        return None
+    cap = _singular_tangent_kappa() * scale
+    for k in range(_SINGULAR_TANGENT_LADDER, 0, -1):
+        t0 = lo + (0.5 * 8.0**-k) * width if edge < 0 else hi - (0.5 * 8.0**-k) * width
+        if not (lo < t0 < hi):
+            continue  # delta below the box's f64 resolution -> not an interior point
+        try:
+            g, gp = float(f(t0)), float(fp(t0))
+        except (ValueError, ArithmeticError):
+            continue
+        if not _finite(g, gp) or abs(gp) > cap:
+            continue
+        return t0
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Shared 1-D secant/tangent emission (the composite-envelope math)
 # --------------------------------------------------------------------------- #
 def _emit_1d(
@@ -1452,13 +1640,24 @@ def _emit_1d(
             coeffs, relaxed_rhs(rhs, envelope_1d_slack(slope, lo, hi, flo, fhi, lt.const, rhs))
         )
 
-    def _tangent_row(t0: float, sign: float) -> None:
+    def _tangent_row(t0: float, sign: float, edge: int = 0) -> None:
         # sign*(w - (f(t0) + f'(t0)(t - t0))) >= 0  ->  -sign*w + sign*f'(t0)*t <= ...
+        # ``edge`` is -1 at ``lo``, +1 at ``hi``, 0 for an interior point.
         try:
             g, gp = float(f(t0)), float(fp(t0))
         except (ValueError, ArithmeticError):
             return
         if not _finite(g, gp):
+            # #1111 (default OFF): ``f`` finite at the endpoint but ``f'`` divergent
+            # is a VERTICAL TANGENT, not an evaluation failure. Re-anchor the facet
+            # at an interior point instead of dropping it — sound for the same
+            # reason the endpoint tangent is (see the module note above), and it
+            # only ADDS a row where none was emitted. Recurse with ``edge=0`` so the
+            # replacement point can never trigger a second search.
+            if edge != 0 and _finite(g) and not math.isfinite(gp) and _singular_tangent_enabled():
+                t0i = _interior_tangent_point(f, fp, lo, hi, slope, edge)
+                if t0i is not None:
+                    _tangent_row(t0i, sign, 0)
             return
         intercept = g - gp * t0  # tangent line: gp*t + intercept
         # sign*w >= sign*(gp*t + intercept), with t = lt (cols) + lt.const:
@@ -1473,14 +1672,10 @@ def _emit_1d(
         )
 
     mid = 0.5 * (lo + hi)
-    if curv == "convex":
-        _secant_row(+1.0)  # w <= secant
-        for t0 in (lo, mid, hi):
-            _tangent_row(t0, +1.0)  # w >= tangent
-    else:  # concave
-        _secant_row(-1.0)  # w >= secant
-        for t0 in (lo, mid, hi):
-            _tangent_row(t0, -1.0)  # w <= tangent
+    sgn = +1.0 if curv == "convex" else -1.0
+    _secant_row(sgn)  # convex: w <= secant; concave: w >= secant
+    for t0, edge in ((lo, -1), (mid, 0), (hi, +1)):
+        _tangent_row(t0, sgn, edge)  # convex: w >= tangent; concave: w <= tangent
     return True
 
 
