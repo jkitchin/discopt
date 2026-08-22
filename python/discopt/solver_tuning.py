@@ -1365,10 +1365,19 @@ class SolverTuning:
     :attr:`singular_tangent_kappa` shows the best static offset is problem-dependent
     by orders of magnitude, with both ends of the range degenerate. A static geometric
     anchor cannot be right for every box. What the measurements point at instead is
-    placing the tangent *where the LP binds* — lazily, at the incumbent LP point, the
-    way ``MccormickLPRelaxer._separate_convex``'s Kelley loop already handles composite
-    convex lifts — which also avoids the specific cost panel 1 charged this flag for,
-    an eager extra row at every node. That is the open question #1111 leaves behind,
+    placing the tangent *where the LP binds* rather than at a geometric offset — which
+    is what ``MccormickLPRelaxer._separate_convex``'s Kelley loop already does for
+    composite convex/concave lifts (``concave: d <= g(x0) + grad g(x0)·(x - x0)`` at
+    the LP point ``x0``). The soundness argument carries over unchanged — every tangent
+    of a concave ``f`` is a global overestimator — and lazy separation also avoids the
+    specific cost panel 1 charged this flag for, an eager extra row at every node.
+
+    **This is a hypothesis to test, not a known fix, and one caveat is already
+    visible.** Lazy placement does not dodge the singularity: on ``kriging_peaks`` the
+    binding point is *near* the endpoint but the gain collapses for ``delta`` below
+    ~1e-5, so an LP point landing on or inside that radius needs the same conditioning
+    guard this cap provides. What lazy separation removes is the need to *guess* the
+    offset, not the degeneracy itself. That is the open question #1111 leaves behind,
     and this flag is the lever for measuring it.
 
     Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome. Note the two #581

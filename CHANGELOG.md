@@ -305,9 +305,12 @@ The release procedure that produces these entries is documented in
   The direction the evidence points is to stop placing the tangent geometrically and
   place it *where the LP binds* — lazily at the incumbent LP point, as
   `MccormickLPRelaxer._separate_convex`'s Kelley loop already does for composite
-  convex lifts — which also avoids the cost panel 1 charged this flag for, an eager
-  extra row at every node. That remains open; the flag stays default-OFF as its
-  measurement lever.
+  convex/concave lifts — which also avoids the cost panel 1 charged this flag for, an
+  eager extra row at every node. That is a hypothesis with a clear entry experiment,
+  not a known fix: lazy placement does not dodge the singularity, since the gain still
+  collapses for offsets below ~1e-5 and an LP point inside that radius needs the same
+  conditioning guard. It remains open; the flag stays default-OFF as its measurement
+  lever.
 
 ### Removed
 
