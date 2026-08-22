@@ -5219,8 +5219,22 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     )
 
 
-#: Fraction of the caller's time limit the #1059 auto-route may spend before the
-#: fallback takes over. The §5 graduation panel measured the failure this bounds:
+#: Fraction of the caller's time limit at which the #1059 auto-route is judged.
+#: Under the #1066 guard (:class:`_RouteProgressGuard`) this is the *checkpoint*
+#: -- the route is untouched before it and must show progress after it. With
+#: ``DISCOPT_CONVEX_ROUTE_GUARD=0``, or for a routed method that carries no
+#: ``termination_hook``, it is the older hard wall it was introduced as.
+#:
+#: The paragraph below is the #1059 rationale, kept because it still explains
+#: why the route is judged at all. Its ``alan`` evidence has since expired:
+#: measured 2026-08-21, ``alan``'s OA arm returns in **0.5 s** with
+#: ``bound=None``, not after the whole budget. And its claim that the class the
+#: route exists for "certifies well inside" the split is what #1066 falsified --
+#: ``syn40m`` certifies at 43.5 s of 60, i.e. outside it, which is why the wall
+#: became a progress test rather than a bigger fraction.
+#:
+#: Original #1059 rationale -- the §5 graduation panel measured the failure this
+#: bounds:
 #: on ``alan`` (a 9-variable convex MIQP) the routed OA path burned the ENTIRE
 #: 180 s budget and returned an uncertified 3.000, where the default spatial path
 #: certifies 2.925 in 0.18 s -- reproducibly, 3/3 reps. Handing OA the whole
@@ -5235,6 +5249,232 @@ _CONVEX_ROUTE_BUDGET_FRACTION = 0.5
 #: routed (uncertified) result is returned as-is rather than being replaced by a
 #: fallback that is itself out of time.
 _CONVEX_ROUTE_FALLBACK_FLOOR_S = 1.0
+
+#: How much the routed solve's relative gap must shrink across one look-back
+#: window for the route to keep running past the checkpoint (#1066).
+_CONVEX_ROUTE_MIN_GAP_IMPROVEMENT = 0.25
+
+#: That look-back window, as a fraction of the checkpoint.
+_CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION = 0.5
+
+
+def _convex_route_progress_guard_enabled() -> bool:
+    """Is the #1066 progress-gated route budget switched on?
+
+    Changing how much budget the route gets changes the bounds that come back,
+    so this is CLAUDE.md §5 regime 2. It graduated to default-on by the panel
+    below; ``DISCOPT_CONVEX_ROUTE_GUARD=0`` still restores the fixed
+    :data:`_CONVEX_ROUTE_BUDGET_FRACTION` split, and that path is kept intact
+    and tested. Read per call, not cached at import, so a test can flip it
+    without reloading the module.
+
+    Graduation panel (2026-08-22): 79 instances -- the #1066 reporter's 15 at
+    their reported limits, plus the 64 in-repo corpus instances at 20 s -- run
+    OFF/ON back to back per instance behind a load gate, scored against
+    ``minlplib.solu`` in each model's own sense
+    (``scratchpad/issue1066/grad_panel_v2.json``):
+
+    ==========================  =========  =========
+    criterion                   OFF        ON
+    ==========================  =========  =========
+    certified                   55 / 79    **56 / 79**
+    total wall                  1817.3 s   **1799.5 s**
+    certificates lost           --         0
+    incumbents worse            --         0
+    dual bounds tighter/looser  --         6 / 3
+    ==========================  =========  =========
+
+    290 soundness checks executed, 0 violations: no incumbent beat its reference
+    optimum, no dual bound crossed one, and no row lost a dual bound it had. The
+    certificate gained is ``syn40m``, the row #1066 was opened about; the guard
+    fired on 11 instances across the syn/rsyn/squfl/portfol/clay/cvxnonsep/tls
+    families, so what it buys is not confined to that row.
+    """
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_GUARD", "1") != "0"
+
+
+class _RouteProgressGuard:
+    """Stop the #1059 auto-route once it stops making progress -- not on a clock.
+
+    :data:`_CONVEX_ROUTE_BUDGET_FRACTION` cuts the route off at a fixed half of
+    the budget no matter what it is doing. That wall is blind in both
+    directions, and both failures were measured on the #1066 reporter panel
+    (15 convex MINLPLib instances, default settings, 60 s; 600 s on two rows):
+
+    * It cuts off a route that is converging. ``syn40m``'s relative gap falls
+      0.770 -> 0.391 -> 0.147 and OA certifies the oracle optimum
+      67.713256 at **43.5 s** -- but the wall lands at 30 s, so the panel
+      reported ``feasible`` 58.210 and the fallback could not certify either.
+    * It lets a dead route run to the wall. ``portfol_classical050_1`` sits at
+      relative gap 0.0045 from iteration 30 through 33 -- identical bounds,
+      154 cuts per iteration buying nothing -- and still holds its budget for
+      the full 30 s. ``alan`` holds a gap of 1.0 flat.
+
+    So the discriminator is *progress*, not gap level, and not the clock. This
+    guard is a ``termination_hook``: it never fires before the checkpoint (so
+    behaviour up to it is exactly the fixed split's), and from the checkpoint
+    on it lets the route continue only while the route keeps *earning* the
+    budget -- the relative gap must have shrunk by
+    :data:`_CONVEX_ROUTE_MIN_GAP_IMPROVEMENT` across the trailing window.
+
+    **Insufficient evidence is abandon, not continue.** A route that has not
+    produced two finite dual bounds by the checkpoint has shown the router
+    nothing, and the fallback is the known-certifying path. This is not
+    hypothetical: on ``rsyn0830m``/``rsyn0840m``/``rsyn0820m02m``/``rsyn0820m``
+    at 60 s the OA loop completes exactly **two** iterations, so it offers one
+    finite gap observation and no trend at all. Treating that as progress would
+    hand the whole budget to a loop that cannot iterate and leave the fallback
+    nothing -- ``rsyn0840m`` would lose the 151.97 incumbent it reports today.
+
+    **Abandoning is not enough; it has to happen on time.** Those same two-iteration
+    ``rsyn`` rows are why this guard also needs :func:`~discopt.solvers.oa.solve_oa`'s
+    ``master_checkin_deadline``. A ``termination_hook`` only runs at the top of an OA
+    iteration, and OA's first master expands to fill the budget it is handed, so
+    simply widening the route from half the limit to all of it pushed the guard's
+    second call from ~30 s out to ~55 s of a 60 s limit. It still said abandon --
+    too late to leave the fallback its reserve, and ``rsyn0840m``'s incumbent
+    collapsed from 151.97 to -11.41 on a maximization model. The checkpoint is
+    therefore passed to OA as a soft master deadline as well as being the instant
+    this hook starts judging. See ``docs/dev/performance-plan.md`` §22.4.
+
+    Replaying this guard against every recorded trace on that panel
+    (``scratchpad/issue1066/charac.json``, 15 instances x 2 arms; the replay is
+    exact, because up to the instant the guard fires the run it judges *is* the
+    recorded full-budget run):
+
+    ======================  ==========  ==========
+    criterion               fixed 50%   guarded
+    ======================  ==========  ==========
+    certified               7 / 15      **8 / 15**
+    total wall              1388.2 s    **1376.4 s**
+    rows left with no dual bound     0  0
+    ======================  ==========  ==========
+
+    That replay scored certificates and wall only -- it never scored incumbent
+    quality, which is exactly why it missed the ``rsyn0840m`` collapse above and
+    why graduation is decided on a live A/B panel rather than on it. Handing the
+    route the whole budget unconditionally was measured too and is *worse*: it
+    loses ``squfl015-060``, where OA burns all 600 s uncertified and the fallback
+    certifies in 37.0 s.
+    """
+
+    def __init__(
+        self,
+        time_limit: float,
+        *,
+        check_fraction: Optional[float] = None,
+        min_improvement: Optional[float] = None,
+        window_fraction: Optional[float] = None,
+    ) -> None:
+        self.time_limit = float(time_limit)
+        limit = self.time_limit
+        fraction = (
+            _CONVEX_ROUTE_BUDGET_FRACTION if check_fraction is None else float(check_fraction)
+        )
+        # The same expression the fixed split used, so "never fires before the
+        # checkpoint" means "never fires before the old wall".
+        self.checkpoint = max(limit * fraction, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
+        self.window = self.checkpoint * (
+            _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION
+            if window_fraction is None
+            else float(window_fraction)
+        )
+        self.min_improvement = (
+            _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT if min_improvement is None else float(min_improvement)
+        )
+        #: ``(elapsed, relative_gap)`` for every iteration that had a finite gap.
+        self.history: list[tuple[float, float]] = []
+        self.fired_at: Optional[float] = None
+        self.reason: Optional[str] = None
+        self.call_count = 0
+
+    def __call__(self, context: Mapping[str, Any]) -> bool:
+        # Deliberately unguarded: this hook reads a context this package builds,
+        # so a missing key is our bug and must surface (CLAUDE.md §7). The OA
+        # driver wraps a raising hook into a RuntimeError rather than losing it.
+        self.call_count += 1
+        elapsed = float(context["elapsed"])
+        gap = context["relative_gap"]
+        if (
+            gap is not None
+            and context["current_dual_bound"] is not None
+            and context["current_primal_bound"] is not None
+        ):
+            self.history.append((elapsed, float(gap)))
+        if elapsed < self.checkpoint:
+            return False
+        stop, reason = self._verdict(elapsed)
+        if stop:
+            self.fired_at = elapsed
+            self.reason = reason
+            logger.info(
+                "Convex MINLP route stopped at %.1fs of %.1fs (%s); "
+                "handing the remaining budget to the fallback",
+                elapsed,
+                self.time_limit,
+                reason,
+            )
+        return stop
+
+    def _verdict(self, now: float) -> tuple[bool, Optional[str]]:
+        """Has the route earned the rest of the budget as of ``now``?"""
+        if len(self.history) < 2:
+            return True, (
+                f"only {len(self.history)} finite dual-bound observation(s) by "
+                f"{now:.1f}s -- no trend to judge"
+            )
+        latest_gap = self.history[-1][1]
+        if latest_gap <= 0.0:
+            # Converged; the loop's own termination test owns this.
+            return False, None
+        cutoff = now - self.window
+        earlier = [gap for when, gap in self.history[:-1] if when >= cutoff]
+        if not earlier:
+            return True, f"no gap observation inside the trailing {self.window:.1f}s window"
+        reference = max(earlier)
+        if latest_gap <= (1.0 - self.min_improvement) * reference:
+            return False, None
+        return True, (
+            f"relative gap {latest_gap:.4g} vs {reference:.4g} over the trailing "
+            f"{self.window:.1f}s -- under the {self.min_improvement:.0%} improvement "
+            f"the route must show to keep the budget"
+        )
+
+
+def _route_progress_guard_options(
+    mip_nlp_options: Optional[Mapping[str, Any]],
+    *,
+    method_key: Any,
+    time_limit: float,
+) -> tuple[Optional[Mapping[str, Any]], Optional["_RouteProgressGuard"]]:
+    """Install the #1066 guard for an auto-routed solve, or decline to.
+
+    Returns ``(options, guard)``. A ``guard`` of ``None`` means the caller keeps
+    the fixed :data:`_CONVEX_ROUTE_BUDGET_FRACTION` split -- the guard declines
+    when it is switched off, when the routed method is not the one that carries
+    a ``termination_hook``, or when the caller supplied a termination hook of
+    their own (theirs wins; two hooks racing to stop the same loop is not a
+    contract worth having). The caller's mapping is never mutated.
+    """
+    if not _convex_route_progress_guard_enabled():
+        return mip_nlp_options, None
+    if method_key != "oa":
+        return mip_nlp_options, None
+    if mip_nlp_options is not None and mip_nlp_options.get("termination_hook") is not None:
+        return mip_nlp_options, None
+    guard = _RouteProgressGuard(time_limit)
+    options = dict(mip_nlp_options or {})
+    options["termination_hook"] = guard
+    # A hook that only runs at the top of an OA iteration cannot budget anything
+    # unless the loop actually gets back there. OA's first master expands to fill
+    # whatever budget it is handed (``_MASTER_NO_INCUMBENT_BUDGET_FRAC``), so
+    # widening the route from half the limit to all of it also widened the master
+    # -- on ``rsyn0840m`` the guard's second call arrived at 55.1s of a 60s limit
+    # and abandoning there left the fallback ~5s, which cost the row its incumbent
+    # (151.97 -> -11.41 on a maximization model). Telling OA when we intend to
+    # look restores the reserve without capping masters in general.
+    options["master_checkin_deadline"] = guard.checkpoint
+    return options, guard
 
 
 def _route_result_is_certified(result, gap_tolerance: float) -> bool:
@@ -7332,12 +7572,27 @@ def solve_model(
         # An EXPLICIT solver="mip-nlp" gets the whole budget: the caller chose the
         # algorithm and there is no fallback to reserve for. Only the auto-route
         # is budgeted.
+        #
+        # #1066: the auto-route is budgeted by PROGRESS where it can be. The
+        # guard gets the whole limit and gives back whatever it has not earned,
+        # which both lets a converging route finish (``syn40m`` certifies at
+        # 43.5 s of 60) and takes the budget off a stalled one before the old
+        # 50% wall would have (``portfol_classical050_1`` at 30.5 s). When the
+        # guard declines -- flag off, non-OA method, caller's own hook -- the
+        # fixed split stands exactly as before.
         _route_budget = time_limit
+        _route_guard: Optional[_RouteProgressGuard] = None
         if _auto_route_reason is not None:
-            _route_budget = max(
-                time_limit * _CONVEX_ROUTE_BUDGET_FRACTION,
-                min(time_limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S),
+            mip_nlp_options, _route_guard = _route_progress_guard_options(
+                mip_nlp_options,
+                method_key=mip_nlp_method_key,
+                time_limit=time_limit,
             )
+            if _route_guard is None:
+                _route_budget = max(
+                    time_limit * _CONVEX_ROUTE_BUDGET_FRACTION,
+                    min(time_limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S),
+                )
         _route_t0 = time.perf_counter()
         _mip_nlp_result = solve_mip_nlp(
             model,

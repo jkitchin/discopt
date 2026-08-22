@@ -3871,3 +3871,240 @@ exactly equal.
 Disposition: bound-neutral (§5 regime 1), default-on, legacy path retained as the
 fallback for an empty `dual` and reachable via `DISCOPT_MILP_RC_FIX_REFACTOR=1`
 for the differential test.
+
+## 22. #1066 route budget: the wall is blind, but capping the OA master is not the fix (2026-08-21)
+
+The #1066 reporter panel — 15 convex MINLPLib instances (`syn`/`rsyn`, `squfl`,
+`portfol_classical050_1`, `alan`) at default settings, `gap_tolerance=1e-4`,
+`time_limit=60` (600 s on two rows) — still returned **7/15 certified** on
+`main` after every linked work item (#1059–#1065) had merged. Two hypotheses
+were raised against those rows. One survived; the other is falsified here, and a
+claim published earlier in the same session is retracted with it.
+
+### 22.1 Confirmed: the fixed 50 % route budget cuts off routes that are converging
+
+`_CONVEX_ROUTE_BUDGET_FRACTION = 0.5` hands the #1059 auto-route half the
+caller's limit and reserves the rest for the spatial fallback. Attribution on
+`syn40m` (three arms, interleaved, load recorded):
+
+| arm | status | objective | wall |
+|---|---|---|---|
+| default (route gets 30 s) | feasible, uncertified | 58.210 | 61.7 s |
+| route budget = 1.0 | **optimal** | 67.71325583 | 32.9 s |
+| explicit `solver="mip-nlp"` | **optimal** | 67.71325583 | 42.3 s |
+
+Published optimum 67.713256. OA certifies this instance at 33–43 s; the wall
+lands at 30 s, so neither path certifies and the panel reports a 17 % gap.
+
+The justification recorded on the constant no longer holds either. It cites
+`alan` as a case where "the routed OA path burned the ENTIRE 180 s budget";
+`alan`'s OA arm now returns in **0.5 s** with `bound=None`, and the spatial path
+certifies 2.925 in 0.2 s / 13 nodes. The constant is defending against a failure
+that has since been fixed elsewhere, while causing a new one.
+
+Full 15 × 2 characterization (`t_oa`/`cert_oa` = explicit OA on the whole budget,
+`t_sp`/`cert_sp` = the spatial path with the route disabled):
+
+| instance | T | t_oa | cert_oa | t_sp | cert_sp |
+|---|---|---|---|---|---|
+| syn40m | 60 | 43.5 | **True** | 60.9 | False |
+| rsyn0820m | 60 | 60.9 | False | 63.9 | False |
+| rsyn0830m | 60 | 60.3 | False | 64.2 | False |
+| rsyn0840m | 60 | 60.6 | False | 62.2 | False |
+| rsyn0820m02m | 60 | 60.4 | False | 71.8 | False |
+| squfl025-040 | 60 | 60.2 | False | 60.6 | False |
+| portfol_classical050_1 | 60 | 60.4 | False | 63.0 | False |
+| alan | 60 | 0.5 | False | 0.2 | **True** |
+| rsyn0805m | 60 | 1.1 | **True** | 60.4 | False |
+| rsyn0810m | 60 | 1.3 | **True** | 63.1 | False |
+| rsyn0815m | 60 | 15.9 | **True** | 60.2 | False |
+| syn30m | 60 | 1.5 | **True** | 28.4 | **True** |
+| syn20m02m | 60 | 10.7 | **True** | 60.7 | False |
+| squfl020-150 | 600 | 602.0 | False | 609.7 | False |
+| squfl015-060 | 600 | 600.8 | False | 37.0 | **True** |
+
+**Handing the route the whole budget is not the fix.** Scored offline against
+these traces, `f = 1.0` gains `syn40m` and *loses* `squfl015-060`, where OA burns
+all 600 s uncertified and the spatial path certifies in 37.0 s — a wash on count
+and a loss on wall. The wall is blind in both directions, and both directions
+cost something.
+
+The discriminator is **progress, not gap level**. At the 50 % checkpoint
+`syn40m` sits at relative gap 0.147 but is moving fast (0.770 → 0.391 → 0.147),
+while `portfol_classical050_1` sits at 0.0045 and is *completely stalled* —
+identical bounds from iteration 30 through 33, 154 cuts per iteration buying
+nothing, final `bound=None`. A gap-*level* rule (θ = 0.2) extends `portfol` and
+costs it its dual bound; a progress rule does not. Scored over all 15 traces:
+
+| policy | certified | wall | rows with no dual bound |
+|---|---|---|---|
+| fixed f = 0.5 (shipping) | 7 | 1388.2 s | 0 |
+| fixed f = 0.75 | 8 | 1521.6 s | 0 |
+| fixed f = 1.0 | 7 | 1634.6 s | 1 |
+| gap-level f0 = 0.5, θ = 0.2 | 8 | 1372.1 s | 1 |
+| **progress-gated f0 = 0.5, δ = 0.25** | **8** | **1376.4 s** | **0** |
+
+Shipped as `DISCOPT_CONVEX_ROUTE_GUARD` / `_RouteProgressGuard`: the route gets
+the whole limit and an injected OA `termination_hook` that never fires before
+the old checkpoint and then hands back whatever the route has not earned.
+**Insufficient evidence is abandon, not continue** — on the four `rsyn` rows the
+OA loop completes two iterations in 60 s, offering one finite gap observation and
+no trend, and treating that as progress would leave the fallback nothing.
+
+### 22.2 FALSIFIED: capping the OA master to force more iterations
+
+**Hypothesis.** On `rsyn0820m`/`rsyn0830m`/`rsyn0840m`/`rsyn0820m02m` the OA loop
+completes only two iterations in 60 s because a single master MILP consumes
+almost the whole budget (`_MASTER_NO_INCUMBENT_BUDGET_FRAC = 0.9`, #1062). A
+truncated master still yields a valid dual bound for a relaxation of the MINLP,
+so capping it per call should buy many more cut rounds and a tighter bound.
+
+**Kill criterion** (stated before the run): *if capping the master leaves the
+dual bound no better, or costs the incumbent, on these rows, the hypothesis is
+dead.*
+
+**Result: both arms fired the kill criterion.** All four instances are
+MAXIMIZE, so the dual bound is an upper bound and *smaller is tighter*:
+
+| instance | optimum | arm | objective | dual bound | iterations |
+|---|---|---|---|---|---|
+| rsyn0840m | 325.55 | base | −11.413 | 759.439 | 2 |
+| | | cap 0.15 | −11.413 | 793.233 ✗ | 7 |
+| | | cap 0.30 | −11.413 | 669.653 ✓ | 4 |
+| rsyn0830m | 510.07 | base | **497.875** | 728.056 | 2 |
+| | | cap 0.15 | 296.403 ✗ | 849.534 ✗ | 7 |
+| | | cap 0.30 | 296.403 ✗ | 780.073 ✗ | 4 |
+| rsyn0820m02m | 1092.09 | base | −84.863 | 5136.400 | 2 |
+| | | cap 0.15 | −83.720 | 5406.735 ✗ | 7 |
+| | | cap 0.30 | −83.720 | 5152.472 ✗ | 4 |
+| rsyn0820m | 1150.30 | base | 1120.012 | **1184.479** | 2 |
+| | | cap 0.15 | 1120.012 | 1436.551 ✗ | 7 |
+| | | cap 0.30 | 1120.012 | 1426.337 ✗ | 4 |
+
+`CHECKS_EXECUTED 24`, all rows sound against `minlplib.solu`. The mechanism
+works — capping does produce 2 → 4 or 7 iterations — but **more rounds bought
+weaker cuts, not better bounds**: the bound is worse on 7 of 8 arm/instance
+pairs, and the single improvement (`rsyn0840m` at cap 0.30) is contradicted by
+cap 0.15 on the same instance, so it is not an effect. `rsyn0830m`'s incumbent
+regresses by 200 units under both caps. The master cap does not ship.
+
+The generalizable lesson: on these instances the OA master's *time* is not the
+scarce resource — the *strength of the cut set* is. A master truncated before it
+proves optimality returns a bound from a partially explored MILP tree, and
+iterating that faster compounds the weakness instead of amortizing it.
+
+### 22.3 Retraction
+
+Earlier in the same session I stated that OA performs "exactly one master MILP
+solve in the entire 60 s" on `rsyn0830m`/`rsyn0840m`/`rsyn0820m02m`. That was
+inferred from characterization traces that carried a single trace point, and it
+is **wrong**: the cleaner low-load `base` arm above measures **two** iterations
+and two master calls on all four `rsyn` rows. The substantive observation — that
+the OA loop barely iterates on this class — stands; the count does not.
+
+### 22.4 The guard needs OA to check in, or it arrives too late (2026-08-21)
+
+The first graduation panel for `DISCOPT_CONVEX_ROUTE_GUARD` (v1, log
+`scratchpad/issue1066/grad_panel_v1_stale.log`) was stopped after ten rows
+because those ten rows falsified the v1 design. Both arms of the same
+interleaved run, at `time_limit=60`, `gap_tolerance=1e-4`, load 8.1–9.9. Every
+instance here is a **maximization** model, so a higher objective is better and a
+*lower* dual bound is tighter:
+
+| instance | OFF obj | ON obj | OFF bound | ON bound | OFF wall | ON wall | guard |
+|---|---|---|---|---|---|---|---|
+| syn40m | 58.2096 | **67.7133 (cert)** | 68.2186 | 67.7133 | 61.6 | **33.5** | 4 calls, no fire |
+| rsyn0820m | 1130.1620 | 1120.0124 | 1420.8056 | 1184.4534 | 61.8 | 60.8 | 2 calls, no fire |
+| rsyn0830m | 497.8750 | 497.8750 | 766.8364 | 729.1202 | 64.4 | 70.6 | fired 54.61 |
+| rsyn0840m | 151.9691 | **−11.4133** | 814.2617 | 764.2488 | 61.0 | 64.9 | fired 55.13 |
+| rsyn0820m02m | −84.8635 | −84.8635 | 5257.0875 | 5091.9553 | 60.3 | 70.5 | fired 54.73 |
+
+The bound moved the right way on every row and `syn40m` gained its certificate,
+but `rsyn0840m` lost its incumbent outright and `rsyn0820m` lost 10 units. Under
+§5 bar 1 ("objective drift within tolerance") that is a failing panel, and the
+v1 flag would have stayed OFF.
+
+**Attribution.** The `fired` column is the mechanism. `_MASTER_NO_INCUMBENT_BUDGET_FRAC`
+gives the first master `0.9 × remaining`, so widening the route's budget from
+`0.5 × time_limit` to the whole limit also widened the first master from ~27 s to
+~54 s. The `termination_hook` only runs at the top of an OA iteration, so on the
+`rsyn` rows the guard's *second* call did not arrive until ~55 s of a 60 s limit.
+Abandoning there is worse than never having tried: the spatial fallback inherits
+~5 s instead of the 30 s the fixed split used to hand it, and never finds the
+incumbent it finds under OFF. The guard was not wrong about those rows — it was
+right and late.
+
+**Why the offline replay missed it.** `scratchpad/issue1066/guard_replay.py`
+scored the recorded OA gap traces for certificates and wall only. It never scored
+incumbent quality, so it was structurally blind to a policy that trades the
+fallback's incumbent for a tighter dual bound, and it scored all four `rsyn` rows
+"same". A replay can only falsify what it scores; this is §6 in a form that
+passes its own executed-assertion count.
+
+**The fix, and why it is not the falsified master cap.** `solve_oa` takes an
+optional `master_checkin_deadline` (seconds of elapsed OA time). `_master_time_budget`
+clamps a master solve so the loop returns to the top of an iteration by that
+deadline, and the clamp lifts once the deadline passes. The auto-route sets it to
+the guard's checkpoint. §22.2 falsified a *different* intervention: capping every
+master to a fraction of remaining, which forced more rounds of weaker cuts and cost
+`rsyn0830m` 200 units of objective. This truncates at most the one master that
+would cross the point where the caller has already said it will decide, and only
+while the route has shown no progress. It is refused without a `termination_hook`
+to read it, because a master truncation nobody acts on is exactly §22.2.
+
+**Entry experiment** (stated kill criterion: if `rsyn0840m`'s ON incumbent does
+not return to ≈151.97 while `syn40m` still certifies, the design is dead and the
+flag stays OFF). Interleaved, `CHECKS_EXECUTED 8`, `VIOLATIONS 0`,
+log `scratchpad/issue1066/entry_v2.log`:
+
+| instance | arm | status | objective | bound | wall | guard |
+|---|---|---|---|---|---|---|
+| syn40m | off | feasible | 58.2096 | 68.2186 | 61.7 | — |
+| syn40m | on | **optimal, certified** | 67.7133 | 67.7133 | 41.3 | 5 calls, no fire |
+| rsyn0840m | off | feasible | 151.9691 | 818.2426 | 62.7 | — |
+| rsyn0840m | on | feasible | **151.9691** | 802.0252 | 61.2 | fired **30.53** |
+
+The fire time moved from 55.1 s to 30.5 s, `rsyn0840m`'s incumbent is bit-identical
+to its OFF arm, and `syn40m` still certifies. `syn40m`'s masters never approach the
+checkpoint, so the clamp never binds there — which is the property that lets one
+mechanism serve both rows. Graduation is scored on the full v2 panel
+(`grad_panel_v2.json`), not on this experiment.
+
+### 22.5 `DISCOPT_CONVEX_ROUTE_GUARD` graduates default-on (2026-08-22)
+
+Panel: 79 instances -- the #1066 reporter's 15 at their reported limits (60 s,
+600 s on `squfl015-060` and `squfl020-150`) plus the 64 in-repo corpus instances
+at 20 s. Arms run back to back per instance so a load excursion hits both, each
+behind a `load1 <= 10` gate, every row scored against `minlplib.solu` in the
+model's own sense. Log `scratchpad/issue1066/grad_panel_v2.log`, data
+`grad_panel_v2.json`.
+
+| criterion | OFF | ON |
+|---|---|---|
+| certified | 55 / 79 | **56 / 79** |
+| total wall | 1817.3 s | **1799.5 s** |
+| certificates gained / lost | — | 1 / 0 |
+| incumbents better / worse | — | 1 / 0 |
+| dual bounds tighter / looser | — | 6 / 3 |
+
+**Bar 1, cert-clean: PASS.** 290 soundness checks executed, 0 violations. No
+incumbent beat its reference optimum, no dual bound crossed one, no
+`gap_certified=True` row regressed to uncertified, no row lost a dual bound it
+had, and the only objective that moved moved the right way (`syn40m`
+58.2096 -> 67.7133 on a maximization model). The three looser dual bounds
+(`casctanks` 6.3109 -> 6.2497, `rsyn0840m` 808.84 -> 820.55,
+`squfl020-150` 373.65 -> 353.18) are all on rows uncertified in **both** arms,
+and all remain on the valid side of their reference optimum.
+
+**Bar 2, net-positive: PASS,** though modestly: +1 certificate, −17.8 s total
+wall, 6 bounds tighter against 3 looser, nothing regressed. The certificate
+gained is `syn40m`, the row #1066 was opened about. The guard *fired* on 11
+instances spanning syn/rsyn/squfl/portfol/clay/cvxnonsep/tls, so the budget it
+reclaims is a class-wide effect and not a `syn40m` special case — on 10 of those
+11 it cut a dead route short without costing anything, which is the half of the
+mechanism that shows up in the wall column rather than the certificate column.
+
+Default flipped to on. `DISCOPT_CONVEX_ROUTE_GUARD=0` restores the fixed
+`_CONVEX_ROUTE_BUDGET_FRACTION` split, and that path stays tested
+(`python/tests/test_1066_route_progress_guard.py::TestGraduatedDefault`,
+`test_1059_route_fallback.py::test_auto_route_gets_a_fraction_of_the_limit`).
