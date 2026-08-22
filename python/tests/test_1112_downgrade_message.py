@@ -55,8 +55,8 @@ CIRCULAR = "Use mccormick_bounds='lp'"
 #: Emitted when the reduced-space engine takes over.
 REDUCED_ACTIVE = "reduced-space McCormick per-node bounding active"
 
-#: Executed-assertion tally (§6). Incremented by ``_check``; asserted non-zero by
-#: ``test_probes_actually_fired``, which pytest runs last in file order.
+#: Executed-assertion tally (§6). Incremented by ``_check``, reset and asserted
+#: PER TEST by the autouse fixture at the bottom of this file.
 _CHECKS = {"n": 0}
 
 
@@ -210,11 +210,15 @@ def test_reduced_space_bound_is_sound_against_an_independent_feasible_point(redu
         f"dual bound {bound} exceeds f(0.5,0.5) = {true_opt_upper} at a FEASIBLE point — "
         "the bound is above the true optimum, which is a false bound",
     )
-    if result.objective is not None:
-        _check(
-            bound <= result.objective + 1e-6,
-            f"dual bound {bound} exceeds incumbent {result.objective}",
-        )
+    # The certificate invariant, phrased so the probe fires UNCONDITIONALLY (§6).
+    # Written as ``if result.objective is not None: _check(...)`` it silently did not
+    # execute at all on this model — no incumbent appears inside the time limit — and
+    # a conditional probe that never runs is the exact degradation the tally exists to
+    # catch. The vacuous arm is now inside the predicate, so the count is deterministic.
+    _check(
+        result.objective is None or bound <= result.objective + 1e-6,
+        f"dual bound {bound} exceeds incumbent {result.objective}",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -288,22 +292,40 @@ def test_nn_style_model_is_not_downgraded():
 # --------------------------------------------------------------------------- #
 # 5. §6: prove the probes fired
 # --------------------------------------------------------------------------- #
-#: Number of ``_check`` calls a complete run of this module must execute. Bumped
-#: deliberately when a check is added; a DROP means a test stopped reaching the
-#: code path it names and degraded into a silent pass.
-EXPECTED_CHECKS = 13
+#: Number of ``_check`` calls each test must execute (§6). Declared PER TEST, not
+#: as a module total: CI runs pytest under xdist, which distributes this module's
+#: tests across workers, so a module-scoped tally sees only its own worker's subset
+#: and fails (9 and 4 against an expected 13 on the first CI run of this file). A
+#: per-test count is also strictly stronger than a total — it catches one test
+#: losing a check even when another gains one.
+#:
+#: A DROP means that test stopped reaching the code path it names and degraded into
+#: a silent pass; a RISE means a check was added without updating this table.
+EXPECTED_CHECKS = {
+    "test_reduced_space_solve_does_not_recommend_the_flag_already_passed": 4,
+    "test_reduced_space_bound_is_sound_against_an_independent_feasible_point": 3,
+    "test_untraceable_custom_model_never_reaches_the_guard": 4,
+    "test_factorable_nonconvex_nlp_keeps_the_original_wording": 2,
+    "test_nn_style_model_is_not_downgraded": 1,
+}
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _assert_probes_fired():
-    """Teardown-time tally, so it holds under any test ordering.
+@pytest.fixture(autouse=True)
+def _assert_probes_fired(request):
+    """Reset the tally before each test and assert its exact count afterwards.
 
-    A file-order ``test_...`` would under-count whenever pytest-randomly (active by
-    default here) shuffles it away from last, making the guard itself the flaky
-    thing it exists to prevent."""
+    Function-scoped, so it is independent of both test ordering (pytest-randomly is
+    active here) and worker distribution (xdist, used by the PR-fast CI job).
+    """
+    name = request.node.name
+    assert name in EXPECTED_CHECKS, (
+        f"{name} has no entry in EXPECTED_CHECKS — every test in this file must "
+        "declare how many probes it executes, or the §6 guard has a hole in it."
+    )
+    _CHECKS["n"] = 0
     yield
-    assert _CHECKS["n"] == EXPECTED_CHECKS, (
-        f"{_CHECKS['n']} checks executed, expected {EXPECTED_CHECKS}. Fewer means a "
-        "test above stopped reaching the code path it names; more means a check was "
-        "added without updating EXPECTED_CHECKS."
+    assert _CHECKS["n"] == EXPECTED_CHECKS[name], (
+        f"{name} executed {_CHECKS['n']} checks, expected {EXPECTED_CHECKS[name]}. "
+        "Fewer means it stopped reaching the code path it names; more means a check "
+        "was added without updating EXPECTED_CHECKS."
     )
