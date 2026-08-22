@@ -4,7 +4,8 @@
 **Status**: research assessment. No solver behaviour was changed.
 **Probes**: `scratchpad/mecp/` (`mecp_models.py`, `exp1_formulations.py`,
 `exp2_scaling_and_local.py`, `exp3_surrogate_mecp.py`, `exp4_coordinates.py`,
-`exp5_charpoly.py`, `exp3b_reduced_space.py`, `exp3c_bound_setting.py`). Every
+`exp5_charpoly.py`, `exp3b_reduced_space.py`, `exp3c_bound_setting.py`,
+`exp6_multistate_gdp.py`). Every
 script ends with an
 executed-check count and exits non-zero if it checked nothing (per CLAUDE.md
 §6). Model surfaces are written once against an injected `exp`, so the numpy
@@ -467,6 +468,55 @@ rigorous-remainder machinery for *factorable* functions
 (`_relax/taylor_model.py`, `_relax/chebyshev_model.py`) but nothing that
 produces such a bound for a data-fitted surrogate. That is a research gap, not
 an implementation gap.
+
+### 3.7 The discrete version: lowest crossing over *any* pair of states
+
+Everything above is purely continuous — you name two surfaces and ask for their
+lowest crossing. The question a chemist usually has is one level up: a molecule
+has several low-lying electronic states, and what matters is the lowest crossing
+point *over any pair of them*, because that is the one the reaction goes
+through. That is a disjunction, and it makes the problem an MINLP:
+
+```
+min_{x,y}  E
+s.t.  y_p = 1  =>  W_i(x) = W_j(x)  and  E = W_i(x)     for each pair p=(i,j)
+      sum_p y_p = 1,   y_p in {0,1},   x in [x^L, x^U]
+```
+
+`exp6_multistate_gdp.py` poses this as a big-M MINLP over three states (three
+candidate pairs, two coordinates) and compares it against the obvious baseline:
+enumerate the pairs, one continuous solve each.
+
+| Route | energy | certified | nodes | wall |
+|---|---|---|---|---|
+| enumeration (3 separate solves) | 1.270684 | yes | 11 | 2.14 s |
+| disjunctive MINLP (1 solve) | 1.270684 | **yes** | 51 | 5.70 s |
+
+Both certify and both agree, as they must — the formulations are equivalent.
+The MINLP selects pair (0,1), and the selected disjunct is genuinely degenerate
+at the returned point (`|W_0-W_1| = 5.3e-15`), which is also the check that the
+big-M was not so loose as to admit a spurious "crossing".
+
+**At three states the disjunctive formulation is 2.7× slower than enumerating,
+and that is the expected answer.** Three pairs is exactly the regime where
+enumeration wins: it is three tiny independent problems, while the MINLP pays
+for binaries and big-M slack on all of them at once. Worth recording anyway,
+for two reasons:
+
+* The interesting regime is *many* states, where pairs grow as O(K²) and a
+  single tree can prune a whole pair on a bound rather than solving it. The
+  crossover was not measured; this is the starting point for finding it.
+* One pair — the two upper states — is **infeasible** (they never cross inside
+  the box), and the enumeration spends a solve discovering that. In a
+  many-state problem most pairs are of that kind, which is precisely the
+  structure a disjunctive formulation should be able to exploit and enumeration
+  cannot.
+
+Caveats to fix before this becomes a real result: the big-M is a grid maximum
+times two, not a rigorous interval bound (it is validated *after* the solve, via
+the degeneracy of the selected disjunct, rather than derived soundly), and
+discopt's native GDP path (`gdp_method`) would take the disjunction directly
+instead of a hand-rolled big-M. Both were skipped for time.
 
 ---
 

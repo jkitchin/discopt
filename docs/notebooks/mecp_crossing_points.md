@@ -284,6 +284,47 @@ a reduced set of active coordinates with the rest frozen. That is how MECP
 scans on large systems are done anyway — but the certificate then applies to
 the reduced subspace, not the full geometry, and should be described that way.
 
+## Several states: which pair crosses lowest?
+
+A molecule usually has more than two low-lying states, and the crossing that
+matters is the lowest one over *any* pair. That is a disjunction, so the
+problem becomes an MINLP — binaries choose the active pair:
+
+```python
+m.minimize(E)
+m.subject_to(sum(y) == 1)                     # exactly one pair is active
+for p, (i, j) in enumerate(PAIRS):
+    slack = BIGM * (1 - y[p])
+    m.subject_to(w[i] - w[j] <= slack)        # y_p=1 => states i,j degenerate
+    m.subject_to(w[j] - w[i] <= slack)
+    m.subject_to(E - w[i] <= slack)           # y_p=1 => E is that energy
+    m.subject_to(w[i] - E <= slack)
+```
+
+Over three states (three candidate pairs, two coordinates), against the obvious
+baseline of enumerating the pairs as separate continuous solves:
+
+| Route | energy | certified | nodes | wall |
+|---|---|---|---|---|
+| enumeration (3 separate solves) | 1.270684 | yes | 11 | 2.14 s |
+| disjunctive MINLP (1 solve) | 1.270684 | yes | 51 | 5.70 s |
+
+Both certify and agree. **At three states, enumeration wins** — three tiny
+independent problems beat one MINLP carrying binaries and big-M slack for all
+of them. The disjunctive formulation is the interesting one when the number of
+states grows, since pairs grow as O(K²) and a single tree can prune a whole
+pair on a bound instead of solving it; note that in the run above one pair (the
+two upper states) never crosses inside the box at all, and enumeration spends a
+solve finding that out. Where the crossover lies has not been measured.
+
+```{note}
+The example uses a hand-rolled big-M taken from a grid maximum, validated after
+the fact by checking the selected pair really is degenerate at the solution
+(`|W₀−W₁| = 5.3e-15`). For production use, derive the constant from interval
+bounds, or hand the disjunction to discopt's GDP path via `gdp_method` instead
+of writing big-M by hand.
+```
+
 ## Real surfaces are black boxes
 
 Everything above assumes an algebraic expression for the energies. Real `E₁`
