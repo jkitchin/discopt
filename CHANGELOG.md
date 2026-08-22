@@ -267,6 +267,48 @@ The release procedure that produces these entries is documented in
   hypothesis is falsified — on the adiabatic LVC MECP model the facet is recovered
   but the root bound and node count are unchanged (1 node either way).
 
+  **Follow-up measurement: the anchor is not the problem, the mechanism is.** Two
+  more of #1111's premises were tested and failed, and a candidate replacement was
+  built and rejected on measurement rather than on argument:
+
+  * *Corpus scope.* Across all 1610 MINLPLib `.nl` instances, `sqrt` appears in 63
+    and `asin`/`acos`/`acosh` in **zero** — the opposite of the issue's expectation
+    that the inverse-trig rows carry the weight.
+  * *Panel 1 was ~36 % diluted.* Five of its 14 instances (`kriging_peaks-red*`)
+    contain no `sqrt` at all, so the flag could not act on them. A targeted panel
+    was rebuilt by screening every corpus instance for an actually-dropped facet,
+    using two complementary instruments — a cheap root screen and a full-solve
+    census — because the root screen alone is structurally blind to the `elec*`
+    family, whose singular boxes only appear after branching.
+  * *A fixed-offset anchor is strictly worse.* `delta = width/8` was implemented and
+    measured against the shipped κ-capped ladder: about **half** the root-bound gain
+    on every instance where the bound moves (`kriging_peaks-full010` +1513 vs +2975,
+    `full200` +34967 vs +68769). It was discarded. The argument that motivated it —
+    that `width/8` minimises *mean envelope slack* over the box, by 3.31× — is
+    retracted: mean slack does not predict bound tightness, because only slack where
+    the relaxation binds matters, and on this family the LP optimum sits at the
+    singular endpoint.
+  * *No constant is right.* Sweeping the offset over eight orders on the three
+    `kriging_peaks-full` instances that move the root bound, the gain rises toward
+    the endpoint, peaks near `delta ~ 1e-5`, then **collapses to zero** by `1e-12`;
+    on an isolated `min 3x - sqrt(x)` atom the peak is orders of magnitude further
+    out. Both ends of the range are degenerate and the optimum is problem-dependent,
+    so a static geometric anchor cannot be right for every box.
+
+  This does give `singular_tangent_kappa` the measured justification it previously
+  lacked — the cap's stated rationale (outward-rounding slack growing with slope) is
+  real in direction but ~1e-14 in magnitude against a ~0.35 cut depth, and is
+  retracted; what the cap actually does is keep the ladder off the degenerate end,
+  adaptively per box. A regression test now pins that: an effectively uncapped κ
+  still emits the facet but buys < 1e-6 of root bound, where κ=100 buys > 1e-3.
+
+  The direction the evidence points is to stop placing the tangent geometrically and
+  place it *where the LP binds* — lazily at the incumbent LP point, as
+  `MccormickLPRelaxer._separate_convex`'s Kelley loop already does for composite
+  convex lifts — which also avoids the cost panel 1 charged this flag for, an eager
+  extra row at every node. That remains open; the flag stays default-OFF as its
+  measurement lever.
+
 ### Removed
 
 - **The inert `superposition` knob** (`fix(relax)`, #1046, closes #1035).

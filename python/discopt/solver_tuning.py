@@ -1350,6 +1350,27 @@ class SolverTuning:
     model the facet is recovered but root bound and node count are unchanged (1 node
     either way).
 
+    **Two further defects in #1111's framing, both measured.** (a) The issue expects
+    the inverse-trig rows to matter most; across all 1610 MINLPLib ``.nl`` instances
+    ``sqrt`` appears in 63 and ``asin``/``acos``/``acosh`` in **zero**, so on this
+    corpus the feature is a sqrt feature. (b) Panel 1 was ~36 % diluted — 5 of its 14
+    instances (``kriging_peaks-red*``) contain no ``sqrt`` at all, so the flag could
+    not act on them and those rows were noise. A targeted 17-instance panel drawn by
+    screening every corpus instance for an actually-dropped facet is the successor.
+
+    **The mechanism, not the constant, is what is wrong.** A fixed-offset
+    reformulation (``delta = width/8``) was built and measured against this ladder and
+    is **strictly worse** — about half the root-bound gain on every instance where the
+    bound moves at all — and the anchor sweep behind
+    :attr:`singular_tangent_kappa` shows the best static offset is problem-dependent
+    by orders of magnitude, with both ends of the range degenerate. A static geometric
+    anchor cannot be right for every box. What the measurements point at instead is
+    placing the tangent *where the LP binds* — lazily, at the incumbent LP point, the
+    way ``MccormickLPRelaxer._separate_convex``'s Kelley loop already handles composite
+    convex lifts — which also avoids the specific cost panel 1 charged this flag for,
+    an eager extra row at every node. That is the open question #1111 leaves behind,
+    and this flag is the lever for measuring it.
+
     Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome. Note the two #581
     precedents below removed such flags rather than leaving them in default-OFF
     limbo; this one is retained by owner decision (2026-08-22) as a measurement
@@ -1364,12 +1385,53 @@ class SolverTuning:
     """Cap on ``|f'(t0)|`` for :attr:`singular_tangent`, as a multiple of the box's
     own slope scale (``DISCOPT_SINGULAR_TANGENT_KAPPA``, default 100).
 
-    A measurement knob for the §5 panel, not a user-facing tuning parameter. A
-    tangent ~100x steeper than the secant is about the numerical limit worth
-    emitting: the outward-rounding guard (``outward_rounding.envelope_1d_slack``)
-    grows linearly with ``|slope|``, so an uncapped near-vertical tangent buys
-    tightness with rounding slack. Only consulted when :attr:`singular_tangent` is
-    on."""
+    A measurement knob for the §5 panel, not a user-facing tuning parameter. Only
+    consulted when :attr:`singular_tangent` is on.
+
+    **The cap is right; the rationale first written here was not, and is retracted
+    (§11).** The original justification was that the outward-rounding guard
+    (``outward_rounding.envelope_1d_slack``) grows linearly with ``|slope|``, so an
+    uncapped near-vertical tangent buys tightness with rounding slack. The linearity
+    is real (``outward_rounding.py`` returns ``outward_slack(d*tmag + ...)``) but the
+    magnitude is not: at ``kappa=100`` the added slack is ~1e-14 against a cut depth
+    of ~0.35 — six orders of magnitude too small to be the reason for anything.
+
+    The cap's actual justification is a measured degeneracy at the uncapped end.
+    Sweeping the anchor offset ``delta`` over eight orders on the three
+    ``kriging_peaks-full`` instances that move the root bound at all, the root LP
+    bound tightens as the anchor approaches the singular endpoint, peaks near
+    ``delta ~ 1e-5``, and then **collapses back to the flag-OFF value** as ``delta``
+    shrinks further (``full020``: OFF −1113.72; gain +552 at 1/8, +1087 at 1.2e-4,
+    +1098 at 1e-5, +1097 at 1e-7, +1039 at 1e-9, **+0** at 1e-12 — same shape on
+    ``full010`` and ``full050``). Past the peak the tangent is numerically degenerate
+    and the emitted row stops constraining anything. Without a cap the ladder takes
+    its smallest rung, ``delta = 0.5*8**-20 ~ 5.5e-19``, which is inside the collapse:
+    the feature would emit a row on every singular atom and buy nothing. That is what
+    the cap is for, and it reproduces on an isolated atom too — ``min 3x - sqrt(x)``
+    over ``[0,4]``, whose LP optimum sits at the singular end, gains **+4.9e-09** at
+    ``kappa=1e12`` against **+0.083** at ``kappa=100``.
+
+    **``kappa=100`` is not measured-optimal, and the optimum is problem-dependent.**
+    On that same isolated atom the best rung is near ``kappa ~ 10`` (gain +0.619, 7x
+    the default's +0.083), i.e. an anchor *further* from the endpoint; on
+    ``kriging_peaks`` the peak is at a *smaller* ``delta`` than the default selects.
+    The two disagree by orders of magnitude, so no single constant is right for both
+    — which is the deeper reason a static geometric rule is the wrong mechanism here
+    (see :attr:`singular_tangent`). Treat 100 as a serviceable midpoint that is on
+    the stable side of the collapse, not as a tuned value. (The isolated-atom figure
+    is a synthetic proxy and is quoted only for the *shape* of the curve; per the
+    #727 RLT lesson the ``kriging_peaks`` numbers are the ones drawn from the real
+    corpus.)
+
+    This also **falsifies a mean-envelope-slack argument** considered as a
+    replacement for the ladder (a fixed ``delta = width/8``, chosen because it
+    minimises mean envelope slack over the box, measured 3.31x better than the
+    near-corner anchor on that metric). Mean slack over the box does not predict
+    bound tightness: on the same instances the near-corner anchor gives ~**2x** the
+    root-bound gain of ``width/8`` (``full010`` +2975 vs +1513, ``full200`` +68769
+    vs +34967). Only slack *where the relaxation binds* matters, and on this family
+    the LP optimum sits at the singular endpoint. The fixed-offset reformulation was
+    measured, found strictly worse, and discarded."""
 
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the

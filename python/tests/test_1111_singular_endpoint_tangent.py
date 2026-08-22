@@ -383,3 +383,79 @@ def test_kappa_flows_from_tuning_to_the_ladder(flag):
         f"kappa=1e-9 must reject every ladder point (got {counts[1e-9]} rows vs "
         f"{a_off.shape[0]} off) — if it does not, kappa is not being read from the tuning"
     )
+
+
+def _endpoint_binding_sqrt_model(a: float):
+    """``min a*x - sqrt(x)`` over ``x in [0,4]`` — a box whose LP optimum sits AT the
+    singular endpoint, so the recovered facet is actually load-bearing.
+
+    The generic single-atom models above put their optimum at the far end of the box,
+    where the dropped facet never binds and every cap reads as neutral. Generic atom,
+    generic box, no named instance."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=-1e3, ub=1e3)
+    m.subject_to(y == dm.sqrt(x))
+    m.minimize(a * x - y)
+    return m
+
+
+@pytest.mark.parametrize("a", [3.0, 1.0])
+def test_an_uncapped_anchor_emits_a_row_that_buys_nothing(flag, a):
+    """The slope cap is load-bearing: without it the facet is worthless (#1111).
+
+    The ladder walks from its SMALLEST ``delta`` outward, so an effectively infinite
+    ``kappa`` accepts the first rung, ``0.5*8**-20 ~ 5.5e-19``. That anchor is
+    numerically degenerate — the row is still emitted, but it constrains nothing, so
+    the feature would pay a row on every singular atom for no bound.
+
+    This is the cap's real justification, and it replaces the one originally written
+    into ``SolverTuning.singular_tangent_kappa`` (outward-rounding slack), which is
+    ~1e-14 here and six orders too small to explain anything. Asserting the ROW IS
+    STILL THERE matters as much as the bound: it distinguishes "the anchor degenerated"
+    from "the ladder declined", which would produce the same bound for a different
+    reason (§6)."""
+    flag(None)
+    model = _endpoint_binding_sqrt_model(a)
+    off = _lp_bound(model)
+
+    def _at(kappa):
+        tuning = solver_tuning.current().replace(
+            singular_tangent=True, singular_tangent_kappa=kappa
+        )
+        token = solver_tuning.set_current(tuning)
+        try:
+            rel = build_uniform_relaxation(model)
+            n_rows = sp.csr_matrix(rel.model._A_ub).shape[0]
+            return _lp_bound(model), n_rows
+        finally:
+            solver_tuning.reset_current(token)
+
+    n_off = sp.csr_matrix(_relax_rows(model)).shape[0]
+    uncapped, n_uncapped = _at(1e12)
+    capped, n_capped = _at(100.0)
+
+    assert n_uncapped == n_off + 1, (
+        f"kappa=1e12 must still EMIT the facet (got {n_uncapped} rows vs {n_off} off) — "
+        "otherwise this test is measuring a declined ladder, not a degenerate anchor"
+    )
+    assert n_capped == n_off + 1, f"kappa=100 must emit the facet ({n_capped} vs {n_off})"
+    assert uncapped - off < 1e-6, (
+        f"an uncapped anchor bought {uncapped - off:.3g} of root bound; it is supposed to "
+        "be degenerate. If this fires the ladder's smallest rung is no longer degenerate "
+        "and the cap's justification needs re-measuring"
+    )
+    assert capped - off > 1e-3, (
+        f"kappa=100 bought only {capped - off:.3g}; the capped anchor is supposed to be "
+        "worth orders more than the uncapped one"
+    )
+    assert capped > uncapped, f"capped {capped} must beat uncapped {uncapped}"
+
+
+def _relax_rows(model):
+    """Flag-OFF constraint matrix of ``model``'s relaxation (row count reference)."""
+    token = solver_tuning.set_current(solver_tuning.current().replace(singular_tangent=False))
+    try:
+        return build_uniform_relaxation(model).model._A_ub
+    finally:
+        solver_tuning.reset_current(token)
