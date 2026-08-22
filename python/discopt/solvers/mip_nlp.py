@@ -50,6 +50,7 @@ _OA_OPTION_KEYS = frozenset(
         "milp_solver",
         "solution_pool",
         "num_solution_iteration",
+        "master_checkin_deadline",
         *_EVENT_HOOK_OPTION_KEYS,
         *FP_OPTION_KEYS,
     }

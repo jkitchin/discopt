@@ -31,6 +31,7 @@ from discopt.solver import (
 
 NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 ROUTE_ENV = "DISCOPT_CONVEX_MINLP_ROUTE"
+GUARD_ENV = "DISCOPT_CONVEX_ROUTE_GUARD"
 
 pytest.importorskip("highspy", reason="the OA master needs a MILP backend")
 
@@ -270,7 +271,17 @@ class TestRouteBudget:
         return seen
 
     def test_auto_route_gets_a_fraction_of_the_limit(self, monkeypatch):
+        """The fixed split, pinned with ``DISCOPT_CONVEX_ROUTE_GUARD=0``.
+
+        #1066 replaced the fixed wall with a progress guard that hands the route
+        the whole limit and takes back what it does not earn. The fixed split is
+        still the fallback path -- for a non-OA method, for a caller with their
+        own termination hook, and for anyone who sets the opt-out -- so it keeps
+        a test. The guard's own budget wiring is tested in
+        ``test_1066_route_progress_guard.py``.
+        """
         monkeypatch.setenv(ROUTE_ENV, "1")
+        monkeypatch.setenv(GUARD_ENV, "0")
         seen = self._capture(monkeypatch)
         _load("gbd").solve(time_limit=20.0)
         assert seen, "solve_mip_nlp was never called -- the router did not fire"

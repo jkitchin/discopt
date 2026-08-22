@@ -61,7 +61,12 @@ logger = logging.getLogger(__name__)
 _MASTER_NO_INCUMBENT_BUDGET_FRAC = 0.9
 
 
-def _master_time_budget(remaining: float, *, has_incumbent: bool) -> float:
+def _master_time_budget(
+    remaining: float,
+    *,
+    has_incumbent: bool,
+    checkin_remaining: Optional[float] = None,
+) -> float:
     """Time limit for one master MILP solve, reserving room for the fixed NLP.
 
     Once an incumbent exists OA has something to return, so the master may use
@@ -74,12 +79,28 @@ def _master_time_budget(remaining: float, *, has_incumbent: bool) -> float:
     which is the common case. Stopping the master early costs only master
     optimality, not soundness: a MILP master truncated at its time limit still
     yields a valid dual bound for a relaxation of the MINLP.
+
+    ``checkin_remaining`` is the caller's *soft* deadline: seconds from now by
+    which the OA loop must return control to the top of the iteration, where the
+    ``termination_hook`` runs. Without it a caller that budgets OA by progress
+    cannot act, because the budget it granted is exactly what the first master
+    expands to fill -- measured on ``rsyn0840m`` at a 60 s route budget, the
+    master ran to ~55 s and the hook's second call arrived too late to leave the
+    caller's fallback anything to work with (#1066). This is not the per-iteration
+    master cap falsified in ``docs/dev/performance-plan.md`` §22.2: that one
+    shrank *every* master to force more rounds and produced weaker bounds; this
+    truncates at most the one master that would cross the caller's deadline.
     """
-    if has_incumbent:
-        return remaining
-    if not math.isfinite(remaining) or remaining <= 0.0:
-        return remaining
-    return remaining * _MASTER_NO_INCUMBENT_BUDGET_FRAC
+    budget = remaining
+    if not has_incumbent and math.isfinite(remaining) and remaining > 0.0:
+        budget = remaining * _MASTER_NO_INCUMBENT_BUDGET_FRAC
+    if (
+        checkin_remaining is not None
+        and math.isfinite(checkin_remaining)
+        and checkin_remaining > 0.0
+    ):
+        budget = min(budget, float(checkin_remaining))
+    return budget
 
 
 _INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary", "fp"})
@@ -4957,6 +4978,7 @@ def solve_oa(
     external_hyperplane_hook: Any = None,
     external_dual_bound_hook: Any = None,
     termination_hook: Any = None,
+    master_checkin_deadline: Optional[float] = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -5088,6 +5110,12 @@ def solve_oa(
         bound/incumbent data, and candidate points where relevant. Returned
         payloads are validated before they can add external fixed-NLP candidates,
         master cuts, dual-bound updates, or request user termination.
+    master_checkin_deadline : float, optional
+        Soft deadline, in seconds of elapsed OA time, by which the loop must
+        return to the top of an iteration so ``termination_hook`` can run. Only
+        the master MILP that would cross it is shortened, and only until the
+        deadline passes; after that the ordinary budget applies. Pointless
+        without ``termination_hook``, and validated as such.
 
     Returns
     -------
@@ -5132,6 +5160,18 @@ def solve_oa(
         external_dual_bound_hook,
     )
     termination_hook = _normalize_optional_hook("termination_hook", termination_hook)
+    if master_checkin_deadline is not None:
+        master_checkin_deadline = float(master_checkin_deadline)
+        if not math.isfinite(master_checkin_deadline) or master_checkin_deadline <= 0.0:
+            raise ValueError(
+                "master_checkin_deadline must be a finite positive number of seconds, "
+                f"got {master_checkin_deadline!r}"
+            )
+        if termination_hook is None:
+            raise ValueError(
+                "master_checkin_deadline only has an effect alongside termination_hook; "
+                "passing it without one shortens a master solve for no reader"
+            )
     heuristic_nonconvex = bool(heuristic_nonconvex)
     solution_pool = bool(solution_pool)
     shot_solution_pool_degraded_reason: Optional[str] = None
@@ -6844,7 +6884,11 @@ def solve_oa(
             decomp.obj_is_linear,
             master_bound_valid,
             time_limit=_master_time_budget(
-                time_limit - elapsed, has_incumbent=incumbent is not None
+                time_limit - elapsed,
+                has_incumbent=incumbent is not None,
+                checkin_remaining=(
+                    None if master_checkin_deadline is None else master_checkin_deadline - elapsed
+                ),
             ),
             gap_tolerance=gap_tolerance,
             add_slack=add_slack,
