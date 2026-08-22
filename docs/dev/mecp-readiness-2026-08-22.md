@@ -4,7 +4,8 @@
 **Status**: research assessment. No solver behaviour was changed.
 **Probes**: `scratchpad/mecp/` (`mecp_models.py`, `exp1_formulations.py`,
 `exp2_scaling_and_local.py`, `exp3_surrogate_mecp.py`, `exp4_coordinates.py`,
-`exp5_charpoly.py`, `exp3b_reduced_space.py`). Every script ends with an
+`exp5_charpoly.py`, `exp3b_reduced_space.py`, `exp3c_bound_setting.py`). Every
+script ends with an
 executed-check count and exits non-zero if it checked nothing (per CLAUDE.md
 §6). Model surfaces are written once against an injected `exp`, so the numpy
 oracle and the discopt expression tree cannot diverge.
@@ -513,14 +514,39 @@ learns a PES from ab-initio data and then wants a *certified* MECP runs into
 this. It is the same problem the `nn` module faces generally, so a fix would
 not be MECP-specific.
 
-### 4.4 Reduced-space bound falls back to alphaBB
+### 4.4 Reduced-space bound falls back to alphaBB, and the suggested remedy is
+inert
 
 The `dm.custom` MCBox path reports `McCormick 'nlp' objective bound is not a
 valid dual bound for nonconvex models (issue #120); falling back to the alphaBB
-underestimator`, and alphaBB was too weak to certify a 3-coordinate MECP in
-300 s where the factorable form took 2 s. Since the documented selling point of
-that path is DOF-only branching — exactly what MECP wants as molecules grow —
-this is worth understanding. Cross-reference issue #120.
+underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on
+models with continuous variables.` and alphaBB was too weak to certify a
+3-coordinate MECP in 300 s where the factorable form took 2 s. Since the
+documented selling point of that path is DOF-only branching — exactly what MECP
+wants as molecules grow — this matters.
+
+**Passing the setting the message recommends does not help**
+(`exp3c_bound_setting.py`):
+
+| Route | `mccormick_bounds` | dual bound | rel. gap | nodes | certified |
+|---|---|---|---|---|---|
+| `dm.custom` MCBox | `auto` | 1.468451 | 5.8e−02 | 293 | no |
+| `dm.custom` MCBox | `lp` | 1.446551 | 7.2e−02 | 297 | no |
+| `discopt.nn` 12×12 | `auto` | −20.596426 | 1.4e+01 | 4833 | no |
+| `discopt.nn` 12×12 | `lp` | −20.596426 | 1.4e+01 | 5041 | no |
+
+The `issue #120` message **reprints verbatim even when `lp` is passed**, the
+bound is unchanged on the `nn` path and slightly *worse* on the CustomCall
+path. So on these two paths the documented remediation is inert. That is a
+narrower and more actionable finding than "alphaBB is weak": either the setting
+is not reaching the relaxation builder on the CustomCall/`nn` paths, or the
+message is advising a setting that does not apply there. Worth checking against
+issue #120 before any tightness work.
+
+A single-hidden-layer net (5 units) gave a far less negative bound (1.4909 vs
+−20.60), so bound quality does scale strongly with network width — but that fit
+was too poor (train RMSE 1.25 on `W_1`) for its optimum to be meaningful, so it
+sizes the tightness effect without being a fair optimization comparison.
 
 ### 4.5 No symmetry handling
 
