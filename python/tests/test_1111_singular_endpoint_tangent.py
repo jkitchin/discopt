@@ -36,6 +36,7 @@ import os
 import warnings
 
 import discopt.modeling as dm
+import discopt.solver_tuning as solver_tuning
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -306,3 +307,79 @@ def test_native_kernel_declines_zero_touching_sqrt(flag, state):
     flag(state)
     assert build_spatial_kernel_spec(m0) is None, "zero-touching sqrt box must decline"
     assert build_spatial_kernel_spec(m1) is not None, "guard must not reject a regular box"
+
+
+# --------------------------------------------------------------------------- #
+# 7. The flag is a SolverTuning field, not a bare environ read
+# --------------------------------------------------------------------------- #
+def test_programmatic_tuning_enables_recovery_without_the_env_var(flag):
+    """``SolverTuning(singular_tangent=True)`` must enable the facet with the
+    environment variable UNSET.
+
+    This is the whole point of the migration: a bare ``os.environ`` read is
+    invisible to a programmatic tuning and cannot be pinned for the duration of a
+    solve. Asserting the env var absent is what makes the test meaningful — with
+    the pre-migration code the ON arm below is byte-identical to the OFF arm and
+    the row-count assertion fails."""
+    flag(None)
+    assert FLAG not in os.environ, "the env var must be unset for this test to mean anything"
+
+    model = _atom_model(dm.sqrt, 0.0, 4.0)
+    _, a_off, b_off = _rows(model, 0.0, 4.0)
+
+    tuning = solver_tuning.current().replace(singular_tangent=True)
+    token = solver_tuning.set_current(tuning)
+    try:
+        assert solver_tuning.current().singular_tangent is True
+        _, a_on, b_on = _rows(model, 0.0, 4.0)
+    finally:
+        solver_tuning.reset_current(token)
+
+    assert a_on.shape[0] == a_off.shape[0] + 1, (
+        f"programmatic tuning emitted {a_on.shape[0]} rows vs {a_off.shape[0]} off — "
+        "the recovered facet is exactly one added row"
+    )
+    assert b_on.shape[0] == a_on.shape[0]
+    # And the context is restored: back to the OFF row count.
+    _, a_after, _ = _rows(model, 0.0, 4.0)
+    assert a_after.shape[0] == a_off.shape[0]
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
+def test_kappa_must_be_finite_and_positive(bad):
+    """An invalid kappa RAISES rather than being silently swapped for the default.
+
+    The pre-migration helper caught ``ValueError`` and returned 100.0, so a typo in
+    a measurement sweep produced a run at the default cap that read as a run at the
+    requested one (§3: refuse loudly; §7: never swallow in an instrument)."""
+    with pytest.raises(ValueError, match="singular_tangent_kappa"):
+        solver_tuning.current().replace(singular_tangent_kappa=bad)
+
+
+def test_kappa_flows_from_tuning_to_the_ladder(flag):
+    """The ladder must read kappa from the active tuning, not a module constant.
+
+    A kappa small enough to reject every ladder point leaves the facet dropped, so
+    the ON arm collapses to the OFF row count — an observable that can only move if
+    the value is genuinely threaded through."""
+    flag(None)
+    model = _atom_model(dm.sqrt, 0.0, 4.0)
+    _, a_off, _ = _rows(model, 0.0, 4.0)
+
+    counts = {}
+    for kappa in (100.0, 1e-9):
+        tuning = solver_tuning.current().replace(
+            singular_tangent=True, singular_tangent_kappa=kappa
+        )
+        token = solver_tuning.set_current(tuning)
+        try:
+            _, a_on, _ = _rows(model, 0.0, 4.0)
+        finally:
+            solver_tuning.reset_current(token)
+        counts[kappa] = a_on.shape[0]
+
+    assert counts[100.0] == a_off.shape[0] + 1, "default kappa must admit the facet"
+    assert counts[1e-9] == a_off.shape[0], (
+        f"kappa=1e-9 must reject every ladder point (got {counts[1e-9]} rows vs "
+        f"{a_off.shape[0]} off) — if it does not, kappa is not being read from the tuning"
+    )

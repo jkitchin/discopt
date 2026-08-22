@@ -1512,36 +1512,35 @@ def _interval_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dic
 #: Ladder depth: ``delta`` ranges over ``0.5*8**-k`` for ``k = 20 … 1``
 #: (``5.5e-19 … 1/16``), smallest first.
 _SINGULAR_TANGENT_LADDER = 20
-#: Default cap on ``|f'(t0)|`` as a multiple of the box's slope scale. A tangent
-#: ~100x steeper than the secant is about the numerical limit worth emitting; the
-#: outward-rounding guard (``envelope_1d_slack``) grows linearly with ``|slope|``,
-#: so an uncapped near-vertical tangent buys tightness with rounding slack.
-_SINGULAR_TANGENT_KAPPA = 100.0
 
 
 def _singular_tangent_enabled() -> bool:
-    """``DISCOPT_SINGULAR_TANGENT=1`` enables vertical-tangent recovery (#1111).
+    """Whether vertical-tangent recovery is on (#1111) — ``SolverTuning`` field.
 
     Default OFF: with the flag unset this module emits exactly the rows it did
-    before #1111 (the endpoint facet stays dropped).
+    before #1111 (the endpoint facet stays dropped). Read through
+    :func:`discopt.solver_tuning.current` rather than ``os.environ`` so a
+    programmatic ``SolverTuning(singular_tangent=True)`` is honoured and the
+    setting is pinned for the duration of a solve; see that field's docstring for
+    the §5 panel that failed gate 2.
     """
-    return os.environ.get("DISCOPT_SINGULAR_TANGENT") == "1"
+    from discopt.solver_tuning import current as _tuning
+
+    return _tuning().singular_tangent
 
 
 def _singular_tangent_kappa() -> float:
-    """Slope cap multiplier; ``DISCOPT_SINGULAR_TANGENT_KAPPA`` overrides it.
+    """Slope cap multiplier for :func:`_interior_tangent_point` (#1111).
 
     A measurement knob for the §5 panel (the issue asks whether a tighter or
-    looser cap is better), not a user-facing tuning parameter.
+    looser cap is better), not a user-facing tuning parameter. Validated
+    finite-and-positive by ``SolverTuning.__post_init__``, so this returns it
+    unchecked — an invalid override raises there rather than being silently
+    swapped for the default (§3: refuse loudly).
     """
-    raw = os.environ.get("DISCOPT_SINGULAR_TANGENT_KAPPA")
-    if not raw:
-        return _SINGULAR_TANGENT_KAPPA
-    try:
-        val = float(raw)
-    except ValueError:
-        return _SINGULAR_TANGENT_KAPPA
-    return val if math.isfinite(val) and val > 0.0 else _SINGULAR_TANGENT_KAPPA
+    from discopt.solver_tuning import current as _tuning
+
+    return _tuning().singular_tangent_kappa
 
 
 def _interior_tangent_point(

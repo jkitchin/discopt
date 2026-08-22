@@ -12,6 +12,52 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The McCormick LP downgrade told users to pass the flag they had just passed**
+  (`relaxation`, #1112). A model whose nonlinearity lives inside a
+  `dm.custom`/`CustomCall` node has no *lifted* relaxation — the body is opaque to
+  the DAG walker by construction — so `has_relaxable_nonlinearity` is False, the LP
+  relaxer is discarded, and the issue-#120 soundness guard demotes `"nlp"` to
+  `"none"`. That demotion is correct and is unchanged. Its *message* was not: it
+  advised `Use mccormick_bounds='lp'` to callers who had passed exactly that, and
+  it fired even when the reduced-space engine was about to supply a perfectly good
+  spatial bound, where there is no fallback to announce. The warning is now
+  suppressed (`debug`, with an accurate one-liner) whenever reduced-space bounding
+  is forced; every other caller sees the original text verbatim.
+
+  **Two of the issue's own claims are falsified and recorded here rather than
+  quietly dropped.** (1) Section (b) states "the node bound it actually gets is
+  alphaBB". Measured on an MCBox-traceable CustomCall model with
+  `mccormick_bounds="lp"`: the reduced engine is active and bounds 0.5413 against
+  `f(0.5, 0.5) = 0.6065` at an independently-checked feasible point — a real
+  spatial bound, not an alphaBB-grade one. (2) The `discopt.nn` rows in the issue's
+  table are a *different bug*: a tanh network reports
+  `has_relaxable_nonlinearity is True` and never reaches the downgrade at all
+  (its loose bound is the missing spanning-box S-envelope —
+  `_curv_by_sign` returns `None` on an inflection-spanning box and `_emit_1d`
+  emits zero rows). `test_1112_downgrade_message.py` pins that distinction so the
+  two are not conflated again.
+
+  A branch explaining the opaque cause to a *non*-reduced-space caller was written
+  and then removed as dead code: a non-admissible `CustomCall` model returns early
+  via `_withhold_local_optimality_certificate` and never reaches the guard, so no
+  `CustomCall` model can arrive there without `_force_reduced_space`. That
+  reachability fact is itself pinned by a test.
+
+  Not addressed, and tracked separately: alphaBB is still enabled alongside the
+  reduced engine because `_use_alphabb` keys on `_mc_lp_relaxer is None` and is
+  computed before `_reduced_space_active`. Suppressing it is bound-changing (if the
+  node bound is currently the better of the two, removing alphaBB can loosen it) and
+  needs the §5 flag-and-panel treatment.
+
+- **`sqrt`/`asin`/`acos`/`acosh` derivatives no longer divide by zero at a singular
+  endpoint** (`relaxation`, #1111). `_dsqrt` and friends evaluate the derivative
+  *limit* explicitly instead of computing `1/0`, so the
+  `RuntimeWarning: divide by zero encountered in scalar divide` is gone at the
+  source rather than suppressed; returned values are bit-identical. Separately,
+  `spatial_producer` now declines a zero-touching `sqrt` box: the Rust mirror
+  (`bnb/mccormick_patch.rs::univariate_rows`) guards `f` but not `f'` and would
+  have written `f'(0) = inf` and a `NaN` intercept into the node LP.
+
 - **Presolve reached its iteration cap on every model with a bound-redundant
   row** (`presolve`, #1053). `SimplifyPass` is `PassCategory::BoundsOnly` — it
   holds `&ctx.model` and cannot remove anything — yet it stamped the rows it
@@ -181,6 +227,45 @@ The release procedure that produces these entries is documented in
   instead, landing the search on denser bases. The 48-update cap is load-bearing.
   No default moved. Details and the falsification record in
   `docs/dev/performance-plan.md` §18f.
+
+### Measured (no behaviour change)
+
+- **Recovering the dropped vertical-tangent facet is sound but not helpful**
+  (#1111, `DISCOPT_SINGULAR_TANGENT`, default **off**). Where `f` is finite at a box
+  endpoint but `f'` diverges there, `_emit_1d` silently dropped the tangent facet,
+  leaving the envelope one-sided. Re-anchoring it at an interior ladder point only
+  ever *adds* a row, so the flag-ON polytope is a subset of the flag-OFF one and the
+  node LP bound can only improve. The §5 panel (13 pairs) is **cert-clean** — zero
+  soundness violations, incumbents identical on all 13, no certification regression
+  — and **fails net-positive**:
+
+  * the two *terminating* pairs are the only load-independent rows: `mathopt5_6`
+    5 → 5 nodes with a bit-identical certificate, and `tspn08` **135 → 191 nodes,
+    +41 %**. A tighter relaxation still grows the tree because a different LP vertex
+    changes the branching choice;
+  * among the time-limited rows, 1 meaningfully better (`tspn10` +1.274) against 4
+    meaningfully worse (`kriging_peaks-full100` −1.144, `full010` −0.542, `tspn12`
+    −0.520, `full050` −0.198);
+  * the root win does not survive branching: `kriging_peaks` gains 13–40× at the
+    root (`full200` −74356.93 → −5596.46), yet after 120 s `full020`'s arms agree to
+    14 digits and `full050`/`full100` are behind. B&B was already recovering that
+    bound cheaply, and an extra LP row at every node is a net loss.
+
+  The `DISCOPT_CUT_INHERIT` outcome. Note that the two #581 precedents in
+  `solver_tuning.py` *removed* such flags rather than leaving them in default-OFF
+  limbo; this one is retained by owner decision as a measurement lever for the open
+  question in #1111 — whether any formulation of the singular-endpoint tangent pays
+  for itself — with the failing panel written into the field's docstring.
+  Flag-OFF is byte-identical to the pre-#1111 relaxation.
+
+  **Retractions.** The panel harness printed `better 10 worse 2 unchanged 1`; that
+  tally is wrong and is not the basis of anything above. Its classifier scored
+  `nodes_on < nodes_off` as "better", which is correct for a terminating run and
+  backwards for a time-limited one, where fewer nodes means the arm did *less* work
+  in the same budget. Two earlier wall-time claims are also retracted: load was
+  37–87 on 14 cores, so the §9 load gate fails outright. And #1111's own motivating
+  hypothesis is falsified — on the adiabatic LVC MECP model the facet is recovered
+  but the root bound and node count are unchanged (1 node either way).
 
 ### Removed
 

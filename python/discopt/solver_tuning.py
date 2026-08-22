@@ -24,6 +24,7 @@ unaffected.
 
 from __future__ import annotations
 
+import math
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
@@ -1313,6 +1314,63 @@ class SolverTuning:
     deliberately accepts. Default off pending the §5 differential panel
     (graduation coupled to the #928/#966 panel)."""
 
+    singular_tangent: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT", default=False)
+    )
+    """Recover the univariate-envelope tangent facet dropped at a **vertical
+    tangent** (``DISCOPT_SINGULAR_TANGENT``, default **off**; §5 bound-changing;
+    issue #1111).
+
+    ``uniform_relax._emit_1d`` places tangents at ``lo``, the midpoint and ``hi``.
+    Where ``f`` is finite at an endpoint but ``f'`` diverges there, ``_tangent_row``
+    returned without emitting and the facet was silently lost, leaving the envelope
+    one-sided on that side — reached by ``sqrt`` at ``t=0`` and ``asin``/``acos`` at
+    ``t=±1``. When on, the facet is re-anchored at an interior ladder point (see
+    ``_interior_tangent_point``); the path only ever ADDS a row where none was
+    emitted, so the flag-ON polytope is a subset of the flag-OFF polytope and the
+    node LP bound can only improve or stay equal.
+
+    **The §5 panel ran and FAILED gate 2 (net-positive). This flag is not a
+    graduation candidate as it stands.** 13 pairs, cert-clean (0 soundness
+    violations, incumbents identical on all 13, no certification regression), but:
+
+    * the two *terminating* pairs are the only load-independent rows, and they read
+      ``mathopt5_6`` 5 → 5 nodes (bit-identical certificate) and ``tspn08``
+      **135 → 191 nodes, +41%**. A tighter relaxation still grows the tree because a
+      different LP vertex changes the branching choice;
+    * among the time-limited rows, 1 meaningfully better (``tspn10`` +1.274) against
+      4 meaningfully worse (``kriging_peaks-full100`` −1.144, ``full010`` −0.542,
+      ``tspn12`` −0.520, ``full050`` −0.198);
+    * the root win does not survive branching: ``kriging_peaks`` gains 13–40× at the
+      root (``full200`` −74356.93 → −5596.46) yet after 120 s ``full020``'s arms
+      agree to 14 digits and ``full050``/``full100`` are behind. B&B was already
+      recovering that bound cheaply, and an extra LP row at every node is a net loss.
+
+    #1111's own motivating hypothesis is **falsified**: on the adiabatic LVC MECP
+    model the facet is recovered but root bound and node count are unchanged (1 node
+    either way).
+
+    Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome. Note the two #581
+    precedents below removed such flags rather than leaving them in default-OFF
+    limbo; this one is retained by owner decision (2026-08-22) as a measurement
+    lever for the open question in #1111 — whether *any* formulation of the
+    singular-endpoint tangent pays for itself — with the failing panel recorded
+    here so no future reader mistakes it for an ungraduated candidate. Flag-OFF is
+    byte-identical to the pre-#1111 relaxation."""
+
+    singular_tangent_kappa: float = field(
+        default_factory=lambda: _env_float("DISCOPT_SINGULAR_TANGENT_KAPPA", 100.0)
+    )
+    """Cap on ``|f'(t0)|`` for :attr:`singular_tangent`, as a multiple of the box's
+    own slope scale (``DISCOPT_SINGULAR_TANGENT_KAPPA``, default 100).
+
+    A measurement knob for the §5 panel, not a user-facing tuning parameter. A
+    tangent ~100x steeper than the secant is about the numerical limit worth
+    emitting: the outward-rounding guard (``outward_rounding.envelope_1d_slack``)
+    grows linearly with ``|slope|``, so an uncapped near-vertical tangent buys
+    tightness with rounding slack. Only consulted when :attr:`singular_tangent` is
+    on."""
+
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
     # tightened box to the children) was DEPRECATED and removed. It was a
@@ -1355,6 +1413,10 @@ class SolverTuning:
             raise ValueError(f"psd_cost_gate_budget must be > 0, got {self.psd_cost_gate_budget}")
         if self.psd_cost_gate_tau < 0:
             raise ValueError(f"psd_cost_gate_tau must be >= 0, got {self.psd_cost_gate_tau}")
+        if not (self.singular_tangent_kappa > 0.0 and math.isfinite(self.singular_tangent_kappa)):
+            raise ValueError(
+                f"singular_tangent_kappa must be finite and > 0, got {self.singular_tangent_kappa}"
+            )
 
     def replace(self, **changes) -> SolverTuning:
         """Return a copy with ``changes`` applied (validated)."""
