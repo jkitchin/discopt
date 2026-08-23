@@ -1398,7 +1398,8 @@ def heuristic_incumbent(
     argument does not apply. Purely a primal seed: the MILP driver re-validates
     it, and a better incumbent only prunes — it never changes the certified
     optimum. Fixed ``seed``/``restarts``/``max_flip_probes`` keep the search
-    deterministic (``deterministic=True`` default)."""
+    deterministic unconditionally — this routine reads no clock, so it does not
+    depend on ``solve(deterministic=...)``, whose default is ``False``."""
     meta = getattr(reformed, "_bml_heuristic", None)
     if not meta:
         return None

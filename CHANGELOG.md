@@ -10,7 +10,168 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
+  #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
+  that raised `NotImplementedError`, with the false reason "discopt not yet
+  available" — including the two in `TestDeterminism`, the repository's only
+  run-to-run reproducibility assertions and therefore the only consumer of
+  `solve(deterministic=...)`. They now solve real instances, `TestFeasibility`'s
+  two assertion-free bodies check the incumbent and its integrality, the ten
+  `TestEdgeCases` stubs are real models, and the module joins CI's
+  python-correctness lane. Instances resolve from `python/tests/data/minlplib_nl/`
+  and then `$DISCOPT_MINLPLIB_NL`; a missing one still skips, but for a true
+  reason. 99 collected, 87 passed, 12 skipped locally.
+
+- **`solve(deterministic=...)` now defaults to `False` and is no longer a dead
+  parameter** (`solver`, #1116). It was documented as "Ensure deterministic
+  results" and read **nowhere** on the solve path — a default that named a
+  guarantee the solver did not provide. It is now wired to the real mode (below),
+  and defaults OFF because turning that mode on by default is a bound-changing
+  default flip (CLAUDE.md §5) with no graduation panel behind it. Callers who
+  passed `deterministic=True` expecting reproducibility now get it; callers who
+  relied on the old *default* get today's behaviour unchanged.
+
 ### Fixed
+
+- **#1119 closed falsified: the singular-endpoint tangent stays default-OFF**
+  (`_relax/mccormick_lp`, #1119). #1115 left the flag off because it costs
+  +25.6 % wall on `eq6_1` and +54.2 % on `maxmin` for no bound; #1119 asked
+  whether gating on *whether the recovered facet binds* could recover that. It
+  cannot: binding is near-tautological (a row is emitted because it is violated,
+  so the next re-solve lands on it), and what separation exists runs backwards —
+  the two instances that pay bind at 1.0000 and 0.9580, the two that gain at
+  0.9173 and 0.8509. `eq6_1` has zero non-binding rows, so the proposed gate drops
+  0 of 22 874 and saves 0 %, while discarding 14.9 % of the rows on the instance
+  the feature is for. `MccormickLPRelaxer.singular_tangent_stats()` keeps the
+  instrument (verified bound-neutral: 40/40 exact `node_count`/`objective`
+  identities, instrumented vs not); the record is `docs/dev/performance-plan.md`
+  §17.
+
+- **The dual bound was a function of machine speed** (`solver`, #1116). The issue
+  reported a 13th-digit drift with the node count flipping 301 ↔ 303 on
+  `kriging_peaks-full200`. At `max_nodes=1` the defect is far larger: three root
+  dual bounds spanning **14 %** (−25371.8 / −28852.0 / −28072.6) in three
+  repetitions of one process, with the incumbent bit-identical.
+
+  The cause is **role-2 wall clocks**, in #912's sense: a clock answering *"when do
+  we stop?"* (the user's `time_limit`) is role 1 and correct by definition, while a
+  clock answering *"how much work do we do?"* makes the ANSWER depend on how fast
+  the machine happens to be that minute — what `_work_budget.py` calls "a
+  correctness-of-process bug, not a performance detail". Bisecting a confounded
+  neutralization showed the clock arm **alone** reproduces bit-exactly, and the
+  mechanism is structural rather than float noise: the first root LP came back with
+  a different number of **columns** (1532 vs 1469), because a wall-truncated
+  tightening stage handed the builder a different box — the root fixpoint returned
+  894 vs 898 tightened bounds from *different input boxes*, having spent 237.7 s vs
+  247.55 s in OBBT.
+
+  `SolverTuning.deterministic` / `DISCOPT_DETERMINISTIC` (default **OFF**) renders
+  role-2 budgets inert at their **origin**: 27 call sites via `_role2_budget` /
+  `_role2_deadline` / `_role2_horizon`, 3 direct guards where the budget is a loop
+  condition, and the integer-ratio dive in `mccormick_lp.py`. Both halves of the
+  search are covered — the dual side (root presolve, declared-box tightening, OBBT,
+  per-node OBBT, the root fixpoint, root cuts, the box/probe/pool LP slices, the
+  MILP stall slice) and the primal side (native-kernel seeds, root sub-NLP seeds,
+  ILS, multistart, one-hot swap, dual recovery), since a machine-speed-dependent
+  incumbent moves the cutoff, which moves the tree, which moves the bound. Verified
+  on the reproducing instance: 3/3 repetitions bit-identical
+  (`-1044.8190276107248`, objective `-3.890198803588073`, 3 nodes) where the
+  default arm returns three distinct bounds.
+
+  **Scoped on purpose.** Two role-1 mechanisms are left live — the phase-entry
+  gates (`_deadline_exhausted()` / `_remaining_budget() > x`) and the POUNCE
+  `max_wall_time = min(30.0, caller_limit)` stall backstop — because neutralizing
+  either lets preprocessing overrun the user's `time_limit` without bound, trading
+  a reproducibility bug for a broken role-1 promise. So the guarantee is: **a solve
+  reproduces when the role-1 budget never binds.** A test pins both residuals so
+  widening the flag to swallow role 1 fails loudly.
+
+  **Falsified and recorded** (§4/§11): the issue's own suggested first step (swap
+  five `bnb` hash containers to `BTreeMap`) — the crate has 18 hash-container
+  declarations and **3** iteration sites, all order-insensitive; thread scheduling
+  (rayon + BLAS pinned to 1, still 301 ↔ 303); `Variable.__hash__ = id(self)`
+  (replaced with a stable index across 26 377 430 firings, bound still moves); the
+  #694 anytime build truncation (`build_truncated=False`, 404/404 constraints); and
+  the issue's premise that no `time_limit` was set (`Model.solve` defaults to
+  3600 s). `solver.py`'s prior claim that "a deterministic `max_nodes` budget makes
+  solves bit-reproducible (6/6 identical)" is **retracted in the file**: a node
+  budget bounds the *tree*, not the wall sub-budgets inside a node. Note also that
+  the no-clock bound (−1044.819) is *tighter* than every wall-bounded run — an
+  early-truncated tightening stage is not merely nondeterministic, it leaves bound
+  on the table.
+
+- **alphaBB ran at every node alongside the reduced-space engine** (`relaxation`,
+  #1114). `_use_alphabb` keyed on the *lifted* LP relaxer being absent, which is
+  exactly the `dm.custom`/`CustomCall` class the reduced-space McCormick engine was
+  introduced to bound. The issue asked for a flag and a differential panel on the
+  grounds that dropping a term from a `max()` can only loosen a bound; the entry
+  experiment says that reasoning does not apply, because on this class alphaBB
+  never produces a bound at all. `rigorous_alpha`'s interval-AD walker has no rule
+  for `CustomCall` — an opaque user callable has no symbolic second derivative — so
+  every box returns `+inf` and `_compute_alphabb_bound` abstains with `-inf`, whose
+  only effect at both call sites is `max(lb, -inf)`. The identical function written
+  in native expression ops yields a finite alpha; wrapped in `dm.custom` it does
+  not.
+
+  Measured over 8 CustomCall models: 51 alphaBB node boxes, all 51 abstaining, → 0,
+  with status/node_count/bound/objective bit-identical (32/32 exact-identity
+  assertions — the §5 *bound-neutral* regime, not a bound trade). It therefore
+  ships unflagged: a default-off knob over a provable no-op is a dead flag (§3). It
+  cannot touch the benchmark corpus either, since `CustomCall` is constructed only
+  by `dm.custom` and no `.nl` or QPLIB instance can contain one.
+  `test_1114_alphabb_customcall_suppressed.py` pins the implication the gate rests
+  on, so teaching the interval-AD walker about `CustomCall` later fails loudly here
+  instead of silently discarding real bounds.
+
+- **`singular_tangent` recovery missed fractional power atoms (`x**0.5`)**
+  (`relaxation`, #1118). `x**0.5` has exactly the vertical tangent at `t = 0` that
+  `dm.sqrt(x)` has, but `_build_power` built its derivative by bare exponentiation
+  and `p * (0.0 ** (p - 1.0))` RAISES `ZeroDivisionError` for `p < 1` — an
+  `ArithmeticError`, which `_emit_1d._tangent_row` catches one branch ABOVE the
+  #1111/#1115 recovery. So the facet stayed dropped and the flag's behavior
+  depended on how the user spelled the square root (counting
+  `_interior_tangent_point` calls through a solve: `sqrt` 6, `x**0.5` **0**).
+  `_pow_deriv` now evaluates the `t == 0` limit explicitly — `+inf` for
+  `0 < p < 1`, the shape `_dsqrt` already had, and `nan` for `p <= 0` where `f`
+  itself diverges and the recovery must decline. Every `t != 0` value is the bare
+  exponentiation, bit-identical including its exceptions.
+
+  Sound before and after (the facet was merely dropped), and reachable only with
+  the default-OFF flag. `python/tests/test_1118_power_singular_tangent.py` pins
+  spelling parity with `dm.sqrt`, flag-OFF byte identity, non-interference with
+  integer/`p > 1`/`p <= 0` powers, the no-graph-point-cut soundness sample, the
+  differential bound (ON >= OFF and ON <= the true box optimum over 32 objective
+  directions, with a counter proving the facet moved the bound), lazy-spec parity,
+  and the native-kernel decline of a zero-touching fractional power in both flag
+  states; 13 of its 41 tests fail before the change.
+
+- **A `SolverTuning` installed with `set_current()` was silently discarded at the
+  `solve()` boundary** (`bug`, #1117). `solver._scoped_tuning` published the
+  `tuning=` kwarg for the call, and with the kwarg omitted — every plain
+  `m.solve()` — it published a *fresh env-resolved* `SolverTuning()` rather than
+  inheriting, so a caller who wrapped a solve in `set_current(...)` got env
+  defaults with no warning. Measured on `41abe795`, counting
+  `_interior_tangent_point` calls through a solve of the issue's `sqrt` model:
+  `solve(tuning=...)` → 6, `set_current(...)` around `solve()` → **0**. The solve
+  boundary now calls the new `solver_tuning.enter_scope()`, whose precedence is
+  explicit `tuning=` kwarg > ambient context > environment defaults; `set_current`
+  keeps its documented `None`-means-env-defaults meaning. Nested solves inherit the
+  outer scope for the same reason.
+
+  The same fix in `_scoped_tuning` alone would have been **inert on exactly the
+  large models**: `_run_with_deep_recursion` (models deeper than 700 expression
+  nodes) runs the solve on a worker thread, and a new thread starts with an *empty*
+  `contextvars` context, so the published tuning would not have reached it. It now
+  runs the callable inside `contextvars.copy_context()` — writes on the worker
+  still cannot leak back to the caller.
+
+  This is the instrument defect behind two retracted #1113 panels, where a probe
+  that never fired reported "both arms bit-identical" as a neutrality result
+  (CLAUDE.md §6). `python/tests/test_1117_tuning_scope.py` pins the precedence
+  order, the end-to-end reproducer, and the worker-thread propagation; 6 of its 7
+  tests fail before the change.
 
 - **The McCormick LP downgrade told users to pass the flag they had just passed**
   (`relaxation`, #1112). A model whose nonlinearity lives inside a
@@ -43,11 +204,11 @@ The release procedure that produces these entries is documented in
   `CustomCall` model can arrive there without `_force_reduced_space`. That
   reachability fact is itself pinned by a test.
 
-  Not addressed, and tracked separately: alphaBB is still enabled alongside the
-  reduced engine because `_use_alphabb` keys on `_mc_lp_relaxer is None` and is
-  computed before `_reduced_space_active`. Suppressing it is bound-changing (if the
-  node bound is currently the better of the two, removing alphaBB can loosen it) and
-  needs the §5 flag-and-panel treatment.
+  Was tracked separately as #1114 and is **now fixed** (entry below). The
+  reasoning recorded here — "suppressing it is bound-changing, because if the node
+  bound is currently the better of the two, removing alphaBB can loosen it" — was
+  **falsified** by #1114's entry experiment (CLAUDE.md §11): on this class alphaBB
+  abstains at every node, so there is no better-of-the-two to lose.
 
 - **`sqrt`/`asin`/`acos`/`acosh` derivatives no longer divide by zero at a singular
   endpoint** (`relaxation`, #1111). `_dsqrt` and friends evaluate the derivative
@@ -255,8 +416,24 @@ The release procedure that produces these entries is documented in
   `solver_tuning.py` *removed* such flags rather than leaving them in default-OFF
   limbo; this one is retained by owner decision as a measurement lever for **#1115** —
   whether any formulation of the singular-endpoint tangent pays for itself — with the
-  failing panel written into the field's docstring. #1115 carries the same disposition
-  rule: if the successor mechanism is falsified too, the flag gets removed.
+  failing panel written into the field's docstring.
+
+  **#1115 resolved this, and its own definition of done turned out to be a false
+  dichotomy** (§4 — the measurement wins over the plan). #1115 offered two endings:
+  graduate the flag, or record that *no* formulation pays for itself and remove it.
+  Neither happened. Lazy placement is sound (gate 1: 0 violations), never loses the
+  bound anywhere on the corpus, and *does* pay for itself on `kriging_peaks` — a
+  tighter bound at an identical node count and identical incumbent for +4.0–4.5 %
+  wall — while costing +25.6 % (`eq6_1`) and +54.2 % (`maxmin`) where it tightens
+  nothing. So gate 2 fails and the flag cannot graduate, but the removal branch's
+  premise is false: the mechanism does pay for itself, on a class too narrow to
+  justify a corpus-wide default. `singular_tangent` therefore **stays default-OFF and
+  stays in the tree**, with `singular_tangent_lazy` as its placement and the eager
+  anchor retained as the live A/B control. What is missing is not a mechanism but a
+  *trigger* — a gate keyed on whether the facet binds often enough to pay for its
+  rows, rather than on the operator being `sqrt`/`asin`/`acos`. Building that on the
+  present evidence would repeat the #727 RLT mistake (§2: a benefit confined to one
+  family), so it is tracked separately rather than attempted here.
   Flag-OFF is byte-identical to the pre-#1111 relaxation.
 
   **Double retraction (§11) — a retraction that was itself wrong.** An earlier

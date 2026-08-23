@@ -15,33 +15,111 @@ Test categories:
 
 from __future__ import annotations
 
-import math
+import os
+import pathlib
+
+import numpy as np
 import pytest
-from dataclasses import dataclass
-from typing import Optional
-
 
 # ─────────────────────────────────────────────────────────────
-# Test fixtures and helpers (stubs — replace with actual discopt imports)
+# Test fixtures and helpers
 # ─────────────────────────────────────────────────────────────
+#
+# This file shipped as a scaffold: ``solve_instance`` raised
+# ``NotImplementedError``, every test caught it and called
+# ``pytest.skip("discopt not yet available")``, and all 98 tests skipped —
+# including the two in ``TestDeterminism``, the only assertions anywhere in the
+# repository that the solver reproduces run to run. #1116 made
+# ``deterministic=`` real (it had been a documented-but-unread parameter), and
+# those two tests were the flag's only consumer, so the flag would have had no
+# consumer that ever executed. That is the CLAUDE.md §6 failure mode — an
+# instrument that measures nothing and reports a pass — sitting in the file named
+# ``test_correctness.py``.
+#
+# The skips that remain are now *accurate*: an instance is skipped when its
+# ``.nl`` is not on this machine, which is a real condition (the 4 800-instance
+# MINLPLib snapshot is a developer-local Dropbox tree), and never a claim about
+# discopt itself.
 
-@dataclass
-class MockSolution:
-    """Stand-in for discopt solution object."""
-    status: str
-    objective: Optional[float] = None
-    bound: Optional[float] = None
-    x: Optional[list[float]] = None
-    node_count: int = 0
-    wall_time: float = 0.0
+# The in-repo corpus is searched first so CI, which has no MINLPLib snapshot,
+# still runs the instances it does ship.
+_REPO_NL = pathlib.Path(__file__).resolve().parents[2] / "python/tests/data/minlplib_nl"
+_BENCH_NL = pathlib.Path(
+    os.environ.get(
+        "DISCOPT_MINLPLIB_NL",
+        str(pathlib.Path.home() / "Dropbox/projects/discopt-minlp-benchmark/minlplib/nl"),
+    )
+)
+
+# Wall budget per solve. The scaffold asked for 3600 s on 29 instances across four
+# test classes, which is not a suite anyone runs. These tests skip when an instance
+# does not reach optimality, so a smaller budget narrows *coverage*, never
+# correctness — and every assertion here is a correctness assertion, not a timing
+# one. Raise it with DISCOPT_BENCH_TIME_LIMIT for a wider local run.
+TIME_LIMIT = float(os.environ.get("DISCOPT_BENCH_TIME_LIMIT", "30"))
+
+# These solve real instances, so they belong to the `correctness` marker (which
+# the root `addopts` deselects by default) and run on CI's python-correctness
+# lane. That lane's per-test timeout is 120 s, which TestDeterminism's three
+# sequential solves have to fit inside -- hence 30 s rather than the scaffold's
+# 3600 s.
+pytestmark = pytest.mark.correctness
+
+_SOLVE_CACHE: dict = {}
+_MODEL_CACHE: dict = {}
 
 
-def solve_instance(name: str, **kwargs) -> MockSolution:
-    """Stub: replace with actual discopt solve call."""
-    # from discopt import solve, load_problem
-    # problem = load_problem(f"instances/{name}.nl")
-    # return solve(problem, **kwargs)
-    raise NotImplementedError("Replace with actual discopt API")
+def _resolve(name: str) -> pathlib.Path:
+    for root in (_REPO_NL, _BENCH_NL):
+        p = root / f"{name}.nl"
+        if p.exists():
+            return p
+    pytest.skip(f"instance {name}.nl not present (set DISCOPT_MINLPLIB_NL)")
+
+
+def _load(name: str):
+    """Parse an instance. Cached: parsing is pure, so re-reading buys nothing."""
+    path = _resolve(name)
+    if path not in _MODEL_CACHE:
+        from discopt.modeling.core import from_nl
+
+        _MODEL_CACHE[path] = from_nl(str(path))
+    return _MODEL_CACHE[path]
+
+
+def solve_instance(name: str, *, cache: bool = True, **kwargs):
+    """Solve a MINLPLib instance by name and return discopt's ``SolveResult``.
+
+    ``cache=False`` is mandatory for anything measuring run-to-run behaviour:
+    a memoised solve would hand the SAME result object to every repetition and
+    ``TestDeterminism`` would pass by construction, which is the failure this
+    file already had once.
+    """
+    key = (name, tuple(sorted(kwargs.items())))
+    if cache and key in _SOLVE_CACHE:
+        return _SOLVE_CACHE[key]
+    kwargs.setdefault("time_limit", TIME_LIMIT)
+    # A fresh parse per solve: a Model carries solve-time state, so reusing one
+    # across repetitions would let a determinism test measure inherited state
+    # rather than the solver.
+    from discopt.modeling.core import from_nl
+
+    res = from_nl(str(_resolve(name))).solve(**kwargs)
+    if cache:
+        _SOLVE_CACHE[key] = res
+    return res
+
+
+def _flat_x(name: str, res) -> np.ndarray | None:
+    """``SolveResult.x`` is a dict of name -> array; flatten it in model order."""
+    if not res.x:
+        return None
+    parts = []
+    for v in _load(name)._variables:
+        if v.name not in res.x:
+            return None
+        parts.append(np.asarray(res.x[v.name], dtype=float).flatten())
+    return np.concatenate(parts) if parts else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -53,42 +131,62 @@ def solve_instance(name: str, **kwargs) -> MockSolution:
 # demonstrably wrong (most ~100-1500x too small) and are corrected here to the
 # authoritative =opt= (proven) / =best= (best known) values.
 KNOWN_OPTIMA = {
-    "ex1221":       7.6672,
-    "ex1222":       1.0765,
-    "ex1223":       4.5796,
-    "ex1223a":      4.5796,
-    "ex1224":      -0.94347,
-    "ex1225":      31.0,           # was 0.0 (=opt=)
-    "ex1226":      -17.0,
-    "ex1233":      155010.6713,    # was 62.1833 (=best=)
-    "ex1243":      83402.50641,    # was 83.6455 (=opt=)
-    "ex1244":      82042.90522,    # was 83.6455 (=opt=)
-    "ex1252":      128893.741,     # was 1169.37 (=opt=; Kocis-Grossmann batch plant)
-    "ex1252a":     128893.741,     # was 1169.37 (=opt=)
-    "ex1263":      19.6,           # was 19.46 (=opt=)
-    "ex1263a":     19.6,           # was 19.46 (=opt=)
-    "ex1264":       8.6,
-    "ex1264a":      8.6,
-    "ex1265":      10.3,
-    "ex1265a":     10.3,
-    "ex1266":      16.3,
-    "ex1266a":     16.3,
-    "fuel":         8566.12,
-    "gastrans":   89.08588,
-    "ghg_1veh":    7.7816348850,   # was -246.04 (=opt=)
+    "ex1221": 7.6672,
+    "ex1222": 1.0765,
+    "ex1223": 4.5796,
+    "ex1223a": 4.5796,
+    "ex1224": -0.94347,
+    "ex1225": 31.0,  # was 0.0 (=opt=)
+    "ex1226": -17.0,
+    "ex1233": 155010.6713,  # was 62.1833 (=best=)
+    "ex1243": 83402.50641,  # was 83.6455 (=opt=)
+    "ex1244": 82042.90522,  # was 83.6455 (=opt=)
+    "ex1252": 128893.741,  # was 1169.37 (=opt=; Kocis-Grossmann batch plant)
+    "ex1252a": 128893.741,  # was 1169.37 (=opt=)
+    "ex1263": 19.6,  # was 19.46 (=opt=)
+    "ex1263a": 19.6,  # was 19.46 (=opt=)
+    "ex1264": 8.6,
+    "ex1264a": 8.6,
+    "ex1265": 10.3,
+    "ex1265a": 10.3,
+    "ex1266": 16.3,
+    "ex1266a": 16.3,
+    "fuel": 8566.12,
+    "gastrans": 89.08588,
+    "ghg_1veh": 7.7816348850,  # was -246.04 (=opt=)
     # `procurement1` (0.0) and `smallinvDAXr1b50` (-3.83) were phantom entries —
     # those names match no MINLPLib instance and the values matched nothing.
     # Replaced with the real instances the suites reference (=best= / =opt=).
-    "procurement1large":      3802.1797490,
-    "procurement1mot":         291.5416577,
-    "procurement2mot":         212.0707488,
-    "smallinvDAXr1b020-022":     1.5715279820,
-    "smallinvDAXr1b050-055":     9.7971434540,
-    "smallinvDAXr1b100-110":    39.1621418600,
+    "procurement1large": 3802.1797490,
+    "procurement1mot": 291.5416577,
+    "procurement2mot": 212.0707488,
+    "smallinvDAXr1b020-022": 1.5715279820,
+    "smallinvDAXr1b050-055": 9.7971434540,
+    "smallinvDAXr1b100-110": 39.1621418600,
 }
 
 ABS_TOL = 1e-4
 REL_TOL = 1e-3
+
+# Resolved at collection time so parametrisation can prefer instances that exist.
+# `_resolve` cannot be used here -- it calls `pytest.skip`, which is a runtime
+# operation.
+AVAILABLE = [
+    n for n in KNOWN_OPTIMA if (_REPO_NL / f"{n}.nl").exists() or (_BENCH_NL / f"{n}.nl").exists()
+]
+
+
+@pytest.mark.smoke
+def test_the_corpus_is_reachable():
+    """Guard: without this, a broken corpus path turns 98 tests into 98 skips.
+
+    That is exactly how this file spent its life before #1116 -- green, and
+    measuring nothing (CLAUDE.md §6).
+    """
+    assert AVAILABLE, (
+        f"no KNOWN_OPTIMA instance resolved under {_REPO_NL} or {_BENCH_NL}; "
+        "every instance-based test below is vacuous"
+    )
 
 
 class TestKnownOptima:
@@ -97,10 +195,7 @@ class TestKnownOptima:
     @pytest.mark.parametrize("instance,expected", list(KNOWN_OPTIMA.items()))
     def test_optimal_value(self, instance: str, expected: float):
         """Solver objective must match known optimum within tolerance."""
-        try:
-            sol = solve_instance(instance, time_limit=3600)
-        except NotImplementedError:
-            pytest.skip("discopt not yet available")
+        sol = solve_instance(instance)
 
         if sol.status != "optimal":
             pytest.skip(f"Not solved to optimality (status={sol.status})")
@@ -116,10 +211,7 @@ class TestKnownOptima:
     @pytest.mark.parametrize("instance,expected", list(KNOWN_OPTIMA.items()))
     def test_bound_validity(self, instance: str, expected: float):
         """Lower bound must never exceed the true optimum."""
-        try:
-            sol = solve_instance(instance, time_limit=3600)
-        except NotImplementedError:
-            pytest.skip("discopt not yet available")
+        sol = solve_instance(instance)
 
         if sol.bound is None:
             pytest.skip("No bound reported")
@@ -135,6 +227,7 @@ class TestKnownOptima:
 # 2. FEASIBILITY VERIFICATION
 # ─────────────────────────────────────────────────────────────
 
+
 class TestFeasibility:
     """Verify that reported solutions actually satisfy constraints."""
 
@@ -143,62 +236,67 @@ class TestFeasibility:
     @pytest.mark.parametrize("instance", list(KNOWN_OPTIMA.keys())[:10])
     def test_solution_feasibility(self, instance: str):
         """Returned solution point must satisfy all constraints."""
-        try:
-            sol = solve_instance(instance, time_limit=3600)
-        except NotImplementedError:
-            pytest.skip("discopt not yet available")
+        sol = solve_instance(instance)
 
         if not sol.x or sol.status not in ("optimal", "feasible"):
             pytest.skip("No feasible solution")
 
-        # Stub: actual implementation would evaluate constraints at sol.x
-        # from discopt import load_problem, evaluate_constraints
-        # problem = load_problem(f"instances/{instance}.nl")
-        # violations = evaluate_constraints(problem, sol.x)
-        # max_violation = max(abs(v) for v in violations)
-        # assert max_violation <= self.FEASIBILITY_TOL, (
-        #     f"Infeasible solution: max violation = {max_violation:.2e}"
-        # )
+        x_flat = _flat_x(instance, sol)
+        assert x_flat is not None, "solution reported but could not be flattened"
+
+        from discopt.warm_start import check_feasibility
+
+        # The reported point is checked against the model the solver was given,
+        # not against the solver's own internal view of it — the point of the
+        # test is to catch a solver that believes an infeasible point.
+        ok, violations = check_feasibility(_load(instance), x_flat, tol=self.FEASIBILITY_TOL)
+        assert ok, f"INFEASIBLE incumbent for {instance}: " + "; ".join(violations[:5])
 
     @pytest.mark.parametrize("instance", list(KNOWN_OPTIMA.keys())[:10])
     def test_integrality(self, instance: str):
         """Integer variables must have integer values in solution."""
-        try:
-            sol = solve_instance(instance, time_limit=3600)
-        except NotImplementedError:
-            pytest.skip("discopt not yet available")
+        sol = solve_instance(instance)
 
         if not sol.x or sol.status not in ("optimal", "feasible"):
             pytest.skip("No feasible solution")
 
-        # Stub: check integrality of integer variables
-        # from discopt import load_problem
-        # problem = load_problem(f"instances/{instance}.nl")
-        # for i in problem.integer_variable_indices:
-        #     assert abs(sol.x[i] - round(sol.x[i])) < 1e-5, (
-        #         f"Variable x[{i}] = {sol.x[i]} is not integer"
-        #     )
+        model = _load(instance)
+        checked = 0
+        for var in model._variables:
+            if var.var_type.value not in ("binary", "integer"):
+                continue
+            for value in np.asarray(sol.x[var.name], dtype=float).ravel():
+                checked += 1
+                assert abs(value - round(value)) < 1e-5, (
+                    f"{instance}: {var.name} = {value!r} is not integral"
+                )
+        if checked == 0:
+            pytest.skip(f"{instance} has no discrete variables")
 
 
 # ─────────────────────────────────────────────────────────────
 # 3. DETERMINISM
 # ─────────────────────────────────────────────────────────────
 
+
 class TestDeterminism:
     """Verify solver produces identical results across runs."""
 
     NUM_RUNS = 3
-    INSTANCES = list(KNOWN_OPTIMA.keys())[:5]
+    # Prefer instances that actually exist here: on CI only the five in-repo
+    # `.nl` files resolve, and slicing the raw dict would spend two of the five
+    # parametrisations on instances that can only skip.
+    INSTANCES = AVAILABLE[:5]
 
     @pytest.mark.parametrize("instance", INSTANCES)
     def test_deterministic_objective(self, instance: str):
         """Objective value must be identical across runs."""
         objectives = []
         for _ in range(self.NUM_RUNS):
-            try:
-                sol = solve_instance(instance, time_limit=600, deterministic=True)
-            except NotImplementedError:
-                pytest.skip("discopt not yet available")
+            # cache=False: a memoised solve would return one object to all three
+            # repetitions and this test would pass without the solver ever having
+            # run twice.
+            sol = solve_instance(instance, cache=False, deterministic=True)
             if sol.objective is not None:
                 objectives.append(sol.objective)
 
@@ -216,10 +314,7 @@ class TestDeterminism:
         """Node count must be identical in deterministic mode."""
         node_counts = []
         for _ in range(self.NUM_RUNS):
-            try:
-                sol = solve_instance(instance, time_limit=600, deterministic=True)
-            except NotImplementedError:
-                pytest.skip("discopt not yet available")
+            sol = solve_instance(instance, cache=False, deterministic=True)
             node_counts.append(sol.node_count)
 
         if len(node_counts) < 2:
@@ -234,52 +329,122 @@ class TestDeterminism:
 # 4. EDGE CASES
 # ─────────────────────────────────────────────────────────────
 
+
 class TestEdgeCases:
-    """Test solver behavior on degenerate and boundary cases."""
+    """Test solver behavior on degenerate and boundary cases.
+
+    These build their models directly rather than reading a corpus, so they run
+    everywhere — including CI, which ships no MINLPLib snapshot.
+    """
+
+    @staticmethod
+    def _model(name: str):
+        from discopt import Model
+
+        return Model(name)
 
     def test_infeasible_detection(self):
         """Solver must correctly report infeasibility."""
-        # Stub: create a known-infeasible problem
-        # from discopt import Problem, solve
-        # p = Problem()
-        # x = p.add_variable(lb=0, ub=1)
-        # p.add_constraint(x >= 2)  # Infeasible
-        # sol = solve(p)
-        # assert sol.status == "infeasible"
-        pytest.skip("discopt not yet available")
+        m = self._model("infeasible")
+        x = m.continuous("x", lb=0, ub=1)
+        m.subject_to(x >= 2)
+        m.minimize(x)
+        assert m.solve(time_limit=TIME_LIMIT).status == "infeasible"
 
     def test_unbounded_detection(self):
         """Solver must correctly report unboundedness."""
-        pytest.skip("discopt not yet available")
+        m = self._model("unbounded")
+        # 1e20 is the LP layer's INF sentinel, so this is an unbounded bound and
+        # not merely a very wide one.
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.minimize(x)
+        assert m.solve(time_limit=TIME_LIMIT).status == "unbounded"
 
     def test_fixed_variables(self):
         """Handle variables with lb == ub."""
-        pytest.skip("discopt not yet available")
+        m = self._model("fixed")
+        x = m.continuous("x", lb=2.0, ub=2.0)
+        y = m.continuous("y", lb=0.0, ub=10.0)
+        m.subject_to(y >= x)
+        m.minimize(x + y)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(4.0, abs=1e-5)
 
     def test_empty_problem(self):
         """Handle problem with no constraints."""
-        pytest.skip("discopt not yet available")
+        m = self._model("unconstrained")
+        x = m.continuous("x", lb=-3.0, ub=5.0)
+        m.minimize(x * x)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(0.0, abs=1e-5)
 
     def test_single_variable(self):
         """Handle trivial single-variable problems."""
-        pytest.skip("discopt not yet available")
+        m = self._model("single")
+        x = m.continuous("x", lb=-5.0, ub=5.0)
+        m.minimize((x - 1.25) ** 2)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(0.0, abs=1e-5)
+        assert float(np.ravel(res.x["x"])[0]) == pytest.approx(1.25, abs=1e-4)
 
     def test_all_integer(self):
         """Handle pure integer (no continuous) problems."""
-        pytest.skip("discopt not yet available")
+        m = self._model("all_integer")
+        a = m.integer("a", lb=0, ub=10)
+        b = m.integer("b", lb=0, ub=10)
+        m.subject_to(a + b >= 7)
+        m.minimize(3 * a + 2 * b)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(14.0, abs=1e-4)
 
     def test_all_continuous(self):
         """Handle pure NLP (no integer) problems."""
-        pytest.skip("discopt not yet available")
+        m = self._model("all_continuous")
+        x = m.continuous("x", lb=-2.0, ub=2.0)
+        y = m.continuous("y", lb=-2.0, ub=2.0)
+        m.subject_to(x + y >= 1)
+        m.minimize((x - 0.5) ** 2 + (y - 0.5) ** 2)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(0.0, abs=1e-5)
 
     def test_linear_constraints_only(self):
         """Handle problems with only linear constraints."""
-        pytest.skip("discopt not yet available")
+        m = self._model("linear_only")
+        x = m.continuous("x", lb=0.0, ub=10.0)
+        y = m.binary("y")
+        m.subject_to(x <= 10 * y)
+        m.subject_to(x >= 3)
+        m.minimize(x + 5 * y)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(8.0, abs=1e-4)
 
     def test_very_tight_bounds(self):
         """Handle near-fixed variables (ub - lb < 1e-8)."""
-        pytest.skip("discopt not yet available")
+        m = self._model("tight_bounds")
+        x = m.continuous("x", lb=1.0, ub=1.0 + 1e-9)
+        y = m.continuous("y", lb=0.0, ub=5.0)
+        m.subject_to(y >= 2 * x)
+        m.minimize(y)
+        res = m.solve(time_limit=TIME_LIMIT)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(2.0, abs=1e-5)
 
     def test_large_coefficient_range(self):
         """Handle poorly scaled problems (coefficient range > 1e8)."""
-        pytest.skip("discopt not yet available")
+        m = self._model("badly_scaled")
+        x = m.continuous("x", lb=0.0, ub=1e6)
+        y = m.continuous("y", lb=0.0, ub=1e-3)
+        m.subject_to(1e8 * y + x >= 1e5)
+        m.minimize(x + 1e9 * y)
+        res = m.solve(time_limit=TIME_LIMIT)
+        # Buying the constraint through x costs 1 per unit and through y costs
+        # 10, so the optimum is all-x at 1e5 -- a solver that lets the 1e9
+        # coefficient dominate its scaling would take the y route.
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(1e5, rel=1e-6)

@@ -38,7 +38,7 @@ result = m.solve(
     node_callback=None,
     stream=False,                   # True -> iterator[SolveUpdate]
     sensitivity=False,              # True -> populate SolveResult.gradient
-    deterministic=True,
+    deterministic=False,            # True -> role-2 wall budgets inert (#1116)
     llm=False,                      # True -> populate .explain(llm=True)
 )
 ```

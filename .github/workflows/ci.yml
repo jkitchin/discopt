@@ -317,7 +317,13 @@ jobs:
           # some correctness tests validate global/claim state that xdist can
           # order-mask (the same reason python-claims-serial runs -n0). The subset
           # is ~5 min serially (287 tests locally), so determinism costs little.
+          # discopt_benchmarks/tests/test_correctness.py joins this lane: it is
+          # the repo's only run-to-run reproducibility assertion (TestDeterminism,
+          # the consumer of #1116's `deterministic=`) and it lived its whole life
+          # skipping. It resolves instances from python/tests/data/minlplib_nl/,
+          # which is in the checkout, and skips the ones that are not.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
+            discopt_benchmarks/tests/test_correctness.py \
             -q --tb=short --timeout=120 -p no:cacheprovider \
             -m "correctness and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_amp.py \

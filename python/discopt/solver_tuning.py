@@ -1123,6 +1123,56 @@ class SolverTuning:
     objective sign selects — keep the primal path exactly as before.
     """
 
+    # --- determinism (#1116) --------------------------------------------------
+    deterministic: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DETERMINISTIC", default=False)
+    )
+    """Make the search a function of the *model* rather than of machine speed by
+    rendering every **role-2** wall budget inert. ``DISCOPT_DETERMINISTIC``,
+    default **OFF**; also reachable as ``Model.solve(deterministic=True)``.
+
+    #912 draws the line this flag acts on. A clock that answers *"when do we
+    stop?"* — the user's ``time_limit`` — is correct by definition (role 1). A
+    clock that answers *"how much work do we do?"* — a sub-budget carved as a
+    fraction of ``time_limit``, or a fixed number of seconds handed to a stage —
+    makes the ANSWER a function of how fast the machine happens to be that
+    minute. ``_work_budget.py`` calls that "a correctness-of-process bug, not a
+    performance detail".
+
+    #1116 measured the consequence. ``kriging_peaks-full200`` at ``max_nodes=1``,
+    same process, same binary, no user time pressure, returned root dual bounds of
+    −25371.8 / −28852.0 / −28072.6 — a 14 % swing — with the incumbent
+    bit-identical. Neutralizing the wall budgets made the same solve reproduce
+    exactly (``-1044.819…`` twice at ``max_nodes=1``, ``-754.478794470719`` twice
+    at ``max_nodes=300``), and *tighter* than every wall-bounded run.
+
+    When this is on, role-2 budgets become ``None``/``math.inf`` at the 27 sites
+    that carve them (``solver._role2_budget`` / ``_role2_deadline`` /
+    ``_role2_horizon``, plus the integer-ratio dive in ``_relax/mccormick_lp.py``)
+    and each stage is bounded by the deterministic caps it already carries (round
+    counts, iteration caps, the node budget). Expect a run to take longer:
+    nothing truncates a stage early any more.
+
+    **What the flag does not cover, and why.** Two role-1 mechanisms are left
+    alone on purpose, because neutralizing them would let preprocessing overrun
+    the user's ``time_limit`` without bound — trading a reproducibility bug for a
+    broken role-1 promise, which CLAUDE.md §1 does not permit:
+
+    * the phase-entry gates (``_deadline_exhausted()`` / ``_remaining_budget() >
+      x``), which decide whether an optional preprocessing phase *starts* at all;
+    * the two POUNCE funnels' ``max_wall_time = min(30.0, caller_limit)`` stall
+      backstop.
+
+    So the guarantee is: **a solve reproduces when the role-1 budget never binds**
+    — i.e. it terminates on work (``max_nodes``/gap) with real slack against
+    ``time_limit``. A run cut short by ``time_limit``, or run on a machine slow
+    enough that a phase-entry gate flips, is not reproducible and does not claim
+    to be. The residual was measured not to bind on the reproduction instance:
+    the 30 s POUNCE cap was live and real during the arm that reproduced
+    bit-exactly, and the solve finished in ~7 min against the default 3600 s
+    limit.
+    """
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
@@ -1369,13 +1419,20 @@ class SolverTuning:
     ``DISCOPT_SINGULAR_TANGENT=1``                2671    313
     ==========================================  ======  =====
 
-    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` is
+    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` was
     inert. So "both arms bit-identical" was not a neutrality result — it is the
     signature of a probe that never fired, and it explains exactly why the arms
     agreed to the last digit. That panel carried no drops counter, so nothing caught
     it (§6). Every root-relaxation measurement quoted below is unaffected: those
     drive ``build_uniform_relaxation`` directly, where ``set_current`` does reach
     (instrumented 10/10).
+
+    **That delivery gap is now fixed (#1117)** — the solve boundary calls
+    :func:`enter_scope`, which inherits an ambient context instead of overwriting it,
+    and the deep-recursion worker thread carries the caller's contextvars context
+    across. The table above is kept as the record of what the broken instrument
+    produced, not as current behavior; ``set_current(...)`` around a plain
+    ``m.solve()`` now fires the flag exactly like ``tuning=``.
 
     The reinstated number was re-measured on a corrected instrument — ``tuning=``
     delivery, the ON arm asserted to have fired, a ``max_nodes`` budget with **no**
@@ -1423,10 +1480,16 @@ class SolverTuning:
 
     **That successor was built and measured — #1115, and it is the default
     placement.** See :attr:`singular_tangent_lazy`. Eager anchoring is retained only
-    as the A/B control for that measurement; the two #581 precedents below removed
-    sound-but-unhelpful flags rather than leaving them in default-OFF limbo, and the
-    same rule applies here if the lazy form is falsified in turn. Flag-OFF is
-    byte-identical to the pre-#1111 relaxation."""
+    as the A/B control for that measurement.
+
+    **Final disposition (#1115).** The lazy form was *not* falsified, so the #581
+    removal precedent does not apply: it is sound, it never loses the bound on the
+    corpus, and it buys a real bound gain at an identical node count on
+    ``kriging_peaks``. It fails gate 2 only because it costs +25.6 %/+54.2 % on the
+    instances it does not help. This flag therefore stays default-OFF **and stays in
+    the tree**; what is missing is a trigger keyed on whether the facet binds often
+    enough to pay for its rows, not a better mechanism. Flag-OFF is byte-identical to
+    the pre-#1111 relaxation."""
 
     singular_tangent_lazy: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT_LAZY", default=True)
@@ -1520,6 +1583,21 @@ class SolverTuning:
     small to change a branching decision. So the #1111 finding "the root win does not
     survive branching" is scoped to the **eager** anchor: where the dropped facet
     dominates the root relaxation, lazy placement does retain part of it.
+
+    **Why this stays default-OFF rather than becoming conditional (#1119, closed
+    falsified 2026-08-23).** The successor question was whether a hit-rate gate —
+    keep the rows that bind in the LP optimal basis, drop the ones that do not —
+    could remove the ``eq6_1``/``maxmin`` overhead while retaining the
+    ``kriging_peaks`` gain. It cannot, and the measurement runs the wrong way:
+    over 200 nodes the two instances that PAY bind at 1.0000 and 0.9580, the two
+    that GAIN bind at 0.9173 and 0.8509, and ``eq6_1`` has **zero** non-binding
+    rows — so the gate drops 0 of its 22 874 rows and saves none of the +25.6 %,
+    while discarding 14.9 % of the rows on the instance the feature exists for.
+    Binding is near-tautological here: a row is emitted because it is violated at
+    the current LP point, so the re-solve that follows lands on it. Full record
+    (including the screen showing only 8 of 96 candidate instances emit any row at
+    all) in ``docs/dev/performance-plan.md`` §17; the instrument is
+    ``MccormickLPRelaxer.singular_tangent_stats``.
     """
 
     singular_tangent_kappa: float = field(
@@ -1646,6 +1724,33 @@ def current() -> SolverTuning:
 def set_current(tuning: SolverTuning | None):
     """Publish ``tuning`` (or a fresh env-resolved one) as active; returns the token."""
     return _current.set(tuning if tuning is not None else SolverTuning())
+
+
+def enter_scope(tuning: SolverTuning | None):
+    """Publish ``tuning`` for a solve scope, **inheriting** the active context when
+    ``tuning`` is ``None``; returns the token to hand to :func:`reset_current`.
+
+    This is the difference between "no override was requested" and "override with
+    env defaults". :func:`set_current` cannot express the former — ``None`` there
+    means *a fresh env-resolved instance* — so the solve boundary used to overwrite
+    whatever a caller had installed with :func:`set_current`, discarding it in
+    silence (issue #1117). The precedence here is explicit ``tuning=`` kwarg >
+    ambient context > environment defaults, which is what a caller reading
+
+    .. code-block:: python
+
+        token = solver_tuning.set_current(tuning)
+        try:
+            m.solve()
+        finally:
+            solver_tuning.reset_current(token)
+
+    already expects. Nested solves inherit the outer scope for the same reason.
+    """
+    active = _current.get()
+    if tuning is not None:
+        return _current.set(tuning)
+    return _current.set(active if active is not None else SolverTuning())
 
 
 def reset_current(token) -> None:

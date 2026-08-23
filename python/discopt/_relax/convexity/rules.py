@@ -1318,6 +1318,7 @@ def _run_with_deep_recursion(fn: Callable[[], _T], *, depth_need: int) -> _T:
     raised Python recursion limit cannot overflow the C stack and crash the
     process. The recursion limit is restored afterward; exceptions propagate.
     """
+    import contextvars
     import threading
 
     current = sys.getrecursionlimit()
@@ -1325,12 +1326,19 @@ def _run_with_deep_recursion(fn: Callable[[], _T], *, depth_need: int) -> _T:
         return fn()
 
     box: dict[str, object] = {}
+    # A new thread starts with an EMPTY contextvars context, so anything published
+    # for the call — notably the active ``SolverTuning`` (issue #1117) — would be
+    # invisible to ``fn`` on the worker and the deep-model path would silently run
+    # on env defaults while the shallow path honored the caller. Run ``fn`` inside
+    # a copy of this thread's context instead; the copy is discarded on return, so
+    # writes made by ``fn`` still cannot leak back here.
+    caller_ctx = contextvars.copy_context()
 
     def _worker() -> None:
         old = sys.getrecursionlimit()
         sys.setrecursionlimit(depth_need)
         try:
-            box["value"] = fn()
+            box["value"] = caller_ctx.run(fn)
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
             box["error"] = exc
         finally:

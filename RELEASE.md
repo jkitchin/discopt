@@ -27,11 +27,25 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
 - [ ] `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest python/tests/ -v` -- full Python suite green.
 - [ ] `pytest python/tests/ --cov=discopt` -- coverage >= 85%.
 - [ ] `pytest discopt_benchmarks/tests/ -v` -- benchmark suite green. **Read the
-      skip count, not just the exit code.** As of v0.8.0 this suite reports
-      `321 passed, 118 skipped`, and all 118 are unconditional-skip stubs in
-      `tests/test_correctness.py` and `tests/test_interop.py` that have never
-      executed (#1050) -- not optional-dependency gates. Benchmark-level
-      correctness is therefore *not* covered here; the real gate is the next item.
+      skip count, not just the exit code.** As of v0.8.0 this suite reported
+      `321 passed, 118 skipped`, and all 118 were unconditional-skip stubs in
+      `tests/test_correctness.py` and `tests/test_interop.py` that had never
+      executed (#1050) -- not optional-dependency gates.
+      `tests/test_correctness.py`'s 98 of those now solve real instances; the ~20
+      in `tests/test_interop.py` are still stubs, so #1050 stays open.
+- [ ] `pytest discopt_benchmarks/tests/test_correctness.py -m correctness -v` --
+      **the `-m` is required**, for the same reason as the `python/tests` item
+      below: that file is now marked `correctness`, which the root `addopts`
+      deselects, so the bare command above silently collects and deselects all 99.
+      This is the lane that checks the reported objective against MINLPLib's
+      `.solu`, that no dual bound exceeds a known optimum, that incumbents are
+      feasible and integral, and (`TestDeterminism`) that a `deterministic=True`
+      solve reproduces run to run. Instances resolve from
+      `python/tests/data/minlplib_nl/` and then from the MINLPLib snapshot named
+      by `DISCOPT_MINLPLIB_NL`; anything absent skips with that reason. Raise
+      `DISCOPT_BENCH_TIME_LIMIT` (default 30 s) for a release-grade run -- at the
+      default, instances that do not reach optimality in time skip rather than
+      assert.
 - [ ] `pytest python/tests/ -m "correctness" -v` -- **`incorrect_count == 0`**.
       Non-negotiable per `CLAUDE.md`. **The `-m` is required, not optional.**
       `pyproject.toml`'s `addopts` defaults to
