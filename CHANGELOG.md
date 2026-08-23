@@ -12,6 +12,25 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`discopt_benchmarks/tests/test_interop.py` deleted; a no-op suite guard added
+  in its place** (closes #1050). The file's 20 tests were written against a
+  `discopt._rust` surface that never existed — all 14 helpers they referenced
+  (`create_test_bounds`, `create_test_sparse`, `get_all_array_outputs`,
+  `get_shared_buffer`, `create_batch`, `benchmark_roundtrip`,
+  `trigger_test_panic`, …) are absent from the compiled module, and the one
+  concrete dtype claim it made was wrong about the real boundary (it asserted
+  CSR `indices.dtype == np.int32`; `solve_lp_warm_csc_py` takes `i64`). Its
+  intent is covered by executing tests: `python/tests/test_batch_dispatch.py`
+  (34 tests) is a class-for-class superset of its array-transfer, dtype,
+  zero-copy — the same `ctypes.data` pointer identity — batch-shape, latency and
+  invalid-input sections; `test_simplex_lp.py` covers the LP infeasible status;
+  `relaxation_harness.assert_containment` covers the sampled McCormick soundness
+  property. `conftest.py` now fails any session in which a test skips with a
+  placeholder-harness reason ("not yet available", "replace with actual",
+  `NotImplementedError`) or in which a module declaring `MUST_EXECUTE` runs
+  nothing — the two signatures of a suite decaying into a no-op while reporting
+  green. Verified against the deleted file itself: it exits 1 and names all 20.
+
 - **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
   #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
   that raised `NotImplementedError`, with the false reason "discopt not yet

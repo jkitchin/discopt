@@ -65,6 +65,13 @@ TIME_LIMIT = float(os.environ.get("DISCOPT_BENCH_TIME_LIMIT", "30"))
 # 3600 s.
 pytestmark = pytest.mark.correctness
 
+# Read by the no-op suite guard in ``conftest.py`` (#1050): this module exists to
+# run, so a session in which every one of its tests skipped is a failure, not a
+# quiet pass. It is the backstop for ``test_the_corpus_is_reachable`` below —
+# that test fails when no instance resolves, this fires even if the reason
+# changes to something nobody anticipated.
+MUST_EXECUTE = True
+
 _SOLVE_CACHE: dict = {}
 _MODEL_CACHE: dict = {}
 
