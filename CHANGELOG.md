@@ -257,9 +257,10 @@ The release procedure that produces these entries is documented in
 
   The `DISCOPT_CUT_INHERIT` outcome. Note that the two #581 precedents in
   `solver_tuning.py` *removed* such flags rather than leaving them in default-OFF
-  limbo; this one is retained by owner decision as a measurement lever for the open
-  question in #1111 — whether any formulation of the singular-endpoint tangent pays
-  for itself — with the failing panel written into the field's docstring.
+  limbo; this one is retained by owner decision as a measurement lever for **#1115** —
+  whether any formulation of the singular-endpoint tangent pays for itself — with the
+  failing panel written into the field's docstring. #1115 carries the same disposition
+  rule: if the successor mechanism is falsified too, the flag gets removed.
   Flag-OFF is byte-identical to the pre-#1111 relaxation.
 
   **Retractions.** An earlier 13-pair panel, ~36 % diluted (5 of its 14 instances

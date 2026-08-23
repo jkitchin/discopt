@@ -1398,16 +1398,19 @@ class SolverTuning:
     binding point is *near* the endpoint but the gain collapses for ``delta`` below
     ~1e-5, so an LP point landing on or inside that radius needs the same conditioning
     guard this cap provides. What lazy separation removes is the need to *guess* the
-    offset, not the degeneracy itself. That is the open question #1111 leaves behind,
-    and this flag is the lever for measuring it.
+    offset, not the degeneracy itself. That is the open question #1111 leaves behind;
+    it is tracked in **#1115**, with the entry experiment and its kill criterion, and
+    this flag is the lever for measuring it.
 
     Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome, in its neutral
     rather than its harmful form. Note the two #581
     precedents below removed such flags rather than leaving them in default-OFF
     limbo; this one is retained by owner decision (2026-08-22) as a measurement
-    lever for the open question in #1111 — whether *any* formulation of the
-    singular-endpoint tangent pays for itself — with the failing panel recorded
-    here so no future reader mistakes it for an ungraduated candidate. Flag-OFF is
+    lever for #1115 — whether *any* formulation of the singular-endpoint tangent pays
+    for itself — with the failing panel recorded here so no future reader mistakes it
+    for an ungraduated candidate. #1115 carries the same disposition rule: if the
+    successor mechanism is falsified too, this flag gets removed rather than left in
+    limbo indefinitely. Flag-OFF is
     byte-identical to the pre-#1111 relaxation."""
 
     singular_tangent_kappa: float = field(
