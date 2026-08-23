@@ -234,6 +234,11 @@ class UniformRelaxation:
     # lifted to a single aux; the OA tangents added lazily at the LP point are
     # global under-/over-estimators (sound, never cut a feasible point).
     composite_multivar_specs: list
+    # Univariate facets dropped at a vertical tangent, deferred to separation at
+    # the LP point (#1115). Each tangent of a concave (resp. convex) ``f`` is a
+    # global over- (under-) estimator on the box, so a separated row never cuts a
+    # feasible point — sound by the same argument as ``composite_multivar_specs``.
+    singular_tangent_specs: list = dataclasses.field(default_factory=list)
     # Affine squares ``(c·x_j+d)**2`` -> ``(var, aux) -> (coeff, const)`` (issue #640
     # Bucket 3), consumed by the incremental McCormick patch to regenerate their
     # box-dependent envelope rows in closed form.
@@ -723,6 +728,13 @@ class _Builder:
         # a global underestimator (concave: overestimator), so no feasible point is
         # ever cut; sound by construction. Populated by ``_try_convex_lift``.
         self.composite_multivar_specs: list = []
+        # Univariate facets dropped at a vertical tangent and deferred to
+        # separation (#1115) — ``SingularTangentSpec`` entries the
+        # ``_separate_singular_tangent`` loop consumes. Populated by ``_emit_1d``
+        # only when ``singular_tangent`` is on AND ``singular_tangent_lazy`` is
+        # set; empty (and the separator inert) otherwise.
+        self.singular_tangent_specs: list = []
+        self.singular_tangent_seen: set = set()
         # Finite-domain trig-square selector tables (issue #640 Bucket 1), populated
         # by ``_build_power`` when it hits a ``trig(int-affine)**2`` over a small
         # finite integer domain.
@@ -1514,6 +1526,45 @@ def _interval_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dic
 _SINGULAR_TANGENT_LADDER = 20
 
 
+@dataclasses.dataclass
+class SingularTangentSpec:
+    """A univariate facet dropped at a vertical tangent, deferred to separation.
+
+    ``w = f(t)`` with ``t = sum(coeffs[j]*x[j]) + const`` over the box
+    ``[lo, hi]`` in ``t``-space. ``sign`` is ``+1`` for a convex ``f`` (the
+    tangent under-estimates) and ``-1`` for a concave one (it over-estimates),
+    matching ``_emit_1d``'s ``sgn``. Consumed by
+    ``MccormickLPRelaxer._separate_singular_tangent``, which adds the supporting
+    tangent at the LP point instead of at a fixed geometric anchor (#1115).
+    """
+
+    aux_col: int
+    coeffs: dict
+    const: float
+    lo: float
+    hi: float
+    f: Callable[[float], float]
+    fp: Callable[[float], float]
+    sign: float
+    #: ``lo``-side (-1) or ``hi``-side (+1) endpoint whose derivative diverges.
+    edge: int
+    #: Secant slope of this box, the scale :func:`_interior_tangent_point` caps
+    #: against. Carried so the separator can fall back to the #1111 ladder anchor
+    #: when the LP point lands ON the singularity, where no finite tangent exists.
+    slope: float
+
+
+def _singular_tangent_lazy() -> bool:
+    """Place the recovered facet at the LP point rather than a ladder anchor (#1115).
+
+    Only consulted when :func:`_singular_tangent_enabled` is true; it selects
+    *where* the recovered tangent goes, never *whether* the facet is recovered.
+    """
+    from discopt.solver_tuning import current as _tuning
+
+    return _tuning().singular_tangent_lazy
+
+
 def _singular_tangent_enabled() -> bool:
     """Whether vertical-tangent recovery is on (#1111) — ``SolverTuning`` field.
 
@@ -1654,9 +1705,31 @@ def _emit_1d(
             # only ADDS a row where none was emitted. Recurse with ``edge=0`` so the
             # replacement point can never trigger a second search.
             if edge != 0 and _finite(g) and not math.isfinite(gp) and _singular_tangent_enabled():
-                t0i = _interior_tangent_point(f, fp, lo, hi, slope, edge)
-                if t0i is not None:
-                    _tangent_row(t0i, sign, 0)
+                if _singular_tangent_lazy():
+                    # #1115: defer to separation at the LP point. Registered once
+                    # per aux even when BOTH endpoints are singular (asin on
+                    # [-1, 1]) — the separator re-derives the tangent from the LP
+                    # point each round, so a second spec would only duplicate rows.
+                    if w not in ctx.singular_tangent_seen:
+                        ctx.singular_tangent_seen.add(w)
+                        ctx.singular_tangent_specs.append(
+                            SingularTangentSpec(
+                                aux_col=w,
+                                coeffs=dict(lt.coeffs),
+                                const=float(lt.const),
+                                lo=lo,
+                                hi=hi,
+                                f=f,
+                                fp=fp,
+                                sign=sign,
+                                edge=int(edge),
+                                slope=float(slope),
+                            )
+                        )
+                else:
+                    t0i = _interior_tangent_point(f, fp, lo, hi, slope, edge)
+                    if t0i is not None:
+                        _tangent_row(t0i, sign, 0)
             return
         intercept = g - gp * t0  # tangent line: gp*t + intercept
         # sign*w >= sign*(gp*t + intercept), with t = lt (cols) + lt.const:
@@ -3866,6 +3939,7 @@ def build_uniform_relaxation(
         multilinear_map=dict(ctx.multilinear_map),
         univariate_square_map=dict(ctx.univariate_square_map),
         composite_multivar_specs=list(ctx.composite_multivar_specs),
+        singular_tangent_specs=list(ctx.singular_tangent_specs),
         affine_square_map=dict(ctx.affine_square_map),
         ratio_map=dict(ctx.ratio_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),

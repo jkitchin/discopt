@@ -50,6 +50,7 @@ from scipy.optimize import linprog
 pytestmark = [pytest.mark.relaxation]
 
 FLAG = "DISCOPT_SINGULAR_TANGENT"
+LAZY = "DISCOPT_SINGULAR_TANGENT_LAZY"
 
 #: ``(label, modeling atom, numpy f, lo, hi)`` — every ``_UNIVARIATE_FN`` entry
 #: whose derivative diverges at an endpoint the domain guard admits, on a box that
@@ -73,17 +74,35 @@ REGULAR_CASES = [
 
 @pytest.fixture
 def flag():
-    """Set/restore ``DISCOPT_SINGULAR_TANGENT`` around a test."""
+    """Set/restore ``DISCOPT_SINGULAR_TANGENT`` around a test, in EAGER mode.
+
+    This file tests the #1111 eager anchor: the facet emitted as a relaxation row
+    at a fixed geometric ladder point. #1115 made LP-point separation the default
+    placement, so enabling recovery here must also pin
+    ``DISCOPT_SINGULAR_TANGENT_LAZY=0`` — otherwise these tests would look for a
+    row that the lazy path deliberately does not emit until the LP asks for it,
+    and would report the eager anchor as broken when it is merely not selected.
+    """
     prev = os.environ.get(FLAG)
+    prev_lazy = os.environ.get(LAZY)
 
     def _set(value: str | None):
         if value is None:
             os.environ.pop(FLAG, None)
+            os.environ.pop(LAZY, None)
         else:
             os.environ[FLAG] = value
+            os.environ[LAZY] = "0"
 
     yield _set
-    _set(prev)
+    if prev is None:
+        os.environ.pop(FLAG, None)
+    else:
+        os.environ[FLAG] = prev
+    if prev_lazy is None:
+        os.environ.pop(LAZY, None)
+    else:
+        os.environ[LAZY] = prev_lazy
 
 
 def _atom_model(atom, lo, hi, obj_coeffs=(0.0, -1.0)):
@@ -327,7 +346,7 @@ def test_programmatic_tuning_enables_recovery_without_the_env_var(flag):
     model = _atom_model(dm.sqrt, 0.0, 4.0)
     _, a_off, b_off = _rows(model, 0.0, 4.0)
 
-    tuning = solver_tuning.current().replace(singular_tangent=True)
+    tuning = solver_tuning.current().replace(singular_tangent=True, singular_tangent_lazy=False)
     token = solver_tuning.set_current(tuning)
     try:
         assert solver_tuning.current().singular_tangent is True
@@ -369,7 +388,7 @@ def test_kappa_flows_from_tuning_to_the_ladder(flag):
     counts = {}
     for kappa in (100.0, 1e-9):
         tuning = solver_tuning.current().replace(
-            singular_tangent=True, singular_tangent_kappa=kappa
+            singular_tangent=True, singular_tangent_lazy=False, singular_tangent_kappa=kappa
         )
         token = solver_tuning.set_current(tuning)
         try:
@@ -421,7 +440,7 @@ def test_an_uncapped_anchor_emits_a_row_that_buys_nothing(flag, a):
 
     def _at(kappa):
         tuning = solver_tuning.current().replace(
-            singular_tangent=True, singular_tangent_kappa=kappa
+            singular_tangent=True, singular_tangent_lazy=False, singular_tangent_kappa=kappa
         )
         token = solver_tuning.set_current(tuning)
         try:

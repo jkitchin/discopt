@@ -1673,6 +1673,12 @@ class MccormickLPRelaxer:
             _t = time.perf_counter()
             res = self._separate_convex(milp, varmap, res, _deadline)
             _st["convex"] += time.perf_counter() - _t
+            # Vertical-tangent facets (#1115): the tangent ``_emit_1d`` could not
+            # write at a singular endpoint, placed at the LP point instead of a
+            # fixed geometric anchor. Inert unless ``singular_tangent`` is on.
+            _t = time.perf_counter()
+            res = self._separate_singular_tangent(milp, varmap, res, _deadline)
+            _st["singular_tangent"] = _st.get("singular_tangent", 0.0) + (time.perf_counter() - _t)
             # G-convexity transformation cuts (#181, DISCOPT_G_CONVEX_CUTS,
             # default-OFF). These are BOX-LOCAL — valid only on this node box, not
             # globally — so they run ONLY on a regular node solve (``out_cuts is
@@ -2210,6 +2216,173 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            return res
+
+    def _separate_singular_tangent(self, milp, varmap, res, deadline):
+        """Recover a dropped vertical-tangent facet at the LP point (issue #1115).
+
+        ``_emit_1d`` places tangents at ``lo``, the midpoint and ``hi``. Where ``f``
+        is finite at an endpoint but ``f'`` diverges there — ``sqrt`` at ``t=0``,
+        ``asin``/``acos`` at ``t=±1`` — no tangent row can be written and the
+        envelope is left one-sided on that side (#1111).
+
+        #1111 recovered the facet EAGERLY, at a fixed geometric anchor near the
+        endpoint, on every node. That is measurably harmful: on ``tspn08`` the tree
+        grows 135 → 191 nodes (+41 %) for a bound gain in the 11th digit, because a
+        row that rarely binds still moves the LP vertex and therefore the branching
+        choice. This places the same facet where the LP actually binds instead:
+
+            concave:  w <= f(t0) + f'(t0)*(t - t0)
+            convex:   w >= f(t0) + f'(t0)*(t - t0)
+
+        with ``t0`` the current LP value of ``t = coeffs·x + const``, and only when
+        that point is violated. A tangent of a concave (resp. convex) function is a
+        global over- (under-) estimator wherever the curvature holds, and ``curv``
+        was certified for the whole box, so no feasible point is ever cut — the
+        bound stays sound at every round. Sound no-op on any failure.
+
+        Inert unless ``SolverTuning.singular_tangent`` is on: the spec list is only
+        populated then.
+        """
+        specs = varmap.get("singular_tangent_relaxations") or []
+        if not specs:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._relax.uniform_relax import _interior_tangent_point
+
+            n_total = len(milp._c)
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+
+            tol = 1e-7
+            for _round in range(8):
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                x = np.asarray(res.x, dtype=np.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for s in specs:
+                    aux = s.aux_col
+                    if aux >= x.size:
+                        continue
+                    wv = float(x[aux])
+                    if not np.isfinite(wv):
+                        continue
+                    t0 = float(s.const)
+                    ok = True
+                    for j, c in s.coeffs.items():
+                        if j >= x.size or not np.isfinite(x[j]):
+                            ok = False
+                            break
+                        t0 += float(c) * float(x[j])
+                    if not ok or not np.isfinite(t0):
+                        continue
+                    # The tangent is only a valid global estimator where the box's
+                    # certified curvature holds, i.e. for t in [lo, hi]. An LP point
+                    # a hair outside (simplex tolerance) is clamped back in rather
+                    # than extrapolated; a point far outside is skipped.
+                    if t0 < s.lo:
+                        if s.lo - t0 > 1e-6 * max(1.0, abs(s.lo)):
+                            continue
+                        t0 = s.lo
+                    elif t0 > s.hi:
+                        if t0 - s.hi > 1e-6 * max(1.0, abs(s.hi)):
+                            continue
+                        t0 = s.hi
+                    # ``ta`` is where the tangent TOUCHES the graph; ``t0`` is where
+                    # the LP sits. They coincide except at the singularity itself.
+                    ta = t0
+                    try:
+                        g, gp = float(s.f(ta)), float(s.fp(ta))
+                    except (ValueError, ArithmeticError):
+                        continue
+                    if not (np.isfinite(g) and np.isfinite(gp)):
+                        # The LP point landed ON the vertical tangent, where no
+                        # finite-slope facet exists — and this is exactly the point
+                        # the dropped facet was supposed to cover, so skipping here
+                        # would make the separator a no-op precisely where it is
+                        # needed (measured: ``min 2x - sqrt(x)`` over ``[0,4]`` puts
+                        # the LP vertex at ``t=0``). Fall back to #1111's
+                        # conditioning-capped ladder anchor for the touch point; the
+                        # violation test below still decides whether the row goes in,
+                        # so this stays lazy — the facet appears only at nodes whose
+                        # LP the static envelope actually fails to bound.
+                        ta_l = _interior_tangent_point(s.f, s.fp, s.lo, s.hi, s.slope, s.edge)
+                        if ta_l is None:
+                            continue
+                        ta = float(ta_l)
+                        try:
+                            g, gp = float(s.f(ta)), float(s.fp(ta))
+                        except (ValueError, ArithmeticError):
+                            continue
+                        if not (np.isfinite(g) and np.isfinite(gp)):
+                            continue
+                    # Conditioning guard, mirroring ``_separate_convex``: a cut whose
+                    # coefficients have blown up (the slope diverges as the LP point
+                    # approaches the singular endpoint) fools the fast simplex into an
+                    # uncertifiable basis. Dropping a cut only loosens, never unsounds.
+                    if abs(gp) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+                        continue
+                    if any(
+                        abs(gp * float(c)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE
+                        for c in s.coeffs.values()
+                    ):
+                        continue
+                    # Tangent line value AT THE LP POINT. When ``ta == t0`` this is
+                    # just ``g``; at the ladder fallback it is the extrapolation of
+                    # the anchor's tangent out to where the LP sits, which is what
+                    # decides violation.
+                    pred = g + gp * (t0 - ta)
+                    scale = tol * max(1.0, abs(pred))
+                    if s.sign > 0.0:
+                        # convex: w >= g + gp*(t - ta)
+                        #   -> sum(gp*c_j x_j) - w <= gp*ta - g - gp*const
+                        if pred - wv > scale:
+                            row = np.zeros(n_total)
+                            for j, c in s.coeffs.items():
+                                row[j] += gp * float(c)
+                            row[aux] += -1.0
+                            rows.append(row)
+                            rhs.append(gp * ta - g - gp * float(s.const))
+                    else:
+                        # concave: w <= g + gp*(t - ta)
+                        #   -> w - sum(gp*c_j x_j) <= g - gp*ta + gp*const
+                        if wv - pred > scale:
+                            row = np.zeros(n_total)
+                            for j, c in s.coeffs.items():
+                                row[j] += -gp * float(c)
+                            row[aux] += 1.0
+                            rows.append(row)
+                            rhs.append(g - gp * ta + gp * float(s.const))
+                if not rows:
+                    break
+                _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            logger.debug("singular-tangent separation failed; keeping prior result", exc_info=True)
             return res
 
     def _separate_convex(self, milp, varmap, res, deadline):

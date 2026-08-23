@@ -1330,38 +1330,67 @@ class SolverTuning:
     emitted, so the flag-ON polytope is a subset of the flag-OFF polytope and the
     node LP bound can only improve or stay equal.
 
-    **The §5 panel ran. Gate 1 (cert-clean) PASSES; gate 2 (net-positive) FAILS
-    because the flag is measured exactly NEUTRAL — not because it is harmful.** The
-    successor panel (17 instances, every one screened to actually drop a facet; both
-    arms in one process on one binary; each arm run twice) reports 24 soundness
-    comparisons with 0 violations, no bound above its ``.solu`` reference, no
-    certification regression, and:
+    **The §5 panel ran. Gate 1 (cert-clean) PASSES; gate 2 (net-positive) FAILS:
+    the EAGER anchor is measured HARMFUL.** On the only instance that terminates
+    inside a deterministic node budget and moves at all, ``tspn08`` goes 135 → 191
+    nodes (**+41.5 %**) to buy a bound gain in the 11th digit
+    (290.56592504129753 → 290.56599569540646). ``mathopt5_6`` is flat at 5 → 5 with
+    a bit-identical bound, and ``kriging_peaks-full010`` is flat to 14 digits. The
+    subset property still holds — the ON bound *is* tighter at every node — but a
+    different LP vertex changes the branching choice, so a tighter relaxation can
+    still grow the tree. Soundness held throughout: no bound above its ``.solu``
+    reference, no certification regression, incumbents identical.
 
-    * the two *terminating* pairs are the only load-independent rows, and both are
-      exactly neutral: ``mathopt5_6`` 5 → 5 nodes and ``tspn08`` 135 → 135 nodes,
-      each with a **bit-identical** dual bound in both arms, reproducible across
-      both repetitions;
-    * every time-limited row is neutral **within its own rep-to-rep spread**.
-      Comparing ON's worse repetition against OFF's better one, no instance is
-      robustly better or worse — the widest excursion, ``tspn10``, straddles zero
-      (−0.739 to +0.318). Under load, at a 60 s limit, this panel cannot resolve a
-      gain of that size, and it should not be quoted as one;
-    * the root win does not survive branching: ``kriging_peaks`` gains 13–40× at the
-      root (``full200`` −74356.93 → −5596.46) yet ``full020``'s arms agree to 14
-      digits at the limit. B&B was already recovering that bound cheaply.
+    The root win also does not survive branching: ``kriging_peaks`` gains 13–40× at
+    the root (``full200`` −74356.93 → −5596.46) yet after a few hundred nodes the
+    arms agree to 14 digits. B&B was already recovering that bound cheaply.
 
-    **Retraction (§11).** An earlier, ~36 %-diluted panel was recorded here — and in
-    the CHANGELOG and PR #1113 — as measuring ``tspn08`` at **135 → 191 nodes, +41 %**,
-    and that number was the load-bearing evidence for calling this flag harmful. **It
-    does not reproduce.** On the undiluted single-binary panel ``tspn08`` is 135 → 135
-    with an identical bound (290.565925041298) in all four runs. Retracted with it:
-    that panel's time-limited list of "4 meaningfully worse" rows
-    (``kriging_peaks-full100`` −1.144, ``full010`` −0.542, ``tspn12`` −0.520,
-    ``full050`` −0.198) — on the successor panel ``full100`` and ``tspn12`` are flat
-    and ``full010``/``full050`` move the *other* way, inside rep noise. Those rows
-    were load artifacts, measured while an unrelated job held most of the machine.
-    The correct disposition is unchanged in outcome (stays default-OFF) but different
-    in kind: **sound, and neutral.**
+    **DOUBLE RETRACTION (§11) — a retraction that was itself wrong.** This docstring,
+    the CHANGELOG and PR #1113 previously *withdrew* the ``tspn08`` 135 → 191 result
+    and recorded the flag as "sound, and neutral", on the strength of a panel showing
+    135 → 135 with bit-identical bounds. **That withdrawal is itself withdrawn, and
+    the +41 % is reinstated as measured above.** The panel behind it never fired.
+
+    The instrument defect, measured not inferred: :func:`solve` is wrapped by a
+    decorator (``solver.py:6274-6280``) that begins ``_set_tuning(kwargs.pop(
+    "tuning", None))``, and :func:`set_current` with ``None`` publishes a **fresh,
+    env-resolved** ``SolverTuning()``. A probe that installs a tuning with
+    ``set_current(...)`` and then calls ``m.solve()`` without ``tuning=`` therefore
+    has that context **silently discarded at the solve boundary**. Counting
+    ``_interior_tangent_point`` calls inside a full solve of
+    ``kriging_peaks-full010``:
+
+    ==========================================  ======  =====
+    how the flag was set                         calls  nodes
+    ==========================================  ======  =====
+    off (control)                                    0    311
+    ``set_current(...)`` around ``m.solve()``        0    311
+    ``m.solve(tuning=...)``                       2671    313
+    ``DISCOPT_SINGULAR_TANGENT=1``                2671    313
+    ==========================================  ======  =====
+
+    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` is
+    inert. So "both arms bit-identical" was not a neutrality result — it is the
+    signature of a probe that never fired, and it explains exactly why the arms
+    agreed to the last digit. That panel carried no drops counter, so nothing caught
+    it (§6). Every root-relaxation measurement quoted below is unaffected: those
+    drive ``build_uniform_relaxation`` directly, where ``set_current`` does reach
+    (instrumented 10/10).
+
+    The reinstated number was re-measured on a corrected instrument — ``tuning=``
+    delivery, the ON arm asserted to have fired, a ``max_nodes`` budget with **no**
+    ``time_limit`` (a wall limit changes the kernel path and makes the run
+    non-reproducible; ``max_nodes`` alone is bit-reproducible over 3 repetitions per
+    arm), both arms in one process on one binary — and reproduces at 135 → 191 on
+    every run since.
+
+    Still retracted, and for reasons unrelated to the above: the first panel's
+    time-limited rows (``kriging_peaks-full100`` −1.144, ``tspn12`` −0.520, …), taken
+    at a 60 s wall limit under load 37–87 on 14 cores, fail the §9 load gate
+    outright; and that panel's printed tally ``better 10 worse 2 unchanged 1``, whose
+    classifier scored ``nodes_on < nodes_off`` as "better" — correct for a
+    terminating run, backwards for a time-limited one, where fewer nodes means the
+    arm did *less* work in the same budget.
 
     #1111's own motivating hypothesis is **falsified**: on the adiabatic LVC MECP
     model the facet is recovered but root bound and node count are unchanged (1 node
@@ -1389,29 +1418,53 @@ class SolverTuning:
     the LP point ``x0``). The soundness argument carries over unchanged — every tangent
     of a concave ``f`` is a global overestimator — and lazy separation also stops the
     solver paying for an eager extra row at every node whether or not that node's LP
-    is near the singular endpoint. (The retracted panel charged this flag for that
-    cost as a *measured* regression; it is not one. It remains a reason to prefer
-    lazy placement, but as an argument, not as evidence.)
+    is near the singular endpoint, which is precisely the cost the ``tspn08``
+    regression above is charging.
 
-    **This is a hypothesis to test, not a known fix, and one caveat is already
-    visible.** Lazy placement does not dodge the singularity: on ``kriging_peaks`` the
-    binding point is *near* the endpoint but the gain collapses for ``delta`` below
-    ~1e-5, so an LP point landing on or inside that radius needs the same conditioning
-    guard this cap provides. What lazy separation removes is the need to *guess* the
-    offset, not the degeneracy itself. That is the open question #1111 leaves behind;
-    it is tracked in **#1115**, with the entry experiment and its kill criterion, and
-    this flag is the lever for measuring it.
-
-    Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome, in its neutral
-    rather than its harmful form. Note the two #581
-    precedents below removed such flags rather than leaving them in default-OFF
-    limbo; this one is retained by owner decision (2026-08-22) as a measurement
-    lever for #1115 — whether *any* formulation of the singular-endpoint tangent pays
-    for itself — with the failing panel recorded here so no future reader mistakes it
-    for an ungraduated candidate. #1115 carries the same disposition rule: if the
-    successor mechanism is falsified too, this flag gets removed rather than left in
-    limbo indefinitely. Flag-OFF is
+    **That successor was built and measured — #1115, and it is the default
+    placement.** See :attr:`singular_tangent_lazy`. Eager anchoring is retained only
+    as the A/B control for that measurement; the two #581 precedents below removed
+    sound-but-unhelpful flags rather than leaving them in default-OFF limbo, and the
+    same rule applies here if the lazy form is falsified in turn. Flag-OFF is
     byte-identical to the pre-#1111 relaxation."""
+
+    singular_tangent_lazy: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT_LAZY", default=True)
+    )
+    """Place the recovered vertical-tangent facet at the LP point (#1115).
+
+    Consulted only when :attr:`singular_tangent` is on; it selects *where* the
+    recovered tangent goes, never *whether* the facet is recovered.
+
+    ``True`` (the default) defers the facet to
+    ``MccormickLPRelaxer._separate_singular_tangent``, which adds the supporting
+    tangent at the current LP point and only when that point violates it.
+    ``False`` restores #1111's eager behaviour: one tangent per node at a fixed
+    geometric ladder anchor near the endpoint, whether or not it binds.
+
+    Where the LP vertex sits *on* the singularity — the case the facet exists for,
+    and where no finite-slope tangent is available — the touch point falls back to
+    #1111's conditioning-capped ladder anchor while the violation test still decides
+    whether the row goes in. Without that fallback the separator degrades to a no-op
+    precisely where it is needed: on ``min 2x - sqrt(x)`` over ``[0,4]`` the LP vertex
+    lands exactly at ``t=0``.
+
+    **Measured.** The eager form is **harmful** — ``tspn08`` 135 → 191 nodes
+    (+41.5 %) for a bound gain in the 11th digit — which is what motivated #1115, and
+    it is retained only as the A/B control. Lazy placement removes that regression
+    (``tspn08`` back to 135 nodes) and, on isolated atoms, does what it was designed
+    to do: ``min 2x - sqrt(x)`` over ``[0,4]`` goes −0.7071 → **−0.12503** against a
+    true optimum of −0.125, where the eager anchor reaches only −0.6557.
+
+    **On the corpus it is neutral, and that is the §5 gate-2 verdict.** The mechanism
+    is measurably live — 604 rows separated on ``kriging_peaks-full010``, moving the
+    node LP objective on 7 of 12 instrumented invocations — but by ~1e-4 against a
+    bound of −5.69, which never changes a branching decision, so the tree and final
+    bound come out bit-identical to leaving the facet dropped. The #727 lesson in
+    reverse: the synthetic atom shows a large gain and the real class shows none,
+    because on a corpus instance the ``sqrt`` term is one of many and the LP optimum
+    is held by other constraints rather than sitting at the singular endpoint.
+    """
 
     singular_tangent_kappa: float = field(
         default_factory=lambda: _env_float("DISCOPT_SINGULAR_TANGENT_KAPPA", 100.0)
