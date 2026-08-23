@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
+  #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
+  that raised `NotImplementedError`, with the false reason "discopt not yet
+  available" — including the two in `TestDeterminism`, the repository's only
+  run-to-run reproducibility assertions and therefore the only consumer of
+  `solve(deterministic=...)`. They now solve real instances, `TestFeasibility`'s
+  two assertion-free bodies check the incumbent and its integrality, the ten
+  `TestEdgeCases` stubs are real models, and the module joins CI's
+  python-correctness lane. Instances resolve from `python/tests/data/minlplib_nl/`
+  and then `$DISCOPT_MINLPLIB_NL`; a missing one still skips, but for a true
+  reason. 99 collected, 87 passed, 12 skipped locally.
+
 - **`solve(deterministic=...)` now defaults to `False` and is no longer a dead
   parameter** (`solver`, #1116). It was documented as "Ensure deterministic
   results" and read **nowhere** on the solve path — a default that named a
@@ -22,6 +34,20 @@ The release procedure that produces these entries is documented in
   relied on the old *default* get today's behaviour unchanged.
 
 ### Fixed
+
+- **#1119 closed falsified: the singular-endpoint tangent stays default-OFF**
+  (`_relax/mccormick_lp`, #1119). #1115 left the flag off because it costs
+  +25.6 % wall on `eq6_1` and +54.2 % on `maxmin` for no bound; #1119 asked
+  whether gating on *whether the recovered facet binds* could recover that. It
+  cannot: binding is near-tautological (a row is emitted because it is violated,
+  so the next re-solve lands on it), and what separation exists runs backwards —
+  the two instances that pay bind at 1.0000 and 0.9580, the two that gain at
+  0.9173 and 0.8509. `eq6_1` has zero non-binding rows, so the proposed gate drops
+  0 of 22 874 and saves 0 %, while discarding 14.9 % of the rows on the instance
+  the feature is for. `MccormickLPRelaxer.singular_tangent_stats()` keeps the
+  instrument (verified bound-neutral: 40/40 exact `node_count`/`objective`
+  identities, instrumented vs not); the record is `docs/dev/performance-plan.md`
+  §17.
 
 - **The dual bound was a function of machine speed** (`solver`, #1116). The issue
   reported a 13th-digit drift with the node count flipping 301 ↔ 303 on

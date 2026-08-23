@@ -4108,3 +4108,103 @@ Default flipped to on. `DISCOPT_CONVEX_ROUTE_GUARD=0` restores the fixed
 `_CONVEX_ROUTE_BUDGET_FRACTION` split, and that path stays tested
 (`python/tests/test_1066_route_progress_guard.py::TestGraduatedDefault`,
 `test_1059_route_fallback.py::test_auto_route_gets_a_fraction_of_the_limit`).
+
+## 17. #1119 singular-tangent binding trigger: the observable is anti-correlated with payoff (falsified 2026-08-23)
+
+#1115 shipped the singular-endpoint tangent (`SolverTuning.singular_tangent`,
+`singular_tangent_lazy`) **default-OFF** because its timing panel failed gate 2:
+sound and bound-helpful on the `kriging_peaks` family, but +25.6 % wall on
+`eq6_1` and +54.2 % on `maxmin` for no bound at all. #1119 was the successor
+hypothesis: the separator fires on the **operator** (a `sqrt` / `asin` / `acos` /
+`acosh` / fractional-power atom with a singular endpoint), and the fix is to fire
+on whether the recovered facet actually **binds** — keep the rows that constrain
+the LP, drop the ones that do not, and the cost goes away where the gain is
+absent.
+
+Kill criterion, quoted from the issue: *if the binding fraction does not separate
+the gaining instances (`kriging_peaks-full*`) from the paying ones (`eq6_1`,
+`maxmin`) — i.e. if rows bind at a similar rate in both groups — then binding-rate
+is not the predictor, a hit-rate gate cannot recover the cost, and this direction
+is dead. Record the falsification and stop rather than reaching for a second
+heuristic.*
+
+### The entry experiment
+
+`MccormickLPRelaxer` now tallies, per emitted batch, how many singular-tangent
+rows are tight at the optimum of the LP they were added to
+(`singular_tangent_stats()`; `_ST_BINDING_TOL = 1e-7` relative, the separator's
+own violation scale). Verified **bound-neutral** first, per §5: 40/40 exact
+`node_count` / `objective` / `bound` / `status` identities across five instances
+× {flag OFF, flag ON}, instrumentation present vs stashed. Panel:
+`scratchpad/issue1119/binding_probe.py`, `max_nodes=200`, `time_limit=120`,
+`deterministic=True`, flag + lazy placement ON.
+
+| instance | #1115 class | rows | binding | **binding_frac** | Σ LP obj gain | gain/row |
+|---|---|---|---|---|---|---|
+| `eq6_1` | pays +25.6 % wall, gains nothing | 22 874 | 22 874 | **1.0000** | −1.4e−13 | ~0 |
+| `maxmin` | pays +54.2 % wall, gains nothing | 23 189 | 22 214 | **0.9580** | 0.2116 | 9.1e−6 |
+| `kriging_peaks-full050` | gains 1.9 % of gap | 5 418 | 4 610 | **0.8509** | 300.2 | 5.5e−2 |
+| `kriging_peaks-full100` | gains 1.6 % of gap | 8 976 | 8 234 | **0.9173** | 594.4 | 6.6e−2 |
+
+### Verdict: falsified, and in the worst of the three available ways
+
+1. **Binding is near-universal, because it is near-tautological.** A row is
+   emitted precisely because it is violated at the current LP point, so the
+   re-solve that follows lands on it. The whole population sits in 0.85–1.00.
+2. **What separation exists runs backwards.** The two instances that *pay* have
+   the two *highest* binding rates; the two that *gain* have the two lowest. A
+   gate that keeps high-binding rows keeps exactly the rows that buy nothing.
+3. **The gate cannot recover the cost even in principle.** `eq6_1` has **zero**
+   non-binding rows: a rule that drops non-binding rows drops 0 of 22 874 and
+   saves 0 % of the +25.6 % it exists to remove. `maxmin` drops 975 of 23 189 —
+   4.2 % of the rows against +54.2 % wall. Meanwhile on `kriging_peaks-full050`
+   the same rule discards 808 of 5 418 (14.9 %) of the rows on the instance the
+   feature is *for*. Zero saving where it must save; collateral where it must not
+   cut.
+
+The direction is dead. Per the issue's own instruction, stopping here rather than
+reaching for a second heuristic.
+
+### What is deliberately NOT being proposed
+
+Σ LP-objective gain per row does separate the two groups, by three to four orders
+of magnitude (~0 and 9.1e−6 for the payers; 5.5e−2 and 6.6e−2 for the gainers), and
+an age-out gate reading it is the obvious next thought. It is not being built, for
+three reasons and none of them is effort:
+
+* It is a **different hypothesis** from the one #1119 authorized, and the issue's
+  kill criterion explicitly forbids substituting one when the first dies.
+* The figure is **unnormalized across objective scales** (`eq6_1`'s bound is
+  −0.497, `kriging_peaks-full100`'s is −345.6), so the four-point spread is not
+  yet evidence of anything scale-free.
+* The population is **tiny**. A prefilter over MINLPLib for instances whose `.nl`
+  contains `o39`/`o51`/`o52`/`o53` or a fractional-power exponent yields 164
+  candidates; screening the 96 smallest (`max_nodes=1`, 15 s, flag + lazy ON;
+  stopped at `tls7`, whose root does not finish inside the budget) registers a
+  spec on 18 and emits a row on **8**:
+
+  | instance | rows | binding | binding_frac | Σ obj gain |
+  |---|---|---|---|---|
+  | `eq6_1` | 300 | 300 | 1.0000 | −5.6e−17 |
+  | `kriging_peaks-full050` | 170 | 80 | 0.4706 | 3.8e−05 |
+  | `kriging_peaks-full030` | 136 | 76 | 0.5588 | 5.6e−05 |
+  | `kriging_peaks-full020` | 24 | 24 | 1.0000 | 1.2e−04 |
+  | `kall_ellipsoids_tc03c` | 16 | 16 | 1.0000 | 0 |
+  | `kriging_peaks-full010` | 8 | 8 | 1.0000 | 3.8e−05 |
+  | `tspn12` | 2 | 2 | 1.0000 | 8.5e−14 |
+  | `tspn15` | 1 | 1 | 1.0000 | −8.5e−14 |
+
+  Same shape at the root as at 200 nodes, and more starkly: the two payer-profile
+  instances (`eq6_1`, `kall_ellipsoids_tc03c` — many rows, zero gain) bind at
+  1.0000, while the two `kriging_peaks` members with enough rows to have a rate
+  bind at 0.47 and 0.56. The in-repo 66-instance corpus tells the same story from
+  the other end: 12 files contain a singular opcode, 2 emit any lazy row at all
+  (`tspn08` 1 row, `tspn12` 3), both at ~1e−13 of bound. A threshold fitted to
+  four named instances out of a population this size is the single-problem
+  solution CLAUDE.md §2 rejects, not a class fix.
+
+`singular_tangent` therefore stays **default-OFF**, which is already its shipped
+state; #1115's flag and its lazy-placement variant remain in tree, tested, and
+opt-in. The accounting stays in `MccormickLPRelaxer` — it costs one dot product
+per emitted batch on a path that only runs when the default-off flag is on, and it
+is how this verdict would be re-checked.

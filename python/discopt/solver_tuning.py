@@ -1583,6 +1583,21 @@ class SolverTuning:
     small to change a branching decision. So the #1111 finding "the root win does not
     survive branching" is scoped to the **eager** anchor: where the dropped facet
     dominates the root relaxation, lazy placement does retain part of it.
+
+    **Why this stays default-OFF rather than becoming conditional (#1119, closed
+    falsified 2026-08-23).** The successor question was whether a hit-rate gate —
+    keep the rows that bind in the LP optimal basis, drop the ones that do not —
+    could remove the ``eq6_1``/``maxmin`` overhead while retaining the
+    ``kriging_peaks`` gain. It cannot, and the measurement runs the wrong way:
+    over 200 nodes the two instances that PAY bind at 1.0000 and 0.9580, the two
+    that GAIN bind at 0.9173 and 0.8509, and ``eq6_1`` has **zero** non-binding
+    rows — so the gate drops 0 of its 22 874 rows and saves none of the +25.6 %,
+    while discarding 14.9 % of the rows on the instance the feature exists for.
+    Binding is near-tautological here: a row is emitted because it is violated at
+    the current LP point, so the re-solve that follows lands on it. Full record
+    (including the screen showing only 8 of 96 candidate instances emit any row at
+    all) in ``docs/dev/performance-plan.md`` §17; the instrument is
+    ``MccormickLPRelaxer.singular_tangent_stats``.
     """
 
     singular_tangent_kappa: float = field(

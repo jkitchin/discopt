@@ -16,6 +16,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import logging
 import os
@@ -378,6 +379,17 @@ def _no_bound_status(status: str) -> str:
     return "uncertified" if status == "optimal" else status
 
 
+# Rolling window over recent singular-tangent rows (#1119). Sized to a few nodes'
+# worth of separation rounds so the gate reacts within a subtree rather than to the
+# whole tree's history.
+_ST_WINDOW = 256
+# A row counts as binding when its slack at the LP optimum it was added to is within
+# this relative tolerance of zero — the same scale the separator's own violation test
+# uses, so "emitted because violated" and "binding after re-solve" are measured
+# against one yardstick.
+_ST_BINDING_TOL = 1e-7
+
+
 class MccormickLPRelaxer:
     """Reusable per-node LP-form McCormick relaxation.
 
@@ -565,6 +577,21 @@ class MccormickLPRelaxer:
         self._inc = None
         self._inc_warm_basis = None
         self._inc_basis_nrows = -1
+        # Singular-tangent separation accounting (#1119). One relaxer serves every
+        # node, so these persist across the tree and are what a hit-rate gate would
+        # read. ``_st_recent`` is a bounded FIFO of per-row binding outcomes at the
+        # LP optimum the row was added to; the aggregate counters are the panel's
+        # report. Kept unconditionally rather than behind a debug flag: the cost is
+        # one dot product per emitted batch, against a batch that has already been
+        # vstacked into the constraint matrix and re-solved.
+        self._st_recent: collections.deque[bool] = collections.deque(maxlen=_ST_WINDOW)
+        self._st_rows = 0
+        self._st_binding = 0
+        self._st_rounds = 0
+        self._st_nodes = 0
+        self._st_obj_gain = 0.0
+        self._st_calls = 0
+        self._st_specs = 0
         # ``build_incremental=False`` skips this (the structure build + its
         # row-for-row validation cold-build the relaxation a handful of times) for
         # callers that only want the relaxer's model/terms/disc and never invoke
@@ -2227,6 +2254,60 @@ class MccormickLPRelaxer:
         except Exception:
             return res
 
+    def _record_singular_tangent_hits(self, rows, rhs, x) -> None:
+        """Tally how many just-emitted singular-tangent rows BIND at the new optimum.
+
+        #1119's entry experiment. The separator fires on the *operator* -- a
+        ``sqrt``/``asin``/``acos``/``acosh``/fractional-power atom with a singular
+        endpoint -- but what predicts payoff is whether the recovered facet actually
+        constrains the LP. #1115's timing panel charged +25.6 % wall on ``eq6_1``
+        and +54.2 % on ``maxmin``, the two instances that gain nothing and draw
+        3-4x the rows, so the question is whether a binding-rate observable
+        separates them from the instances that do gain.
+
+        Every row here is a ``<=`` row, so its slack at the optimum is
+        ``rhs - row @ x`` and it binds when that slack is ~0 -- measured against the
+        solution of the LP the row was added to, the only point at which "did this
+        row do anything" has an answer.
+
+        Pure accounting: no row is dropped and no bound changes. A shape mismatch
+        returns without recording rather than raising, because a stats mishap must
+        not perturb a certificate -- but it also must not silently read as "nothing
+        bound", which is why the panel asserts a non-zero row count before believing
+        a binding fraction.
+        """
+        if x is None:
+            return
+        xv = np.asarray(x, dtype=np.float64)
+        if xv.ndim != 1:
+            return
+        R = np.asarray(rows, dtype=np.float64)
+        b = np.asarray(rhs, dtype=np.float64)
+        if R.ndim != 2 or R.shape[0] != b.size or R.shape[1] != xv.size:
+            return
+        slack = b - R @ xv
+        scale = _ST_BINDING_TOL * np.maximum(1.0, np.abs(b))
+        hits = np.abs(slack) <= scale
+        self._st_rows += int(hits.size)
+        self._st_binding += int(np.count_nonzero(hits))
+        self._st_recent.extend(bool(h) for h in hits)
+
+    def singular_tangent_stats(self) -> dict:
+        """The #1119 accounting, as a plain dict for panels and tests."""
+        return {
+            "nodes": self._st_nodes,
+            "calls": self._st_calls,
+            "specs": self._st_specs,
+            "rounds": self._st_rounds,
+            "rows": self._st_rows,
+            "binding": self._st_binding,
+            "binding_frac": (self._st_binding / self._st_rows) if self._st_rows else None,
+            "recent_binding_frac": (
+                (sum(self._st_recent) / len(self._st_recent)) if self._st_recent else None
+            ),
+            "obj_gain": self._st_obj_gain,
+        }
+
     def _separate_singular_tangent(self, milp, varmap, res, deadline):
         """Recover a dropped vertical-tangent facet at the LP point (issue #1115).
 
@@ -2256,8 +2337,17 @@ class MccormickLPRelaxer:
         specs = varmap.get("singular_tangent_relaxations") or []
         if not specs:
             return res
+        self._st_specs = max(self._st_specs, len(specs))
         if res is None or res.status != "optimal" or res.x is None:
             return res
+        # Counted here rather than at the first emitted row, so "the separator ran
+        # and emitted nothing" stays distinguishable from "the separator never ran".
+        # #1119 records that on all three ``elec*`` instances the lazy arm
+        # registered thousands of specs and the separator ran zero times, because
+        # the separation chain is gated on ``if separate:`` upstream — conflating
+        # the two would read as a 0 % binding rate on an instance that was never
+        # asked a question.
+        self._st_calls += 1
         try:
             import scipy.sparse as sp
 
@@ -2380,6 +2470,7 @@ class MccormickLPRelaxer:
                 if not rows:
                     break
                 _append(rows, rhs)
+                _prev_obj = res.objective
                 _tl = (
                     None
                     if deadline is None
@@ -2388,6 +2479,15 @@ class MccormickLPRelaxer:
                 new_res = milp.solve(time_limit=_tl, backend=self._backend)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
+                if _round == 0:
+                    self._st_nodes += 1
+                self._st_rounds += 1
+                self._record_singular_tangent_hits(rows, rhs, new_res.x)
+                if _prev_obj is not None:
+                    # Minimisation form throughout the LP layer, so a tightening
+                    # RAISES the objective; record the gain with that sign so a
+                    # negative total is visible as the anomaly it would be.
+                    self._st_obj_gain += float(new_res.objective) - float(_prev_obj)
                 res = new_res
             return res
         except Exception:
