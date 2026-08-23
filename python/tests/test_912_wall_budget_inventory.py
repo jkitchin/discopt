@@ -48,6 +48,34 @@ Categories:
     consumption, plus (for the bound-changing ones — OBBT, NBT, root cuts, PSD
     separation, convexity classification) its own differential-bound panel.
 
+What #1116 changed about the residuals
+--------------------------------------
+
+#1116 measured a residual gate doing exactly what this file exists to prevent:
+``kriging_peaks-full200`` at ``max_nodes=1`` returned root dual bounds spanning
+14 % across three repetitions of the same binary on the same machine, because a
+wall-truncated tightening stage handed the relaxation builder a different box
+(first root LP: 1532 columns one run, 1469 the next). That is the "large
+instance" case the paragraph below names as the trigger to revisit — and it
+arrived, so the trigger fired.
+
+The response was not a per-gate conversion to deterministic units (§9 below still
+falsifies that as a blanket move) but a switch that makes the whole role-2 class
+*inert on request*: ``Model.solve(deterministic=True)`` / ``DISCOPT_DETERMINISTIC``
+routes each budget through ``solver._role2_budget`` / ``_role2_deadline`` /
+``_role2_horizon``, which return the no-clock value (``None`` or ``math.inf``)
+under the flag. Eleven of the entries below changed spelling for that reason and
+for that reason only — the same gate at the same site, now wrapped. They keep the
+``residual`` category because the flag is **default-off**: with it off the gate
+still decides how much work runs, which is what ``residual`` means. Turning it on
+is bound-changing and needs the panel in CLAUDE.md §5.
+
+The wrapping is not a conversion, so the count below does not move. It does give
+the residual class a documented escape hatch it did not have, and it puts the
+role-1 gates that were deliberately *not* wrapped (the phase-entry
+``_deadline_exhausted()`` checks, the POUNCE stall backstop) on record in
+``solver_tuning.SolverTuning.deterministic``.
+
 Why the residuals were left, and when to revisit
 ------------------------------------------------
 
@@ -236,7 +264,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline = time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S)",
+        "deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))",
         "residual",
     ),
     (
@@ -246,7 +274,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline = (time.perf_counter() + budget) if budget else None",
+        "deadline = _role2_deadline((time.perf_counter() + budget) if budget else None)",
         "residual",
     ),
     # The #138 root-relaxation fallback's rule-2 stop. This was ``residual`` and is
@@ -267,27 +295,27 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + _per_budget_s,",
+        "deadline=_role2_deadline(time.perf_counter() + _per_budget_s),",
         "residual",
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + _dcb_budget,",
+        "deadline=_role2_deadline(time.perf_counter() + _dcb_budget),",
         "residual",
     ),
     (
         "solver.py",
-        "model, deadline=time.perf_counter() + _nbt_budget_s",
+        "model, deadline=_role2_deadline(time.perf_counter() + _nbt_budget_s)",
         "residual",
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + _obbt_budget,",
+        "deadline=_role2_deadline(time.perf_counter() + _obbt_budget),",
         "residual",
     ),
     (
         "solver.py",
-        "time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit))),",
+        "time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit)))",
         "residual",
     ),
     # The #823/#993 GDP configuration constructor's slice: 15% of what is left,
@@ -305,12 +333,12 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + 5.0,",
+        "deadline=_role2_deadline(time.perf_counter() + 5.0),",
         "residual",
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + _rf_budget,",
+        "deadline=_role2_deadline(time.perf_counter() + _rf_budget),",
         "residual",
     ),
     (
@@ -325,7 +353,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline=time.perf_counter() + budget,",
+        "deadline=_role2_deadline(time.perf_counter() + budget),",
         "residual",
     ),
     (
@@ -406,7 +434,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "_relax/mccormick_lp.py",
-        "deadline = time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S",
+        "else time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S",
         "residual",
     ),
     (
@@ -554,6 +582,10 @@ def test_residual_count_is_visible():
     # 19 -> 20: ``_gdp_config_deadline`` — not a new gate, a newly *visible* one.
     # It predates this bump; the scanner could not see it until it learned to
     # follow a clock read through a function argument (#993).
+    # 20 -> 20 across #1116: eleven entries changed spelling when their gate was
+    # routed through ``solver._role2_*``, but a wrap is not a conversion — the
+    # flag is default-off, so with it off the gate still decides how much work
+    # runs. Pinned separately by ``test_1116_wrapped_gates_stay_wrapped``.
     assert len(residual) == 20, (
         f"the #912 residual inventory changed ({len(residual)} entries, expected 20). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
@@ -561,3 +593,56 @@ def test_residual_count_is_visible():
         "backlog — see the module docstring for the evidence and the condition that "
         "would justify shrinking it.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
     )
+
+
+@pytest.mark.unit
+def test_1116_wrapped_gates_stay_wrapped():
+    """The gates #1116 made flag-suppressible must not quietly lose the wrapper.
+
+    Unwrapping one is invisible to the two ratchets above — the line text would
+    change, the author would re-record it, and both tests would pass while
+    ``deterministic=True`` silently stopped covering that site. So the count is
+    pinned here.
+
+    Suppression is read from the *source window* around each recorded gate rather
+    than from the recorded text, because two of the eleven do not show it on their
+    own line: ``mccormick_lp``'s integer-ratio dive is guarded by a bare
+    ``_tuning().deterministic`` conditional (the budget is a loop condition, not an
+    argument), and the continuous-multistart gate carries its ``_role2_horizon(``
+    on the line above after formatting. A record-text check would have scored those
+    two as unwrapped and, worse, would keep scoring them by their spelling.
+
+    Lowering the count means a gate left the role-2 class (converted to a
+    deterministic budget, or reclassified ``contract``); raising it means another
+    was brought in, which is the direction this is meant to encourage.
+    """
+    marks = ("_role2_", "_tuning().deterministic")
+    wrapped = []
+    checked = 0
+    for path, line in sorted(_KNOWN_KEYS):
+        lines = (_PKG / path).read_text().splitlines()
+        hits = [i for i, raw in enumerate(lines) if raw.strip() == line]
+        # A KNOWN line that matches nothing is ``test_recorded_gates_still_exist``'s
+        # business, not this one — except for the multi-line records, which are
+        # stored implicitly concatenated and never match a single source line.
+        if not hits:
+            continue
+        checked += 1
+        for i in hits:
+            window = "\n".join(lines[max(0, i - 2) : i + 2])
+            if any(m in window for m in marks):
+                wrapped.append((path, line))
+                break
+
+    assert checked >= len(_KNOWN_KEYS) - 3, (
+        f"only {checked} of {len(_KNOWN_KEYS)} recorded gates were located in source "
+        "— this probe has stopped measuring (rule 6)"
+    )
+    assert len(wrapped) == 11, (
+        f"the #1116 role-2 suppression count changed ({len(wrapped)} gates, expected 11).\n"
+        + "\n".join(f"  {p}: {s}" for p, s in sorted(wrapped))
+    )
+    for path, line in wrapped:
+        assert _CATEGORY[(path, line)] == "residual", (
+            f"{path}: a role-2-suppressed gate is by construction role 2 — {line}"
+        )

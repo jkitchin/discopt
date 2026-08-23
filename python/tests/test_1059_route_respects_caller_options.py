@@ -40,22 +40,40 @@ class TestIgnoredOptionTable:
     """The table is shared, so its predicates are worth pinning directly."""
 
     def test_an_untouched_default_is_not_caller_intent(self):
-        # Every value here is solve_model's own default. A default solve must
-        # stay routable -- if this regressed, the route would silently switch
-        # itself off for everyone and the graduation panel would be undone.
-        defaults = {
-            "threads": 1,
-            "deterministic": True,
-            "batch_size": 16,
-            "strategy": "best_first",
-            "nlp_bb": None,
-            "node_callback": None,
-            "incumbent_callback": None,
-            "presolve": True,
-            "cuts": "auto",
-            "subnlp_frequency": 20,
-            "in_tree_presolve_stride": 1,
-        }
+        """A default solve must stay routable.
+
+        If this regressed the route would silently switch itself off for
+        everyone and the graduation panel would be undone.
+
+        The defaults are read from ``solve_model``'s own signature rather than
+        transcribed. A transcribed copy goes stale the moment a default moves and
+        then tests a value nobody passes -- which is what happened when #1116
+        moved ``deterministic`` from ``True`` to ``False``.
+        """
+        import inspect
+
+        from discopt.solver import solve_model
+
+        sig = inspect.signature(solve_model).parameters
+        names = [
+            "threads",
+            "deterministic",
+            "batch_size",
+            "strategy",
+            "nlp_bb",
+            "node_callback",
+            "incumbent_callback",
+            "presolve",
+            "cuts",
+            "subnlp_frequency",
+            "in_tree_presolve_stride",
+        ]
+        defaults = {}
+        for n in names:
+            assert n in sig, f"{n} is no longer a solve_model parameter"
+            assert sig[n].default is not inspect.Parameter.empty, f"{n} has no default"
+            defaults[n] = sig[n].default
+        assert len(defaults) == len(names), "a name was dropped -- the probe shrank"
         assert _mip_nlp_ignored_options(defaults) == []
 
     @pytest.mark.parametrize(
