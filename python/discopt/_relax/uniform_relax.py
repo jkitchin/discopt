@@ -2055,6 +2055,33 @@ def _pow_curv(p: float, lo: float, hi: float) -> Optional[str]:
     return "convex"  # p in {0,1} degenerate (won't reach: pow collapses those)
 
 
+def _pow_deriv(p: float) -> Callable[[float], float]:
+    """``d/dt t**p``, with the ``t == 0`` limit evaluated instead of divided (#1118).
+
+    ``p * (0.0 ** (p - 1.0))`` RAISES ``ZeroDivisionError`` for every ``p < 1`` — an
+    ``ArithmeticError``, which ``_emit_1d._tangent_row`` catches ONE BRANCH ABOVE the
+    vertical-tangent recovery. So ``x**0.5`` on a box touching 0 silently lost the
+    facet that ``dm.sqrt(x)`` keeps under ``singular_tangent``: the same function,
+    the same singularity, different behavior depending on how the user spelled it.
+    Evaluating the limit here returns ``+inf`` instead, which is what ``_dsqrt`` and
+    the other named atoms do, and control reaches the recovery unchanged.
+
+    For ``p <= 0`` the limit is still not a vertical tangent of a *finite* ``f`` —
+    ``f(0)`` itself diverges — so ``nan`` keeps ``_finite(g)`` the decliner there.
+    Every ``t != 0`` value is the bare exponentiation, bit-identical to before,
+    including its exceptions (an overflow at a huge base still propagates to
+    ``_tangent_row``'s handler and drops the row exactly as it did).
+    """
+
+    def _dpow(t: float, _p: float = p) -> float:
+        t = float(t)
+        if t == 0.0 and _p < 1.0:
+            return math.inf if _p > 0.0 else math.nan
+        return float(_p * (t ** (_p - 1.0)))
+
+    return _dpow
+
+
 def _odd_power_tangent_point(p: int, endpoint: float, lo: float, hi: float) -> Optional[float]:
     """Tangent point of the line through ``(endpoint, endpoint**p)`` touching ``t**p``.
 
@@ -2264,7 +2291,7 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
         return Envelope(rows=[], tight=True)
     curv = _pow_curv(p, lo, hi)
     f = lambda t: float(t) ** p  # noqa: E731
-    fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
+    fp = _pow_deriv(p)
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv)
     # Sign-straddling odd power: _pow_curv abstains (S-shaped) -> two-piece hull.
     if curv is None and float(p).is_integer():

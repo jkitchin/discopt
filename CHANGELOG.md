@@ -12,6 +12,28 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`singular_tangent` recovery missed fractional power atoms (`x**0.5`)**
+  (`relaxation`, #1118). `x**0.5` has exactly the vertical tangent at `t = 0` that
+  `dm.sqrt(x)` has, but `_build_power` built its derivative by bare exponentiation
+  and `p * (0.0 ** (p - 1.0))` RAISES `ZeroDivisionError` for `p < 1` — an
+  `ArithmeticError`, which `_emit_1d._tangent_row` catches one branch ABOVE the
+  #1111/#1115 recovery. So the facet stayed dropped and the flag's behavior
+  depended on how the user spelled the square root (counting
+  `_interior_tangent_point` calls through a solve: `sqrt` 6, `x**0.5` **0**).
+  `_pow_deriv` now evaluates the `t == 0` limit explicitly — `+inf` for
+  `0 < p < 1`, the shape `_dsqrt` already had, and `nan` for `p <= 0` where `f`
+  itself diverges and the recovery must decline. Every `t != 0` value is the bare
+  exponentiation, bit-identical including its exceptions.
+
+  Sound before and after (the facet was merely dropped), and reachable only with
+  the default-OFF flag. `python/tests/test_1118_power_singular_tangent.py` pins
+  spelling parity with `dm.sqrt`, flag-OFF byte identity, non-interference with
+  integer/`p > 1`/`p <= 0` powers, the no-graph-point-cut soundness sample, the
+  differential bound (ON >= OFF and ON <= the true box optimum over 32 objective
+  directions, with a counter proving the facet moved the bound), lazy-spec parity,
+  and the native-kernel decline of a zero-touching fractional power in both flag
+  states; 13 of its 41 tests fail before the change.
+
 - **A `SolverTuning` installed with `set_current()` was silently discarded at the
   `solve()` boundary** (`bug`, #1117). `solver._scoped_tuning` published the
   `tuning=` kwarg for the call, and with the kwarg omitted — every plain
