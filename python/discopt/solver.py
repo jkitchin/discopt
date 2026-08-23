@@ -4795,6 +4795,44 @@ def _is_pure_continuous(model: Model) -> bool:
     return all(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
 
+def _expression_contains_custom_call(root) -> bool:
+    """True if the expression DAG rooted at ``root`` contains a ``CustomCall``.
+
+    Shared by :func:`_model_contains_custom_call` (the whole-model test) and the
+    alphaBB gate in :func:`solve_model` (#1114), which asks the same question of
+    a single expression.
+    """
+    if root is None:
+        return False
+    # Explicit-stack DFS (not Python recursion): ``from_nl`` can build a single
+    # body tens of thousands of nodes deep, which a per-node recursive walk would
+    # overflow the default recursion limit on (issue #271).
+    stack = [root]
+    while stack:
+        expr = stack.pop()
+        if isinstance(expr, CustomCall):
+            return True
+        # Generic child traversal mirroring the DAG node fields used elsewhere
+        # (e.g. discopt._relax.cutting_planes): BinaryOp/MatMul -> left/right,
+        # UnaryOp/SumExpression -> operand, FunctionCall/CustomCall -> args,
+        # SumOverExpression -> terms, IndexExpression -> base.
+        left = getattr(expr, "left", None)
+        if left is not None:
+            stack.append(left)
+        right = getattr(expr, "right", None)
+        if right is not None:
+            stack.append(right)
+        operand = getattr(expr, "operand", None)
+        if operand is not None:
+            stack.append(operand)
+        base = getattr(expr, "base", None)
+        if base is not None:
+            stack.append(base)
+        stack.extend(getattr(expr, "args", ()) or ())
+        stack.extend(getattr(expr, "terms", ()) or ())
+    return False
+
+
 def _model_contains_custom_call(model: Model) -> bool:
     """True if any objective/constraint body contains a ``CustomCall`` node.
 
@@ -4803,43 +4841,11 @@ def _model_contains_custom_call(model: Model) -> bool:
     about. The solver uses this to force the local NLP path and to refuse global
     branch-and-bound (see ``solve_model``). See issue #27b.
     """
-
-    def _walk(root) -> bool:
-        # Explicit-stack DFS (not Python recursion): ``from_nl`` can build a
-        # single body tens of thousands of nodes deep, which a per-node recursive
-        # walk would overflow the default recursion limit on (issue #271).
-        stack = [root]
-        while stack:
-            expr = stack.pop()
-            if isinstance(expr, CustomCall):
-                return True
-            # Generic child traversal mirroring the DAG node fields used
-            # elsewhere (e.g. discopt._relax.cutting_planes): BinaryOp/MatMul ->
-            # left/right, UnaryOp/SumExpression -> operand,
-            # FunctionCall/CustomCall -> args, SumOverExpression -> terms,
-            # IndexExpression -> base.
-            left = getattr(expr, "left", None)
-            if left is not None:
-                stack.append(left)
-            right = getattr(expr, "right", None)
-            if right is not None:
-                stack.append(right)
-            operand = getattr(expr, "operand", None)
-            if operand is not None:
-                stack.append(operand)
-            base = getattr(expr, "base", None)
-            if base is not None:
-                stack.append(base)
-            stack.extend(getattr(expr, "args", ()) or ())
-            stack.extend(getattr(expr, "terms", ()) or ())
-        return False
-
     obj = getattr(model, "_objective", None)
-    if obj is not None and getattr(obj, "expression", None) is not None and _walk(obj.expression):
+    if obj is not None and _expression_contains_custom_call(getattr(obj, "expression", None)):
         return True
     for c in model._constraints:
-        body = getattr(c, "body", None)
-        if body is not None and _walk(body):
+        if _expression_contains_custom_call(getattr(c, "body", None)):
             return True
     return False
 
@@ -10866,7 +10872,40 @@ def solve_model(
         # ``evaluate_objective``/``_obj_fn`` minimize ``-f`` for a maximize model,
         # so the expression whose Hessian must be convexified is likewise negated.
         _alphabb_expr = -model._objective.expression if _obj_negate else model._objective.expression
-        _use_alphabb = True
+        # #1114: an opaque ``CustomCall`` in the objective makes alphaBB a
+        # guaranteed no-op, so do not pay for it. ``_compute_alphabb_bound``
+        # derives its bound from ``rigorous_alpha``, which encloses the Hessian
+        # with the interval-AD walker in ``_relax/convexity/interval_ad.py``.
+        # That walker has NO rule for ``CustomCall`` (the opaque user callable
+        # has no symbolic second derivative), so the node falls through to
+        # ``_unbounded`` and the ``unbounded`` flag propagates through every
+        # enclosing operator. ``rigorous_alpha`` therefore returns ``+inf`` for
+        # every variable on EVERY box -- not just wide ones, so subdividing
+        # never recovers it -- and ``_compute_alphabb_bound`` abstains with
+        # ``-inf``, whose only effect at both node-loop call sites is the no-op
+        # ``max(lb, -inf)``. Suppressing it is bound-neutral by construction,
+        # not a bound trade: what is skipped is one interval-Hessian walk per
+        # node with a single possible outcome. (The issue also names a "~2 s root
+        # alpha estimate"; that is stale -- C-17 replaced the sampled root alpha
+        # with the per-node rigorous one, so this block now only builds the
+        # expression. The saving is a per-node call count, not a timing claim.)
+        # Measured over an 8-model CustomCall family (scratchpad/issue1114): 51
+        # node boxes, alphaBB abstained on every one, and suppressing it left
+        # status/node_count/bound/objective bit-identical on all 8 (32/32 exact
+        # identity assertions) -- the CLAUDE.md §5 bound-neutral regime. The
+        # mechanism check shows the identical function written in native
+        # expression ops yields a FINITE alpha while the ``dm.custom`` wrapper
+        # yields ``+inf``. ``test_1114_alphabb_customcall_suppressed.py`` asserts
+        # that implication directly, so adding a ``CustomCall`` interval-AD rule
+        # later fails loudly here instead of silently disabling a working bound.
+        if _expression_contains_custom_call(_alphabb_expr):
+            logger.debug(
+                "alphaBB not enabled: the objective contains an opaque CustomCall, "
+                "for which the interval Hessian is unbounded on every box (#1114)."
+            )
+            _alphabb_expr = None
+        else:
+            _use_alphabb = True
 
     # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
     # valid dual bound only for convex models. The bound solver evaluates the
