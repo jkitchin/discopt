@@ -1456,14 +1456,19 @@ class SolverTuning:
     to do: ``min 2x - sqrt(x)`` over ``[0,4]`` goes −0.7071 → **−0.12503** against a
     true optimum of −0.125, where the eager anchor reaches only −0.6557.
 
-    **On the corpus it weakly dominates leaving the facet dropped.** Three-arm panel
+    **On the corpus lazy never loses and wins four times.** Three-arm panel
     (off / eager / lazy), 300-node budget with no wall limit so node counts and bounds
-    are bit-reproducible, each arm's firing asserted, 10 scorable instances:
-    ``eager vs off: WORSE 2, flat 8, better 0``; ``lazy vs off: BETTER 2, flat 8,
-    worse 0``; 40 soundness comparisons against ``minlplib.solu``, 0 violations. The
-    two lazy gains are ``kriging_peaks-full050`` (−142.657 → −139.918) and
-    ``full100`` (−348.054 → −342.588), both at *identical node counts and identical
-    incumbents* — i.e. a strictly better bound for the same work. This is NOT the
+    are bit-reproducible, each arm's firing asserted, 13 scorable instances:
+    ``eager vs off: BETTER 2, WORSE 2, flat 9``; ``lazy vs off: BETTER 4, flat 9,
+    worse 0``; 52 soundness comparisons against ``minlplib.solu``, 0 violations. The
+    lazy gains are ``kriging_peaks-full050`` (−142.657 → −139.918), ``full100``
+    (−348.054 → −342.588), ``full200`` (−746.566 → −734.495) — ~1.6–1.9 % of gap each —
+    and a marginal ``tspn15``. All occur at *identical node counts and identical
+    incumbents*: a strictly better bound for the same work. The three substantial ones
+    follow a size trend (nothing at ``full010/020/030``), which is what a mechanism
+    acting only where the dropped facet dominates the root relaxation should look like.
+    Eager's two BETTER cells are ``tspn15`` (+0.002) and ``full200`` (+1e-08, noise)
+    against two real losses, so eager stays net-negative. This is NOT the
     ``cut_inherit`` outcome, which was neutral-or-harmful.
 
     It is also not yet a graduation case, for three reasons kept here rather than in a
@@ -1480,10 +1485,11 @@ class SolverTuning:
       ``eq6_1`` and 35 585 on ``maxmin`` buy bound movement in the 12th digit. No
       wall-time figure is quoted because that panel's timing column was contaminated
       by load the author generated (§9).
-    * **7 of 17 screened instances produced no scorable row** — ``elec*`` and
-      ``full500`` return no dual bound at all; ``full030``, ``tspn15`` and ``full200``
-      were lost to a per-instance wall kill that truncated the *lazy* arm
-      preferentially, since it always runs third.
+    * **4 of 17 screened instances produced no scorable row** — ``elec*`` and
+      ``full500`` return no dual bound at all. ``full030``, ``tspn15`` and ``full200``
+      were initially lost to a per-instance wall kill that truncated the *lazy* arm
+      preferentially; a per-arm re-run recovered all three, and doing so added one
+      eager BETTER and one substantial lazy BETTER.
 
     Where the gains come from: both sit in ``kriging_peaks``, the family with the
     largest root gain (13–40×). On ``full010``, 12 separator invocations move the node

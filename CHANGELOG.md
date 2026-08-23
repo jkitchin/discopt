@@ -360,25 +360,30 @@ The release procedure that produces these entries is documented in
   reaches only −0.6557; the same holds on boxes nine orders of magnitude apart
   (`[0,1e-3]`, `[0,1e6]`, the latter recovering −353.55 → −125 exactly).
 
-  **On the corpus it weakly dominates leaving the facet dropped.** Three-arm panel
+  **On the corpus lazy never loses and wins four times.** Three-arm panel
   (off / eager / lazy), one binary, `max_nodes` budget with **no** `time_limit` so
   node counts and bounds are bit-reproducible, each arm's firing mechanism separately
-  instrumented and asserted. 10 instances produced a scorable three-arm row:
+  instrumented and asserted. 13 instances produced a scorable three-arm row:
 
   | instance | off | eager | lazy | lazy rows |
   |---|---|---|---|---|
+  | `kriging_peaks-full050` | −142.657069 | flat | **−139.917835 (BETTER, +1.9 %)** | 7860 |
+  | `kriging_peaks-full100` | −348.053602 | flat | **−342.588463 (BETTER, +1.6 %)** | 13214 |
+  | `kriging_peaks-full200` | −746.566175 | +1e−08 (noise) | **−734.495407 (BETTER, +1.6 %)** | 32451 |
+  | `tspn15` | 269.3529936 | **269.8773406 (BETTER)** | 269.3558802 (BETTER, marginal) | 85 |
   | `tspn08` | 135 nodes | **191 nodes (WORSE, +41.5 %)** | 135 nodes | 25 |
   | `tspn10` | 177.43065803 | **177.39907299 (WORSE)** | 177.43065803 | 1 |
-  | `kriging_peaks-full050` | −142.657069 | −142.657069 | **−139.917835 (BETTER)** | 7860 |
-  | `kriging_peaks-full100` | −348.053602 | −348.053602 | **−342.588463 (BETTER)** | 13214 |
-  | `mathopt5_6`, `eq6_1`, `maxmin`, `full010`, `full020`, `tspn12` | — | flat | flat | 0–35585 |
+  | `mathopt5_6`, `eq6_1`, `maxmin`, `full010/020/030`, `tspn12` | — | flat | flat | 0–35585 |
 
-  `eager vs off: WORSE 2, flat 8, better 0`. `lazy vs off: BETTER 2, flat 8, worse 0`.
-  40 soundness comparisons against `minlplib.solu`, **0 violations**. Both lazy gains
-  occur at *identical node counts and identical incumbents* — a strictly better bound
-  for the same work — and both sit in `kriging_peaks`, the family with the largest
-  root gain (13–40×). This is **not** the `DISCOPT_CUT_INHERIT` outcome, which was
-  neutral-or-harmful.
+  `eager vs off: BETTER 2, WORSE 2, flat 9`. `lazy vs off: BETTER 4, flat 9, worse 0`.
+  52 soundness comparisons against `minlplib.solu`, **0 violations**. Every lazy gain
+  occurs at an *identical node count and identical incumbent* — a strictly better bound
+  for the same work — and the three substantial ones follow a coherent size trend:
+  nothing at `full010/020/030`, ~1.6–1.9 % of gap at `full050/100/200`, which is what a
+  mechanism acting only where the dropped facet dominates the root relaxation should
+  look like. Eager's two BETTER cells are `tspn15` (+0.002) and `full200` (+1e−08,
+  noise) against two real losses, so eager stays net-negative. This is **not** the
+  `DISCOPT_CUT_INHERIT` outcome, which was neutral-or-harmful.
 
   It is also not yet a graduation case, and the gaps are recorded rather than glossed:
 
@@ -393,10 +398,12 @@ The release procedure that produces these entries is documented in
     35 585 on `maxmin` buy movement in the 12th digit. No wall-time figure is quoted:
     that panel's timing column was contaminated by load the author generated
     concurrently (§9), so it is discarded rather than reported.
-  * **7 of 17 screened instances produced no scorable row.** `elec*` and `full500`
-    return no dual bound at all (1 node, or 0 for `full500`); `full030`, `tspn15` and
-    `full200` were lost to a per-instance wall kill set too low — which truncated the
-    **lazy** arm preferentially, since it always runs third.
+  * **4 of 17 screened instances produced no scorable row:** `elec*` and `full500`
+    return no dual bound at all (1 node, or 0 for `full500`). `full030`, `tspn15` and
+    `full200` were initially lost to a per-instance wall kill set too low — a biased
+    loss, since lazy runs third and every truncation cut it preferentially — and were
+    recovered by a per-arm re-run. Recovering them added one eager BETTER and one
+    substantial lazy BETTER, so the truncation had been hiding results on both sides.
 
   Consequently the #1111 finding "the root win does not survive branching" is scoped
   to the **eager** anchor. Where the dropped facet dominates the root relaxation,
