@@ -1456,23 +1456,55 @@ class SolverTuning:
     to do: ``min 2x - sqrt(x)`` over ``[0,4]`` goes −0.7071 → **−0.12503** against a
     true optimum of −0.125, where the eager anchor reaches only −0.6557.
 
-    **On the corpus lazy never loses and wins four times.** Three-arm panel
-    (off / eager / lazy), 300-node budget with no wall limit so node counts and bounds
-    are bit-reproducible, each arm's firing asserted, 13 scorable instances:
-    ``eager vs off: BETTER 2, WORSE 2, flat 9``; ``lazy vs off: BETTER 4, flat 9,
-    worse 0``; 52 soundness comparisons against ``minlplib.solu``, 0 violations. The
-    lazy gains are ``kriging_peaks-full050`` (−142.657 → −139.918), ``full100``
-    (−348.054 → −342.588), ``full200`` (−746.566 → −734.495) — ~1.6–1.9 % of gap each —
-    and a marginal ``tspn15``. All occur at *identical node counts and identical
-    incumbents*: a strictly better bound for the same work. The three substantial ones
-    follow a size trend (nothing at ``full010/020/030``), which is what a mechanism
-    acting only where the dropped facet dominates the root relaxation should look like.
-    Eager's two BETTER cells are ``tspn15`` (+0.002) and ``full200`` (+1e-08, noise)
-    against two real losses, so eager stays net-negative. This is NOT the
-    ``cut_inherit`` outcome, which was neutral-or-harmful.
+    **On the corpus lazy never loses the bound, and that is not enough.** Three-arm
+    panel (off / eager / lazy), 300-node budget with no wall limit, each arm's firing
+    asserted, 12 scorable instances: ``eager vs off: BETTER 1, WORSE 2, flat 9``;
+    ``lazy vs off: BETTER 3, flat 9, worse 0``. Soundness checked on every arm of
+    every run against ``minlplib.solu`` — 0 violations, including per-repetition
+    asserts in the reproducibility and timing panels. The lazy gains are
+    ``kriging_peaks-full050`` (−142.657 → −139.918) and ``full100`` (−348.054 →
+    −342.588), ~1.6–1.9 % of gap, plus a marginal ``tspn15``; each occurs at an
+    *identical node count and identical incumbent*, i.e. a better bound for the same
+    tree. Eager's one BETTER cell (``tspn15``, +0.002) against two real losses leaves
+    it net-negative.
 
-    It is also not yet a graduation case, for three reasons kept here rather than in a
-    commit message:
+    **The timing panel decides it, and it decides against graduation.** Interleaved
+    off/lazy, 3 repetitions, per-arm and pooled standard deviations, load gate
+    recorded per instance (2.5–5.2 on 14 cores), both arms verified to explore
+    identical trees::
+
+        eq6_1                 off  10.82+-0.12s   lazy  13.59+-0.09s   +25.6%   0 gain
+        maxmin                off  33.52+-0.13s   lazy  51.68+-0.04s   +54.2%   0 gain
+        kriging_peaks-full050 off  42.21+-0.21s   lazy  44.09+-0.12s    +4.5%  +1.9%
+        kriging_peaks-full100 off 101.21+-0.21s   lazy 105.22+-0.22s    +4.0%  +1.6%
+
+    Every delta is 12–200 pooled sd; none is noise. The shape disqualifies it:
+    **lazy is cheap where it helps and expensive where it does not** — the two
+    instances charged +25.6 % and +54.2 % are exactly the two that gain nothing,
+    because they draw the most rows. Default-ON would pay the ``maxmin`` bill
+    corpus-wide to collect the ``full050`` gain occasionally. Gate 1 (cert-clean)
+    passes; **gate 2 (net-positive) fails**; the flag stays default-OFF. Same
+    disposition as ``cut_inherit``, reached by a different route — that one was
+    neutral-or-harmful, this one is helpful on a narrow class and unaffordable off it.
+
+    Corrections to earlier readings recorded here (§11):
+
+    * ``kriging_peaks-full200`` was reported as a third gain (−746.566 → −734.495,
+      +1.6 %) and is **withdrawn**. Over 3 reps on a quiet machine it is
+      nondeterministic in *both* arms: off gives nodes {301, 303} with two distinct
+      bounds and zero separated rows; lazy gives {301, 303} with rows {32451, 32472,
+      32583}. Two single runs of a nondeterministic instance are not a comparison.
+      Pre-existing at that size, unrelated to this flag, filed separately.
+    * An intermediate claim that lazy *caused* that nondeterminism is also withdrawn:
+      it rested on two reps in which off agreed, and the third falsified it.
+    * **The quoted bounds are load-dependent to ~3 significant figures.** Quiet,
+      ``full100`` gives −350.768 → −345.634 over 12 498 rows; under the original
+      panel's contention, −348.054 → −342.588 over 13 214. Separation is wall-bounded
+      (every ``_separate_*`` breaks on a shared ``_deadline``; the node LP re-solve
+      takes ``time_limit=_remaining()``), so row counts and the bounds they produce
+      shift with machine load. The direction reproduces; the digits do not.
+
+    Remaining gap:
 
     * **A coverage hole eager does not have.** The separation chain is gated on
       ``if separate:`` (``mccormick_lp.py``), forced off on yield rounds and pool-free
@@ -1481,15 +1513,6 @@ class SolverTuning:
       fired at build time throughout. Lazy is not a coverage superset of eager: it
       trades "emit a geometric guess wherever a relaxation is built" for "emit an
       exact tangent only where a separation round runs".
-    * **Cost is real and only counted in rows, not seconds.** 31 614 separated rows on
-      ``eq6_1`` and 35 585 on ``maxmin`` buy bound movement in the 12th digit. No
-      wall-time figure is quoted because that panel's timing column was contaminated
-      by load the author generated (§9).
-    * **4 of 17 screened instances produced no scorable row** — ``elec*`` and
-      ``full500`` return no dual bound at all. ``full030``, ``tspn15`` and ``full200``
-      were initially lost to a per-instance wall kill that truncated the *lazy* arm
-      preferentially; a per-arm re-run recovered all three, and doing so added one
-      eager BETTER and one substantial lazy BETTER.
 
     Where the gains come from: both sit in ``kriging_peaks``, the family with the
     largest root gain (13–40×). On ``full010``, 12 separator invocations move the node

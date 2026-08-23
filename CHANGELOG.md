@@ -343,7 +343,8 @@ The release procedure that produces these entries is documented in
   merely an argument. Built and measured as #1115, below.
 
 - **Placing the vertical-tangent facet where the LP binds removes the eager
-  anchor's regression and, on part of the corpus, buys a tighter bound** (#1115,
+  anchor's regression and tightens the bound on part of the corpus — but costs
+  25-54 % where it tightens nothing, so it stays default-OFF** (#1115,
   `DISCOPT_SINGULAR_TANGENT_LAZY`, default **on**, consulted only when
   `singular_tangent` is on — so the shipped default path is unchanged).
   `MccormickLPRelaxer._separate_singular_tangent` adds the supporting tangent at the
@@ -360,32 +361,67 @@ The release procedure that produces these entries is documented in
   reaches only −0.6557; the same holds on boxes nine orders of magnitude apart
   (`[0,1e-3]`, `[0,1e6]`, the latter recovering −353.55 → −125 exactly).
 
-  **On the corpus lazy never loses and wins four times.** Three-arm panel
-  (off / eager / lazy), one binary, `max_nodes` budget with **no** `time_limit` so
-  node counts and bounds are bit-reproducible, each arm's firing mechanism separately
-  instrumented and asserted. 13 instances produced a scorable three-arm row:
+  **On the corpus lazy never loses the bound, and that is not enough.** Three-arm
+  panel (off / eager / lazy), one binary, `max_nodes` budget with **no** `time_limit`,
+  each arm's firing mechanism separately instrumented and asserted. 12 instances
+  produced a scorable three-arm row:
 
   | instance | off | eager | lazy | lazy rows |
   |---|---|---|---|---|
   | `kriging_peaks-full050` | −142.657069 | flat | **−139.917835 (BETTER, +1.9 %)** | 7860 |
   | `kriging_peaks-full100` | −348.053602 | flat | **−342.588463 (BETTER, +1.6 %)** | 13214 |
-  | `kriging_peaks-full200` | −746.566175 | +1e−08 (noise) | **−734.495407 (BETTER, +1.6 %)** | 32451 |
   | `tspn15` | 269.3529936 | **269.8773406 (BETTER)** | 269.3558802 (BETTER, marginal) | 85 |
   | `tspn08` | 135 nodes | **191 nodes (WORSE, +41.5 %)** | 135 nodes | 25 |
   | `tspn10` | 177.43065803 | **177.39907299 (WORSE)** | 177.43065803 | 1 |
   | `mathopt5_6`, `eq6_1`, `maxmin`, `full010/020/030`, `tspn12` | — | flat | flat | 0–35585 |
 
-  `eager vs off: BETTER 2, WORSE 2, flat 9`. `lazy vs off: BETTER 4, flat 9, worse 0`.
-  52 soundness comparisons against `minlplib.solu`, **0 violations**. Every lazy gain
-  occurs at an *identical node count and identical incumbent* — a strictly better bound
-  for the same work — and the three substantial ones follow a coherent size trend:
-  nothing at `full010/020/030`, ~1.6–1.9 % of gap at `full050/100/200`, which is what a
-  mechanism acting only where the dropped facet dominates the root relaxation should
-  look like. Eager's two BETTER cells are `tspn15` (+0.002) and `full200` (+1e−08,
-  noise) against two real losses, so eager stays net-negative. This is **not** the
-  `DISCOPT_CUT_INHERIT` outcome, which was neutral-or-harmful.
+  `eager vs off: BETTER 1, WORSE 2, flat 9`. `lazy vs off: BETTER 3, flat 9, worse 0`.
+  Soundness checked on every arm of every run against `minlplib.solu` — **0 violations**,
+  including per-repetition asserts in the reproducibility and timing panels. Each lazy
+  gain occurs at an *identical node count and identical incumbent*: a strictly better
+  bound for the same tree.
 
-  It is also not yet a graduation case, and the gaps are recorded rather than glossed:
+  **The timing panel is what decides it, and it decides against graduation.**
+  Interleaved off/lazy, 3 repetitions, per-arm standard deviation and a pooled sd,
+  load gate recorded at every instance start (2.5–5.2 on 14 cores), both arms verified
+  to explore identical trees so the wall delta is attributable to separation alone:
+
+  | instance | off | lazy | Δ | lazy rows | bound gain |
+  |---|---|---|---|---|---|
+  | `eq6_1` | 10.82 ± 0.12 s | 13.59 ± 0.09 s | **+25.6 %** | 31 614 | none |
+  | `maxmin` | 33.52 ± 0.13 s | 51.68 ± 0.04 s | **+54.2 %** | 35 585 | none |
+  | `kriging_peaks-full050` | 42.21 ± 0.21 s | 44.09 ± 0.12 s | +4.5 % | 7 860 | +1.9 % of gap |
+  | `kriging_peaks-full100` | 101.21 ± 0.21 s | 105.22 ± 0.22 s | +4.0 % | 12 498 | +1.6 % of gap |
+
+  Every delta is 12–200 pooled standard deviations; none is noise. The shape is the
+  disqualifying part: **lazy is cheap where it helps and expensive where it does not.**
+  The two instances it charges +25.6 % and +54.2 % are exactly the two that gain
+  nothing, because they are the ones that draw the most rows. A corpus-wide default-ON
+  would pay the `maxmin` bill everywhere to collect the `full050` gain occasionally.
+  Gate 1 (cert-clean) passes; **gate 2 (net-positive) fails**, so the flag stays
+  default-OFF — the `DISCOPT_CUT_INHERIT` disposition, reached by a different route
+  (there: neutral-or-harmful; here: helpful on a narrow class, unaffordable off it).
+
+  Three corrections to earlier statements in this entry (§11):
+
+  * **`kriging_peaks-full200` is withdrawn from the gains table.** It was reported at
+    −746.566175 → −734.495407 (+1.6 %). Over three repetitions on a quiet machine the
+    instance is nondeterministic *in both arms* — off returns nodes {301, 303} with two
+    distinct bounds and **zero** separated rows; lazy returns {301, 303} with rows
+    {32451, 32472, 32583}. Two single runs of a nondeterministic instance are not a
+    comparison. This is pre-existing solver behaviour at that size, unrelated to this
+    flag, and is filed separately.
+  * **An intermediate claim that lazy *caused* that nondeterminism is also withdrawn.**
+    It rested on two repetitions in which the off arm agreed; the third falsified it.
+  * **The quoted bounds are load-dependent to ~3 significant figures.** Quiet, `full100`
+    gives off −350.768042 → lazy −345.634363 over 12 498 rows; under the contention of
+    the original panel, −348.053602 → −342.588463 over 13 214. Separation is wall-bounded
+    (`_separate_*` all break on a shared `_deadline`; the node LP re-solve takes
+    `time_limit=_remaining()`), so row counts — and the bounds they produce — shift with
+    machine load. The *direction* (lazy better by ~1.5 % of gap) reproduces; the digits
+    do not, and should not be read as properties of the instance alone.
+
+  Remaining gaps, recorded rather than glossed:
 
   * **Lazy has a coverage hole eager does not.** The separation chain is gated on
     `if separate:` (`mccormick_lp.py:1641`), forced off on yield rounds and pool-free
@@ -394,16 +430,11 @@ The release procedure that produces these entries is documented in
     fired at build time throughout. Lazy trades "emit a geometric guess wherever a
     relaxation is built" for "emit an exact tangent only where a separation round
     runs" — it is not a coverage superset.
-  * **Cost is counted in rows, not seconds.** 31 614 separated rows on `eq6_1` and
-    35 585 on `maxmin` buy movement in the 12th digit. No wall-time figure is quoted:
-    that panel's timing column was contaminated by load the author generated
-    concurrently (§9), so it is discarded rather than reported.
-  * **4 of 17 screened instances produced no scorable row:** `elec*` and `full500`
-    return no dual bound at all (1 node, or 0 for `full500`). `full030`, `tspn15` and
-    `full200` were initially lost to a per-instance wall kill set too low — a biased
-    loss, since lazy runs third and every truncation cut it preferentially — and were
-    recovered by a per-arm re-run. Recovering them added one eager BETTER and one
-    substantial lazy BETTER, so the truncation had been hiding results on both sides.
+  * **5 of 17 screened instances produced no scorable row:** `elec*` and `full500`
+    return no dual bound at all (1 node, or 0 for `full500`), and `full200` is
+    nondeterministic in both arms (above). `full030` and `tspn15` were initially lost
+    to a per-instance wall kill set too low — a biased loss, since lazy runs third and
+    every truncation cut it preferentially — and were recovered by a per-arm re-run.
 
   Consequently the #1111 finding "the root win does not survive branching" is scoped
   to the **eager** anchor. Where the dropped facet dominates the root relaxation,
