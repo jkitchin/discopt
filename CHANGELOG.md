@@ -235,21 +235,25 @@ The release procedure that produces these entries is documented in
   endpoint but `f'` diverges there, `_emit_1d` silently dropped the tangent facet,
   leaving the envelope one-sided. Re-anchoring it at an interior ladder point only
   ever *adds* a row, so the flag-ON polytope is a subset of the flag-OFF one and the
-  node LP bound can only improve. The §5 panel (13 pairs) is **cert-clean** — zero
-  soundness violations, incumbents identical on all 13, no certification regression
-  — and **fails net-positive**:
+  node LP bound can only improve. The §5 panel is **cert-clean** and **fails
+  net-positive — because the flag is exactly neutral, not because it is harmful.**
+  17 instances, every one screened to actually drop a facet; both arms in one
+  process on one binary; each arm run twice. 24 soundness comparisons, 0 violations,
+  no bound above its `.solu` reference, no certification regression, incumbents
+  identical throughout. And:
 
-  * the two *terminating* pairs are the only load-independent rows: `mathopt5_6`
-    5 → 5 nodes with a bit-identical certificate, and `tspn08` **135 → 191 nodes,
-    +41 %**. A tighter relaxation still grows the tree because a different LP vertex
-    changes the branching choice;
-  * among the time-limited rows, 1 meaningfully better (`tspn10` +1.274) against 4
-    meaningfully worse (`kriging_peaks-full100` −1.144, `full010` −0.542, `tspn12`
-    −0.520, `full050` −0.198);
+  * the two *terminating* pairs are the only load-independent rows, and both are
+    exactly neutral: `mathopt5_6` 5 → 5 nodes and `tspn08` 135 → 135 nodes, each
+    with a **bit-identical** dual bound in both arms, reproducible across both
+    repetitions;
+  * every time-limited row is neutral **within its own rep-to-rep spread**. Compare
+    ON's worse repetition against OFF's better one and no instance is robustly
+    better or worse; the widest excursion, `tspn10`, straddles zero (−0.739 to
+    +0.318). At a 60 s limit under load this panel cannot resolve a gain that size
+    and none is claimed;
   * the root win does not survive branching: `kriging_peaks` gains 13–40× at the
-    root (`full200` −74356.93 → −5596.46), yet after 120 s `full020`'s arms agree to
-    14 digits and `full050`/`full100` are behind. B&B was already recovering that
-    bound cheaply, and an extra LP row at every node is a net loss.
+    root (`full200` −74356.93 → −5596.46), yet `full020`'s arms agree to 14 digits
+    at the limit. B&B was already recovering that bound cheaply.
 
   The `DISCOPT_CUT_INHERIT` outcome. Note that the two #581 precedents in
   `solver_tuning.py` *removed* such flags rather than leaving them in default-OFF
@@ -258,12 +262,24 @@ The release procedure that produces these entries is documented in
   for itself — with the failing panel written into the field's docstring.
   Flag-OFF is byte-identical to the pre-#1111 relaxation.
 
-  **Retractions.** The panel harness printed `better 10 worse 2 unchanged 1`; that
-  tally is wrong and is not the basis of anything above. Its classifier scored
-  `nodes_on < nodes_off` as "better", which is correct for a terminating run and
-  backwards for a time-limited one, where fewer nodes means the arm did *less* work
-  in the same budget. Two earlier wall-time claims are also retracted: load was
-  37–87 on 14 cores, so the §9 load gate fails outright. And #1111's own motivating
+  **Retractions.** An earlier 13-pair panel, ~36 % diluted (5 of its 14 instances
+  contain no `sqrt`, so the flag could not act on them), was published here and in
+  PR #1113 as measuring `tspn08` at **135 → 191 nodes, +41 %** — the load-bearing
+  evidence for calling this flag harmful. **It does not reproduce.** On the
+  undiluted single-binary panel `tspn08` is 135 → 135 with an identical bound
+  (290.565925041298) in all four runs. Retracted with it: that panel's four
+  "meaningfully worse" time-limited rows (`kriging_peaks-full100` −1.144, `full010`
+  −0.542, `tspn12` −0.520, `full050` −0.198) — on the successor panel `full100` and
+  `tspn12` are flat and `full010`/`full050` move the *other* way, inside rep noise.
+  Those were load artifacts, measured while an unrelated job held most of the
+  machine. The outcome is unchanged (stays default-OFF); its character is not — the
+  flag is neutral, not a regression.
+
+  Also retracted: the harness's printed tally `better 10 worse 2 unchanged 1`, whose
+  classifier scored `nodes_on < nodes_off` as "better" — correct for a terminating
+  run, backwards for a time-limited one, where fewer nodes means the arm did *less*
+  work in the same budget. Both earlier wall-time claims are retracted too (load
+  37–87 on 14 cores; the §9 load gate fails outright). And #1111's own motivating
   hypothesis is falsified — on the adiabatic LVC MECP model the facet is recovered
   but the root bound and node count are unchanged (1 node either way).
 
@@ -274,9 +290,9 @@ The release procedure that produces these entries is documented in
   * *Corpus scope.* Across all 1610 MINLPLib `.nl` instances, `sqrt` appears in 63
     and `asin`/`acos`/`acosh` in **zero** — the opposite of the issue's expectation
     that the inverse-trig rows carry the weight.
-  * *Panel 1 was ~36 % diluted.* Five of its 14 instances (`kriging_peaks-red*`)
-    contain no `sqrt` at all, so the flag could not act on them. A targeted panel
-    was rebuilt by screening every corpus instance for an actually-dropped facet,
+  * *The first panel was ~36 % diluted* (see the retraction above). The targeted
+    successor panel was rebuilt by screening every corpus instance for an
+    actually-dropped facet,
     using two complementary instruments — a cheap root screen and a full-solve
     census — because the root screen alone is structurally blind to the `elec*`
     family, whose singular boxes only appear after branching.
@@ -305,8 +321,11 @@ The release procedure that produces these entries is documented in
   The direction the evidence points is to stop placing the tangent geometrically and
   place it *where the LP binds* — lazily at the incumbent LP point, as
   `MccormickLPRelaxer._separate_convex`'s Kelley loop already does for composite
-  convex/concave lifts — which also avoids the cost panel 1 charged this flag for, an
-  eager extra row at every node. That is a hypothesis with a clear entry experiment,
+  convex/concave lifts — which also stops the solver paying for an eager extra row at
+  every node whether or not that node's LP is near the singular endpoint. (The
+  retracted panel charged this flag for that cost as a *measured* regression; it is
+  not one. It stays a reason to prefer lazy placement as an argument, not as
+  evidence.) That is a hypothesis with a clear entry experiment,
   not a known fix: lazy placement does not dodge the singularity, since the gain still
   collapses for offsets below ~1e-5 and an LP point inside that radius needs the same
   conditioning guard. It remains open; the flag stays default-OFF as its measurement

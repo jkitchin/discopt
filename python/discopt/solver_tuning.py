@@ -1330,21 +1330,38 @@ class SolverTuning:
     emitted, so the flag-ON polytope is a subset of the flag-OFF polytope and the
     node LP bound can only improve or stay equal.
 
-    **The §5 panel ran and FAILED gate 2 (net-positive). This flag is not a
-    graduation candidate as it stands.** 13 pairs, cert-clean (0 soundness
-    violations, incumbents identical on all 13, no certification regression), but:
+    **The §5 panel ran. Gate 1 (cert-clean) PASSES; gate 2 (net-positive) FAILS
+    because the flag is measured exactly NEUTRAL — not because it is harmful.** The
+    successor panel (17 instances, every one screened to actually drop a facet; both
+    arms in one process on one binary; each arm run twice) reports 24 soundness
+    comparisons with 0 violations, no bound above its ``.solu`` reference, no
+    certification regression, and:
 
-    * the two *terminating* pairs are the only load-independent rows, and they read
-      ``mathopt5_6`` 5 → 5 nodes (bit-identical certificate) and ``tspn08``
-      **135 → 191 nodes, +41%**. A tighter relaxation still grows the tree because a
-      different LP vertex changes the branching choice;
-    * among the time-limited rows, 1 meaningfully better (``tspn10`` +1.274) against
-      4 meaningfully worse (``kriging_peaks-full100`` −1.144, ``full010`` −0.542,
-      ``tspn12`` −0.520, ``full050`` −0.198);
+    * the two *terminating* pairs are the only load-independent rows, and both are
+      exactly neutral: ``mathopt5_6`` 5 → 5 nodes and ``tspn08`` 135 → 135 nodes,
+      each with a **bit-identical** dual bound in both arms, reproducible across
+      both repetitions;
+    * every time-limited row is neutral **within its own rep-to-rep spread**.
+      Comparing ON's worse repetition against OFF's better one, no instance is
+      robustly better or worse — the widest excursion, ``tspn10``, straddles zero
+      (−0.739 to +0.318). Under load, at a 60 s limit, this panel cannot resolve a
+      gain of that size, and it should not be quoted as one;
     * the root win does not survive branching: ``kriging_peaks`` gains 13–40× at the
-      root (``full200`` −74356.93 → −5596.46) yet after 120 s ``full020``'s arms
-      agree to 14 digits and ``full050``/``full100`` are behind. B&B was already
-      recovering that bound cheaply, and an extra LP row at every node is a net loss.
+      root (``full200`` −74356.93 → −5596.46) yet ``full020``'s arms agree to 14
+      digits at the limit. B&B was already recovering that bound cheaply.
+
+    **Retraction (§11).** An earlier, ~36 %-diluted panel was recorded here — and in
+    the CHANGELOG and PR #1113 — as measuring ``tspn08`` at **135 → 191 nodes, +41 %**,
+    and that number was the load-bearing evidence for calling this flag harmful. **It
+    does not reproduce.** On the undiluted single-binary panel ``tspn08`` is 135 → 135
+    with an identical bound (290.565925041298) in all four runs. Retracted with it:
+    that panel's time-limited list of "4 meaningfully worse" rows
+    (``kriging_peaks-full100`` −1.144, ``full010`` −0.542, ``tspn12`` −0.520,
+    ``full050`` −0.198) — on the successor panel ``full100`` and ``tspn12`` are flat
+    and ``full010``/``full050`` move the *other* way, inside rep noise. Those rows
+    were load artifacts, measured while an unrelated job held most of the machine.
+    The correct disposition is unchanged in outcome (stays default-OFF) but different
+    in kind: **sound, and neutral.**
 
     #1111's own motivating hypothesis is **falsified**: on the adiabatic LVC MECP
     model the facet is recovered but root bound and node count are unchanged (1 node
@@ -1353,10 +1370,11 @@ class SolverTuning:
     **Two further defects in #1111's framing, both measured.** (a) The issue expects
     the inverse-trig rows to matter most; across all 1610 MINLPLib ``.nl`` instances
     ``sqrt`` appears in 63 and ``asin``/``acos``/``acosh`` in **zero**, so on this
-    corpus the feature is a sqrt feature. (b) Panel 1 was ~36 % diluted — 5 of its 14
-    instances (``kriging_peaks-red*``) contain no ``sqrt`` at all, so the flag could
-    not act on them and those rows were noise. A targeted 17-instance panel drawn by
-    screening every corpus instance for an actually-dropped facet is the successor.
+    corpus the feature is a sqrt feature. (b) The first panel was ~36 % diluted — 5 of
+    its 14 instances (``kriging_peaks-red*``) contain no ``sqrt`` at all, so the flag
+    could not act on them and those rows were pure noise. That dilution is why its
+    numbers are retracted above; the panel quoted here is its successor, drawn by
+    screening every corpus instance for an actually-dropped facet.
 
     **The mechanism, not the constant, is what is wrong.** A fixed-offset
     reformulation (``delta = width/8``) was built and measured against this ladder and
@@ -1369,8 +1387,11 @@ class SolverTuning:
     is what ``MccormickLPRelaxer._separate_convex``'s Kelley loop already does for
     composite convex/concave lifts (``concave: d <= g(x0) + grad g(x0)·(x - x0)`` at
     the LP point ``x0``). The soundness argument carries over unchanged — every tangent
-    of a concave ``f`` is a global overestimator — and lazy separation also avoids the
-    specific cost panel 1 charged this flag for, an eager extra row at every node.
+    of a concave ``f`` is a global overestimator — and lazy separation also stops the
+    solver paying for an eager extra row at every node whether or not that node's LP
+    is near the singular endpoint. (The retracted panel charged this flag for that
+    cost as a *measured* regression; it is not one. It remains a reason to prefer
+    lazy placement, but as an argument, not as evidence.)
 
     **This is a hypothesis to test, not a known fix, and one caveat is already
     visible.** Lazy placement does not dodge the singularity: on ``kriging_peaks`` the
@@ -1380,7 +1401,8 @@ class SolverTuning:
     offset, not the degeneracy itself. That is the open question #1111 leaves behind,
     and this flag is the lever for measuring it.
 
-    Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome. Note the two #581
+    Sound but not helpful — the ``DISCOPT_CUT_INHERIT`` outcome, in its neutral
+    rather than its harmful form. Note the two #581
     precedents below removed such flags rather than leaving them in default-OFF
     limbo; this one is retained by owner decision (2026-08-22) as a measurement
     lever for the open question in #1111 — whether *any* formulation of the
