@@ -1369,13 +1369,20 @@ class SolverTuning:
     ``DISCOPT_SINGULAR_TANGENT=1``                2671    313
     ==========================================  ======  =====
 
-    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` is
+    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` was
     inert. So "both arms bit-identical" was not a neutrality result — it is the
     signature of a probe that never fired, and it explains exactly why the arms
     agreed to the last digit. That panel carried no drops counter, so nothing caught
     it (§6). Every root-relaxation measurement quoted below is unaffected: those
     drive ``build_uniform_relaxation`` directly, where ``set_current`` does reach
     (instrumented 10/10).
+
+    **That delivery gap is now fixed (#1117)** — the solve boundary calls
+    :func:`enter_scope`, which inherits an ambient context instead of overwriting it,
+    and the deep-recursion worker thread carries the caller's contextvars context
+    across. The table above is kept as the record of what the broken instrument
+    produced, not as current behavior; ``set_current(...)`` around a plain
+    ``m.solve()`` now fires the flag exactly like ``tuning=``.
 
     The reinstated number was re-measured on a corrected instrument — ``tuning=``
     delivery, the ON arm asserted to have fired, a ``max_nodes`` budget with **no**
@@ -1646,6 +1653,33 @@ def current() -> SolverTuning:
 def set_current(tuning: SolverTuning | None):
     """Publish ``tuning`` (or a fresh env-resolved one) as active; returns the token."""
     return _current.set(tuning if tuning is not None else SolverTuning())
+
+
+def enter_scope(tuning: SolverTuning | None):
+    """Publish ``tuning`` for a solve scope, **inheriting** the active context when
+    ``tuning`` is ``None``; returns the token to hand to :func:`reset_current`.
+
+    This is the difference between "no override was requested" and "override with
+    env defaults". :func:`set_current` cannot express the former — ``None`` there
+    means *a fresh env-resolved instance* — so the solve boundary used to overwrite
+    whatever a caller had installed with :func:`set_current`, discarding it in
+    silence (issue #1117). The precedence here is explicit ``tuning=`` kwarg >
+    ambient context > environment defaults, which is what a caller reading
+
+    .. code-block:: python
+
+        token = solver_tuning.set_current(tuning)
+        try:
+            m.solve()
+        finally:
+            solver_tuning.reset_current(token)
+
+    already expects. Nested solves inherit the outer scope for the same reason.
+    """
+    active = _current.get()
+    if tuning is not None:
+        return _current.set(tuning)
+    return _current.set(active if active is not None else SolverTuning())
 
 
 def reset_current(token) -> None:

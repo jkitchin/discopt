@@ -44,8 +44,8 @@ from discopt.modeling.core import (
     VarType,
 )
 from discopt.solver_tuning import current as _tuning
+from discopt.solver_tuning import enter_scope as _enter_tuning_scope
 from discopt.solver_tuning import reset_current as _reset_tuning
-from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
     SolveStatus,
@@ -6263,9 +6263,16 @@ def _scoped_tuning(fn: _F) -> _F:
     """Publish the ``tuning`` kwarg as the active :class:`SolverTuning` for the
     call, then restore the previous context. Relaxer read sites consult
     ``solver_tuning.current()`` instead of ``os.environ`` — so the levers are
-    per-call and typed. ``tuning=None`` resolves to a fresh env-default instance
-    (the prior global behavior), and the reset prevents one solve's overrides from
-    leaking into a later relaxer built outside any solve (e.g. in tests).
+    per-call and typed. Precedence is ``tuning=`` kwarg > a context the caller
+    installed with ``solver_tuning.set_current(...)`` > environment defaults, and
+    the reset prevents one solve's overrides from leaking into a later relaxer
+    built outside any solve (e.g. in tests).
+
+    Omitting ``tuning=`` used to publish a *fresh env-default* instance rather than
+    inherit, so ``set_current(...)`` around a plain ``m.solve()`` was discarded at
+    this boundary without a warning — issue #1117, and the instrument defect behind
+    two retracted #1113 panels. ``solver_tuning.enter_scope`` is the None-inherits
+    variant that fixes it.
 
     Typed as ``(_F) -> _F`` so the decorated function keeps its original
     signature/return type for callers and the type checker.
@@ -6273,7 +6280,7 @@ def _scoped_tuning(fn: _F) -> _F:
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        token = _set_tuning(kwargs.pop("tuning", None))
+        token = _enter_tuning_scope(kwargs.pop("tuning", None))
         try:
             return fn(*args, **kwargs)
         finally:

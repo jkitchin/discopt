@@ -12,6 +12,32 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A `SolverTuning` installed with `set_current()` was silently discarded at the
+  `solve()` boundary** (`bug`, #1117). `solver._scoped_tuning` published the
+  `tuning=` kwarg for the call, and with the kwarg omitted — every plain
+  `m.solve()` — it published a *fresh env-resolved* `SolverTuning()` rather than
+  inheriting, so a caller who wrapped a solve in `set_current(...)` got env
+  defaults with no warning. Measured on `41abe795`, counting
+  `_interior_tangent_point` calls through a solve of the issue's `sqrt` model:
+  `solve(tuning=...)` → 6, `set_current(...)` around `solve()` → **0**. The solve
+  boundary now calls the new `solver_tuning.enter_scope()`, whose precedence is
+  explicit `tuning=` kwarg > ambient context > environment defaults; `set_current`
+  keeps its documented `None`-means-env-defaults meaning. Nested solves inherit the
+  outer scope for the same reason.
+
+  The same fix in `_scoped_tuning` alone would have been **inert on exactly the
+  large models**: `_run_with_deep_recursion` (models deeper than 700 expression
+  nodes) runs the solve on a worker thread, and a new thread starts with an *empty*
+  `contextvars` context, so the published tuning would not have reached it. It now
+  runs the callable inside `contextvars.copy_context()` — writes on the worker
+  still cannot leak back to the caller.
+
+  This is the instrument defect behind two retracted #1113 panels, where a probe
+  that never fired reported "both arms bit-identical" as a neutrality result
+  (CLAUDE.md §6). `python/tests/test_1117_tuning_scope.py` pins the precedence
+  order, the end-to-end reproducer, and the worker-thread propagation; 6 of its 7
+  tests fail before the change.
+
 - **The McCormick LP downgrade told users to pass the flag they had just passed**
   (`relaxation`, #1112). A model whose nonlinearity lives inside a
   `dm.custom`/`CustomCall` node has no *lifted* relaxation — the body is opaque to
