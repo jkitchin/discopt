@@ -343,7 +343,7 @@ The release procedure that produces these entries is documented in
   merely an argument. Built and measured as #1115, below.
 
 - **Placing the vertical-tangent facet where the LP binds removes the eager
-  anchor's regression and buys nothing beyond it** (#1115,
+  anchor's regression and, on part of the corpus, buys a tighter bound** (#1115,
   `DISCOPT_SINGULAR_TANGENT_LAZY`, default **on**, consulted only when
   `singular_tangent` is on — so the shipped default path is unchanged).
   `MccormickLPRelaxer._separate_singular_tangent` adds the supporting tangent at the
@@ -360,24 +360,48 @@ The release procedure that produces these entries is documented in
   reaches only −0.6557; the same holds on boxes nine orders of magnitude apart
   (`[0,1e-3]`, `[0,1e6]`, the latter recovering −353.55 → −125 exactly).
 
-  **On the corpus it is neutral.** Three-arm panel (off / eager / lazy), one process
-  per instance on one binary, `max_nodes` budget with no `time_limit`, each arm's
-  firing mechanism separately instrumented and asserted:
+  **On the corpus it weakly dominates leaving the facet dropped.** Three-arm panel
+  (off / eager / lazy), one binary, `max_nodes` budget with **no** `time_limit` so
+  node counts and bounds are bit-reproducible, each arm's firing mechanism separately
+  instrumented and asserted. 10 instances produced a scorable three-arm row:
 
-  | instance | off | eager | lazy | lazy rows separated |
+  | instance | off | eager | lazy | lazy rows |
   |---|---|---|---|---|
-  | `tspn08` | 135 nodes | **191 nodes (+41.5 %)** | 135 nodes | 25 |
-  | `mathopt5_6` | 5 nodes | 5 nodes | 5 nodes | 0 |
-  | `kriging_peaks-full010` | −0.81783918772926**15** | −0.81783918772926**02** | −0.81783918772926**15** | 604 |
+  | `tspn08` | 135 nodes | **191 nodes (WORSE, +41.5 %)** | 135 nodes | 25 |
+  | `tspn10` | 177.43065803 | **177.39907299 (WORSE)** | 177.43065803 | 1 |
+  | `kriging_peaks-full050` | −142.657069 | −142.657069 | **−139.917835 (BETTER)** | 7860 |
+  | `kriging_peaks-full100` | −348.053602 | −348.053602 | **−342.588463 (BETTER)** | 13214 |
+  | `mathopt5_6`, `eq6_1`, `maxmin`, `full010`, `full020`, `tspn12` | — | flat | flat | 0–35585 |
 
-  Lazy placement fixes the eager regression — `tspn08` returns to 135 nodes — and
-  gains nothing over leaving the facet dropped. The mechanism is measurably live
-  (604 rows separated on `kriging_peaks-full010`; instrumented, the separator moves
-  the node LP objective on 7 of 12 invocations) but by ~1e-4 against a bound of
-  −5.69, which never changes a branching decision. This is the #727 lesson in
-  reverse: the synthetic atom shows a large gain, the real class shows none, because
-  on a corpus instance the sqrt term is one of many and the LP optimum is held by
-  other constraints rather than sitting at the singular endpoint.
+  `eager vs off: WORSE 2, flat 8, better 0`. `lazy vs off: BETTER 2, flat 8, worse 0`.
+  40 soundness comparisons against `minlplib.solu`, **0 violations**. Both lazy gains
+  occur at *identical node counts and identical incumbents* — a strictly better bound
+  for the same work — and both sit in `kriging_peaks`, the family with the largest
+  root gain (13–40×). This is **not** the `DISCOPT_CUT_INHERIT` outcome, which was
+  neutral-or-harmful.
+
+  It is also not yet a graduation case, and the gaps are recorded rather than glossed:
+
+  * **Lazy has a coverage hole eager does not.** The separation chain is gated on
+    `if separate:` (`mccormick_lp.py:1641`), forced off on yield rounds and pool-free
+    re-solves. On all three `elec*` instances the lazy arm registered thousands of
+    specs (19 236 on `elec100`) and the separator ran **zero** times, while eager
+    fired at build time throughout. Lazy trades "emit a geometric guess wherever a
+    relaxation is built" for "emit an exact tangent only where a separation round
+    runs" — it is not a coverage superset.
+  * **Cost is counted in rows, not seconds.** 31 614 separated rows on `eq6_1` and
+    35 585 on `maxmin` buy movement in the 12th digit. No wall-time figure is quoted:
+    that panel's timing column was contaminated by load the author generated
+    concurrently (§9), so it is discarded rather than reported.
+  * **7 of 17 screened instances produced no scorable row.** `elec*` and `full500`
+    return no dual bound at all (1 node, or 0 for `full500`); `full030`, `tspn15` and
+    `full200` were lost to a per-instance wall kill set too low — which truncated the
+    **lazy** arm preferentially, since it always runs third.
+
+  Consequently the #1111 finding "the root win does not survive branching" is scoped
+  to the **eager** anchor. Where the dropped facet dominates the root relaxation,
+  lazy placement does retain part of it; elsewhere it is inert, and on `elec*` it
+  cannot act at all.
 
 ### Removed
 

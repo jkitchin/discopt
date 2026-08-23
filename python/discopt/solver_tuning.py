@@ -1456,14 +1456,41 @@ class SolverTuning:
     to do: ``min 2x - sqrt(x)`` over ``[0,4]`` goes −0.7071 → **−0.12503** against a
     true optimum of −0.125, where the eager anchor reaches only −0.6557.
 
-    **On the corpus it is neutral, and that is the §5 gate-2 verdict.** The mechanism
-    is measurably live — 604 rows separated on ``kriging_peaks-full010``, moving the
-    node LP objective on 7 of 12 instrumented invocations — but by ~1e-4 against a
-    bound of −5.69, which never changes a branching decision, so the tree and final
-    bound come out bit-identical to leaving the facet dropped. The #727 lesson in
-    reverse: the synthetic atom shows a large gain and the real class shows none,
-    because on a corpus instance the ``sqrt`` term is one of many and the LP optimum
-    is held by other constraints rather than sitting at the singular endpoint.
+    **On the corpus it weakly dominates leaving the facet dropped.** Three-arm panel
+    (off / eager / lazy), 300-node budget with no wall limit so node counts and bounds
+    are bit-reproducible, each arm's firing asserted, 10 scorable instances:
+    ``eager vs off: WORSE 2, flat 8, better 0``; ``lazy vs off: BETTER 2, flat 8,
+    worse 0``; 40 soundness comparisons against ``minlplib.solu``, 0 violations. The
+    two lazy gains are ``kriging_peaks-full050`` (−142.657 → −139.918) and
+    ``full100`` (−348.054 → −342.588), both at *identical node counts and identical
+    incumbents* — i.e. a strictly better bound for the same work. This is NOT the
+    ``cut_inherit`` outcome, which was neutral-or-harmful.
+
+    It is also not yet a graduation case, for three reasons kept here rather than in a
+    commit message:
+
+    * **A coverage hole eager does not have.** The separation chain is gated on
+      ``if separate:`` (``mccormick_lp.py``), forced off on yield rounds and pool-free
+      re-solves. On all three ``elec*`` instances the lazy arm registered thousands of
+      specs (19 236 on ``elec100``) and the separator ran **zero** times, while eager
+      fired at build time throughout. Lazy is not a coverage superset of eager: it
+      trades "emit a geometric guess wherever a relaxation is built" for "emit an
+      exact tangent only where a separation round runs".
+    * **Cost is real and only counted in rows, not seconds.** 31 614 separated rows on
+      ``eq6_1`` and 35 585 on ``maxmin`` buy bound movement in the 12th digit. No
+      wall-time figure is quoted because that panel's timing column was contaminated
+      by load the author generated (§9).
+    * **7 of 17 screened instances produced no scorable row** — ``elec*`` and
+      ``full500`` return no dual bound at all; ``full030``, ``tspn15`` and ``full200``
+      were lost to a per-instance wall kill that truncated the *lazy* arm
+      preferentially, since it always runs third.
+
+    Where the gains come from: both sit in ``kriging_peaks``, the family with the
+    largest root gain (13–40×). On ``full010``, 12 separator invocations move the node
+    LP objective 7 times but only by ~1e-4 against a bound of −5.69 — live, and far too
+    small to change a branching decision. So the #1111 finding "the root win does not
+    survive branching" is scoped to the **eager** anchor: where the dropped facet
+    dominates the root relaxation, lazy placement does retain part of it.
     """
 
     singular_tangent_kappa: float = field(
