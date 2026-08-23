@@ -65,6 +65,13 @@ TIME_LIMIT = float(os.environ.get("DISCOPT_BENCH_TIME_LIMIT", "30"))
 # 3600 s.
 pytestmark = pytest.mark.correctness
 
+# Read by the no-op suite guard in ``conftest.py`` (#1050): this module exists to
+# run, so a session in which every one of its tests skipped is a failure, not a
+# quiet pass. It is the backstop for ``test_the_corpus_is_reachable`` below —
+# that test fails when no instance resolves, this fires even if the reason
+# changes to something nobody anticipated.
+MUST_EXECUTE = True
+
 _SOLVE_CACHE: dict = {}
 _MODEL_CACHE: dict = {}
 
@@ -85,6 +92,16 @@ def _load(name: str):
 
         _MODEL_CACHE[path] = from_nl(str(path))
     return _MODEL_CACHE[path]
+
+
+def _is_maximize(name: str) -> bool:
+    """True when the instance maximizes.
+
+    MINLPLib mixes senses and `.solu` records the optimum without one, so a
+    bound check that assumes minimization silently tests the wrong inequality on
+    the instances that do not.
+    """
+    return _load(name)._objective.sense.value == "maximize"
 
 
 def solve_instance(name: str, *, cache: bool = True, **kwargs):
@@ -160,6 +177,12 @@ KNOWN_OPTIMA = {
     "procurement1large": 3802.1797490,
     "procurement1mot": 291.5416577,
     "procurement2mot": 212.0707488,
+    # The only maximizing instance with a `.solu` optimum that ships *in this
+    # repository* (`python/tests/data/minlplib_nl/`). CI has no access to the
+    # MINLPLib snapshot, so without it the sense-aware arm of
+    # `test_bound_validity` is exercised on a developer machine and nowhere else
+    # -- which is how the sense bug survived #1120 in the first place.
+    "syn05hfsg": 837.7324009,
     "smallinvDAXr1b020-022": 1.5715279820,
     "smallinvDAXr1b050-055": 9.7971434540,
     "smallinvDAXr1b100-110": 39.1621418600,
@@ -167,6 +190,20 @@ KNOWN_OPTIMA = {
 
 ABS_TOL = 1e-4
 REL_TOL = 1e-3
+
+
+def bound_is_valid(bound: float, optimum: float, *, maximize: bool, tol: float = ABS_TOL) -> bool:
+    """Does a dual bound respect the true optimum, given the objective sense?
+
+    Minimizing, the dual bound is a *lower* bound and is invalid when it rises
+    above the optimum. Maximizing, it is an *upper* bound and is invalid when it
+    falls below. This is a pure function so both directions can be tested with
+    no corpus, no solve, and no dependence on which `.nl` files a machine has --
+    the corpus-based check below cannot do that, which is exactly how the
+    minimization-only version shipped.
+    """
+    return bound >= optimum - tol if maximize else bound <= optimum + tol
+
 
 # Resolved at collection time so parametrisation can prefer instances that exist.
 # `_resolve` cannot be used here -- it calls `pytest.skip`, which is a runtime
@@ -187,6 +224,55 @@ def test_the_corpus_is_reachable():
         f"no KNOWN_OPTIMA instance resolved under {_REPO_NL} or {_BENCH_NL}; "
         "every instance-based test below is vacuous"
     )
+
+
+@pytest.mark.parametrize(
+    "bound,optimum,maximize,expected",
+    [
+        # Minimizing: the dual bound is a LOWER bound.
+        (1.0, 2.0, False, True),  # below the optimum -- sound
+        (2.0, 2.0, False, True),  # equal -- sound
+        (3.0, 2.0, False, False),  # above the optimum -- cuts it off
+        # Maximizing: the dual bound is an UPPER bound. These four are the cases
+        # the pre-fix check got wrong: it called the first two invalid (they are
+        # sound) and the last valid (it cuts the optimum off).
+        (3593.688106, 291.5416577, True, True),  # the real procurement1mot bound
+        (40237.35099, 3802.179749, True, True),  # the real procurement1large bound
+        (291.5416577, 291.5416577, True, True),  # equal -- sound
+        (200.0, 291.5416577, True, False),  # BELOW the optimum -- cuts it off
+    ],
+)
+def test_bound_validity_respects_the_objective_sense(bound, optimum, maximize, expected):
+    """The direction of the bound check, tested without a corpus or a solve.
+
+    `test_bound_validity` below can only exercise the senses that happen to be
+    present on the machine running it, and CI ships only the 66-file in-repo
+    corpus. That gap is what let a minimization-only assertion survive #1120, so
+    the decision itself is pulled out and tested directly, in both directions,
+    everywhere (CLAUDE.md §6).
+    """
+    assert bound_is_valid(bound, optimum, maximize=maximize) is expected
+
+
+@pytest.mark.smoke
+def test_the_corpus_exposes_a_readable_sense_for_every_instance():
+    """Every available instance must yield a sense, and the split is reported.
+
+    Asserting *which* senses exist would encode a property of one machine's
+    corpus -- CI resolves far fewer instances than a developer box with the
+    MINLPLib snapshot. What must hold everywhere is that the sense is readable
+    at all: if `_objective.sense` ever stops being the place the sense lives,
+    `_is_maximize` would raise rather than quietly answer "minimize" and send
+    every bound check back down the wrong branch.
+    """
+    senses = {n: _is_maximize(n) for n in AVAILABLE}
+    maximizing = sorted(n for n, mx in senses.items() if mx)
+    print(
+        f"[sense probe] {len(senses)} instances read: "
+        f"{len(maximizing)} maximize {maximizing}, "
+        f"{len(senses) - len(maximizing)} minimize"
+    )
+    assert len(senses) == len(AVAILABLE), "an instance did not yield a sense"
 
 
 class TestKnownOptima:
@@ -210,16 +296,26 @@ class TestKnownOptima:
 
     @pytest.mark.parametrize("instance,expected", list(KNOWN_OPTIMA.items()))
     def test_bound_validity(self, instance: str, expected: float):
-        """Lower bound must never exceed the true optimum."""
+        """The dual bound must never cut off the true optimum.
+
+        Which direction that is depends on the objective sense, and three of the
+        instances in ``KNOWN_OPTIMA`` (the ``procurement*`` family) maximize. An
+        assertion hardcoded to minimization is wrong twice over on those: it
+        fires on a perfectly valid upper bound, and it can never catch a genuinely
+        invalid one, because it is testing the wrong inequality. The sense is read
+        from the parsed model rather than assumed.
+        """
         sol = solve_instance(instance)
 
         if sol.bound is None:
             pytest.skip("No bound reported")
 
-        # For minimization: bound ≤ optimal + tolerance
-        assert sol.bound <= expected + ABS_TOL, (
-            f"INVALID BOUND: {instance} bound={sol.bound:.8e} "
-            f"optimal={expected:.8e} (bound exceeds optimum!)"
+        maximizing = _is_maximize(instance)
+        relation = "bound below optimum" if maximizing else "bound exceeds optimum"
+
+        assert bound_is_valid(sol.bound, expected, maximize=maximizing), (
+            f"INVALID BOUND: {instance} ({'max' if maximizing else 'min'}) "
+            f"bound={sol.bound:.8e} optimal={expected:.8e} ({relation}!)"
         )
 
 

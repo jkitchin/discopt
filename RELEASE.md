@@ -30,9 +30,12 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
       skip count, not just the exit code.** As of v0.8.0 this suite reported
       `321 passed, 118 skipped`, and all 118 were unconditional-skip stubs in
       `tests/test_correctness.py` and `tests/test_interop.py` that had never
-      executed (#1050) -- not optional-dependency gates.
-      `tests/test_correctness.py`'s 98 of those now solve real instances; the ~20
-      in `tests/test_interop.py` are still stubs, so #1050 stays open.
+      executed (#1050) -- not optional-dependency gates. Both are resolved:
+      `test_correctness.py`'s 98 now solve real instances, and `test_interop.py`
+      was deleted (it tested 14 `discopt._rust` helpers that never existed; its
+      real intent is covered by `python/tests/test_batch_dispatch.py`).
+      A skip count is still worth reading, but a *stub* skip now fails the
+      session outright -- see the no-op suite guard in `tests/conftest.py`.
 - [ ] `pytest discopt_benchmarks/tests/test_correctness.py -m correctness -v` --
       **the `-m` is required**, for the same reason as the `python/tests` item
       below: that file is now marked `correctness`, which the root `addopts`

@@ -12,6 +12,25 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`discopt_benchmarks/tests/test_interop.py` deleted; a no-op suite guard added
+  in its place** (closes #1050). The file's 20 tests were written against a
+  `discopt._rust` surface that never existed — all 14 helpers they referenced
+  (`create_test_bounds`, `create_test_sparse`, `get_all_array_outputs`,
+  `get_shared_buffer`, `create_batch`, `benchmark_roundtrip`,
+  `trigger_test_panic`, …) are absent from the compiled module, and the one
+  concrete dtype claim it made was wrong about the real boundary (it asserted
+  CSR `indices.dtype == np.int32`; `solve_lp_warm_csc_py` takes `i64`). Its
+  intent is covered by executing tests: `python/tests/test_batch_dispatch.py`
+  (34 tests) is a class-for-class superset of its array-transfer, dtype,
+  zero-copy — the same `ctypes.data` pointer identity — batch-shape, latency and
+  invalid-input sections; `test_simplex_lp.py` covers the LP infeasible status;
+  `relaxation_harness.assert_containment` covers the sampled McCormick soundness
+  property. `conftest.py` now fails any session in which a test skips with a
+  placeholder-harness reason ("not yet available", "replace with actual",
+  `NotImplementedError`) or in which a module declaring `MUST_EXECUTE` runs
+  nothing — the two signatures of a suite decaying into a no-op while reporting
+  green. Verified against the deleted file itself: it exits 1 and names all 20.
+
 - **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
   #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
   that raised `NotImplementedError`, with the false reason "discopt not yet
@@ -34,6 +53,31 @@ The release procedure that produces these entries is documented in
   relied on the old *default* get today's behaviour unchanged.
 
 ### Fixed
+
+- **`TestKnownOptima::test_bound_validity` tested the wrong inequality on every
+  maximizing instance** (`discopt_benchmarks/tests/test_correctness.py`, #1050).
+  Making the file executable (#1116) exposed a defect in the check itself: it
+  asserted `bound <= optimum + tol` unconditionally, with the comment "For
+  minimization". Three of the 29 available instances — `procurement1large`,
+  `procurement1mot`, `procurement2mot` — maximize, so their dual bound is an
+  *upper* bound; the check failed them on valid bounds (`procurement1mot`:
+  obj 251.75 ≤ ref 291.54 ≤ bound 3593.69, a consistent upper bound) and, worse,
+  could never have caught a genuinely invalid one, because an invalid upper
+  bound is one that falls *below* the optimum. The check now reads the sense from
+  the parsed model (`_objective.sense`) and asserts the corresponding direction.
+  Keeping that arm exercised needed a second pass: the first attempt asserted
+  that the corpus contains a maximizing instance, which is true only on a machine
+  carrying the MINLPLib snapshot, and CI failed it. The durable fix is two-part —
+  the direction decision is now a pure `bound_is_valid()` unit-tested in both
+  directions with no corpus and no solve, and `syn05hfsg`, a maximizing instance
+  that already ships in `python/tests/data/minlplib_nl/` and solves to optimality
+  in under 6 s, joins `KNOWN_OPTIMA` so the maximize arm runs on CI rather than
+  only on a developer box. The remaining corpus probe asserts only what holds
+  everywhere (every available instance yields a readable sense) and prints the
+  split. **Retraction (CLAUDE.md §11):** the claim in PR #1120 that
+  "no bound exceeded its reference optimum on any of the 29" was produced by this
+  sense-blind check and was therefore not a valid verification for the three
+  maximizing instances; the sense-aware re-run is the verification of record.
 
 - **#1119 closed falsified: the singular-endpoint tangent stays default-OFF**
   (`_relax/mccormick_lp`, #1119). #1115 left the flag off because it costs

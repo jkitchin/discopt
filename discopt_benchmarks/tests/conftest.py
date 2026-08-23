@@ -213,3 +213,119 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "gpu" in item.keywords:
                 item.add_marker(skip_gpu)
+
+
+# ─────────────────────────────────────────────────────────────
+# NO-OP SUITE GUARD (#1050)
+# ─────────────────────────────────────────────────────────────
+#
+# `test_correctness.py` and `test_interop.py` between them held 118 tests that
+# had never executed: a placeholder harness raised `NotImplementedError` and
+# every caller caught it and skipped with the reason "discopt not yet
+# available". The suite reported green, `RELEASE.md` listed it as a release
+# gate, and a pre-release run asserted nothing in 0.70 s. Nothing was wrong with
+# any individual test — the failure was that *skipping* and *passing* are
+# indistinguishable in a summary line, so a suite can decay into a no-op and
+# still read as coverage.
+#
+# Two guards, because the defect has two independent signatures:
+#
+#   1. A stub skip *reason*. A test that skips because an optional dependency is
+#      genuinely absent is legitimate and common here (GDPlib, external solvers,
+#      GPU). A test that skips because its own harness was never written is not.
+#      The idioms below are the ones this repo actually produced; matching on the
+#      reason catches a future copy of the pattern anywhere in the suite, which a
+#      count-based check cannot.
+#   2. A module that declares `MUST_EXECUTE = True` and then executes nothing.
+#      This is the opt-in backstop for a module whose whole point is to run —
+#      it survives a rewording of the skip reason.
+#
+# Guard 2 is suppressed for any module that had items deselected (`-k`, `-m`),
+# because a narrow filter legitimately leaves only environment-gated tests. A
+# guard that fires on an ordinary developer command would be turned off, and a
+# guard that is off is worth less than no guard at all.
+#
+# Both are skipped inside xdist workers: a worker sees an arbitrary subset, so
+# "this module executed nothing *here*" carries no information. The controller
+# receives every report and enforces on the whole session.
+
+_STUB_SKIP_IDIOMS = (
+    "not yet available",
+    "replace with actual",
+    "notimplementederror",
+)
+
+_stub_skips: list[str] = []
+_module_collected: dict[str, int] = {}
+_module_executed: dict[str, int] = {}
+_module_must_execute: dict[str, bool] = {}
+_module_deselected: set[str] = set()
+
+
+def _module_of(item) -> str:
+    return str(getattr(item, "nodeid", "")).split("::", 1)[0]
+
+
+def pytest_deselected(items):
+    for item in items:
+        _module_deselected.add(_module_of(item))
+
+
+def pytest_report_collectionfinish(config, items):
+    for item in items:
+        mod = _module_of(item)
+        _module_collected[mod] = _module_collected.get(mod, 0) + 1
+        if mod not in _module_must_execute:
+            try:
+                _module_must_execute[mod] = bool(getattr(item.module, "MUST_EXECUTE", False))
+            except Exception:  # pragma: no cover - a module that cannot be imported
+                _module_must_execute[mod] = False
+    return []
+
+
+def pytest_runtest_logreport(report):
+    if report.when != "call" and not (report.when == "setup" and report.skipped):
+        return
+    mod = _module_of(report)
+    if report.skipped:
+        reason = ""
+        if isinstance(getattr(report, "longrepr", None), tuple) and len(report.longrepr) == 3:
+            reason = str(report.longrepr[2])
+        lowered = reason.lower()
+        if any(idiom in lowered for idiom in _STUB_SKIP_IDIOMS):
+            _stub_skips.append(f"{report.nodeid}: {reason}")
+    elif report.when == "call":
+        _module_executed[mod] = _module_executed.get(mod, 0) + 1
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if hasattr(session.config, "workerinput"):  # xdist worker: partial view
+        return
+
+    problems: list[str] = []
+
+    if _stub_skips:
+        shown = "\n    ".join(_stub_skips[:10])
+        more = f"\n    ... and {len(_stub_skips) - 10} more" if len(_stub_skips) > 10 else ""
+        problems.append(
+            f"{len(_stub_skips)} test(s) skipped with a placeholder-harness reason. A skip on a\n"
+            f"  correctness gate is indistinguishable from a pass; implement the test or delete\n"
+            f"  it, but do not leave it asserting nothing (#1050):\n    {shown}{more}"
+        )
+
+    for mod, collected in sorted(_module_collected.items()):
+        if not _module_must_execute.get(mod, False):
+            continue
+        if mod in _module_deselected:  # a filter narrowed this module; see above
+            continue
+        if collected and _module_executed.get(mod, 0) == 0:
+            problems.append(
+                f"{mod} declares MUST_EXECUTE but all {collected} collected test(s) skipped.\n"
+                f"  This module exists to run; a fully-skipped run of it is a no-op reporting\n"
+                f"  as coverage (#1050)."
+            )
+
+    if problems:
+        for problem in problems:
+            print(f"\nNO-OP SUITE GUARD (#1050): {problem}")
+        session.exitstatus = 1
