@@ -1430,10 +1430,16 @@ class SolverTuning:
 
     **That successor was built and measured — #1115, and it is the default
     placement.** See :attr:`singular_tangent_lazy`. Eager anchoring is retained only
-    as the A/B control for that measurement; the two #581 precedents below removed
-    sound-but-unhelpful flags rather than leaving them in default-OFF limbo, and the
-    same rule applies here if the lazy form is falsified in turn. Flag-OFF is
-    byte-identical to the pre-#1111 relaxation."""
+    as the A/B control for that measurement.
+
+    **Final disposition (#1115).** The lazy form was *not* falsified, so the #581
+    removal precedent does not apply: it is sound, it never loses the bound on the
+    corpus, and it buys a real bound gain at an identical node count on
+    ``kriging_peaks``. It fails gate 2 only because it costs +25.6 %/+54.2 % on the
+    instances it does not help. This flag therefore stays default-OFF **and stays in
+    the tree**; what is missing is a trigger keyed on whether the facet binds often
+    enough to pay for its rows, not a better mechanism. Flag-OFF is byte-identical to
+    the pre-#1111 relaxation."""
 
     singular_tangent_lazy: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT_LAZY", default=True)

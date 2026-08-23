@@ -303,8 +303,24 @@ The release procedure that produces these entries is documented in
   `solver_tuning.py` *removed* such flags rather than leaving them in default-OFF
   limbo; this one is retained by owner decision as a measurement lever for **#1115** —
   whether any formulation of the singular-endpoint tangent pays for itself — with the
-  failing panel written into the field's docstring. #1115 carries the same disposition
-  rule: if the successor mechanism is falsified too, the flag gets removed.
+  failing panel written into the field's docstring.
+
+  **#1115 resolved this, and its own definition of done turned out to be a false
+  dichotomy** (§4 — the measurement wins over the plan). #1115 offered two endings:
+  graduate the flag, or record that *no* formulation pays for itself and remove it.
+  Neither happened. Lazy placement is sound (gate 1: 0 violations), never loses the
+  bound anywhere on the corpus, and *does* pay for itself on `kriging_peaks` — a
+  tighter bound at an identical node count and identical incumbent for +4.0–4.5 %
+  wall — while costing +25.6 % (`eq6_1`) and +54.2 % (`maxmin`) where it tightens
+  nothing. So gate 2 fails and the flag cannot graduate, but the removal branch's
+  premise is false: the mechanism does pay for itself, on a class too narrow to
+  justify a corpus-wide default. `singular_tangent` therefore **stays default-OFF and
+  stays in the tree**, with `singular_tangent_lazy` as its placement and the eager
+  anchor retained as the live A/B control. What is missing is not a mechanism but a
+  *trigger* — a gate keyed on whether the facet binds often enough to pay for its
+  rows, rather than on the operator being `sqrt`/`asin`/`acos`. Building that on the
+  present evidence would repeat the #727 RLT mistake (§2: a benefit confined to one
+  family), so it is tracked separately rather than attempted here.
   Flag-OFF is byte-identical to the pre-#1111 relaxation.
 
   **Double retraction (§11) — a retraction that was itself wrong.** An earlier
