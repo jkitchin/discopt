@@ -54,6 +54,23 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`TestKnownOptima::test_bound_validity` tested the wrong inequality on every
+  maximizing instance** (`discopt_benchmarks/tests/test_correctness.py`, #1050).
+  Making the file executable (#1116) exposed a defect in the check itself: it
+  asserted `bound <= optimum + tol` unconditionally, with the comment "For
+  minimization". Three of the 29 available instances — `procurement1large`,
+  `procurement1mot`, `procurement2mot` — maximize, so their dual bound is an
+  *upper* bound; the check failed them on valid bounds (`procurement1mot`:
+  obj 251.75 ≤ ref 291.54 ≤ bound 3593.69, a consistent upper bound) and, worse,
+  could never have caught a genuinely invalid one, because an invalid upper
+  bound is one that falls *below* the optimum. The check now reads the sense from
+  the parsed model (`_objective.sense`) and asserts the corresponding direction,
+  and a new smoke test asserts the corpus still contains both senses so neither
+  arm goes untested. **Retraction (CLAUDE.md §11):** the claim in PR #1120 that
+  "no bound exceeded its reference optimum on any of the 29" was produced by this
+  sense-blind check and was therefore not a valid verification for the three
+  maximizing instances; the sense-aware re-run is the verification of record.
+
 - **#1119 closed falsified: the singular-endpoint tangent stays default-OFF**
   (`_relax/mccormick_lp`, #1119). #1115 left the flag off because it costs
   +25.6 % wall on `eq6_1` and +54.2 % on `maxmin` for no bound; #1119 asked

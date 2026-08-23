@@ -94,6 +94,16 @@ def _load(name: str):
     return _MODEL_CACHE[path]
 
 
+def _is_maximize(name: str) -> bool:
+    """True when the instance maximizes.
+
+    MINLPLib mixes senses and `.solu` records the optimum without one, so a
+    bound check that assumes minimization silently tests the wrong inequality on
+    the instances that do not.
+    """
+    return _load(name)._objective.sense.value == "maximize"
+
+
 def solve_instance(name: str, *, cache: bool = True, **kwargs):
     """Solve a MINLPLib instance by name and return discopt's ``SolveResult``.
 
@@ -196,6 +206,27 @@ def test_the_corpus_is_reachable():
     )
 
 
+@pytest.mark.smoke
+def test_the_corpus_contains_both_objective_senses():
+    """Guard: the sense branch in ``test_bound_validity`` has to be live.
+
+    ``.solu`` records an optimum without a sense, so a bound check reads as
+    plausible while testing the wrong inequality -- which is what happened here:
+    the check was hardcoded to minimization and fired on the perfectly valid
+    *upper* bounds of the ``procurement`` family. If the corpus ever drifts to a
+    single sense, the branch stops being exercised and the same bug can be
+    reintroduced unnoticed (CLAUDE.md §6).
+    """
+    maximizing = sorted(n for n in AVAILABLE if _is_maximize(n))
+    minimizing = sorted(n for n in AVAILABLE if not _is_maximize(n))
+    print(
+        f"[sense probe] {len(AVAILABLE)} available: "
+        f"{len(maximizing)} maximize {maximizing}, {len(minimizing)} minimize"
+    )
+    assert maximizing, "no maximize instance available; the max arm is untested"
+    assert minimizing, "no minimize instance available; the min arm is untested"
+
+
 class TestKnownOptima:
     """Verify solver finds correct global optima on known instances."""
 
@@ -217,16 +248,32 @@ class TestKnownOptima:
 
     @pytest.mark.parametrize("instance,expected", list(KNOWN_OPTIMA.items()))
     def test_bound_validity(self, instance: str, expected: float):
-        """Lower bound must never exceed the true optimum."""
+        """The dual bound must never cut off the true optimum.
+
+        Which direction that is depends on the objective sense, and three of the
+        instances in ``KNOWN_OPTIMA`` (the ``procurement*`` family) maximize. An
+        assertion hardcoded to minimization is wrong twice over on those: it
+        fires on a perfectly valid upper bound, and it can never catch a genuinely
+        invalid one, because it is testing the wrong inequality. The sense is read
+        from the parsed model rather than assumed.
+        """
         sol = solve_instance(instance)
 
         if sol.bound is None:
             pytest.skip("No bound reported")
 
-        # For minimization: bound ≤ optimal + tolerance
-        assert sol.bound <= expected + ABS_TOL, (
-            f"INVALID BOUND: {instance} bound={sol.bound:.8e} "
-            f"optimal={expected:.8e} (bound exceeds optimum!)"
+        maximizing = _is_maximize(instance)
+        if maximizing:
+            # Upper bound: it is invalid when it drops BELOW the optimum.
+            valid = sol.bound >= expected - ABS_TOL
+            relation = "bound below optimum"
+        else:
+            valid = sol.bound <= expected + ABS_TOL
+            relation = "bound exceeds optimum"
+
+        assert valid, (
+            f"INVALID BOUND: {instance} ({'max' if maximizing else 'min'}) "
+            f"bound={sol.bound:.8e} optimal={expected:.8e} ({relation}!)"
         )
 
 
