@@ -37,6 +37,54 @@ gate. :attr:`WorkBudget.stopped_on` records which one fired, so a panel can
 assert that a run was decided by work and not by the clock — i.e. that the run
 it is about to compare is actually reproducible.
 
+What role-2 clocks cost when they are left in place (#1116)
+----------------------------------------------------------
+
+#912 fixed role (2) at the sites it covered. #1116 measured what the *remaining*
+role-2 clocks do to the answer, and it is larger than the node-count cliff above.
+
+``kriging_peaks-full200``, ``max_nodes=1``, one process, one binary, no user time
+pressure, three repetitions: root dual bounds of −25371.8 / −28852.0 / −28072.6 —
+a 14 % spread — with the incumbent bit-identical to the last digit. At
+``max_nodes=300`` the same defect survives as a 13th-digit bound move that flips
+the node count 301 ↔ 303, which is enough to make CLAUDE.md §5's bound-neutral
+regime (``node_count`` and ``objective`` *exactly* unchanged) inapplicable to the
+instance and to turn an A/B on it into a measurement of noise. One #1115 panel row
+was published and withdrawn for exactly that reason.
+
+The mechanism is structural, not float noise. The first root LP comes back with a
+different number of COLUMNS per repetition (1532 vs 1469 measured), because a
+wall-truncated tightening stage handed the relaxation builder a different box: the
+root fixpoint returned 894 tightened bounds in one repetition and 898 in the next,
+from *different input boxes*, having spent 237.7 s and 247.55 s in OBBT. Three
+plausible non-clock explanations were tested and falsified — the Rust hash
+containers named in the issue (the whole crate has three iteration sites over hash
+containers, all order-insensitive), thread scheduling (pinned to one thread, still
+varies), and ``Variable.__hash__ = id(self)`` (replaced with a stable index across
+26 M patched calls, still varies). Replacing the clock alone with a deterministic
+counter made the solve reproduce bit-exactly, and *tighter* than any wall-bounded
+run (−1044.819 vs the −25 000…−34 000 cluster) — an early-truncated tightening
+stage is not merely nondeterministic, it is leaving bound on the table.
+
+``solver_tuning.SolverTuning.deterministic`` (``DISCOPT_DETERMINISTIC``, default
+OFF) is the switch that renders those budgets inert, via ``solver._role2_budget``
+/ ``_role2_deadline`` / ``_role2_horizon`` at the origin of each one. It is the
+same doctrine applied by suppression rather than by counting: where #912 replaces
+a wall budget with a work counter, the flag removes the wall budget and leaves the
+stage to the deterministic caps it already carries (round counts, iteration caps,
+the node budget), with the user's ``time_limit`` still stopping the search.
+
+Two role-1 mechanisms are deliberately left in place under that flag: the
+phase-entry gates (``_deadline_exhausted()`` / ``_remaining_budget() > x``, which
+decide whether an optional preprocessing phase starts at all) and the POUNCE
+``max_wall_time = min(30.0, caller_limit)`` stall backstop. Neutralizing either
+would let preprocessing overrun the user's ``time_limit`` without bound, which
+trades a reproducibility bug for a broken role-1 promise — so the guarantee is
+scoped to a solve whose role-1 budget never binds, rather than widened until it
+does. Both residuals were measured not to bind on the reproduction instance: the
+30 s POUNCE cap was live during the arm that reproduced bit-exactly, and the
+solve finished in ~7 min against the default 3600 s limit.
+
 Why per-kind counters and not one currency
 ------------------------------------------
 

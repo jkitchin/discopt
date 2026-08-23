@@ -4119,7 +4119,7 @@ class Model:
         llm: bool = False,
         sensitivity: bool = False,
         stream: bool = False,
-        deterministic: bool = True,
+        deterministic: bool = False,
         partitions: int = 0,
         initial_solution: Optional[dict] = None,
         skip_convex_check: bool = False,
@@ -4157,8 +4157,17 @@ class Model:
         stream : bool, default False
             If True, return an iterator of :class:`SolveUpdate` instead of
             the final result.
-        deterministic : bool, default True
-            Ensure reproducible results across runs.
+        deterministic : bool, default False
+            Make the search a function of the model rather than of machine speed,
+            by rendering every **role-2** wall budget inert — the sub-budgets that
+            decide *how much work* a stage does, as opposed to the role-1
+            ``time_limit`` that decides *when to stop*. A solve then reproduces
+            when the role-1 budget never binds — it terminates on work
+            (``max_nodes``, the gap) with real slack against ``time_limit``. Expect
+            a longer run: nothing truncates a stage early any more.
+
+            Until #1116 this defaulted to ``True`` and was read nowhere. See
+            :meth:`discopt.solver.solve_model`.
         partitions : int, default 0
             Number of piecewise McCormick partitions (0 = standard convex
             relaxation, k > 0 = k partitions for tighter relaxations).

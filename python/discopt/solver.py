@@ -9,6 +9,7 @@ Connects:
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import math
@@ -46,6 +47,7 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
 from discopt.solver_tuning import reset_current as _reset_tuning
+from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
     SolveStatus,
@@ -939,6 +941,21 @@ def _native_spatial_kernel_enabled() -> bool:
     busy machine (verified end-to-end at load 2.2 rising to 5.9: 4/4 decisive instances
     STABLE, 0 quarantined).
 
+    **RETRACTED 2026-08-23 (#1116, CLAUDE.md §11): "a deterministic ``max_nodes``
+    budget makes solves bit-reproducible" is FALSE as a general claim.** The 6/6 above
+    stands for the instances it was measured on; it does not generalize, and it was
+    written here as though it did. ``kriging_peaks-full200`` under exactly that
+    recipe — ``max_nodes``, one process, one binary, no user time pressure — returned
+    three distinct dual bounds in three repetitions at ``max_nodes=300`` (13th
+    significant digit, node count flipping 301 ↔ 303) and a 14 % spread at
+    ``max_nodes=1`` (−25371.8 / −28852.0 / −28072.6, incumbent bit-identical). A node
+    budget bounds the *tree*; it does not bound the wall-clock sub-budgets inside a
+    node, and those decide how much tightening happens. The bit-reproducibility this
+    paragraph assumed is available — it is what ``deterministic=True`` now buys
+    (``solver_tuning.SolverTuning.deterministic``) — but it was never a property of
+    ``max_nodes`` alone, so a replication panel must keep treating a disagreeing
+    instance as unresolved rather than trusting the budget to have removed the noise.
+
     **RE-GRADUATED default-ON 2026-07-31 (#902), on the first VALID panel this flag has
     ever had.** The 2026-07-27 graduation was not validly earned — the only panel it
     passed was blind on all three counts above — so the default went back to OFF
@@ -1264,7 +1281,9 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                         x0,
                         evaluator=ev,
                         backend=backend,
-                        time_budget=max(1e-3, min(3.0, deadline - time.perf_counter())),
+                        time_budget=_role2_budget(
+                            max(1e-3, min(3.0, deadline - time.perf_counter()))
+                        ),
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug("native seed subnlp raised: %s", exc)
@@ -1316,7 +1335,9 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                         xr,
                         evaluator=ev,
                         backend=backend,
-                        time_budget=max(1e-3, min(4.0, deadline - time.perf_counter())),
+                        time_budget=_role2_budget(
+                            max(1e-3, min(4.0, deadline - time.perf_counter()))
+                        ),
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug("native seed subnlp raised: %s", exc)
@@ -1360,7 +1381,7 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None):
     A verified feasible objective is only ever an *upper bound*: seeding it can prune and
     cutoff-propagate but can never loosen a bound or invent an incumbent, so an
     unverifiable candidate is simply dropped and the full solve runs unseeded."""
-    deadline = time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S)
+    deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
     if outer_deadline is not None:
         deadline = min(deadline, float(outer_deadline))
     if time.perf_counter() >= deadline:
@@ -4981,7 +5002,7 @@ def _classify_model_convexity(
     # Default cap (15 s) bounds classification even when called outside a budgeted
     # solve_model (e.g. on a model produced by factorable reformulation).
     budget = getattr(model, "_convexity_time_budget", 15.0)
-    deadline = (time.perf_counter() + budget) if budget else None
+    deadline = _role2_deadline((time.perf_counter() + budget) if budget else None)
     solve_deadline = getattr(model, "_solve_deadline", None)
     if solve_deadline is not None:
         deadline = solve_deadline if deadline is None else min(deadline, float(solve_deadline))
@@ -5034,7 +5055,7 @@ _CONVEX_MINLP_ROUTE_CLASSES = frozenset({"miqp", "miqcp", "miqcqp", "minlp"})
 #: severities.
 _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("threads", lambda v: v != 1),
-    ("deterministic", lambda v: v is not True),
+    ("deterministic", lambda v: bool(v)),
     ("batch_size", lambda v: v != 16),
     ("strategy", lambda v: v != "best_first"),
     ("ipopt_options", lambda v: v is not None),
@@ -6219,7 +6240,10 @@ def _root_relaxation_lower_bound(
                 # weakens the candidate at worst — it never invalidates one.
                 _sep_budget = min(budget, _fb_left()) if _have else budget
                 node_res = MccormickLPRelaxer(model).solve_at_node(
-                    root_lb, root_ub, time_limit=_sep_budget, build_deadline=_build_deadline
+                    root_lb,
+                    root_ub,
+                    time_limit=_role2_budget(_sep_budget),
+                    build_deadline=_build_deadline,
                 )
                 if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
                     sep_bound = float(node_res.lower_bound)
@@ -6263,6 +6287,74 @@ def _root_relaxation_lower_bound(
 
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _role2_budget(seconds):
+    """Return a **role-2** wall budget, or ``None`` when determinism was asked for.
+
+    #912's distinction, applied at the origin. A wall clock that answers *"when do
+    we stop?"* is role 1 — the user's ``time_limit`` — and is correct by
+    definition. A wall clock that answers *"how much work do we do?"* is role 2: a
+    sub-budget carved as a fraction of ``time_limit``, or a fixed number of seconds
+    handed to a stage, that decides how many OBBT passes / heuristic dives /
+    tightening rounds happen before the stage gives up. Role 2 makes the ANSWER a
+    function of machine speed; ``_work_budget.py`` calls that "a correctness-of-
+    process bug, not a performance detail".
+
+    #1116 is the measurement. ``kriging_peaks-full200`` at ``max_nodes=1``, one
+    process, one binary, no user time pressure, returned root dual bounds of
+    −25371.8 / −28852.0 / −28072.6 across three repetitions — a 14 % swing, with
+    the incumbent bit-identical. The mechanism is structural, not float noise: the
+    first root LP came back with a different number of COLUMNS per repetition
+    (1532 vs 1469), because a wall-truncated tightening stage handed the builder a
+    different box. Neutralizing the wall budgets made the solve reproduce exactly.
+
+    Under ``deterministic``, each stage is left to the deterministic caps it
+    already carries (``max_rounds``, ``obbt_rounds``, ``fbbt_max_iter``, iteration
+    caps, the node budget). The role-1 deadline is *not* routed through here and
+    still stops the search.
+    """
+    return None if _tuning().deterministic else seconds
+
+
+def _role2_deadline(deadline):
+    """The absolute-deadline form of :func:`_role2_budget` (``None`` = no clock)."""
+    return None if _tuning().deterministic else deadline
+
+
+def _role2_horizon(seconds):
+    """:func:`_role2_budget` for a callee whose budget parameter is a plain
+    ``float`` rather than ``Optional[float]`` — ``math.inf`` is the no-clock value
+    there, since every such callee compares elapsed time *against* it."""
+    return math.inf if _tuning().deterministic else seconds
+
+
+def _scoped_determinism(fn: _F) -> _F:
+    """Publish ``deterministic=True`` onto the active :class:`SolverTuning`.
+
+    ``deterministic`` was a public parameter of :func:`solve_model` documented as
+    "Ensure deterministic results" that was read **nowhere** on the solve path — a
+    dead flag (CLAUDE.md §3) and a false API promise. #1116 both measured the
+    promise being broken and supplied the mechanism to keep it, so the parameter is
+    wired here instead of deleted. Its default moved ``True`` -> ``False`` in the
+    same change: the old default named a guarantee the solver never provided, and
+    turning the real mode on by default would be a bound-changing default flip
+    (CLAUDE.md §5) with no graduation panel behind it.
+
+    The kwarg is *peeked*, not popped — ``fn`` keeps receiving it.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not kwargs.get("deterministic", False):
+            return fn(*args, **kwargs)
+        token = _set_tuning(dataclasses.replace(_tuning(), deterministic=True))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _reset_tuning(token)
+
+    return cast(_F, wrapper)
 
 
 def _scoped_tuning(fn: _F) -> _F:
@@ -6708,13 +6800,14 @@ def _stamp_layer_timing(fn: _F) -> _F:
 @_stamp_layer_timing
 @_scoped_deep_recursion
 @_scoped_tuning
+@_scoped_determinism
 @_debug_outermost_solve
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
     gap_tolerance: float = 1e-4,
     threads: int = 1,
-    deterministic: bool = True,
+    deterministic: bool = False,
     batch_size: int = 16,
     strategy: str = "best_first",
     max_nodes: int = 100_000,
@@ -6791,8 +6884,32 @@ def solve_model(
         Relative optimality gap tolerance for termination.
     threads : int, default 1
         Number of CPU threads (reserved for future use).
-    deterministic : bool, default True
-        Ensure deterministic results.
+    deterministic : bool, default False
+        Make the search a function of the model rather than of machine speed, by
+        rendering every **role-2** wall budget inert (see
+        :class:`~discopt.solver_tuning.SolverTuning.deterministic`). Role-2 clocks
+        are the sub-budgets that decide *how much work* a stage does — a fraction
+        of ``time_limit`` handed to root reduction, a fixed number of seconds for a
+        dive — as opposed to the role-1 ``time_limit`` that decides *when to stop*.
+        With this on, those stages are bounded by the deterministic caps they
+        already carry, so two runs of the same model return the same answer;
+        expect the run to take longer, since nothing truncates a stage early.
+
+        The guarantee covers a run whose role-1 budget never binds — one that
+        terminates on **work** (``max_nodes``, the gap) with real slack against
+        ``time_limit``. ``time_limit`` is role 1 and still stops the search on the
+        real clock, and the phase-entry gates that ask "is there enough time left
+        to bother starting this phase?" are deliberately left alone (neutralizing
+        them would let preprocessing overrun ``time_limit`` without bound). A run
+        cut short by ``time_limit``, or one slow enough to flip such a gate, is
+        not reproducible and does not claim to be; see
+        :class:`~discopt.solver_tuning.SolverTuning.deterministic` for the full
+        residual.
+
+        Until #1116 this parameter defaulted to ``True`` and was read nowhere —
+        it named a guarantee the solver did not provide. The default is now
+        ``False`` because turning the real mode on by default is a bound-changing
+        default flip (CLAUDE.md §5) that has no graduation panel behind it.
     batch_size : int, default 16
         Number of B&B nodes to export per iteration.
     strategy : str, default "best_first"
@@ -7438,7 +7555,7 @@ def solve_model(
     # the box.
     _nbt_budget_s = min(min(max(0.15 * float(time_limit), 2.0), 30.0), _remaining_budget())
     _declared_tightening = _declared_box_tightening(
-        model, deadline=time.perf_counter() + _nbt_budget_s
+        model, deadline=_role2_deadline(time.perf_counter() + _nbt_budget_s)
     )
     _check_finite_bounds(model, _declared_tightening)
     nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
@@ -7654,7 +7771,9 @@ def solve_model(
                     [np.asarray(_routed_x[v.name], dtype=float).ravel() for v in model._variables]
                 )
                 _cd, _bdl, _bdu = _recover_nlp_duals_at_incumbent(
-                    model, _x_flat, time_budget=max(0.1, min(5.0, time_limit * 0.05))
+                    model,
+                    _x_flat,
+                    time_budget=_role2_horizon(max(0.1, min(5.0, time_limit * 0.05))),
                 )
                 if _cd is not None:
                     _mip_nlp_result.constraint_duals = _cd
@@ -7919,7 +8038,7 @@ def solve_model(
                 ignored_amp_options.append(name)
 
         _note_ignored("threads", threads != 1)
-        _note_ignored("deterministic", deterministic is not True)
+        _note_ignored("deterministic", bool(deterministic))
         _note_ignored("batch_size", batch_size != 16)
         _note_ignored("strategy", strategy != "best_first")
         _note_ignored("max_nodes", max_nodes != 100_000)
@@ -7987,7 +8106,7 @@ def solve_model(
                 ignored_gp_options.append(name)
 
         _note_ignored_gp("threads", threads != 1)
-        _note_ignored_gp("deterministic", deterministic is not True)
+        _note_ignored_gp("deterministic", bool(deterministic))
         _note_ignored_gp("batch_size", batch_size != 16)
         _note_ignored_gp("strategy", strategy != "best_first")
         _note_ignored_gp("max_nodes", max_nodes != 100_000)
@@ -8045,7 +8164,7 @@ def solve_model(
                 ignored_gp_minlp_options.append(name)
 
         _note_ignored_gp_minlp("threads", threads != 1)
-        _note_ignored_gp_minlp("deterministic", deterministic is not True)
+        _note_ignored_gp_minlp("deterministic", bool(deterministic))
         _note_ignored_gp_minlp("batch_size", batch_size != 16)
         _note_ignored_gp_minlp("strategy", strategy != "best_first")
         _note_ignored_gp_minlp("partitions", partitions != 0)
@@ -8427,7 +8546,7 @@ def solve_model(
             _origin_lb_chk,
             _origin_ub_chk,
             rules=(PeriodicVariableBoundRule(), FunctionDomainBoundRule()),
-            deadline=time.perf_counter() + _per_budget_s,
+            deadline=_role2_deadline(time.perf_counter() + _per_budget_s),
         )
         if _per_stats.n_tightened > 0:
             from discopt.solvers.amp import _apply_flat_bounds_to_model
@@ -8766,7 +8885,7 @@ def solve_model(
                                     model,
                                     np.asarray(_dcb_lb, dtype=np.float64),
                                     np.asarray(_dcb_ub, dtype=np.float64),
-                                    deadline=time.perf_counter() + _dcb_budget,
+                                    deadline=_role2_deadline(time.perf_counter() + _dcb_budget),
                                     # The wall deadline governs in-solve; the leaf
                                     # cap is a runaway backstop only (the module
                                     # default of 48 would stop a 150 s budget at
@@ -9848,7 +9967,7 @@ def solve_model(
                 lb,
                 ub,
                 rounds=_obbt_rounds,
-                deadline=time.perf_counter() + _obbt_budget,
+                deadline=_role2_deadline(time.perf_counter() + _obbt_budget),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
             )
@@ -10649,7 +10768,7 @@ def solve_model(
                                 max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _probe = _mc_lp_relaxer.solve_at_node(
-                                _probe_lb, _probe_ub, time_limit=_probe_budget
+                                _probe_lb, _probe_ub, time_limit=_role2_budget(_probe_budget)
                             )
                             # #930: bank the probe's proved bound WITH the box it was
                             # proved over. This solve costs real time (3.4 s on hda)
@@ -10728,7 +10847,7 @@ def solve_model(
                             _pool_res = _mc_lp_relaxer.solve_at_node(
                                 _probe_lb,
                                 _probe_ub,
-                                time_limit=_pool_budget,
+                                time_limit=_role2_budget(_pool_budget),
                                 out_cuts=_pool_chunks,
                                 psd_max_rounds=_root_cut_rounds,
                             )
@@ -10821,7 +10940,7 @@ def solve_model(
                             _pool_res = _mc_lp_relaxer.solve_at_node(
                                 _probe_lb,
                                 _probe_ub,
-                                time_limit=_pool_budget,
+                                time_limit=_role2_budget(_pool_budget),
                                 out_cuts=_pool_chunks,
                             )
                             _pool_solve_wall = time.perf_counter() - _pool_solve_t0
@@ -11056,7 +11175,7 @@ def solve_model(
                     model,
                     np.clip(_ir_seed, lb, ub),
                     evaluator=evaluator,
-                    time_budget=_ir_budget,
+                    time_budget=_role2_horizon(_ir_budget),
                 )
                 if _ir_sn is not None and (_ir_best is None or _ir_sn[1] < _ir_best[1]):
                     _ir_best = _ir_sn
@@ -11928,7 +12047,9 @@ def solve_model(
         # the relaxation, which is what lets a node fathom once its independent
         # drivers are branched (welded-beam / nvs05). Gated + budgeted at setup;
         # here we additionally stop as soon as the cumulative budget is spent.
-        if _per_node_obbt_enabled and _pn_obbt_spent < _pn_obbt_budget_total:
+        if _per_node_obbt_enabled and (
+            _tuning().deterministic or _pn_obbt_spent < _pn_obbt_budget_total
+        ):
             _pn_inc = tree.incumbent()
             _pn_cutoff = (
                 float(_pn_inc[1])
@@ -11951,7 +12072,7 @@ def solve_model(
                     break
                 if node_infeasible_mask[i]:
                     continue
-                if _pn_obbt_spent >= _pn_obbt_budget_total:
+                if not _tuning().deterministic and _pn_obbt_spent >= _pn_obbt_budget_total:
                     break
                 _t_pn = time.perf_counter()
                 if time_limit - (_t_pn - t_start) < _DEADLINE_NODE_FLOOR_S:
@@ -11963,7 +12084,7 @@ def solve_model(
                         ub=np.asarray(batch_ub[i], dtype=np.float64),
                         rounds=_PER_NODE_OBBT_ROUNDS,
                         incumbent_cutoff=_pn_cutoff,
-                        deadline=_t_pn + _PER_NODE_OBBT_PER_NODE_S,
+                        deadline=_role2_deadline(_t_pn + _PER_NODE_OBBT_PER_NODE_S),
                         time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
                         prefer_pounce=nlp_solver == "pounce",
                         top_k=_pn_obbt_topk,
@@ -13201,7 +13322,7 @@ def solve_model(
                             # wall clock. ``time_budget`` is only consulted on the
                             # ``DISCOPT_ILS_WORK_BUDGET=0`` legacy path; the solve
                             # deadline rides along purely as a time_limit backstop.
-                            time_budget=min(5.0, 0.15 * max(1.0, time_limit)),
+                            time_budget=_role2_horizon(min(5.0, 0.15 * max(1.0, time_limit))),
                             deadline=_deadline,
                         )
                         if ils is not None:
@@ -13293,7 +13414,9 @@ def solve_model(
                         evaluator=evaluator,
                         deadline=min(
                             _deadline,
-                            time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit))),
+                            _role2_horizon(
+                                time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit)))
+                            ),
                         ),
                         incumbent_obj=_cms_inc_obj,
                     )
@@ -13461,7 +13584,7 @@ def solve_model(
                             # Single root attempt (no loop): give it a fair budget
                             # so it can converge to a feasible incumbent even if
                             # preprocessing already consumed the deadline.
-                            time_budget=min(3.0, float(time_limit)),
+                            time_budget=_role2_budget(min(3.0, float(time_limit))),
                         )
                     except Exception as _e:
                         logger.debug("subnlp (gams seed) raised: %s", _e)
@@ -13503,7 +13626,7 @@ def solve_model(
                         # Single root fallback attempt (no loop): give it a fair
                         # budget so it can converge even if preprocessing already
                         # consumed the deadline.
-                        time_budget=min(3.0, float(time_limit)),
+                        time_budget=_role2_budget(min(3.0, float(time_limit))),
                     )
                 except Exception as _e:
                     logger.debug("subnlp raised: %s", _e)
@@ -13559,7 +13682,7 @@ def solve_model(
                             backend=_subnlp_backend_fn,
                             nlp_options=subnlp_options,
                             evaluator=evaluator,
-                            time_budget=_sn_budget,
+                            time_budget=_role2_budget(_sn_budget),
                         )
                     except Exception as _e:
                         logger.debug("subnlp raised: %s", _e)
@@ -13761,7 +13884,7 @@ def solve_model(
                         # sub-NLP count; ``time_budget`` is only read on the
                         # legacy (``ils_solve_budget=0``) path, and the solve
                         # deadline is the time_limit backstop.
-                        time_budget=_box_budget,
+                        time_budget=_role2_horizon(_box_budget),
                         deadline=_deadline,
                     )
                 except Exception as _e:
@@ -13922,7 +14045,9 @@ def solve_model(
                             model,
                             np.asarray(_lns_inc[0], dtype=np.float64),
                             evaluator=evaluator,
-                            time_budget=min(1.0, _deadline - time.perf_counter() - 0.1),
+                            time_budget=_role2_horizon(
+                                min(1.0, _deadline - time.perf_counter() - 0.1)
+                            ),
                             deadline=_deadline,
                         )
                         if _sw is not None:
@@ -14193,7 +14318,7 @@ def solve_model(
                             ub=np.array(ub),
                             rounds=2,
                             incumbent_cutoff=float(inc_obj),
-                            deadline=time.perf_counter() + 5.0,
+                            deadline=_role2_deadline(time.perf_counter() + 5.0),
                             time_limit_per_lp=0.1,
                             prefer_pounce=nlp_solver == "pounce",
                         )
@@ -14372,7 +14497,7 @@ def solve_model(
                         np.asarray(lb, dtype=np.float64),
                         np.asarray(ub, dtype=np.float64),
                         incumbent_cutoff=_rf_cutoff,
-                        deadline=time.perf_counter() + _rf_budget,
+                        deadline=_role2_deadline(time.perf_counter() + _rf_budget),
                         tol=1e-6,
                         prefer_pounce=nlp_solver == "pounce",
                         measure_bound=False,
@@ -15834,7 +15959,13 @@ def _solve_nlp_bb(
                 _rc_ev = _make_evaluator(model)  # pre-cut evaluator (cached)
                 _rc_budget = max(2.0, min(10.0, 0.2 * float(time_limit)))
                 _rc = generate_root_cuts(
-                    model, _rc_ev, lb, ub, _rc_is_int, _rc_is_bin, time_budget_s=_rc_budget
+                    model,
+                    _rc_ev,
+                    lb,
+                    ub,
+                    _rc_is_int,
+                    _rc_is_bin,
+                    time_budget_s=_role2_horizon(_rc_budget),
                 )
                 jax_time += time.perf_counter() - t_jax_start
                 _rc_cols = flat_column_terms(model)
@@ -20846,8 +20977,8 @@ def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> O
         sw = one_hot_swap_search(
             src,
             np.asarray(x_lifted[: int(n0)], dtype=np.float64),
-            time_budget=min(1.0, budget * 0.5),
-            deadline=time.perf_counter() + budget,
+            time_budget=_role2_horizon(min(1.0, budget * 0.5)),
+            deadline=_role2_deadline(time.perf_counter() + budget),
         )
         if sw is None:
             return None
@@ -20951,7 +21082,15 @@ def _solve_milp_simplex(
     # ~1 s, far inside this cap — so capping costs nothing on the common case while
     # bounding the wasted time before fallback to a few seconds.
     _remaining = float(time_limit) - (time.perf_counter() - t_start)
-    _milp_budget = max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
+    # #1116: the half-of-remaining stall slice is a role-2 clock — it decides how
+    # much of the tree the Rust driver explores, so the BOUND it returns depends on
+    # machine speed. Under ``deterministic`` the driver is bounded by ``max_nodes``
+    # (already passed below) and the whole role-1 budget is the only wall.
+    _milp_budget = (
+        float(time_limit)
+        if _tuning().deterministic
+        else max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
+    )
     # Interactive debugger: install the Rust checkpoint hook only when a debugger
     # is attached now (bound-neutral otherwise). This is the pure-Rust MILP
     # fast-path — the hook fires the same node-lifecycle checkpoints as the

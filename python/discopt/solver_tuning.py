@@ -1123,6 +1123,56 @@ class SolverTuning:
     objective sign selects — keep the primal path exactly as before.
     """
 
+    # --- determinism (#1116) --------------------------------------------------
+    deterministic: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DETERMINISTIC", default=False)
+    )
+    """Make the search a function of the *model* rather than of machine speed by
+    rendering every **role-2** wall budget inert. ``DISCOPT_DETERMINISTIC``,
+    default **OFF**; also reachable as ``Model.solve(deterministic=True)``.
+
+    #912 draws the line this flag acts on. A clock that answers *"when do we
+    stop?"* — the user's ``time_limit`` — is correct by definition (role 1). A
+    clock that answers *"how much work do we do?"* — a sub-budget carved as a
+    fraction of ``time_limit``, or a fixed number of seconds handed to a stage —
+    makes the ANSWER a function of how fast the machine happens to be that
+    minute. ``_work_budget.py`` calls that "a correctness-of-process bug, not a
+    performance detail".
+
+    #1116 measured the consequence. ``kriging_peaks-full200`` at ``max_nodes=1``,
+    same process, same binary, no user time pressure, returned root dual bounds of
+    −25371.8 / −28852.0 / −28072.6 — a 14 % swing — with the incumbent
+    bit-identical. Neutralizing the wall budgets made the same solve reproduce
+    exactly (``-1044.819…`` twice at ``max_nodes=1``, ``-754.478794470719`` twice
+    at ``max_nodes=300``), and *tighter* than every wall-bounded run.
+
+    When this is on, role-2 budgets become ``None``/``math.inf`` at the 27 sites
+    that carve them (``solver._role2_budget`` / ``_role2_deadline`` /
+    ``_role2_horizon``, plus the integer-ratio dive in ``_relax/mccormick_lp.py``)
+    and each stage is bounded by the deterministic caps it already carries (round
+    counts, iteration caps, the node budget). Expect a run to take longer:
+    nothing truncates a stage early any more.
+
+    **What the flag does not cover, and why.** Two role-1 mechanisms are left
+    alone on purpose, because neutralizing them would let preprocessing overrun
+    the user's ``time_limit`` without bound — trading a reproducibility bug for a
+    broken role-1 promise, which CLAUDE.md §1 does not permit:
+
+    * the phase-entry gates (``_deadline_exhausted()`` / ``_remaining_budget() >
+      x``), which decide whether an optional preprocessing phase *starts* at all;
+    * the two POUNCE funnels' ``max_wall_time = min(30.0, caller_limit)`` stall
+      backstop.
+
+    So the guarantee is: **a solve reproduces when the role-1 budget never binds**
+    — i.e. it terminates on work (``max_nodes``/gap) with real slack against
+    ``time_limit``. A run cut short by ``time_limit``, or run on a machine slow
+    enough that a phase-entry gate flips, is not reproducible and does not claim
+    to be. The residual was measured not to bind on the reproduction instance:
+    the 30 s POUNCE cap was live and real during the arm that reproduced
+    bit-exactly, and the solve finished in ~7 min against the default 3600 s
+    limit.
+    """
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)

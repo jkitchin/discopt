@@ -10,7 +10,94 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`solve(deterministic=...)` now defaults to `False` and is no longer a dead
+  parameter** (`solver`, #1116). It was documented as "Ensure deterministic
+  results" and read **nowhere** on the solve path — a default that named a
+  guarantee the solver did not provide. It is now wired to the real mode (below),
+  and defaults OFF because turning that mode on by default is a bound-changing
+  default flip (CLAUDE.md §5) with no graduation panel behind it. Callers who
+  passed `deterministic=True` expecting reproducibility now get it; callers who
+  relied on the old *default* get today's behaviour unchanged.
+
 ### Fixed
+
+- **The dual bound was a function of machine speed** (`solver`, #1116). The issue
+  reported a 13th-digit drift with the node count flipping 301 ↔ 303 on
+  `kriging_peaks-full200`. At `max_nodes=1` the defect is far larger: three root
+  dual bounds spanning **14 %** (−25371.8 / −28852.0 / −28072.6) in three
+  repetitions of one process, with the incumbent bit-identical.
+
+  The cause is **role-2 wall clocks**, in #912's sense: a clock answering *"when do
+  we stop?"* (the user's `time_limit`) is role 1 and correct by definition, while a
+  clock answering *"how much work do we do?"* makes the ANSWER depend on how fast
+  the machine happens to be that minute — what `_work_budget.py` calls "a
+  correctness-of-process bug, not a performance detail". Bisecting a confounded
+  neutralization showed the clock arm **alone** reproduces bit-exactly, and the
+  mechanism is structural rather than float noise: the first root LP came back with
+  a different number of **columns** (1532 vs 1469), because a wall-truncated
+  tightening stage handed the builder a different box — the root fixpoint returned
+  894 vs 898 tightened bounds from *different input boxes*, having spent 237.7 s vs
+  247.55 s in OBBT.
+
+  `SolverTuning.deterministic` / `DISCOPT_DETERMINISTIC` (default **OFF**) renders
+  role-2 budgets inert at their **origin**: 27 call sites via `_role2_budget` /
+  `_role2_deadline` / `_role2_horizon`, 3 direct guards where the budget is a loop
+  condition, and the integer-ratio dive in `mccormick_lp.py`. Both halves of the
+  search are covered — the dual side (root presolve, declared-box tightening, OBBT,
+  per-node OBBT, the root fixpoint, root cuts, the box/probe/pool LP slices, the
+  MILP stall slice) and the primal side (native-kernel seeds, root sub-NLP seeds,
+  ILS, multistart, one-hot swap, dual recovery), since a machine-speed-dependent
+  incumbent moves the cutoff, which moves the tree, which moves the bound. Verified
+  on the reproducing instance: 3/3 repetitions bit-identical
+  (`-1044.8190276107248`, objective `-3.890198803588073`, 3 nodes) where the
+  default arm returns three distinct bounds.
+
+  **Scoped on purpose.** Two role-1 mechanisms are left live — the phase-entry
+  gates (`_deadline_exhausted()` / `_remaining_budget() > x`) and the POUNCE
+  `max_wall_time = min(30.0, caller_limit)` stall backstop — because neutralizing
+  either lets preprocessing overrun the user's `time_limit` without bound, trading
+  a reproducibility bug for a broken role-1 promise. So the guarantee is: **a solve
+  reproduces when the role-1 budget never binds.** A test pins both residuals so
+  widening the flag to swallow role 1 fails loudly.
+
+  **Falsified and recorded** (§4/§11): the issue's own suggested first step (swap
+  five `bnb` hash containers to `BTreeMap`) — the crate has 18 hash-container
+  declarations and **3** iteration sites, all order-insensitive; thread scheduling
+  (rayon + BLAS pinned to 1, still 301 ↔ 303); `Variable.__hash__ = id(self)`
+  (replaced with a stable index across 26 377 430 firings, bound still moves); the
+  #694 anytime build truncation (`build_truncated=False`, 404/404 constraints); and
+  the issue's premise that no `time_limit` was set (`Model.solve` defaults to
+  3600 s). `solver.py`'s prior claim that "a deterministic `max_nodes` budget makes
+  solves bit-reproducible (6/6 identical)" is **retracted in the file**: a node
+  budget bounds the *tree*, not the wall sub-budgets inside a node. Note also that
+  the no-clock bound (−1044.819) is *tighter* than every wall-bounded run — an
+  early-truncated tightening stage is not merely nondeterministic, it leaves bound
+  on the table.
+
+- **alphaBB ran at every node alongside the reduced-space engine** (`relaxation`,
+  #1114). `_use_alphabb` keyed on the *lifted* LP relaxer being absent, which is
+  exactly the `dm.custom`/`CustomCall` class the reduced-space McCormick engine was
+  introduced to bound. The issue asked for a flag and a differential panel on the
+  grounds that dropping a term from a `max()` can only loosen a bound; the entry
+  experiment says that reasoning does not apply, because on this class alphaBB
+  never produces a bound at all. `rigorous_alpha`'s interval-AD walker has no rule
+  for `CustomCall` — an opaque user callable has no symbolic second derivative — so
+  every box returns `+inf` and `_compute_alphabb_bound` abstains with `-inf`, whose
+  only effect at both call sites is `max(lb, -inf)`. The identical function written
+  in native expression ops yields a finite alpha; wrapped in `dm.custom` it does
+  not.
+
+  Measured over 8 CustomCall models: 51 alphaBB node boxes, all 51 abstaining, → 0,
+  with status/node_count/bound/objective bit-identical (32/32 exact-identity
+  assertions — the §5 *bound-neutral* regime, not a bound trade). It therefore
+  ships unflagged: a default-off knob over a provable no-op is a dead flag (§3). It
+  cannot touch the benchmark corpus either, since `CustomCall` is constructed only
+  by `dm.custom` and no `.nl` or QPLIB instance can contain one.
+  `test_1114_alphabb_customcall_suppressed.py` pins the implication the gate rests
+  on, so teaching the interval-AD walker about `CustomCall` later fails loudly here
+  instead of silently discarding real bounds.
 
 - **`singular_tangent` recovery missed fractional power atoms (`x**0.5`)**
   (`relaxation`, #1118). `x**0.5` has exactly the vertical tangent at `t = 0` that
@@ -91,11 +178,11 @@ The release procedure that produces these entries is documented in
   `CustomCall` model can arrive there without `_force_reduced_space`. That
   reachability fact is itself pinned by a test.
 
-  Not addressed, and tracked separately: alphaBB is still enabled alongside the
-  reduced engine because `_use_alphabb` keys on `_mc_lp_relaxer is None` and is
-  computed before `_reduced_space_active`. Suppressing it is bound-changing (if the
-  node bound is currently the better of the two, removing alphaBB can loosen it) and
-  needs the §5 flag-and-panel treatment.
+  Was tracked separately as #1114 and is **now fixed** (entry below). The
+  reasoning recorded here — "suppressing it is bound-changing, because if the node
+  bound is currently the better of the two, removing alphaBB can loosen it" — was
+  **falsified** by #1114's entry experiment (CLAUDE.md §11): on this class alphaBB
+  abstains at every node, so there is no better-of-the-two to lose.
 
 - **`sqrt`/`asin`/`acos`/`acosh` derivatives no longer divide by zero at a singular
   endpoint** (`relaxation`, #1111). `_dsqrt` and friends evaluate the derivative

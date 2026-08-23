@@ -1198,7 +1198,16 @@ class MccormickLPRelaxer:
         ):
             return res
         try:
-            deadline = time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S
+            # #1116: a fixed per-node second count is a role-2 clock — it decides
+            # how many piece LPs the dive runs, so the BOUND it returns is a
+            # function of machine speed. Under ``deterministic`` the
+            # partitioner's own LP cap is the only bound (see
+            # ``solver_tuning.SolverTuning.deterministic``).
+            deadline = (
+                None
+                if _tuning().deterministic
+                else time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S
+            )
             lifted = p.node_bound(node_lb, node_ub, deadline=deadline)
         except Exception:
             logger.debug("integer-ratio partition bound abstained", exc_info=True)
