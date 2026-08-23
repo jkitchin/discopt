@@ -10871,12 +10871,32 @@ def solve_model(
     # mccormick_bounds="nlp" and the lp→nlp fallbacks (e.g. pure-integer
     # nonconvex models). Fall back to the rigorous alphaBB underestimator.
     if _mc_mode == "nlp" and not _model_is_convex:
-        logger.warning(
-            "McCormick 'nlp' objective bound is not a valid dual bound for "
-            "nonconvex models (issue #120); falling back to the alphaBB "
-            "underestimator. Use mccormick_bounds='lp' for a valid spatial "
-            "relaxation on models with continuous variables."
-        )
+        # The DEMOTION is unconditional — it is the soundness guard and never
+        # branches. Only the message does (#1112): as written it recommended
+        # ``mccormick_bounds='lp'`` to users who had just passed exactly that,
+        # and it fired even on models where the reduced-space engine is about to
+        # supply a perfectly good spatial bound, where it is pure misdirection.
+        if _force_reduced_space:
+            # Reduced-space bounding is active for this model — set at the
+            # CustomCall gate above, which is also the ONLY way a CustomCall model
+            # reaches this line: a non-admissible one returns early via
+            # ``_withhold_local_optimality_certificate``. So here the LP relaxer
+            # was discarded because the nonlinearity is hidden inside opaque
+            # ``dm.custom`` nodes with no lifted relaxation, "lp" is exactly what
+            # the user passed, and the reduced engine — not alphaBB — is about to
+            # supply the node bound. Every clause of the warning below would be
+            # wrong; there is no fallback to announce and no advice to give.
+            logger.debug(
+                "McCormick 'nlp' objective bound declined for a nonconvex model "
+                "(issue #120); reduced-space McCormick supplies the node bound."
+            )
+        else:
+            logger.warning(
+                "McCormick 'nlp' objective bound is not a valid dual bound for "
+                "nonconvex models (issue #120); falling back to the alphaBB "
+                "underestimator. Use mccormick_bounds='lp' for a valid spatial "
+                "relaxation on models with continuous variables."
+            )
         _mc_mode = "none"
 
     if _mc_mode == "nlp" and model._objective is not None:

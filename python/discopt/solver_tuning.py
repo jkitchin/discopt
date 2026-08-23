@@ -24,6 +24,7 @@ unaffected.
 
 from __future__ import annotations
 
+import math
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
@@ -1313,6 +1314,268 @@ class SolverTuning:
     deliberately accepts. Default off pending the §5 differential panel
     (graduation coupled to the #928/#966 panel)."""
 
+    singular_tangent: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT", default=False)
+    )
+    """Recover the univariate-envelope tangent facet dropped at a **vertical
+    tangent** (``DISCOPT_SINGULAR_TANGENT``, default **off**; §5 bound-changing;
+    issue #1111).
+
+    ``uniform_relax._emit_1d`` places tangents at ``lo``, the midpoint and ``hi``.
+    Where ``f`` is finite at an endpoint but ``f'`` diverges there, ``_tangent_row``
+    returned without emitting and the facet was silently lost, leaving the envelope
+    one-sided on that side — reached by ``sqrt`` at ``t=0`` and ``asin``/``acos`` at
+    ``t=±1``. When on, the facet is re-anchored at an interior ladder point (see
+    ``_interior_tangent_point``); the path only ever ADDS a row where none was
+    emitted, so the flag-ON polytope is a subset of the flag-OFF polytope and the
+    node LP bound can only improve or stay equal.
+
+    **The §5 panel ran. Gate 1 (cert-clean) PASSES; gate 2 (net-positive) FAILS:
+    the EAGER anchor is measured HARMFUL.** On the only instance that terminates
+    inside a deterministic node budget and moves at all, ``tspn08`` goes 135 → 191
+    nodes (**+41.5 %**) to buy a bound gain in the 11th digit
+    (290.56592504129753 → 290.56599569540646). ``mathopt5_6`` is flat at 5 → 5 with
+    a bit-identical bound, and ``kriging_peaks-full010`` is flat to 14 digits. The
+    subset property still holds — the ON bound *is* tighter at every node — but a
+    different LP vertex changes the branching choice, so a tighter relaxation can
+    still grow the tree. Soundness held throughout: no bound above its ``.solu``
+    reference, no certification regression, incumbents identical.
+
+    The root win also does not survive branching: ``kriging_peaks`` gains 13–40× at
+    the root (``full200`` −74356.93 → −5596.46) yet after a few hundred nodes the
+    arms agree to 14 digits. B&B was already recovering that bound cheaply.
+
+    **DOUBLE RETRACTION (§11) — a retraction that was itself wrong.** This docstring,
+    the CHANGELOG and PR #1113 previously *withdrew* the ``tspn08`` 135 → 191 result
+    and recorded the flag as "sound, and neutral", on the strength of a panel showing
+    135 → 135 with bit-identical bounds. **That withdrawal is itself withdrawn, and
+    the +41 % is reinstated as measured above.** The panel behind it never fired.
+
+    The instrument defect, measured not inferred: :func:`solve` is wrapped by a
+    decorator (``solver.py:6274-6280``) that begins ``_set_tuning(kwargs.pop(
+    "tuning", None))``, and :func:`set_current` with ``None`` publishes a **fresh,
+    env-resolved** ``SolverTuning()``. A probe that installs a tuning with
+    ``set_current(...)`` and then calls ``m.solve()`` without ``tuning=`` therefore
+    has that context **silently discarded at the solve boundary**. Counting
+    ``_interior_tangent_point`` calls inside a full solve of
+    ``kriging_peaks-full010``:
+
+    ==========================================  ======  =====
+    how the flag was set                         calls  nodes
+    ==========================================  ======  =====
+    off (control)                                    0    311
+    ``set_current(...)`` around ``m.solve()``        0    311
+    ``m.solve(tuning=...)``                       2671    313
+    ``DISCOPT_SINGULAR_TANGENT=1``                2671    313
+    ==========================================  ======  =====
+
+    ``tuning=`` and the environment variable agree bit-for-bit; ``set_current`` is
+    inert. So "both arms bit-identical" was not a neutrality result — it is the
+    signature of a probe that never fired, and it explains exactly why the arms
+    agreed to the last digit. That panel carried no drops counter, so nothing caught
+    it (§6). Every root-relaxation measurement quoted below is unaffected: those
+    drive ``build_uniform_relaxation`` directly, where ``set_current`` does reach
+    (instrumented 10/10).
+
+    The reinstated number was re-measured on a corrected instrument — ``tuning=``
+    delivery, the ON arm asserted to have fired, a ``max_nodes`` budget with **no**
+    ``time_limit`` (a wall limit changes the kernel path and makes the run
+    non-reproducible; ``max_nodes`` alone is bit-reproducible over 3 repetitions per
+    arm), both arms in one process on one binary — and reproduces at 135 → 191 on
+    every run since.
+
+    Still retracted, and for reasons unrelated to the above: the first panel's
+    time-limited rows (``kriging_peaks-full100`` −1.144, ``tspn12`` −0.520, …), taken
+    at a 60 s wall limit under load 37–87 on 14 cores, fail the §9 load gate
+    outright; and that panel's printed tally ``better 10 worse 2 unchanged 1``, whose
+    classifier scored ``nodes_on < nodes_off`` as "better" — correct for a
+    terminating run, backwards for a time-limited one, where fewer nodes means the
+    arm did *less* work in the same budget.
+
+    #1111's own motivating hypothesis is **falsified**: on the adiabatic LVC MECP
+    model the facet is recovered but root bound and node count are unchanged (1 node
+    either way).
+
+    **Two further defects in #1111's framing, both measured.** (a) The issue expects
+    the inverse-trig rows to matter most; across all 1610 MINLPLib ``.nl`` instances
+    ``sqrt`` appears in 63 and ``asin``/``acos``/``acosh`` in **zero**, so on this
+    corpus the feature is a sqrt feature. (b) The first panel was ~36 % diluted — 5 of
+    its 14 instances (``kriging_peaks-red*``) contain no ``sqrt`` at all, so the flag
+    could not act on them and those rows were pure noise. That dilution is why its
+    numbers are retracted above; the panel quoted here is its successor, drawn by
+    screening every corpus instance for an actually-dropped facet.
+
+    **The mechanism, not the constant, is what is wrong.** A fixed-offset
+    reformulation (``delta = width/8``) was built and measured against this ladder and
+    is **strictly worse** — about half the root-bound gain on every instance where the
+    bound moves at all — and the anchor sweep behind
+    :attr:`singular_tangent_kappa` shows the best static offset is problem-dependent
+    by orders of magnitude, with both ends of the range degenerate. A static geometric
+    anchor cannot be right for every box. What the measurements point at instead is
+    placing the tangent *where the LP binds* rather than at a geometric offset — which
+    is what ``MccormickLPRelaxer._separate_convex``'s Kelley loop already does for
+    composite convex/concave lifts (``concave: d <= g(x0) + grad g(x0)·(x - x0)`` at
+    the LP point ``x0``). The soundness argument carries over unchanged — every tangent
+    of a concave ``f`` is a global overestimator — and lazy separation also stops the
+    solver paying for an eager extra row at every node whether or not that node's LP
+    is near the singular endpoint, which is precisely the cost the ``tspn08``
+    regression above is charging.
+
+    **That successor was built and measured — #1115, and it is the default
+    placement.** See :attr:`singular_tangent_lazy`. Eager anchoring is retained only
+    as the A/B control for that measurement; the two #581 precedents below removed
+    sound-but-unhelpful flags rather than leaving them in default-OFF limbo, and the
+    same rule applies here if the lazy form is falsified in turn. Flag-OFF is
+    byte-identical to the pre-#1111 relaxation."""
+
+    singular_tangent_lazy: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SINGULAR_TANGENT_LAZY", default=True)
+    )
+    """Place the recovered vertical-tangent facet at the LP point (#1115).
+
+    Consulted only when :attr:`singular_tangent` is on; it selects *where* the
+    recovered tangent goes, never *whether* the facet is recovered.
+
+    ``True`` (the default) defers the facet to
+    ``MccormickLPRelaxer._separate_singular_tangent``, which adds the supporting
+    tangent at the current LP point and only when that point violates it.
+    ``False`` restores #1111's eager behaviour: one tangent per node at a fixed
+    geometric ladder anchor near the endpoint, whether or not it binds.
+
+    Where the LP vertex sits *on* the singularity — the case the facet exists for,
+    and where no finite-slope tangent is available — the touch point falls back to
+    #1111's conditioning-capped ladder anchor while the violation test still decides
+    whether the row goes in. Without that fallback the separator degrades to a no-op
+    precisely where it is needed: on ``min 2x - sqrt(x)`` over ``[0,4]`` the LP vertex
+    lands exactly at ``t=0``.
+
+    **Measured.** The eager form is **harmful** — ``tspn08`` 135 → 191 nodes
+    (+41.5 %) for a bound gain in the 11th digit — which is what motivated #1115, and
+    it is retained only as the A/B control. Lazy placement removes that regression
+    (``tspn08`` back to 135 nodes) and, on isolated atoms, does what it was designed
+    to do: ``min 2x - sqrt(x)`` over ``[0,4]`` goes −0.7071 → **−0.12503** against a
+    true optimum of −0.125, where the eager anchor reaches only −0.6557.
+
+    **On the corpus lazy never loses the bound, and that is not enough.** Three-arm
+    panel (off / eager / lazy), 300-node budget with no wall limit, each arm's firing
+    asserted, 12 scorable instances: ``eager vs off: BETTER 1, WORSE 2, flat 9``;
+    ``lazy vs off: BETTER 3, flat 9, worse 0``. Soundness checked on every arm of
+    every run against ``minlplib.solu`` — 0 violations, including per-repetition
+    asserts in the reproducibility and timing panels. The lazy gains are
+    ``kriging_peaks-full050`` (−142.657 → −139.918) and ``full100`` (−348.054 →
+    −342.588), ~1.6–1.9 % of gap, plus a marginal ``tspn15``; each occurs at an
+    *identical node count and identical incumbent*, i.e. a better bound for the same
+    tree. Eager's one BETTER cell (``tspn15``, +0.002) against two real losses leaves
+    it net-negative.
+
+    **The timing panel decides it, and it decides against graduation.** Interleaved
+    off/lazy, 3 repetitions, per-arm and pooled standard deviations, load gate
+    recorded per instance (2.5–5.2 on 14 cores), both arms verified to explore
+    identical trees::
+
+        eq6_1                 off  10.82+-0.12s   lazy  13.59+-0.09s   +25.6%   0 gain
+        maxmin                off  33.52+-0.13s   lazy  51.68+-0.04s   +54.2%   0 gain
+        kriging_peaks-full050 off  42.21+-0.21s   lazy  44.09+-0.12s    +4.5%  +1.9%
+        kriging_peaks-full100 off 101.21+-0.21s   lazy 105.22+-0.22s    +4.0%  +1.6%
+
+    Every delta is 12–200 pooled sd; none is noise. The shape disqualifies it:
+    **lazy is cheap where it helps and expensive where it does not** — the two
+    instances charged +25.6 % and +54.2 % are exactly the two that gain nothing,
+    because they draw the most rows. Default-ON would pay the ``maxmin`` bill
+    corpus-wide to collect the ``full050`` gain occasionally. Gate 1 (cert-clean)
+    passes; **gate 2 (net-positive) fails**; the flag stays default-OFF. Same
+    disposition as ``cut_inherit``, reached by a different route — that one was
+    neutral-or-harmful, this one is helpful on a narrow class and unaffordable off it.
+
+    Corrections to earlier readings recorded here (§11):
+
+    * ``kriging_peaks-full200`` was reported as a third gain (−746.566 → −734.495,
+      +1.6 %) and is **withdrawn**. Over 3 reps on a quiet machine it is
+      nondeterministic in *both* arms: off gives nodes {301, 303} with two distinct
+      bounds and zero separated rows; lazy gives {301, 303} with rows {32451, 32472,
+      32583}. Two single runs of a nondeterministic instance are not a comparison.
+      Pre-existing at that size, unrelated to this flag, filed separately.
+    * An intermediate claim that lazy *caused* that nondeterminism is also withdrawn:
+      it rested on two reps in which off agreed, and the third falsified it.
+    * **The quoted bounds are load-dependent to ~3 significant figures.** Quiet,
+      ``full100`` gives −350.768 → −345.634 over 12 498 rows; under the original
+      panel's contention, −348.054 → −342.588 over 13 214. Separation is wall-bounded
+      (every ``_separate_*`` breaks on a shared ``_deadline``; the node LP re-solve
+      takes ``time_limit=_remaining()``), so row counts and the bounds they produce
+      shift with machine load. The direction reproduces; the digits do not.
+
+    Remaining gap:
+
+    * **A coverage hole eager does not have.** The separation chain is gated on
+      ``if separate:`` (``mccormick_lp.py``), forced off on yield rounds and pool-free
+      re-solves. On all three ``elec*`` instances the lazy arm registered thousands of
+      specs (19 236 on ``elec100``) and the separator ran **zero** times, while eager
+      fired at build time throughout. Lazy is not a coverage superset of eager: it
+      trades "emit a geometric guess wherever a relaxation is built" for "emit an
+      exact tangent only where a separation round runs".
+
+    Where the gains come from: both sit in ``kriging_peaks``, the family with the
+    largest root gain (13–40×). On ``full010``, 12 separator invocations move the node
+    LP objective 7 times but only by ~1e-4 against a bound of −5.69 — live, and far too
+    small to change a branching decision. So the #1111 finding "the root win does not
+    survive branching" is scoped to the **eager** anchor: where the dropped facet
+    dominates the root relaxation, lazy placement does retain part of it.
+    """
+
+    singular_tangent_kappa: float = field(
+        default_factory=lambda: _env_float("DISCOPT_SINGULAR_TANGENT_KAPPA", 100.0)
+    )
+    """Cap on ``|f'(t0)|`` for :attr:`singular_tangent`, as a multiple of the box's
+    own slope scale (``DISCOPT_SINGULAR_TANGENT_KAPPA``, default 100).
+
+    A measurement knob for the §5 panel, not a user-facing tuning parameter. Only
+    consulted when :attr:`singular_tangent` is on.
+
+    **The cap is right; the rationale first written here was not, and is retracted
+    (§11).** The original justification was that the outward-rounding guard
+    (``outward_rounding.envelope_1d_slack``) grows linearly with ``|slope|``, so an
+    uncapped near-vertical tangent buys tightness with rounding slack. The linearity
+    is real (``outward_rounding.py`` returns ``outward_slack(d*tmag + ...)``) but the
+    magnitude is not: at ``kappa=100`` the added slack is ~1e-14 against a cut depth
+    of ~0.35 — six orders of magnitude too small to be the reason for anything.
+
+    The cap's actual justification is a measured degeneracy at the uncapped end.
+    Sweeping the anchor offset ``delta`` over eight orders on the three
+    ``kriging_peaks-full`` instances that move the root bound at all, the root LP
+    bound tightens as the anchor approaches the singular endpoint, peaks near
+    ``delta ~ 1e-5``, and then **collapses back to the flag-OFF value** as ``delta``
+    shrinks further (``full020``: OFF −1113.72; gain +552 at 1/8, +1087 at 1.2e-4,
+    +1098 at 1e-5, +1097 at 1e-7, +1039 at 1e-9, **+0** at 1e-12 — same shape on
+    ``full010`` and ``full050``). Past the peak the tangent is numerically degenerate
+    and the emitted row stops constraining anything. Without a cap the ladder takes
+    its smallest rung, ``delta = 0.5*8**-20 ~ 5.5e-19``, which is inside the collapse:
+    the feature would emit a row on every singular atom and buy nothing. That is what
+    the cap is for, and it reproduces on an isolated atom too — ``min 3x - sqrt(x)``
+    over ``[0,4]``, whose LP optimum sits at the singular end, gains **+4.9e-09** at
+    ``kappa=1e12`` against **+0.083** at ``kappa=100``.
+
+    **``kappa=100`` is not measured-optimal, and the optimum is problem-dependent.**
+    On that same isolated atom the best rung is near ``kappa ~ 10`` (gain +0.619, 7x
+    the default's +0.083), i.e. an anchor *further* from the endpoint; on
+    ``kriging_peaks`` the peak is at a *smaller* ``delta`` than the default selects.
+    The two disagree by orders of magnitude, so no single constant is right for both
+    — which is the deeper reason a static geometric rule is the wrong mechanism here
+    (see :attr:`singular_tangent`). Treat 100 as a serviceable midpoint that is on
+    the stable side of the collapse, not as a tuned value. (The isolated-atom figure
+    is a synthetic proxy and is quoted only for the *shape* of the curve; per the
+    #727 RLT lesson the ``kriging_peaks`` numbers are the ones drawn from the real
+    corpus.)
+
+    This also **falsifies a mean-envelope-slack argument** considered as a
+    replacement for the ladder (a fixed ``delta = width/8``, chosen because it
+    minimises mean envelope slack over the box, measured 3.31x better than the
+    near-corner anchor on that metric). Mean slack over the box does not predict
+    bound tightness: on the same instances the near-corner anchor gives ~**2x** the
+    root-bound gain of ``width/8`` (``full010`` +2975 vs +1513, ``full200`` +68769
+    vs +34967). Only slack *where the relaxation binds* matters, and on this family
+    the LP optimum sits at the singular endpoint. The fixed-offset reformulation was
+    measured, found strictly worse, and discarded."""
+
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
     # tightened box to the children) was DEPRECATED and removed. It was a
@@ -1355,6 +1618,10 @@ class SolverTuning:
             raise ValueError(f"psd_cost_gate_budget must be > 0, got {self.psd_cost_gate_budget}")
         if self.psd_cost_gate_tau < 0:
             raise ValueError(f"psd_cost_gate_tau must be >= 0, got {self.psd_cost_gate_tau}")
+        if not (self.singular_tangent_kappa > 0.0 and math.isfinite(self.singular_tangent_kappa)):
+            raise ValueError(
+                f"singular_tangent_kappa must be finite and > 0, got {self.singular_tangent_kappa}"
+            )
 
     def replace(self, **changes) -> SolverTuning:
         """Return a copy with ``changes`` applied (validated)."""

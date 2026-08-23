@@ -2245,6 +2245,7 @@ _EMPTY_VARMAP_KEYS: tuple[str, ...] = (
     "univariate_relaxations",
     "composite_relaxations",
     "composite_multivar_relaxations",
+    "singular_tangent_relaxations",
     "univariate_piecewise_relaxations",
     "univariate_square",
     "univariate_square_relaxations",
@@ -2364,6 +2365,11 @@ def _uniform_relaxation_delegate(
     # (over-) estimator, so the cut never removes a feasible point (sound by
     # construction; the loop is a sound no-op on any failure).
     vm["composite_multivar_relaxations"] = list(rel.composite_multivar_specs)
+    # Vertical-tangent facets deferred to separation (#1115): the facet ``_emit_1d``
+    # drops where ``f`` is finite but ``f'`` diverges at a box endpoint, recovered as
+    # a supporting tangent at the LP point rather than at a fixed geometric anchor.
+    # Empty unless ``singular_tangent`` is on, so the separator is inert by default.
+    vm["singular_tangent_relaxations"] = list(rel.singular_tangent_specs)
     # Piecewise univariate/monomial/bilinear refinement (#640 S8) is now emitted
     # DIRECTLY as relaxation rows by ``build_uniform_relaxation`` when a ``disc_state``
     # partition is supplied (the AMP path), not surfaced through this legacy census

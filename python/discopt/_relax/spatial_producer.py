@@ -134,6 +134,26 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         return None
     if any(fname != "sqrt" for (fname, *_rest) in rel.univariate_atom_specs):
         return None
+    # VERTICAL TANGENT (#1111): the Rust kernel's ``mccormick_patch::univariate_rows``
+    # regenerates the 4-row sqrt envelope UNCONDITIONALLY — it guards ``f`` on the
+    # box but not ``f'``, so at ``t_lo == 0`` its tangent-at-``t_lo`` row is
+    # ``f'(0) = +inf`` and ``intercept = 0 - inf*0 = NaN``: an LP row with an
+    # infinite coefficient and a NaN rhs. The Python build does NOT emit that row
+    # (``_emit_1d`` drops the facet, or — under ``DISCOPT_SINGULAR_TANGENT`` —
+    # re-anchors it at an interior point the kernel knows nothing about), so the two
+    # engines disagree there in BOTH flag states.
+    #
+    # Today that disagreement is caught only incidentally: the dropped row makes the
+    # real-box build one row shorter than the probe build and the shape check below
+    # declines. Under the #1111 flag the row counts match again and the incidental
+    # guard evaporates, so make the condition EXPLICIT and decline here. Sub-boxes
+    # can only raise ``t_lo`` (branching and FBBT tighten), so a spec admitted with
+    # ``t_lo > 0`` stays NaN-free at every node.
+    for _fname, _w, _var, _coeff, _cst in rel.univariate_atom_specs:
+        ta = float(_coeff) * float(lb[int(_var)]) + float(_cst)
+        tb = float(_coeff) * float(ub[int(_var)]) + float(_cst)
+        if min(ta, tb) <= 0.0:  # sqrt: f'(t) = 0.5/sqrt(t) diverges at t = 0
+            return None
 
     A = sp.csr_matrix(milp._A_ub, dtype=np.float64)
     A.sort_indices()
