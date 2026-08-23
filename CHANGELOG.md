@@ -64,9 +64,17 @@ The release procedure that produces these entries is documented in
   obj 251.75 ≤ ref 291.54 ≤ bound 3593.69, a consistent upper bound) and, worse,
   could never have caught a genuinely invalid one, because an invalid upper
   bound is one that falls *below* the optimum. The check now reads the sense from
-  the parsed model (`_objective.sense`) and asserts the corresponding direction,
-  and a new smoke test asserts the corpus still contains both senses so neither
-  arm goes untested. **Retraction (CLAUDE.md §11):** the claim in PR #1120 that
+  the parsed model (`_objective.sense`) and asserts the corresponding direction.
+  Keeping that arm exercised needed a second pass: the first attempt asserted
+  that the corpus contains a maximizing instance, which is true only on a machine
+  carrying the MINLPLib snapshot, and CI failed it. The durable fix is two-part —
+  the direction decision is now a pure `bound_is_valid()` unit-tested in both
+  directions with no corpus and no solve, and `syn05hfsg`, a maximizing instance
+  that already ships in `python/tests/data/minlplib_nl/` and solves to optimality
+  in under 6 s, joins `KNOWN_OPTIMA` so the maximize arm runs on CI rather than
+  only on a developer box. The remaining corpus probe asserts only what holds
+  everywhere (every available instance yields a readable sense) and prints the
+  split. **Retraction (CLAUDE.md §11):** the claim in PR #1120 that
   "no bound exceeded its reference optimum on any of the 29" was produced by this
   sense-blind check and was therefore not a valid verification for the three
   maximizing instances; the sense-aware re-run is the verification of record.
