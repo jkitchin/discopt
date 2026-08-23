@@ -45,8 +45,10 @@ Read the output carefully:
 Get a deterministic, smallest-possible reproduction:
 - Re-run the exact failing command. For `discopt solve`, add `--no-daemon` to
   rule the daemon out and get the traceback in your own process.
-- In Python, set `m.solve(deterministic=True)` (the default) so the failure is
-  stable across runs.
+- In Python, set `m.solve(deterministic=True)` (NOT the default) so the failure
+  is stable across runs. It makes the solver's role-2 wall budgets inert — those
+  are what otherwise move the dual bound and the node count run to run (#1116).
+  A default solve is not reproducible on a large model.
 - If it's a big model, try to shrink it (fewer variables/constraints) until the
   symptom flips — that localizes the offending structure.
 

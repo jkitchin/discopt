@@ -93,7 +93,7 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
        psd_cuts=False,         # PSD/eigenvalue cuts for QCQP
        gdp_method="big-m",     # or "hull" for tighter disjunctive relaxations
        nlp_bb=None,            # None=auto, True=NLP-BB, False=spatial B&B
-       deterministic=True,     # reproducible results
+       deterministic=False,    # True -> reproducible (neutralizes role-2 clocks)
        validate=False,         # post-solve KKT check -> result.validation_report
    )
    ```

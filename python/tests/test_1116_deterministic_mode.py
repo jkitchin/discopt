@@ -156,3 +156,39 @@ def test_role1_phase_entry_gates_are_deliberately_left_live():
     field_doc = Path(solver_tuning.__file__).read_text()
     assert "_deadline_exhausted" in field_doc, "the residual must stay documented"
     assert "max_wall_time" in field_doc, "the POUNCE stall backstop must stay documented"
+
+
+def test_shipped_docs_do_not_advertise_the_old_default():
+    """The default flip must not leave user-facing docs stating the old value.
+
+    ``deterministic`` shipped as ``True`` for a long time while being read
+    nowhere, so several docs in the package present it as the default. #1116 made
+    the flag real and flipped it to ``False``; a doc still saying "(the default)"
+    now tells a user they already have a guarantee they do not have. These three
+    are the shipped skill/agent files a user reads before touching the source.
+    """
+    import inspect
+
+    from discopt.solver import solve_model
+
+    default = inspect.signature(solve_model).parameters["deterministic"].default
+    assert default is False, "the default moved — update these docs and this test"
+
+    root = Path(solver.__file__).parent
+    checked = 0
+    for rel in (
+        "skills/commands/debug.md",
+        "skills/commands/diagnose.md",
+        "skills/agents/minlp-solver-expert.md",
+    ):
+        text = (root / rel).read_text()
+        assert "deterministic" in text, f"{rel} no longer mentions the flag"
+        checked += 1
+        for line in text.splitlines():
+            if "deterministic=True" not in line:
+                continue
+            assert "NOT the default" in line, (
+                f"{rel}: presents deterministic=True without saying it is not the "
+                f"default — {line.strip()}"
+            )
+    assert checked == 3, "the probe stopped reading files (rule 6)"
