@@ -28,6 +28,16 @@ on:
       - "discopt_benchmarks/scripts/graduation_gate.py"
       - "discopt_benchmarks/scripts/generality_sweep.py"
 
+# The cert re-solve is minutes, and a PR that touches the gate usually touches it
+# more than once. Cancel superseded PR runs; never cancel the weekly cron or a
+# manual dispatch, whose whole point is to produce one recorded verdict.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        && github.run_id || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   graduation-gate-ci-subset:
     name: cert-neutrality regression guard (vendored panel)
