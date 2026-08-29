@@ -40,6 +40,7 @@ HiGHS reports no usable dual bound, ``bound`` is ``None``; it is never synthesiz
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Optional, Union
 
@@ -75,6 +76,115 @@ def _to_highs_inf(arr: np.ndarray, highspy) -> np.ndarray:
     out[out >= _INF] = highspy.kHighsInf
     out[out <= -_INF] = -highspy.kHighsInf
     return out
+
+
+def _highs_matrix_window(h, highspy) -> tuple[float, float]:
+    """HiGHS's ``(small_matrix_value, large_matrix_value)`` -- the window it accepts.
+
+    An entry at or below the small value is DROPPED and reported as ``kWarning``;
+    one at or above the large value is refused outright. Both are read from the live
+    solver rather than hardcoded, so a caller that moves either option stays in sync
+    with the row preparation below instead of silently disagreeing with it.
+    """
+    out = []
+    for key in ("small_matrix_value", "large_matrix_value"):
+        st, val = h.getOptionValue(key)
+        if st != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"HiGHS would not report {key} (status {st})")
+        out.append(float(val))
+    return out[0], out[1]
+
+
+def _prepare_cut_row(
+    coeffs: np.ndarray,
+    rhs: float,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    small_tol: float,
+    large_tol: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Make ``coeffs @ x <= rhs`` safe to hand :meth:`highspy.Highs.addRow`.
+
+    HiGHS silently discards any matrix entry with ``|value| <= small_matrix_value``
+    and reports the discard as ``kWarning`` -- neither an error nor a clean add.
+    Both readings are wrong: treating it as a rejection killed every ``squfl``
+    instance under ``lp_nlp_bb`` (#1066; ``squfl025-040`` died in 1.0 s), and
+    treating it as a clean add would let HiGHS *change the cut* behind the
+    separator's back. So the row is fitted to HiGHS's window here:
+
+    1. **Scale.** An OA cut is an inequality, so multiplying it by any ``s > 0``
+       leaves it mathematically identical. ``squfl025-040``'s first cut spans
+       ``2.05e-19`` to ``114`` -- 21 orders -- but HiGHS's window is 24 wide, so the
+       whole row fits once lifted. ``s`` is rounded down to a power of two, which
+       makes the scaled row *bit-for-bit* the original one rescaled: no coefficient
+       is perturbed, so there is no question of a rounding-tightened cut.
+    2. **Drop what still will not fit**, on the valid side only: with ``rhs``
+       untouched when ``a_j * x_j >= 0`` over the whole column box (removing a
+       non-negative term can only make the row easier to satisfy), otherwise with
+       ``rhs`` loosened by the most that term can contribute. Either way the result
+       is *implied by* the original row -- every point the cut kept, it keeps.
+    3. **Refuse loudly** when neither applies, rather than ship a row that is not
+       implied by the cut.
+
+    The unboundedness test is on the *bound* (``>= _INF``), never on the product:
+    ``1e-9 * 1e20`` is an unremarkable ``1e11``, which is exactly how an open bound
+    sneaks past a finiteness check (CLAUDE.md).
+    """
+    nz = np.flatnonzero(coeffs)
+    if nz.size == 0:
+        return nz, coeffs[nz], rhs
+
+    a = coeffs[nz]
+    a_min = float(np.min(np.abs(a)))
+    a_max = float(np.max(np.abs(a)))
+    # Lift the small end a decade clear of the drop threshold, without bringing the
+    # large end within a decade of the value HiGHS refuses. Scale UP only: scaling
+    # down would push entries that fit today below the threshold. Both ends are
+    # strictly positive, so the logarithm is always defined.
+    room = min(10.0 * small_tol / a_min, large_tol / (10.0 * a_max))
+    headroom = math.floor(math.log2(room))
+    if headroom > 0:
+        scale = 2.0**headroom
+        coeffs = coeffs * scale
+        rhs *= scale
+
+    tiny = (coeffs != 0.0) & (np.abs(coeffs) <= small_tol)
+    if not tiny.any():
+        nz = np.flatnonzero(coeffs)
+        return nz, coeffs[nz], rhs
+
+    a = coeffs[tiny]
+    lo, hi = lb[tiny], ub[tiny]
+    # ``a_j * x_j >= 0`` everywhere: a positive coefficient on a non-negative
+    # column, or a negative one on a non-positive column. Those drop for free.
+    free = np.where(a > 0.0, lo >= 0.0, hi <= 0.0)
+    # Otherwise rhs must absorb the term's worst contribution, which needs the
+    # bound on the binding side to be finite.
+    binding_open = np.where(a > 0.0, lo <= -_INF, hi >= _INF)
+    stuck = ~free & binding_open
+    if stuck.any():
+        bad = np.flatnonzero(tiny)[stuck][:5]
+        raise ValueError(
+            "cannot add this lazy cut to the HiGHS master: even rescaled it has "
+            f"coefficients at or below HiGHS's small_matrix_value ({small_tol:g}) on "
+            f"columns that are unbounded on the binding side (columns {bad.tolist()}), "
+            "so HiGHS would drop those terms and no finite right-hand side can "
+            "compensate. The cut would silently stop being valid. Bound those "
+            "columns, or separate a cut that does not touch them."
+        )
+    absorb = ~free
+    if absorb.any():
+        aa, lo_a, hi_a = a[absorb], lo[absorb], hi[absorb]
+        # One ulp up, because the loosening can be smaller than the ulp of ``rhs``
+        # and round straight back off it -- which would leave the row a hair
+        # TIGHTER than the one that is provably implied. Rounding the slack up is
+        # always the safe direction: it can only weaken the cut.
+        rhs = float(np.nextafter(rhs + float(np.sum(np.maximum(-aa * lo_a, -aa * hi_a))), np.inf))
+
+    kept = coeffs.copy()
+    kept[tiny] = 0.0
+    nz = np.flatnonzero(kept)
+    return nz, kept[nz], rhs
 
 
 def _stack_rows(
@@ -363,6 +473,7 @@ def solve_milp_with_lazy_cuts(
         sol.col_value = seed
         h.setSolution(sol)
 
+    small_tol, large_tol = _highs_matrix_window(h, highspy)
     counts = {"mipsol_calls": 0, "mipnode_calls": 0, "lazy_cuts": 0, "node_cuts": 0, "restarts": 0}
     pending: list[tuple[np.ndarray, float]] = []
     # The accepted incumbent is tracked separately from HiGHS's own: HiGHS's best
@@ -427,18 +538,23 @@ def solve_milp_with_lazy_cuts(
         for coeffs, rhs in pending:
             if coeffs.shape[0] != n:
                 raise ValueError(f"lazy cut has {coeffs.shape[0]} coefficients, expected {n}")
-            nz = np.flatnonzero(coeffs)
-            if (
-                h.addRow(
-                    -highspy.kHighsInf,
-                    rhs,
-                    int(nz.size),
-                    nz.astype(np.int32),
-                    coeffs[nz],
+            idx, vals, row_rhs = _prepare_cut_row(coeffs, float(rhs), lb, ub, small_tol, large_tol)
+            if idx.size == 0:
+                # Nothing survived, so there is no row to add. Adding nothing would
+                # restart an identical tree forever on a point the separator keeps
+                # vetoing, so refuse instead of spinning.
+                raise ValueError(
+                    "the separator returned a lazy cut with no coefficient HiGHS will "
+                    f"accept (small_matrix_value {small_tol:g}); there is no row to "
+                    "add and the master would not change."
                 )
-                != highspy.HighsStatus.kOk
-            ):
-                raise RuntimeError("HiGHS rejected a lazy cut row")
+            st = h.addRow(-highspy.kHighsInf, row_rhs, int(idx.size), idx.astype(np.int32), vals)
+            if st != highspy.HighsStatus.kOk:
+                raise RuntimeError(
+                    f"HiGHS rejected a lazy cut row (status {st}): {idx.size} nonzeros, "
+                    f"|coef| in [{np.min(np.abs(vals)):.3g}, {np.max(np.abs(vals)):.3g}], "
+                    f"rhs {row_rhs:.6g}"
+                )
 
     h.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
     h.clearCallbacks()
