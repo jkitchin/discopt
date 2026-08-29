@@ -5526,13 +5526,23 @@ def _route_progress_guard_options(
     """
     if not _convex_route_progress_guard_enabled():
         return mip_nlp_options, None
-    if method_key != "oa":
+    if method_key not in ("oa", "lp_nlp_bb"):
         return mip_nlp_options, None
     if mip_nlp_options is not None and mip_nlp_options.get("termination_hook") is not None:
         return mip_nlp_options, None
     guard = _RouteProgressGuard(time_limit)
     options = dict(mip_nlp_options or {})
     options["termination_hook"] = guard
+    if method_key == "lp_nlp_bb":
+        # The single-tree method checks in at every master restart, so it needs no
+        # deadline to get the hook called -- and has no separate master to give one
+        # to. The fixed split cost it ``rsyn0820m02m``, which certifies at 37.5s of
+        # a 60s limit and was cut at the 30s wall (measured 2026-08-29, both arms
+        # back to back). The reserve is not waste, though: ``squfl015-060`` is
+        # certified by the FALLBACK, not the route, and giving the route the whole
+        # limit loses it (optimal -> feasible in the same panel). Progress is what
+        # separates those two rows; the clock cannot.
+        return options, guard
     # A hook that only runs at the top of an OA iteration cannot budget anything
     # unless the loop actually gets back there. OA's first master expands to fill
     # whatever budget it is handed (``_MASTER_NO_INCUMBENT_BUDGET_FRAC``), so

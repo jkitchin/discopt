@@ -372,6 +372,7 @@ def solve_milp_with_lazy_cuts(
     lazy_callback=None,
     node_callback=None,
     terminate_callback=None,
+    terminate_poll_s: float = 1.0,
     mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
@@ -406,6 +407,26 @@ def solve_milp_with_lazy_cuts(
 
     ``callback_stats["mipsol_calls"] == 0`` means the separator never ran — NOT
     that it accepted everything (CLAUDE.md §6).
+
+    ``terminate_callback`` is consulted at two kinds of instant: **at each
+    restart**, after a tree has finished and produced cuts; and **inside the
+    tree**, through ``kCallbackMipInterrupt``. The snapshot is the running
+    ``callback_stats`` plus ``context`` (``"restart"`` or ``"interrupt"``),
+    ``elapsed`` and ``dual_bound`` — the master's current dual bound, ``None``
+    when HiGHS has none yet. Returning true stops the search and sets
+    ``callback_stats["terminated"]``.
+
+    The in-tree poll is what makes a progress budget honest: restarts alone are
+    not a clock. On ``rsyn0820m02m`` the master separates rarely enough that a
+    restart-only hook had nothing to judge at the checkpoint and abandoned a run
+    that certifies 2 s later. But HiGHS fires that callback about **3000 times a
+    second** (measured), which is neither affordable to answer in Python nor a
+    sensible sampling rate for a trend, so it is answered at most once every
+    ``terminate_poll_s`` seconds. That interval is the hook's real resolution and
+    a caller budgeting by it should size its window accordingly.
+
+    The hook can only ever give budget *back*: ``time_limit`` is still enforced
+    through the HiGHS option on every run, so nothing here can overrun it.
     """
     highspy = _require_highspy()
     t0 = time.time()
@@ -420,11 +441,6 @@ def solve_milp_with_lazy_cuts(
             "the HiGHS lazy-cut backend has no MIPNODE equivalent: it separates only "
             "at integer-feasible incumbents, so node_callback (fractional user cuts) "
             "cannot be honoured. Use milp_solver='gurobi' for that."
-        )
-    if terminate_callback is not None:
-        raise NotImplementedError(
-            "the HiGHS lazy-cut backend enforces time_limit through the HiGHS option "
-            "and has no callback-termination hook; pass time_limit instead."
         )
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
@@ -474,7 +490,23 @@ def solve_milp_with_lazy_cuts(
         h.setSolution(sol)
 
     small_tol, large_tol = _highs_matrix_window(h, highspy)
-    counts = {"mipsol_calls": 0, "mipnode_calls": 0, "lazy_cuts": 0, "node_cuts": 0, "restarts": 0}
+    counts = {
+        "mipsol_calls": 0,
+        "mipnode_calls": 0,
+        "lazy_cuts": 0,
+        "node_cuts": 0,
+        "restarts": 0,
+        # How many times the hook was actually asked. Zero with a hook installed
+        # is "it never got a look in", NOT "it kept saying continue" (§6).
+        "terminate_polls": 0,
+    }
+    terminated = False
+    terminate_context: Optional[str] = None
+    stop = [False]
+    last_poll = [t0]
+    poll_interval = float(terminate_poll_s)
+    if poll_interval < 0.0:
+        raise ValueError(f"terminate_poll_s must be non-negative, got {terminate_poll_s!r}")
     pending: list[tuple[np.ndarray, float]] = []
     # The accepted incumbent is tracked separately from HiGHS's own: HiGHS's best
     # solution may be a point the separator VETOED, and returning that as the OA
@@ -483,7 +515,37 @@ def solve_milp_with_lazy_cuts(
     best: list[Optional[np.ndarray]] = [None]
     best_obj: list[Optional[float]] = [None]
 
+    def _consult(context: str, dual_bound, elapsed: float) -> bool:
+        """Ask the caller's hook whether to stop. Never swallows (CLAUDE.md §7)."""
+        snapshot: dict[str, object] = dict(counts)
+        snapshot["context"] = context
+        snapshot["elapsed"] = elapsed
+        snapshot["dual_bound"] = dual_bound
+        counts["terminate_polls"] += 1
+        return bool(terminate_callback(snapshot))
+
     def _callback(callback_type, message, data_out, data_in, user_data):
+        if callback_type == highspy.cb.HighsCallbackType.kCallbackMipInterrupt:
+            # HiGHS hands every callback the SAME input struct, so the flag the
+            # separator sets to request a restart is still set when the rebuilt
+            # tree's first interrupt arrives -- and interrupts it before it has
+            # done anything. Measured: with this branch not writing the flag, the
+            # toy model below dropped from 7 restarts / optimal 9.0 to 1 restart /
+            # feasible 15.0. Every path through here states the flag it wants.
+            if stop[0]:
+                data_in.user_interrupt = True
+                return
+            # Fires thousands of times a second, so it is answered on an interval.
+            now = time.time()
+            if now - last_poll[0] < poll_interval:
+                data_in.user_interrupt = False
+                return
+            last_poll[0] = now
+            raw_lb = float(data_out.mip_dual_bound)
+            stop[0] = _consult("interrupt", raw_lb if np.isfinite(raw_lb) else None, now - t0)
+            data_in.user_interrupt = stop[0]
+            return
+
         x = np.asarray(data_out.mip_solution, dtype=np.float64).ravel()[:n]
         counts["mipsol_calls"] += 1
         # CLAUDE.md §7: a separator that raises must crash the solve, not be read
@@ -505,6 +567,8 @@ def solve_milp_with_lazy_cuts(
 
     h.setCallback(_callback, None)
     h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
+    if terminate_callback is not None:
+        h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
 
     status = SolveStatus.ERROR
     bound = None
@@ -529,12 +593,33 @@ def solve_milp_with_lazy_cuts(
         if np.isfinite(raw_bound):
             bound = raw_bound if bound is None else max(bound, raw_bound)
 
+        if stop[0]:
+            # The hook interrupted the tree. HiGHS reports that as kInterrupt,
+            # which is true but says nothing about who asked; record who.
+            terminated = True
+            terminate_context = "interrupt"
+            status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
+            break
+
         if not pending:
             status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
             break
 
         # A cut was requested, so this tree is stale: append the rows and rebuild.
         counts["restarts"] += 1
+        if terminate_callback is not None:
+            last_poll[0] = time.time()
+            if _consult("restart", bound, last_poll[0] - t0):
+                terminated = True
+                terminate_context = "restart"
+                status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
+                if status == SolveStatus.OPTIMAL:
+                    # The tree that just finished was solved to optimality, but its
+                    # rows are stale -- the separator vetoed its incumbent. Calling
+                    # that "optimal" would hand the caller a certificate for a
+                    # master that is missing the cut we are about to not add.
+                    status = SolveStatus.TIME_LIMIT
+                break
         for coeffs, rhs in pending:
             if coeffs.shape[0] != n:
                 raise ValueError(f"lazy cut has {coeffs.shape[0]} coefficients, expected {n}")
@@ -557,6 +642,8 @@ def solve_milp_with_lazy_cuts(
                 )
 
     h.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
+    if terminate_callback is not None:
+        h.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
     h.clearCallbacks()
 
     x_out, obj_out = best[0], best_obj[0]
@@ -573,5 +660,5 @@ def solve_milp_with_lazy_cuts(
         node_count=nodes,
         iterations=iters,
         wall_time=time.time() - t0,
-        callback_stats={**counts, "terminated": False, "terminate_context": None},
+        callback_stats={**counts, "terminated": terminated, "terminate_context": terminate_context},
     )
