@@ -21,6 +21,8 @@ These tests pin the rounding arithmetic and the retry, not the timing -- a
 wall-clock assertion would need a load gate and a spread to mean anything (§9).
 """
 
+import time
+
 import numpy as np
 import pytest
 from discopt import solver as S
@@ -192,91 +194,270 @@ def _ufl_model(n_i=6, n_j=12):
     return m
 
 
-_STUB_SLEEP = 0.3
+_ROUND_ATTEMPT_CAP_REF = 64
+_STUB_COST = 0.3
 _STUB_TIME_LIMIT = 10.0
 
 
-def _run_with_declining_stub(monkeypatch, frac):
-    """Solve the UFL fixture with a stub that always declines and costs time.
+# --- The spend rule: exercised directly, not raced to -------------------------
+#
+# These two tests used to run the UFL fixture below through two full solves and
+# compare how many times each reached the round gate. That measures the machine,
+# not the budget: the gate sits inside a wall-clock-bounded search, and ten
+# identical runs on one box (2026-08-29) gave 0, 7 or 15 gate visits, 0/31/97
+# nodes, and a status flipping between ``optimal`` and ``feasible``. On CI both
+# arms clamped at 7 and the comparison failed on main while the budget was
+# working correctly; on this developer box the fixture usually reached the gate
+# zero times, so the invariant was not tested at all. The rule now lives in
+# ``_RoundBudget``/``_round_fix_resolve_attempt`` and is asserted on directly --
+# which also pins the two conjuncts (opt-out, no-incumbent) nothing tested
+# before. ``test_the_miqp_search_wires_the_budget_in`` keeps the end-to-end
+# claim that the solver actually uses the rule.
 
-    Standing in for the expensive ``_pounce_recover_node_bound`` re-solve keeps
-    the bound under test the *budget* rather than POUNCE's convergence.
+
+def _drive_gate(monkeypatch, budget, *, cost=_STUB_COST, enabled=True, has_incumbent=False):
+    """Call the gate until it declines, with an attempt that costs ``cost``.
+
+    The stub charges the budget itself rather than sleeping, so the rule is
+    exercised at its own arithmetic instead of at the clock -- deterministic,
+    and it does not spend ``cost`` seconds of the suite per attempt. The real
+    elapsed time the gate also charges is microseconds, far below ``cost``.
     """
-    import time as _time
-
+    lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, Q = _fix_or_free_qp()
     seen = {"calls": 0, "limits": []}
 
     def _stub(*args, **kwargs):
         seen["calls"] += 1
         # Signature: (..., t_start, time_limit, Q=None) -- time_limit is arg 13.
         seen["limits"].append(float(args[12]))
-        _time.sleep(_STUB_SLEEP)
+        budget.add_spend(cost)
         return None
 
     monkeypatch.setattr(S, "_pounce_round_incumbent", _stub)
-    monkeypatch.setattr(S, "_ROUND_TIME_FRAC", frac)
-    monkeypatch.setenv("DISCOPT_ROUND_FIX_RESOLVE", "1")
-
-    t0 = _time.perf_counter()
-    S.solve_model(_ufl_model(), time_limit=_STUB_TIME_LIMIT)
-    seen["wall"] = _time.perf_counter() - t0
-    # The probe must have fired, or every assertion downstream is vacuous.
-    assert seen["calls"] > 0, (
-        "round-fix-resolve never ran: this model no longer reaches the MIQP "
-        "round gate, so the budget is untested -- fix the fixture, not the bound"
-    )
+    # The solver passes a perf_counter reading; 0.0 would make the elapsed
+    # term the machine's whole uptime and clamp every deadline to the solve.
+    t_start = time.perf_counter()
+    for _ in range(_ROUND_ATTEMPT_CAP_REF + 5):
+        before = seen["calls"]
+        S._round_fix_resolve_attempt(
+            np.array([0.4, 0.6]),
+            [0],
+            [1],
+            lb,
+            ub,
+            c,
+            k,
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            t_start,
+            _STUB_TIME_LIMIT,
+            Q,
+            budget,
+            enabled=enabled,
+            has_incumbent=has_incumbent,
+        )
+        if seen["calls"] == before:
+            break  # the gate declined; the stub was not reached
+    else:  # pragma: no cover - runaway guard
+        pytest.fail("the gate never declined -- the rule bounds nothing")
     return seen
 
 
-def test_round_fix_resolve_is_bounded_by_a_time_budget(monkeypatch):
-    """The heuristic may not spend the solve.
+def test_the_budget_not_the_attempt_cap_is_what_bounds_the_spend(monkeypatch):
+    """The binding constraint must be *time*, and neutralising it must show that.
 
-    ``_ROUND_ATTEMPT_CAP`` caps the *number* of attempts, but each attempt is up
+    ``_ROUND_ATTEMPT_CAP`` caps the number of attempts, but each attempt is up
     to two ``_pounce_recover_node_bound`` calls -- a full POUNCE re-solve whose
     cost varies by orders of magnitude across instances -- so a count cap bounds
     nothing. Measured on slay05h at T=60 s before this budget existed: 31
-    attempts, 0 hits, 66.5 s = 98.3% of the wall, turning a certified optimum
+    attempts, 0 hits, 66.5 s = 98.3 % of the wall, turning a certified optimum
     (1335 nodes, 15.5 s) into a time_limit with no incumbent (63 nodes).
     """
     budget = S._ROUND_TIME_FRAC * _STUB_TIME_LIMIT
-    seen = _run_with_declining_stub(monkeypatch, S._ROUND_TIME_FRAC)
-
-    assert seen["calls"] < _ROUND_ATTEMPT_CAP_REF
-    spent = seen["calls"] * _STUB_SLEEP
-    assert spent <= budget + _STUB_SLEEP + 0.5, (
-        f"spent {spent:.2f}s of a {budget:.2f}s budget over {seen['calls']} attempts"
+    budgeted = _drive_gate(monkeypatch, S._RoundBudget(_STUB_TIME_LIMIT))
+    # Stopped by the budget, well short of the cap.
+    assert budgeted["calls"] < _ROUND_ATTEMPT_CAP_REF
+    spent = budgeted["calls"] * _STUB_COST
+    assert spent <= budget + _STUB_COST, (
+        f"spent {spent:.2f}s of a {budget:.2f}s budget over {budgeted['calls']} attempts"
     )
-    # Each attempt is handed the budget's deadline, not the solve's: passing the
-    # global limit lets a single attempt run all the way to the deadline.
-    assert max(seen["limits"]) < _STUB_TIME_LIMIT
-    assert seen["wall"] < _STUB_TIME_LIMIT + 5.0
 
-
-def test_the_time_budget_is_what_bounds_the_spend(monkeypatch):
-    """Neutralising only the budget restores the unbounded behaviour.
-
-    Without this arm the test above would pass on any solve that happens to make
-    few attempts, and would not show that the *budget* is the binding constraint
-    rather than the attempt cap or the search finishing early.
-    """
-    default_frac = S._ROUND_TIME_FRAC
-    budgeted = _run_with_declining_stub(monkeypatch, default_frac)
-    unbudgeted = _run_with_declining_stub(monkeypatch, 1e6)
-
+    # Neutralise only the budget: now nothing but the backstop stops it.
+    unbudgeted = _drive_gate(monkeypatch, S._RoundBudget(_STUB_TIME_LIMIT, frac=1e6))
+    assert unbudgeted["calls"] == _ROUND_ATTEMPT_CAP_REF
     assert unbudgeted["calls"] > 2 * budgeted["calls"], (
-        f"budget frac made no difference: {budgeted['calls']} attempts budgeted "
+        f"budget made no difference: {budgeted['calls']} attempts budgeted "
         f"vs {unbudgeted['calls']} unbudgeted"
     )
-    # Unbudgeted, the stub alone outruns the solve's own time limit.
-    assert unbudgeted["calls"] * _STUB_SLEEP > _STUB_TIME_LIMIT * default_frac
+    # Unbudgeted, the attempts alone outrun the solve's own time limit.
+    assert unbudgeted["calls"] * _STUB_COST > _STUB_TIME_LIMIT * S._ROUND_TIME_FRAC
 
 
-_ROUND_ATTEMPT_CAP_REF = 64
+def test_each_attempt_gets_the_budget_deadline_not_the_solve_deadline(monkeypatch):
+    """Handing an attempt the global limit lets one attempt run to the deadline.
+
+    ``_pounce_recover_node_bound`` derives its own limit as
+    ``time_limit - (now - t_start)``, so the per-attempt deadline has to be the
+    budget's remainder, and it has to shrink as the budget is spent.
+    """
+    seen = _drive_gate(monkeypatch, S._RoundBudget(_STUB_TIME_LIMIT))
+    assert seen["limits"], "no attempt was made, so no deadline was handed out"
+    assert max(seen["limits"]) < _STUB_TIME_LIMIT
+    assert seen["limits"] == sorted(seen["limits"], reverse=True), (
+        f"per-attempt deadline did not shrink with the budget: {seen['limits']}"
+    )
+    assert seen["limits"][0] == pytest.approx(S._ROUND_TIME_FRAC * _STUB_TIME_LIMIT, abs=1e-3)
 
 
-def test_attempt_cap_is_still_a_backstop():
-    assert S._ROUND_ATTEMPT_CAP == _ROUND_ATTEMPT_CAP_REF
-    assert 0.0 < S._ROUND_TIME_FRAC < 1.0
+def test_the_gate_is_spent_only_while_the_tree_has_no_incumbent(monkeypatch):
+    """With a primal bound in hand a rounded completion can add nothing.
+
+    ``_pounce_round_incumbent`` only ever supplies an upper bound, so spending
+    the budget once the tree already has one is pure loss.
+    """
+    budget = S._RoundBudget(_STUB_TIME_LIMIT)
+    lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, Q = _fix_or_free_qp()
+    called = {"n": 0}
+
+    def _stub(*args, **kwargs):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(S, "_pounce_round_incumbent", _stub)
+    for has_inc, enabled in ((True, True), (False, False)):
+        assert (
+            S._round_fix_resolve_attempt(
+                np.array([0.4, 0.6]),
+                [0],
+                [1],
+                lb,
+                ub,
+                c,
+                k,
+                A_ub,
+                b_ub,
+                A_eq,
+                b_eq,
+                time.perf_counter(),
+                _STUB_TIME_LIMIT,
+                Q,
+                budget,
+                enabled=enabled,
+                has_incumbent=has_inc,
+            )
+            is None
+        )
+    assert called["n"] == 0, "the gate ran an attempt it should have declined"
+    assert budget.attempts == 0 and budget.secs == 0.0
+    # And the same budget still works, so the declines above were the gate's
+    # doing rather than an exhausted budget.
+    assert _drive_gate(monkeypatch, budget)["calls"] > 0
+
+
+def test_a_raising_attempt_still_charges_the_budget(monkeypatch):
+    """Otherwise a rounding that always throws buys unlimited retries."""
+    budget = S._RoundBudget(_STUB_TIME_LIMIT)
+    lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, Q = _fix_or_free_qp()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("rounding blew up")
+
+    monkeypatch.setattr(S, "_pounce_round_incumbent", _boom)
+    with pytest.raises(RuntimeError, match="blew up"):
+        S._round_fix_resolve_attempt(
+            np.array([0.4, 0.6]),
+            [0],
+            [1],
+            lb,
+            ub,
+            c,
+            k,
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            time.perf_counter(),
+            _STUB_TIME_LIMIT,
+            Q,
+            budget,
+            enabled=True,
+            has_incumbent=False,
+        )
+    assert budget.attempts == 1, "a raising attempt was not counted"
+    assert budget.secs > 0.0, "a raising attempt was not charged any time"
+
+
+def _ufl_model(n_i=6, n_j=12):
+    """Uncapacitated-facility-location shape -- the #1064 class.
+
+    Binary ``y_i``, continuous ``x_ij``, VUB links ``x_ij <= y_i``, covering
+    equalities ``sum_i x_ij == 1``, convex quadratic objective. This routes to
+    ``_solve_miqp_bb``, which is what makes the wiring test below meaningful.
+    """
+    from discopt import Model
+
+    m = Model("ufl")
+    y = m.binary("y", shape=(n_i,))
+    x = m.continuous("x", shape=(n_i, n_j), lb=0.0, ub=1.0)
+    rng = np.random.default_rng(0)
+    serve = rng.uniform(1.0, 9.0, size=(n_i, n_j))
+    opens = rng.uniform(5.0, 15.0, size=n_i)
+    for i in range(n_i):
+        for j in range(n_j):
+            m.subject_to(x[i, j] <= y[i])
+    for j in range(n_j):
+        m.subject_to(sum(x[i, j] for i in range(n_i)) == 1)
+    m.minimize(
+        sum(opens[i] * y[i] for i in range(n_i))
+        + sum(serve[i, j] * x[i, j] * x[i, j] for i in range(n_i) for j in range(n_j))
+    )
+    return m
+
+
+def test_the_miqp_search_wires_the_budget_in():
+    """The unit tests above are worthless if the search does not use the rule.
+
+    ``_solve_miqp_bb`` is entered directly rather than through ``solve_model``:
+    whether a given model *routes* to the convex-MIQP engine is itself not
+    reproducible (measured 2026-08-29 -- five identical ``solve_model`` runs of
+    the fixture below entered it zero times, other runs of the same build
+    entered it and reached the round gate 7 or 15 times). Calling the engine
+    makes the wiring claim deterministic; the ``_RoundBudget`` the engine builds
+    is the one the gate consults, and it is built from the solve's own limit.
+    """
+    built, asked = [], []
+    real = S._RoundBudget
+
+    class _Recording(real):
+        def __init__(self, time_limit, frac=None):
+            built.append(float(time_limit))
+            super().__init__(time_limit, frac)
+
+        def may_attempt(self):
+            asked.append(True)
+            return super().may_attempt()
+
+    saved, S._RoundBudget = S._RoundBudget, _Recording
+    try:
+        S._solve_miqp_bb(
+            _ufl_model(),
+            _STUB_TIME_LIMIT,
+            1e-4,
+            1,
+            "best_first",
+            10_000,
+            time.perf_counter(),
+            prefer_pounce=True,
+        )
+    finally:
+        S._RoundBudget = saved
+    assert built, "the MIQP search never built a round budget -- the rule is unwired"
+    assert built[0] == pytest.approx(_STUB_TIME_LIMIT)
+    # Building it is not using it: the gate has to actually consult the rule.
+    assert asked, "the round gate never consulted the budget -- the rule is bypassed"
+    assert real is saved, "the recording subclass leaked out of the test"
 
 
 # --- The candidate ladder (#1064: switch structure) ---------------------------
