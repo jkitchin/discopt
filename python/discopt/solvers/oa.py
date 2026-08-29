@@ -45,6 +45,7 @@ from discopt.solvers.mip_nlp_options import (
 
 if TYPE_CHECKING:
     from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import SolveStatus
 
 logger = logging.getLogger(__name__)
 
@@ -3890,6 +3891,79 @@ def _compute_gap(lb: float, ub: float) -> float:
     return optimality_gap(lb, ub, denom_floor=1.0)
 
 
+def _lp_nlp_bb_exit_status(
+    *,
+    converged_early: bool,
+    callback_terminated: bool,
+    master_status: "SolveStatus",
+    has_incumbent: bool,
+    master_bound_valid: bool,
+    gap: Optional[float],
+    gap_tolerance: float,
+    hook_stopped_before_wall: bool,
+) -> tuple[str, Optional[str]]:
+    """The status and termination reason :func:`solve_lp_nlp_bb` exits with.
+
+    Split out of the driver so the decision can be tested at every combination of
+    its inputs rather than only at whichever ones a 60-second solve happens to
+    produce.
+
+    The last clause is the one with teeth. A certificate the driver already holds
+    does not stop being a certificate because the *clock* -- rather than the gap
+    test -- is what ended the search. ``master_bound_valid`` says the master is a
+    relaxation of the MINLP, and a MIP tree's dual bound bounds its own optimum
+    whether the tree finished or was cut off mid-search, so ``gap <=
+    gap_tolerance`` on that bound is the same certificate a converged run reports.
+    Before this, a run that ended on the wall was reported ``feasible`` even with
+    the gap closed: ``squfl015-060`` at default settings finished with dual bound
+    366.6218167383147 against incumbent 366.62181673996474 -- a relative gap of
+    4.5e-14 against a 1e-4 tolerance -- and reported ``feasible``.
+
+    ``termination_reason`` is deliberately NOT rewritten to ``gap_tolerance`` when
+    that clause fires: the search really did stop on the clock, and the trace
+    should keep saying so. Status answers "is the answer proven"; the reason
+    answers "why did the loop end". They are different questions.
+    """
+    from discopt.solvers import SolveStatus
+
+    status = "feasible"
+    termination_reason: Optional[str] = None
+    if converged_early and has_incumbent:
+        # Stopped on the certificate, not on the clock or the caller's option.
+        termination_reason = "gap_tolerance"
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif callback_terminated:
+        # The clock and the hook both come back through the same callback, so name
+        # whichever one it was rather than reporting a time limit that may not have
+        # been reached.
+        termination_reason = "termination_hook" if hook_stopped_before_wall else "time_limit"
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.INFEASIBLE:
+        status = "infeasible"
+    elif master_status == SolveStatus.TIME_LIMIT:
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.ITERATION_LIMIT:
+        status = "iteration_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.OPTIMAL and has_incumbent:
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif not has_incumbent:
+        status = "no_feasible_point"
+    if (
+        status == "feasible"
+        and has_incumbent
+        and master_bound_valid
+        and gap is not None
+        and gap <= gap_tolerance
+    ):
+        # ``gap`` comes from :func:`_compute_gap`, which reports 1.0 -- never a
+        # small number -- when the bound ordering is materially inverted, so a
+        # broken certificate cannot reach this branch (see ``solvers._gap``).
+        status = "optimal"
+    if termination_reason is None:
+        termination_reason = status
+    return status, termination_reason
+
+
 def solve_feasibility_pump(
     model: Model,
     time_limit: float = 3600.0,
@@ -4606,7 +4680,7 @@ def solve_lp_nlp_bb(
         )
         return rows
 
-    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers import MILPResult
 
     solve_milp_with_lazy_cuts: Callable[..., MILPResult]
     if lazy_backend == "gurobi":
@@ -4749,34 +4823,18 @@ def solve_lp_nlp_bb(
     callback_stats["dual_bound_observations"] = int(bound_observations[0])
     callback_stats["converged_early"] = bool(converged_at[0] is not None)
     callback_terminated = bool(callback_stats.get("terminated"))
-    status = "feasible"
-    termination_reason: Optional[str] = None
-    if converged_at[0] is not None and incumbent is not None:
-        # Stopped on the certificate, not on the clock or the caller's option.
-        termination_reason = "gap_tolerance"
-        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
-    elif callback_terminated:
-        # The clock and the hook both come back through the same callback, so name
-        # whichever one it was rather than reporting a time limit that may not have
-        # been reached.
-        termination_reason = (
-            "termination_hook"
-            if hook is not None and (time.perf_counter() - t_start) < float(time_limit)
-            else "time_limit"
-        )
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.INFEASIBLE:
-        status = "infeasible"
-    elif master_result.status == SolveStatus.TIME_LIMIT:
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.ITERATION_LIMIT:
-        status = "iteration_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.OPTIMAL and incumbent is not None:
-        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
-    elif incumbent is None:
-        status = "no_feasible_point"
-    if termination_reason is None:
-        termination_reason = status
+    status, termination_reason = _lp_nlp_bb_exit_status(
+        converged_early=converged_at[0] is not None,
+        callback_terminated=callback_terminated,
+        master_status=master_result.status,
+        has_incumbent=incumbent is not None,
+        master_bound_valid=bool(master_bound_valid),
+        gap=gap,
+        gap_tolerance=gap_tolerance,
+        hook_stopped_before_wall=(
+            hook is not None and (time.perf_counter() - t_start) < float(time_limit)
+        ),
+    )
 
     trace_bound_validity = (
         "global"
