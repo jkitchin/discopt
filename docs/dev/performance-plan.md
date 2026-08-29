@@ -4208,3 +4208,183 @@ state; #1115's flag and its lazy-placement variant remain in tree, tested, and
 opt-in. The accounting stays in `MccormickLPRelaxer` — it costs one dot product
 per emitted batch on a path that only runs when the default-off flag is on, and it
 is how this verdict would be re-checked.
+
+## 23. #1066 master cut budget: raising it is falsified; probe-then-escalate is the fix (2026-08-29)
+
+§22 established that the #1066 rows lose because a single OA master MILP eats
+almost the whole 60 s budget, and that capping the master is not the fix. This
+section resolves what the master's cost actually is, records the falsification of
+the obvious remedy, and reports the policy that replaced it.
+
+### 23.1 The stale constant
+
+`milp_simplex` is the single Python funnel through which every in-house MILP
+reaches the Rust driver, and it passed the driver **no cut options at all** — so
+every solve silently inherited the binding's defaults, `root_cuts=16`,
+`cut_rounds=1`, `cut_select=False`. Those numbers were set in #334 (commit
+`03f84a62`, 2026-06-27) against the *cost* of cutting: back then each round of
+the root loop re-derived the augmented LP from a cold slack basis, so a second
+round cost a full root solve — 14 cold root solves were 23.1 s of a 24.2 s cut
+loop on the `rsyn0840m` master. #1102 removed that cost by warm-starting each
+round from the previous round's basis. The budget chosen against it was never
+revisited.
+
+### 23.2 Entry experiment: raising the budget, 10 instances
+
+Hypothesis: the legacy budget is now mis-set, and raising it to
+`root_cuts=200, cut_rounds=10, cut_select=True` lets the master close inside the
+OA loop's per-iteration share. Kill criterion: dead if no row gains a certificate
+and no dual bound tightens materially. `CHECKS_EXECUTED 40`, `VIOLATIONS 0`:
+
+| instance | OFF (legacy 16/1) | ON (200/10/select) |
+|---|---|---|
+| `rsyn0820m` (max) | feasible, bnd 1435.84, 63.6 s | **optimal, certified** 1150.3005, 20.4 s |
+| `rsyn0830m` (max) | obj 497.87, bnd 744.10 | obj 504.59, bnd 523.45 |
+| `rsyn0840m` (max) | obj 151.97, bnd 839.93 | obj 325.55, bnd 500.03 |
+| `rsyn0820m02m` (max) | obj −65.28, bnd 5227.41 | obj −24.15, bnd 4359.66 |
+| `syn40m` | certified, 30.0 s | certified, 1.4 s |
+| `syn20m02m` | certified, 7.9 s | certified, 2.9 s |
+| `rsyn0805m` | certified, 1.1 s | certified, 2.8 s (**cost**) |
+| `squfl025-040` (min) | bnd 144.64 | bnd 122.91 (**regression**) |
+| `portfol_classical050_1` | obj −0.09071, bnd −0.09743 | tie |
+| `alan` | certified, 0.5 s | certified, 0.5 s |
+
+The kill criterion was not met — a certificate was gained and four bounds moved
+substantially — so the mechanism was carried to a graduation panel.
+
+### 23.3 FALSIFIED: no static budget is safe (graduation panel, 79 instances)
+
+The corpus-wide panel **failed §5 bar 1**. `CHECKS_EXECUTED 291`,
+`VIOLATIONS 1`, `ROWS_EXERCISED 37/79`. Certified 56/79 in both arms: the raised
+budget *gained* `rsyn0820m` and **lost `tls2`** — a certification regression, which
+bar 1 forbids with zero slack. Total wall 1797.6 s → 1722.4 s; five bounds
+tighter, four looser.
+
+Root cause, measured standalone on `tls2`'s masters (tiny: 46 ub rows, 6 eq rows,
+37 cols, 33 integer):
+
+| `tls2` master0 | status | bound | nodes | wall |
+|---|---|---|---|---|
+| legacy 16/1 | **optimal 3.10** | 3.10 | 241 | 0.0 s |
+| 200/10/select | feasible | 2.43 | 58 923 | 60.0 s |
+| 100/10/select | feasible | 2.43 | 64 705 | 60.0 s |
+| 64/5/select | feasible | 2.30 | 31 631 | 16.1 s |
+| 32/5/select | feasible | 2.30 | 31 631 | 16.0 s |
+
+Same shape on masters 3 and 6 (515 and 595 nodes, 0.0 s at the legacy budget; the
+strong arms on master 6 find a *worse* incumbent, 8.30 vs 5.30). No soundness
+violation — the optimum stays inside `[bound, incumbent]` on every arm — but the
+conclusion is binding: **a master that closes in a few hundred nodes at 16 cuts is
+overhead territory, and the extra rows derail its search.** Neither budget
+dominates, and no static raise is safe. Treat this as a negative result: do not
+re-propose raising `root_cuts`/`cut_rounds` unconditionally.
+
+Sub-hypotheses falsified in the same sweeps, also binding:
+
+* `gmi_cuts=False` is far worse than legacy on 3 of 4 `rsyn` masters.
+* `node_propagation=True` is neutral-to-harmful.
+* `root_cuts >= 500` collapses node throughput.
+* `root_cuts=16, cut_rounds=10, cut_select=True` is insufficient — the *cap*
+  matters, not merely the number of rounds.
+
+### 23.4 The design that replaced it: probe, then escalate
+
+Since nothing in a master's shape predicts which class it is in, the policy
+measures instead of guessing: run the cheap budget under a **node cap**, and
+spend the strong budget only on a master that cap fails to close. Both attempts
+bound the same MILP, so either one's dual bound is valid and either one's
+incumbent is feasible; the merge takes the better of each and can never invent a
+bound neither attempt proved. The second attempt is seeded with the probe's
+incumbent (the driver re-validates a seed and silently drops one it cannot prove
+feasible, so seeding cannot manufacture a certificate).
+
+Entry experiment on 10 captured masters, cap 20 000 nodes, 60 s:
+
+| master | escalates? | policy | legacy alone | strong alone |
+|---|---|---|---|---|
+| `tls2` masters 0/3/6 | **no** | optimal, 0.0 s | optimal, 0.0 s | feasible, 60 s |
+| `rsyn0820m` m0 | yes | optimal 1.6 s | optimal 11.4 s | optimal 0.7 s |
+| `rsyn0830m` m0 | yes | optimal 1.1 s | optimal 49.2 s | optimal 0.3 s |
+| `rsyn0840m` m0 | yes | **optimal 33.5 s** | feasible 63.3 s | optimal 32.4 s |
+| `rsyn0820m02m` m0 | yes | bnd −4152.9 | bnd −5015.8 | bnd −4156.8 |
+| `squfl025-040` m0/m5 | **no** | optimal (1 n, 23 n) | optimal | optimal |
+| `portfol_classical050_1` m0 | **no** | optimal, 0.0 s | optimal | optimal |
+
+The policy keeps every `rsyn` win and declines to escalate on `tls2`, `squfl` and
+`portfol` — the three classes the static profile hurt.
+
+**Retraction (CLAUDE.md §11).** The probe-overhead half of the stated kill
+criterion — "dead if probe overhead exceeds ~15 % of the strong arm's wall on the
+`rsyn` masters" — **fails as written**: the probe costs 0.9 s against a 0.7 s
+strong wall on `rsyn0820m` (129 %). The criterion was unmeasurable, not the design
+unsound: a node-capped probe costs a roughly fixed ~1 s while the strong wall
+ranges 0.3 s → 32 s, so the ratio tracks the denominator rather than the policy.
+The decision-relevant quantity is absolute overhead — ~0.8–1.1 s per *escalating*
+master against a 54 s master budget, and zero on a master that declines — and the
+end-to-end panel in §23.5.
+
+The shipped cap is **5 000 nodes**, chosen from the measured node counts rather
+than taste: every master the legacy budget closes fast closes well inside it
+(`tls2` at 241/515/595 nodes), and every master that needs the strong budget was
+still open at 20 000 (all four `rsyn`). 5 000 sits ~8× above the first class and
+far below the second, so it classifies identically to the 20 000 cap the entry
+experiment ran at while costing ~4× less where it escalates.
+
+### 23.5 Graduation panel: both bars pass (2026-08-29)
+
+Same 79-instance manifest, same scorer and same machine as the §23.3 panel that
+the static profile failed, so the two are directly comparable. Arms interleaved
+per instance behind a load gate (CLAUDE.md §9); `DISCOPT_MILP_CUT_BUDGET`
+off/on.
+
+`CHECKS_EXECUTED 292`, `VIOLATIONS 0`, `ROWS_EXERCISED 37/79`.
+
+**Bar 1 — cert-clean.** Zero violations: no incumbent past its `minlplib.solu`
+reference, no dual bound crossing one, no row losing a bound it had, and — the
+clause the static profile broke — **no certification regression**. Certificates
+56 → 57: `rsyn0820m` gained, nothing lost. `tls2`, whose certificate the static
+profile destroyed, is now bit-identical across arms (`obj 5.299999999988933`,
+`bound 5.299999976086654`, 21.4 s both) because the probe closes each of its 11
+masters and declines to escalate. `portfol_classical050_1` is likewise identical.
+
+**Bar 2 — net-positive.** Every direction moves the right way:
+
+| | OFF (legacy only) | ON (probe-then-escalate) |
+|---|---|---|
+| certified | 56/79 | **57/79** |
+| dual bounds moved | — | **5 tighter, 0 looser** (of 78 compared) |
+| total wall, all rows | 1796.6 s | **1712.3 s** (−4.7 %) |
+
+Tighter bounds: `rsyn0820m` 1435.8 → 1150.3, `rsyn0830m` 738.3 → 517.1,
+`rsyn0840m` 816.8 → 499.3, `rsyn0820m02m` 5216.2 → 4360.5 (all max sense, so
+lower is tighter), `squfl025-040` 144.882 → 144.993 (min sense) — the row the
+static profile *loosened* to 122.9.
+
+Largest wall movements, all improvements, none a regression:
+
+| instance | OFF | ON | |
+|---|---|---|---|
+| `rsyn0820m` | 63.5 s uncertified | **20.2 s certified** | −43.2 s |
+| `syn40m` | 29.1 s | 2.2 s | −26.8 s |
+| `rsyn0815m` | 13.5 s | 3.4 s | −10.0 s |
+| `syn20m02m` | 7.5 s | 3.4 s | −4.1 s |
+
+No exercised row got more than 2 s slower, and `rsyn0805m` — which the static
+profile taxed 1.1 → 2.8 s — is 1.1 → 1.0 s, because its masters close inside the
+probe cap and never reach the strong budget. This is the point of the design: the
+cost is paid only where the cheap budget has already been shown to fail.
+
+Both bars clear on one run, which under the 2026-07-17 policy suffices, so
+`_MILP_CUT_BUDGET_DEFAULT` graduates to `True`. `DISCOPT_MILP_CUT_BUDGET=0`
+remains the opt-out and restores the single legacy solve exactly; that path stays
+covered by tests.
+
+### 23.6 Known defect uncovered, not fixed here
+
+The Rust root cut loop (`crates/discopt-core/src/bnb/milp_driver.rs`, the
+`for _round in 0..opts.cut_rounds` loop) **never consults `time_limit_s`**. At the
+legacy `cut_rounds=1` this is invisible; at the strong budget's 10 rounds a master
+can in principle spend its whole deadline cutting before a single B&B node runs.
+The escalation is not exposed to it in any measurement here — the strong arm is
+entered only after a node-capped probe has already returned, and no panel row hit
+it — but the loop should honour the deadline regardless of who calls it.
