@@ -25,7 +25,11 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "python", "tests"))
 
 import numpy as np  # noqa: E402
 
-#: n_initial as a function of the dimension. ``None`` = whatever the shipped rule does.
+#: n_initial as a function of the dimension. ``None`` = whatever the shipped rule
+#: does -- so the "shipped" arm tracks the LIVE code. The committed results were
+#: taken before #1036, when that was ``max(n+2, min(10n, max_evals // 2))``; on
+#: this tree it now resolves to ``2(n+1)`` and duplicates that arm. To reproduce
+#: the "shipped" column, restore the old expression in ``solve_surrogate`` first.
 ARMS: dict[str, object] = {
     "shipped": None,
     "n+2": lambda n: n + 2,
@@ -34,6 +38,13 @@ ARMS: dict[str, object] = {
     "5n": lambda n: 5 * n,
     "10n": lambda n: 10 * n,
 }
+
+
+def _dump_rows(rows: list[dict], path: str) -> None:
+    """One row per line: the same data as ``indent=1``, ~10x fewer diff lines."""
+    body = ",\n ".join(json.dumps(r, separators=(",", ":")) for r in rows)
+    with open(path, "w") as fh:
+        fh.write("[" + body + "\n]\n")
 
 
 def _one(job):
@@ -105,8 +116,7 @@ def main() -> None:
             if i % 20 == 0 or i == len(jobs):
                 print(f"  ... {i}/{len(jobs)} done", flush=True)
 
-    with open(args.out, "w") as fh:
-        json.dump(rows, fh, indent=1)
+    _dump_rows(rows, args.out)
 
     # -- report ---------------------------------------------------------------
     print()

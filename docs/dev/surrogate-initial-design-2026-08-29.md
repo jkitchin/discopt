@@ -94,7 +94,10 @@ the full budget (`design_experiment.py`, then `analyze.py`).
 ## Result — the criterion was met
 
 Censored mean evaluations to 1e-2 (lower is better); `shipped` is the rule in
-force at the time, which equals `10n` wherever `10n ≤ max_evals // 2`.
+force at the time, which equals `10n` wherever `10n ≤ max_evals // 2`. That arm
+reads the live code, so on the post-fix tree it resolves to `2(n+1)` and
+duplicates that column — reproducing the `shipped` column means restoring the old
+expression in `solve_surrogate` first.
 
 ### RBF (default family), 8 functions × 12 seeds
 

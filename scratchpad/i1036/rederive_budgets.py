@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "python", "tests"))
 import numpy as np  # noqa: E402
 
 
+def _dump_rows(rows: list[dict], path: str) -> None:
+    """One row per line: the same data as ``indent=1``, ~10x fewer diff lines."""
+    body = ",\n ".join(json.dumps(r, separators=(",", ":")) for r in rows)
+    with open(path, "w") as fh:
+        fh.write("[" + body + "\n]\n")
+
+
 def _one(job):
     import discopt.solvers.surrogate as S
     from support import direct_testfuncs as tfs
@@ -51,7 +58,7 @@ def main() -> None:
     print(f"{len(jobs)} traces at max_evals={args.budget}, tol={args.tol}", flush=True)
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         rows = list(pool.map(_one, jobs))
-    json.dump(rows, open(args.out, "w"), indent=1)
+    _dump_rows(rows, args.out)
 
     print(f"\n{'function':<18}{'per-seed first-reach':<46}{'k/k budget':>11}")
     print("-" * 75)
