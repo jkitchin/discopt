@@ -55,8 +55,8 @@ bound=None  gap=None  gap_certified=False
 ```
 
 Thirty evaluations is not convergence — the backend's own test suite reports
-branin reaching 1% relative accuracy at 38. The point of the number above is the
-second line.
+branin reaching 1% relative accuracy at 16-42 evaluations over seeds 0-7. The
+point of the number above is the second line.
 
 ## The cost model — read this before choosing this backend
 
@@ -64,9 +64,9 @@ Nearly all the wall clock is the *acquisition* solve, not your objective. On
 branin with a free objective and `max_evals=30`, instrumented per evaluation:
 
 ```
-evals 1-15  (initial design):   0.77 s total
-evals 16-30 (each):            ~20.2 s      <- exactly acquisition_time_limit
-total:                          303.8 s
+evals 1-6   (initial design):   0.29 s total
+evals 7-30  (each):            ~19.0 s      <- almost exactly acquisition_time_limit
+total:                          456.3 s
 ```
 
 That is the intended trade when a single evaluation dwarfs 20 s of solver time.
@@ -79,7 +79,10 @@ cubic kernel the acquisition never certifies, so the budget *looks* wasted — i
 is not. It is buying primal solution quality.
 ```
 
-Relative error at `max_evals=30`, measured:
+Relative error at `max_evals=30`, measured **under the pre-#1036 initial-design
+rule** (15 points rather than 6 — the conclusion is about
+`acquisition_time_limit`, which that change did not touch, but the absolute
+numbers have not been re-taken):
 
 | function | `acquisition_time_limit=20` | `=2` |
 |---|---|---|
@@ -160,13 +163,16 @@ Evaluations to 1e-2 relative accuracy, from the backend's test suite:
 
 | function | surrogate | DIRECT | |
 |---|---|---|---|
-| six_hump_camel | 32 | 137 | 4.3× |
-| branin | 38 | 69 | 1.8× |
-| hartman_3 | 46 | 79 | 1.7× |
-| ackley_2 | 48 | 67 | 1.4× |
-| **goldstein_price** | **96** | **75** | **0.8× — a loss** |
+| six_hump_camel | 23 | 137 | 6.0× |
+| branin | 36 | 69 | 1.9× |
+| hartman_3 | 50 | 79 | 1.6× |
+| ackley_2 | 44.5 (2/3 seeds) | 67 | 1.5× |
+| **goldstein_price** | **never, 0/3 seeds** | **75** | **a loss** |
 
-The advantage is real but it is roughly **2×, not an order of magnitude**, and
+Median of seeds 0-2 at a 60-evaluation budget; DIRECT is deterministic. Three
+seeds is a slice, not a verdict — the 8-function, 12-seed panel behind the
+default initial-design size lives in the repository's `docs/dev/`. The
+advantage is real but it is roughly **2×, not an order of magnitude**, and
 goldstein_price is an outright loss caused by objective dynamic range (3 → ~10⁶);
 RBFOpt's monotone objective transformation {cite:p}`CostaNannicini2018` is the
 known remedy and is not implemented here. DIRECT is a stronger baseline than the
@@ -204,7 +210,7 @@ at scale, MADS-family solvers {cite:p}`AuditDennis2006` remain the mature choice
 | `max_evals` | `200` | evaluation budget — the cost model |
 | `surrogate` | `"rbf"` | `"rbf"` or `"kriging"` |
 | `rbf_kernel` | `"cubic"` | `"cubic"`, `"thin_plate"`, `"linear"` (the certifying one) |
-| `n_initial` | auto | initial design size; default `max(n+2, min(10n, max_evals//2))` |
+| `n_initial` | auto | initial design size; default `2(n+1)`, capped at `max_evals` — the dimension only, never the budget |
 | `acquisition_optimizer` | `"auto"` | `"certified"` refuses rather than falling back |
 | `acquisition_time_limit` | `20.0` | per-acquisition budget — see the cost model above |
 | `nugget` / `estimate_nugget` | `1e-8` / `False` | kriging noise floor |

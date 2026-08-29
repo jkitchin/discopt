@@ -12,6 +12,37 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`solver="surrogate"`: the initial design is sized from the dimension alone,
+  `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,
+  `max(n+2, min(10n, max_evals // 2))`, made the design — and therefore the whole
+  trajectory — a step function of `max_evals`, so two runs at different budgets
+  were two different searches rather than one search and its continuation.
+  Measured on the `on_evaluation` traces, 17 of 30 budget pairs over
+  `{40, 46, 60, 80, 100}` diverged at evaluation 1; after the change, 0 of 30.
+  That invalidated every "the incumbent first reached the tolerance at evaluation
+  `k`, so a budget of `B > k` has headroom" statement made about this backend,
+  including the one the convergence panel's budgets were set from. The smaller
+  design is also measurably better: over 8 functions × 12 seeds at
+  `max_evals=100`, mean evaluations to 1e-2 relative error (a non-reaching seed
+  counted at the full budget) falls from 67.8 to 60.0 with RBF and from 65.6 to
+  61.1 with kriging, improving 6 of 8 and 4 of 6 functions respectively. The two
+  that regress are the two the module docstring already names as this backend's
+  hard shapes — a sharply scaled objective (`goldstein_price`) and a densely
+  multimodal one (`rastrigin_2`); `n_initial` remains the override and the
+  docstring now says which shapes to raise it for. `n+2` beats `2(n+1)` on the
+  RBF panel mean by 0.3% but takes `goldstein_price` from 4/12 seeds reaching the
+  tolerance to 0/12, so it was not taken. Full panel:
+  `docs/dev/surrogate-initial-design-2026-08-29.md`.
+  `test_reaches_the_published_optimum_within_a_small_budget` now asserts a
+  population statistic — a quorum of seeds reaching the tolerance plus the median
+  relative error — with budgets re-derived as the evaluation at which the last of
+  8 seeds first reaches it, plus ~50% headroom. The old single-seed pass/fail on
+  a chaotic deterministic search was a statement about one machine's floating
+  point: the `hartman_3` failure reported in #1036 does not reproduce on
+  Linux/OpenBLAS, where the whole panel passes.
+  `test_a_larger_budget_continues_the_same_search` pins the nesting property that
+  makes the budget derivation valid at all.
+
 - **`discopt_benchmarks/tests/test_interop.py` deleted; a no-op suite guard added
   in its place** (closes #1050). The file's 20 tests were written against a
   `discopt._rust` surface that never existed — all 14 helpers they referenced

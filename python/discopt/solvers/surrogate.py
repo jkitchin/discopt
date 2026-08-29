@@ -34,18 +34,22 @@ certifying the answer.
 Cost model: what you are paying for
 -----------------------------------
 Nearly all the wall clock is the acquisition solve, not the objective. Measured
-on branin with a free objective, ``max_evals=30``: the 15-point initial design
-costs 0.8 s in total, and every subsequent evaluation costs almost exactly
-``acquisition_time_limit`` (20 s by default). That is the intended trade — the
-backend exists for objectives where one evaluation dwarfs 20 s of solver time —
-but it means ``solver="surrogate"`` on a cheap objective is far slower than
+on branin with a free objective, ``max_evals=30``: the 6-point initial design
+costs 0.29 s in total, and every subsequent evaluation costs almost exactly
+``acquisition_time_limit`` (19.0 s mean against a 20 s limit). That is the
+intended trade — the backend exists for objectives where one evaluation dwarfs
+20 s of solver time — but it means ``solver="surrogate"`` on a cheap objective is far slower than
 ``solver="direct"`` for a worse answer, and the choice between them is a
 statement about *your* evaluation cost.
 
 Do not shorten ``acquisition_time_limit`` to make it feel faster. It is tempting:
 with the default cubic kernel the acquisition never certifies (see the kernel
 table below), so the budget looks wasted. It is not wasted — it is buying primal
-solution quality. Measured, ``max_evals=30``, relative error at 20 s vs 2 s:
+solution quality. Measured, ``max_evals=30``, relative error at 20 s vs 2 s
+(**taken under the pre-#1036 initial-design rule** — the conclusion is about
+``acquisition_time_limit``, which #1036 did not touch, but the absolute numbers
+were produced with a 15-point rather than a 6-point design and have not been
+re-taken):
 
 =================  ==========  =========
 function           20 s        2 s
@@ -229,15 +233,35 @@ that matters is *evaluations to a target accuracy*. Measured head to head agains
 target — 1e-2 relative error, 60-evaluation budget, median of seeds 0-2 for this
 backend (DIRECT is deterministic):
 
-================  =========  ======  ==============
-function          surrogate  DIRECT  factor
-================  =========  ======  ==============
-six_hump_camel    32         137     4.3x
-branin            38         69      1.8x
-hartman_3         46 (2/3)   79      1.7x
-ackley_2          48         67      1.4x
-goldstein_price   96         75      **0.8x (loss)**
-================  =========  ======  ==============
+================  ==========  ======  ==============
+function          surrogate   DIRECT  factor
+================  ==========  ======  ==============
+six_hump_camel    23          137     6.0x
+branin            36          69      1.9x
+hartman_3         50          79      1.6x
+ackley_2          44.5 (2/3)  67      1.5x
+goldstein_price   never 0/3   75      **loss**
+================  ==========  ======  ==============
+
+Re-measured 2026-08-29, after issue #1036 resized the initial design from
+``max(n+2, min(10n, max_evals // 2))`` to ``2(n+1)``; DIRECT, being
+deterministic, did not move. Read this table as the 3-seed slice it is rather
+than as the verdict on that change: ``six_hump_camel`` (32 → 23) and ``branin``
+(38 → 36) improved, ``goldstein_price`` — already the loss — got worse, and the
+other two moved in both directions at once. ``hartman_3``'s median rose 46 → 50
+because all three seeds now reach the tolerance where only two did; ``ackley_2``
+fell 48 → 44.5 because one of the three stopped reaching it inside 60
+evaluations. Three seeds cannot separate those from noise. The verdict is the
+8-function, 12-seed panel in
+``docs/dev/surrogate-initial-design-2026-08-29.md``, whose mean evaluations to
+1e-2 fall 67.8 → 60.0.
+
+The old rule also made the design, and therefore the whole trajectory, a
+function of ``max_evals``. Two runs at different budgets were different searches
+rather than one search and its continuation, which invalidated every "reached
+the tolerance at evaluation ``k``, so budget ``B > k`` has headroom" statement
+made about this backend. The default design size is now a function of the
+dimension alone; ``test_a_larger_budget_continues_the_same_search`` pins it.
 
 Two things to take from that rather than from an adjective:
 
@@ -351,6 +375,52 @@ _RBF_RESIDUAL_TOL = 1e-3
 #: pin down a response surface grows with dimension, and the acquisition's own
 #: global optimization gets harder at the same time. Warn, never refuse.
 _DIMENSION_WARN_THRESHOLD = 15
+
+
+def _default_design_size(n_vars: int) -> int:
+    """Default initial-design size: ``2 (n + 1)``, a function of dimension ONLY.
+
+    Two properties, and the first is the one that matters:
+
+    **It does not depend on ``max_evals``.** The previous rule was
+    ``max(n+2, min(10n, max_evals // 2))``, which made the design — and therefore
+    the entire trajectory — a function of the budget. Two runs at different
+    budgets were then two different searches rather than one search and its
+    continuation, so "the incumbent first reached the tolerance at evaluation
+    ``k``, therefore a budget of ``B > k`` has headroom" was not a valid argument
+    about this backend. Measured on the ``on_evaluation`` traces at seed 0
+    (``scratchpad/i1036/nesting_probe.py``): 17 of 30 budget pairs over
+    ``{40, 46, 60, 80, 100}`` diverged at **evaluation 1**. With a
+    dimension-only size the same probe finds 0 of 30 — a larger budget is now
+    literally the smaller-budget run, continued.
+
+    **It is smaller than the ``10n`` it replaces, and that is measured.** ``10n``
+    is the sizing rule for fitting a response surface *once*, over a design chosen
+    in advance; it is not a budget-allocation rule for a serial adaptive search,
+    where every design point is a point not spent on the acquisition. Evaluations
+    to 1e-2 relative error, 12 seeds per cell, ``max_evals=100``, non-reached
+    counted as the full budget (``docs/dev/surrogate-initial-design-2026-08-29.md``
+    has the per-function table):
+
+    ==============================  ========  ============  ========  ========
+    panel mean, evals to 1e-2       ``10n``   ``2(n+1)``    ``n+2``   ``5n``
+    ==============================  ========  ============  ========  ========
+    RBF, 8 functions                68.1      **60.0**      59.8      64.7
+    kriging, 6 functions            65.6      **61.1**      —         62.2
+    ==============================  ========  ============  ========  ========
+
+    ``n+2`` edges out ``2(n+1)`` on the RBF mean but collapses on
+    ``goldstein_price`` (0 of 12 seeds reach the tolerance, against 4 of 12 for
+    ``10n``); ``2(n+1)`` is within 0.4% of it on the mean while matching ``10n``
+    there. It also stays at or above the ``n+1`` an RBF with a linear tail needs
+    to be fitted at all, for every ``n``.
+
+    Not tuned per family: the two tables above point the same way, so one rule
+    covers both. ``n_initial`` overrides it, and a caller who knows their
+    objective is sharply scaled or densely multimodal should raise it — those are
+    the two shapes on this panel that preferred a larger design.
+    """
+    return 2 * (int(n_vars) + 1)
 
 
 @dataclass
@@ -1598,10 +1668,18 @@ def solve_surrogate(
         Smoothing on the RBF's ``Φ`` block — the RBF analogue of ``nugget``.
         ``0`` (default) interpolates.
     n_initial
-        Size of the initial space-filling design. Default
-        ``max(n+2, min(10n, max_evals // 2))``: ``10n`` is the classic rule of
-        thumb, ``n+2`` is the minimum an RBF with a linear tail can be fitted
-        from, and the cap stops the design from eating a small budget whole.
+        Size of the initial space-filling design. Default ``2 (n + 1)``, capped at
+        ``max_evals`` — **a function of the dimension only**, deliberately not of
+        the budget. See :func:`_default_design_size` for the measurement behind
+        both halves of that: the budget-independence is what makes a larger
+        ``max_evals`` a *continuation* of a smaller one rather than a different
+        search (it was not, before issue #1036), and ``2(n+1)`` reaches 1e-2
+        relative error in fewer evaluations than the ``10n`` it replaces on 6 of 8
+        panel functions with RBF and 4 of 6 with kriging.
+
+        Raise it if you know the objective is sharply scaled or densely
+        multimodal: ``goldstein_price`` and ``rastrigin_2`` are the two shapes on
+        that panel that preferred a bigger design.
     acquisition_optimizer
         How the acquisition subproblem is maximized.
 
@@ -1755,7 +1833,12 @@ def solve_surrogate(
     from discopt._relax.primal_heuristics import _generate_starts
 
     if n_initial is None:
-        n_design = max(n_vars + 2, min(10 * n_vars, max(1, max_evals // 2)))
+        # Sized from the DIMENSION alone. The previous rule,
+        # ``max(n+2, min(10n, max_evals // 2))``, made the design a function of
+        # the budget, and that is not a tuning detail — it is what makes two runs
+        # at different budgets two *different searches* rather than one search and
+        # its continuation. See :func:`_default_design_size` and issue #1036.
+        n_design = _default_design_size(n_vars)
     else:
         n_design = int(n_initial)
     n_design = max(1, min(n_design, max_evals))
