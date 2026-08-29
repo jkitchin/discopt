@@ -44,13 +44,36 @@ def _gate_script() -> str:
     raise AssertionError("no `filter` step in the `changes` job — did it get renamed?")
 
 
-def _render(script: str, *, event: str, before: str, sha: str, base_ref: str) -> str:
-    """Substitute the ``${{ github.* }}`` expressions GitHub would expand."""
+def _render(
+    script: str,
+    *,
+    event: str,
+    before: str,
+    sha: str,
+    base_ref: str,
+    draft: str = "false",
+    action: str = "",
+) -> str:
+    """Substitute the ``${{ github.* }}`` expressions GitHub would expand.
+
+    ``draft`` and ``action`` default to the values that mean "an ordinary push to
+    an ordinary PR" — a non-draft, and no label action — so every test written
+    before the draft/label short-circuits existed still describes the same
+    scenario and still pins the same answer.
+
+    The leftover assertion below is the load-bearing part of this helper: adding
+    a ``${{ }}`` expression to the gate without teaching this table about it
+    fails every test in the file rather than silently running a script with an
+    unexpanded expression in it, which under ``set -uo pipefail`` would be a
+    syntax error the gate would never see in CI.
+    """
     subs = {
         "github.event_name": event,
         "github.event.before": before,
         "github.sha": sha,
         "github.base_ref": base_ref,
+        "github.event.pull_request.draft": draft,
+        "github.event.action": action,
     }
     out = script
     for key, val in subs.items():
@@ -207,6 +230,131 @@ def test_pull_request_docs_only_against_its_merge_base_skips(tmp_path):
     _git(repo, "update-ref", "refs/remotes/origin/main", base)
     script = _render(_gate_script(), event="pull_request", before="", sha=tip, base_ref="main")
     assert _run_gate(repo, script) == "false"
+
+
+# ----------------------------------------------------------------------
+# Cost short-circuits: events that must not buy the whole matrix
+# ----------------------------------------------------------------------
+
+
+def test_draft_pull_request_skips_the_matrix(tmp_path):
+    """A draft PR must not run the ~56 min matrix on every push.
+
+    ``synchronize`` fires on every push to a draft, and a branch is typically
+    pushed many times before it is ready. This is a DEFERRAL, not a hole: the
+    control below pins that marking the PR ready runs everything on the final
+    tree, and a draft cannot be merged in the meantime.
+
+    The repo here touches the solver, so `code=false` can only come from the
+    draft short-circuit — not from the allowlist.
+    """
+    repo, base, tip = _make_repo(tmp_path, ["python/discopt/solver.py"])
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(
+        _gate_script(),
+        event="pull_request",
+        before="",
+        sha=tip,
+        base_ref="main",
+        draft="true",
+        action="synchronize",
+    )
+    assert _run_gate(repo, script) == "false"
+
+
+def test_ready_for_review_runs_the_matrix_on_a_solver_change(tmp_path):
+    """The control for the test above: the deferred signal must actually arrive.
+
+    Same repo, same solver change, same event — only ``draft`` flips. If this
+    ever answers ``false`` the draft skip has stopped being a deferral and has
+    become a hole, which is the #953 "green wall of nothing" shape.
+    """
+    repo, base, tip = _make_repo(tmp_path, ["python/discopt/solver.py"])
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(
+        _gate_script(),
+        event="pull_request",
+        before="",
+        sha=tip,
+        base_ref="main",
+        draft="false",
+        action="ready_for_review",
+    )
+    assert _run_gate(repo, script) == "true"
+
+
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_label_events_skip_the_matrix(tmp_path, action):
+    """Adding any label used to re-run all 56 min of it.
+
+    The lanes that genuinely care about a label (`python-coverage` on
+    `coverage`, the AMP suite on `amp-integration`) gate themselves on it and do
+    not depend on this job, so they still fire — see
+    ``test_label_gated_lanes_do_not_depend_on_the_changes_gate``.
+    """
+    repo, base, tip = _make_repo(tmp_path, ["python/discopt/solver.py"])
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(
+        _gate_script(),
+        event="pull_request",
+        before="",
+        sha=tip,
+        base_ref="main",
+        action=action,
+    )
+    assert _run_gate(repo, script) == "false"
+
+
+def test_an_ordinary_push_to_an_open_pr_still_runs(tmp_path):
+    """Control for both short-circuits: the common case is untouched."""
+    repo, base, tip = _make_repo(tmp_path, ["python/discopt/solver.py"])
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    script = _render(
+        _gate_script(),
+        event="pull_request",
+        before="",
+        sha=tip,
+        base_ref="main",
+        action="synchronize",
+    )
+    assert _run_gate(repo, script) == "true"
+
+
+def test_label_gated_lanes_do_not_depend_on_the_changes_gate():
+    """What makes the label short-circuit safe rather than a hole.
+
+    The gate answers ``false`` on a label event, so anything with
+    ``needs: changes`` is skipped. That is only correct while the lanes a label
+    is *for* reach the runner by a different route. If either grows a
+    ``needs: changes``, adding its label would silently do nothing — the label
+    would look wired up and buy no run at all.
+    """
+    wf = yaml.safe_load(_CI.read_text())
+    cov = wf["jobs"]["python-coverage"]
+    assert "changes" not in (cov.get("needs") or []), (
+        "python-coverage gained a dependency on the `changes` gate, which "
+        "answers false on a label event -- adding the `coverage` label would "
+        "then run nothing."
+    )
+    assert "coverage" in cov["if"], (
+        f"python-coverage no longer gates on the `coverage` label: {cov['if']!r}"
+    )
+
+
+def test_draft_prs_can_still_become_ready():
+    """The draft skip is a deferral only while `ready_for_review` is a trigger.
+
+    Drop it from ``types:`` and a PR opened as a draft would run the matrix
+    exactly never -- it would go from draft straight to mergeable with every
+    solver job reporting ``skipped``.
+    """
+    wf = yaml.safe_load(_CI.read_text())
+    triggers = wf.get(True, wf.get("on"))
+    types = triggers["pull_request"]["types"]
+    assert "ready_for_review" in types, (
+        "the `changes` gate skips draft PRs on the promise that marking one "
+        f"ready re-runs everything; `types:` no longer fires on it: {types}"
+    )
 
 
 # ----------------------------------------------------------------------
