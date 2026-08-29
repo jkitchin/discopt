@@ -4437,3 +4437,93 @@ can in principle spend its whole deadline cutting before a single B&B node runs.
 The escalation is not exposed to it in any measurement here — the strong arm is
 entered only after a node-capped probe has already returned, and no panel row hit
 it — but the loop should honour the deadline regardless of who calls it.
+
+## 24. #1066 root cuts: the stage's time budget never covered the stage (2026-08-29)
+
+§23's probe-then-escalate fixed the OA *master*. It did not close `rsyn0830m`
+or `rsyn0840m` at default settings, so this is where the remaining wall went.
+
+### The measurement
+
+A default solve of `rsyn0830m` (`time_limit=150`, `gap_tolerance=1e-4`) under
+`cProfile`, against the escalation-ON tree. Top of the cumulative profile:
+
+```
+   ncalls  tottime  cumtime  filename:lineno(function)
+        1   81.281   81.281  discopt/solvers/_root_cuts.py:276(_solve_lp)
+        1    0.003   75.230  discopt/solvers/mip_nlp.py:662(solve_mip_nlp)
+        8   74.469   74.469  {built-in method discopt._rust.solve_milp_csc_py}
+```
+
+**A single `_solve_lp` call cost 81.3 s of a 150 s solve.** The two figures are
+disjoint (81.3 + 75.2 ≈ the 150.6 s wall): the root cutting-plane stage runs to
+completion, and only then does the OA search get what is left. The instance
+finishes `feasible`, not `optimal`, having spent 54% of its budget in a stage
+whose caller allots it `max(2.0, min(10.0, 0.2 * time_limit))` = **10.0 s**.
+
+### The defect
+
+`generate_root_cuts`' docstring says "``time_budget_s`` bounds the stage's wall
+time." It did not, in two independent ways:
+
+1. **The clock started in the wrong place.** `t0 = _time.perf_counter()` sat
+   *below* the initial `obj, x, duals, h = oa_converge()`. The whole OA
+   prologue — up to `OA_MAX_ITERS` = 60 LP solves — ran before the budget was
+   armed. Nothing measured it and nothing could stop it.
+2. **The check was between rounds, and the overrun is inside one call.** Even
+   with the clock started correctly, `if perf_counter() - t0 > time_budget_s`
+   is only consulted at the top of the round loop. `_solve_lp` passed no
+   `time_limit` to HiGHS, so one LP could run arbitrarily long — and on
+   `rsyn0830m` exactly one did. **A between-rounds budget cannot bound a stage
+   whose unit of work is unbounded.** This is the same shape as the Rust
+   root-cut-loop deadline defect recorded in §23.6.
+
+Note which of these the 81.3 s was: `ncalls` is **1**. Not 60 cheap LPs adding
+up past a budget — one LP that never had a deadline.
+
+### The fix (`DISCOPT_ROOT_CUT_DEADLINE`, default-OFF)
+
+- The stage clock (`t_stage`) starts before the prologue, and `_remaining()`
+  is what every LP is bounded by.
+- `_solve_lp` gains a `time_limit` and sets HiGHS' own `time_limit` option,
+  floored at 1e-3 — HiGHS reads `<= 0` as *no limit*, which would silently
+  restore the overrun.
+- `oa_converge` checks the remaining budget between its iterations.
+- Budget exhausted before the first LP closes → the stage returns no cuts,
+  which is identical to the stage being switched off.
+
+**Soundness.** Truncation can only ever *remove* cuts. A partially converged OA
+is an outer approximation over *fewer* constraints than the true feasible set —
+a relaxation of a relaxation — so its bound and every cut separated from it stay
+valid; only their strength is given up. There is no arm of this change that can
+produce a bound tighter than the truth.
+
+**Why it still ships default-off.** It is bound-changing (CLAUDE.md §5 regime 2):
+on an instance whose prologue outruns the budget it changes which cuts the stage
+separates, hence that instance's root bound. Soundness is not the open question —
+*net-positive* is. Spending 81 s of root cuts is not obviously worse than not
+spending it; the graduation panel is what answers that, and until it clears both
+bars the flag stays off.
+
+### Verification
+
+Deterministic and load-immune: a fake `perf_counter` the stub advances, so no
+assertion here depends on machine load (CLAUDE.md §9). Five new tests in
+`python/tests/test_nlpbb_root_cuts_781.py`. Mutation battery, each restored to
+identical afterwards:
+
+| mutation | result |
+| --- | --- |
+| round-loop clock starts late in both arms (the original bug) | 1 failed |
+| prologue LPs unbounded (deadline only inside the round loop) | 1 failed |
+| HiGHS never gets the `time_limit` option | 1 failed |
+| no positive floor on the limit handed to HiGHS | 1 failed |
+| the flag defaults ON | 1 failed |
+| flag OFF also gets a deadline (legacy path not intact) | 1 failed |
+
+A first battery run reported the bug-revert mutation as *surviving*. It was the
+mutation that was wrong, not the test: it neutralised `_remaining()` but left
+`t0 = t_stage`, so the round-loop check still fired at the same point. Recorded
+because "the mutation survived" and "the test is vacuous" look identical from
+the exit code, and only reading the mutation apart from the result tells them
+apart.
