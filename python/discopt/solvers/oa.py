@@ -368,7 +368,20 @@ def _validate_external_termination(
 
 
 def _float_tuple(values) -> tuple[float, ...]:
-    return tuple(float(v) for v in np.asarray(values, dtype=np.float64).reshape(-1))
+    """The row as a tuple of Python floats.
+
+    ``ndarray.tolist()`` is the same conversion the element-wise ``float(v)``
+    generator did -- a ``float64`` becomes a Python ``float``, with identical
+    value, equality and hash -- but it runs in C over the whole buffer instead of
+    building one generator frame per element. That matters because this is the
+    per-cut cost of the provenance ledger, paid on the FULL master width for every
+    row: profiled on ``squfl020-150`` (3020 columns) at a 60 s limit, the
+    generator alone was 159.5 M calls and 11.5 s, and ``add_row`` 20.8 s
+    cumulative -- 31% of the solve spent recording cuts rather than generating
+    them. The values are unchanged, so this is bound-neutral by construction
+    (CLAUDE.md §5): same coefficients, same dedup keys, same tree.
+    """
+    return tuple(np.asarray(values, dtype=np.float64).reshape(-1).tolist())
 
 
 def _row_violation(
