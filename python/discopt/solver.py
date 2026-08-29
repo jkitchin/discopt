@@ -5153,13 +5153,15 @@ def _convex_minlp_route_enabled() -> bool:
     return raw.strip() != "0"
 
 
-def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
+def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
 
-    Returns ``(method, reason)`` where ``method`` is the ``mip_nlp_method`` to
-    use, or ``None`` to leave the model on the default spatial/NLP
-    branch-and-bound. ``reason`` always explains the verdict and is surfaced on
-    ``SolveResult.algorithm_route`` so the decision is never invisible.
+    Returns ``(method, reason, options)`` where ``method`` is the
+    ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
+    spatial/NLP branch-and-bound, and ``options`` are the extra MIP-NLP kwargs the
+    route picked with it (empty when there are none). ``reason`` always explains
+    the verdict and is surfaced on ``SolveResult.algorithm_route`` so the decision
+    is never invisible.
 
     Why this exists: discopt certifies models like the MINLPLib ``syn``/``rsyn``
     family fully convex at the root in hundredths of a second (286/286
@@ -5178,10 +5180,27 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     ``syn20m02m``   feasible, 63.7% off     optimal, 23.5 s
     ==============  ======================  ====================
 
-    ``"oa"`` is the route target rather than the faster ``"lp_nlp_bb"``
-    (optimal on all three in 1.5-3.4 s) because ``lp_nlp_bb`` hard-requires a
-    Gurobi license — see #1060, which must land before that becomes selectable
-    automatically.
+    The target used to be ``"oa"``, "because ``lp_nlp_bb`` hard-requires a Gurobi
+    license — see #1060, which must land before that becomes selectable
+    automatically". #1060 landed on 2026-08-20 and brought a free HiGHS master
+    with it, so that reason has expired and the target moves to ``lp_nlp_bb`` on
+    the HiGHS master. Measured 2026-08-29 at the default 60 s on the #1066 rows
+    the ``"oa"`` target did not close, reference optimum in brackets:
+
+    ==========================  =====================  ========================
+    instance                    ``"oa"`` (the target    ``lp_nlp_bb`` + HiGHS
+                                until now)             (the target now)
+    ==========================  =====================  ========================
+    ``rsyn0830m`` [510.072]     feasible, 60.2 s       **optimal, 4.9 s**
+    ``rsyn0840m`` [325.555]     feasible, 62.7 s       **optimal, 8.4 s**
+    ``rsyn0820m02m`` [1092.09]  feasible 102% off      **optimal, 39.3 s**
+    ==========================  =====================  ========================
+
+    The master engine is the whole difference, not the tree topology:
+    ``lp_nlp_bb`` on the *in-house* master is measurably WORSE than ``"oa"`` on
+    the same rows (``rsyn0840m`` 103.5% off vs 0.0%), which is why the HiGHS
+    master is a precondition of the retarget rather than an optimization on top
+    of it. Without ``highspy`` the target stays ``"oa"``.
 
     Every gate below is a *refusal* to route: an unknown convexity verdict, a
     nonconvex model, a missing MILP backend, or an opaque ``dm.custom`` body all
@@ -5189,17 +5208,17 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     whose convexity is merely unproven.
     """
     if not _convex_minlp_route_enabled():
-        return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)"
+        return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
-        return None, "not routed: model is pure continuous"
+        return None, "not routed: model is pure continuous", {}
 
     if _model_contains_custom_call(model):
         # dm.custom is an opaque AD-only callable; the MILP master cannot
         # linearize what it cannot read.
-        return None, "not routed: model contains an opaque dm.custom body"
+        return None, "not routed: model contains an opaque dm.custom body", {}
 
     try:
         from discopt._relax.problem_classifier import ProblemClass, classify_problem
@@ -5207,20 +5226,20 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
         problem_class = classify_problem(model)
     except Exception as exc:  # noqa: BLE001 - classification failure => stay put
         logger.debug("convex-MINLP route: problem classification failed: %s", exc)
-        return None, "not routed: problem classification failed"
+        return None, "not routed: problem classification failed", {}
 
     if not isinstance(problem_class, ProblemClass):  # pragma: no cover - defensive
-        return None, "not routed: problem classification returned an unknown value"
+        return None, "not routed: problem classification returned an unknown value", {}
     if problem_class.value not in _CONVEX_MINLP_ROUTE_CLASSES:
-        return None, f"not routed: problem class {problem_class.value} is not a discrete NLP"
+        return None, f"not routed: problem class {problem_class.value} is not a discrete NLP", {}
 
     known, is_convex, _mask = _classify_model_convexity(
         model, failure_label="convex-MINLP route convexity detection failed"
     )
     if not known:
-        return None, "not routed: model convexity is unproven"
+        return None, "not routed: model convexity is unproven", {}
     if not is_convex:
-        return None, "not routed: model is not convex"
+        return None, "not routed: model is not convex", {}
 
     # The OA master is a MILP. Refuse to route when no MILP backend can be
     # loaded rather than routing into an import error (CLAUDE.md §3: a loud
@@ -5238,11 +5257,33 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
 
         get_milp_solver()
     except ImportError:
-        return None, "not routed: no MILP backend available for the OA master"
+        return None, "not routed: no MILP backend available for the OA master", {}
 
-    return "oa", (
-        f"mip-nlp/oa: {problem_class.value} certified convex at the root "
-        "(DISCOPT_CONVEX_MINLP_ROUTE)"
+    # ``lp_nlp_bb`` is the target only when the HiGHS master it needs is actually
+    # importable. On the in-house master the same method is worse than ``"oa"``
+    # (see the table above), so this is not a preference between two good options
+    # -- it is the difference between the retarget being an improvement and a
+    # regression. No highspy, no retarget.
+    try:
+        from discopt.solvers.milp_highs import solve_milp_with_lazy_cuts  # noqa: F401
+    except ImportError:
+        return (
+            "oa",
+            (
+                f"mip-nlp/oa: {problem_class.value} certified convex at the root; "
+                "lp_nlp_bb not selected (highspy unavailable) "
+                "(DISCOPT_CONVEX_MINLP_ROUTE)"
+            ),
+            {},
+        )
+
+    return (
+        "lp_nlp_bb",
+        (
+            f"mip-nlp/lp_nlp_bb on the HiGHS master: {problem_class.value} certified "
+            "convex at the root (DISCOPT_CONVEX_MINLP_ROUTE)"
+        ),
+        {"milp_solver": "highs"},
     )
 
 
@@ -7591,11 +7632,19 @@ def solve_model(
                 + ")"
             )
         else:
-            _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
+            (
+                _auto_route_method,
+                _auto_route_reason,
+                _auto_route_options,
+            ) = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
             kwargs.setdefault("mip_nlp_method", _auto_route_method)
+            # setdefault, not assignment: an explicit milp_solver= from the caller
+            # outranks the route's pick.
+            for _route_opt, _route_val in _auto_route_options.items():
+                kwargs.setdefault(_route_opt, _route_val)
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":
