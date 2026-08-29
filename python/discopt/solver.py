@@ -20049,6 +20049,104 @@ _ROUND_TIME_FRAC = 0.2
 _ROUND_ATTEMPT_CAP = 64
 
 
+class _RoundBudget:
+    """The spend rule for #1064's round-fix-resolve, as an object.
+
+    The real bound is *time*, not calls: one attempt is up to two
+    ``_pounce_recover_node_bound`` re-solves whose cost varies by orders of
+    magnitude across instances, so an attempt count bounds nothing.
+    ``_ROUND_ATTEMPT_CAP`` is only a backstop for a family whose roundings are
+    each cheap enough that the time budget alone would allow unboundedly many.
+
+    Split out of ``_solve_miqp_bb``'s node loop so the rule can be exercised
+    directly. Counting attempts through a real solve measures the machine, not
+    the budget: how many times a wall-clock-bounded search reaches this gate is
+    not reproducible even on one box (measured 2026-08-29, ten identical runs of
+    the UFL fixture -- 0, 7 or 15 gate visits, 0/31/97 nodes, status flipping
+    between ``optimal`` and ``feasible``), which is how the end-to-end version of
+    this test came to compare two coin flips and fail on main.
+    """
+
+    __slots__ = ("attempts", "secs", "budget")
+
+    def __init__(self, time_limit: float, frac: float | None = None) -> None:
+        # Read the module global at construction time so a test can retune it.
+        self.budget = (_ROUND_TIME_FRAC if frac is None else float(frac)) * float(time_limit)
+        self.attempts = 0
+        self.secs = 0.0
+
+    def may_attempt(self) -> bool:
+        return self.attempts < _ROUND_ATTEMPT_CAP and self.secs < self.budget
+
+    def attempt_deadline(self, time_limit: float, elapsed: float) -> float:
+        """Per-attempt limit: what is left of the budget, never past the solve.
+
+        ``_pounce_recover_node_bound`` derives its own limit as
+        ``time_limit - (now - t_start)``, so handing it the global limit would
+        let one attempt run all the way to the solve deadline.
+        """
+        return min(float(time_limit), float(elapsed) + max(0.0, self.budget - self.secs))
+
+    def begin_attempt(self) -> None:
+        self.attempts += 1
+
+    def add_spend(self, secs: float) -> None:
+        self.secs += float(secs)
+
+
+def _round_fix_resolve_attempt(
+    x_row,
+    int_offsets,
+    int_sizes,
+    node_lb_i,
+    node_ub_i,
+    c,
+    obj_const,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start,
+    time_limit,
+    Q,
+    budget,
+    *,
+    enabled,
+    has_incumbent,
+):
+    """#1064's round-fix-resolve gate: a rounded completion, or a declined gate.
+
+    Spent only while the tree has no incumbent -- with one in hand there is
+    already a primal bound, and a rounded completion can only ever supply an
+    upper bound (see :func:`_pounce_round_incumbent`) -- and only while
+    ``budget`` allows. The spend is recorded even when the attempt raises, so a
+    failing rounding cannot buy unlimited retries.
+    """
+    if not enabled or has_incumbent or not budget.may_attempt():
+        return None
+    budget.begin_attempt()
+    t0 = time.perf_counter()
+    try:
+        return _pounce_round_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            c,
+            obj_const,
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            t_start,
+            budget.attempt_deadline(time_limit, t0 - t_start),
+            Q=Q,
+        )
+    finally:
+        budget.add_spend(time.perf_counter() - t0)
+
+
 def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
     """Round to the nearest integer that actually lies inside ``[lo, hi]``.
 
@@ -22274,20 +22372,16 @@ def _solve_miqp_bb(
         )
 
     # #1064: round-fix-resolve is a *first incumbent* mechanism, so it is spent
-    # only while the tree has none, and it is capped so a family where every
-    # rounding is infeasible cannot eat the search. Both are counted, not
-    # assumed: ``_round_attempts`` is what the regression test asserts on.
-    _round_attempts = 0
-    # The real bound is time, not calls (see _ROUND_TIME_FRAC). Both are
-    # counted, not assumed: the regression test asserts on _round_attempts and
-    # on the seconds actually spent here.
-    _round_budget = _ROUND_TIME_FRAC * float(time_limit)
-    _round_secs = 0.0
+    # only while the tree has none, and it is bounded by time (with an attempt
+    # cap as a backstop) so a family where every rounding is infeasible cannot
+    # eat the search. The rule lives in :class:`_RoundBudget` /
+    # :func:`_round_fix_resolve_attempt` so it is testable without racing a
+    # wall-clock-bounded search to this gate.
+    _round = _RoundBudget(time_limit)
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
-        nonlocal _round_attempts, _round_secs
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -22305,28 +22399,10 @@ def _solve_miqp_bb(
             Q=_Q_m,
         )
         how = "snapped"
-        if (
-            inc is None
-            and _tuning().round_fix_resolve
-            and tree.incumbent() is None
-            and _round_attempts < _ROUND_ATTEMPT_CAP
-            and _round_secs < _round_budget
-        ):
+        if inc is None:
             # The snap path declined, i.e. this point is genuinely fractional.
-            # With no incumbent in hand there is no primal bound at all, so a
-            # rounded completion is strictly better than nothing — and it can
-            # only ever supply an upper bound (see _pounce_round_incumbent).
-            _round_attempts += 1
-            # Bound this single attempt by whatever is left of the heuristic's
-            # budget as well as by the solve deadline: _pounce_recover_node_bound
-            # derives its own limit as ``time_limit - (now - t_start)``, so
-            # handing it the global limit lets one attempt run to the deadline.
-            _t_round = time.perf_counter()
-            _round_tl = min(
-                float(time_limit),
-                (_t_round - t_start) + max(0.0, _round_budget - _round_secs),
-            )
-            inc = _pounce_round_incumbent(
+            # The gate itself decides whether an attempt is affordable.
+            inc = _round_fix_resolve_attempt(
                 x_row,
                 int_offsets,
                 int_sizes,
@@ -22339,11 +22415,14 @@ def _solve_miqp_bb(
                 _A_eq_m,
                 _b_eq_m,
                 t_start,
-                _round_tl,
-                Q=_Q_m,
+                time_limit,
+                _Q_m,
+                _round,
+                enabled=_tuning().round_fix_resolve,
+                has_incumbent=tree.incumbent() is not None,
             )
-            _round_secs += time.perf_counter() - _t_round
-            how = "rounded"
+            if inc is not None:
+                how = "rounded"
         if inc is not None:
             x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
             # #952: an injected incumbent goes straight into the tree as a

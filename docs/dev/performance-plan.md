@@ -3435,6 +3435,55 @@ declined", not "the panel never ran".
 
 Per §5 the flag is now **default-ON**, with `DISCOPT_PERSPECTIVE_OA_CUT=0` kept
 as the opt-out and the plain-tangent path intact.
+
+### 19.5 The round-budget regression test measured the machine, not the budget (2026-08-29)
+
+`test_1064_round_fix_resolve.py::test_the_time_budget_is_what_bounds_the_spend`
+failed on `main` at `1b8866ec` with *"budget frac made no difference: 7 attempts
+budgeted vs 7 unbudgeted"*, and reproduced on a rerun. It was not a solver
+regression, and the budget it tests is correct.
+
+The test ran two full `solve_model` calls with a stub that declines and sleeps
+0.3 s, and compared how many times each reached the round gate — the budgeted
+arm bounded by `_ROUND_TIME_FRAC * T = 2.0 s` (7 attempts), the unbudgeted arm
+expected to run to the solve's own limit. That comparison is only meaningful if
+the search reaches the gate many more than 14 times, and how often a
+wall-clock-bounded search reaches it is not reproducible. Ten identical runs of
+the fixture, one box, one build, arms interleaved (load1 4.5–10.0):
+
+| frac | gate visits | nodes | status | wall |
+|---|---|---|---|---|
+| 0.2 | 7, 7, 0, 0, 0 | 97, 97, 0, 0, 0 | optimal | 8.6–6.0 s |
+| 1e6 | 15, 15, 15, 0, 0 | 31, 31, 31, 0, 0 | feasible/optimal | 10.9–5.7 s |
+
+The `0` rows are the important ones: the model does not always route to
+`_solve_miqp_bb` at all, so on this box the test usually failed its own
+"round-fix-resolve never ran" precondition — the invariant was untested on any
+developer machine and only ever evaluated on CI, where it eventually drew
+`7 vs 7`. Entering `_solve_miqp_bb` **directly** is by contrast exactly
+reproducible (5/5 runs: 91 nodes, `optimal`, budget built once, gate consulted
+once), which is what the wiring test now does.
+
+**Retraction (§11).** Mid-session I told the owner the CI failure was "a real
+failure, not flaky" because a rerun reproduced it. The reproduction was real; the
+conclusion was wrong. Reruns land on similar runners, so reproducing a
+load-sensitive race is not evidence against it being one.
+
+The rule (`_RoundBudget`, `_round_fix_resolve_attempt`) was lifted out of
+`_solve_miqp_bb`'s node loop so it can be exercised directly instead of raced to.
+That is strictly more coverage, not less: the extracted gate also pins the
+opt-out and no-incumbent conjuncts, which nothing tested before, and the whole
+file dropped from ~25 s (two flaky tests) to 0.7 s (none). Five mutations of the
+production rule — dropping the time term from `may_attempt`, handing an attempt
+the solve deadline, dropping the `enabled`/`has_incumbent` conjuncts, not
+recording the spend, and bypassing the gate entirely — each fail at least one
+test.
+
+**Standing lesson.** A wall-clock-bounded search is not a fixture. Any assertion
+that counts how many times such a search reaches an internal gate is measuring
+the machine; extract the rule and assert on it directly.
+
+
 ## 20. #1061 root cuts: `DISCOPT_NLPBB_ROOT_CUTS` is sound but not helpful — stays OFF (rejected 2026-08-20)
 
 > **Superseded by §21 (2026-08-20).** The re-run panel below — on a build with
