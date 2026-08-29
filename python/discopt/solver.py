@@ -6756,7 +6756,9 @@ _ROUTE_FALLBACK_NOTE: list[str] = []
 #: default path's ~67 return sites and can reach none of them. Same
 #: list-not-scalar discipline as the note: the wrapper restores the exact depth
 #: it entered at, so a raised exception cannot leak state into the next solve.
-_ROUTE_FALLBACK_STATE: list[tuple["SolveResult", bool]] = []
+# ``None`` is a real state here: an auto-route that RAISED has no result to
+# carry forward, and ``_merge_route_and_fallback`` returns the fallback for it.
+_ROUTE_FALLBACK_STATE: list[tuple[Optional["SolveResult"], bool]] = []
 
 
 def _stamp_layer_timing(fn: _F) -> _F:
@@ -7783,17 +7785,45 @@ def solve_model(
                     min(time_limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S),
                 )
         _route_t0 = time.perf_counter()
-        _mip_nlp_result = solve_mip_nlp(
-            model,
-            method=mip_nlp_method,
-            mip_nlp_options=mip_nlp_options,
-            time_limit=_route_budget,
-            gap_tolerance=gap_tolerance,
-            max_iterations=max_nodes,
-            nlp_solver=nlp_solver,
-            initial_point=initial_point,
-            **mip_nlp_kwargs,
-        )
+        _route_raised: Optional[BaseException] = None
+        try:
+            _mip_nlp_result = solve_mip_nlp(
+                model,
+                method=mip_nlp_method,
+                mip_nlp_options=mip_nlp_options,
+                time_limit=_route_budget,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                **mip_nlp_kwargs,
+            )
+        except Exception as _route_exc:  # noqa: BLE001 - see below
+            # #1066: a route the *router* chose is a decision, not a promise. The
+            # decomposition can refuse a model outright -- the HiGHS master
+            # rejects a lazy cut whose coefficients it cannot represent on an
+            # unbounded column, and raises rather than silently dropping terms
+            # (which is right: CLAUDE.md §3). But an auto-routed refusal must not
+            # become the caller's answer when the default path solves the model:
+            # ``st_test1`` and ``st_test5`` are ``optimal`` on the default path
+            # and raised ``HiGHS rejected the master model`` once the retarget
+            # sent them to the single-tree master (measured on the 104-instance
+            # route panel, 2026-08-29). Treat it exactly like a route that did
+            # not certify and spend the rest of the budget on the fallback.
+            #
+            # Narrow by construction, not by exception type: this arm is reached
+            # only when ``_auto_route_reason is not None``. An explicit
+            # ``solver="mip-nlp"`` re-raises, because the caller chose the
+            # algorithm and there is no fallback to reserve for.
+            if _auto_route_reason is None:
+                raise
+            _route_raised = _route_exc
+            _mip_nlp_result = None
+            logger.info(
+                "Convex MINLP auto-route raised %s: %s; falling back to the default path",
+                type(_route_exc).__name__,
+                _route_exc,
+            )
         _route_elapsed = time.perf_counter() - _route_t0
         # #1059: record WHY this algorithm ran. Only set on the auto-route, so an
         # explicit solver="mip-nlp" leaves the field None (the caller already
@@ -7842,12 +7872,16 @@ def solve_model(
                 logger.debug("MIP-NLP dual recovery skipped: %s", _dual_exc)
 
         _route_remaining = time_limit - _route_elapsed
-        if (
+        if _route_raised is None and (
             _auto_route_reason is None
             or _route_result_is_certified(_mip_nlp_result, gap_tolerance)
             or _route_remaining < _CONVEX_ROUTE_FALLBACK_FLOOR_S
         ):
+            assert _mip_nlp_result is not None  # only a raise leaves this None
             return _mip_nlp_result
+        # A route that RAISED has no result to return, so the floor above cannot
+        # apply to it -- returning ``None`` from ``solve_model`` would turn a
+        # solvable model into an ``AttributeError`` at the call site.
 
         # --- #1059: the auto-route did not certify -- fall back to the default path ---
         #
@@ -7877,9 +7911,14 @@ def solve_model(
         # 29.9 s limit and returned ``time_limit`` after 1 node with no
         # incumbent, which is the failure this whole change exists to remove.
         _ROUTE_FALLBACK_NOTE.append(
-            f"{_auto_route_reason}; did not certify in {_route_elapsed:.2f}s "
-            f"(status={getattr(_mip_nlp_result, 'status', None)}) -> fell back to the "
-            f"default path with {_route_remaining:.2f}s"
+            f"{_auto_route_reason}; "
+            + (
+                f"raised {type(_route_raised).__name__}: {_route_raised}"
+                if _route_raised is not None
+                else f"did not certify in {_route_elapsed:.2f}s "
+                f"(status={getattr(_mip_nlp_result, 'status', None)})"
+            )
+            + f" -> fell back to the default path with {_route_remaining:.2f}s"
         )
         # #1059: hand the routed result forward so the wrapper can return the
         # better of the two. This is the "never worse than the route" contract;
