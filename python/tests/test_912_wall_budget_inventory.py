@@ -409,7 +409,15 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solvers/oa.py",
-        "return (time.perf_counter() - t_start) >= float(time_limit)",
+        "if (time.perf_counter() - t_start) >= float(time_limit):",
+        "contract",
+    ),
+    (
+        # The single-tree driver asks whether the wall or the termination hook is
+        # what stopped it, so the exit status can name the right reason. Reads the
+        # caller's own ``time_limit``; decides nothing about how much work to do.
+        "solvers/oa.py",
+        "hook is not None and (time.perf_counter() - t_start) < float(time_limit)",
         "contract",
     ),
     (

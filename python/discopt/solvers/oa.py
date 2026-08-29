@@ -45,6 +45,7 @@ from discopt.solvers.mip_nlp_options import (
 
 if TYPE_CHECKING:
     from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import SolveStatus
 
 logger = logging.getLogger(__name__)
 
@@ -3890,6 +3891,79 @@ def _compute_gap(lb: float, ub: float) -> float:
     return optimality_gap(lb, ub, denom_floor=1.0)
 
 
+def _lp_nlp_bb_exit_status(
+    *,
+    converged_early: bool,
+    callback_terminated: bool,
+    master_status: "SolveStatus",
+    has_incumbent: bool,
+    master_bound_valid: bool,
+    gap: Optional[float],
+    gap_tolerance: float,
+    hook_stopped_before_wall: bool,
+) -> tuple[str, Optional[str]]:
+    """The status and termination reason :func:`solve_lp_nlp_bb` exits with.
+
+    Split out of the driver so the decision can be tested at every combination of
+    its inputs rather than only at whichever ones a 60-second solve happens to
+    produce.
+
+    The last clause is the one with teeth. A certificate the driver already holds
+    does not stop being a certificate because the *clock* -- rather than the gap
+    test -- is what ended the search. ``master_bound_valid`` says the master is a
+    relaxation of the MINLP, and a MIP tree's dual bound bounds its own optimum
+    whether the tree finished or was cut off mid-search, so ``gap <=
+    gap_tolerance`` on that bound is the same certificate a converged run reports.
+    Before this, a run that ended on the wall was reported ``feasible`` even with
+    the gap closed: ``squfl015-060`` at default settings finished with dual bound
+    366.6218167383147 against incumbent 366.62181673996474 -- a relative gap of
+    4.5e-14 against a 1e-4 tolerance -- and reported ``feasible``.
+
+    ``termination_reason`` is deliberately NOT rewritten to ``gap_tolerance`` when
+    that clause fires: the search really did stop on the clock, and the trace
+    should keep saying so. Status answers "is the answer proven"; the reason
+    answers "why did the loop end". They are different questions.
+    """
+    from discopt.solvers import SolveStatus
+
+    status = "feasible"
+    termination_reason: Optional[str] = None
+    if converged_early and has_incumbent:
+        # Stopped on the certificate, not on the clock or the caller's option.
+        termination_reason = "gap_tolerance"
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif callback_terminated:
+        # The clock and the hook both come back through the same callback, so name
+        # whichever one it was rather than reporting a time limit that may not have
+        # been reached.
+        termination_reason = "termination_hook" if hook_stopped_before_wall else "time_limit"
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.INFEASIBLE:
+        status = "infeasible"
+    elif master_status == SolveStatus.TIME_LIMIT:
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.ITERATION_LIMIT:
+        status = "iteration_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.OPTIMAL and has_incumbent:
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif not has_incumbent:
+        status = "no_feasible_point"
+    if (
+        status == "feasible"
+        and has_incumbent
+        and master_bound_valid
+        and gap is not None
+        and gap <= gap_tolerance
+    ):
+        # ``gap`` comes from :func:`_compute_gap`, which reports 1.0 -- never a
+        # small number -- when the bound ordering is materially inverted, so a
+        # broken certificate cannot reach this branch (see ``solvers._gap``).
+        status = "optimal"
+    if termination_reason is None:
+        termination_reason = status
+    return status, termination_reason
+
+
 def solve_feasibility_pump(
     model: Model,
     time_limit: float = 3600.0,
@@ -4110,6 +4184,7 @@ def solve_lp_nlp_bb(
     integer_to_binary: bool = False,
     mip_nlp_profile: str = "default",
     mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
+    termination_hook: Any = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
@@ -4125,6 +4200,21 @@ def solve_lp_nlp_bb(
     ``milp_solver`` selects that backend: ``"simplex"`` (the in-house Rust MILP
     driver, also reached by the default ``"auto"``) or ``"gurobi"``. See
     :func:`_resolve_lp_nlp_bb_backend` for what each one supports.
+
+    ``termination_hook`` is the same contract :func:`solve_oa` offers -- a callable
+    handed a context mapping, returning true to stop -- so a caller that budgets a
+    solve by progress can budget this method too. It is honoured on the backends
+    that have a check-in point: ``"highs"`` consults it at every master restart and
+    ``"gurobi"`` on its wall-clock poll. The ``"simplex"`` driver has neither, and
+    passing a hook it cannot call would make any budget built on it a fiction, so
+    that combination is refused rather than silently ignored (CLAUDE.md §3).
+
+    The context carries the keys :func:`solve_oa`'s hook sees for a bound-driven
+    decision -- ``event``, ``elapsed``, ``is_minimization``, ``current_dual_bound``,
+    ``current_primal_bound``, ``relative_gap``, ``absolute_gap``,
+    ``incumbent_objective`` -- plus ``restarts`` and ``lazy_cuts``. The per-iteration
+    OA keys have no meaning in a single tree and are not invented: this method has
+    no ``iteration``.
     """
     if kwargs:
         raise ValueError(
@@ -4134,7 +4224,7 @@ def solve_lp_nlp_bb(
             "feasibility_cuts, feasibility_norm, heuristic_nonconvex, init_strategy, "
             "integer_to_binary, "
             "max_slack, milp_solver, mip_nlp_profile, mip_nlp_shot_config, "
-            "oa_penalty_factor."
+            "oa_penalty_factor, termination_hook."
         )
     t_start = time.perf_counter()
     shot_config = mip_nlp_shot_config if mip_nlp_profile == "shot" else None
@@ -4143,6 +4233,15 @@ def solve_lp_nlp_bb(
     # Resolve (and refuse) the single-tree backend before any model work, so an
     # unsupported request costs a message rather than a decomposition.
     lazy_backend = _resolve_lp_nlp_bb_backend(milp_solver, shot_profile=shot_profile)
+    hook = _normalize_optional_hook("termination_hook", termination_hook)
+    if hook is not None and lazy_backend == "simplex":
+        raise NotImplementedError(
+            "termination_hook is not available on the in-house simplex master: the "
+            "driver enforces time_limit itself and offers no check-in point, so the "
+            "hook could never be called and any budget built on it would be a "
+            "fiction. Use milp_solver='highs' (checks in at every master restart) "
+            "or milp_solver='gurobi'."
+        )
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
     fp_config = _normalize_fp_config(
@@ -4581,7 +4680,7 @@ def solve_lp_nlp_bb(
         )
         return rows
 
-    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers import MILPResult
 
     solve_milp_with_lazy_cuts: Callable[..., MILPResult]
     if lazy_backend == "gurobi":
@@ -4606,8 +4705,68 @@ def solve_lp_nlp_bb(
             mip_start_objective=_master_objective_from_evaluator(incumbent_obj),
         )
 
-    def callback_terminate(_snapshot: dict[str, object]) -> bool:
-        return (time.perf_counter() - t_start) >= float(time_limit)
+    hook_calls = [0]
+    #: The internal-sense dual bound that closed the gap, once one does.
+    converged_at: list[Optional[float]] = [None]
+    #: How many check-ins carried a usable dual bound. Zero means the early exit
+    #: never had anything to judge, which is NOT the same as "it judged and said
+    #: keep going" (CLAUDE.md §6); it is exported in ``callback_stats``.
+    bound_observations = [0]
+
+    def _master_bound_internal(raw) -> Optional[float]:
+        """The master's dual bound in the internal minimization sense, or None."""
+        if not master_bound_valid or raw is None or not np.isfinite(float(raw)):
+            return None
+        value = float(raw)
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            value += float(decomp.obj_coeffs[1])
+        return value
+
+    def callback_terminate(snapshot: dict[str, object]) -> bool:
+        if (time.perf_counter() - t_start) >= float(time_limit):
+            return True
+        lb = _master_bound_internal(snapshot.get("dual_bound"))
+        ub = incumbent_obj
+        if lb is not None and ub is not None:
+            bound_observations[0] += 1
+            if _compute_gap(lb, ub) <= gap_tolerance:
+                # The master's running dual bound has met the NLP incumbent, which
+                # is the same certificate this driver tests for after the master
+                # returns -- just read at the moment it becomes true rather than
+                # whenever the separator happens to run dry. The bound is valid:
+                # the master is a relaxation of the MINLP (its cuts are supporting
+                # hyperplanes of convex functions, and ``master_bound_valid`` is
+                # what says so), and a MIP tree's dual bound is a valid bound on
+                # its own optimum at every instant of the search, interrupted or
+                # not. Without this the loop runs past its own certificate:
+                # ``rsyn0820m02m`` had bound 1092.1600 against incumbent 1092.0911
+                # -- gap 6.3e-5, inside the 1e-4 default -- at 5.1 s of a 60 s
+                # limit, then rebuilt its tree five more times and was reported
+                # ``feasible`` at the wall (measured 2026-08-29).
+                converged_at[0] = lb if converged_at[0] is None else max(converged_at[0], lb)
+                return True
+        if hook is None:
+            return False
+        context: dict[str, object] = {
+            "event": "termination",
+            "elapsed": float(time.perf_counter() - t_start),
+            "is_minimization": bool(obj_sign > 0),
+            "current_dual_bound": None if lb is None else obj_sign * lb,
+            "current_primal_bound": None if ub is None else obj_sign * ub,
+            "relative_gap": _compute_gap(lb, ub) if lb is not None and ub is not None else None,
+            "absolute_gap": (None if lb is None or ub is None else abs(ub - lb)),
+            "incumbent_objective": None if ub is None else obj_sign * ub,
+            "n_vars": int(n_vars),
+            "n_constraints": int(n_cons),
+            "restarts": int(cast(int, snapshot.get("restarts", 0) or 0)),
+            "lazy_cuts": int(cast(int, snapshot.get("lazy_cuts", 0) or 0)),
+        }
+        hook_calls[0] += 1
+        try:
+            raw = hook(context)
+        except Exception as exc:  # never swallowed (CLAUDE.md §7)
+            raise RuntimeError(f"termination_hook failed during LP/NLP BB solve: {exc}") from exc
+        return _validate_external_termination(raw)
 
     lazy_kwargs: dict[str, object] = dict(
         c=master.c,
@@ -4623,9 +4782,16 @@ def solve_lp_nlp_bb(
         mip_start=master_mip_start,
     )
     if lazy_backend == "gurobi":
-        # MIPNODE user cuts and the wall-clock poll are Gurobi-only; the native
-        # driver has no fractional-node hook and enforces `time_limit` itself.
+        # MIPNODE user cuts are Gurobi-only; the native driver has no
+        # fractional-node hook.
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
+        lazy_kwargs["terminate_callback"] = callback_terminate
+    elif lazy_backend == "highs":
+        # The HiGHS master checks in at every restart and, between them, on an
+        # interval. That is what lets a caller budget this method by progress
+        # (#1066) -- and, hook or no hook, what lets the driver notice its own
+        # certificate the moment the bound meets the incumbent instead of at
+        # whatever later instant the separator runs dry.
         lazy_kwargs["terminate_callback"] = callback_terminate
     master_result = solve_milp_with_lazy_cuts(**lazy_kwargs)  # type: ignore[arg-type]
     wall_time = time.perf_counter() - t_start
@@ -4635,30 +4801,40 @@ def solve_lp_nlp_bb(
         bound = float(master_result.bound)
         if decomp.obj_is_linear and decomp.obj_coeffs is not None:
             bound += float(decomp.obj_coeffs[1])
+    if converged_at[0] is not None:
+        # Report the bound the stop was actually taken on. Both readings are valid
+        # bounds in the internal sense, so the tighter one is the honest one -- and
+        # if the post-hoc read came back weaker, reporting it would contradict the
+        # very test that ended the search and turn a certificate into "feasible".
+        bound = converged_at[0] if bound is None else max(bound, converged_at[0])
     gap = (
         _compute_gap(bound, incumbent_obj)
         if bound is not None and incumbent_obj is not None
         else None
     )
     callback_stats = dict(master_result.callback_stats or {})
+    # How many times the caller's hook actually ran. Zero with a hook installed
+    # means it never got a check-in -- a master that never separated -- and NOT
+    # that it kept saying continue (CLAUDE.md §6).
+    callback_stats["termination_hook_calls"] = int(hook_calls[0])
+    # Distinguish "the early exit never had a bound to judge" from "it judged and
+    # kept going" -- only the HiGHS backend reports a dual bound at check-in, so
+    # on any other master this count is 0 and the exit is inert by construction.
+    callback_stats["dual_bound_observations"] = int(bound_observations[0])
+    callback_stats["converged_early"] = bool(converged_at[0] is not None)
     callback_terminated = bool(callback_stats.get("terminated"))
-    status = "feasible"
-    termination_reason: Optional[str] = None
-    if callback_terminated:
-        termination_reason = "time_limit"
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.INFEASIBLE:
-        status = "infeasible"
-    elif master_result.status == SolveStatus.TIME_LIMIT:
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.ITERATION_LIMIT:
-        status = "iteration_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.OPTIMAL and incumbent is not None:
-        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
-    elif incumbent is None:
-        status = "no_feasible_point"
-    if termination_reason is None:
-        termination_reason = status
+    status, termination_reason = _lp_nlp_bb_exit_status(
+        converged_early=converged_at[0] is not None,
+        callback_terminated=callback_terminated,
+        master_status=master_result.status,
+        has_incumbent=incumbent is not None,
+        master_bound_valid=bool(master_bound_valid),
+        gap=gap,
+        gap_tolerance=gap_tolerance,
+        hook_stopped_before_wall=(
+            hook is not None and (time.perf_counter() - t_start) < float(time_limit)
+        ),
+    )
 
     trace_bound_validity = (
         "global"
