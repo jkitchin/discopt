@@ -42,6 +42,12 @@ _TIME_LIMIT = 600.0
 #: below, where its cost is the point rather than an obstacle.
 _FAST = {"acquisition_optimizer": "multistart"}
 
+#: Seeds the convergence panel runs. The panel asserts a *population* statistic
+#: rather than one trajectory — see
+#: ``test_reaches_the_published_optimum_within_a_small_budget`` for why a
+#: single-seed pass/fail was the wrong shape for a chaotic deterministic search.
+_PANEL_SEEDS = 5
+
 
 def _solve(tf, **kwargs):
     model, _ = tfs.build_model(tf)
@@ -299,6 +305,90 @@ def test_solver_stats_report_which_acquisition_optimizer_ran():
     assert stats["surrogate/acq_certified"] == 0, "multistart was requested"
 
 
+# ── the budget is a stopping point, not a parameter of the search ────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("n_vars", [1, 2, 3, 6, 15])
+def test_the_default_design_size_depends_on_the_dimension_alone(n_vars):
+    """The signature is the invariant: ``max_evals`` is not an argument.
+
+    Pinned as a *type* statement rather than only as a behavioural one because
+    the regression it guards was a one-line formula that read perfectly
+    reasonably (``min(10n, max_evals // 2)``) and quietly made the budget a
+    parameter of the search. Also pinned: the result is at least the ``n+1`` an
+    RBF with a linear tail needs, so the default can never produce a design the
+    default surrogate cannot be fitted from.
+    """
+    import inspect
+
+    from discopt.solvers.surrogate import _default_design_size
+
+    assert list(inspect.signature(_default_design_size).parameters) == ["n_vars"]
+    size = _default_design_size(n_vars)
+    assert size >= n_vars + 1, (n_vars, size)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["branin", "hartman_3", "hartman_6"])
+def test_a_larger_budget_continues_the_same_search(name):
+    """A bigger ``max_evals`` extends the search; it does not start a different one.
+
+    This is the property every "first reached the tolerance at evaluation ``k``,
+    so budget ``B > k`` has headroom" statement in this file rests on, and it was
+    silently false (issue #1036): the initial design was sized
+    ``max(n+2, min(10n, max_evals // 2))``, so raising the budget raised the
+    design and re-rolled the whole trajectory. Measured before the fix, on these
+    same three functions and the same five budgets, **17 of 30 budget pairs
+    diverged at evaluation 1**; ``branin`` was the only one that nested, and only
+    because ``10n = 20`` happened to be under ``max_evals // 2`` for every budget
+    tried — which is precisely the kind of accident that makes a panel look
+    healthy while its rationale is unsound.
+
+    The incumbent traces are compared elementwise rather than only the final
+    objectives: a monotone-improvement check would pass on two entirely different
+    searches that happen to end in the same basin, and pass most loudly on the
+    default seed, which is where the original claim came from.
+
+    ``hartman_6`` is in the list because at ``n = 6`` the old rule's two branches
+    (``10n = 60`` and ``max_evals // 2``) crossed *inside* the budget range, so it
+    is the case where the coupling bit hardest — 10 of its 10 pairs diverged.
+    """
+    tf = tfs.get(name)
+    budgets = [40, 46, 60, 80, 100]
+    traces: dict[int, list[float | None]] = {}
+    for budget in budgets:
+        trace: list[float | None] = []
+        model, _ = tfs.build_model(tf)
+        solve_surrogate(
+            model,
+            max_evals=budget,
+            time_limit=_TIME_LIMIT,
+            seed=0,
+            on_evaluation=lambda _n, v: trace.append(v),
+            **_FAST,
+        )
+        assert trace, f"{name}: the on_evaluation hook never fired at budget {budget}"
+        traces[budget] = trace
+
+    compared = 0
+    for i, small in enumerate(budgets):
+        for large in budgets[i + 1 :]:
+            assert len(traces[large]) >= len(traces[small]), (
+                f"{name}: budget {large} spent fewer evaluations than budget {small}"
+            )
+            prefix = traces[large][: len(traces[small])]
+            compared += 1
+            assert prefix == traces[small], (
+                f"{name}: the budget-{large} run is not the budget-{small} run continued — "
+                f"they diverge at evaluation "
+                f"{next(k for k, (a, b) in enumerate(zip(traces[small], prefix), 1) if a != b)}"
+            )
+    assert compared == len(budgets) * (len(budgets) - 1) // 2, (
+        f"{name}: compared {compared} budget pairs — this test measured nothing"
+    )
+
+
 # ── sample efficiency: the reason this backend exists ────────────────────────
 
 
@@ -345,39 +435,86 @@ def _surrogate_evals_to_tolerance(tf, tol: float, budget: int, **kwargs) -> int 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    ("name", "tol", "budget"),
+    ("name", "tol", "budget", "quorum"),
     [
-        ("branin", 1e-2, 60),  # three global minima
-        ("six_hump_camel", 1e-2, 60),  # two global minima
-        ("ackley_2", 1e-2, 70),  # heavily multimodal
-        ("hartman_3", 1e-2, 100),  # moderate dimension
-        ("goldstein_price", 1e-2, 130),  # sharply scaled: see below
+        # budget = the k-of-k crossing measured below, with ~50% headroom.
+        ("branin", 1e-2, 65, 4),  # three global minima; 8/8 by 42
+        ("six_hump_camel", 1e-2, 55, 4),  # two global minima; 8/8 by 34
+        ("ackley_2", 1e-2, 100, 4),  # heavily multimodal; 8/8 by 64
+        ("hartman_3", 1e-2, 90, 4),  # moderate dimension; 8/8 by 60
+        ("goldstein_price", 1e-2, 225, 4),  # sharply scaled: see below; 8/8 by 150
     ],
 )
-def test_reaches_the_published_optimum_within_a_small_budget(name, tol, budget):
+def test_reaches_the_published_optimum_within_a_small_budget(name, tol, budget, quorum):
     """Convergence on the standard functions, at budgets a costly objective allows.
 
     The budgets are the point: ``solve_direct``'s own suite uses 800-1200
-    evaluations for the same functions and tolerances. These are 60-130, and each
-    is set from a measurement rather than from hope — the evaluation at which the
-    incumbent first reached the tolerance on the default seed, with headroom:
-    branin 38, six_hump_camel 32, ackley_2 48, hartman_3 46, goldstein_price 96.
+    evaluations for the same functions and tolerances. These are 55-225.
+
+    **How they are derived, and why the previous derivation was invalid**
+    (issue #1036). The old docstring argued "the incumbent first reached the
+    tolerance at evaluation ``k`` on the default seed, so a budget of ``B > k``
+    has headroom". That argument needs the run at ``B`` to *contain* the run at
+    ``k``, and it did not: the initial design was sized
+    ``max(n+2, min(10n, max_evals // 2))``, so changing the budget changed the
+    design and started a different search. Measured on the ``on_evaluation``
+    traces, 17 of 30 budget pairs over ``{40, 46, 60, 80, 100}`` diverged at
+    evaluation 1. The design is now a function of the dimension alone
+    (:func:`~discopt.solvers.surrogate._default_design_size`), the same probe
+    finds 0 of 30, and ``test_a_larger_budget_continues_the_same_search`` below
+    keeps it that way — so the headroom argument is now available, and used.
+
+    Each budget is the evaluation at which the **last of 8 seeds** first reached
+    the tolerance, with ~50% headroom on top:
+
+    ================  ===========================================  =====
+    function          per-seed first reach (seeds 0-7)             8 / 8
+    ================  ===========================================  =====
+    branin            30, 36, 41, 42, 16, 36, 23, 22               42
+    six_hump_camel    23, 34, 17, 29, 18, 17, 22, 12               34
+    ackley_2          42, 64, 47, 46, 46, 48, 52, 53               64
+    hartman_3         60, 50, 19, 17, 24, 25, 20, 41               60
+    goldstein_price   120, 143, 131, 150, 82, 144, 132, 84         150
+    ================  ===========================================  =====
+
+    **The assertion is a statement about the method, not about one trajectory.**
+    It runs ``k`` seeds and requires a quorum of them to reach the tolerance,
+    plus the median relative error to meet it. A single-seed pass/fail was the
+    other half of what made this test fragile: the search is deterministic per
+    seed but *chaotic*, so a different BLAS can move one seed into a neighbouring
+    basin — which is exactly how the original failure was reported (rel. err.
+    1.1202e-2 against 1e-2) on a machine where a re-derivation of the same panel
+    passes. A convergence regression worth catching moves the population; a
+    floating-point difference moves one seed.
 
     ``goldstein_price`` is here for coverage of a sharply scaled objective, and
     what it covers is a **limitation**, stated rather than hidden: its values span
     3 to ~10⁶ on the box, so an interpolant fitted to raw values resolves the 10⁶
-    region and is nearly flat where the optimum is. It needs the largest budget by
-    far, it is the one function in the panel where DIRECT beats this backend, and
-    with seed 2 it does not reach 1e-2 within 150 evaluations at all. This test
+    region and is nearly flat where the optimum is. It needs by far the largest
+    budget — 150 evaluations for 8 of 8 seeds against 34-64 for the rest — and it
+    is the one function in the panel where DIRECT beats this backend. This test
     pins only that the default configuration converges on it; the remedy is a
     monotone objective transformation before fitting, a named follow-up in the
     module docstring that is deliberately not implemented.
     """
     tf = tfs.get(name)
-    result = _solve(tf, max_evals=budget, **_FAST)
-    assert result.objective is not None
-    assert tf.relative_error(result.objective) <= tol, (
-        f"{name}: got {result.objective}, published optimum {tf.fstar}, budget {budget} evaluations"
+    seeds = list(range(_PANEL_SEEDS))
+    errors = []
+    for seed in seeds:
+        result = _solve(tf, max_evals=budget, seed=seed, **_FAST)
+        assert result.objective is not None, f"{name}: seed {seed} returned no incumbent"
+        errors.append(tf.relative_error(result.objective))
+    assert len(errors) == len(seeds), "the panel loop ran no seeds — this measured nothing"
+
+    reached = sum(1 for e in errors if e <= tol)
+    detail = ", ".join(f"seed {s}: {e:.4e}" for s, e in zip(seeds, errors))
+    assert reached >= quorum, (
+        f"{name}: only {reached}/{len(seeds)} seeds reached {tol} within {budget} "
+        f"evaluations (need {quorum}); published optimum {tf.fstar}; {detail}"
+    )
+    assert float(np.median(errors)) <= tol, (
+        f"{name}: median relative error {np.median(errors):.4e} exceeds {tol} "
+        f"over {len(seeds)} seeds at {budget} evaluations; {detail}"
     )
 
 
@@ -385,8 +522,8 @@ def test_reaches_the_published_optimum_within_a_small_budget(name, tol, budget):
 @pytest.mark.parametrize(
     ("name", "factor"),
     [
-        ("six_hump_camel", 3.0),  # measured 4.3x
-        ("branin", 1.4),  # measured 1.8x
+        ("six_hump_camel", 3.0),  # measured 6.0x
+        ("branin", 1.4),  # measured 1.9x
         ("ackley_2", 1.2),  # measured 1.4x
     ],
 )
@@ -403,15 +540,27 @@ def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name, factor):
     **Measured, evaluations to 1e-2 relative error** (median of seeds 0-2 for the
     surrogate; DIRECT is deterministic), 60-evaluation budget:
 
-    ================  =========  ======  ==============
-    function          surrogate  DIRECT  factor
-    ================  =========  ======  ==============
-    six_hump_camel    32         137     4.3x
-    branin            38         69      1.8x
-    hartman_3         46 (2/3)   79      1.7x
-    ackley_2          48         67      1.4x
-    goldstein_price   96         75      **0.8x (loss)**
-    ================  =========  ======  ==============
+    ================  ==========  ======  ==============
+    function          surrogate   DIRECT  factor
+    ================  ==========  ======  ==============
+    six_hump_camel    23          137     6.0x
+    branin            36          69      1.9x
+    hartman_3         50          79      1.6x
+    ackley_2          44.5 (2/3)  67      1.5x
+    goldstein_price   never 0/3   75      **loss**
+    ================  ==========  ======  ==============
+
+    Re-measured after issue #1036 resized the initial design; the DIRECT column,
+    being deterministic, did not move. Read it as the 3-seed slice it is:
+    ``six_hump_camel`` (32 → 23) and ``branin`` (38 → 36) improved,
+    ``goldstein_price`` got worse, and the other two moved in both directions —
+    ``hartman_3``'s median rose 46 → 50 because all three seeds now reach the
+    tolerance where two did, and ``ackley_2``'s fell 48 → 44.5 because one seed
+    stopped reaching it inside 60 evaluations. The verdict on that change is the
+    8-function, 12-seed panel in
+    ``docs/dev/surrogate-initial-design-2026-08-29.md``, not this table. The
+    asserted factors below were not re-tuned to the new numbers — they were
+    already well under the old ones and are further under these.
 
     Three honest points, because "far fewer" is not uniformly true and pretending
     otherwise would be the kind of published-then-retracted claim CLAUDE.md §11 is
@@ -428,8 +577,8 @@ def test_uses_fewer_evaluations_than_direct_for_the_same_accuracy(name, factor):
       reason ``local_refine`` defaults off in this backend.
 
     The asserted factors sit well under the measured ones — seed-to-seed spread on
-    branin alone is 30-42 evaluations — because this must not be flaky. The table,
-    not the threshold, is the record.
+    branin alone is 16-42 evaluations over seeds 0-7 — because this must not be
+    flaky. The table, not the threshold, is the record.
     """
     tf = tfs.get(name)
     tol = 1e-2
