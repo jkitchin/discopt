@@ -316,8 +316,31 @@ def perspective_disaggregation_enabled() -> bool:
     The aggregate arm was still climbing after 250 cutting-plane rounds and
     51.6 s; the disaggregated arm converged in 41 rounds and 5.9 s.
 
-    **Default OFF** pending the CLAUDE.md §5 graduation panel:
-    ``DISCOPT_PERSPECTIVE_DISAGG=1`` switches it on. Read per call, not cached at
-    import, so a test can flip it without reloading.
+    **Default ON** since the CLAUDE.md §5 graduation panel of 2026-08-29: 111
+    instances (the 104 that reach the convex auto-route, plus the seven rows the
+    #1066 report names that the route panel did not already carry), ON vs OFF,
+    interleaved arm-by-arm per instance at a 60 s limit and default settings.
+
+    ==========================  ==========  ==========
+    metric                      OFF         ON
+    ==========================  ==========  ==========
+    solved to optimality        98          **99**
+    total wall, all instances   1398.5 s    **1348.9 s**
+    total nodes                 298 840     **292 065**
+    status regressions          --          0
+    ==========================  ==========  ==========
+
+    *Cert-clean*: 438 executed checks, 0 violations -- no bound above its
+    reference optimum, no incumbent below one, no instance that certified with
+    the flag OFF failing to certify with it ON, and no solve error on either arm.
+    *Net-positive*: one instance gains a certificate (``squfl025-040``, whose
+    dual bound moves 143.83 -> 197.33 against a 197.334 optimum and which
+    finishes in 32.5 s instead of exhausting the limit), and the aggregate wall
+    and node counts both fall. The only material single-instance slowdown is
+    ``slay07h`` (23.9 -> 27.5 s), still optimal.
+
+    ``DISCOPT_PERSPECTIVE_DISAGG=0`` is the opt-out and keeps the aggregate path
+    exactly as it was. Read per call, not cached at import, so a test can flip it
+    without reloading.
     """
-    return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "0").strip() not in ("", "0")
+    return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "1").strip() not in ("", "0")

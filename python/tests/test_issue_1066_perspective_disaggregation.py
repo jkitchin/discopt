@@ -13,7 +13,9 @@ closure of the master LP with binaries relaxed to [0, 1] on ``squfl015-060``
 still climbing after 250 rounds -- disaggregated **362.941 (99.0%)**, converged
 in 41 rounds.
 
-Default OFF pending the §5 graduation panel; ``DISCOPT_PERSPECTIVE_DISAGG=1``.
+Default ON since the §5 graduation panel of 2026-08-29 (111 instances, ON vs
+OFF interleaved: 99 vs 98 solved, 1348.9 s vs 1398.5 s total wall, 438 executed
+checks, 0 violations); ``DISCOPT_PERSPECTIVE_DISAGG=0`` is the opt-out.
 """
 
 import numpy as np
@@ -28,9 +30,10 @@ def _epigraph(terms):
     return ep
 
 
-def test_flag_defaults_off_and_reads_the_environment(monkeypatch):
+def test_flag_defaults_on_and_the_opt_out_still_works(monkeypatch):
+    """Graduated default-ON, with the ``=0`` opt-out kept intact (CLAUDE.md §5)."""
     monkeypatch.delenv("DISCOPT_PERSPECTIVE_DISAGG", raising=False)
-    assert perspective_disaggregation_enabled() is False
+    assert perspective_disaggregation_enabled() is True
     monkeypatch.setenv("DISCOPT_PERSPECTIVE_DISAGG", "0")
     assert perspective_disaggregation_enabled() is False
     monkeypatch.setenv("DISCOPT_PERSPECTIVE_DISAGG", "1")
