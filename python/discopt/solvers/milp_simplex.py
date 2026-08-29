@@ -18,8 +18,10 @@ can fall back.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from typing import Callable, NamedTuple, Optional, Union, cast
 
 import numpy as np
@@ -50,6 +52,60 @@ _INF = 1e20  # discopt's effective-infinity sentinel for free variable bounds.
 # ``list[tuple[float, float]]`` of a fully-bounded caller still type-checks --
 # ``list`` is invariant, ``Sequence`` is not.
 BoundList = Sequence[tuple[Optional[float], Optional[float]]]
+
+#: The root cut budget every MILP that reaches the Rust driver *through Python*
+#: has run at since #334: at most 16 cuts, in a single round, first-come (no
+#: efficacy/orthogonality selection). Those numbers were not chosen against cut
+#: quality — they were chosen against cut *cost*. Until #1102 every round of the
+#: root loop re-derived the augmented LP from a cold slack basis, so a second
+#: round cost a full root solve. Measured on the ``rsyn0840m`` OA master at
+#: ``root_cuts=500, cut_rounds=15``: 14 cold root solves = 23.1 s of a 24.2 s cut
+#: loop. #1102 made the round warm (re-optimize from the previous round's optimal
+#: basis), and the budget was never revisited.
+_LEGACY_CUT_PROFILE: dict[str, object] = {
+    "root_cuts": 16,
+    "cut_rounds": 1,
+    "cut_select": False,
+}
+
+#: The budget the loop is worth now that a round is warm (#1066) — reached ONLY
+#: through :func:`solve_milp`'s escalation, never as a blanket default. Applying
+#: it unconditionally was measured and rejected: it costs the ``tls2`` masters
+#: their proof (see the escalation comment in :func:`solve_milp`). ``cut_select``
+#: is the half that bounds the *cost*: it keeps only the strongest, most diverse
+#: cuts up to the cap, so a 200-cut budget does not densify every node LP the way
+#: 200 first-come Gomory rows would. Measured on the four OA masters #1066 still
+#: loses (``master0``, 60 s cap, nodes to proven optimality):
+#:
+#: ==================  ===================  ====================
+#: master              legacy 16/1          200/10/select
+#: ==================  ===================  ====================
+#: ``rsyn0820m``       139 267 n, 12.9 s    4 785 n, 0.8 s
+#: ``rsyn0830m``       529 573 n, 57.1 s    1 197 n, 0.3 s
+#: ``rsyn0840m``       no proof in 60 s     120 241 n, 33.5 s
+#: ``rsyn0820m02m``    bound −5108.7        bound −4151.2
+#: ==================  ===================  ====================
+#:
+#: The cap matters as much as the rounds: ``16/10/select`` leaves ``rsyn0840m``
+#: unproven, and dropping GMI (``gmi_cuts=False``) is far worse than the legacy
+#: profile on three of the four — the tableau cuts are what close this class.
+_STRONG_CUT_PROFILE: dict[str, object] = {
+    "root_cuts": 200,
+    "cut_rounds": 10,
+    "cut_select": True,
+}
+
+#: Whether an unset ``DISCOPT_MILP_CUT_BUDGET`` enables the escalation. Escalating
+#: changes which cuts the root loop adds on a master the probe cannot close, hence
+#: that master's dual bound — a bound-changing knob (CLAUDE.md §5 regime 2). So it
+#: ships default-off and is flipped only by a graduation panel that clears both
+#: bars — cert-clean and net-positive — over the corpus. That panel passed on
+#: 2026-08-29 (79 instances, 292 soundness checks, 0 violations; certificates
+#: 56 -> 57, five dual bounds tighter and none looser, total wall -4.7 %), so the
+#: default is ON. ``DISCOPT_MILP_CUT_BUDGET=0`` remains the opt-out and keeps the
+#: single-legacy-solve path exactly as it was. The panel is recorded in
+#: ``docs/dev/performance-plan.md`` §23.
+_MILP_CUT_BUDGET_DEFAULT = True
 
 _U64 = 2.0**-53  # float64 unit roundoff
 
@@ -536,12 +592,48 @@ def _farkas_certified_std(
     return False
 
 
+def milp_cut_budget_enabled() -> bool:
+    """Is the #1066 cut-budget escalation switched on?
+
+    Escalating changes which cuts the root loop adds on a master the probe cannot
+    close, hence that master's dual bound and node count — CLAUDE.md §5 regime 2.
+    ``DISCOPT_MILP_CUT_BUDGET=0`` restores the single :data:`_LEGACY_CUT_PROFILE`
+    solve exactly, and that path stays tested.
+
+    Read per call, not cached at import, so a test can flip it without reloading
+    the module, and so an A/B panel can drive both arms from one build.
+    """
+    raw = os.environ.get("DISCOPT_MILP_CUT_BUDGET")
+    if raw is None:
+        return _MILP_CUT_BUDGET_DEFAULT
+    return raw.strip() != "0"
+
+
+#: Node cap for the escalation probe (#1066). Measured, not chosen by taste: on
+#: the captured OA masters the two classes separate cleanly by node count. Every
+#: master the legacy budget closes *fast* closes well inside the cap (tls2
+#: masters 0/3/6 at 241, 515 and 595 nodes, each in 0.0 s), while every master
+#: that needs the strong budget was still open at 20 000 nodes (all four rsyn
+#: masters). 5 000 sits ~8x above the first class and far below the second, so
+#: the probe decides correctly on both while costing ~0.2 s where it escalates.
+_PROBE_MAX_NODES = 5_000
+
+#: Statuses that make a probe result final — a *proof*, not a budget cut-off.
+#: Escalating past one of these would spend the strong budget re-deriving an
+#: answer already certified.
+_PROBE_FINAL_STATUSES = frozenset(
+    {SolveStatus.OPTIMAL, SolveStatus.INFEASIBLE, SolveStatus.UNBOUNDED}
+)
+
+
 class _StdForm(NamedTuple):
     """The engine's standard form ``[A_ub | I] z = b``, built column-major.
 
     ``n`` structural columns come first, then one slack per row; ``lb``/``ub``/``c``
-    are over all ``n + m`` columns. ``lp_kwargs`` carries the pure-LP
-    short-circuit described in :func:`_marshal_std_form`.
+    are over all ``n + m`` columns. ``lp_kwargs`` carries either the pure-LP
+    short-circuit or the root cut budget, both described in
+    :func:`_marshal_std_form`, and is forwarded by every entry point in this
+    module — so the two never diverge between the plain and lazy-cut drivers.
     """
 
     m: int
@@ -706,7 +798,12 @@ def _marshal_std_form(
             strong_branch=False,
         )
         if _pure_lp
-        else {}
+        # A genuine MILP marshals at the LEGACY budget unconditionally. The #1066
+        # strong budget is not a blanket default: it is reached only through
+        # :func:`solve_milp`'s escalation, which spends it on the masters a cheap
+        # probe fails to close. Marshaling it here would also hand it to
+        # :func:`solve_milp_with_lazy_cuts`, a path no #1066 measurement covers.
+        else dict(_LEGACY_CUT_PROFILE)
     )
     return _StdForm(
         m=m,
@@ -752,63 +849,188 @@ def solve_milp(
     n = c_arr.shape[0]
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m
-    _lp_kwargs = std.lp_kwargs
 
     # Interactive debugger: install the Rust checkpoint hook only when a debugger
     # is attached now, so the pure-Rust search stays bound-neutral otherwise.
     from discopt import debug as _debug
 
-    status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
-        std.c,
-        m,
-        n + m,  # total columns: structural + one slack per row
-        std.col_ptr,
-        std.row_idx,
-        std.vals,
-        std.b,
-        std.lb,
-        std.ub,
-        std.int_cols,
-        n,  # n_struct: structural columns precede the slacks
-        0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
-        int(max_nodes),
-        float(gap_tolerance),
-        # #928: pass ``None`` for "no limit" and the number — INCLUDING an exact
-        # 0.0 — for a real budget. The previous ``0.0 if time_limit is None``
-        # spelling collapsed the two: the binding mapped 0.0 back to "no
-        # deadline", so a caller whose shared budget was already spent by earlier
-        # attempts (``MilpRelaxationModel.solve`` under ``DISCOPT_LP_WARM_DEADLINE``)
-        # launched an *unbounded* B&B at the one moment it must not start at all.
-        time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
-        debug_hook=_debug.rust_hook(),
-        **_lp_kwargs,
-    )
+    def _drive(
+        *,
+        cut_kwargs: dict,
+        node_cap: int,
+        budget: Optional[float],
+        seed: Optional[np.ndarray],
+    ) -> MILPResult:
+        """One call into the Rust driver, decoded into a :class:`MILPResult`."""
+        status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
+            std.c,
+            m,
+            n + m,  # total columns: structural + one slack per row
+            std.col_ptr,
+            std.row_idx,
+            std.vals,
+            std.b,
+            std.lb,
+            std.ub,
+            std.int_cols,
+            n,  # n_struct: structural columns precede the slacks
+            0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
+            int(node_cap),
+            float(gap_tolerance),
+            # #928: pass ``None`` for "no limit" and the number — INCLUDING an
+            # exact 0.0 — for a real budget. The previous
+            # ``0.0 if time_limit is None`` spelling collapsed the two: the
+            # binding mapped 0.0 back to "no deadline", so a caller whose shared
+            # budget was already spent by earlier attempts
+            # (``MilpRelaxationModel.solve`` under ``DISCOPT_LP_WARM_DEADLINE``)
+            # launched an *unbounded* B&B at the one moment it must not start at
+            # all. The escalation below relies on this too: its second attempt
+            # gets the budget the probe left, and an exhausted budget must return
+            # at once rather than run unbounded.
+            time_limit_s=None if budget is None else max(0.0, float(budget)),
+            initial_incumbent=seed,
+            debug_hook=_debug.rust_hook(),
+            **cut_kwargs,
+        )
 
-    if status == "infeasible":
-        return MILPResult(status=SolveStatus.INFEASIBLE, node_count=int(nodes))
-    if status == "unbounded":
-        return MILPResult(status=SolveStatus.UNBOUNDED, node_count=int(nodes))
+        if status == "infeasible":
+            return MILPResult(status=SolveStatus.INFEASIBLE, node_count=int(nodes))
+        if status == "unbounded":
+            return MILPResult(status=SolveStatus.UNBOUNDED, node_count=int(nodes))
 
-    x_struct = np.asarray(x_full, dtype=np.float64)[:n]
-    if status == "optimal":
-        # Proven optimum: incumbent == dual bound, a tight valid lower bound.
+        x_struct = np.asarray(x_full, dtype=np.float64)[:n]
+        if status == "optimal":
+            # Proven optimum: incumbent == dual bound, a tight valid lower bound.
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=x_struct,
+                objective=float(obj),
+                bound=float(obj),
+                node_count=int(nodes),
+            )
+
+        # node_limit / feasible: ``objective`` is the incumbent (upper bound) and
+        # ``bound`` is the engine's dual lower bound (sound) if finite. Callers that
+        # need a lower bound must read ``bound``, never ``objective``.
         return MILPResult(
-            status=SolveStatus.OPTIMAL,
+            status=SolveStatus.ITERATION_LIMIT,
             x=x_struct,
-            objective=float(obj),
-            bound=float(obj),
+            objective=float(obj) if np.isfinite(obj) else None,
+            bound=float(bound) if np.isfinite(bound) else None,
             node_count=int(nodes),
         )
 
-    # node_limit / feasible: ``objective`` is the incumbent (upper bound) and
-    # ``bound`` is the engine's dual lower bound (sound) if finite. Callers that
-    # need a lower bound must read ``bound``, never ``objective``.
+    legacy_kwargs = dict(_LEGACY_CUT_PROFILE)
+    if not milp_cut_budget_enabled() or std.int_cols.size == 0:
+        # Flag off, or a pure LP whose short-circuit already replaced the cut
+        # budget with "no integer machinery at all": one solve, legacy budget,
+        # byte-for-byte the pre-#1066 path.
+        return _drive(cut_kwargs=std.lp_kwargs, node_cap=max_nodes, budget=time_limit, seed=None)
+
+    # --- #1066 escalation --------------------------------------------------
+    # Measurement (docs/dev/performance-plan.md §23) killed the obvious fix of
+    # simply raising the root cut budget for every MILP. Raising it is a large
+    # win where the master is hard (rsyn0830m master: 49.2 s -> 0.3 s) and a
+    # large *loss* where it is easy (tls2 masters close in 241-595 nodes at the
+    # legacy budget and in 0.0 s; at the strong budget the extra rows derail the
+    # search and it is still open at 60 s). Neither budget dominates, and nothing
+    # in the master's shape predicts which class it is in — so the policy
+    # measures instead of guessing: run the cheap budget under a node cap, and
+    # spend the strong budget only on a master that cap fails to close.
+    #
+    # Soundness: both attempts bound the same MILP, so either one's dual bound is
+    # valid and either one's incumbent is feasible. The merge takes the better of
+    # each, which cannot invent a bound neither attempt proved.
+    t_probe = time.perf_counter()
+    probe = _drive(
+        cut_kwargs=legacy_kwargs,
+        node_cap=min(int(max_nodes), _PROBE_MAX_NODES),
+        budget=time_limit,
+        seed=None,
+    )
+    if probe.status in _PROBE_FINAL_STATUSES:
+        # The cheap budget proved it. This is the tls2 class, and it is the
+        # common case — escalating here would be pure overhead.
+        return probe
+
+    remaining = None
+    if time_limit is not None:
+        remaining = max(0.0, float(time_limit) - (time.perf_counter() - t_probe))
+        if remaining <= 0.0:
+            # The probe spent the whole budget. A second attempt with no time
+            # cannot improve on it, and #928 makes 0.0 a real (spent) budget
+            # rather than "unlimited" — return what we proved.
+            return probe
+
+    second = _drive(
+        cut_kwargs=dict(_STRONG_CUT_PROFILE),
+        node_cap=max(1, int(max_nodes) - int(probe.node_count)),
+        budget=remaining,
+        # Hand over the probe's incumbent so the strong attempt starts with the
+        # pruning power the probe already paid for. The driver re-validates the
+        # seed and silently drops one it cannot prove feasible, so this can never
+        # manufacture a certificate.
+        seed=probe.x if probe.x is not None else None,
+    )
+    return _merge_escalation(probe, second)
+
+
+def _merge_escalation(probe: MILPResult, second: MILPResult) -> MILPResult:
+    """Combine the #1066 probe and strong attempts into one sound result.
+
+    Both attempts bound the *same* MILP, so the tightest valid dual bound is the
+    larger of the two (the driver minimizes) and the best incumbent is the
+    smaller objective. Node counts add: the caller is told what the search cost.
+
+    A ``second`` that reached a proof is returned as the proof it is — with one
+    exception. If it contradicts a feasible point the probe actually found (it
+    claims infeasibility, or an optimum worse than that point), the two arms
+    disagree about the same problem and at least one is wrong. That is a
+    soundness question, not a performance one, so the escalation declines to be
+    the arm that produces a false certificate: it keeps the probe's result, which
+    is backed by a point, and says so loudly. CLAUDE.md §1/§3.
+    """
+    probe_obj = probe.objective
+    if probe_obj is not None and probe.x is not None:
+        contradiction = (
+            second.status == SolveStatus.INFEASIBLE
+            or second.status == SolveStatus.UNBOUNDED
+            or (
+                second.status == SolveStatus.OPTIMAL
+                and second.objective is not None
+                and second.objective > probe_obj + 1e-6 * (1.0 + abs(probe_obj))
+            )
+        )
+        if contradiction:
+            logger.error(
+                "#1066 escalation: the strong-cut attempt returned %s (objective %r) on a "
+                "master where the probe holds a feasible point of objective %.12g. The two "
+                "cut budgets disagree about the same MILP; keeping the probe result. This "
+                "indicates an invalid cut and should be reported.",
+                second.status,
+                second.objective,
+                probe_obj,
+            )
+            return replace(probe, node_count=probe.node_count + second.node_count)
+
+    if second.status in _PROBE_FINAL_STATUSES:
+        return replace(second, node_count=probe.node_count + second.node_count)
+
+    bounds = [b for b in (probe.bound, second.bound) if b is not None]
+    best_bound = max(bounds) if bounds else None
+
+    best = probe
+    if probe.objective is None or (
+        second.objective is not None and second.objective < probe.objective
+    ):
+        best = second
+
     return MILPResult(
         status=SolveStatus.ITERATION_LIMIT,
-        x=x_struct,
-        objective=float(obj) if np.isfinite(obj) else None,
-        bound=float(bound) if np.isfinite(bound) else None,
-        node_count=int(nodes),
+        x=best.x,
+        objective=best.objective,
+        bound=best_bound,
+        node_count=probe.node_count + second.node_count,
     )
 
 
