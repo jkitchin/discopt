@@ -46,7 +46,13 @@ jobs:
     # copy had lost and added one wired since (`lu_density_route`,
     # `node_numerical_dual_bound`, `root_build_deadline`), so the gated set is 7
     # arms, not 5.
-    timeout-minutes: 90
+    #
+    # 90 -> 120: the CI subset now measures a flag-OFF control panel once and
+    # compares every arm against it, so it runs 8 panels rather than 7. Measured
+    # ~6m17s per panel in run 32706094552, i.e. ~50 min rather than ~44; 120 leaves
+    # the same proportional headroom 90 did and keeps the timeout a hang backstop
+    # rather than something a slightly slower runner trips.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
