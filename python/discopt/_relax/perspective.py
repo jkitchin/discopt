@@ -63,7 +63,11 @@ from .term_classifier import _compute_var_offset
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["perspective_objective_terms", "perspective_oa_cut_enabled"]
+__all__ = [
+    "perspective_objective_terms",
+    "perspective_oa_cut_enabled",
+    "perspective_disaggregation_enabled",
+]
 
 #: Coefficients below this are treated as structurally zero when reading the
 #: objective Hessian. Matches the classifier's own quadratic-term tolerance.
@@ -286,3 +290,57 @@ def perspective_oa_cut_enabled() -> bool:
     import, so a test can flip it without reloading.
     """
     return os.environ.get("DISCOPT_PERSPECTIVE_OA_CUT", "1").strip() not in ("", "0")
+
+
+def perspective_disaggregation_enabled() -> bool:
+    """Is the #1066 *disaggregated* perspective epigraph switched on?
+
+    The strengthening above puts the perspective correction into the master's
+    single aggregate objective epigraph row, so what the master gets each round
+    is ``sup_z sum_i g_i(z)`` -- the sum of the per-term perspective cuts taken
+    at one *common* reference point. The disaggregated form gives each term its
+    own epigraph column, so the master's own LP relaxation combines each term's
+    best reference independently and gets ``sum_i sup_z g_i(z)``, which is the
+    full perspective closure and never weaker.
+
+    Measured on the real instances before implementing (CLAUDE.md §4), as the
+    cutting-plane closure of the master's LP relaxation with the binaries
+    relaxed to ``[0, 1]``:
+
+    ==============  ==========  =========  ==========  ============
+    instance        aggregate   disagg.    optimum     disagg. % opt
+    ==============  ==========  =========  ==========  ============
+    squfl015-060      173.401   362.941     366.622        99.0%
+    ==============  ==========  =========  ==========  ============
+
+    The aggregate arm was still climbing after 250 cutting-plane rounds and
+    51.6 s; the disaggregated arm converged in 41 rounds and 5.9 s.
+
+    **Default ON** since the CLAUDE.md §5 graduation panel of 2026-08-29: 111
+    instances (the 104 that reach the convex auto-route, plus the seven rows the
+    #1066 report names that the route panel did not already carry), ON vs OFF,
+    interleaved arm-by-arm per instance at a 60 s limit and default settings.
+
+    ==========================  ==========  ==========
+    metric                      OFF         ON
+    ==========================  ==========  ==========
+    solved to optimality        98          **99**
+    total wall, all instances   1398.5 s    **1348.9 s**
+    total nodes                 298 840     **292 065**
+    status regressions          --          0
+    ==========================  ==========  ==========
+
+    *Cert-clean*: 438 executed checks, 0 violations -- no bound above its
+    reference optimum, no incumbent below one, no instance that certified with
+    the flag OFF failing to certify with it ON, and no solve error on either arm.
+    *Net-positive*: one instance gains a certificate (``squfl025-040``, whose
+    dual bound moves 143.83 -> 197.33 against a 197.334 optimum and which
+    finishes in 32.5 s instead of exhausting the limit), and the aggregate wall
+    and node counts both fall. The only material single-instance slowdown is
+    ``slay07h`` (23.9 -> 27.5 s), still optimal.
+
+    ``DISCOPT_PERSPECTIVE_DISAGG=0`` is the opt-out and keeps the aggregate path
+    exactly as it was. Read per call, not cached at import, so a test can flip it
+    without reloading.
+    """
+    return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "1").strip() not in ("", "0")
