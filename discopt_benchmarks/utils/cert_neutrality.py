@@ -161,9 +161,19 @@ def check_neutrality(
             violations.append(NeutralityViolation(inst, "missing", "absent from new run"))
             continue
         gated = inst in perf_gated
-        # status: baseline rows are all certified-optimal; the new run must be too
-        # (perf-class — suppressed for a documented perf-gated instance).
-        if new.get("status") != "optimal" and not gated:
+        # status: a REGRESSION relative to the reference, not an absolute demand.
+        #
+        # This used to read `new.status != "optimal"`, which is equivalent whenever
+        # the reference is the committed cert-baseline (all 52 of its rows are
+        # `optimal` by construction — gen_cert_baseline writes only the
+        # deterministically-certifying subset). It is wrong for any *live*
+        # reference, such as the flag-OFF panel the graduation gate's CI subset now
+        # compares each arm against: an instance that fails to certify inside its
+        # wall-clock budget in BOTH arms is a property of the budget and the
+        # machine, not something the flag did, and charging it to the flag makes the
+        # guard measure the runner. Phrased against the reference it still catches
+        # the case that matters — the flag LOST a certification the reference had.
+        if base.get("status") == "optimal" and new.get("status") != "optimal" and not gated:
             violations.append(
                 NeutralityViolation(
                     inst, "status", f"status={new.get('status')} (baseline optimal)"
@@ -173,7 +183,19 @@ def check_neutrality(
         nb, no = base.get("objective"), new.get("objective")
         if no is None and gated:
             pass  # a perf-gated instance that didn't certify has no objective to check
-        elif nb is None or no is None:
+        elif nb is None:
+            # The REFERENCE certified nothing, so there is no certificate for this
+            # run to disagree with. This used to be `nb is None or no is None` ->
+            # an "objective" violation, which is soundness-class and hard-fails.
+            # Against the committed baseline it could never fire that way (no row
+            # has a null objective), so it only ever meant "lost a certificate".
+            # Against a live flag-OFF reference it also fires for None -> None
+            # (neither side certified — nothing to be wrong about) and for
+            # None -> value (the flag certified what the reference could not, an
+            # improvement). Neither is a false certificate. A genuinely lost
+            # certificate is `nb is not None and no is None`, still flagged below.
+            pass
+        elif no is None:
             violations.append(NeutralityViolation(inst, "objective", f"objective {nb!r} -> {no!r}"))
         else:
             ov = _objective_violation(
