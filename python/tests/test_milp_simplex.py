@@ -247,14 +247,22 @@ class TestPureLpShortCircuit:
         assert lp_kw.get("heuristics") is False
         assert lp_kw.get("strong_branch") is False
 
-        # Genuine MILP (integer columns present): machinery must stay ON, i.e. the
-        # short-circuit kwargs are NOT injected (Rust defaults apply).
+        # Genuine MILP (integer columns present): machinery must stay ON. Until
+        # #1066 the funnel injected nothing here and leaned on the Rust binding's
+        # defaults, so this asserted the *absence* of the keys. The funnel now
+        # passes the cut budget explicitly (same values), so assert the machinery
+        # is on BY VALUE -- strictly stronger, since absence only pinned
+        # "whatever the binding happens to default to".
         captured.clear()
         milp_simplex.solve_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=np.array([1, 1]))
         milp_kw = captured[-1]
-        assert "root_cuts" not in milp_kw
-        assert "gmi_cuts" not in milp_kw
-        assert "heuristics" not in milp_kw
+        assert milp_kw.get("root_cuts", 0) > 0, "root cuts must stay on for a genuine MILP"
+        assert milp_kw.get("cut_rounds", 0) > 0, "the cut loop must run for a genuine MILP"
+        # These three are still left to the driver's machinery-on defaults, so the
+        # short-circuit's off-switches must not have leaked onto the MILP path.
+        assert milp_kw.get("gmi_cuts") is not False
+        assert milp_kw.get("heuristics") is not False
+        assert milp_kw.get("strong_branch") is not False
 
     def test_pure_lp_optimum_is_bound_neutral(self):
         """The short-circuit must return the exact LP optimum — a fractional
