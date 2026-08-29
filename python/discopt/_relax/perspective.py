@@ -63,7 +63,11 @@ from .term_classifier import _compute_var_offset
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["perspective_objective_terms", "perspective_oa_cut_enabled"]
+__all__ = [
+    "perspective_objective_terms",
+    "perspective_oa_cut_enabled",
+    "perspective_disaggregation_enabled",
+]
 
 #: Coefficients below this are treated as structurally zero when reading the
 #: objective Hessian. Matches the classifier's own quadratic-term tolerance.
@@ -286,3 +290,34 @@ def perspective_oa_cut_enabled() -> bool:
     import, so a test can flip it without reloading.
     """
     return os.environ.get("DISCOPT_PERSPECTIVE_OA_CUT", "1").strip() not in ("", "0")
+
+
+def perspective_disaggregation_enabled() -> bool:
+    """Is the #1066 *disaggregated* perspective epigraph switched on?
+
+    The strengthening above puts the perspective correction into the master's
+    single aggregate objective epigraph row, so what the master gets each round
+    is ``sup_z sum_i g_i(z)`` -- the sum of the per-term perspective cuts taken
+    at one *common* reference point. The disaggregated form gives each term its
+    own epigraph column, so the master's own LP relaxation combines each term's
+    best reference independently and gets ``sum_i sup_z g_i(z)``, which is the
+    full perspective closure and never weaker.
+
+    Measured on the real instances before implementing (CLAUDE.md §4), as the
+    cutting-plane closure of the master's LP relaxation with the binaries
+    relaxed to ``[0, 1]``:
+
+    ==============  ==========  =========  ==========  ============
+    instance        aggregate   disagg.    optimum     disagg. % opt
+    ==============  ==========  =========  ==========  ============
+    squfl015-060      173.401   362.941     366.622        99.0%
+    ==============  ==========  =========  ==========  ============
+
+    The aggregate arm was still climbing after 250 cutting-plane rounds and
+    51.6 s; the disaggregated arm converged in 41 rounds and 5.9 s.
+
+    **Default OFF** pending the CLAUDE.md §5 graduation panel:
+    ``DISCOPT_PERSPECTIVE_DISAGG=1`` switches it on. Read per call, not cached at
+    import, so a test can flip it without reloading.
+    """
+    return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "0").strip() not in ("", "0")
