@@ -152,7 +152,7 @@ faithful iff it certifies that optimum. Ported so far:
 | native model | structure exercised | certified optimum |
 |---|---|---:|
 | `jobshop` | 2-way linear ordering disjunctions | 11.0 |
-| `ex1_linan_2023` | two xor grid disjunctions + excluded disjunct, nonconvex objective | −0.9996 |
+| `ex1_linan_2023` | two select-one grid disjunctions (mutually exclusive equalities) + excluded disjunct, nonconvex objective | −0.9996 |
 | `small_batch` | k-way unit-count disjunction per stage, `exp` objective | 167427.65 |
 
 Not yet ported (candidates, with the transcription reason they were deferred):

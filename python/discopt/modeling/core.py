@@ -339,6 +339,139 @@ if TYPE_CHECKING:
 builtins_sum = _builtins.sum
 
 # ─────────────────────────────────────────────────────────────
+# Disjunction semantics
+# ─────────────────────────────────────────────────────────────
+
+
+class SelectorActivation(Enum):
+    """How a disjunction's selector binary relates to its disjunct's predicate.
+
+    This is the axis that decides whether an *unselected* disjunct's predicate
+    may still happen to be true, and it is the axis every continuous /
+    complementarity lowering has to dispatch on (issue #1123).
+
+    Attributes
+    ----------
+    ONE_WAY : str
+        ``y_k = 1 => x in S_k``. Nothing is asserted when ``y_k = 0``, so a
+        deselected predicate may be true. The projection onto ``x`` is the
+        union of the disjuncts.
+    REIFIED : str
+        ``y_k = 1 <=> x in S_k``. The selector *is* the truth value of the
+        predicate, so ``y_k = 0`` forces ``x not in S_k`` — a strict complement,
+        which needs an explicit negation policy (an epsilon or an exact open-set
+        encoding) and changes the feasible set.
+    """
+
+    ONE_WAY = "one_way"
+    REIFIED = "reified"
+
+
+class SelectorCardinality(Enum):
+    """How many of a disjunction's selectors may be active at once."""
+
+    AT_LEAST_ONE = "at_least_one"  # sum_k y_k >= 1
+    EXACTLY_ONE = "exactly_one"  # sum_k y_k == 1
+    AT_MOST_ONE = "at_most_one"  # sum_k y_k <= 1
+
+
+class DisjunctionSemantics(Enum):
+    """The declared meaning of a disjunction.
+
+    Each member is defined as the ``(activation, cardinality)`` pair it stands
+    for, and every lowering branches on that pair rather than on the member
+    name — so a new combination (e.g. an optional-mode disjunction, which is
+    ``(ONE_WAY, AT_MOST_ONE)``) is an added member and not a redefinition of
+    what the enum means.
+
+    Attributes
+    ----------
+    SELECT_ONE : str
+        ``(ONE_WAY, EXACTLY_ONE)``. Exactly one disjunct is *selected*; an
+        unselected disjunct's predicate may nonetheless be true. This is the
+        meaning of :meth:`Model.either_or` and the only semantics any lowering
+        currently implements.
+    OR : str
+        ``(ONE_WAY, AT_LEAST_ONE)``. At least one disjunct is selected. Its
+        projection onto ``x`` equals ``SELECT_ONE``'s; the two differ only in
+        the selector space.
+    EXACTLY_ONE_TRUE : str
+        ``(REIFIED, EXACTLY_ONE)``. Exactly one *predicate* is true, which
+        requires full reification of every selector. Deliberately **not**
+        called ``XOR``: over three or more operands XOR is odd parity, not
+        "exactly one true", and this codebase already uses ``xor`` for the
+        pairwise Boolean operator (the GAMS ``boolxor`` opcode).
+
+    Notes
+    -----
+    ``SELECT_ONE`` and ``EXACTLY_ONE_TRUE`` are a *semantic* distinction, not a
+    convexity one: with ``S_1 = {x <= 1}`` and ``S_2 = {x >= 0}``, the point
+    ``x = 1/2`` is feasible under ``SELECT_ONE`` and infeasible under
+    ``EXACTLY_ONE_TRUE`` — and the same holds verbatim for nonconvex ``S_k``.
+    """
+
+    SELECT_ONE = "select_one"
+    OR = "or"
+    EXACTLY_ONE_TRUE = "exactly_one_true"
+
+    @property
+    def activation(self) -> SelectorActivation:
+        """The selector/predicate activation direction this semantics implies."""
+        return _DISJUNCTION_SEMANTICS_PAIRS[self][0]
+
+    @property
+    def cardinality(self) -> SelectorCardinality:
+        """The selector cardinality this semantics implies."""
+        return _DISJUNCTION_SEMANTICS_PAIRS[self][1]
+
+
+_DISJUNCTION_SEMANTICS_PAIRS: dict[
+    DisjunctionSemantics, tuple[SelectorActivation, SelectorCardinality]
+] = {
+    DisjunctionSemantics.SELECT_ONE: (
+        SelectorActivation.ONE_WAY,
+        SelectorCardinality.EXACTLY_ONE,
+    ),
+    DisjunctionSemantics.OR: (
+        SelectorActivation.ONE_WAY,
+        SelectorCardinality.AT_LEAST_ONE,
+    ),
+    DisjunctionSemantics.EXACTLY_ONE_TRUE: (
+        SelectorActivation.REIFIED,
+        SelectorCardinality.EXACTLY_ONE,
+    ),
+}
+
+
+def _coerce_disjunction_semantics(value) -> DisjunctionSemantics:
+    """Accept a :class:`DisjunctionSemantics` or its string name.
+
+    Rejects ``"xor"`` explicitly: Pyomo.GDP spells select-one semantics
+    ``Disjunction(xor=True)``, which is precisely the ambiguity this enum
+    exists to remove, so the spelling is refused rather than silently mapped.
+    """
+    if isinstance(value, DisjunctionSemantics):
+        return value
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in ("xor", "truth_xor"):
+            raise ValueError(
+                f"semantics={value!r} is ambiguous and is not accepted. Over three or "
+                "more disjuncts 'xor' means odd parity, not 'exactly one true'; and "
+                "Pyomo.GDP's Disjunction(xor=True) means select-one. Use "
+                "DisjunctionSemantics.SELECT_ONE (exactly one disjunct *selected*, the "
+                "default) or DisjunctionSemantics.EXACTLY_ONE_TRUE (exactly one "
+                "*predicate* true, requiring full reification)."
+            )
+        try:
+            return DisjunctionSemantics(key)
+        except ValueError:
+            pass
+    allowed = ", ".join(repr(s.value) for s in DisjunctionSemantics)
+    raise ValueError(f"unknown disjunction semantics {value!r}; use one of: {allowed}")
+
+
+# ─────────────────────────────────────────────────────────────
 # Variable Types
 # ─────────────────────────────────────────────────────────────
 
@@ -3693,11 +3826,25 @@ class Model:
         self,
         disjuncts: list[list[Constraint]],
         name: Optional[str] = None,
+        *,
+        semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
     ):
         """
         Add disjunctive constraint (Generalized Disjunctive Programming).
 
-        Exactly one group of constraints must hold.
+        Exactly one disjunct is **selected**, and the selected disjunct's
+        constraints are enforced
+        (:attr:`DisjunctionSemantics.SELECT_ONE`). An *unselected* disjunct's
+        constraints are not enforced, but they may still happen to hold: the
+        projection of the feasible set onto the model variables is the
+        **union** of the disjuncts, so a point lying in the overlap of two
+        disjuncts stays feasible and is assigned to one selected mode.
+
+        This is *not* "exactly one group of constraints holds". That stronger
+        reading is :attr:`DisjunctionSemantics.EXACTLY_ONE_TRUE`, which
+        requires reifying every selector, and which no lowering implements yet
+        (issue #1124) — passing it raises rather than silently reusing one-way
+        activation.
 
         Parameters
         ----------
@@ -3706,6 +3853,10 @@ class Model:
             must all hold together.
         name : str, optional
             Name for the disjunction.
+        semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
+            The declared meaning of the disjunction. Recorded on the model; a
+            value other than ``SELECT_ONE`` is refused by the GDP reformulation
+            pass rather than approximated.
 
         Examples
         --------
@@ -3718,6 +3869,7 @@ class Model:
             _DisjunctiveConstraint(
                 disjuncts=disjuncts,
                 name=name,
+                semantics=_coerce_disjunction_semantics(semantics),
             )
         )
 
@@ -3892,6 +4044,10 @@ class Model:
         # over its own active region. Big-M keeps every branch's equation in
         # the global model and yields an unreliable relaxation bound for
         # nonlinear equality disjuncts (it can cut off the true optimum).
+        # SELECT_ONE, like every other disjunction here. The two branches are
+        # complementary by construction (``body <= 0`` and ``-body <= 0``), so
+        # they overlap only on the boundary ``body == 0`` where both hold —
+        # exactly the sound over-approximation described above.
         self._constraints.append(
             _DisjunctiveConstraint(
                 disjuncts=[
@@ -3900,6 +4056,7 @@ class Model:
                 ],
                 name=f"_{base}_{self._aux_counter}_disj",
                 method="hull",
+                semantics=DisjunctionSemantics.SELECT_ONE,
             )
         )
         return w
@@ -3990,11 +4147,14 @@ class Model:
         self,
         disjuncts: list[list],
         name: Optional[str] = None,
+        *,
+        semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
     ) -> "_DisjunctiveConstraint":
         """Create a disjunction object for nesting inside either_or().
 
         Unlike :meth:`either_or`, this does **not** add the disjunction to
-        the model. Use it to build nested disjunctions.
+        the model. Use it to build nested disjunctions. Carries the same
+        select-one semantics as :meth:`either_or`.
 
         Parameters
         ----------
@@ -4002,12 +4162,18 @@ class Model:
             Each inner list is a group of constraints (a disjunct).
         name : str, optional
             Name for the disjunction.
+        semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
+            The declared meaning of the disjunction; see :meth:`either_or`.
 
         Returns
         -------
         _DisjunctiveConstraint
         """
-        return _DisjunctiveConstraint(disjuncts=disjuncts, name=name)
+        return _DisjunctiveConstraint(
+            disjuncts=disjuncts,
+            name=name,
+            semantics=_coerce_disjunction_semantics(semantics),
+        )
 
     def make_disjunct(self, name: str) -> "Disjunct":
         """Create a named disjunct block with an auto-generated indicator.
@@ -4032,11 +4198,23 @@ class Model:
         self,
         disjuncts: list["Disjunct"],
         name: Optional[str] = None,
+        *,
+        semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
     ) -> None:
         """Add a disjunction over Disjunct blocks.
 
-        Exactly one disjunct must be active. This maps to indicator
-        constraints (``if_then``) and an ``exactly(1, ...)`` selector.
+        Exactly one disjunct is **selected**: this maps to indicator
+        constraints (``if_then``) and an ``exactly(1, ...)`` selector, i.e.
+        :attr:`DisjunctionSemantics.SELECT_ONE`.
+
+        Because each block owns a *named* indicator, the select-one reading is
+        directly observable here, and it is the one users most often misread:
+        constraining an indicator to 0 means "this mode is not **selected**",
+        **not** "this disjunct's predicate is false". With overlapping
+        disjuncts a deselected block's constraints may still hold at the
+        optimum. Forcing a predicate false is
+        :attr:`DisjunctionSemantics.EXACTLY_ONE_TRUE`, which is not
+        implemented (issue #1124).
 
         Parameters
         ----------
@@ -4044,6 +4222,10 @@ class Model:
             The disjunct blocks to form the disjunction.
         name : str, optional
             Name for the disjunction.
+        semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
+            The declared meaning of the disjunction. Anything other than
+            ``SELECT_ONE`` raises: this path lowers to indicator constraints
+            immediately, so there is no later pass that could honor it.
 
         Example
         -------
@@ -4053,10 +4235,22 @@ class Model:
         >>> d2.subject_to(x >= 7)
         >>> m.add_disjunction([d1, d2], name="mode_select")
         """
+        resolved = _coerce_disjunction_semantics(semantics)
+        if resolved is not DisjunctionSemantics.SELECT_ONE:
+            raise NotImplementedError(
+                f"add_disjunction() implements only "
+                f"DisjunctionSemantics.SELECT_ONE; {resolved.value!r} "
+                f"({resolved.activation.value}, {resolved.cardinality.value}) is not "
+                "implemented. Tracking issue: "
+                "https://github.com/jkitchin/discopt/issues/1124"
+            )
         for d in disjuncts:
             self.if_then(d.indicator.variable, d._constraints, name=d.name)
         indicators = [d.indicator.variable for d in disjuncts]
-        self.exactly(1, indicators, name=f"_disj_{name}_xor" if name else None)
+        # Named ``_select``, not ``_xor``: this row is the select-one selector
+        # cardinality (exactly one indicator active), not a truth-XOR over the
+        # disjunct predicates.
+        self.exactly(1, indicators, name=f"_disj_{name}_select" if name else None)
 
     # ── Boolean logic (GDP) ──
 
@@ -5421,6 +5615,11 @@ class _DisjunctiveConstraint:
     # which is robust for nonlinear equality disjuncts where big-M's relaxation
     # bound is unreliable.
     method: Optional[str] = None
+    # The declared meaning of this disjunction (issue #1124). Carried on the IR
+    # so a lowering can never *infer* the semantics from whichever activation it
+    # happens to emit. Only SELECT_ONE is implemented; the GDP pass refuses any
+    # other value loudly rather than approximating it with one-way activation.
+    semantics: DisjunctionSemantics = DisjunctionSemantics.SELECT_ONE
 
 
 @dataclass

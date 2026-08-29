@@ -48,6 +48,11 @@ m.if_then(y[0], [x[0] >= 10, x[1] <= 50])
 m.either_or([[x[0] >= 5], [x[1] >= 5]])
 ```
 
+`either_or` is *select-one*: exactly one disjunct is selected and enforced, and the
+feasible set projects onto the union of the disjuncts — an unselected disjunct's
+constraints may still happen to hold. See
+[disjunction semantics](design/disjunction-semantics.md).
+
 ### Pyomo
 
 ```python

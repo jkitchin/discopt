@@ -20,6 +20,7 @@ from discopt.modeling.core import (
     BooleanVar,
     Constant,
     Constraint,
+    DisjunctionSemantics,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -55,6 +56,30 @@ _DEFAULT_BIG_M = 1e4
 # false optimal). Both big-M paths refuse rather than emit a vacuous M. This is
 # orthogonal to the GDP-1/#413 "M too small cuts feasible points" guard.
 _BIGM_SENTINEL = 1e15
+
+
+def _require_select_one(dc: _DisjunctiveConstraint) -> None:
+    """Refuse any disjunction semantics no lowering here implements.
+
+    Every reformulation in this module emits *one-way* activation
+    (``y_k = 1 => disjunct k holds``) under ``sum_k y_k == 1``, which is
+    exactly ``SELECT_ONE``. Emitting those same rows for a disjunction declared
+    ``OR`` or ``EXACTLY_ONE_TRUE`` would silently hand back a different feasible
+    set than the model declares — a truth-XOR model would be solved as
+    select-one and certified. Refuse loudly instead (issue #1124).
+    """
+    semantics = getattr(dc, "semantics", DisjunctionSemantics.SELECT_ONE)
+    if semantics is DisjunctionSemantics.SELECT_ONE:
+        return
+    raise NotImplementedError(
+        f"disjunction {dc.name or '<anon>'!r} declares "
+        f"DisjunctionSemantics.{semantics.name} "
+        f"({semantics.activation.value}, {semantics.cardinality.value}), which no GDP "
+        "lowering implements. Only SELECT_ONE (exactly one disjunct *selected*, "
+        "one-way activation) is available; it is not a valid substitute, since "
+        f"{semantics.name} has a different feasible set. Tracking issue: "
+        "https://github.com/jkitchin/discopt/issues/1124"
+    )
 
 
 def reformulate_gdp(
@@ -731,6 +756,7 @@ def _reformulate_disjunction(
 
     Returns new variables and constraints.
     """
+    _require_select_one(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -831,6 +857,7 @@ def _reformulate_disjunction_nested(
     When parent_selector = 0, all inner selectors must be 0.
     When parent_selector = 1, exactly one inner selector must be 1.
     """
+    _require_select_one(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -915,6 +942,28 @@ def _reformulate_disjunction_nested(
 # ── Hull reformulation ──
 
 
+def _reject_nested_under_hull(dc: _DisjunctiveConstraint) -> None:
+    """Refuse a nested disjunction on the hull path, which cannot lower it.
+
+    Only the big-M path implements nesting (``_reformulate_disjunction_nested``).
+    The hull path walks ``con.body`` over every item in a disjunct, and a nested
+    ``_DisjunctiveConstraint`` has no ``.body`` — so without this guard the pass
+    dies on a bare ``AttributeError`` from deep inside the disaggregation, which
+    names neither the disjunction nor the real limitation (issue #1124).
+    """
+    for k, disjunct in enumerate(dc.disjuncts):
+        for item in disjunct:
+            if isinstance(item, _DisjunctiveConstraint):
+                raise NotImplementedError(
+                    f"the hull reformulation does not support nested disjunctions: "
+                    f"disjunct {k} of {dc.name or '<anon>'!r} contains the nested "
+                    f"disjunction {item.name or '<anon>'!r}. Use "
+                    "gdp_method='big-m' (or 'mbigm'), which implements nesting, or "
+                    "flatten the disjunction. Tracking issue: "
+                    "https://github.com/jkitchin/discopt/issues/1124"
+                )
+
+
 def _reformulate_disjunction_hull(
     dc: _DisjunctiveConstraint,
     model: Model,
@@ -948,6 +997,8 @@ def _reformulate_disjunction_hull(
     tuple of (list[Variable], list[Constraint])
         New variables and constraints.
     """
+    _require_select_one(dc)
+    _reject_nested_under_hull(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars: list[Variable] = []
     new_cons: list[Constraint] = []

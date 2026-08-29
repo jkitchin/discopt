@@ -135,7 +135,9 @@ The discopt modeling API:
 - set_objective(sense, expression): Set objective ("minimize" or "maximize")
 - add_constraint(expression, sense, rhs, name): Add a constraint
 - add_if_then(indicator, constraints, name): Add indicator constraint
-- add_either_or(disjuncts, name): Add disjunctive constraint (exactly one group holds)
+- add_either_or(disjuncts, name): Add disjunctive constraint (exactly one disjunct is
+  SELECTED and enforced; the feasible set is the union of the disjuncts, so an
+  unselected disjunct's constraints may still happen to hold)
 - add_implies(y1, y2, name): Add logical implication y1 => y2 for binary variables
 - add_at_least(k, binaries, name): At least k of the listed binaries must be 1
 

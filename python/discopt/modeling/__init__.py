@@ -24,12 +24,16 @@ from discopt.modeling.core import (
     # Opaque AD-only user function node (for isinstance checks)
     CustomCall,
     Disjunct,
+    # Disjunction semantics (issue #1124)
+    DisjunctionSemantics,
     # Expressions (for isinstance checks, rarely needed)
     Expression,
     LogicalExpression,
     # Model
     Model,
     Parameter,
+    SelectorActivation,
+    SelectorCardinality,
     # Results
     SolveResult,
     SolveUpdate,
@@ -151,6 +155,9 @@ __all__ = [
     "BooleanVar",
     "BooleanVarArray",
     "Disjunct",
+    "DisjunctionSemantics",
+    "SelectorActivation",
+    "SelectorCardinality",
     "LogicalExpression",
     "land",
     "lor",
