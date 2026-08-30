@@ -3146,6 +3146,103 @@ def _reduce_node_and_stage(
     return False
 
 
+# The unbounded sentinel, matching the ``cu[j] < 1e19`` / ``cl[j] > -1e19``
+# guards at this function's call site.  Bounds at or beyond it are treated as
+# infinite: their terms are counted, never summed.
+_FBBT_INF = 1e19
+
+
+def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
+    """One FBBT sweep of a single *linear* row, in Gauss-Seidel order.
+
+    For row ``j`` linearised at ``mid``, the bound implied for variable ``i`` is
+
+        J_i * (x_i - mid_i)  <=  rhs - g_j - sum_{k != i} J_k * (bound_k - mid_k)
+
+    where ``bound_k`` is whichever of ``lb_k``/``ub_k`` leaves the row the most
+    room.  The pre-#1066 code recomputed that ``k`` sum *inside* the ``i`` loop,
+    so a row cost O(n^2) and the sweep O(m * n^2) -- 14M Python iterations per
+    call on a 150-variable, 103-row instance, measured as 9.9 s of self time
+    (40% of a 60 s ``portfol_classical050_1`` solve) and 56M ``abs()`` calls.
+
+    The sum over ``k != i`` differs between consecutive ``i`` only in which
+    single term is excluded, so it is formed once and the excluded term is
+    subtracted, at O(n) per row.
+
+    Nothing is lost by hoisting it, even though the original read ``lb``/``ub``
+    live and so *could* have seen a bound tightened earlier in the same sweep:
+    in either sense the update writes the bound **opposite** the one the terms
+    read.  For ``<=``, a ``J_k > 0`` term draws on ``lb_k`` while a ``J_i > 0``
+    update writes ``ub_i``; for ``J < 0`` the two swap together.  The clamps
+    (``max(lb[i], ...)``/``min(ub[i], ...)``) and the ``lb == ub`` skip only
+    ever touch ``i``'s own bounds.  So no update inside a sweep can change any
+    term of that sweep, and the hoisted sum is the same sum -- this is not a
+    Jacobi relaxation of a Gauss-Seidel loop.  (Between the two senses the
+    bounds *have* moved, which is why each sense forms its terms afresh.)
+
+    ``is_upper`` selects the sense: ``True`` for ``g_j(x) <= rhs``, ``False``
+    for ``g_j(x) >= rhs``.  In both senses the predicate ``(J_k > 0) ==
+    is_upper`` picks *both* the bound that enters the term and the bound the
+    update writes, which is why one body serves both.
+
+    Terms are only ever infinite in the direction that makes the residual
+    infinite (a ``J_k > 0`` term draws on ``lb_k``, so it can only be ``-inf``
+    for the ``<=`` sense), and an infinite residual leaves every comparison
+    below false.  Rather than form ``inf - inf``, infinite terms are counted
+    and any ``i`` with another infinite term is skipped -- which is exactly
+    what the arithmetic did, without the NaN.
+
+    Returns ``True`` if any bound moved.  ``lb``/``ub`` are updated in place.
+    """
+    active = np.flatnonzero(np.abs(J_row) >= 1e-12)
+    if active.size == 0:
+        return False
+
+    bound = np.where((J_row[active] > 0.0) == is_upper, lb[active], ub[active])
+    term = J_row[active] * (bound - mid[active])
+    # The unbounded marker here is the sentinel ``1e20``, not ``inf``, so
+    # ``np.isfinite`` is *not* the test -- ``9.999e19`` is an ordinary float and
+    # passes it.  Its term then enters the running total, and the ulp of
+    # ``1e20`` is 16384: every ordinary-scale term added to it is annihilated,
+    # so ``sum - term_i`` returns ``0`` where the true partial sum was the small
+    # remainder, and the row over-tightens.  The pre-#1066 loop never formed
+    # that sum -- it subtracted the ``k != i`` terms one at a time.  Test the
+    # *bound*, as the sentinel rule requires, and keep those terms out of the
+    # total; they are counted below exactly as true infinities are.
+    finite = np.isfinite(term) & (np.abs(bound) < _FBBT_INF)
+    n_inf = int(active.size - np.count_nonzero(finite))
+    sum_finite = float(np.sum(np.where(finite, term, 0.0)))
+
+    slack = rhs - g_j
+    changed = False
+
+    for pos in range(active.size):
+        i = int(active[pos])
+        if lb[i] == ub[i]:
+            continue
+        term_i = float(term[pos])
+        finite_i = bool(finite[pos])
+        if n_inf - (0 if finite_i else 1) > 0:
+            # Some *other* term is infinite: the residual is infinite and no
+            # comparison below can fire.  Skip, as the original arithmetic did.
+            continue
+        residual = slack - (sum_finite - (term_i if finite_i else 0.0))
+
+        J_i = float(J_row[i])
+        new_bound = mid[i] + residual / J_i
+        if (J_i > 0.0) == is_upper:
+            if not new_bound < ub[i] - 1e-10:
+                continue
+            ub[i] = max(lb[i], new_bound)
+        else:
+            if not new_bound > lb[i] + 1e-10:
+                continue
+            lb[i] = min(ub[i], new_bound)
+        changed = True
+
+    return changed
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -3253,68 +3350,10 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
         for j in range(m):
             if not is_linear[j]:
                 continue
-            # For constraint g_j(x) <= cu_j:
-            # Linear approx: g_j(mid) + J[j,:] @ (x - mid) <= cu_j
-            # To find max x_i, set other vars to MINIMIZE g (most room):
-            #   J[j,k] > 0 → use lb[k];  J[j,k] < 0 → use ub[k]
-            if cu[j] < 1e19:
-                for i in range(n):
-                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
-                        continue
-                    residual = cu[j] - g[j]
-                    for k in range(n):
-                        if k == i:
-                            continue
-                        if abs(J[j, k]) < 1e-12:
-                            # Zero Jacobian entry contributes nothing; skip to
-                            # avoid ``0 * inf = nan`` when var k is unbounded.
-                            continue
-                        if J[j, k] > 0:
-                            residual -= J[j, k] * (lb[k] - mid[k])
-                        else:
-                            residual -= J[j, k] * (ub[k] - mid[k])
-                    # J[j,i] * (x_i - mid_i) <= residual
-                    if J[j, i] > 1e-12:
-                        new_ub = mid[i] + residual / J[j, i]
-                        if new_ub < ub[i] - 1e-10:
-                            ub[i] = max(lb[i], new_ub)
-                            changed = True
-                    elif J[j, i] < -1e-12:
-                        new_lb = mid[i] + residual / J[j, i]
-                        if new_lb > lb[i] + 1e-10:
-                            lb[i] = min(ub[i], new_lb)
-                            changed = True
-
-            # For constraint g_j(x) >= cl_j:
-            # To find min x_i, set other vars to MAXIMIZE g (most room):
-            #   J[j,k] > 0 → use ub[k];  J[j,k] < 0 → use lb[k]
-            if cl[j] > -1e19:
-                for i in range(n):
-                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
-                        continue
-                    residual = cl[j] - g[j]
-                    for k in range(n):
-                        if k == i:
-                            continue
-                        if abs(J[j, k]) < 1e-12:
-                            # Zero Jacobian entry contributes nothing; skip to
-                            # avoid ``0 * inf = nan`` when var k is unbounded.
-                            continue
-                        if J[j, k] > 0:
-                            residual -= J[j, k] * (ub[k] - mid[k])
-                        else:
-                            residual -= J[j, k] * (lb[k] - mid[k])
-                    # J[j,i] * (x_i - mid_i) >= residual
-                    if J[j, i] > 1e-12:
-                        new_lb = mid[i] + residual / J[j, i]
-                        if new_lb > lb[i] + 1e-10:
-                            lb[i] = min(ub[i], new_lb)
-                            changed = True
-                    elif J[j, i] < -1e-12:
-                        new_ub = mid[i] + residual / J[j, i]
-                        if new_ub < ub[i] - 1e-10:
-                            ub[i] = max(lb[i], new_ub)
-                            changed = True
+            if cu[j] < 1e19 and _fbbt_linear_row_sweep(J[j], g[j], cu[j], mid, lb, ub, True):
+                changed = True
+            if cl[j] > -1e19 and _fbbt_linear_row_sweep(J[j], g[j], cl[j], mid, lb, ub, False):
+                changed = True
 
         if not changed:
             break
