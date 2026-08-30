@@ -76,6 +76,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -87,6 +88,19 @@ sys.path.insert(0, str(_BENCH_ROOT))
 sys.path.insert(0, str(_SCRIPTS))
 
 import generality_sweep as gs  # noqa: E402
+
+# The parent process runs the drift + false-certificate checks itself (see the
+# CI-subset block in main), so it needs these directly and not only inside the
+# cert-neutrality worker's source string.
+from check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED  # noqa: E402
+from gen_cert_baseline import _CERT_OPTIMA  # noqa: E402
+
+from utils.cert_neutrality import (  # noqa: E402
+    CORRECTNESS_ATOL,  # noqa: E402
+    CORRECTNESS_RTOL,
+    check_neutrality,
+    load_baseline,
+)
 
 DEFAULT_CORPUS = Path(os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark"))
 CERT_NEUTRALITY_SCRIPT = _SCRIPTS / "check_cert_neutrality.py"
@@ -138,9 +152,15 @@ class CertResult:
     kind: str  # "byte_identical" | "objective_only" | "skipped"
     violations: list[dict]
     note: str
+    # The panel rows this run produced. The CI subset keeps the flag-OFF run's rows
+    # and reuses them as the reference for every arm, so the control is paid for
+    # once rather than once per flag.
+    panel_rows: dict = field(default_factory=dict)
 
 
-def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
+def run_cert_neutrality(
+    arm: str, env_on: dict[str, str], reference_rows: dict | None = None
+) -> CertResult:
     """Run ``check_cert_neutrality.py`` in a fresh subprocess with the flag ON.
 
     The check compares the flagged re-solve of the 41-instance cert panel against
@@ -175,6 +195,14 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         "from utils.cert_neutrality import check_neutrality, load_baseline\n"
         "from scripts.check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED\n"
         "baseline = load_baseline(_CERT_BASELINE)\n"
+        # The panel to SOLVE is always the committed baseline's instance list; only
+        # the rows COMPARED AGAINST are swapped for the live control. The reference
+        # travels by file (GRADGATE_REFERENCE) rather than being interpolated into
+        # this source string — it is ~26 KB of JSON and embedding it would make the
+        # worker's quoting a correctness problem.
+        "import os\n"
+        "_ref = os.environ.get('GRADGATE_REFERENCE')\n"
+        "reference = json.loads(Path(_ref).read_text()) if _ref else baseline\n"
         "_op = Path(_CERT_OPTIMA)\n"
         "oracle = json.loads(_op.read_text()) if _op.exists() else {}\n"
         f"regime = {regime!r}\n"
@@ -186,12 +214,19 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         "        time_limit=int(budgets.get(name, 60)), num_runs=1, solvers=[solver])\n"
         "    res = BenchmarkRunner(cfg)._run_discopt(solver, name, 0)\n"
         "    new_rows[name] = res.to_dict()\n"
-        "viol = check_neutrality(new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED,\n"
+        "viol = check_neutrality(new_rows, reference, known_perf_gated=_KNOWN_PERF_GATED,\n"
         "    regime=regime, oracle=oracle)\n"
+        "print('ROWSJSON:' + json.dumps(new_rows))\n"
         "print('CERTJSON:' + json.dumps([{'instance': v.instance, 'kind': v.kind,\n"
         "    'detail': v.detail} for v in viol]))\n"
     )
+    ref_file: str | None = None
     try:
+        if reference_rows is not None:
+            fd, ref_file = tempfile.mkstemp(suffix=".json", prefix="gradgate-ref-")
+            with os.fdopen(fd, "w") as fh:
+                json.dump(reference_rows, fh)
+            env["GRADGATE_REFERENCE"] = ref_file
         proc = subprocess.run(
             [sys.executable, "-c", worker],
             capture_output=True,
@@ -201,6 +236,9 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         )
     except subprocess.TimeoutExpired:
         return CertResult(False, "skipped", [], "cert-neutrality subprocess timed out (1h)")
+    finally:
+        if ref_file:
+            Path(ref_file).unlink(missing_ok=True)
     line = next(
         (ln for ln in proc.stdout.splitlines() if ln.startswith("CERTJSON:")),
         None,
@@ -213,6 +251,8 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
             f"cert-neutrality produced no JSON (stderr tail: {proc.stderr.strip()[-300:]!r})",
         )
     viol = json.loads(line[len("CERTJSON:") :])
+    rows_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("ROWSJSON:")), None)
+    panel_rows = json.loads(rows_line[len("ROWSJSON:") :]) if rows_line else {}
     # Soundness-class violations (objective / status / missing) are hard fails in
     # every regime. node_regression is perf-class: fatal for a bound-neutral flag,
     # a documented note for a bound-changing / heuristic-policy flag.
@@ -222,7 +262,7 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         neutral = not viol
         kind = "byte_identical"
         note = "byte-identical required (bound-neutral flag)"
-        return CertResult(neutral, kind, viol, note)
+        return CertResult(neutral, kind, viol, note, panel_rows)
     # bound-changing / control: objective must hold; node drift is a perf note.
     neutral = not hard
     kind = "objective_only"
@@ -231,7 +271,7 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         note += (
             f" ({len(node_only)} instance(s) changed node_count — expected where structure present)"
         )
-    return CertResult(neutral, kind, hard, note)
+    return CertResult(neutral, kind, hard, note, panel_rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -274,13 +314,14 @@ def evaluate_flag(
     tl: float,
     off_cache: dict,
     ci_subset: bool,
+    cert_reference: dict | None = None,
 ) -> Verdict:
     env_on = gs.ARMS[flag]["env"]
     regime = gs.ARMS[flag]["regime"]
     notes: list[str] = []
 
     # (2/3) cert-panel neutrality + incorrect_count (both regimes run this).
-    cert = run_cert_neutrality(flag, env_on)
+    cert = run_cert_neutrality(flag, env_on, reference_rows=cert_reference)
     notes.append(f"cert: {cert.note}")
 
     if ci_subset:
@@ -487,6 +528,124 @@ def main() -> int:
         )
 
     off_cache: dict = {}
+    # ------------------------------------------------------------------ #
+    # CI subset: measure the flag-OFF control panel ONCE here, and compare every arm
+    # against it.
+    #
+    # The gate used to compare each flag-ON panel run against the committed
+    # cert-baseline.jsonl snapshot. That conflates two different deltas:
+    #
+    #     (flag ON  vs  flag OFF)       <- what a flag guard is for
+    #     (today's main  vs  snapshot)  <- drift, identical for every flag
+    #
+    # and the second term swamped the first. Measured 2026-08-29 over this panel:
+    # the OFF control ALONE produces 9 violations against the committed snapshot,
+    # and root_fixpoint and lu_density_route each produce the same 9 — so all seven
+    # arms failed identically, reporting `soundness=FAIL` for something no flag did.
+    # That is why this gate has been red since run 32706094552 (2026-08-24) while
+    # #1058 and #1122 were opened and closed against it.
+    #
+    # The drift is NOT a soundness problem: across every comparison there were ZERO
+    # objective violations. It is three instances (clay0303hfsg, nvs05, tanksize) no
+    # longer certifying inside their 60 s wall-clock budget, plus node-count
+    # movement. A wall-clock budget deciding a `soundness=FAIL` verdict is the "the
+    # bar measures the runner" failure this repo names elsewhere
+    # (`_assert_budget_not_clock`).
+    #
+    # So the flag verdict is now ON-vs-OFF, same session, same machine — immune to
+    # snapshot staleness and to hardware speed. The snapshot comparison is kept as
+    # an explicit DRIFT report below, and still hard-fails on the thing that really
+    # is a soundness fault: a certified objective that disagrees with the baseline.
+    # ------------------------------------------------------------------ #
+    cert_reference: dict | None = None
+    if args.ci_subset:
+        print(
+            "\n=== cert-panel control: flag-OFF (shared reference for every arm) ===",
+            flush=True,
+        )
+        off_cert = run_cert_neutrality("off", {})
+        cert_reference = off_cert.panel_rows or None
+        if cert_reference is None:
+            print(
+                f"!! flag-OFF control produced no panel rows ({off_cert.note}); "
+                "falling back to the committed baseline as the reference",
+                flush=True,
+            )
+        else:
+            # Drift report: today's OFF control vs the committed snapshot.
+            #
+            # Computed HERE rather than taken from off_cert.violations, because
+            # that comparison runs under gs.ARMS["off"]["regime"] == "control",
+            # i.e. the byte-reproducibility branch (1e-8). Against a month-old
+            # snapshot that flags ordinary floating-point jitter — 12 instances at
+            # 1e-8..1e-6 in a trial run — which is noise, not drift worth reading.
+            # The correctness-tolerance bracket against the true optimum is the
+            # meaningful comparison.
+            committed = load_baseline(_CERT_BASELINE)
+            _op = Path(_CERT_OPTIMA)
+            oracle = json.loads(_op.read_text()) if _op.exists() else {}
+            drift = check_neutrality(
+                cert_reference,
+                committed,
+                known_perf_gated=_KNOWN_PERF_GATED,
+                regime="bound_changing",
+                oracle=oracle,
+            )
+            print(
+                f"# drift vs committed cert-baseline ({len(committed)} instances): "
+                f"{len(drift)} violation(s)",
+                flush=True,
+            )
+            for v in drift:
+                print(f"#   {v.instance:22} {v.kind:15} {v.detail[:100]}", flush=True)
+            print(
+                "# Drift is reported, not fatal: it is dominated by whether an "
+                "instance certified inside its 60 s wall-clock budget on THIS "
+                "machine, which is a perf fact, not a soundness one. The soundness "
+                "half is enforced below and stays fatal.",
+                flush=True,
+            )
+
+            # The one genuinely hardware-independent soundness question: did any
+            # instance we CERTIFIED come back with an objective that disagrees with
+            # the true optimum? Only a certified row carries a certificate — an
+            # uncertified incumbent sitting above the optimum is the expected shape
+            # of an open gap, not a false certificate, so it is skipped.
+            wrong = []
+            checked = 0
+            for inst, row in sorted(cert_reference.items()):
+                if row.get("status") != "optimal":
+                    continue
+                obj, opt = row.get("objective"), oracle.get(inst)
+                if obj is None or opt is None:
+                    continue
+                checked += 1
+                tol = CORRECTNESS_ATOL + CORRECTNESS_RTOL * abs(opt)
+                if abs(obj - opt) > tol:
+                    wrong.append((inst, obj, opt, abs(obj - opt), tol))
+            print(
+                f"# false-certificate check: {checked} certified instance(s) "
+                f"bracketed against cert-optima.json",
+                flush=True,
+            )
+            if checked == 0:
+                print(
+                    "!! false-certificate check compared NOTHING (no certified row had "
+                    "an oracle entry) — refusing to report a pass it did not measure.",
+                    flush=True,
+                )
+                return 1
+            if wrong:
+                print(
+                    "!! FALSE CERTIFICATE: a certified objective disagrees with the "
+                    "true optimum beyond correctness tolerance. Hard fail.",
+                    flush=True,
+                )
+                for inst, obj, opt, d, tol in wrong:
+                    print(f"!!   {inst}: certified {obj} vs optimum {opt} "
+                          f"(|Δ|={d:.3e} > tol {tol:.3e})", flush=True)
+                return 1
+
     verdicts: list[Verdict] = []
     meta = {
         "mode": "ci_subset" if args.ci_subset else "full",
@@ -498,7 +657,15 @@ def main() -> int:
     }
     for flag in requested:
         print(f"\n=== gating flag: {flag} ===", flush=True)
-        v = evaluate_flag(flag, instances, nl_dir, args.time_limit, off_cache, args.ci_subset)
+        v = evaluate_flag(
+            flag,
+            instances,
+            nl_dir,
+            args.time_limit,
+            off_cache,
+            args.ci_subset,
+            cert_reference=cert_reference,
+        )
         verdicts.append(v)
         if not args.ci_subset and not args.no_ledger:
             append_ledger(v, ts, meta)

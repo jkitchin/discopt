@@ -61,7 +61,16 @@ def test_script_with_json_is_rejected():
 
 @pytest.mark.smoke
 @pytest.mark.skipif(not _TINY_NL.exists(), reason="minlplib_nl test corpus absent")
-def test_cli_runs_scripted_repl_solve(tmp_path):
+def test_cli_runs_scripted_repl_solve(tmp_path, monkeypatch):
+    # What this test debugs is the spatial B&B tree, so it has to be given one.
+    # ``st_miqp3`` is a convex MIQP, and since #1066 the convex auto-route
+    # certifies it inside the routed master without opening a single node --
+    # ``status=optimal objective=-6 nodes=0``, so ``break if nodes>=1`` never
+    # fires and the scripted REPL never starts. That is a better solve, not a
+    # worse one; it just leaves this test with no subject. Pin the path whose
+    # tree the debugger exists to inspect rather than trusting a model to keep
+    # being slow enough to have one.
+    monkeypatch.setenv("DISCOPT_CONVEX_MINLP_ROUTE", "0")
     script = tmp_path / "cmds.pdbg"
     script.write_text("info\nbreak if nodes>=1\ncontinue\nprint bound\ncontinue\n")
     err = io.StringIO()
@@ -70,3 +79,19 @@ def test_cli_runs_scripted_repl_solve(tmp_path):
     out = err.getvalue()
     assert "status=optimal" in out
     assert "paused at" in out  # the scripted debugger actually ran
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not _TINY_NL.exists(), reason="minlplib_nl test corpus absent")
+def test_cli_reports_a_solve_the_router_finishes_without_a_tree(tmp_path):
+    """The other half of the above: the default path must still report a result.
+
+    With no spatial node to pause on, the CLI has nothing to hand the REPL -- and
+    it should say what happened rather than hanging or exiting non-zero.
+    """
+    script = tmp_path / "cmds.pdbg"
+    script.write_text("info\ncontinue\n")
+    err = io.StringIO()
+    rc = cli.main([str(_TINY_NL), "--script", str(script), "--time-limit", "20"], err=err)
+    assert rc == 0
+    assert "status=optimal" in err.getvalue()

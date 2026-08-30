@@ -3,6 +3,17 @@ name: Docs
 on:
   push:
     branches: [main]
+    # The site is built from docs/ and the autoapi-generated API pages, so a push
+    # that touches neither cannot change it. Without this the book was rebuilt —
+    # jax/jaxlib install plus a full jupyter-book build — on every merge to main,
+    # including Rust-only and benchmark-results-only merges.
+    paths:
+      - "docs/**"
+      - "python/discopt/**"
+      - ".github/workflows/docs.yml"
+  # Keep a manual button so the site can be republished without a docs commit
+  # (e.g. after a Pages settings change or a failed deploy).
+  workflow_dispatch:
 
 permissions:
   contents: read

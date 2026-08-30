@@ -79,6 +79,9 @@ _LP_NLP_BB_OPTION_KEYS = frozenset(
         "integer_to_binary",
         "feasibility_norm",
         "milp_solver",
+        # #1066: the single tree checks in at every master restart, so a caller
+        # that budgets by progress can budget this method too.
+        "termination_hook",
     }
 )
 _DIRECT_ROUTABLE_METHODS = frozenset({"oa", "ecp", "goa"})

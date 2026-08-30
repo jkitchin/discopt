@@ -232,24 +232,28 @@ def test_a_wrong_length_cut_is_refused_instead_of_being_padded():
 
 
 @pytest.mark.smoke
-def test_hooks_this_backend_cannot_honour_are_refused_loudly():
-    """HiGHS has no fractional-node or terminate hook; silence would lose cuts.
+def test_a_hook_this_backend_cannot_honour_is_refused_loudly():
+    """HiGHS has no fractional-node hook; silence would lose the caller's cuts.
 
     Accepting a ``node_callback`` and never calling it would make the SHOT
     profile's MIPNODE cuts vanish with no diagnostic -- the caller would read a
     weaker search as an algorithmic result (CLAUDE.md §3).
+
+    ``terminate_callback`` used to be refused alongside it and no longer is:
+    #1066 gave this backend a real check-in point at the master restart, so the
+    hook is called rather than ignored. Its behaviour is pinned in
+    ``test_issue_1066_lp_nlp_bb_progress_budget.py``.
     """
-    for kw in ({"node_callback": lambda x: None}, {"terminate_callback": lambda: False}):
-        with pytest.raises(NotImplementedError):
-            solve_milp_with_lazy_cuts(
-                _C,
-                _A_UB,
-                _B_UB,
-                bounds=_BOUNDS,
-                integrality=_INTEGRALITY,
-                lazy_callback=lambda x: None,
-                **kw,
-            )
+    with pytest.raises(NotImplementedError, match="no MIPNODE equivalent"):
+        solve_milp_with_lazy_cuts(
+            _C,
+            _A_UB,
+            _B_UB,
+            bounds=_BOUNDS,
+            integrality=_INTEGRALITY,
+            lazy_callback=lambda x: None,
+            node_callback=lambda x: None,
+        )
 
 
 @pytest.mark.smoke

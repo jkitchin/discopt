@@ -120,3 +120,94 @@ def test_bound_changing_status_and_missing_still_enforced():
     kinds = {v.kind for v in check_neutrality(new, base, regime="bound_changing", oracle=oracle)}
     assert "status" in kinds
     assert "missing" in kinds
+
+
+# --------------------------------------------------------------------------- #
+# Reference-relative semantics: the checks must describe a REGRESSION against
+# whatever reference they are given, not an absolute property of the new run.
+#
+# The graduation gate's CI subset compares each arm against a flag-OFF panel
+# measured in the same session, instead of against the committed
+# cert-baseline.jsonl snapshot (which had drifted a month behind `main`, failing
+# all 7 arms identically and reporting it as `soundness=FAIL`). Both checks below
+# were phrased absolutely, which is indistinguishable from reference-relative on
+# the committed baseline but wrong against a live one.
+# --------------------------------------------------------------------------- #
+
+
+def test_committed_baseline_rows_are_all_optimal_with_an_objective():
+    """The property that makes both changes below no-ops on the pre-existing path.
+
+    ``gen_cert_baseline`` writes only the deterministically-certifying subset, so
+    every committed row is ``optimal`` with a non-null objective. While that holds,
+    `base.status == "optimal"` is always true and `nb is None` is always false, so
+    the reference-relative checks behave exactly as the absolute ones did for every
+    caller that passes the committed baseline (``check_cert_neutrality.main``, and
+    the gate's full/nightly path). If this ever fails, those two changes stop being
+    behaviour-preserving there and both need re-deriving.
+    """
+    from utils.cert_neutrality import load_baseline  # noqa: PLC0415
+
+    from scripts.check_cert_neutrality import _CERT_BASELINE  # noqa: PLC0415
+
+    baseline = load_baseline(_CERT_BASELINE)
+    assert baseline, "committed cert baseline is empty"
+    bad_status = {k: v.get("status") for k, v in baseline.items() if v.get("status") != "optimal"}
+    bad_obj = [k for k, v in baseline.items() if v.get("objective") is None]
+    assert not bad_status, f"committed baseline rows that are not optimal: {bad_status}"
+    assert not bad_obj, f"committed baseline rows with a null objective: {bad_obj}"
+
+
+def test_status_not_certified_in_both_arms_is_not_the_flags_fault():
+    """clay0303hfsg / nvs05 / tanksize: not certified inside the 60 s budget with the
+    flag OFF *or* ON. That is the budget and the machine, not the flag.
+
+    Fails before the change (the check demanded ``new.status == "optimal"``
+    outright, so it flagged an instance the reference could not certify either).
+    """
+    ref = {"clay0303hfsg": _row(None, status="time_limit")}
+    new = {"clay0303hfsg": _row(None, status="time_limit")}
+    viol = check_neutrality(new, ref, regime="bound_changing")
+    assert [v.kind for v in viol] == [], f"charged the flag for a budget miss: {viol}"
+
+
+def test_status_lost_relative_to_the_reference_is_still_a_violation():
+    """The control for the test above: the case that actually matters — the arm
+    lost a certification the reference had — must still be flagged."""
+    ref = {"gbd": _row(2.2)}
+    new = {"gbd": _row(None, status="time_limit")}
+    kinds = {v.kind for v in check_neutrality(new, ref, regime="bound_changing")}
+    assert "status" in kinds, "a certification lost relative to the reference must flag"
+
+
+def test_no_certificate_on_either_side_is_not_an_objective_violation():
+    """``objective None -> None``: neither side certified, so there is no
+    certificate for either to be wrong about.
+
+    Fails before the change — ``nb is None or no is None`` made this an
+    ``objective`` violation, which is soundness-class and hard-fails the gate. It
+    is what kept the CI subset red even once the status check was made relative.
+    """
+    ref = {"clay0303hfsg": _row(None, status="time_limit")}
+    new = {"clay0303hfsg": _row(None, status="time_limit")}
+    kinds = [v.kind for v in check_neutrality(new, ref, regime="bound_changing")]
+    assert "objective" not in kinds, "None -> None reported as a false certificate"
+
+
+def test_certifying_what_the_reference_could_not_is_not_a_violation():
+    """``None -> value``: the arm certified an instance the reference could not.
+    That is an improvement, not a false certificate."""
+    ref = {"tanksize": _row(None, status="time_limit")}
+    new = {"tanksize": _row(1.2686437598530085)}
+    viol = check_neutrality(new, ref, regime="bound_changing")
+    assert viol == [], f"an improvement reported as a violation: {viol}"
+
+
+def test_losing_a_certificate_is_still_an_objective_violation():
+    """The control: ``value -> None`` stays soundness-class. This is the only shape
+    the pre-existing ``nb is None or no is None`` branch could ever take against the
+    committed baseline, and it is unchanged."""
+    ref = {"gbd": _row(2.2)}
+    new = {"gbd": _row(None, status="time_limit")}
+    kinds = [v.kind for v in check_neutrality(new, ref, regime="bound_changing")]
+    assert "objective" in kinds, "a lost certificate must stay an objective violation"

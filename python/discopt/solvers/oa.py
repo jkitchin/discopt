@@ -45,6 +45,7 @@ from discopt.solvers.mip_nlp_options import (
 
 if TYPE_CHECKING:
     from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import SolveStatus
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +368,20 @@ def _validate_external_termination(
 
 
 def _float_tuple(values) -> tuple[float, ...]:
-    return tuple(float(v) for v in np.asarray(values, dtype=np.float64).reshape(-1))
+    """The row as a tuple of Python floats.
+
+    ``ndarray.tolist()`` is the same conversion the element-wise ``float(v)``
+    generator did -- a ``float64`` becomes a Python ``float``, with identical
+    value, equality and hash -- but it runs in C over the whole buffer instead of
+    building one generator frame per element. That matters because this is the
+    per-cut cost of the provenance ledger, paid on the FULL master width for every
+    row: profiled on ``squfl020-150`` (3020 columns) at a 60 s limit, the
+    generator alone was 159.5 M calls and 11.5 s, and ``add_row`` 20.8 s
+    cumulative -- 31% of the solve spent recording cuts rather than generating
+    them. The values are unchanged, so this is bound-neutral by construction
+    (CLAUDE.md §5): same coefficients, same dedup keys, same tree.
+    """
+    return tuple(np.asarray(values, dtype=np.float64).reshape(-1).tolist())
 
 
 def _row_violation(
@@ -870,6 +884,11 @@ class _MasterMILPData:
     slack_index: Optional[int]
     integer_binary_expansion: Optional["_IntegerBinaryExpansion"] = None
     integer_binary_start: Optional[int] = None
+    #: #1066: first column of the disaggregated perspective epigraph block, one
+    #: column per term in ``perspective_terms``. ``None`` means the master
+    #: carries the single aggregate epigraph and nothing else.
+    perspective_start: Optional[int] = None
+    perspective_terms: tuple[tuple[int, int, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1183,8 +1202,23 @@ def _extend_master_mip_start(
     if master.use_objective_epigraph:
         if mip_start_objective is None or not np.isfinite(float(mip_start_objective)):
             return None
+        eta_value = float(mip_start_objective)
+        if master.perspective_start is not None:
+            # eta carries the residual objective in a disaggregated master, so a
+            # start that put the whole objective here would violate the very
+            # epigraph rows it is meant to satisfy.
+            term_values = np.array(
+                [q * start[xc] * start[xc] for xc, _yc, q in master.perspective_terms],
+                dtype=np.float64,
+            )
+            eta_value -= float(term_values.sum())
+            for k, value in enumerate(term_values):
+                lo_k, hi_k = master.bounds[master.perspective_start + k]
+                full[master.perspective_start + k] = min(
+                    max(float(value), float(lo_k)), float(hi_k)
+                )
         lo, hi = master.bounds[next_index]
-        full[next_index] = min(max(float(mip_start_objective), float(lo)), float(hi))
+        full[next_index] = min(max(eta_value, float(lo)), float(hi))
     if master.slack_index is not None:
         lo, hi = master.bounds[master.slack_index]
         full[master.slack_index] = min(max(0.0, float(lo)), float(hi))
@@ -2339,6 +2373,213 @@ def _strengthen_objective_cut_perspective(coeffs, rhs, x_star, n_vars, terms):
     return coeffs, rhs, applied
 
 
+#: #1066 §6 telemetry, the disaggregated counterparts of the counter above:
+#: how many per-term epigraph rows were emitted, and how many objective cuts
+#: were *refused* because a reference coordinate was not finite. A panel arm
+#: reporting zero rows ran the aggregate master whatever the flag said.
+_PERSPECTIVE_DISAGG_ROWS: list[int] = [0]
+_PERSPECTIVE_DISAGG_REFUSED: list[int] = [0]
+#: References dropped because their row carries no information (see
+#: ``_PERSPECTIVE_MIN_ROW_COEFF``). Counted so "none were dropped" is
+#: distinguishable from "the check never ran" (CLAUDE.md §6).
+_PERSPECTIVE_DISAGG_NEAR_ZERO: list[int] = [0]
+
+#: Smallest ``2*q*|z|`` worth a perspective row. The row is
+#: ``2*q*z*x_k - q*z**2*y_k - s_k <= 0`` against a ``-1`` on ``s_k``, so once
+#: ``2*q*|z|`` falls to the master backend's matrix floor the backend drops the
+#: ``x_k`` term outright and what lands is ``s_k >= 0`` -- which the column's own
+#: lower bound already says. This is HiGHS's default ``small_matrix_value``, the
+#: value at which that discard provably happens.
+#:
+#: Measured on ``squfl020-150`` (#1066): references at ``z ~ 1.2e-16`` produced
+#: 43 500 such rows, 63% of the master's 69 330. Because their ``q*z**2`` term
+#: (~3e-32) also drove the row-scaling in ``milp_highs._prepare_cut_row``, each
+#: reached HiGHS multiplied by ``2**46``, taking the master's coefficient range
+#: to 6.4e18 -- and HiGHS then reported dual bounds ABOVE the master's own
+#: provable optimum (558.044 against 557.84865).
+_PERSPECTIVE_MIN_ROW_COEFF = 1e-9
+
+
+def _perspective_disagg_enabled() -> bool:
+    """Thin re-export so ``oa.py`` does not import ``solver.py`` (cycle)."""
+    from discopt._relax.perspective import perspective_disaggregation_enabled
+
+    return perspective_disaggregation_enabled()
+
+
+@dataclass
+class _PerspectiveEpigraph:
+    """One epigraph column per separable perspective term (#1066).
+
+    The master's aggregate ``eta`` is left covering only the *residual*
+    objective ``f - sum_k q_k x_k**2``; each term gets its own column ``s_k``
+    and its own Frangioni-Gentile rows
+
+        ``2*q*z*x_k - q*z**2*y_k - s_k <= 0``
+
+    one per reference ``z`` the search visits. The master objective is
+    ``eta + sum_k s_k``, so the sum is still a valid underestimator of ``f``
+    (each row is valid on both integral values of ``y_k`` -- see
+    ``_relax.perspective``), and the master's LP relaxation is free to pick a
+    *different* reference for each term at a fractional point, which is the one
+    thing the aggregate row cannot do.
+    """
+
+    terms: tuple[tuple[int, int, float], ...]
+    rows: list[tuple[int, float]] = field(default_factory=list)
+    _seen: set[tuple[int, float]] = field(default_factory=set)
+    #: Column-wise copies of ``terms`` and of the pooled references, so a whole
+    #: pool can be scored in one vectorised pass. The pool reaches tens of
+    #: thousands of rows on the squfl family (69 NLP solves x ~930 live terms,
+    #: measured on squfl025-040); materialising a dense master row per pool
+    #: entry just to test it for violation cost more than the cuts bought.
+    _x_cols: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    _y_cols: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    _q: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
+    _row_k: list[int] = field(default_factory=list)
+    _row_z: list[float] = field(default_factory=list)
+    #: Row indices created since the last drain. A per-term row born with the
+    #: aggregate cut it was split out of must reach the master *with* it: it is
+    #: exactly tight at the point it was generated from, so a violation filter
+    #: scores it at 0 and drops it, and the term's ``s_k`` is then left free at
+    #: its lower bound while the residual row it was subtracted from is already
+    #: in. That asymmetry -- and not the disaggregation itself -- is what made
+    #: the first cut of this report a *looser* dual bound than the aggregate
+    #: row on squfl025-040 (120.652 vs 142.510).
+    _pending: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._x_cols = np.array([t[0] for t in self.terms], dtype=np.intp)
+        self._y_cols = np.array([t[1] for t in self.terms], dtype=np.intp)
+        self._q = np.array([t[2] for t in self.terms], dtype=np.float64)
+
+    def add(self, k: int, z: float) -> bool:
+        """Record a reference for term ``k``; False if it is already carried."""
+        key = (int(k), float(z))
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        self.rows.append(key)
+        self._row_k.append(int(k))
+        self._row_z.append(float(z))
+        self._pending.append(len(self.rows) - 1)
+        _PERSPECTIVE_DISAGG_ROWS[0] += 1
+        return True
+
+    def drain_pending(self) -> list[int]:
+        """Row indices created since the last call, and clear the list."""
+        pending = self._pending
+        self._pending = []
+        return pending
+
+    def violations(self, master_x, *, perspective_start: int) -> np.ndarray:
+        """``a^T x`` of every pooled row (rhs is 0), vectorised over the pool."""
+        if not self.rows:
+            return np.zeros(0, dtype=np.float64)
+        x = np.asarray(master_x, dtype=np.float64).ravel()
+        ks = np.asarray(self._row_k, dtype=np.intp)
+        zs = np.asarray(self._row_z, dtype=np.float64)
+        q = self._q[ks]
+        scores = (
+            2.0 * q * zs * x[self._x_cols[ks]]
+            - q * zs * zs * x[self._y_cols[ks]]
+            - x[perspective_start + ks]
+        )
+        return np.asarray(scores, dtype=np.float64)
+
+    def row_for(self, index: int, *, n_master: int, perspective_start: int) -> np.ndarray:
+        k, z = self.rows[index]
+        x_col, y_col, q = self.terms[k]
+        row = np.zeros(n_master, dtype=np.float64)
+        row[x_col] = 2.0 * q * z
+        row[y_col] = -q * z * z
+        row[perspective_start + k] = -1.0
+        return row
+
+    def term_values(self, x) -> np.ndarray:
+        """``q_k * x_k**2`` per term: the epigraph values at a point."""
+        arr = np.asarray(x, dtype=np.float64).ravel()
+        return np.array([q * arr[xc] * arr[xc] for xc, _yc, q in self.terms], dtype=np.float64)
+
+
+def _perspective_epigraph_for(terms, n_vars: int) -> Optional[_PerspectiveEpigraph]:
+    """Build the epigraph, or ``None`` when the term table cannot carry one.
+
+    Every term must be usable: the split below removes *all* of them from every
+    aggregate row, so a term that can be removed from one row and not another
+    would leave the master double-counting it -- an over-estimate of ``f``, i.e.
+    an invalid bound. Refuse the whole disaggregation rather than part of it.
+    """
+    if not terms:
+        return None
+    for x_col, y_col, q in terms:
+        if not (0 <= int(x_col) < n_vars and 0 <= int(y_col) < n_vars):
+            return None
+        if not np.isfinite(q) or q <= 0.0:
+            return None
+    return _PerspectiveEpigraph(terms=tuple((int(a), int(b), float(c)) for a, b, c in terms))
+
+
+def _disaggregate_objective_cut(coeffs, rhs, x_star, epigraph: _PerspectiveEpigraph):
+    """Move every perspective term out of an aggregate epigraph row.
+
+    ``coeffs``/``rhs`` are ``grad^T x - eta <= rhs``; term ``k`` contributes
+    ``2*q*z`` to ``coeffs[x_col]`` and ``q*z**2`` to ``rhs`` (the tangent's
+    ``grad.z - f(z)``), so removing it is exact arithmetic and leaves the row a
+    valid tangent of the residual objective. The term is re-added as its own
+    perspective row against ``s_k``.
+
+    Returns ``(coeffs, rhs)``, or ``None`` when a reference coordinate is not
+    finite -- in which case the caller must drop the cut entirely rather than
+    emit a row that removes some terms and not others.
+    """
+    for x_col, _y_col, _q in epigraph.terms:
+        if not np.isfinite(float(x_star[x_col])):
+            _PERSPECTIVE_DISAGG_REFUSED[0] += 1
+            return None
+    for k, (x_col, _y_col, q) in enumerate(epigraph.terms):
+        z = float(x_star[x_col])
+        coeffs[x_col] -= 2.0 * q * z
+        rhs -= q * z * z
+        if 2.0 * q * abs(z) > _PERSPECTIVE_MIN_ROW_COEFF:
+            epigraph.add(k, z)
+        else:
+            # The row would say ``s_k >= 0``, which the column bound already
+            # says -- exactly true at z == 0 and true to the master's own
+            # arithmetic below the floor. The removal above still has to happen
+            # either way; it subtracts ``2*q*z`` and ``q*z**2``, both negligible
+            # here, and dropping an underestimator row can only weaken the
+            # bound, never invalidate it.
+            _PERSPECTIVE_DISAGG_NEAR_ZERO[0] += 1
+    return coeffs, rhs
+
+
+def _split_or_strengthen_objective_cut(
+    evaluator, coeffs, rhs, x_star, n_vars, *, strengthen_aggregate: bool = True
+):
+    """Apply whichever perspective treatment this master is configured for.
+
+    ``strengthen_aggregate=False`` opts a call site out of the #1064 in-place
+    strengthening while keeping the #1066 split, which every site that writes
+    into a disaggregated master must take. It is how the ECP site stays
+    bound-neutral when disaggregation is off: #1064 graduated on a panel that
+    measured the OA site only.
+
+    Returns ``(coeffs, rhs)`` or ``None`` to mean "do not emit this cut".
+    """
+    epigraph = getattr(evaluator, "_perspective_epigraph", None)
+    if epigraph is not None:
+        return _disaggregate_objective_cut(coeffs, rhs, x_star, epigraph)
+    terms = getattr(evaluator, "_perspective_oa_terms", None)
+    if terms and strengthen_aggregate:
+        coeffs, rhs, n_applied = _strengthen_objective_cut_perspective(
+            coeffs, rhs, x_star, n_vars, terms
+        )
+        if n_applied:
+            _PERSPECTIVE_OA_CUT_APPLIED[0] += n_applied
+    return coeffs, rhs
+
+
 def _add_oa_cuts(
     evaluator,
     x_star,
@@ -2459,17 +2700,18 @@ def _add_oa_cuts(
         obj_cut = generate_objective_oa_cut(evaluator, x_star, n_master, z_index=n_vars)
         obj_coeffs_row = obj_cut.coeffs.copy()
         obj_rhs = float(obj_cut.rhs)
-        # #1064: strengthen the aggregate tangent with the perspective of every
-        # separable convex square over a semicontinuous variable. Globally valid
-        # (see ``_relax.perspective``), so ``global_valid=True`` below is
-        # unchanged, and a no-op when the model has no such structure.
-        _persp_terms = getattr(evaluator, "_perspective_oa_terms", None)
-        if _persp_terms:
-            obj_coeffs_row, obj_rhs, _n_persp = _strengthen_objective_cut_perspective(
-                obj_coeffs_row, obj_rhs, x_star, n_vars, _persp_terms
-            )
-            if _n_persp:
-                _PERSPECTIVE_OA_CUT_APPLIED[0] += _n_persp
+        # #1064/#1066: treat the perspective of every separable convex square
+        # over a semicontinuous variable -- either strengthening this aggregate
+        # row in place, or splitting the terms out into their own epigraph
+        # columns. Globally valid either way (see ``_relax.perspective``), so
+        # ``global_valid=True`` below is unchanged, and a no-op when the model
+        # has no such structure.
+        _split = _split_or_strengthen_objective_cut(
+            evaluator, obj_coeffs_row, obj_rhs, x_star, n_vars
+        )
+        if _split is None:
+            return
+        obj_coeffs_row, obj_rhs = _split
         _append_master_cut(
             oa_A_rows,
             oa_b_rows,
@@ -2633,16 +2875,32 @@ def _add_ecp_cuts(
                     local_added += 1
                 n_added += 1
 
+    _ecp_obj_coeffs = None
+    _ecp_obj_rhs = None
+    obj_support = None
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
         obj_value = float(evaluator.evaluate_objective(x_master))
         obj_support = np.concatenate([np.asarray(x_master, dtype=np.float64), [obj_value]])
         obj_cut = generate_objective_oa_cut(evaluator, x_master, n_master, z_index=n_vars)
+        # Same perspective treatment as the OA site: an ECP objective row lands
+        # in the *same* master, so leaving a term in this row while the OA rows
+        # split it out would double-count it against the epigraph columns.
+        _split = _split_or_strengthen_objective_cut(
+            evaluator,
+            obj_cut.coeffs.copy(),
+            float(obj_cut.rhs),
+            x_master,
+            n_vars,
+            strengthen_aggregate=False,
+        )
+        _ecp_obj_coeffs, _ecp_obj_rhs = _split if _split is not None else (None, None)
+    if _ecp_obj_coeffs is not None:
         _append_master_cut(
             oa_A_rows,
             oa_b_rows,
-            obj_cut.coeffs.copy(),
-            obj_cut.rhs,
+            _ecp_obj_coeffs,
+            _ecp_obj_rhs,
             oa_cut_relaxable,
             relaxable=False,
             cut_provenance=cut_provenance,
@@ -2885,6 +3143,17 @@ def _add_esh_cuts(
             )
 
     if not obj_is_linear and objective_epigraph_available:
+        if getattr(evaluator, "_perspective_epigraph", None) is not None:
+            # An ESH objective hyperplane is built, filtered and possibly
+            # discarded downstream, so it cannot carry the all-or-nothing term
+            # split a disaggregated master requires. The two are never combined
+            # (``solve_lp_nlp_bb`` refuses to disaggregate under a SHOT
+            # profile); refuse loudly rather than emit a row that double-counts
+            # every perspective term against its own epigraph column.
+            raise RuntimeError(
+                "ESH objective hyperplanes cannot be generated into a master "
+                "with a disaggregated perspective epigraph (#1066)"
+            )
         n_master = n_vars + 1
         objective_global_valid = bool(objective_is_convex)
         obj_value = float(evaluator.evaluate_objective(support))
@@ -3177,6 +3446,7 @@ def _build_master_milp_data(
     oa_cut_relaxable=None,
     use_objective_epigraph=None,
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
+    perspective_epigraph: Optional[_PerspectiveEpigraph] = None,
 ) -> _MasterMILPData:
     """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -3201,6 +3471,23 @@ def _build_master_milp_data(
     if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
         integer_binary_start = n_master
         n_master += integer_binary_expansion.bit_count
+    # #1066: the disaggregated perspective epigraph is appended *after* every
+    # existing block, so ``n_vars``, the eta column, the slack column and the
+    # binary-expansion offsets all keep the values the rest of this module is
+    # written against, and a stored row shorter than the master still maps by
+    # prefix copy with zeros in the new columns.
+    perspective_start = None
+    n_perspective = 0
+    if perspective_epigraph is not None:
+        if not use_objective_epigraph:
+            raise ValueError(
+                "a disaggregated perspective epigraph needs the objective "
+                "epigraph column: the split leaves eta covering the residual "
+                "objective, and without eta the residual has nowhere to go"
+            )
+        n_perspective = len(perspective_epigraph.terms)
+        perspective_start = n_master
+        n_master += n_perspective
 
     # Build A_ub, b_ub from linear <= constraints + OA cuts
     A_ub_rows = []
@@ -3247,6 +3534,16 @@ def _build_master_milp_data(
         A_ub_rows.append(row)
         b_ub_vals.append(oa_b_rows[i])
 
+    if perspective_start is not None:
+        assert perspective_epigraph is not None
+        for row_index in range(len(perspective_epigraph.rows)):
+            A_ub_rows.append(
+                perspective_epigraph.row_for(
+                    row_index, n_master=n_master, perspective_start=perspective_start
+                )
+            )
+            b_ub_vals.append(0.0)
+
     # Equality constraints from linear
     A_eq_rows = []
     b_eq_vals = []
@@ -3284,6 +3581,10 @@ def _build_master_milp_data(
         c[:n_vars] = c_vec
     elif use_objective_epigraph:
         c[n_vars] = 1.0  # minimize eta
+    if perspective_start is not None:
+        # eta now underestimates only the residual objective; the split-out
+        # terms are minimised through their own columns.
+        c[perspective_start : perspective_start + n_perspective] = 1.0
     if slack_index is not None:
         c[slack_index] = oa_penalty_factor
 
@@ -3295,6 +3596,10 @@ def _build_master_milp_data(
         bounds_list.append((0.0, max_slack))
     if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
         bounds_list.extend((0.0, 1.0) for _ in range(integer_binary_expansion.bit_count))
+    if perspective_start is not None:
+        # q_k * x_k**2 >= 0, and the lower bound is what makes the z == 0
+        # reference row redundant rather than missing.
+        bounds_list.extend((0.0, 1e20) for _ in range(n_perspective))
 
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
@@ -3324,6 +3629,8 @@ def _build_master_milp_data(
         slack_index=slack_index,
         integer_binary_expansion=integer_binary_expansion,
         integer_binary_start=integer_binary_start,
+        perspective_start=perspective_start,
+        perspective_terms=(perspective_epigraph.terms if perspective_epigraph is not None else ()),
     )
 
 
@@ -3890,6 +4197,79 @@ def _compute_gap(lb: float, ub: float) -> float:
     return optimality_gap(lb, ub, denom_floor=1.0)
 
 
+def _lp_nlp_bb_exit_status(
+    *,
+    converged_early: bool,
+    callback_terminated: bool,
+    master_status: "SolveStatus",
+    has_incumbent: bool,
+    master_bound_valid: bool,
+    gap: Optional[float],
+    gap_tolerance: float,
+    hook_stopped_before_wall: bool,
+) -> tuple[str, Optional[str]]:
+    """The status and termination reason :func:`solve_lp_nlp_bb` exits with.
+
+    Split out of the driver so the decision can be tested at every combination of
+    its inputs rather than only at whichever ones a 60-second solve happens to
+    produce.
+
+    The last clause is the one with teeth. A certificate the driver already holds
+    does not stop being a certificate because the *clock* -- rather than the gap
+    test -- is what ended the search. ``master_bound_valid`` says the master is a
+    relaxation of the MINLP, and a MIP tree's dual bound bounds its own optimum
+    whether the tree finished or was cut off mid-search, so ``gap <=
+    gap_tolerance`` on that bound is the same certificate a converged run reports.
+    Before this, a run that ended on the wall was reported ``feasible`` even with
+    the gap closed: ``squfl015-060`` at default settings finished with dual bound
+    366.6218167383147 against incumbent 366.62181673996474 -- a relative gap of
+    4.5e-14 against a 1e-4 tolerance -- and reported ``feasible``.
+
+    ``termination_reason`` is deliberately NOT rewritten to ``gap_tolerance`` when
+    that clause fires: the search really did stop on the clock, and the trace
+    should keep saying so. Status answers "is the answer proven"; the reason
+    answers "why did the loop end". They are different questions.
+    """
+    from discopt.solvers import SolveStatus
+
+    status = "feasible"
+    termination_reason: Optional[str] = None
+    if converged_early and has_incumbent:
+        # Stopped on the certificate, not on the clock or the caller's option.
+        termination_reason = "gap_tolerance"
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif callback_terminated:
+        # The clock and the hook both come back through the same callback, so name
+        # whichever one it was rather than reporting a time limit that may not have
+        # been reached.
+        termination_reason = "termination_hook" if hook_stopped_before_wall else "time_limit"
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.INFEASIBLE:
+        status = "infeasible"
+    elif master_status == SolveStatus.TIME_LIMIT:
+        status = "time_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.ITERATION_LIMIT:
+        status = "iteration_limit" if not has_incumbent else "feasible"
+    elif master_status == SolveStatus.OPTIMAL and has_incumbent:
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif not has_incumbent:
+        status = "no_feasible_point"
+    if (
+        status == "feasible"
+        and has_incumbent
+        and master_bound_valid
+        and gap is not None
+        and gap <= gap_tolerance
+    ):
+        # ``gap`` comes from :func:`_compute_gap`, which reports 1.0 -- never a
+        # small number -- when the bound ordering is materially inverted, so a
+        # broken certificate cannot reach this branch (see ``solvers._gap``).
+        status = "optimal"
+    if termination_reason is None:
+        termination_reason = status
+    return status, termination_reason
+
+
 def solve_feasibility_pump(
     model: Model,
     time_limit: float = 3600.0,
@@ -4110,6 +4490,7 @@ def solve_lp_nlp_bb(
     integer_to_binary: bool = False,
     mip_nlp_profile: str = "default",
     mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
+    termination_hook: Any = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
@@ -4125,6 +4506,21 @@ def solve_lp_nlp_bb(
     ``milp_solver`` selects that backend: ``"simplex"`` (the in-house Rust MILP
     driver, also reached by the default ``"auto"``) or ``"gurobi"``. See
     :func:`_resolve_lp_nlp_bb_backend` for what each one supports.
+
+    ``termination_hook`` is the same contract :func:`solve_oa` offers -- a callable
+    handed a context mapping, returning true to stop -- so a caller that budgets a
+    solve by progress can budget this method too. It is honoured on the backends
+    that have a check-in point: ``"highs"`` consults it at every master restart and
+    ``"gurobi"`` on its wall-clock poll. The ``"simplex"`` driver has neither, and
+    passing a hook it cannot call would make any budget built on it a fiction, so
+    that combination is refused rather than silently ignored (CLAUDE.md §3).
+
+    The context carries the keys :func:`solve_oa`'s hook sees for a bound-driven
+    decision -- ``event``, ``elapsed``, ``is_minimization``, ``current_dual_bound``,
+    ``current_primal_bound``, ``relative_gap``, ``absolute_gap``,
+    ``incumbent_objective`` -- plus ``restarts`` and ``lazy_cuts``. The per-iteration
+    OA keys have no meaning in a single tree and are not invented: this method has
+    no ``iteration``.
     """
     if kwargs:
         raise ValueError(
@@ -4134,7 +4530,7 @@ def solve_lp_nlp_bb(
             "feasibility_cuts, feasibility_norm, heuristic_nonconvex, init_strategy, "
             "integer_to_binary, "
             "max_slack, milp_solver, mip_nlp_profile, mip_nlp_shot_config, "
-            "oa_penalty_factor."
+            "oa_penalty_factor, termination_hook."
         )
     t_start = time.perf_counter()
     shot_config = mip_nlp_shot_config if mip_nlp_profile == "shot" else None
@@ -4143,6 +4539,15 @@ def solve_lp_nlp_bb(
     # Resolve (and refuse) the single-tree backend before any model work, so an
     # unsupported request costs a message rather than a decomposition.
     lazy_backend = _resolve_lp_nlp_bb_backend(milp_solver, shot_profile=shot_profile)
+    hook = _normalize_optional_hook("termination_hook", termination_hook)
+    if hook is not None and lazy_backend == "simplex":
+        raise NotImplementedError(
+            "termination_hook is not available on the in-house simplex master: the "
+            "driver enforces time_limit itself and offers no check-in point, so the "
+            "hook could never be called and any budget built on it would be a "
+            "fiction. Use milp_solver='highs' (checks in at every master restart) "
+            "or milp_solver='gurobi'."
+        )
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
     fp_config = _normalize_fp_config(
@@ -4307,6 +4712,26 @@ def solve_lp_nlp_bb(
     incumbent_obj: Optional[float] = None
     nlp_subproblem_count = 0
 
+    # #1066: give every separable perspective term its own epigraph column, so
+    # the master's LP relaxation can combine each term's best reference at a
+    # fractional point instead of being held to one common reference per row.
+    # Only on this driver's own master: it builds exactly one, which is what
+    # makes the all-or-nothing term split checkable. Not under a SHOT profile,
+    # whose ESH hyperplanes cannot carry the split (they are filtered after
+    # generation), and not without the epigraph column the residual needs.
+    perspective_epigraph: Optional[_PerspectiveEpigraph] = None
+    if (
+        _perspective_disagg_enabled()
+        and not shot_profile
+        and not decomp.obj_is_linear
+        and decomp.oa_objective_is_convex
+    ):
+        perspective_epigraph = _perspective_epigraph_for(
+            getattr(evaluator, "_perspective_oa_terms", None) or [], n_vars
+        )
+        if perspective_epigraph is not None:
+            evaluator._perspective_epigraph = perspective_epigraph  # type: ignore[attr-defined]
+
     def accept_incumbent(x: np.ndarray, obj: float) -> None:
         nonlocal incumbent, incumbent_obj
         if incumbent_obj is None or obj < incumbent_obj:
@@ -4427,10 +4852,47 @@ def solve_lp_nlp_bb(
         oa_cut_relaxable=oa_cut_relaxable,
         use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
         integer_binary_expansion=integer_binary_expansion,
+        perspective_epigraph=perspective_epigraph,
+    )
+    #: Perspective epigraph rows already in the master. The build below takes
+    #: whatever the pool holds at that moment; everything the search adds after
+    #: it has to reach the tree as a lazy row like any other cut. Rows that are
+    #: not violated yet stay in the pool and are offered again later rather than
+    #: being dropped -- a term's reference earns its place at a *fractional*
+    #: point, which is the whole reason the epigraph is disaggregated.
+    perspective_rows_emitted = set(
+        range(len(perspective_epigraph.rows)) if perspective_epigraph is not None else ()
     )
 
-    def collect_new_lazy_cuts(start: int, master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+    def collect_new_perspective_rows(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        if perspective_epigraph is None or master.perspective_start is None:
+            return []
         rows: list[tuple[np.ndarray, float]] = []
+        scores = perspective_epigraph.violations(
+            master_x, perspective_start=master.perspective_start
+        )
+        # Freshly split rows go in unconditionally (see ``_pending``); older
+        # pooled rows only when the master point actually violates them.
+        candidates = perspective_epigraph.drain_pending()
+        candidates.extend(np.flatnonzero(scores > 1e-6).tolist())
+        for row_index in candidates:
+            if row_index in perspective_rows_emitted:
+                continue
+            rows.append(
+                (
+                    perspective_epigraph.row_for(
+                        row_index,
+                        n_master=len(master.c),
+                        perspective_start=master.perspective_start,
+                    ),
+                    0.0,
+                )
+            )
+            perspective_rows_emitted.add(row_index)
+        return rows
+
+    def collect_new_lazy_cuts(start: int, master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        rows: list[tuple[np.ndarray, float]] = list(collect_new_perspective_rows(master_x))
         for idx in range(start, len(oa_A_rows)):
             relaxable = bool(oa_cut_relaxable[idx]) if idx < len(oa_cut_relaxable) else True
             row = _format_lazy_master_cut(
@@ -4581,7 +5043,7 @@ def solve_lp_nlp_bb(
         )
         return rows
 
-    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers import MILPResult
 
     solve_milp_with_lazy_cuts: Callable[..., MILPResult]
     if lazy_backend == "gurobi":
@@ -4606,8 +5068,68 @@ def solve_lp_nlp_bb(
             mip_start_objective=_master_objective_from_evaluator(incumbent_obj),
         )
 
-    def callback_terminate(_snapshot: dict[str, object]) -> bool:
-        return (time.perf_counter() - t_start) >= float(time_limit)
+    hook_calls = [0]
+    #: The internal-sense dual bound that closed the gap, once one does.
+    converged_at: list[Optional[float]] = [None]
+    #: How many check-ins carried a usable dual bound. Zero means the early exit
+    #: never had anything to judge, which is NOT the same as "it judged and said
+    #: keep going" (CLAUDE.md §6); it is exported in ``callback_stats``.
+    bound_observations = [0]
+
+    def _master_bound_internal(raw) -> Optional[float]:
+        """The master's dual bound in the internal minimization sense, or None."""
+        if not master_bound_valid or raw is None or not np.isfinite(float(raw)):
+            return None
+        value = float(raw)
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            value += float(decomp.obj_coeffs[1])
+        return value
+
+    def callback_terminate(snapshot: dict[str, object]) -> bool:
+        if (time.perf_counter() - t_start) >= float(time_limit):
+            return True
+        lb = _master_bound_internal(snapshot.get("dual_bound"))
+        ub = incumbent_obj
+        if lb is not None and ub is not None:
+            bound_observations[0] += 1
+            if _compute_gap(lb, ub) <= gap_tolerance:
+                # The master's running dual bound has met the NLP incumbent, which
+                # is the same certificate this driver tests for after the master
+                # returns -- just read at the moment it becomes true rather than
+                # whenever the separator happens to run dry. The bound is valid:
+                # the master is a relaxation of the MINLP (its cuts are supporting
+                # hyperplanes of convex functions, and ``master_bound_valid`` is
+                # what says so), and a MIP tree's dual bound is a valid bound on
+                # its own optimum at every instant of the search, interrupted or
+                # not. Without this the loop runs past its own certificate:
+                # ``rsyn0820m02m`` had bound 1092.1600 against incumbent 1092.0911
+                # -- gap 6.3e-5, inside the 1e-4 default -- at 5.1 s of a 60 s
+                # limit, then rebuilt its tree five more times and was reported
+                # ``feasible`` at the wall (measured 2026-08-29).
+                converged_at[0] = lb if converged_at[0] is None else max(converged_at[0], lb)
+                return True
+        if hook is None:
+            return False
+        context: dict[str, object] = {
+            "event": "termination",
+            "elapsed": float(time.perf_counter() - t_start),
+            "is_minimization": bool(obj_sign > 0),
+            "current_dual_bound": None if lb is None else obj_sign * lb,
+            "current_primal_bound": None if ub is None else obj_sign * ub,
+            "relative_gap": _compute_gap(lb, ub) if lb is not None and ub is not None else None,
+            "absolute_gap": (None if lb is None or ub is None else abs(ub - lb)),
+            "incumbent_objective": None if ub is None else obj_sign * ub,
+            "n_vars": int(n_vars),
+            "n_constraints": int(n_cons),
+            "restarts": int(cast(int, snapshot.get("restarts", 0) or 0)),
+            "lazy_cuts": int(cast(int, snapshot.get("lazy_cuts", 0) or 0)),
+        }
+        hook_calls[0] += 1
+        try:
+            raw = hook(context)
+        except Exception as exc:  # never swallowed (CLAUDE.md §7)
+            raise RuntimeError(f"termination_hook failed during LP/NLP BB solve: {exc}") from exc
+        return _validate_external_termination(raw)
 
     lazy_kwargs: dict[str, object] = dict(
         c=master.c,
@@ -4623,42 +5145,99 @@ def solve_lp_nlp_bb(
         mip_start=master_mip_start,
     )
     if lazy_backend == "gurobi":
-        # MIPNODE user cuts and the wall-clock poll are Gurobi-only; the native
-        # driver has no fractional-node hook and enforces `time_limit` itself.
+        # MIPNODE user cuts are Gurobi-only; the native driver has no
+        # fractional-node hook.
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
+        lazy_kwargs["terminate_callback"] = callback_terminate
+    elif lazy_backend == "highs":
+        # The HiGHS master checks in at every restart and, between them, on an
+        # interval. That is what lets a caller budget this method by progress
+        # (#1066) -- and, hook or no hook, what lets the driver notice its own
+        # certificate the moment the bound meets the incumbent instead of at
+        # whatever later instant the separator runs dry.
         lazy_kwargs["terminate_callback"] = callback_terminate
     master_result = solve_milp_with_lazy_cuts(**lazy_kwargs)  # type: ignore[arg-type]
     wall_time = time.perf_counter() - t_start
 
     bound = None
+    # The master bound as it stood before the inversion guard below, kept so the
+    # trace still carries the number a diagnosis needs after ``bound`` is
+    # suppressed. ``None`` means the guard did not fire.
+    inverted_master_bound: Optional[float] = None
     if master_bound_valid and master_result.bound is not None:
         bound = float(master_result.bound)
         if decomp.obj_is_linear and decomp.obj_coeffs is not None:
             bound += float(decomp.obj_coeffs[1])
+    if converged_at[0] is not None:
+        # Report the bound the stop was actually taken on. Both readings are valid
+        # bounds in the internal sense, so the tighter one is the honest one -- and
+        # if the post-hoc read came back weaker, reporting it would contradict the
+        # very test that ended the search and turn a certificate into "feasible".
+        bound = converged_at[0] if bound is None else max(bound, converged_at[0])
+    # The master's dual bound crossed the incumbent it is reported against.
+    # ``solve_oa`` has refused to publish that since ``fac2`` (see
+    # ``_certified_bound_inverted``); this path -- the single-tree LP/NLP-BB
+    # driver, a different function -- never got the same guard. Measured on
+    # ``squfl020-150`` (MINLPLib ``=best=`` 557.84865) at default settings: the
+    # HiGHS lazy master returned ``bound=557.9460019817818`` against this
+    # driver's own incumbent ``557.848649973387``, i.e. a *lower* bound 0.097
+    # ABOVE the true optimum, and the run reported it. ``_compute_gap`` already
+    # declines to call that converged (it returns 1.0, documented as "nothing
+    # proved"), but suppressing only the gap still hands the caller ``bound >
+    # objective``, and #1059's route merge republishes exactly that number.
+    #
+    # One of the two is wrong and this code cannot tell which, so neither is
+    # reported as proved. The incumbent survives -- it is an independently
+    # feasibility-checked point -- and the offending number is kept in the
+    # trace as ``inverted_master_bound``, where a diagnostic belongs and nothing
+    # reads it as a dual certificate (CLAUDE.md §1).
+    if (
+        bound is not None
+        and incumbent_obj is not None
+        and np.isfinite(bound)
+        and np.isfinite(incumbent_obj)
+        and float(bound) - float(incumbent_obj)
+        > bound_inversion_tolerance(float(bound), float(incumbent_obj))
+    ):
+        logger.warning(
+            "lp_nlp_bb: master dual bound %.12g is above the incumbent %.12g by "
+            "more than rounding -- one of the two is wrong, so neither the bound "
+            "nor the gap is reported. This is a bound-validity defect worth "
+            "investigating, not a tolerance to widen.",
+            float(bound),
+            float(incumbent_obj),
+        )
+        inverted_master_bound = float(bound)
+        bound = None
+        master_bound_valid = False
     gap = (
         _compute_gap(bound, incumbent_obj)
         if bound is not None and incumbent_obj is not None
         else None
     )
     callback_stats = dict(master_result.callback_stats or {})
+    # How many times the caller's hook actually ran. Zero with a hook installed
+    # means it never got a check-in -- a master that never separated -- and NOT
+    # that it kept saying continue (CLAUDE.md §6).
+    callback_stats["termination_hook_calls"] = int(hook_calls[0])
+    # Distinguish "the early exit never had a bound to judge" from "it judged and
+    # kept going" -- only the HiGHS backend reports a dual bound at check-in, so
+    # on any other master this count is 0 and the exit is inert by construction.
+    callback_stats["dual_bound_observations"] = int(bound_observations[0])
+    callback_stats["converged_early"] = bool(converged_at[0] is not None)
     callback_terminated = bool(callback_stats.get("terminated"))
-    status = "feasible"
-    termination_reason: Optional[str] = None
-    if callback_terminated:
-        termination_reason = "time_limit"
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.INFEASIBLE:
-        status = "infeasible"
-    elif master_result.status == SolveStatus.TIME_LIMIT:
-        status = "time_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.ITERATION_LIMIT:
-        status = "iteration_limit" if incumbent is None else "feasible"
-    elif master_result.status == SolveStatus.OPTIMAL and incumbent is not None:
-        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
-    elif incumbent is None:
-        status = "no_feasible_point"
-    if termination_reason is None:
-        termination_reason = status
+    status, termination_reason = _lp_nlp_bb_exit_status(
+        converged_early=converged_at[0] is not None,
+        callback_terminated=callback_terminated,
+        master_status=master_result.status,
+        has_incumbent=incumbent is not None,
+        master_bound_valid=bool(master_bound_valid),
+        gap=gap,
+        gap_tolerance=gap_tolerance,
+        hook_stopped_before_wall=(
+            hook is not None and (time.perf_counter() - t_start) < float(time_limit)
+        ),
+    )
 
     trace_bound_validity = (
         "global"
@@ -4718,6 +5297,10 @@ def solve_lp_nlp_bb(
         "final_lb": _trace_value(bound),
         "final_ub": _trace_value(incumbent_obj),
         "final_gap": _trace_value(gap),
+        # Only set when the master handed back a bound past the incumbent and
+        # the guard above suppressed it -- the number to investigate, kept out
+        # of ``final_lb`` so nothing reads it as a dual certificate.
+        "inverted_master_bound": _trace_value(inverted_master_bound),
     }
 
     if incumbent is not None and incumbent_obj is not None:
