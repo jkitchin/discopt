@@ -170,6 +170,40 @@ class _IpoptCallbacks:
         return (rows, cols)
 
 
+_BOUNDS_CACHE_ATTR = "_discopt_constraint_bounds_cache"
+
+
+def _constraint_bounds_fingerprint(constraints, sizes) -> tuple:
+    """An O(1) identity of the constraint list the bounds were derived from.
+
+    ``constraints`` and ``sizes`` are owned by the evaluator, which also owns
+    the cache entry, so neither object can be garbage-collected (and neither
+    ``id`` recycled) while the entry is reachable. Rebuilding either list --
+    the only way a compiled evaluator's senses can change -- changes the
+    identity and misses the cache.
+    """
+    return (id(constraints), len(constraints), id(sizes), int(np.sum(sizes)))
+
+
+def _cached_constraint_bounds(source, constraints, sizes):
+    entry = getattr(source, _BOUNDS_CACHE_ATTR, None)
+    if entry is None:
+        return None
+    fingerprint, cl, cu = entry
+    if fingerprint != _constraint_bounds_fingerprint(constraints, sizes):
+        return None
+    return cl, cu
+
+
+def _store_constraint_bounds(source, constraints, sizes, cl, cu) -> None:
+    # Evaluators defined with ``__slots__`` simply go uncached rather than
+    # raising; the bounds are recomputed exactly as they were before.
+    if not hasattr(source, "__dict__"):
+        return
+    entry = (_constraint_bounds_fingerprint(constraints, sizes), cl, cu)
+    setattr(source, _BOUNDS_CACHE_ATTR, entry)
+
+
 def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
     """Infer constraint bounds (cl, cu) from model constraint senses.
 
@@ -192,6 +226,17 @@ def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
     else:
         constraints = source._source_constraints
         sizes = source._constraint_flat_sizes
+        # An NLPEvaluator compiles its constraint list once in ``__init__`` and
+        # never mutates it, but the bounds were rebuilt on every call: the OA
+        # feasibility phase calls this 45k times per solve through
+        # ``_constraint_violation_data``, and each call allocates ``2 * n_cons``
+        # ``np.full`` arrays plus two concatenates. Measured on
+        # ``portfol_classical050_1`` (103 constraints): 111.4 us/call, ~5.1 s of
+        # a 32.8 s solve. A ``Model`` can gain constraints between calls, so
+        # only the evaluator branch is cached.
+        cached = _cached_constraint_bounds(source, constraints, sizes)
+        if cached is not None:
+            return cached[0].copy(), cached[1].copy()
 
     cl_parts: list[np.ndarray] = []
     cu_parts: list[np.ndarray] = []
@@ -209,8 +254,20 @@ def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
         cu_parts.append(np.full(sz_int, hi, dtype=np.float64))
 
     if not cl_parts:
-        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-    return np.concatenate(cl_parts), np.concatenate(cu_parts)
+        cl = np.empty(0, dtype=np.float64)
+        cu = np.empty(0, dtype=np.float64)
+    else:
+        cl = np.concatenate(cl_parts)
+        cu = np.concatenate(cu_parts)
+
+    if isinstance(source, Model):
+        # Never cached, so these arrays are already the caller's alone.
+        return cl, cu
+
+    _store_constraint_bounds(source, constraints, sizes, cl, cu)
+    # Callers receive their own arrays, exactly as before this was cached, so a
+    # caller that writes into the result cannot corrupt the cache.
+    return cl.copy(), cu.copy()
 
 
 def solve_nlp(
