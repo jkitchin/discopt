@@ -12,6 +12,7 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, NoReturn, Optional, Sequence, TypeVar
 
 import numpy as np
@@ -135,6 +136,7 @@ def _get_struct_cache(model: Model) -> dict:
         cache = {
             "token": token,
             "flatten": {},
+            "rowstruct": {},
             "metadata": build_flat_variable_metadata(model),
         }
         try:
@@ -174,6 +176,54 @@ def _cached_flat_terms(model: Model, expr) -> list[tuple[float, object]]:
     return terms
 
 
+_ROWSTRUCT_MISS = object()
+
+
+def _cached_row_structure(model: Model, rule_name: str, constraint, metadata, build):
+    """Memoize a rule's *bound-independent* decomposition of one constraint row.
+
+    A rule's row scan splits into two halves: deriving the row's algebraic
+    shape (which terms are squares, which are linear, their coefficients) and
+    then intersecting that shape against the current box. Only the second half
+    reads ``flat_lb``/``flat_ub``; the first depends solely on the expression
+    DAG and the flat-variable metadata, both invariant across B&B nodes -- the
+    same invariant ``_cached_flat_terms`` already relies on.
+
+    Measured on portfol_classical050_1 (#1066), that first half dominated:
+    10.5M ``_constant_value`` calls and 55.6M ``isinstance`` calls, 15.9 s of a
+    46.6 s solve, redone identically at every one of 160 tightening passes.
+
+    The whole decomposition is cached rather than the individual term matches,
+    because a per-term cache would have to re-apply each term's scale *after*
+    the lookup. Threading the scale through the recursion computes
+    ``(s * c1) * c2`` while a unit-scale cache would compute ``s * (c1 * c2)``;
+    those differ in the last ulp, which would move a bound and violate the
+    CLAUDE.md 5 bound-neutrality requirement. Caching the finished dicts
+    reproduces the original arithmetic bit-for-bit.
+
+    ``build`` must return the decomposition, or ``None`` when the row does not
+    match the rule -- a non-match is cached too, since it is just as invariant.
+
+    The decomposition depends on ``metadata`` as well as on the row, and
+    ``metadata`` reaches a rule as a *parameter*. The production driver always
+    passes ``_cached_flat_metadata(model)`` -- the very object this cache is
+    stored beside, invalidated by the same structural token -- but a caller that
+    builds its own metadata (a test exercising a rule directly) would otherwise
+    read entries derived from a different one. Such a caller bypasses the cache
+    rather than being trusted to match it.
+    """
+    cache = _get_struct_cache(model)
+    if metadata is not cache["metadata"]:
+        return build()
+    rowstruct = cache["rowstruct"]
+    key = (rule_name, id(constraint.body))
+    value = rowstruct.get(key, _ROWSTRUCT_MISS)
+    if value is _ROWSTRUCT_MISS:
+        value = build()
+        rowstruct[key] = value
+    return value
+
+
 @dataclass(frozen=True)
 class NonlinearBoundTighteningStats:
     """Summary of a nonlinear tightening pass."""
@@ -196,6 +246,28 @@ class NonlinearBoundTighteningStats:
 # its deadline once per binary on an instance with 7 binaries and 107k constraints,
 # which is a poll that never fires in time.
 _DEADLINE_POLL_STRIDE = 64
+
+
+def _cached_model_structure(model: Model, key: str, metadata, build):
+    """Memoize a rule's *bound-independent* scan of the whole model.
+
+    The row-level sibling :func:`_cached_row_structure` keys on one constraint
+    body; a rule whose conclusion depends on what the model does *not* contain
+    (``PeriodicVariableBoundRule``) must scan the objective and every row before
+    it can conclude anything, so its unit of caching is the model.
+
+    Same metadata guard, for the same reason: the scan resolves expressions to
+    flat indices through ``metadata``, so a caller supplying its own bypasses the
+    cache rather than being trusted to match it.
+    """
+    cache = _get_struct_cache(model)
+    if metadata is not cache["metadata"]:
+        return build()
+    value = cache.get(key, _ROWSTRUCT_MISS)
+    if value is _ROWSTRUCT_MISS:
+        value = build()
+        cache[key] = value
+    return value
 
 
 def _rows_until(model: Model, deadline: Optional[float]):
@@ -977,6 +1049,58 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
     ) -> Optional[tuple[int, float]]:
         return _match_scaled_square_var(expr, scale, metadata)
 
+    def _decompose_row(
+        self,
+        model: Model,
+        constraint,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[float, dict[int, tuple[float, float]]]]:
+        """Bound-independent half of the row scan; see ``_cached_row_structure``.
+
+        Returns ``(constant_term, {flat_idx: (quad_coeff, linear_coeff)})``, or
+        ``None`` when the row is not a separable convex quadratic this rule can
+        use. The arithmetic is exactly the loop this replaced, in the same order.
+        """
+        terms = _cached_flat_terms(model, constraint.body)
+
+        constant_term = 0.0
+        quad_coeffs: dict[int, float] = {}
+        linear_coeffs: dict[int, float] = {}
+
+        for scale, term in terms:
+            const_val = _constant_value(term)
+            if const_val is not None:
+                constant_term += scale * const_val
+                continue
+
+            square_match = self._match_scaled_square(term, scale, metadata)
+            if square_match is not None:
+                flat_idx, coeff = square_match
+                quad_coeffs[flat_idx] = quad_coeffs.get(flat_idx, 0.0) + coeff
+                continue
+
+            linear_match = _match_scaled_linear_var(term, scale, metadata)
+            if linear_match is not None:
+                flat_idx, coeff = linear_match
+                linear_coeffs[flat_idx] = linear_coeffs.get(flat_idx, 0.0) + coeff
+                continue
+
+            return None
+
+        if not quad_coeffs and not linear_coeffs:
+            return None
+
+        coeffs = {
+            flat_idx: (
+                quad_coeffs.get(flat_idx, 0.0),
+                linear_coeffs.get(flat_idx, 0.0),
+            )
+            for flat_idx in set(quad_coeffs) | set(linear_coeffs)
+        }
+        if any(a < -1e-12 for a, _ in coeffs.values()):
+            return None
+        return constant_term, coeffs
+
     def tighten(
         self,
         model: Model,
@@ -992,46 +1116,16 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms = _cached_flat_terms(model, constraint.body)
-
-            constant_term = 0.0
-            quad_coeffs: dict[int, float] = {}
-            linear_coeffs: dict[int, float] = {}
-            matches_pattern = True
-
-            for scale, term in terms:
-                const_val = _constant_value(term)
-                if const_val is not None:
-                    constant_term += scale * const_val
-                    continue
-
-                square_match = self._match_scaled_square(term, scale, metadata)
-                if square_match is not None:
-                    flat_idx, coeff = square_match
-                    quad_coeffs[flat_idx] = quad_coeffs.get(flat_idx, 0.0) + coeff
-                    continue
-
-                linear_match = _match_scaled_linear_var(term, scale, metadata)
-                if linear_match is not None:
-                    flat_idx, coeff = linear_match
-                    linear_coeffs[flat_idx] = linear_coeffs.get(flat_idx, 0.0) + coeff
-                    continue
-
-                matches_pattern = False
-                break
-
-            if not matches_pattern or (not quad_coeffs and not linear_coeffs):
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._decompose_row(model, c, metadata),
+            )
+            if structure is None:
                 continue
-
-            coeffs = {
-                flat_idx: (
-                    quad_coeffs.get(flat_idx, 0.0),
-                    linear_coeffs.get(flat_idx, 0.0),
-                )
-                for flat_idx in set(quad_coeffs) | set(linear_coeffs)
-            }
-            if any(a < -1e-12 for a, _ in coeffs.values()):
-                continue
+            constant_term, coeffs = structure
 
             min_contribs: dict[int, float] = {}
             for flat_idx, (a, b) in coeffs.items():
@@ -1747,6 +1841,38 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
 
         return None
 
+    def _decompose_row(
+        self,
+        constraint,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[float, int, float, list[tuple[int, float]]]]:
+        """Bound-independent half of the row scan; see ``_cached_row_structure``.
+
+        Returns ``(constant_term, target_idx, target_scale, positive)`` -- the
+        negative square this rule tightens and the positive squares whose box
+        activity bounds it -- or ``None`` when the row is not of that shape. The
+        arithmetic is exactly the prologue this replaced, in the same order, and
+        ``positive`` keeps its original list order because the caller sums over
+        it in floating point.
+        """
+        if getattr(constraint, "sense", None) != "==":
+            return None
+
+        square_coeffs: dict[int, float] = {}
+        constant = self._collect_square_sum(constraint.body, 1.0, metadata, square_coeffs)
+        if constant is None:
+            return None
+        constant_term = float(constant)
+
+        square_coeffs = {idx: coeff for idx, coeff in square_coeffs.items() if abs(coeff) > 1e-12}
+        negative = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff < -1e-12]
+        positive = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff > 1e-12]
+        if len(negative) != 1 or not positive:
+            return None
+
+        target_idx, target_coeff = negative[0]
+        return constant_term, target_idx, -target_coeff, positive
+
     def tighten(
         self,
         model: Model,
@@ -1759,25 +1885,17 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in _rows_until(model, deadline):
-            if getattr(constraint, "sense", None) != "==":
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._decompose_row(c, metadata),
+            )
+            if structure is None:
                 continue
+            constant_term, target_idx, target_scale, positive = structure
 
-            square_coeffs: dict[int, float] = {}
-            constant = self._collect_square_sum(constraint.body, 1.0, metadata, square_coeffs)
-            if constant is None:
-                continue
-            constant_term = float(constant)
-
-            square_coeffs = {
-                idx: coeff for idx, coeff in square_coeffs.items() if abs(coeff) > 1e-12
-            }
-            negative = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff < -1e-12]
-            positive = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff > 1e-12]
-            if len(negative) != 1 or not positive:
-                continue
-
-            target_idx, target_coeff = negative[0]
-            target_scale = -target_coeff
             rhs_lb = constant_term
             rhs_ub = constant_term
             for flat_idx, coeff in positive:
@@ -1969,6 +2087,60 @@ class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
     # tightening -- safe to stop at a deadline mid-scan (#875).
     row_scan_is_anytime = True
 
+    def _decompose_row(
+        self,
+        model: Model,
+        constraint,
+        metadata: FlatVariableMetadata,
+        n_vars: int,
+    ) -> Optional[tuple[np.ndarray, float, int, float, float]]:
+        """Bound-independent half of the row scan; see ``_cached_row_structure``.
+
+        Returns ``(affine_coeff, affine_const, base_idx, exponent, power_scale)``
+        for a row of the form ``power_scale * x**exponent + affine <= rhs`` with
+        ``exponent < 0``, or ``None``. The arithmetic is exactly the prologue this
+        replaced, in the same order.
+
+        ``affine_coeff`` is shared by every node that reads this row, so it is
+        marked read-only: a downstream in-place write would otherwise corrupt the
+        cached row silently, and the box it produced with it (CLAUDE.md 3 --
+        refuse loudly rather than approximate).
+        """
+        if getattr(constraint, "sense", None) not in ("<=", "=="):
+            return None
+
+        terms = _cached_flat_terms(model, constraint.body)
+
+        power_match: Optional[tuple[int, float, float]] = None
+        affine_coeff = np.zeros(n_vars, dtype=np.float64)
+        affine_const = 0.0
+
+        for scale, term in terms:
+            match = _match_scaled_negative_power(term, scale, metadata)
+            if match is not None:
+                if power_match is not None:
+                    return None
+                power_match = match
+                continue
+
+            affine = _linearize_affine_expr(term, scale, metadata, n_vars)
+            if affine is None:
+                return None
+            affine_coeff += affine[0]
+            affine_const += affine[1]
+
+        if power_match is None:
+            return None
+
+        base_idx, exponent, power_scale = power_match
+        if power_scale <= 0.0:
+            return None
+        if abs(float(affine_coeff[base_idx])) > 1e-12:
+            return None
+
+        affine_coeff.setflags(write=False)
+        return affine_coeff, affine_const, base_idx, exponent, power_scale
+
     def tighten(
         self,
         model: Model,
@@ -1982,40 +2154,17 @@ class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
         n_vars = len(flat_lb)
 
         for constraint in _rows_until(model, deadline):
-            if getattr(constraint, "sense", None) not in ("<=", "=="):
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._decompose_row(model, c, metadata, n_vars),
+            )
+            if structure is None:
                 continue
+            affine_coeff, affine_const, base_idx, exponent, power_scale = structure
 
-            terms = _cached_flat_terms(model, constraint.body)
-
-            power_match: Optional[tuple[int, float, float]] = None
-            affine_coeff = np.zeros(n_vars, dtype=np.float64)
-            affine_const = 0.0
-            matches_pattern = True
-
-            for scale, term in terms:
-                match = _match_scaled_negative_power(term, scale, metadata)
-                if match is not None:
-                    if power_match is not None:
-                        matches_pattern = False
-                        break
-                    power_match = match
-                    continue
-
-                affine = _linearize_affine_expr(term, scale, metadata, n_vars)
-                if affine is None:
-                    matches_pattern = False
-                    break
-                affine_coeff += affine[0]
-                affine_const += affine[1]
-
-            if not matches_pattern or power_match is None:
-                continue
-
-            base_idx, exponent, power_scale = power_match
-            if power_scale <= 0.0:
-                continue
-            if abs(float(affine_coeff[base_idx])) > 1e-12:
-                continue
             if tightened_lb[base_idx] < -1e-12 or tightened_ub[base_idx] <= 0.0:
                 continue
 
@@ -2337,6 +2486,64 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
             return scale, v_idx, coeffs, const[0]
         return None
 
+    def _decompose_row(
+        self,
+        model: Model,
+        constraint,
+        metadata: FlatVariableMetadata,
+    ):
+        """Bound-independent half of the row scan; see ``_cached_row_structure``.
+
+        Returns ``(scale_p, v_idx, f_coeffs, f_const, rest_coeffs, rest_const)``
+        for a row ``s·(v·F) + R == 0``, or ``None``. The arithmetic is exactly the
+        prologue this replaced, in the same order.
+
+        The two coefficient maps are shared by every node that reads this row, so
+        they are wrapped read-only: ``_affine_box_interval`` only iterates them,
+        and a future in-place write would otherwise corrupt the cached row and
+        every box derived from it silently (CLAUDE.md 3 -- refuse loudly).
+        """
+        if getattr(constraint, "sense", None) != "==":
+            return None
+
+        terms = _cached_flat_terms(model, constraint.body)
+        product: Optional[tuple[float, int, dict[int, float], float]] = None
+        rest_coeffs: dict[int, float] = {}
+        rest_const = [0.0]
+
+        for scale, term in terms:
+            const_val = _constant_value(term)
+            if const_val is not None:
+                rest_const[0] += scale * const_val
+                continue
+            match = self._match_product_term(term, metadata)
+            if match is not None:
+                if product is not None:
+                    return None  # more than one bilinear product: not this pattern
+                p_scale, v_idx, f_coeffs, f_const = match
+                product = (scale * p_scale, v_idx, f_coeffs, f_const)
+                continue
+            if not _accumulate_affine(term, scale, metadata, rest_coeffs, rest_const):
+                return None  # a second nonlinear term: bail
+
+        if product is None:
+            return None
+
+        scale_p, v_idx, f_coeffs, f_const = product
+        # v must appear nowhere else (its presence in the remainder would make
+        # the isolation ``v = -R/(s·F)`` circular/unsound).
+        if abs(rest_coeffs.get(v_idx, 0.0)) > 1e-12:
+            return None
+
+        return (
+            scale_p,
+            v_idx,
+            MappingProxyType(f_coeffs),
+            f_const,
+            MappingProxyType(rest_coeffs),
+            rest_const[0],
+        )
+
     def tighten(
         self,
         model: Model,
@@ -2350,47 +2557,23 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
         eps = 1e-9
 
         for constraint in _rows_until(model, deadline):
-            if getattr(constraint, "sense", None) != "==":
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._decompose_row(model, c, metadata),
+            )
+            if structure is None:
                 continue
-
-            terms = _cached_flat_terms(model, constraint.body)
-            product: Optional[tuple[float, int, dict[int, float], float]] = None
-            rest_coeffs: dict[int, float] = {}
-            rest_const = [0.0]
-            ok = True
-
-            for scale, term in terms:
-                const_val = _constant_value(term)
-                if const_val is not None:
-                    rest_const[0] += scale * const_val
-                    continue
-                match = self._match_product_term(term, metadata)
-                if match is not None:
-                    if product is not None:
-                        ok = False  # more than one bilinear product: not this pattern
-                        break
-                    p_scale, v_idx, f_coeffs, f_const = match
-                    product = (scale * p_scale, v_idx, f_coeffs, f_const)
-                    continue
-                if not _accumulate_affine(term, scale, metadata, rest_coeffs, rest_const):
-                    ok = False  # a second nonlinear term: bail
-                    break
-
-            if not ok or product is None:
-                continue
-
-            scale_p, v_idx, f_coeffs, f_const = product
-            # v must appear nowhere else (its presence in the remainder would make
-            # the isolation ``v = -R/(s·F)`` circular/unsound).
-            if abs(rest_coeffs.get(v_idx, 0.0)) > 1e-12:
-                continue
+            scale_p, v_idx, f_coeffs, f_const, rest_coeffs, rest_const_val = structure
 
             f_lo, f_hi = _affine_box_interval(f_coeffs, f_const, tightened_lb, tightened_ub)
             if not (f_lo > eps or f_hi < -eps):
                 continue  # F not sign-stable: division by an interval straddling 0
 
             r_lo, r_hi = _affine_box_interval(
-                rest_coeffs, rest_const[0], tightened_lb, tightened_ub
+                rest_coeffs, rest_const_val, tightened_lb, tightened_ub
             )
             # s·(v·F) + R == 0  ->  v·F == -R/s. Build the numerator box P.
             num_endpoints = [-r_hi / scale_p, -r_lo / scale_p]
@@ -2599,15 +2782,23 @@ class PeriodicVariableBoundRule(NonlinearBoundTighteningRule):
                 for sub in subs:
                     walk(sub)
 
-            if model._objective is not None:
-                walk(model._objective.expression)
-            for c in model._constraints:  # must be complete; see row_scan_is_anytime
-                walk(c.body)
+            def _scan():
+                """The whole bound-independent scan: which variables are
+                periodic-only, or ``None`` if an unrecognized node forbids the
+                conclusion. Depends on the expression graph, never on the box."""
+                if model._objective is not None:
+                    walk(model._objective.expression)
+                for c in model._constraints:  # must be complete; see row_scan_is_anytime
+                    walk(c.body)
+                if not complete[0]:
+                    return None
+                return frozenset(periodic - disqualified)
 
-            if not complete[0]:
+            periodic_only = _cached_model_structure(model, "periodic_only", metadata, _scan)
+            if periodic_only is None:
                 return lb, ub  # saw an unrecognized node -> change nothing
 
-            for idx in periodic - disqualified:
+            for idx in periodic_only:
                 if idx >= len(metadata.flat_var_types):
                     continue
                 if metadata.flat_var_types[idx] != VarType.CONTINUOUS:
