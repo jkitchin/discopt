@@ -2379,6 +2379,25 @@ def _strengthen_objective_cut_perspective(coeffs, rhs, x_star, n_vars, terms):
 #: reporting zero rows ran the aggregate master whatever the flag said.
 _PERSPECTIVE_DISAGG_ROWS: list[int] = [0]
 _PERSPECTIVE_DISAGG_REFUSED: list[int] = [0]
+#: References dropped because their row carries no information (see
+#: ``_PERSPECTIVE_MIN_ROW_COEFF``). Counted so "none were dropped" is
+#: distinguishable from "the check never ran" (CLAUDE.md §6).
+_PERSPECTIVE_DISAGG_NEAR_ZERO: list[int] = [0]
+
+#: Smallest ``2*q*|z|`` worth a perspective row. The row is
+#: ``2*q*z*x_k - q*z**2*y_k - s_k <= 0`` against a ``-1`` on ``s_k``, so once
+#: ``2*q*|z|`` falls to the master backend's matrix floor the backend drops the
+#: ``x_k`` term outright and what lands is ``s_k >= 0`` -- which the column's own
+#: lower bound already says. This is HiGHS's default ``small_matrix_value``, the
+#: value at which that discard provably happens.
+#:
+#: Measured on ``squfl020-150`` (#1066): references at ``z ~ 1.2e-16`` produced
+#: 43 500 such rows, 63% of the master's 69 330. Because their ``q*z**2`` term
+#: (~3e-32) also drove the row-scaling in ``milp_highs._prepare_cut_row``, each
+#: reached HiGHS multiplied by ``2**46``, taking the master's coefficient range
+#: to 6.4e18 -- and HiGHS then reported dual bounds ABOVE the master's own
+#: provable optimum (558.044 against 557.84865).
+_PERSPECTIVE_MIN_ROW_COEFF = 1e-9
 
 
 def _perspective_disagg_enabled() -> bool:
@@ -2522,10 +2541,16 @@ def _disaggregate_objective_cut(coeffs, rhs, x_star, epigraph: _PerspectiveEpigr
         z = float(x_star[x_col])
         coeffs[x_col] -= 2.0 * q * z
         rhs -= q * z * z
-        if z != 0.0:
-            # z == 0 makes the row ``0 <= s_k``, which the column bound already
-            # says; the removal above still has to happen either way.
+        if 2.0 * q * abs(z) > _PERSPECTIVE_MIN_ROW_COEFF:
             epigraph.add(k, z)
+        else:
+            # The row would say ``s_k >= 0``, which the column bound already
+            # says -- exactly true at z == 0 and true to the master's own
+            # arithmetic below the floor. The removal above still has to happen
+            # either way; it subtracts ``2*q*z`` and ``q*z**2``, both negligible
+            # here, and dropping an underestimator row can only weaken the
+            # bound, never invalidate it.
+            _PERSPECTIVE_DISAGG_NEAR_ZERO[0] += 1
     return coeffs, rhs
 
 

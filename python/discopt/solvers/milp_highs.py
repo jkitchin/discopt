@@ -134,14 +134,26 @@ def _prepare_cut_row(
     if nz.size == 0:
         return nz, coeffs[nz], rhs
 
-    a = coeffs[nz]
-    a_min = float(np.min(np.abs(a)))
-    a_max = float(np.max(np.abs(a)))
-    # Lift the small end a decade clear of the drop threshold, without bringing the
-    # large end within a decade of the value HiGHS refuses. Scale UP only: scaling
-    # down would push entries that fit today below the threshold. Both ends are
-    # strictly positive, so the logarithm is always defined.
-    room = min(10.0 * small_tol / a_min, large_tol / (10.0 * a_max))
+    a_abs = np.abs(coeffs[nz])
+    a_max = float(np.max(a_abs))
+    # The largest scale the big end tolerates, i.e. without bringing it within a
+    # decade of the value HiGHS refuses. Scale UP only: scaling down would push
+    # entries that fit today below the threshold.
+    scale_cap = large_tol / (10.0 * a_max)
+    # Only terms this scale can actually lift clear of the drop threshold get a
+    # say in how far to scale. A term too small to be rescued is dropped below no
+    # matter what, so letting it set the scale buys nothing and costs the whole
+    # row its conditioning -- measured on ``squfl020-150`` (#1066): a perspective
+    # row at reference ``z=1.2e-16`` spans 3e-32 (its ``q*z**2`` term) to 1, the
+    # 3e-32 drove ``headroom`` to 46, and ``2**46 * 3e-32 = 2.1e-18`` was still
+    # under ``small_matrix_value`` and dropped -- so the row was scaled by
+    # 7.04e13 to rescue a term it discarded, and what reached the master was a
+    # redundant ``s_k >= 0`` carrying a 7.04e13 coefficient.
+    liftable = a_abs[a_abs * scale_cap > small_tol]
+    # ``a_max`` itself always qualifies (``a_max * scale_cap`` is ``large_tol/10``,
+    # far above ``small_tol``), so this is never empty.
+    a_min = float(np.min(liftable))
+    room = min(10.0 * small_tol / a_min, scale_cap)
     headroom = math.floor(math.log2(room))
     if headroom > 0:
         scale = 2.0**headroom
