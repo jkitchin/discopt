@@ -267,7 +267,7 @@ def test_stalling_loop_exits_after_stall_rounds(monkeypatch):
     x_fixed = np.array([1.0, 1.0, 0.5, 0.5])
     calls = {"lp": 0, "sel": 0}
 
-    def _frozen_lp(root, cuts_a, cuts_b):
+    def _frozen_lp(root, cuts_a, cuts_b, time_limit=None):
         calls["lp"] += 1
         return 5.0, x_fixed.copy(), None, None  # bound never moves
 
@@ -453,3 +453,204 @@ def test_vector_and_scalar_forms_agree(monkeypatch):
     vector = _build_convex_minlp_vector().solve(time_limit=30, nlp_bb=True)
     assert scalar.objective is not None and vector.objective is not None
     assert scalar.objective == pytest.approx(vector.objective, abs=1e-4, rel=1e-4)
+
+
+# ── #1066: the stage budget must bound the LPs, not only the round boundaries ──
+
+
+def _deadline_flag(monkeypatch, on: bool) -> None:
+    monkeypatch.setenv("DISCOPT_ROOT_CUT_DEADLINE", "1" if on else "0")
+
+
+def _fake_clock(monkeypatch):
+    """A clock only the stub advances, so nothing here depends on machine load.
+
+    ``generate_root_cuts`` does ``import time as _time`` at call time, so
+    patching the module attribute reaches it. Returns the mutable holder.
+    """
+    import time as _t
+
+    now = {"t": 1000.0}
+    monkeypatch.setattr(_t, "perf_counter", lambda: now["t"])
+    return now
+
+
+def _charging_lp_stub(monkeypatch, now, cost):
+    """Stub ``_solve_lp`` that charges ``cost`` seconds per call to the fake clock.
+
+    Records the ``time_limit`` each call was handed. Returns a frozen bound so
+    the round loop's own stall guard is the only other thing that can stop it.
+    """
+    import discopt.solvers._root_cuts as rc
+
+    seen = {"limits": [], "calls": 0}
+    x_fixed = np.array([1.0, 1.0, 0.5, 0.5])
+
+    def _stub(root, cuts_a, cuts_b, time_limit=None):
+        seen["calls"] += 1
+        seen["limits"].append(time_limit)
+        now["t"] += cost
+        return 5.0, x_fixed.copy(), None, None
+
+    def _always_a_cut(candidates, x, **kw):
+        a = np.zeros(len(x_fixed))
+        a[0] = 1.0
+        return [(a, 99.0)]
+
+    monkeypatch.setattr(rc, "_solve_lp", _stub)
+    monkeypatch.setattr(rc, "_select_cuts", _always_a_cut)
+    return seen
+
+
+def _run_stage(time_budget_s):
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = _build_convex_minlp("max")
+    return rc.generate_root_cuts(
+        m,
+        NLPEvaluator(m),
+        np.array([0.0, 0.0, 0.0, 0.0]),
+        np.array([10.0, 10.0, 1.0, 1.0]),
+        np.array([False, False, True, True]),
+        np.array([False, False, True, True]),
+        time_budget_s=time_budget_s,
+    )
+
+
+def test_the_budget_covers_the_oa_prologue_not_only_the_round_loop(monkeypatch):
+    """The #1066 defect, stated exactly.
+
+    ``generate_root_cuts``' docstring promises ``time_budget_s`` bounds the
+    stage's wall time. It did not: the clock was started AFTER the initial
+    ``oa_converge()``, so the prologue -- up to ``OA_MAX_ITERS`` unbounded LPs --
+    ran entirely outside it. Measured on rsyn0830m at default settings: one
+    ``_solve_lp`` call burned 81.3 s of a 150 s solve against a 10 s budget,
+    which is the whole reason that instance misses the 60 s default.
+
+    Here the very first LP costs more than the entire budget. With the deadline
+    on, the stage must notice and stop; with it off it does not, which is the
+    bug this reproduces.
+    """
+    now = _fake_clock(monkeypatch)
+    _deadline_flag(monkeypatch, True)
+    seen_on = _charging_lp_stub(monkeypatch, now, cost=25.0)
+    res_on = _run_stage(time_budget_s=10.0)
+
+    now["t"] = 1000.0
+    _deadline_flag(monkeypatch, False)
+    seen_off = _charging_lp_stub(monkeypatch, now, cost=25.0)
+    _run_stage(time_budget_s=10.0)
+
+    assert seen_on["calls"] > 0 and seen_off["calls"] > 0, (
+        "stubs never ran — probe measured nothing"
+    )
+    assert seen_on["calls"] == 1, (
+        f"the deadline arm spent {seen_on['calls']} LPs on a budget the first one "
+        f"had already blown; the stage clock must cover the prologue"
+    )
+    assert res_on.stop_reason == "budget", f"stopped on {res_on.stop_reason!r}, not the budget"
+    assert seen_off["calls"] > seen_on["calls"], (
+        f"legacy arm made {seen_off['calls']} calls, deadline arm {seen_on['calls']} — "
+        f"the flag made no difference, so this test is not measuring the fix"
+    )
+
+
+def test_each_lp_is_handed_what_is_left_of_the_stage_budget(monkeypatch):
+    """Every LP gets a deadline, and it shrinks as the budget is spent.
+
+    An unbounded LP defeats a between-rounds budget check no matter how tight
+    that check is: the overrun happens inside one call. So the budget has to
+    reach the LP itself.
+    """
+    now = _fake_clock(monkeypatch)
+    _deadline_flag(monkeypatch, True)
+    seen = _charging_lp_stub(monkeypatch, now, cost=3.0)
+    _run_stage(time_budget_s=10.0)
+
+    limits = seen["limits"]
+    assert len(limits) >= 2, f"only {len(limits)} LP(s) ran; nothing to compare"
+    assert all(v is not None for v in limits), "an LP ran with no deadline"
+    assert all(v <= 10.0 + 1e-9 for v in limits), f"a limit exceeded the budget: {limits}"
+    assert limits == sorted(limits, reverse=True), f"limits not non-increasing: {limits}"
+    assert limits[0] == pytest.approx(10.0), f"first LP got {limits[0]}, not the full budget"
+    # Total charged cannot exceed the budget by more than the call in flight.
+    assert len(limits) * 3.0 <= 10.0 + 3.0, f"{len(limits)} LPs x 3.0 s overran a 10 s budget"
+
+
+def test_the_deadline_flag_is_default_off_with_an_opt_in(monkeypatch):
+    """CLAUDE.md §5 regime 2: bound-changing, so it ships default-off."""
+    import discopt.solvers._root_cuts as rc
+
+    monkeypatch.delenv("DISCOPT_ROOT_CUT_DEADLINE", raising=False)
+    assert rc._deadline_enabled() is False
+    for on in ("1", "true", "on", "yes"):
+        monkeypatch.setenv("DISCOPT_ROOT_CUT_DEADLINE", on)
+        assert rc._deadline_enabled() is True, f"{on!r} did not switch it on"
+    for off in ("0", "false", "off", "no"):
+        monkeypatch.setenv("DISCOPT_ROOT_CUT_DEADLINE", off)
+        assert rc._deadline_enabled() is False, f"{off!r} did not switch it off"
+
+
+def test_the_legacy_lp_call_is_unchanged_when_the_flag_is_off(monkeypatch):
+    """Flag OFF hands every LP ``time_limit=None`` — the legacy path, intact."""
+    now = _fake_clock(monkeypatch)
+    _deadline_flag(monkeypatch, False)
+    seen = _charging_lp_stub(monkeypatch, now, cost=0.0)
+    _run_stage(time_budget_s=10.0)
+    assert seen["calls"] > 0, "stub never ran — probe measured nothing"
+    assert all(v is None for v in seen["limits"]), (
+        f"the legacy arm passed a deadline to HiGHS: {seen['limits']}"
+    )
+
+
+def test_the_deadline_reaches_highs_not_just_the_python_loop(monkeypatch):
+    """``_solve_lp`` must hand the limit to HiGHS itself.
+
+    The tests above stub ``_solve_lp``, so they prove the loop computes a
+    deadline but not that HiGHS is told about it -- and a deadline HiGHS never
+    sees bounds nothing, which is the exact shape of the bug (a between-rounds
+    check cannot stop an overrun that happens inside one ``h.run()``).
+    """
+    import discopt.solvers._root_cuts as rc
+    import highspy
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = _build_convex_minlp("max")
+    is_int = np.array([False, False, True, True])
+    root = rc._RootLP(
+        m,
+        NLPEvaluator(m),
+        np.array([0.0, 0.0, 0.0, 0.0]),
+        np.array([10.0, 10.0, 1.0, 1.0]),
+        is_int,
+        is_int.copy(),
+        True,
+    )
+
+    opts: list = []
+    real_highs = highspy.Highs
+
+    class _Recording(real_highs):  # type: ignore[misc,valid-type]
+        def setOptionValue(self, key, val):  # noqa: N802 - HiGHS' own spelling
+            opts.append((key, val))
+            return super().setOptionValue(key, val)
+
+    monkeypatch.setattr(highspy, "Highs", _Recording)
+
+    rc._solve_lp(root, [], [], 4.25)
+    assert ("time_limit", 4.25) in opts, f"HiGHS never got the deadline; options seen: {opts}"
+
+    opts.clear()
+    rc._solve_lp(root, [], [], None)
+    assert not [k for k, _ in opts if k == "time_limit"], (
+        f"a deadline was set on the legacy path: {opts}"
+    )
+
+    opts.clear()
+    rc._solve_lp(root, [], [], -5.0)
+    tl = [v for k, v in opts if k == "time_limit"]
+    assert tl and tl[0] > 0.0, (
+        f"a non-positive limit reached HiGHS as {tl}; HiGHS reads <= 0 as "
+        f"'no limit', which would restore the overrun this bounds"
+    )
