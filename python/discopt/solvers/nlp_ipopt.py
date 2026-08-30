@@ -36,10 +36,32 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # For non-convex NLPs the problem may still be feasible from a different
 # starting point.  Mapping to ERROR prevents the solver from confidently
 # reporting "infeasible" when the problem is merely hard to solve.
+#: Ipopt's ``Infeasible_Problem_Detected``: the restoration phase converged to a
+#: **local** minimizer of the constraint violation with the violation still
+#: positive.
+#:
+#: It is deliberately NOT mapped to :attr:`SolveStatus.INFEASIBLE` in
+#: :data:`_IPOPT_STATUS_MAP` below. On a **convex** subproblem the verdict is a
+#: genuine infeasibility proof — the violation measure is convex, so a local
+#: minimizer of it is global — but on a nonconvex one it says only that the
+#: algorithm is stuck at an infeasible point, which is not a proof of anything.
+#: The map serves every caller, including the pure-NLP path in
+#: :func:`discopt.solver.solve_model`, which would then publish
+#: ``status="infeasible"`` for a model it never proved infeasible (CLAUDE.md §1).
+#:
+#: Callers that hold a convexity certificate may read the verdict soundly, via
+#: :attr:`discopt.solvers.NLPResult.raw_status`. #1141 measured the cost of the
+#: conservative reading on the convex MINLP class: 60 of 401 OA fixed-NLP
+#: subproblems on ``portfol_classical050_1`` came back code 2, every one of them a
+#: genuinely infeasible integer assignment that the master then had to be talked
+#: out of by weaker means.
+IPOPT_LOCALLY_INFEASIBLE = 2
+
 _IPOPT_STATUS_MAP: dict[int, SolveStatus] = {
     0: SolveStatus.OPTIMAL,  # Solve_Succeeded
     1: SolveStatus.OPTIMAL,  # Solved_To_Acceptable_Level
-    2: SolveStatus.ERROR,  # Infeasible_Problem_Detected (local only)
+    # Infeasible_Problem_Detected — LOCAL only; see IPOPT_LOCALLY_INFEASIBLE above.
+    2: SolveStatus.ERROR,
     # Ipopt code 3 = Search_Direction_Becomes_Too_Small: the IPM stalled on a tiny
     # step, typically AT/near a local solution it cannot certify to tolerance — NOT
     # unboundedness (that is code 4, Diverging_Iterates). Mapping it to UNBOUNDED made
@@ -370,6 +392,7 @@ def solve_nlp(
         bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
         iterations=0,  # Ipopt doesn't expose iteration count via this API
         wall_time=wall_time,
+        raw_status=int(status_code),
     )
 
 

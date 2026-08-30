@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 import warnings
 from collections import Counter
@@ -858,6 +859,15 @@ class _NLPAttempt:
     objective: Optional[float]
     multipliers: Optional[np.ndarray]
     status: Optional[object] = None
+    #: The subsolver's own terminal code (``NLPResult.raw_status``), kept because
+    #: ``status`` collapses several distinct Ipopt outcomes onto ``ERROR`` and the
+    #: collapse is not reversible. Diagnosing #1141 needed exactly this
+    #: distinction: 401 fixed-NLP solves behind one OA separator returned 281
+    #: successes, 60 ``Infeasible_Problem_Detected`` and 57
+    #: ``Error_In_Step_Computation``, and the callback trace recorded all 118
+    #: failures identically as "failed". A genuinely infeasible integer assignment
+    #: and a subsolver that fell over are different problems with different fixes.
+    raw_status: Optional[int] = None
 
 
 @dataclass
@@ -1526,6 +1536,17 @@ def _solve_nlp_attempt(
                     multipliers=result.multipliers,
                     status=result.status,
                 )
+        # Not accepted as a usable point — but WHY is not thrown away (#1141).
+        # ``status``/``raw_status`` ride along on the empty attempt so the caller
+        # (and the callback trace) can tell "this assignment is infeasible" from
+        # "the subsolver fell over", which the single empty attempt could not.
+        return _NLPAttempt(
+            x=None,
+            objective=None,
+            multipliers=None,
+            status=result.status,
+            raw_status=getattr(result, "raw_status", None),
+        )
     except Exception as exc:  # noqa: BLE001 - an empty attempt is handled by the caller
         # Capability-disabling: no NLP point means no OA linearization from this
         # node, which reads as "OA cuts don't help" rather than as a failure.
@@ -1553,6 +1574,35 @@ def _maybe_return_nlp_attempt(attempt: _NLPAttempt, return_attempt: bool):
     if return_attempt:
         return attempt
     return attempt.x, attempt.objective
+
+
+def _fixed_nlp_status_label(attempt: _NLPAttempt) -> str:
+    """Name a fixed-NLP subproblem outcome for the callback trace (#1141).
+
+    ``"feasible"`` when the attempt produced a usable point. Otherwise the
+    subsolver's own verdict, so the record distinguishes the outcomes that used to
+    collapse into one ``"failed"``:
+
+    * ``"infeasible_local"`` — Ipopt/POUNCE code 2, restoration converged to a
+      local minimizer of the constraint violation. On a **convex** subproblem that
+      is a genuine infeasibility proof; on a nonconvex one it proves nothing, which
+      is why it is labelled ``local`` here and is NOT mapped to
+      :attr:`SolveStatus.INFEASIBLE` upstream (see
+      :data:`discopt.solvers.nlp_ipopt.IPOPT_LOCALLY_INFEASIBLE`). Nothing in this
+      driver prunes on the label; it is a diagnostic.
+    * ``"failed:<code>"`` — any other terminal code, named rather than erased.
+    * ``"failed"`` — the subsolver raised, so there is no code to report.
+    """
+    if attempt.x is not None:
+        return "feasible"
+    raw = attempt.raw_status
+    if raw is None:
+        return "failed"
+    from discopt.solvers.nlp_ipopt import IPOPT_LOCALLY_INFEASIBLE
+
+    if int(raw) == IPOPT_LOCALLY_INFEASIBLE:
+        return "infeasible_local"
+    return f"failed:{int(raw)}"
 
 
 def _coerce_nlp_attempt(result) -> _NLPAttempt:
@@ -4393,6 +4443,41 @@ def solve_feasibility_pump(
     )
 
 
+def _oa_node_cuts_enabled() -> bool:
+    """``DISCOPT_OA_NODE_CUTS``: separate ECP cuts at *fractional* master nodes.
+
+    Default-OFF. Adding a supporting hyperplane at a fractional node is sound (a
+    convex constraint's tangent underestimates it everywhere, so the row is
+    globally valid), but it CHANGES the master's dual bound — CLAUDE.md §5 regime
+    2 — so it ships behind a flag until a corpus-wide differential panel clears
+    both bars, cert-clean and net-positive. ``=1`` turns it on.
+
+    Ignored on the SHOT profile, which is *defined* by fractional-point
+    hyperplane generation and therefore always separates at nodes.
+    """
+    return os.environ.get("DISCOPT_OA_NODE_CUTS", "0") not in ("0", "", "false", "False")
+
+
+def _oa_node_cut_rounds() -> int:
+    """Separation rounds one master node may run (``DISCOPT_OA_NODE_CUT_ROUNDS``).
+
+    Each round is one gradient evaluation plus one warm LP re-solve of that node.
+    The rows are global, so what one node does not separate the next one will —
+    a small budget is the design, not a compromise.
+    """
+    return max(1, int(os.environ.get("DISCOPT_OA_NODE_CUT_ROUNDS", "2")))
+
+
+def _oa_node_cut_cap() -> int:
+    """Cap on fractional-node rows per solve (``DISCOPT_OA_NODE_CUT_CAP``).
+
+    A fractional cut only tightens, so it is optional and budgeted: an unbounded
+    stream of gradient cuts densifies every node LP and trades the node win back
+    for wall time.
+    """
+    return max(1, int(os.environ.get("DISCOPT_OA_NODE_CUT_CAP", "500")))
+
+
 def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     """Pick the single-tree MILP backend for LP/NLP branch-and-bound.
 
@@ -4432,15 +4517,19 @@ def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     backend = milp_solver.strip().lower() if isinstance(milp_solver, str) else ""
     if backend == "gurobi":
         return "gurobi"
-    if shot_profile:
-        raise RuntimeError(
-            "mip_nlp_method='lp_nlp_bb' with mip_nlp_profile='shot' requires "
-            "milp_solver='gurobi': the SHOT profile separates hyperplanes at "
-            "fractional node relaxations (MIPNODE user cuts), which the in-house "
-            f"simplex backend does not expose. Got milp_solver={milp_solver!r}."
-        )
     if backend in {"auto", "simplex"}:
         return "simplex"
+    if shot_profile:
+        # The SHOT profile separates hyperplanes at fractional node relaxations.
+        # Only Gurobi and the in-house simplex driver (#1141) expose that hook;
+        # the HiGHS master does not, and accepting the request while dropping
+        # those cuts would report a SHOT run that never ran SHOT's cut generation.
+        raise RuntimeError(
+            "mip_nlp_method='lp_nlp_bb' with mip_nlp_profile='shot' requires a "
+            "backend with a fractional-node cut hook: 'gurobi' or 'simplex' (also "
+            "reachable as 'auto'). The HiGHS master separates only at "
+            f"integer-feasible incumbents. Got milp_solver={milp_solver!r}."
+        )
     if backend == "highs":
         return "highs"
     raise RuntimeError(
@@ -4940,9 +5029,8 @@ def solve_lp_nlp_bb(
                 hyperplane_selection_factor=shot_config.hyperplane_selection_factor,
             )
         nlp_subproblem_count += 1
-        fixed_nlp_status = "failed"
         integer_cut_added = False
-        x_nlp, obj_nlp = _solve_nlp_subproblem(
+        fixed_attempt = _solve_fixed_nlp_subproblem_attempt(
             evaluator,
             decomp.lb,
             decomp.ub,
@@ -4952,8 +5040,13 @@ def solve_lp_nlp_bb(
             initial_point=x_master,
             max_wall_time=_remaining_wall(t_start, time_limit),
         )
+        x_nlp, obj_nlp = fixed_attempt.x, fixed_attempt.objective
+        # #1141: the trace used to record every non-success as the single word
+        # "failed", which made a genuinely infeasible integer assignment and a
+        # subsolver that fell over indistinguishable in the record — and those are
+        # different problems with different fixes. Name the outcome instead.
+        fixed_nlp_status = _fixed_nlp_status_label(fixed_attempt)
         if x_nlp is not None:
-            fixed_nlp_status = "feasible"
             if obj_nlp is not None:
                 accept_incumbent(x_nlp, obj_nlp)
                 _record_interior_point(
@@ -5145,10 +5238,20 @@ def solve_lp_nlp_bb(
         mip_start=master_mip_start,
     )
     if lazy_backend == "gurobi":
-        # MIPNODE user cuts are Gurobi-only; the native driver has no
-        # fractional-node hook.
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
         lazy_kwargs["terminate_callback"] = callback_terminate
+    elif lazy_backend == "simplex" and (shot_profile or _oa_node_cuts_enabled()):
+        # #1141: the in-house driver now has a fractional-node hook, so the ECP
+        # cuts that used to require Gurobi's MIPNODE run here too. This is the
+        # capability the issue measured as missing: without it every node either
+        # pays a full NLP (38.9 ms/node against SCIP's 3.0) or gets a relaxation
+        # that ignores the nonlinear constraint. The SHOT profile *needs* it (its
+        # hyperplane strategy is defined at fractional points), so it is wired
+        # unconditionally there; for the plain convex path it is a bound-CHANGING
+        # knob and ships behind ``DISCOPT_OA_NODE_CUTS`` (CLAUDE.md §5 regime 2).
+        lazy_kwargs["node_callback"] = node_callback
+        lazy_kwargs["node_hook_rounds"] = _oa_node_cut_rounds()
+        lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
     elif lazy_backend == "highs":
         # The HiGHS master checks in at every restart and, between them, on an
         # interval. That is what lets a caller budget this method by progress

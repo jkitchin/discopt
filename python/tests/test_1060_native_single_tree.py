@@ -69,12 +69,21 @@ def test_pounce_backend_is_refused_not_silently_substituted():
 
 
 @pytest.mark.smoke
-def test_shot_profile_still_requires_gurobi():
-    # SHOT separates hyperplanes at fractional node relaxations (MIPNODE); the
-    # native hook only fires at integer-feasible points.
-    with pytest.raises(RuntimeError, match="MIPNODE"):
-        _resolve_lp_nlp_bb_backend("simplex", shot_profile=True)
+def test_shot_profile_runs_on_any_backend_with_a_fractional_node_hook():
+    # SHOT separates hyperplanes at *fractional* node relaxations. Until #1141 only
+    # Gurobi's MIPNODE could do that and this resolution refused everything else;
+    # the native driver now has the hook too, so 'simplex'/'auto' resolve as well.
+    assert _resolve_lp_nlp_bb_backend("simplex", shot_profile=True) == "simplex"
+    assert _resolve_lp_nlp_bb_backend("auto", shot_profile=True) == "simplex"
     assert _resolve_lp_nlp_bb_backend("gurobi", shot_profile=True) == "gurobi"
+
+
+@pytest.mark.smoke
+def test_shot_profile_still_refuses_the_highs_master():
+    # The HiGHS master separates only at integer-feasible incumbents, so running
+    # SHOT there would report a SHOT run that never ran SHOT's cut generation.
+    with pytest.raises(RuntimeError, match="fractional-node cut hook"):
+        _resolve_lp_nlp_bb_backend("highs", shot_profile=True)
 
 
 # --------------------------------------------------------------------------
@@ -203,9 +212,25 @@ def test_unsupported_callbacks_are_refused_loudly():
 
     with pytest.raises(ValueError, match="lazy_callback"):
         solve_milp_with_lazy_cuts(**kw, lazy_callback=None)
-    # Accepting these while ignoring them would report cuts that were never added.
-    with pytest.raises(NotImplementedError, match="node_callback"):
-        solve_milp_with_lazy_cuts(**kw, lazy_callback=lambda _x: [], node_callback=lambda _x: [])
+    # #1141 gave the driver a fractional-node hook, so `node_callback` is honoured
+    # now -- but only with a budget it can actually spend. A zero budget makes the
+    # separator unfireable, and `mipnode_calls == 0` would then be indistinguishable
+    # from "it ran and found nothing" (CLAUDE.md §6), so it is refused.
+    with pytest.raises(ValueError, match="node_hook_rounds"):
+        solve_milp_with_lazy_cuts(
+            **kw,
+            lazy_callback=lambda _x: [],
+            node_callback=lambda _x: [],
+            node_hook_rounds=0,
+        )
+    with pytest.raises(ValueError, match="node_hook_cut_cap"):
+        solve_milp_with_lazy_cuts(
+            **kw,
+            lazy_callback=lambda _x: [],
+            node_callback=lambda _x: [],
+            node_hook_cut_cap=0,
+        )
+    # Accepting this while ignoring it would report a termination that never fired.
     with pytest.raises(NotImplementedError, match="terminate_callback"):
         solve_milp_with_lazy_cuts(
             **kw, lazy_callback=lambda _x: [], terminate_callback=lambda _s: False

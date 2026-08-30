@@ -124,6 +124,8 @@ fn opts(inst: &Instance) -> MilpOptions {
         sb_max_cands: 8,
         sb_node_budget: 4096,
         initial_incumbent: None,
+        node_hook_rounds: 0,
+        node_hook_cut_cap: 0,
         simplex: SimplexOptions {
             tol: 1e-9,
             max_iter: 100_000,

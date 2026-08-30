@@ -86,6 +86,19 @@ pub struct MilpResult {
     /// "the separator re-searched boxes", which is the signal the OA caller
     /// needs to tell a converged single-tree run from a vacuous one.
     pub lazy_requeues: usize,
+    /// Number of times a [`MilpNodeHook`] separator was actually invoked at a
+    /// **fractional** node relaxation. Zero whenever no node hook was attached.
+    ///
+    /// The anti-vacuity counter for fractional separation (CLAUDE.md §6): a
+    /// caller that wires a node separator in and gets `node_calls == 0` back
+    /// learns the separator never saw a fractional point — a different failure
+    /// from "the separator found nothing to cut", and one that must never be
+    /// reported as convergence.
+    pub node_calls: usize,
+    /// Rows a [`MilpNodeHook`] separator returned that were actually folded into
+    /// the shared relaxation (post-dedup, post-cap). `node_calls > 0` with
+    /// `node_cuts_added == 0` means the separator ran and cut nothing.
+    pub node_cuts_added: usize,
 }
 
 /// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
@@ -194,6 +207,57 @@ pub enum MilpLazyVerdict {
 pub trait MilpLazyHook: Sync {
     /// Separate `x` (length `n_struct`) against the caller's lazy constraints.
     fn separate(&self, x: &[f64]) -> MilpLazyVerdict;
+}
+
+/// What a [`MilpNodeHook`] says about a **fractional** node relaxation solution.
+#[derive(Debug, Clone)]
+pub enum MilpNodeVerdict {
+    /// Nothing to separate at this point: the node's LP result is imported
+    /// exactly as an unhooked search would import it.
+    None,
+    /// Globally valid `coeffs · x ≥ rhs` rows (coefficients indexed by
+    /// structural column; trailing columns implicitly zero) that cut this
+    /// fractional point off. Never empty — an empty separation is [`Self::None`].
+    Cuts(Vec<GomoryCut>),
+    /// The separator itself failed (e.g. the Python callable raised). The search
+    /// stops and the result is reported uncertified — a failed separator must
+    /// never be silently read as "found nothing" (CLAUDE.md §7).
+    Failed,
+}
+
+/// A **fractional**-node cut separator attached to the Rust MILP search: the
+/// native equivalent of a Gurobi `MIPNODE` user-cut callback, and the missing
+/// half of single-tree LP/NLP branch-and-cut (#1141).
+///
+/// [`MilpLazyHook`] fires only at *integer-feasible* points, so a caller whose
+/// relaxation ignores a nonlinear constraint pays a full NLP at every integer
+/// proposal and gets no help at the fractional nodes in between. This hook fires
+/// at the fractional ones: for a convex MINLP the caller returns the
+/// first-order linearization `g(x̄) + ∇g(x̄)·(x − x̄) ≤ 0` of each violated
+/// constraint, which is a supporting hyperplane and therefore globally valid.
+/// That is exactly what SCIP does, and what makes an LP node cheap *and* tight
+/// instead of cheap *or* tight.
+///
+/// **Soundness contract.** Every returned row must be valid for the WHOLE
+/// problem, not just this node's box: the driver folds it into the shared
+/// matrix. A row valid only under the node's local bounds would cut feasible
+/// points out of sibling subtrees and produce a false certificate.
+///
+/// **Not a veto.** Unlike a lazy veto, a node separation never rejects a point
+/// that could become the incumbent — a fractional LP solution is not a
+/// candidate solution in the first place. So exhausting the per-node round
+/// budget is benign: the node's own (valid) LP bound is imported and the search
+/// continues, with certification untouched.
+///
+/// Must be `Sync`: the solve runs under `Python::allow_threads` and the Python
+/// adapter re-acquires the GIL.
+///
+/// **Zero effect when absent:** every fire-site is gated on `Option::is_some`
+/// AND on `MilpOptions::node_hook_rounds > 0`, so a `None` hook leaves the
+/// search bit-for-bit identical (bound-neutral).
+pub trait MilpNodeHook: Sync {
+    /// Separate the fractional point `x` (length `n_struct`).
+    fn separate_node(&self, x: &[f64]) -> MilpNodeVerdict;
 }
 
 /// How many times one node may be re-solved after a lazy veto before the search
@@ -366,6 +430,23 @@ pub struct MilpOptions {
     /// an infeasible incumbent would prune the true optimum — a false
     /// certificate.
     pub initial_incumbent: Option<Vec<f64>>,
+    /// Max separation rounds one node may run against an attached
+    /// [`MilpNodeHook`] before its LP result is imported as-is. `0` disables
+    /// fractional separation entirely (the default, and what makes an attached
+    /// hook a no-op unless the caller asks for it).
+    ///
+    /// Each round costs one hook call plus one warm re-solve of the node LP, and
+    /// buys a tighter bound at that node (and, since the rows are global, at
+    /// every later node). A small budget is the point: the cuts are global, so
+    /// what one node does not separate the next one will.
+    pub node_hook_rounds: usize,
+    /// Cap on the total number of rows an attached [`MilpNodeHook`] may fold
+    /// into the shared relaxation over the whole solve. Unlike a lazy cut — which
+    /// is mandatory, because it is the only thing keeping a vetoed point out — a
+    /// fractional cut is optional: it only tightens. So it is budgeted, and once
+    /// the budget is spent the hook stops being called and the search runs on the
+    /// relaxation it has.
+    pub node_hook_cut_cap: usize,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -473,7 +554,7 @@ pub fn solve_milp_hooked(
 /// `None` this is exactly [`solve_milp_hooked`].
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_hooked(
-    mut csc_w: SparseCols,
+    csc_w: SparseCols,
     m: usize,
     n: usize,
     c: &[f64],
@@ -485,6 +566,52 @@ pub fn solve_milp_lazy_hooked(
     hook: Option<&dyn MilpDebugHook>,
     lazy: Option<&dyn MilpLazyHook>,
 ) -> MilpResult {
+    solve_milp_node_hooked(
+        csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, None,
+    )
+}
+
+/// [`solve_milp_lazy_hooked`] plus an optional **fractional**-node cut separator
+/// (#1141).
+///
+/// `node` completes the single-tree branch-and-cut picture: `lazy` fires at
+/// integer-feasible points (the caller's constraints must hold there), `node`
+/// fires at the fractional node relaxations in between (the caller's convex
+/// constraints can be *linearized* there). Rows from either are globally valid
+/// and fold into the shared matrix at the batch boundary.
+///
+/// The two hooks differ in what a separation means. A lazy veto is mandatory —
+/// it is the only thing keeping a point out of the incumbent — so a vetoed node
+/// is re-queued and exhausting the re-queue cap costs certification. A node
+/// separation is optional — it only tightens a relaxation — so exhausting
+/// `MilpOptions::node_hook_rounds` simply imports the node's own valid LP bound
+/// and certification is untouched.
+///
+/// When `node` is `None` (or `opts.node_hook_rounds == 0`) this is exactly
+/// [`solve_milp_lazy_hooked`].
+#[allow(clippy::too_many_arguments)]
+pub fn solve_milp_node_hooked(
+    mut csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+    lazy: Option<&dyn MilpLazyHook>,
+    node: Option<&dyn MilpNodeHook>,
+) -> MilpResult {
+    // A hook with a zero round budget can never fire; drop it here so every
+    // fire-site downstream is a single `Option` test and the "zero effect when
+    // absent" guarantee covers "present but disabled" too.
+    let node = if opts.node_hook_rounds == 0 || opts.node_hook_cut_cap == 0 {
+        None
+    } else {
+        node
+    };
     crate::profile::init_from_env();
     crate::profile::reset();
     let ns = opts.n_struct;
@@ -529,6 +656,8 @@ pub fn solve_milp_lazy_hooked(
                 lp_iters: 0,
                 lazy_calls: 0,
                 lazy_requeues: 0,
+                node_calls: 0,
+                node_cuts_added: 0,
             };
         }
         (pr.l, pr.u)
@@ -562,11 +691,29 @@ pub fn solve_milp_lazy_hooked(
     let mut lazy_requeues: HashMap<NodeId, u32> = HashMap::new();
     // Set when the separator itself failed; the search stops uncertified.
     let mut lazy_failed = false;
+    // Set when the FRACTIONAL separator itself failed; the search stops
+    // uncertified for the same reason (CLAUDE.md §7): a caller that asked for
+    // cuts and got an exception must not be handed a result that reads as if the
+    // separator simply found nothing.
+    let mut node_failed = false;
     // Executed separator calls, for the caller's anti-vacuity check (§6).
     let mut lazy_calls: usize = 0;
     // Total re-queue events across all nodes (the per-node counts above are
     // consumed by the cap; this one is reported).
     let mut lazy_requeue_events: usize = 0;
+
+    // --- Fractional-node separation state (only live when `node` is Some) ---
+    // Rows the node separator produced, awaiting the next batch-boundary fold.
+    // Kept in the same vector family as the lazy ones but budgeted separately:
+    // a fractional cut only tightens, so it is optional and capped, where a lazy
+    // cut is mandatory and exempt.
+    let mut node_pending: Vec<GomoryCut> = Vec::new();
+    // Executed node-separator calls, for the caller's anti-vacuity check (§6).
+    let mut node_calls: usize = 0;
+    // Rows the node separator contributed that survived dedup and the cap.
+    let mut node_cuts_added: usize = 0;
+    // Per-node separation-round counts, against `opts.node_hook_rounds`.
+    let mut node_rounds: HashMap<NodeId, u32> = HashMap::new();
     // Dedup + record a batch of separator rows into `lazy_pending`. Returns how
     // many were new (a fully-duplicate veto cannot make progress, so the caller
     // counts on the re-queue cap to break the loop).
@@ -579,6 +726,29 @@ pub fn solve_milp_lazy_hooked(
                     fresh += 1;
                 }
             }
+            fresh
+        }};
+    }
+
+    // Dedup + record a batch of fractional-separator rows into `node_pending`,
+    // honouring `node_hook_cut_cap`. Shares `lazy_sigs` with the lazy separator
+    // so a row already in the relaxation is never added twice, whichever hook
+    // produced it. Returns how many were new (zero means the round separated
+    // nothing the matrix does not already carry, so re-solving the node cannot
+    // move its bound and the caller must not re-queue it).
+    macro_rules! stage_node_cuts {
+        ($cuts:expr) => {{
+            let mut fresh = 0usize;
+            for cut in $cuts {
+                if node_cuts_added + fresh >= opts.node_hook_cut_cap {
+                    break;
+                }
+                if lazy_sigs.insert(cut_signature(&cut)) {
+                    node_pending.push(cut);
+                    fresh += 1;
+                }
+            }
+            node_cuts_added += fresh;
             fresh
         }};
     }
@@ -1209,10 +1379,57 @@ pub fn solve_milp_lazy_hooked(
             // The predicate must match the one `process_evaluated` uses
             // (`result.is_feasible || is_integer_feasible(solution)`), or a point
             // it treats as integral would slip past unseparated.
+            let node_result_usable = out.result.lower_bound.is_finite();
+            let integral = node_result_usable
+                && (out.result.is_feasible
+                    || solution_is_integral(&out.result.solution, &is_int));
+            // Fractional separation (#1141). Only at a point the integral branch
+            // below will not handle, and only while this node has separation
+            // rounds left. A node whose own bound already meets the incumbent is
+            // about to be pruned, so separating there buys nothing.
+            if let Some(h) = node {
+                let prunable = tm
+                    .incumbent()
+                    .map(|(_, v)| out.result.lower_bound >= v)
+                    .unwrap_or(false);
+                let rounds = node_rounds.get(&id).copied().unwrap_or(0);
+                if node_result_usable
+                    && !integral
+                    && !prunable
+                    && (rounds as usize) < opts.node_hook_rounds
+                    && node_cuts_added < opts.node_hook_cut_cap
+                {
+                    node_calls += 1;
+                    match h.separate_node(&out.result.solution) {
+                        MilpNodeVerdict::None => {}
+                        MilpNodeVerdict::Cuts(cuts) => {
+                            let fresh = stage_node_cuts!(cuts);
+                            if fresh > 0 {
+                                // Re-open the node so it re-solves against the
+                                // tightened matrix (the rows fold in at this
+                                // batch's boundary). Its stored basis was saved
+                                // above, so the re-solve warm-starts through the
+                                // dual simplex once the cut rows are appended.
+                                //
+                                // Discarding this evaluation costs nothing in
+                                // soundness: the node keeps its parent-inherited
+                                // bound, which is valid over its box, and the
+                                // re-solve can only sharpen it.
+                                node_rounds.insert(id, rounds + 1);
+                                tm.requeue_node(id);
+                                continue;
+                            }
+                            // Every row was already in the relaxation, so a
+                            // re-solve would return this same point. Import the
+                            // result and let the node branch.
+                        }
+                        MilpNodeVerdict::Failed => {
+                            node_failed = true;
+                        }
+                    }
+                }
+            }
             if let Some(h) = lazy {
-                let integral = out.result.lower_bound.is_finite()
-                    && (out.result.is_feasible
-                        || solution_is_integral(&out.result.solution, &is_int));
                 if integral {
                     lazy_calls += 1;
                     match h.separate(&out.result.solution) {
@@ -1254,7 +1471,7 @@ pub fn solve_milp_lazy_hooked(
             }
             results.push(out.result);
         }
-        if lazy_failed {
+        if lazy_failed || node_failed {
             // A separator that raised leaves constraints unenforced; continuing
             // would report a result built against a model the caller did not
             // ask for. Stop, uncertified (CLAUDE.md §7).
@@ -1294,6 +1511,12 @@ pub fn solve_milp_lazy_hooked(
         // re-queued forever against a matrix that never changed.
         if !lazy_pending.is_empty() {
             pending_cuts.append(&mut lazy_pending);
+        }
+        // Fractional-separator rows join the same fold. They are already capped
+        // by `node_hook_cut_cap` at staging time, so they do not go through the
+        // node-cut pool budget a second time.
+        if !node_pending.is_empty() {
+            pending_cuts.append(&mut node_pending);
         }
 
         // Fold this batch's newly-found global cuts into the shared matrix.
@@ -1355,6 +1578,8 @@ pub fn solve_milp_lazy_hooked(
         lp_iters,
         lazy_calls,
         lazy_requeues: lazy_requeue_events,
+        node_calls,
+        node_cuts_added,
     }
 }
 
@@ -3482,6 +3707,8 @@ mod tests {
             sb_max_cands: 8,
             sb_node_budget: 1024,
             initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
             simplex: SimplexOptions::default(),
         }
     }
@@ -4100,6 +4327,8 @@ mod tests {
             sb_max_cands: 0,
             sb_node_budget: 0,
             initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
             simplex: SimplexOptions::default(),
         };
         let r = solve_milp(&lp, &b, 0.0, &o);
@@ -4228,6 +4457,8 @@ mod sparse_milp_diff {
                 sb_max_cands: 8,
                 sb_node_budget: 1024,
                 initial_incumbent: None,
+                node_hook_rounds: 0,
+                node_hook_cut_cap: 0,
                 simplex: SimplexOptions::default(),
             }
         }
@@ -4521,6 +4752,8 @@ mod sparse_milp_diff {
             sb_max_cands: 8,
             sb_node_budget: 1024,
             initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
             simplex: SimplexOptions::default(),
         };
         let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);
@@ -4809,6 +5042,8 @@ mod lazy_separation {
                 sb_max_cands: 8,
                 sb_node_budget: 1024,
                 initial_incumbent: None,
+                node_hook_rounds: 0,
+                node_hook_cut_cap: 0,
                 simplex: SimplexOptions::default(),
             }
         }
