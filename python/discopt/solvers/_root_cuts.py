@@ -100,6 +100,12 @@ def nlpbb_root_cuts_enabled() -> bool:
 #: default-off pending a graduation panel that clears both bars. The truncation
 #: is sound in either arm (fewer cuts can only loosen a bound, never invalidate
 #: one); the open question the panel answers is whether it is *net-positive*.
+#:
+#: That panel is owed, not optional: OFF is the arm in which ``generate_root_cuts``'
+#: docstring promise ("``time_budget_s`` bounds the stage's wall time") is false,
+#: and the stage is default-ON, so the shipped default is a default-path stage
+#: with a budget it cannot enforce. **Tracked in #1141** -- this flag graduates
+#: or is deleted; leaving it off forever is the dead flag CLAUDE.md §3 forbids.
 _ROOT_CUT_DEADLINE_DEFAULT = False
 
 

@@ -4527,3 +4527,31 @@ mutation that was wrong, not the test: it neutralised `_remaining()` but left
 because "the mutation survived" and "the test is vacuous" look identical from
 the exit code, and only reading the mutation apart from the result tells them
 apart.
+
+### The owed panel (tracked in #1141)
+
+`DISCOPT_ROOT_CUT_DEADLINE` merges default-OFF, which means the shipped default
+is the arm where the docstring's promise is false. That is acceptable only for
+as long as the graduation panel is actually owed to someone, so it is recorded
+here and in **#1141**: the flag graduates or is deleted, and "neither" is not an
+outcome. A flag that ships off and is never panelled is the dead flag CLAUDE.md
+§3 forbids; the difference between this and that is whether the debt is written
+down.
+
+Re-confirmed live on `main` at 2026-08-30, before merging — the defect is not an
+artefact of the #1066-era tree:
+
+- `_root_cuts.py` calls `oa_converge()` and only *then* sets `t0`, so the
+  prologue is still outside the budget.
+- `_solve_lp` still sets `output_flag` and nothing else, so no LP carries a
+  deadline.
+- `nlpbb_root_cuts_enabled()` is **default-ON** (graduated 2026-08-20, §21) and
+  `solver.py` hands the stage `max(2.0, min(10.0, 0.2 * time_limit))`, so this
+  is a default-path stage with a budget it cannot enforce, not an opt-in one.
+
+The panel to run is the standard §5 regime-2 A/B — `DISCOPT_ROOT_CUT_DEADLINE`
+ON vs OFF over the in-repo corpus — under a load gate (§9), since *net-positive*
+here is entirely a wall-clock claim. Soundness is not what the panel is for:
+truncation only removes cuts, so neither arm can produce a bound tighter than
+the truth. The question is whether 81 s of root cuts buys more than 81 s of
+branch-and-bound, and only the panel answers it.
