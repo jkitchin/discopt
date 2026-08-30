@@ -5135,6 +5135,10 @@ def solve_lp_nlp_bb(
     wall_time = time.perf_counter() - t_start
 
     bound = None
+    # The master bound as it stood before the inversion guard below, kept so the
+    # trace still carries the number a diagnosis needs after ``bound`` is
+    # suppressed. ``None`` means the guard did not fire.
+    inverted_master_bound: Optional[float] = None
     if master_bound_valid and master_result.bound is not None:
         bound = float(master_result.bound)
         if decomp.obj_is_linear and decomp.obj_coeffs is not None:
@@ -5145,6 +5149,42 @@ def solve_lp_nlp_bb(
         # if the post-hoc read came back weaker, reporting it would contradict the
         # very test that ended the search and turn a certificate into "feasible".
         bound = converged_at[0] if bound is None else max(bound, converged_at[0])
+    # The master's dual bound crossed the incumbent it is reported against.
+    # ``solve_oa`` has refused to publish that since ``fac2`` (see
+    # ``_certified_bound_inverted``); this path -- the single-tree LP/NLP-BB
+    # driver, a different function -- never got the same guard. Measured on
+    # ``squfl020-150`` (MINLPLib ``=best=`` 557.84865) at default settings: the
+    # HiGHS lazy master returned ``bound=557.9460019817818`` against this
+    # driver's own incumbent ``557.848649973387``, i.e. a *lower* bound 0.097
+    # ABOVE the true optimum, and the run reported it. ``_compute_gap`` already
+    # declines to call that converged (it returns 1.0, documented as "nothing
+    # proved"), but suppressing only the gap still hands the caller ``bound >
+    # objective``, and #1059's route merge republishes exactly that number.
+    #
+    # One of the two is wrong and this code cannot tell which, so neither is
+    # reported as proved. The incumbent survives -- it is an independently
+    # feasibility-checked point -- and the offending number is kept in the
+    # trace as ``inverted_master_bound``, where a diagnostic belongs and nothing
+    # reads it as a dual certificate (CLAUDE.md §1).
+    if (
+        bound is not None
+        and incumbent_obj is not None
+        and np.isfinite(bound)
+        and np.isfinite(incumbent_obj)
+        and float(bound) - float(incumbent_obj)
+        > bound_inversion_tolerance(float(bound), float(incumbent_obj))
+    ):
+        logger.warning(
+            "lp_nlp_bb: master dual bound %.12g is above the incumbent %.12g by "
+            "more than rounding -- one of the two is wrong, so neither the bound "
+            "nor the gap is reported. This is a bound-validity defect worth "
+            "investigating, not a tolerance to widen.",
+            float(bound),
+            float(incumbent_obj),
+        )
+        inverted_master_bound = float(bound)
+        bound = None
+        master_bound_valid = False
     gap = (
         _compute_gap(bound, incumbent_obj)
         if bound is not None and incumbent_obj is not None
@@ -5232,6 +5272,10 @@ def solve_lp_nlp_bb(
         "final_lb": _trace_value(bound),
         "final_ub": _trace_value(incumbent_obj),
         "final_gap": _trace_value(gap),
+        # Only set when the master handed back a bound past the incumbent and
+        # the guard above suppressed it -- the number to investigate, kept out
+        # of ``final_lb`` so nothing reads it as a dual certificate.
+        "inverted_master_bound": _trace_value(inverted_master_bound),
     }
 
     if incumbent is not None and incumbent_obj is not None:

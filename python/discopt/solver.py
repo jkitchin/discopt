@@ -5746,7 +5746,31 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         winner.bound = float(l_b)
     obj, bnd = winner.objective, winner.bound
     if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
-        winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
+        # A bound past the incumbent is a broken certificate whichever side it
+        # came from -- the check above covers only the LOSER's bound, so a
+        # winner that arrives already inverted sailed through. Measured on
+        # ``squfl020-150`` at default settings: the OA route won with
+        # ``objective=557.848649973387`` and its own ``bound=557.9460019817818``
+        # (MINLPLib ``=best=`` 557.84865), and this merge published that bound.
+        #
+        # Note what the gap formula below does with such a pair on its own:
+        # ``abs(bnd - obj)`` turns an inversion of 0.097 into a 1.75e-4 gap
+        # that reads as nearly converged -- precisely backwards. The guard has
+        # to come first; the formula cannot detect this case at all.
+        if _bound_crosses_objective(float(bnd), obj, is_maximize):
+            logger.warning(
+                "#1059 merge: the %s side's dual bound %.12g crosses the incumbent "
+                "%.12g it is reported against; suppressing it rather than "
+                "publishing a bound known to be invalid.",
+                "route" if route_wins else "fallback",
+                float(bnd),
+                float(obj),
+            )
+            winner.bound = None
+            winner.gap = None
+            winner.gap_certified = False
+        else:
+            winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
     # ``node_count`` is a WORK statistic, not part of the answer, so it belongs to
     # the solve rather than to whichever side won it. Reporting only the winner's
     # made a routed ``squfl025-040`` say ``nodes=0`` after 61 s in which the
