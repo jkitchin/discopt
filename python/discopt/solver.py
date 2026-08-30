@@ -3146,6 +3146,12 @@ def _reduce_node_and_stage(
     return False
 
 
+# The unbounded sentinel, matching the ``cu[j] < 1e19`` / ``cl[j] > -1e19``
+# guards at this function's call site.  Bounds at or beyond it are treated as
+# infinite: their terms are counted, never summed.
+_FBBT_INF = 1e19
+
+
 def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
     """One FBBT sweep of a single *linear* row, in Gauss-Seidel order.
 
@@ -3194,7 +3200,16 @@ def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
 
     bound = np.where((J_row[active] > 0.0) == is_upper, lb[active], ub[active])
     term = J_row[active] * (bound - mid[active])
-    finite = np.isfinite(term)
+    # The unbounded marker here is the sentinel ``1e20``, not ``inf``, so
+    # ``np.isfinite`` is *not* the test -- ``9.999e19`` is an ordinary float and
+    # passes it.  Its term then enters the running total, and the ulp of
+    # ``1e20`` is 16384: every ordinary-scale term added to it is annihilated,
+    # so ``sum - term_i`` returns ``0`` where the true partial sum was the small
+    # remainder, and the row over-tightens.  The pre-#1066 loop never formed
+    # that sum -- it subtracted the ``k != i`` terms one at a time.  Test the
+    # *bound*, as the sentinel rule requires, and keep those terms out of the
+    # total; they are counted below exactly as true infinities are.
+    finite = np.isfinite(term) & (np.abs(bound) < _FBBT_INF)
     n_inf = int(active.size - np.count_nonzero(finite))
     sum_finite = float(np.sum(np.where(finite, term, 0.0)))
 
