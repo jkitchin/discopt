@@ -1381,7 +1381,26 @@ pub fn solve_milp_node_hooked(
             // the one `process_evaluated` uses (`result.is_feasible ||
             // is_integer_feasible(solution)`), or a point that path treats as
             // integral would slip past unseparated.
-            let integral = out.result.lower_bound.is_finite()
+            // `INFEAS_SENTINEL` is a FINITE 1e30, so `is_finite()` alone admits an
+            // INFEASIBLE node -- and such a node carries a placeholder solution
+            // vector of zeros, which `solution_is_integral` then happily accepts.
+            // The lazy separator was therefore called on infeasible nodes with a
+            // meaningless point, returned a (valid but useless) cut for it, and the
+            // node was re-queued... against a matrix the point still violates,
+            // because the point was never a solution of it. Measured on MINLPLib
+            // `tls2` (#1141 item 4): ONE distinct assignment re-proposed 1386 times,
+            // the returned point violating 31 of the 35 cut rows already in its own
+            // matrix, until `LAZY_REQUEUE_CAP` exhausted -- which drops
+            // `gap_certified` and marks the search incomplete. That is why the
+            // in-house master could not certify instances the HiGHS master closes in
+            // 13 subproblems, and it cost `tls2` its incumbent entirely.
+            //
+            // Same test the fractional hook already applies (`node_result_usable`);
+            // it was added there in this issue and the lazy path was left alone,
+            // which is the bug.
+            let node_usable = out.result.lower_bound.is_finite()
+                && out.result.lower_bound < INFEAS_SENTINEL - 1.0;
+            let integral = node_usable
                 && (out.result.is_feasible || solution_is_integral(&out.result.solution, &is_int));
             // The fractional separator's own admission test is stricter, and only
             // it: `INFEAS_SENTINEL` (1e30) is a FINITE number meaning "this node's
@@ -5552,5 +5571,155 @@ mod node_separation {
             MilpStatus::Optimal,
             "a separator that failed left rows unenforced; the run must not certify"
         );
+    }
+}
+
+#[cfg(test)]
+mod lazy_infeasible_node {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+    use std::sync::Mutex;
+
+    /// Records every point the lazy separator is shown, and never accepts.
+    ///
+    /// Rejecting unconditionally is the point: a separator that always vetoes
+    /// makes any node it is called on get re-queued, so if the driver calls it on
+    /// an INFEASIBLE node the search cannot terminate until `LAZY_REQUEUE_CAP`
+    /// exhausts -- which drops `gap_certified`.
+    struct RecordAll {
+        seen: Mutex<Vec<Vec<f64>>>,
+    }
+
+    impl MilpLazyHook for RecordAll {
+        fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+            self.seen.lock().unwrap().push(x.to_vec());
+            // `-x0 >= 1` i.e. `x0 <= -1`: unsatisfiable inside `x >= 0`, so this
+            // rejects whatever it is shown.
+            MilpLazyVerdict::Reject(vec![GomoryCut {
+                coeffs: vec![-1.0, 0.0],
+                rhs: 1.0,
+            }])
+        }
+    }
+
+    /// `x0 + x1 = 1` with `x0, x1` binary and an extra row forcing `x0 >= 2`:
+    /// every node is infeasible, so the driver must never reach the separator.
+    fn infeasible_binary() -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        // rows: x0 + x1 + s = 1 ; x0 - t = 2   (s, t >= 0)
+        let a = vec![
+            1.0, 1.0, 1.0, 0.0, //
+            1.0, 0.0, 0.0, -1.0,
+        ];
+        let (m, n) = (2usize, 4usize);
+        (
+            SparseCols::from_dense(&a, m, n),
+            m,
+            n,
+            vec![1.0, 1.0, 0.0, 0.0], // c
+            vec![0.0, 0.0, 0.0, 0.0], // l
+            vec![1.0, 1.0, INF, INF], // u
+            vec![1.0, 2.0],           // b
+        )
+    }
+
+    fn opts() -> MilpOptions {
+        MilpOptions {
+            n_struct: 2,
+            integer_cols: vec![0, 1],
+            max_nodes: 100_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 0,
+            gmi_cuts: false,
+            cut_select: false,
+            node_cuts: false,
+            max_pool_cuts: 128,
+            heuristics: false,
+            presolve: false,
+            strong_branch: false,
+            node_propagation: false,
+            reduced_cost_fixing: false,
+            sb_max_cands: 6,
+            sb_node_budget: 48,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    /// #1141 item 4: the lazy separator must not be called on an INFEASIBLE node.
+    ///
+    /// `INFEAS_SENTINEL` is a finite `1e30`, so the old admission test
+    /// (`lower_bound.is_finite()`) let an infeasible node through -- and such a
+    /// node carries a placeholder solution of zeros, which `solution_is_integral`
+    /// accepts. The separator was then handed a point that is not a solution of
+    /// anything, returned a cut for it, and the node was re-queued against a
+    /// matrix the point still violated. Measured on MINLPLib `tls2`: ONE distinct
+    /// assignment re-proposed 1386 times, the point violating 31 of the 35 cut
+    /// rows in its own matrix, until the re-queue cap dropped `gap_certified`.
+    ///
+    /// Fails before the fix: the separator is called and the model is reported
+    /// with certification dropped rather than as a clean `Infeasible`.
+    #[test]
+    fn the_lazy_hook_is_never_called_on_an_infeasible_node() {
+        let (csc, m, n, c, l, u, b) = infeasible_binary();
+        let hook = RecordAll {
+            seen: Mutex::new(Vec::new()),
+        };
+        let r = solve_milp_lazy_hooked(csc, m, n, &c, &l, &u, &b, 0.0, &opts(), None, Some(&hook));
+        let seen = hook.seen.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "separator was called {} time(s) on an infeasible model; first point {:?}",
+            seen.len(),
+            seen.first()
+        );
+        assert_eq!(r.status, MilpStatus::Infeasible, "bound={}", r.bound);
+        assert_eq!(r.lazy_calls, 0);
+        assert_eq!(
+            r.lazy_requeues, 0,
+            "an infeasible node must not be re-queued"
+        );
+    }
+
+    /// The guard must not cost the separator a node it SHOULD see: the same hook
+    /// shape on a feasible model still gets called. Without this the test above
+    /// would pass on a driver that never calls the separator at all (§6).
+    #[test]
+    fn a_feasible_node_still_reaches_the_lazy_hook() {
+        // rows: x0 + x1 + s = 1 (drop the infeasible row)
+        let a = vec![1.0, 1.0, 1.0];
+        let csc = SparseCols::from_dense(&a, 1, 3);
+        let hook = RecordAll {
+            seen: Mutex::new(Vec::new()),
+        };
+        let r = solve_milp_lazy_hooked(
+            csc,
+            1,
+            3,
+            &[1.0, 1.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 1.0, INF],
+            &[1.0],
+            0.0,
+            &opts(),
+            None,
+            Some(&hook),
+        );
+        assert!(
+            !hook.seen.lock().unwrap().is_empty(),
+            "separator never ran on a FEASIBLE model; the guard above proves nothing"
+        );
+        let _ = r;
     }
 }
