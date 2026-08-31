@@ -4850,3 +4850,53 @@ portfolio family; whether it also holds on `rsyn*` is the measurement that decid
 retarget, and `rsyn*` is not vendored. **Do not retarget the route on the portfolio
 evidence alone.**
 
+
+### 25.9 The added work item: `DISCOPT_ROOT_CUT_DEADLINE` FAILS bar 1 (2026-08-31)
+
+#1141 gained a second work item after #1129 merged: graduate or delete
+`DISCOPT_ROOT_CUT_DEADLINE`, the §24 flag that bounds the root cutting-plane
+stage's individual LPs. The issue asks for the standard §5 regime-2 A/B over the
+in-repo corpus under a load gate. It was run. **The flag fails bar 1.**
+
+**Populating the panel.** The stage runs only when the model is convexity-certified
+and has integer variables, on a top-level solve, and `generate_root_cuts` returns
+before its first LP when there are no integers. That population is 25 of the 119
+vendored instances. Run on the plain default path the stage is nearly unreachable —
+`DISCOPT_CONVEX_MINLP_ROUTE` diverts convex MINLPs to `mip-nlp`, so only **2 of 25**
+rows enter the stage and only **1** reaches an LP, with the deadline never biting
+(122 LPs, 0 declined). A panel over that population would have printed "0
+violations" while measuring nothing (CLAUDE.md §6). With the convex route off, so
+the NLP-BB path that owns the stage actually runs it, the population is real:
+**12/25** rows enter the stage, **8/25** run LPs under a deadline, **1/25** has the
+deadline bite.
+
+**The result.** 86 soundness checks, and the one violation is the one that matters:
+
+| `tls2`, 3 reps per arm | OFF | ON |
+|---|---|---|
+| 30 s budget | `optimal` 5.3 / `feasible` 5.3 ×2 | **`time_limit`, no incumbent** ×3 |
+| 60 s budget | **`optimal` 5.3** ×3, in 31–36 s | `feasible` ×3, incumbents 5.3 / **7.3** / **8.3**, using the full 60 s |
+
+Reproducible 6/6 across two budgets, and every ON run shows `declined: 1` — exactly
+one LP stopped on the deadline. That is a **certification regression**, which bar 1
+forbids with zero slack, and at 60 s it also costs the incumbent (5.3 → 8.3).
+
+**Why one declined LP costs the whole stage.** The deadline is enforced by handing
+HiGHS a `time_limit`, and an LP that stops on it returns the all-`None` declined
+tuple — which is what any non-optimal status already returned. But inside
+`oa_converge` that sets `x = None`, the loop breaks, and `generate_root_cuts`
+returns an empty `RootCutResult()`. So a single truncated LP anywhere in the
+convergence discards **every cut the stage had accumulated**, and the search that
+follows runs on no root cuts at all. The counters show it is not early truncation —
+both arms run ~240 LPs on `tls2`; it is the cliff at the end.
+
+This is soundness-neutral (fewer cuts can only loosen a bound), so it is a bar-2
+question in the usual sense — except that losing a proof is a bar-1 event, and it
+does. **The flag stays OFF.**
+
+It is also fixable rather than fatal, and the fix is not a tolerance tweak: keep the
+cuts accumulated so far when an LP stops on the deadline, instead of discarding the
+stage's whole output. That would bound the stage *and* leave `tls2` its proof, and
+it is what the flag needs before this panel can be re-run for graduation. Not done
+here: it is a redesign of #1129's mechanism rather than #1141's, and this PR is
+already scoped to the fractional-node work.
