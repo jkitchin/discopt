@@ -1,0 +1,1256 @@
+[
+ {
+  "instance": "4stufen",
+  "off": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 0.3457673309999336,
+   "feas": null,
+   "nodes": 0
+  },
+  "on": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 0.08379907100015771,
+   "feas": null,
+   "nodes": 0
+  }
+ },
+ {
+  "instance": "alan",
+  "off": {
+   "status": "feasible",
+   "objective": 3.000000000000001,
+   "bound": null,
+   "wall": 0.03491800600022543,
+   "feas": 1.7763568394002505e-15,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 3.000000000000001,
+   "bound": null,
+   "wall": 0.03548455100008141,
+   "feas": 1.7763568394002505e-15,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "bchoco06",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 1.0,
+   "wall": 0.9120409520000976,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 1.0,
+   "wall": 0.9326148840000315,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "bchoco07",
+  "off": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 1.0127558379999755,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 1.0037557169998763,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "bchoco08",
+  "off": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 1.4127185370002735,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 1.3732320990002336,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "beuster",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 5942.4914087085635,
+   "wall": 0.11125383799981137,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 5942.4914087085635,
+   "wall": 0.10711504200025956,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "casctanks",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 64.34973703200012,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 63.93121238200001,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "chance",
+  "off": {
+   "status": "optimal",
+   "objective": 29.89437816664239,
+   "bound": 29.89437816664239,
+   "wall": 0.019451314999969327,
+   "feas": 0.0,
+   "nodes": 0
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 29.89437816664239,
+   "bound": 29.89437816664239,
+   "wall": 0.01478149599961398,
+   "feas": 0.0,
+   "nodes": 0
+  }
+ },
+ {
+  "instance": "clay0303hfsg",
+  "off": {
+   "status": "feasible",
+   "objective": 42098.84487900549,
+   "bound": 1700.0,
+   "wall": 32.861444815999675,
+   "feas": 2.7714832842958844e-13,
+   "nodes": 395
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 42098.84487900549,
+   "bound": 3.979039320256561e-12,
+   "wall": 32.80924399700007,
+   "feas": 2.7714832842958844e-13,
+   "nodes": 349
+  }
+ },
+ {
+  "instance": "contvar",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 0.8158859519999169,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 0.7717218519997004,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "cvxnonsep_nsig30",
+  "off": {
+   "status": "feasible",
+   "objective": 130.65134224711673,
+   "bound": 130.47997315417328,
+   "wall": 30.272589143000005,
+   "feas": 0.0,
+   "nodes": 6899
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 130.6920986366621,
+   "bound": 130.47997315350963,
+   "wall": 30.35120339399964,
+   "feas": 0.0,
+   "nodes": 4239
+  }
+ },
+ {
+  "instance": "cvxnonsep_psig30",
+  "off": {
+   "status": "feasible",
+   "objective": 78.9988543416164,
+   "bound": 78.75399431849263,
+   "wall": 30.333628180999767,
+   "feas": 0.0,
+   "nodes": 4991
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 79.00237823939584,
+   "bound": 78.74479747073926,
+   "wall": 30.478754051000124,
+   "feas": 0.0,
+   "nodes": 2065
+  }
+ },
+ {
+  "instance": "cvxnonsep_psig40r",
+  "off": {
+   "status": "optimal",
+   "objective": 86.5451538163194,
+   "bound": 86.54508848338929,
+   "wall": 5.818307362000269,
+   "feas": 0.0,
+   "nodes": 2989
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 86.5451538163194,
+   "bound": 86.545089868599,
+   "wall": 2.869601798000076,
+   "feas": 0.0,
+   "nodes": 1595
+  }
+ },
+ {
+  "instance": "dispatch",
+  "off": {
+   "status": "optimal",
+   "objective": 3155.287926863271,
+   "bound": 3155.287926863271,
+   "wall": 0.017555100000208768,
+   "feas": 3.319809704915855e-12,
+   "nodes": 0
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 3155.287926863271,
+   "bound": 3155.287926863271,
+   "wall": 0.016213596999932633,
+   "feas": 3.319809704915855e-12,
+   "nodes": 0
+  }
+ },
+ {
+  "instance": "ex1221",
+  "off": {
+   "status": "feasible",
+   "objective": 7.66718007883675,
+   "bound": 0.0,
+   "wall": 0.030889649000073405,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 7.66718007883675,
+   "bound": 0.0,
+   "wall": 0.03237778399989111,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "ex1222",
+  "off": {
+   "status": "feasible",
+   "objective": 1.0765430883932854,
+   "bound": -0.651758326563781,
+   "wall": 0.04942888200002926,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 1.0765430883932854,
+   "bound": -0.651758326563781,
+   "wall": 0.02078997199987498,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "ex1224",
+  "off": {
+   "status": "feasible",
+   "objective": -0.8378999992484181,
+   "bound": null,
+   "wall": 0.07237909100012985,
+   "feas": 4.440892098500626e-16,
+   "nodes": 3
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -0.8378999992484181,
+   "bound": null,
+   "wall": 0.04340632299999925,
+   "feas": 4.440892098500626e-16,
+   "nodes": 3
+  }
+ },
+ {
+  "instance": "ex1225",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 27.0,
+   "wall": 0.3398238830000082,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 27.0,
+   "wall": 0.31637620299989067,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "ex1226",
+  "off": {
+   "status": "feasible",
+   "objective": -3.3353023543447478,
+   "bound": -21.0,
+   "wall": 0.02089234300001408,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -3.3353023543447478,
+   "bound": -21.0,
+   "wall": 0.018481831999906717,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "ex14_1_9",
+  "off": {
+   "status": "optimal",
+   "objective": 5.011807266743493e-09,
+   "bound": 5.011807266743493e-09,
+   "wall": 0.011334513999827323,
+   "feas": 0.0,
+   "nodes": 0
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 5.011807266743493e-09,
+   "bound": 5.011807266743493e-09,
+   "wall": 0.010320389999833424,
+   "feas": 0.0,
+   "nodes": 0
+  }
+ },
+ {
+  "instance": "fac2",
+  "off": {
+   "status": "feasible",
+   "objective": 331837498.17687935,
+   "bound": 259641262.84624624,
+   "wall": 30.622151379000115,
+   "feas": 8.526512829121202e-14,
+   "nodes": 61
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 331837498.17687935,
+   "bound": 257873971.5378873,
+   "wall": 32.08969144799994,
+   "feas": 8.526512829121202e-14,
+   "nodes": 231
+  }
+ },
+ {
+  "instance": "flay02m",
+  "off": {
+   "status": "optimal",
+   "objective": 37.94733194457007,
+   "bound": 37.94733191703476,
+   "wall": 0.05403788000012355,
+   "feas": 0.0,
+   "nodes": 7
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 37.94733194457007,
+   "bound": 37.94733192001526,
+   "wall": 0.049422321999827545,
+   "feas": 0.0,
+   "nodes": 7
+  }
+ },
+ {
+  "instance": "flay03m",
+  "off": {
+   "status": "optimal",
+   "objective": 48.98979488823174,
+   "bound": 48.98979484433013,
+   "wall": 0.4930540319996908,
+   "feas": 0.0,
+   "nodes": 107
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 48.9897948882318,
+   "bound": 48.989794854953075,
+   "wall": 0.4683414440000888,
+   "feas": 0.0,
+   "nodes": 105
+  }
+ },
+ {
+  "instance": "gbd",
+  "off": {
+   "status": "optimal",
+   "objective": 2.200000000909095,
+   "bound": 2.2,
+   "wall": 0.018594889999803854,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 2.200000000909095,
+   "bound": 2.2,
+   "wall": 0.016998445999888645,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "gkocis",
+  "off": {
+   "status": "feasible",
+   "objective": 0.27777777868686204,
+   "bound": -6.388888888888889,
+   "wall": 0.051714910000100645,
+   "feas": 8.74749235344879e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 0.27777777868686204,
+   "bound": -6.388888888888889,
+   "wall": 0.04664322100006757,
+   "feas": 8.74749235344879e-16,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "hda",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": -103157.74799999999,
+   "wall": 25.887494289000188,
+   "feas": null,
+   "nodes": 3
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": -103157.74799999999,
+   "wall": 22.93738295000003,
+   "feas": null,
+   "nodes": 3
+  }
+ },
+ {
+  "instance": "heatexch_gen1",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": 43312.50000000003,
+   "wall": 31.905385124000077,
+   "feas": null,
+   "nodes": 73
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": 43312.50000000003,
+   "wall": 31.69969283799992,
+   "feas": null,
+   "nodes": 73
+  }
+ },
+ {
+  "instance": "heatexch_gen2",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 1.1113525800001298,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 1.14576884600001,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "heatexch_gen3",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 30.66238391900015,
+   "feas": null,
+   "nodes": 215
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 30.97654775400042,
+   "feas": null,
+   "nodes": 215
+  }
+ },
+ {
+  "instance": "m3",
+  "off": {
+   "status": "feasible",
+   "objective": 37.80000007286182,
+   "bound": 16.231681591426256,
+   "wall": 30.87511661999997,
+   "feas": 0.0,
+   "nodes": 65
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 37.80000007286183,
+   "bound": 16.54374455833392,
+   "wall": 30.055929639999704,
+   "feas": 0.0,
+   "nodes": 59
+  }
+ },
+ {
+  "instance": "nvs01",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.029510368000046583,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.02947143999972468,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs02",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.050366884000141,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.05001745200024743,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs03",
+  "off": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 13.403115700000853,
+   "feas": 0.0,
+   "nodes": 11
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 4.448601183000392,
+   "feas": 0.0,
+   "nodes": 3
+  }
+ },
+ {
+  "instance": "nvs04",
+  "off": {
+   "status": "feasible",
+   "objective": 2.12,
+   "bound": null,
+   "wall": 0.03182422499958193,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 2.12,
+   "bound": null,
+   "wall": 0.02967995200015139,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs05",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 0.010375939000368817,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": null,
+   "wall": 0.008814976000394381,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs06",
+  "off": {
+   "status": "feasible",
+   "objective": 11.600000000000001,
+   "bound": null,
+   "wall": 0.007818756999768084,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 11.600000000000001,
+   "bound": null,
+   "wall": 0.00824048300000868,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs07",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 2.9999999936188226,
+   "wall": 0.024246829999356123,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": 2.9999999936188226,
+   "wall": 0.02251479299957282,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs08",
+  "off": {
+   "status": "feasible",
+   "objective": 23.449727348195918,
+   "bound": 17.610615706862145,
+   "wall": 0.9450500319999264,
+   "feas": 0.0,
+   "nodes": 9
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 23.449727348195918,
+   "bound": 17.610615706862145,
+   "wall": 0.26405539299958036,
+   "feas": 0.0,
+   "nodes": 3
+  }
+ },
+ {
+  "instance": "nvs09",
+  "off": {
+   "status": "feasible",
+   "objective": -43.13433689290518,
+   "bound": null,
+   "wall": 0.013128212000083295,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -43.13433689290518,
+   "bound": null,
+   "wall": 0.013292720999743324,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs10",
+  "off": {
+   "status": "optimal",
+   "objective": -310.80000000000007,
+   "bound": -310.80000000000007,
+   "wall": 0.04542827299974306,
+   "feas": 0.0,
+   "nodes": 11
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -310.80000000000007,
+   "bound": -310.8,
+   "wall": 0.04949807100001635,
+   "feas": 0.0,
+   "nodes": 7
+  }
+ },
+ {
+  "instance": "nvs11",
+  "off": {
+   "status": "optimal",
+   "objective": -431.0,
+   "bound": -431.00000000000006,
+   "wall": 0.11744399600047473,
+   "feas": 0.0,
+   "nodes": 19
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -431.0,
+   "bound": -431.0,
+   "wall": 0.2372531480004909,
+   "feas": 0.0,
+   "nodes": 15
+  }
+ },
+ {
+  "instance": "nvs12",
+  "off": {
+   "status": "optimal",
+   "objective": -481.2,
+   "bound": -481.2,
+   "wall": 0.35594105000018317,
+   "feas": 0.0,
+   "nodes": 61
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -481.2,
+   "bound": -481.20000000000005,
+   "wall": 0.4758133730001646,
+   "feas": 0.0,
+   "nodes": 49
+  }
+ },
+ {
+  "instance": "nvs13",
+  "off": {
+   "status": "optimal",
+   "objective": -585.2,
+   "bound": -585.2000000000002,
+   "wall": 3.5852116490004846,
+   "feas": 0.0,
+   "nodes": 707
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -585.2,
+   "bound": -585.2000000000002,
+   "wall": 1.1078626380003698,
+   "feas": 0.0,
+   "nodes": 115
+  }
+ },
+ {
+  "instance": "nvs14",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.056014840999523585,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.050135845999648154,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "nvs15",
+  "off": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 0.9999999999999996,
+   "wall": 0.07503868199910357,
+   "feas": 0.0,
+   "nodes": 13
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 1.0,
+   "wall": 0.06590984600006777,
+   "feas": 0.0,
+   "nodes": 9
+  }
+ },
+ {
+  "instance": "nvs21",
+  "off": {
+   "status": "feasible",
+   "objective": 0.0,
+   "bound": null,
+   "wall": 0.05450045900033729,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 0.0,
+   "bound": null,
+   "wall": 0.05544725199979439,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "oaer",
+  "off": {
+   "status": "feasible",
+   "objective": -1.7209716307953338,
+   "bound": -5.388888250000001,
+   "wall": 0.04978709500028344,
+   "feas": 5.532797553442492e-09,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -1.7209716307953338,
+   "bound": -5.388888250000001,
+   "wall": 0.04742700800034072,
+   "feas": 5.532797553442492e-09,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_e11",
+  "off": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 0.03518315299970709,
+   "feas": null,
+   "nodes": 0
+  },
+  "on": {
+   "status": "infeasible",
+   "objective": null,
+   "bound": null,
+   "wall": 0.038095308000265504,
+   "feas": null,
+   "nodes": 0
+  }
+ },
+ {
+  "instance": "st_e13",
+  "off": {
+   "status": "feasible",
+   "objective": 2.0000000050113913,
+   "bound": 0.0,
+   "wall": 0.01780203399994207,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 2.0000000050113913,
+   "bound": 0.0,
+   "wall": 0.016501780999533366,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_e29",
+  "off": {
+   "status": "feasible",
+   "objective": -0.8378999992484181,
+   "bound": null,
+   "wall": 0.03259959800016077,
+   "feas": 4.440892098500626e-16,
+   "nodes": 3
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -0.8378999992484181,
+   "bound": null,
+   "wall": 0.03559322499950213,
+   "feas": 4.440892098500626e-16,
+   "nodes": 3
+  }
+ },
+ {
+  "instance": "st_e36",
+  "off": {
+   "status": "feasible",
+   "objective": -198.7880000000012,
+   "bound": null,
+   "wall": 0.07684812300067279,
+   "feas": 2.447439462133724e-25,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": -198.7880000000012,
+   "bound": null,
+   "wall": 0.07402842400006193,
+   "feas": 2.447439462133724e-25,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_e38",
+  "off": {
+   "status": "feasible",
+   "objective": 7197.727148530756,
+   "bound": null,
+   "wall": 0.01992571400023735,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 7197.727148530756,
+   "bound": null,
+   "wall": 0.019332824000230175,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_miqp1",
+  "off": {
+   "status": "feasible",
+   "objective": 281.0,
+   "bound": 244.06885350862112,
+   "wall": 30.06218006800009,
+   "feas": 0.0,
+   "nodes": 17
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 281.0,
+   "bound": 281.0,
+   "wall": 0.027670126999510103,
+   "feas": 0.0,
+   "nodes": 7
+  }
+ },
+ {
+  "instance": "st_miqp2",
+  "off": {
+   "status": "optimal",
+   "objective": 2.0,
+   "bound": 1.9999999999999964,
+   "wall": 0.0514762900002097,
+   "feas": 0.0,
+   "nodes": 7
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 2.0,
+   "bound": 1.9999999999999964,
+   "wall": 0.046630320999611286,
+   "feas": 0.0,
+   "nodes": 5
+  }
+ },
+ {
+  "instance": "st_miqp3",
+  "off": {
+   "status": "optimal",
+   "objective": -6.0,
+   "bound": -6.0,
+   "wall": 0.024066503999165434,
+   "feas": 0.0,
+   "nodes": 3
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -6.0,
+   "bound": -6.000000000469942,
+   "wall": 0.02239761999953771,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_miqp4",
+  "off": {
+   "status": "optimal",
+   "objective": -4573.999999984964,
+   "bound": -4574.000000000005,
+   "wall": 0.03169327099931252,
+   "feas": 0.0,
+   "nodes": 1
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -4573.999999984964,
+   "bound": -4574.000000000005,
+   "wall": 0.029112614000041503,
+   "feas": 0.0,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_miqp5",
+  "off": {
+   "status": "optimal",
+   "objective": -333.8888889153194,
+   "bound": -333.88888888881695,
+   "wall": 0.0679171950005184,
+   "feas": 2.448494740292517e-10,
+   "nodes": 1
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -333.8888889153194,
+   "bound": -333.88888888881695,
+   "wall": 0.0677147229998809,
+   "feas": 2.448494740292517e-10,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "st_test1",
+  "off": {
+   "status": "optimal",
+   "objective": 0.0,
+   "bound": 0.0,
+   "wall": 0.06811787500009814,
+   "feas": 0.0,
+   "nodes": 15
+  },
+  "on": {
+   "status": "optimal",
+   "objective": 0.0,
+   "bound": 0.0,
+   "wall": 0.12482902299962007,
+   "feas": 0.0,
+   "nodes": 15
+  }
+ },
+ {
+  "instance": "st_testgr3",
+  "off": {
+   "status": "optimal",
+   "objective": -20.59,
+   "bound": -20.59,
+   "wall": 0.941150760999335,
+   "feas": 0.0,
+   "nodes": 589
+  },
+  "on": {
+   "status": "optimal",
+   "objective": -20.59,
+   "bound": -20.590000000000003,
+   "wall": 0.7230408589994113,
+   "feas": 0.0,
+   "nodes": 249
+  }
+ },
+ {
+  "instance": "syn05hfsg",
+  "off": {
+   "status": "feasible",
+   "objective": 837.4448652204449,
+   "bound": 1335.9263990680909,
+   "wall": 0.09966166599951976,
+   "feas": 4.86692041926022e-13,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 837.4448652204449,
+   "bound": 1335.9263990680909,
+   "wall": 0.09471136000047409,
+   "feas": 4.86692041926022e-13,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "tanksize",
+  "off": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.22783074700055295,
+   "feas": null,
+   "nodes": 1
+  },
+  "on": {
+   "status": "no_feasible_point",
+   "objective": null,
+   "bound": null,
+   "wall": 0.22911070300051506,
+   "feas": null,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "tls2",
+  "off": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": 1.1999999999999995,
+   "wall": 30.047219543999745,
+   "feas": null,
+   "nodes": 5
+  },
+  "on": {
+   "status": "iteration_limit",
+   "objective": null,
+   "bound": 1.2460346057480178,
+   "wall": 30.08358150999993,
+   "feas": null,
+   "nodes": 11
+  }
+ },
+ {
+  "instance": "tspn05",
+  "off": {
+   "status": "feasible",
+   "objective": 191.25520784332005,
+   "bound": null,
+   "wall": 0.03627823100032401,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 191.25520784332005,
+   "bound": null,
+   "wall": 0.03044451899950218,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "tspn08",
+  "off": {
+   "status": "feasible",
+   "objective": 290.56685402831454,
+   "bound": null,
+   "wall": 0.0906588380003086,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 290.56685402831454,
+   "bound": null,
+   "wall": 0.09939555900018604,
+   "feas": 2.220446049250313e-16,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "tspn10",
+  "off": {
+   "status": "feasible",
+   "objective": 225.12607174914731,
+   "bound": null,
+   "wall": 0.08999104400027136,
+   "feas": 4.440892098500626e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 225.12607174914731,
+   "bound": null,
+   "wall": 0.13996874599979492,
+   "feas": 4.440892098500626e-16,
+   "nodes": 1
+  }
+ },
+ {
+  "instance": "tspn12",
+  "off": {
+   "status": "feasible",
+   "objective": 262.6473959144803,
+   "bound": null,
+   "wall": 0.1187903379995987,
+   "feas": 4.440892098500626e-16,
+   "nodes": 1
+  },
+  "on": {
+   "status": "feasible",
+   "objective": 262.6473959144803,
+   "bound": null,
+   "wall": 0.1550551499994981,
+   "feas": 4.440892098500626e-16,
+   "nodes": 1
+  }
+ }
+]

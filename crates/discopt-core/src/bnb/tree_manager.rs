@@ -1119,6 +1119,32 @@ impl TreeManager {
         }
     }
 
+    /// Raise a node's stored lower bound, keeping the tighter of the two.
+    ///
+    /// The companion to [`Self::requeue_node`] (#1141). Re-opening a node throws
+    /// its evaluation away and leaves it on the *parent-inherited* bound — which
+    /// is valid, but is the bound the tree already had. On a fractional-separation
+    /// re-queue that is a measurable loss: the node's own LP optimum over its box
+    /// IS a valid lower bound for that box (the relaxation it was computed on is a
+    /// relaxation of the problem, and adding the separator's cuts can only tighten
+    /// it), so discarding it drops the frontier minimum for no reason. Measured on
+    /// `clay0303hfsg`: the master's reported dual bound fell 1700.0 -> 3.98e-12
+    /// purely because 40 separated nodes went back into the frontier carrying
+    /// their parents' bounds.
+    ///
+    /// Monotone by construction — it never lowers a bound, so it cannot weaken
+    /// `global_lower_bound`, and it never raises one above what an evaluation
+    /// proved, so it cannot fabricate one. A non-finite `bound` is ignored.
+    pub fn raise_node_bound(&mut self, node_id: NodeId, bound: f64) {
+        if !bound.is_finite() {
+            return;
+        }
+        let node = self.pool.get_mut(node_id);
+        if bound > node.local_lower_bound {
+            node.local_lower_bound = bound;
+        }
+    }
+
     /// Return an exported node to the open frontier without importing a result.
     ///
     /// The single-tree lazy-constraint path (#1060) calls this when a user

@@ -52,6 +52,8 @@ fn stride_unset_never_dives_away_from_the_root() {
         sb_max_cands: 0,
         sb_node_budget: 0,
         initial_incumbent: None,
+        node_hook_rounds: 0,
+        node_hook_cut_cap: 0,
         simplex: SimplexOptions::default(),
     };
     let res = solve_milp(&lp, &b, 0.0, &opts);

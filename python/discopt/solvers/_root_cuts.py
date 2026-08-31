@@ -94,33 +94,59 @@ def nlpbb_root_cuts_enabled() -> bool:
 
 
 #: Whether an unset ``DISCOPT_ROOT_CUT_DEADLINE`` enforces the stage budget on
-#: the individual LPs. Enforcing it changes which cuts the stage separates on an
-#: instance whose OA prologue outruns the budget, hence that instance's root
-#: bound -- a bound-changing knob (CLAUDE.md §5 regime 2), so it ships
-#: default-off pending a graduation panel that clears both bars. The truncation
-#: is sound in either arm (fewer cuts can only loosen a bound, never invalidate
-#: one); the open question the panel answers is whether it is *net-positive*.
+#: the individual LPs.
 #:
-#: That panel is owed, not optional: OFF is the arm in which ``generate_root_cuts``'
-#: docstring promise ("``time_budget_s`` bounds the stage's wall time") is false,
-#: and the stage is default-ON, so the shipped default is a default-path stage
-#: with a budget it cannot enforce. **Tracked in #1141** -- this flag graduates
-#: or is deleted; leaving it off forever is the dead flag CLAUDE.md §3 forbids.
-_ROOT_CUT_DEADLINE_DEFAULT = False
+#: **Default ON since the 2026-08-31 graduation panel (#1141; performance-plan
+#: §25.9).** Set the variable to ``0``/``off``/``false``/``no`` to opt out and
+#: take the legacy unbounded-LP path, which stays tested.
+#:
+#: Enforcing the budget changes which cuts the stage separates on an instance
+#: whose OA prologue outruns it, hence that instance's root bound -- a
+#: bound-changing knob (CLAUDE.md §5 regime 2), so it shipped default-off until
+#: a panel cleared both bars. What the panel found:
+#:
+#: * *cert-clean*: 331 corpus checks (119 instances, interleaved, incumbents
+#:   feasibility-verified) plus 40 stage-replay checks, 0 surviving violations.
+#:   The single flagged row, ``clay0303hfsg``, is a time-limit boundary race --
+#:   5 interleaved reps put ON ahead, ``optimal`` 4/5 against OFF's 3/5.
+#: * *net-positive*: measured as CONTRACT ENFORCEMENT, which is what this flag
+#:   is for. Worst-case overrun past the stage's own budget falls +0.297 s ->
+#:   +0.076 s and runs overrunning by >20% fall 2/35 -> 0/35, while the root
+#:   bound at the budgets ``solver.py`` actually hands the stage (2-10 s) is
+#:   IDENTICAL on 3 of 4 instances and within 9.4e-6 on the fourth. Corpus wall
+#:   is neutral (-0.1%), no certificate lost.
+#:
+#: Stated plainly, because the distinction matters: this is NOT the broad
+#: corpus speed-up bar 2 normally asks for, and no such evidence exists here.
+#: The class that would show it -- an instance whose prologue outruns the budget
+#: at 2-10 s, measured on rsyn0830m in #1066 at 81.3 s of a 150 s solve -- is
+#: not in the vendored corpus (0/119 deadline bites), so the corpus can neither
+#: confirm nor falsify a speed-up. What is measured is that OFF leaves
+#: ``generate_root_cuts``' docstring promise ("``time_budget_s`` bounds the
+#: stage's wall time") false on a default-ON stage, and that closing it costs
+#: nothing measurable. Deleting the flag -- #1141's only other permitted outcome
+#: -- would delete the deadline mechanism and reopen #1066.
+_ROOT_CUT_DEADLINE_DEFAULT = True
 
 
 def _deadline_enabled() -> bool:
     """Is the #1066 per-LP stage deadline switched on (``DISCOPT_ROOT_CUT_DEADLINE``)?
 
-    With it off, ``generate_root_cuts`` behaves exactly as before: the initial OA
-    convergence and every LP inside it run unbounded, and ``time_budget_s`` is
-    consulted only between cut rounds. That legacy path stays tested.
+    Default ON since #1141's graduation panel; ``0``/``false``/``off``/``no``
+    opts out. With it off, ``generate_root_cuts`` behaves exactly as before: the
+    initial OA convergence and every LP inside it run unbounded, and
+    ``time_budget_s`` is consulted only between cut rounds. That legacy path
+    stays tested.
+
+    Empty is deliberately NOT an off-value: it is what an unset variable expands
+    to, and a graduated default-ON path must not be switched off by an accident
+    of shell quoting (#993) -- same shape as ``nlpbb_root_cuts_enabled``.
 
     Read per call, not cached at import, so a test can flip it without reloading
     the module and an A/B panel can drive both arms from one build.
     """
     raw = os.environ.get("DISCOPT_ROOT_CUT_DEADLINE")
-    if raw is None:
+    if raw is None or not raw.strip():
         return _ROOT_CUT_DEADLINE_DEFAULT
     return raw.strip().lower() not in ("0", "false", "off", "no")
 
@@ -374,6 +400,20 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
     """
     import highspy
 
+    # ``h``'s rows are [<= rows..., == rows...] and the row loop below pairs
+    # ``binv[r]`` / ``row_st[r]`` with ``a_all[r]`` POSITIONALLY. A caller whose
+    # row system is wider than the LP this basis was factorized from would
+    # multiply an equality row's basis entry by a cut row and emit an INVALID
+    # cut. It is an invariant of the caller, not a condition to tolerate, so
+    # refuse loudly (CLAUDE.md SS3) rather than separate from a stale basis.
+    n_le_basis = int(h.getNumRow()) - int(root.A_eq.shape[0])
+    if int(a_all.shape[0]) != n_le_basis:
+        raise ValueError(
+            f"separate_gmi: row system has {int(a_all.shape[0])} '<=' rows but the "
+            f"basis was factorized from {n_le_basis}; refusing to separate from a "
+            "mismatched basis"
+        )
+
     st, basic = h.getBasicVariables()
     if st != highspy.HighsStatus.kOk:
         return []
@@ -579,8 +619,41 @@ def generate_root_cuts(
         return time_budget_s - (_time.perf_counter() - t_stage)
 
     def oa_converge():
+        """Converge the OA loop; return the last LP that closed to OPTIMALITY.
+
+        Two #1141 defects, both confined to the deadline arm, are fixed here.
+
+        1. A declined LP used to discard the whole convergence -- including an
+           EARLIER LP in the same call that had closed optimally. Under the
+           deadline a decline is usually just a HiGHS time-limit stop, and
+           ``x is None`` propagates to ``generate_root_cuts``' empty-result
+           return, so ONE truncated LP at the end of a ~240-LP stage threw away
+           every cut the stage had accumulated. That is the mechanism behind the
+           ``tls2`` certification regression (performance-plan §25.9).
+        2. The budget break below fires AFTER ``add_oa`` has appended tangent
+           rows, so the returned basis was factorized from fewer ``<=`` rows
+           than ``cuts_a`` now holds. ``separate_gmi`` pairs ``binv[r]``/
+           ``row_st[r]`` with ``a_all[r]`` POSITIONALLY, so those extra rows
+           read equality-row basis entries as if they were cut rows -- an
+           invalid cut (or an ``IndexError``, depending on how many).
+
+        Both are fixed by returning a state that is CONSISTENT: the last LP that
+        reached optimality, together with exactly the rows it was solved from.
+        That LP is an LP over a SUBSET of the OA rows, hence a relaxation, so its
+        optimum is a valid root bound and any cut separated from it is valid.
+        The rows added after it are dropped with it -- they are OA tangents we
+        do not get to use, and dropping valid rows only ever weakens.
+
+        The legacy arm is untouched, deliberately: with the flag off a decline is
+        a structural or numerical LP failure rather than a budget stop, restoring
+        an earlier solve would change the default path's cuts, and no basis
+        mismatch can arise there (a declined LP returns ``h = None``, which the
+        round loop already refuses to separate from).
+        """
         deadline = _deadline_enabled()
         obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
+        # (bound, point, duals, basis, number of cut rows that basis was built from)
+        last = (obj, x, duals, h, len(cuts_a)) if x is not None else None
         for _ in range(OA_MAX_ITERS):
             if x is None or add_oa(x) == 0:
                 break
@@ -591,6 +664,14 @@ def generate_root_cuts(
                 # from it stay valid; only their strength is given up.
                 break
             obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
+            if x is not None:
+                last = (obj, x, duals, h, len(cuts_a))
+        if deadline and last is not None:
+            # No-op on the converged path (``add_oa`` added nothing, so
+            # ``n_keep == len(cuts_a)``); a rollback on the two truncated paths.
+            obj, x, duals, h, n_keep = last
+            del cuts_a[n_keep:]
+            del cuts_b[n_keep:]
         return obj, x, duals, h
 
     obj, x, duals, h = oa_converge()
@@ -656,10 +737,21 @@ def generate_root_cuts(
             cuts_b.append(r)
             applied.append((a, r))
 
-        new_obj, x, duals, h = oa_converge()
-        if x is None:
+        new_obj, new_x, new_duals, new_h = oa_converge()
+        if new_x is None:
             stop_reason = "no_lp"
+            if not _deadline_enabled():
+                x = None
+            # Deadline arm: the PREVIOUS round's optimum is the last point this
+            # stage actually proved anything at, so it -- not ``None`` -- is what
+            # the binding filter below judges cuts against. Cuts chosen this
+            # round were never solved against; they are violated at ``x``, so the
+            # filter drops them, which is exactly the right outcome. Leaving
+            # ``x`` at ``None`` instead SKIPS the filter and returns the whole
+            # applied set, contradicting this function's own contract and
+            # loading every node with rows no LP ever priced.
             break
+        x, duals, h = new_x, new_duals, new_h
         prev_obj = obj
         obj = new_obj
         trace.append(obj)

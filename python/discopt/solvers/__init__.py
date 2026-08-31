@@ -140,6 +140,20 @@ class NLPResult:
     bound_multipliers_upper: Optional[np.ndarray] = None
     iterations: int = 0
     wall_time: float = 0.0
+    #: The subsolver's own terminal code, unmapped (Ipopt/POUNCE ``info["status"]``),
+    #: or ``None`` for backends that do not report one.
+    #:
+    #: ``status`` deliberately collapses several distinct Ipopt codes onto
+    #: :attr:`SolveStatus.ERROR`, and the collapse is not reversible: code 2
+    #: (``Infeasible_Problem_Detected``) means "restoration converged to a local
+    #: minimizer of the constraint violation", which on a **convex** subproblem is
+    #: a genuine infeasibility proof and on a nonconvex one is not a proof of
+    #: anything. Mapping it to :attr:`SolveStatus.INFEASIBLE` for everyone would
+    #: let a local claim be published as a global verdict (CLAUDE.md §1), so the
+    #: map stays conservative and the raw code is carried here for the callers
+    #: that hold a convexity certificate and may soundly read it. See
+    #: :data:`discopt.solvers.nlp_ipopt.IPOPT_LOCALLY_INFEASIBLE`.
+    raw_status: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

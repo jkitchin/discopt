@@ -18,6 +18,12 @@ settings, 60 s, arms back to back, 2026-08-29):
 So neither a bigger budget nor a smaller one is the answer, and the discriminator
 has to be progress -- which means ``lp_nlp_bb`` needs a check-in. The HiGHS master
 has exactly one honest one: the restart between trees.
+
+The tests that assert HiGHS-master specifics (restart counts) now pin
+``milp_solver="highs"`` rather than reaching it through the default route: #1141
+stopped the route naming an opt-in backend, and the in-house master it targets
+instead has its own check-in (the driver's per-iteration checkpoint), with no
+restarts to count because it is a true single tree.
 """
 
 from __future__ import annotations
@@ -201,14 +207,68 @@ def test_the_route_never_installs_its_own_hook_over_the_callers():
 
 
 @pytest.mark.smoke
-def test_the_simplex_master_refuses_a_hook_it_could_never_call():
-    """A budget built on a hook that cannot fire is a fiction (CLAUDE.md §3)."""
+def test_the_simplex_master_honours_a_hook_it_used_to_refuse():
+    """#1141: the in-house master has a check-in, so the hook is real here too.
+
+    This used to assert a ``NotImplementedError`` -- "the driver enforces
+    time_limit itself and offers no check-in point". The first half is true and
+    irrelevant; the second was stale. The driver has had a per-iteration
+    checkpoint carrying incumbent/bound/gap/elapsed with a Stop control since the
+    interactive debugger landed, already exposed to Python as ``debug_hook``.
+
+    The refusal was not harmless: the #1066 route progress guard installs a
+    ``termination_hook`` on every auto-routed solve, so once #1141 stopped the
+    route naming an opt-in backend, the refusal raised on every routed convex
+    MINLP and the route fell all the way back to the spatial path.
+
+    Anti-vacuity first (CLAUDE.md §6): a hook that returns False must be seen to
+    have been CALLED, otherwise "it did not stop the search" proves nothing.
+    """
     from discopt.solvers.oa import solve_lp_nlp_bb
 
-    m = _toy_convex_minlp()
+    seen: list[dict] = []
+    res = solve_lp_nlp_bb(
+        _toy_convex_minlp(),
+        time_limit=30.0,
+        milp_solver="simplex",
+        termination_hook=lambda ctx: bool(seen.append(dict(ctx))),
+    )
+    assert seen, "the hook was never called; this test would pass on a dropped hook"
+    ctx = seen[-1]
+    assert ctx["event"] == "termination"
+    assert ctx["is_minimization"] is True
+    assert ctx["elapsed"] >= 0.0
+    assert str(res.status) in ("SolveStatus.OPTIMAL", "optimal")
+    assert res.objective == pytest.approx(9.0, abs=1e-6)
 
-    with pytest.raises(NotImplementedError, match="no check-in point"):
-        solve_lp_nlp_bb(m, time_limit=5.0, milp_solver="simplex", termination_hook=lambda _c: False)
+
+@pytest.mark.smoke
+def test_the_simplex_master_actually_stops_when_the_hook_says_stop():
+    """Honouring a hook means obeying it, not just calling it.
+
+    A hook that stops immediately must cut the search short and give up the
+    certificate -- an interrupted tree has not proved its bound. Reporting
+    ``optimal`` here would be a false certificate, which is the one outcome that
+    matters (CLAUDE.md §1).
+    """
+    from discopt.solvers.oa import solve_lp_nlp_bb
+
+    calls = [0]
+
+    def _stop_at_once(_ctx: dict) -> bool:
+        calls[0] += 1
+        return True
+
+    res = solve_lp_nlp_bb(
+        _toy_convex_minlp(),
+        time_limit=30.0,
+        milp_solver="simplex",
+        termination_hook=_stop_at_once,
+    )
+    assert calls[0] > 0, "the hook was never called; the stop was never requested"
+    assert str(res.status) not in ("SolveStatus.OPTIMAL", "optimal"), (
+        "a search stopped by a hook must not report a certificate it did not earn"
+    )
 
 
 @pytest.mark.smoke
@@ -411,7 +471,15 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
     incumbent 1092.0911 -- gap 6.3e-5, inside the 1e-4 default -- at 5.1 s of a
     60 s limit, then five more trees and ``feasible`` at the wall.
     """
-    res = _separator_outlives_the_certificate().solve(time_limit=60)
+    # ``milp_solver="highs"`` is pinned, not inherited from the route (#1141).
+    # This test is about the HiGHS master's per-RESTART check-in -- it asserts
+    # ``restarts > 1`` two lines down -- and the auto-route no longer targets that
+    # master: naming an opt-in backend made the default algorithm depend on
+    # whether highspy happened to be installed. The whole module already
+    # ``importorskip``s highspy, so pinning it here changes no coverage.
+    res = _separator_outlives_the_certificate().solve(
+        time_limit=60, mip_nlp_method="lp_nlp_bb", milp_solver="highs"
+    )
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
 
     assert stats["dual_bound_observations"] > 0, (
@@ -429,7 +497,7 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
 @pytest.mark.smoke
 def test_the_early_exit_stays_out_of_the_way_when_the_separator_finishes_first():
     """Not every model needs it, and on those it must change nothing."""
-    res = _toy_convex_minlp().solve(time_limit=30)
+    res = _toy_convex_minlp().solve(time_limit=30, mip_nlp_method="lp_nlp_bb", milp_solver="highs")
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
     assert stats["dual_bound_observations"] > 0
     assert stats["converged_early"] is False

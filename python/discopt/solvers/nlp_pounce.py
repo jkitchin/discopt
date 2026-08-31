@@ -215,6 +215,7 @@ def solve_nlp(
         bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
         iterations=int(info.get("iter_count", 0)),
         wall_time=wall_time,
+        raw_status=int(status_code),
     )
 
 
