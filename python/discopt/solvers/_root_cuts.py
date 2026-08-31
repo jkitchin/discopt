@@ -374,6 +374,20 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
     """
     import highspy
 
+    # ``h``'s rows are [<= rows..., == rows...] and the row loop below pairs
+    # ``binv[r]`` / ``row_st[r]`` with ``a_all[r]`` POSITIONALLY. A caller whose
+    # row system is wider than the LP this basis was factorized from would
+    # multiply an equality row's basis entry by a cut row and emit an INVALID
+    # cut. It is an invariant of the caller, not a condition to tolerate, so
+    # refuse loudly (CLAUDE.md SS3) rather than separate from a stale basis.
+    n_le_basis = int(h.getNumRow()) - int(root.A_eq.shape[0])
+    if int(a_all.shape[0]) != n_le_basis:
+        raise ValueError(
+            f"separate_gmi: row system has {int(a_all.shape[0])} '<=' rows but the "
+            f"basis was factorized from {n_le_basis}; refusing to separate from a "
+            "mismatched basis"
+        )
+
     st, basic = h.getBasicVariables()
     if st != highspy.HighsStatus.kOk:
         return []
@@ -579,8 +593,41 @@ def generate_root_cuts(
         return time_budget_s - (_time.perf_counter() - t_stage)
 
     def oa_converge():
+        """Converge the OA loop; return the last LP that closed to OPTIMALITY.
+
+        Two #1141 defects, both confined to the deadline arm, are fixed here.
+
+        1. A declined LP used to discard the whole convergence -- including an
+           EARLIER LP in the same call that had closed optimally. Under the
+           deadline a decline is usually just a HiGHS time-limit stop, and
+           ``x is None`` propagates to ``generate_root_cuts``' empty-result
+           return, so ONE truncated LP at the end of a ~240-LP stage threw away
+           every cut the stage had accumulated. That is the mechanism behind the
+           ``tls2`` certification regression (performance-plan §25.9).
+        2. The budget break below fires AFTER ``add_oa`` has appended tangent
+           rows, so the returned basis was factorized from fewer ``<=`` rows
+           than ``cuts_a`` now holds. ``separate_gmi`` pairs ``binv[r]``/
+           ``row_st[r]`` with ``a_all[r]`` POSITIONALLY, so those extra rows
+           read equality-row basis entries as if they were cut rows -- an
+           invalid cut (or an ``IndexError``, depending on how many).
+
+        Both are fixed by returning a state that is CONSISTENT: the last LP that
+        reached optimality, together with exactly the rows it was solved from.
+        That LP is an LP over a SUBSET of the OA rows, hence a relaxation, so its
+        optimum is a valid root bound and any cut separated from it is valid.
+        The rows added after it are dropped with it -- they are OA tangents we
+        do not get to use, and dropping valid rows only ever weakens.
+
+        The legacy arm is untouched, deliberately: with the flag off a decline is
+        a structural or numerical LP failure rather than a budget stop, restoring
+        an earlier solve would change the default path's cuts, and no basis
+        mismatch can arise there (a declined LP returns ``h = None``, which the
+        round loop already refuses to separate from).
+        """
         deadline = _deadline_enabled()
         obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
+        # (bound, point, duals, basis, number of cut rows that basis was built from)
+        last = (obj, x, duals, h, len(cuts_a)) if x is not None else None
         for _ in range(OA_MAX_ITERS):
             if x is None or add_oa(x) == 0:
                 break
@@ -591,6 +638,14 @@ def generate_root_cuts(
                 # from it stay valid; only their strength is given up.
                 break
             obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
+            if x is not None:
+                last = (obj, x, duals, h, len(cuts_a))
+        if deadline and last is not None:
+            # No-op on the converged path (``add_oa`` added nothing, so
+            # ``n_keep == len(cuts_a)``); a rollback on the two truncated paths.
+            obj, x, duals, h, n_keep = last
+            del cuts_a[n_keep:]
+            del cuts_b[n_keep:]
         return obj, x, duals, h
 
     obj, x, duals, h = oa_converge()
@@ -656,10 +711,21 @@ def generate_root_cuts(
             cuts_b.append(r)
             applied.append((a, r))
 
-        new_obj, x, duals, h = oa_converge()
-        if x is None:
+        new_obj, new_x, new_duals, new_h = oa_converge()
+        if new_x is None:
             stop_reason = "no_lp"
+            if not _deadline_enabled():
+                x = None
+            # Deadline arm: the PREVIOUS round's optimum is the last point this
+            # stage actually proved anything at, so it -- not ``None`` -- is what
+            # the binding filter below judges cuts against. Cuts chosen this
+            # round were never solved against; they are violated at ``x``, so the
+            # filter drops them, which is exactly the right outcome. Leaving
+            # ``x`` at ``None`` instead SKIPS the filter and returns the whole
+            # applied set, contradicting this function's own contract and
+            # loading every node with rows no LP ever priced.
             break
+        x, duals, h = new_x, new_duals, new_h
         prev_obj = obj
         obj = new_obj
         trace.append(obj)

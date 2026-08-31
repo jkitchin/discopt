@@ -654,3 +654,202 @@ def test_the_deadline_reaches_highs_not_just_the_python_loop(monkeypatch):
         f"a non-positive limit reached HiGHS as {tl}; HiGHS reads <= 0 as "
         f"'no limit', which would restore the overrun this bounds"
     )
+
+
+# ── #1141: a truncated LP must not discard what the stage already proved ──────
+#
+# The added work item on #1141 is "graduate or delete DISCOPT_ROOT_CUT_DEADLINE".
+# Panelling it found the flag failing bar 1 (a certification regression on tls2),
+# and the mechanism is entirely in how `generate_root_cuts` handles an LP that
+# stops on the deadline: it returns the all-`None` declined tuple, and both
+# places that consume it treat "this LP declined" as "the stage knows nothing".
+#
+# Both paths are fixed only in the deadline arm. With the flag off a decline is a
+# structural or numerical LP failure rather than a budget stop, and restoring an
+# earlier solve there would change the DEFAULT path's cuts -- a bound-changing
+# edit that belongs to its own panel (CLAUDE.md §5). The legacy behaviour is
+# pinned by `test_the_legacy_no_lp_exit_still_discards` below.
+
+
+def _stub_lp_declining_on(monkeypatch, decline_calls, bounds, x_fixed):
+    """``_solve_lp`` stub that DECLINES on the given 1-based call indices.
+
+    Returns ``h = None`` so the GMI separator (which needs a real basis) stays
+    out of this fixture; the cut supply is `_select_cuts` below.
+    """
+    import discopt.solvers._root_cuts as rc
+
+    seen = {"calls": 0, "declined": 0}
+    decline_calls = set(decline_calls)
+
+    def _stub(root, cuts_a, cuts_b, time_limit=None):
+        seen["calls"] += 1
+        if seen["calls"] in decline_calls:
+            seen["declined"] += 1
+            return None, None, None, None
+        i = min(seen["calls"] - 1, len(bounds) - 1)
+        return float(bounds[i]), np.array(x_fixed, float), None, None
+
+    monkeypatch.setattr(rc, "_solve_lp", _stub)
+    return seen
+
+
+def _stub_two_cuts_one_binding(monkeypatch, x_fixed):
+    """Every round offers one cut BINDING at ``x_fixed`` and one far from it.
+
+    The pair is what makes the binding filter observable: a result that kept both
+    did not filter, a result that kept only the first did.
+    """
+    import discopt.solvers._root_cuts as rc
+
+    a = np.zeros(len(x_fixed))
+    a[0] = 1.0
+    binding_rhs = float(a @ np.array(x_fixed, float))  # slack exactly 0
+
+    def _always_two(candidates, x, **kw):
+        return [(a.copy(), binding_rhs), (a.copy(), binding_rhs + 98.0)]
+
+    monkeypatch.setattr(rc, "_select_cuts", _always_two)
+    return binding_rhs
+
+
+def _run_min_stage(time_budget_s=1e6):
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = _build_convex_minlp("min")
+    return rc.generate_root_cuts(
+        m,
+        NLPEvaluator(m),
+        np.array([0.0, 0.0, 0.0, 0.0]),
+        np.array([10.0, 10.0, 1.0, 1.0]),
+        np.array([False, False, True, True]),
+        np.array([False, False, True, True]),
+        time_budget_s=time_budget_s,
+    )
+
+
+# ``f0^2 + f1^2 <= 16`` holds here, so ``add_oa`` adds nothing and each
+# convergence is exactly ONE LP -- which makes the call indices below the round
+# indices. The violating point is used by the mid-convergence test instead.
+_X_OA_FEASIBLE = [1.0, 1.0, 0.5, 0.5]
+_X_OA_VIOLATING = [4.0, 4.0, 0.5, 0.5]
+
+
+def test_a_declined_lp_at_a_round_boundary_still_filters_to_binding_cuts(monkeypatch):
+    """#1141: the ``no_lp`` exit skipped the binding filter and shipped everything.
+
+    ``generate_root_cuts`` promises "the returned cuts are only those BINDING at
+    the final LP optimum ... the full applied set (measured: ~170 dense rows on
+    rsyn0805m) collapses node NLP throughput". On a ``no_lp`` exit ``x`` was
+    ``None``, so the filter was skipped and the whole applied set was returned --
+    exactly the row flood the docstring exists to prevent, and measured on tls2
+    as 90 rows where the filter yields 19.
+
+    Fails before the fix with 6 cuts (2 per round × 3 rounds, unfiltered).
+    """
+    _deadline_flag(monkeypatch, True)
+    seen = _stub_lp_declining_on(
+        monkeypatch, decline_calls={4}, bounds=[5.0, 6.0, 7.0], x_fixed=_X_OA_FEASIBLE
+    )
+    _stub_two_cuts_one_binding(monkeypatch, _X_OA_FEASIBLE)
+
+    res = _run_min_stage()
+
+    assert seen["declined"] == 1, "the decline never fired; the test proves nothing"
+    assert seen["calls"] == 4, seen
+    assert res.stop_reason == "no_lp"
+    assert res.rounds_run == 3
+    # 3 rounds × 2 cuts = 6 applied; exactly half of them bind at the last solved
+    # LP optimum, so a filtered result has 3 and an unfiltered one has 6.
+    assert len(res.cuts) == 3, f"binding filter skipped: {len(res.cuts)} cuts kept"
+    assert all(abs(float(a @ np.array(_X_OA_FEASIBLE)) - r) <= 1e-6 for a, r in res.cuts)
+
+
+def test_a_declined_lp_mid_convergence_keeps_the_lp_that_did_close(monkeypatch):
+    """#1141: one truncated LP threw away an OPTIMAL LP from the same call.
+
+    ``oa_converge`` overwrote ``obj, x, duals, h`` in place, so a decline on the
+    second LP of a convergence discarded the first -- and when that happened in
+    the prologue, ``generate_root_cuts`` took its ``x is None`` early return and
+    the stage contributed nothing at all.
+
+    The retained LP is a relaxation of the one that timed out (it is over a
+    SUBSET of the OA rows), so its optimum is a valid root bound and cuts
+    separated from it are valid. Fails before the fix: empty result, 0 rounds.
+    """
+    _deadline_flag(monkeypatch, True)
+    seen = _stub_lp_declining_on(
+        monkeypatch,
+        decline_calls={2},
+        bounds=[5.0, 5.0, 6.0, 7.0, 8.0],
+        x_fixed=_X_OA_VIOLATING,
+    )
+    _stub_two_cuts_one_binding(monkeypatch, _X_OA_VIOLATING)
+
+    res = _run_min_stage()
+
+    assert seen["declined"] == 1, "the decline never fired; the test proves nothing"
+    assert res.rounds_run >= 1, "prologue decline still aborted the whole stage"
+    assert res.lp_bound is not None
+    assert res.cuts, "stage returned no cuts despite a converged prologue LP"
+
+
+def test_the_legacy_no_lp_exit_still_discards(monkeypatch):
+    """The flag-OFF path is untouched by both fixes above (CLAUDE.md §5).
+
+    Same stub, same decline, flag off: the prologue decline must still abort the
+    stage. If this ever starts passing cuts through, the default path changed
+    without a panel.
+    """
+    _deadline_flag(monkeypatch, False)
+    seen = _stub_lp_declining_on(
+        monkeypatch,
+        decline_calls={2},
+        bounds=[5.0, 5.0, 6.0, 7.0, 8.0],
+        x_fixed=_X_OA_VIOLATING,
+    )
+    _stub_two_cuts_one_binding(monkeypatch, _X_OA_VIOLATING)
+
+    res = _run_min_stage()
+
+    assert seen["declined"] == 1, "the decline never fired; the test proves nothing"
+    assert res.cuts == []
+    assert res.rounds_run == 0
+    assert res.lp_bound is None
+
+
+def test_separate_gmi_refuses_a_basis_from_a_different_row_system():
+    """The invariant the retention fix has to preserve, made structural.
+
+    ``separate_gmi`` pairs ``binv[r]`` / ``row_st[r]`` with ``a_all[r]``
+    POSITIONALLY, and the basis rows are ``[<= rows..., == rows...]``. Hand it a
+    row system one row wider than the LP the basis came from and row ``m_le``
+    multiplies an EQUALITY row's basis entry by a cut row -- an invalid cut, with
+    nothing to signal it. Keeping a solved LP across an ``add_oa`` that appends
+    rows is exactly how that could arise, so the fix rolls the appended rows back
+    and this guard is what says so out loud.
+    """
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = _build_convex_minlp("min")
+    root = rc._RootLP(
+        m,
+        NLPEvaluator(m),
+        np.array([0.0, 0.0, 0.0, 0.0]),
+        np.array([10.0, 10.0, 1.0, 1.0]),
+        np.array([False, False, True, True]),
+        np.array([False, False, True, True]),
+        False,
+    )
+    obj, x, duals, h = rc._solve_lp(root, [], [])
+    assert h is not None, "fixture LP did not solve; the guard is untested"
+
+    a_all = np.vstack([root.A_le, np.zeros((1, root.n))])
+    b_all = np.concatenate([root.b_le, [1.0]])
+    with pytest.raises(ValueError, match="mismatched basis"):
+        rc.separate_gmi(root, h, x, a_all, b_all)
+
+    # ...and the matched system is still accepted (the guard is not a blanket no).
+    rc.separate_gmi(root, h, x, root.A_le, root.b_le)
