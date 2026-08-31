@@ -4437,3 +4437,180 @@ can in principle spend its whole deadline cutting before a single B&B node runs.
 The escalation is not exposed to it in any measurement here — the strong arm is
 entered only after a node-capped probe has already returned, and no panel row hit
 it — but the loop should honour the deadline regardless of who calls it.
+
+## 24. #1141 fractional-node separation: the capability was missing, and it exposed a false dual bound (2026-08-30)
+
+#1066 closed at 14/15. The row it could not close, `portfol_classical050_1`, is not
+closeable by tuning the OA loop: on the certified-convex class discopt solves an
+**NLP at every node** where SCIP solves an **LP with gradient cuts** — 38.9 ms/node
+against 3.0 — and explores *more* nodes for it. #1141 records four tuning-level
+fixes already falsified against that row. This section resolves what the missing
+capability is, reports the soundness defect that building it uncovered, and
+records the corpus panel that keeps the new flag OFF.
+
+### 24.1 The capability
+
+`oa.py:5017` has defined `node_callback` — gradient (ECP) cuts separated at
+**fractional** node LP solutions, which is exactly what SCIP does — since the SHOT
+work. It was wired to nothing usable:
+
+| backend | fractional-node hook |
+|---|---|
+| `gurobi.py:639` | implemented (MIPNODE) |
+| `milp_highs.py:451` | refused; HiGHS 1.12 declares `kCallbackMipDefineLazyConstraints` and binds nothing to it |
+| `milp_simplex.py:1093` | refused; the Rust driver's hook fired only at integer-feasible points |
+
+So without a commercial license every node either paid a full NLP (expensive, what
+we do) or ran on a relaxation that ignored the nonlinear constraint (weak). SCIP is
+cheap *and* tight because it re-separates at each node's fractional LP.
+
+The Rust driver now has the hook (`MilpNodeHook` / `MilpNodeVerdict` /
+`solve_milp_node_hooked`): it fires at fractional node relaxations, stages the
+globally-valid rows the separator returns, and re-queues the node so it re-solves
+against them. Two budgets bound it — `node_hook_rounds` (separation rounds per
+node) and `node_hook_cut_cap` (rows per solve) — and a zero budget is treated as no
+hook at all, so an unhooked search stays bit-for-bit identical.
+
+The asymmetry with the lazy hook is the design point. A lazy veto is **mandatory**:
+it is the only thing keeping a point out of the incumbent, so a vetoed node is
+re-queued and exhausting the re-queue cap costs certification. A node separation is
+**optional**: a fractional LP solution is not an incumbent candidate, it only
+tightens a relaxation, so exhausting either budget imports the node's own valid LP
+bound and leaves certification untouched.
+
+`DISCOPT_OA_NODE_CUTS` (default OFF, bound-changing, CLAUDE.md §5 regime 2) wires
+`oa.py`'s existing `node_callback` to the simplex master. The SHOT profile no
+longer requires Gurobi — the hook it needs now exists in-house — while the HiGHS
+master is still refused for SHOT, since it separates only at integer-feasible
+incumbents.
+
+### 24.2 The false dual bound the panel uncovered
+
+Building the differential panel produced an arm that certified `optimal` at
+−0.10088167 on an instance whose optimum is −0.10091959. The cuts were not at
+fault: 215 separator rows were checked against the verified optimum and against
+sampled feasible points, 0 invalid; 100 random MILPs with valid non-cutting node
+rows left the certified objective unchanged; 200 brute-force-checked solves over
+100 randomized convex MINLPs with genuinely cutting rows agreed with enumeration
+on every arm. Replaying the exact
+system the driver was handed — static rows plus every separator row — as a plain
+MILP found −0.10091959, so the driver's own exit was the false one.
+
+Root cause, and it is **pre-existing and not about #1141's hook at all**:
+`milp_simplex` published `bound = objective` on a driver exit of `"optimal"`, on
+the reasoning that a proven optimum has incumbent == dual bound. That holds only at
+gap **zero**. `"optimal"` from the driver means optimal *within* `gap_tol`
+(`decide_status` takes `tm.gap() <= opts.gap_tol`), and `TreeManager::gap`
+normalises by `max(|incumbent|, 1.0)` — so on an objective of magnitude 0.1 a 1e-4
+"relative" tolerance is 1e-4 **absolute**, i.e. 1e-3 relative. `solve_lp_nlp_bb`
+then republished that number as the MINLP's dual bound.
+
+`_certified_bound` now publishes the engine's own `global_lower_bound` (already
+floored by the #598 unresolved-fathom floor and capped at the incumbent), and the
+lazy entry point reports the real gap rather than a hardcoded `0.0`. A genuinely
+drained tree loses nothing — its frontier bound equals the incumbent. Regression
+tests in `python/tests/test_1141_fractional_node_cuts.py` fail before the fix
+(`published dual bound -0.5420000000000001 is above the true optimum
+-0.5430000000000001`) and pass after.
+
+The same `bound = objective`-at-`"optimal"` reading should be audited in the other
+MILP wrappers (`milp_highs`, `milp_pounce`, `gurobi`); only `milp_simplex` was
+touched here.
+
+### 24.3 Class measurement (the `portfol_classical050_1` family)
+
+MINLPLib is not reachable from the environment this was built in, so the class was
+rebuilt with the modeling API: cardinality-constrained Markowitz portfolios whose
+expected returns differ by ~1e-3, which reproduces the regime #1141 measured — the
+objective barely depends on the binaries, so a combinatorial number of assignments
+tie at the master LP optimum. `lp_nlp_bb`, 60 s cap, gap 1e-4. Three arms A/B/C **interleaved**, three
+repetitions each, mean ± sd (`scratchpad/1141/timing_class.py`, 27 runs, load
+average 0.68 before / 1.08 after — CLAUDE.md §9):
+
+| instance | HiGHS master (the route's target) | simplex master | simplex **+ node cuts** |
+|---|---|---|---|
+| n=50, K=5 | 17.84 ± 0.22 s | 19.83 ± 0.49 s | **1.41 ± 0.06 s** |
+| n=40, K=6 | 54.53 ± 1.45 s | 48.33 ± 0.94 s | **2.49 ± 0.12 s** |
+| n=60, K=6 | 7.58 ± 0.03 s | 49.88 ± 0.66 s | **6.20 ± 0.23 s** |
+
+Every arm exits `optimal` and the three dual bounds agree to ~1e-8 per row
+(−0.10193369, −0.10091960, −0.10095279), so this is a wall comparison at equal
+certificate, not a bound trade. The simplex master **with** fractional separation
+is the fastest arm on all three rows; **without** it, it is the slowest on two.
+
+### 24.4 FALSIFIED as a default: no static budget is broadly net-positive
+
+Corpus panel over the 66 vendored MINLPLib instances (`scratchpad/1141/panel_corpus.py`),
+`lp_nlp_bb` / simplex, 30 s per arm, OFF vs ON interleaved per instance, incumbents
+feasibility-verified from the model's own evaluator rather than taken on the
+solver's word. `ROWS THAT EXERCISED THE FLAG: 26/66`,
+`EXECUTED SOUNDNESS CHECKS: 98`, `VIOLATIONS: 0`.
+
+**Bar 1 (cert-clean) passes.** No soundness violation once the check is made
+sense-aware — the one flag the first pass raised was `syn05hfsg`, a MAXIMIZE model
+whose `bound >= objective` is the correct relation and which is identical on both
+arms. Certificates went 19 → 20 with none lost, and every incumbent verified
+feasible on both arms.
+
+**Bar 2 (net-positive) fails.** Aggregate wall improved (397.8 s → 352.0 s,
+−11.5 %), four bounds tightened, and `st_miqp1` went from `feasible` after 30 s
+with bound 244.07 to **optimal in 0.03 s** at the oracle 281.0 — but
+`clay0303hfsg`'s dual bound collapsed, 1700.0 → 3.98e-12, reproducibly, and
+`fac2`'s loosened 259 641 263 → 257 873 972. The mechanism is the re-queue: at
+`rounds=2` the master spends its budget re-solving separated nodes instead of
+branching and reaches the wall with a shallow frontier.
+
+Retuning does not fix it, it moves the loss:
+
+| instance | OFF | `rounds=2` | `rounds=1` |
+|---|---|---|---|
+| `clay0303hfsg` (bound) | **1700.0** | 3.98e-12 | 1360.0 |
+| `st_miqp1` | feasible 30 s | **optimal 0.03 s** | optimal 21.8 s |
+| `tls2` (bound) | 1.200 | **1.246** | none |
+| `fac2` (bound) | 259 641 263 | 257 873 972 | **259 729 247** |
+| `cvxnonsep_psig30` (bound) | 78.7448 | 78.7448 | **78.7884** |
+
+Neither budget dominates. This is the `tls2` lesson of §23.3 in a new place, and
+the `DISCOPT_CUT_INHERIT` rule applies: **sound but not broadly helpful stays
+OFF**, with the measurement recorded. `DISCOPT_OA_NODE_CUTS` therefore ships
+default-OFF; `DISCOPT_OA_NODE_CUT_ROUNDS` / `DISCOPT_OA_NODE_CUT_CAP` tune it.
+
+One measurement note for anyone re-running this: `cvxnonsep_nsig30`'s OFF-arm
+incumbent moved between two runs of the same arm (130.6513 vs 130.6628), so
+incumbent drift on a time-limited row on this panel is run-to-run variability, not
+a flag effect. Only bound and status movements are attributable.
+
+### 24.5 What would graduate it, and what would close #1141's row
+
+The class the flag helps — convex MIQCP with a dense quadratic row and degenerate
+binaries — is **not represented** in the 61-instance vendored corpus, and the class
+it hurts (`clay*`, `tls2`) is. The graduation gate is therefore the MINLPLib
+convex-MINLP family on a corpus machine: `lp_nlp_bb` / simplex, flag OFF vs ON,
+requiring cert-clean plus a net-positive verdict over that family, with
+`clay0303hfsg`'s bound as an explicit non-regression probe.
+
+Closing #1141's own row additionally needs the **route** to reach this master.
+`_convex_minlp_route_target` sends the certified-convex class to `lp_nlp_bb` on the
+**HiGHS** master, chosen in #1066 because the in-house master lost on `rsyn*`
+(`rsyn0840m`: in-house root loop 0 % of the gap closed, HiGHS 86.1 %). §24.3 shows
+the in-house master **with** fractional separation beating HiGHS on the portfolio
+family; whether it also holds on `rsyn*` is the measurement that decides the
+retarget, and `rsyn*` is not vendored either. Do not retarget the route on the
+portfolio evidence alone.
+
+### 24.6 Not addressed here
+
+#1141's items 3 and 4 — OA feasibility restoration converging 0 of 60 times, and 7
+of 172 integer assignments being re-proposed — were diagnosed on
+`portfol_classical050_1` and need that instance to work on. What did land is the
+instrument they were diagnosed with: `_solve_nlp_attempt` no longer collapses every
+failure mode into one empty attempt, `NLPResult.raw_status` carries the subsolver's
+own code, and the callback trace records `infeasible_local` / `failed:<code>`.
+
+Item 2 as literally proposed — map Ipopt code 2 to `SolveStatus.INFEASIBLE` — is
+**refused**, not deferred. Restoration converging to a local minimizer of the
+constraint violation proves infeasibility only on a **convex** subproblem, and
+`_IPOPT_STATUS_MAP` also serves `solve_model`'s pure-NLP path, which would then
+publish `status="infeasible"` for a nonconvex model it never proved infeasible.
+That is a §1 violation, not a bound change. The sound version is to read the raw
+code where a convexity certificate is held, which is why it is now carried.

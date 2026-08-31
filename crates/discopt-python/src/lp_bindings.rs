@@ -1156,8 +1156,18 @@ pub fn solve_milp_py<'py>(
     // Fully sparse driver (T3b5): build the working CSC from the dense numpy matrix
     // once and delegate. The CSC entry `solve_milp_csc_py` skips this densify.
     let csc = SparseCols::from_dense(&a_owned, m, n);
-    let (status, x, obj, bound, nodes, lp_iters, _lazy_calls, _lazy_requeues, _node_calls, _node_cuts) =
-        run_milp_hooked(
+    let (
+        status,
+        x,
+        obj,
+        bound,
+        nodes,
+        lp_iters,
+        _lazy_calls,
+        _lazy_requeues,
+        _node_calls,
+        _node_cuts,
+    ) = run_milp_hooked(
         py,
         csc,
         m,
@@ -1262,8 +1272,18 @@ pub fn solve_milp_csc_py<'py>(
         .map(|&v| v as usize)
         .collect();
     let csc = SparseCols::from_csc(col_ptr_v, row_idx_v, vals_v);
-    let (status, x, obj, bound, nodes, lp_iters, _lazy_calls, _lazy_requeues, _node_calls, _node_cuts) =
-        run_milp_hooked(
+    let (
+        status,
+        x,
+        obj,
+        bound,
+        nodes,
+        lp_iters,
+        _lazy_calls,
+        _lazy_requeues,
+        _node_calls,
+        _node_cuts,
+    ) = run_milp_hooked(
         py,
         csc,
         m,

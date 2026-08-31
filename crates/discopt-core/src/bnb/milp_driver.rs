@@ -566,9 +566,7 @@ pub fn solve_milp_lazy_hooked(
     hook: Option<&dyn MilpDebugHook>,
     lazy: Option<&dyn MilpLazyHook>,
 ) -> MilpResult {
-    solve_milp_node_hooked(
-        csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, None,
-    )
+    solve_milp_node_hooked(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, None)
 }
 
 /// [`solve_milp_lazy_hooked`] plus an optional **fractional**-node cut separator
@@ -1379,10 +1377,21 @@ pub fn solve_milp_node_hooked(
             // The predicate must match the one `process_evaluated` uses
             // (`result.is_feasible || is_integer_feasible(solution)`), or a point
             // it treats as integral would slip past unseparated.
-            let node_result_usable = out.result.lower_bound.is_finite();
-            let integral = node_result_usable
-                && (out.result.is_feasible
-                    || solution_is_integral(&out.result.solution, &is_int));
+            // UNCHANGED from the pre-#1141 lazy predicate — it must keep matching
+            // the one `process_evaluated` uses (`result.is_feasible ||
+            // is_integer_feasible(solution)`), or a point that path treats as
+            // integral would slip past unseparated.
+            let integral = out.result.lower_bound.is_finite()
+                && (out.result.is_feasible || solution_is_integral(&out.result.solution, &is_int));
+            // The fractional separator's own admission test is stricter, and only
+            // it: `INFEAS_SENTINEL` (1e30) is a FINITE number meaning "this node's
+            // LP was infeasible or excluded", carried with a placeholder solution.
+            // Firing on that placeholder is sound (a convex tangent is valid wherever
+            // it is taken) but pure waste, and it would re-queue a node the tree is
+            // about to fathom — invisible until an incumbent exists to make the prune
+            // test below catch it.
+            let node_result_usable = out.result.lower_bound.is_finite()
+                && out.result.lower_bound < INFEAS_SENTINEL - 1.0;
             // Fractional separation (#1141). Only at a point the integral branch
             // below will not handle, and only while this node has separation
             // rounds left. A node whose own bound already meets the incumbent is
@@ -5268,5 +5277,268 @@ mod lazy_separation {
         );
         compared += 1;
         assert_eq!(compared, 9, "integrality-screen comparison count");
+    }
+}
+
+/// #1141 — fractional-node cut separation ([`MilpNodeHook`]).
+///
+/// The hook fires where [`MilpLazyHook`] cannot: at node relaxation solutions
+/// that are still fractional. Every test here asserts the separator actually
+/// fired (`node_calls`) before asserting anything about the answer — a driver
+/// that silently ignored the hook would still answer these models correctly and
+/// would read as a pass while testing nothing (CLAUDE.md §6).
+#[cfg(test)]
+mod node_separation {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Binary knapsack `min −5x0 − 4x1 − 3x2` s.t. `2x0 + 3x1 + x2 + s = 4`.
+    ///
+    /// Its LP relaxation is fractional (`x1 = 1/3` at the root), which is what
+    /// gives the fractional separator anything to see; the plain integer optimum
+    /// is `(1, 0, 1)`, objective `−8`. [`CapPair`] holds one more constraint,
+    /// `x0 + x2 ≤ 1`, that exists ONLY in the hooks — with it the answer is
+    /// `(0, 1, 1)`, objective `−7`.
+    struct FracKnapsack {
+        a: Vec<f64>,
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+    }
+
+    impl FracKnapsack {
+        fn new() -> Self {
+            FracKnapsack {
+                a: vec![2.0, 3.0, 1.0, 1.0],
+                m: 1,
+                n: 4,
+                c: vec![-5.0, -4.0, -3.0, 0.0],
+                l: vec![0.0; 4],
+                u: vec![1.0, 1.0, 1.0, INF],
+                b: vec![4.0],
+            }
+        }
+
+        fn opts(&self, rounds: usize, cap: usize) -> MilpOptions {
+            MilpOptions {
+                n_struct: 3,
+                integer_cols: vec![0, 1, 2],
+                max_nodes: 100_000,
+                time_limit_s: None,
+                gap_tol: 1e-9,
+                root_cuts: 0,
+                cut_rounds: 0,
+                gmi_cuts: false,
+                cut_select: false,
+                node_cuts: false,
+                max_pool_cuts: 128,
+                heuristics: false,
+                presolve: true,
+                strong_branch: true,
+                node_propagation: false,
+                reduced_cost_fixing: true,
+                sb_max_cands: 6,
+                sb_node_budget: 48,
+                initial_incumbent: None,
+                node_hook_rounds: rounds,
+                node_hook_cut_cap: cap,
+                simplex: SimplexOptions::default(),
+            }
+        }
+
+        fn solve(
+            &self,
+            rounds: usize,
+            cap: usize,
+            lazy: Option<&dyn MilpLazyHook>,
+            node: Option<&dyn MilpNodeHook>,
+        ) -> MilpResult {
+            solve_milp_node_hooked(
+                SparseCols::from_dense(&self.a, self.m, self.n),
+                self.m,
+                self.n,
+                &self.c,
+                &self.l,
+                &self.u,
+                &self.b,
+                0.0,
+                &self.opts(rounds, cap),
+                None,
+                lazy,
+                node,
+            )
+        }
+    }
+
+    /// Holds `x0 + x2 ≤ 1` (driver form `−x0 − x2 ≥ −1`) and separates it at any
+    /// violating point, fractional or integral. Serves as both hooks so the two
+    /// arms of the agreement test enforce exactly the same constraint.
+    struct CapPair {
+        node_calls: AtomicUsize,
+        fractional_points: AtomicUsize,
+    }
+
+    impl CapPair {
+        fn new() -> Self {
+            CapPair {
+                node_calls: AtomicUsize::new(0),
+                fractional_points: AtomicUsize::new(0),
+            }
+        }
+
+        fn row(x: &[f64]) -> Option<GomoryCut> {
+            if x[0] + x[2] > 1.0 + 1e-9 {
+                Some(GomoryCut {
+                    coeffs: vec![-1.0, 0.0, -1.0],
+                    rhs: -1.0,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    impl MilpNodeHook for CapPair {
+        fn separate_node(&self, x: &[f64]) -> MilpNodeVerdict {
+            self.node_calls.fetch_add(1, Ordering::SeqCst);
+            if x[..3].iter().any(|v| (v - v.round()).abs() > 1e-7) {
+                self.fractional_points.fetch_add(1, Ordering::SeqCst);
+            }
+            match Self::row(x) {
+                Some(cut) => MilpNodeVerdict::Cuts(vec![cut]),
+                None => MilpNodeVerdict::None,
+            }
+        }
+    }
+
+    impl MilpLazyHook for CapPair {
+        fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+            match Self::row(x) {
+                Some(cut) => MilpLazyVerdict::Reject(vec![cut]),
+                None => MilpLazyVerdict::Accept,
+            }
+        }
+    }
+
+    struct NodeSeparatorFails;
+
+    impl MilpNodeHook for NodeSeparatorFails {
+        fn separate_node(&self, _x: &[f64]) -> MilpNodeVerdict {
+            MilpNodeVerdict::Failed
+        }
+    }
+
+    #[test]
+    fn absent_hook_leaves_the_search_untouched() {
+        let k = FracKnapsack::new();
+        let r = k.solve(4, 100, None, None);
+        assert_eq!(r.status, MilpStatus::Optimal);
+        assert_eq!(r.node_calls, 0, "no hook must mean no calls");
+        assert_eq!(r.node_cuts_added, 0, "no hook must mean no rows");
+        assert!((r.obj + 8.0).abs() < 1e-9, "unhooked optimum: {}", r.obj);
+    }
+
+    #[test]
+    fn a_zero_budget_hook_is_treated_as_absent() {
+        let k = FracKnapsack::new();
+        for (rounds, cap) in [(0usize, 100usize), (4, 0)] {
+            let hook = CapPair::new();
+            let r = k.solve(rounds, cap, None, Some(&hook));
+            assert_eq!(r.node_calls, 0, "rounds={rounds} cap={cap}");
+            assert_eq!(hook.node_calls.load(Ordering::SeqCst), 0);
+            assert!((r.obj + 8.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn the_separator_sees_fractional_points_and_its_calls_are_counted() {
+        let k = FracKnapsack::new();
+        let hook = CapPair::new();
+        let r = k.solve(4, 100, Some(&hook), Some(&hook));
+        assert!(r.node_calls > 0, "the fractional separator never fired");
+        assert_eq!(
+            r.node_calls,
+            hook.node_calls.load(Ordering::SeqCst),
+            "the driver's call count disagrees with the hook's own"
+        );
+        assert!(
+            hook.fractional_points.load(Ordering::SeqCst) > 0,
+            "the separator only ever saw integral points; this is the LAZY hook's \
+             job and the fractional path was never exercised"
+        );
+        assert!(
+            r.node_cuts_added > 0,
+            "the fractional separator added no rows"
+        );
+    }
+
+    #[test]
+    fn both_hooks_together_agree_with_the_lazy_only_answer() {
+        let k = FracKnapsack::new();
+        let lazy_only = CapPair::new();
+        let a = k.solve(4, 100, Some(&lazy_only), None);
+        let both = CapPair::new();
+        let b = k.solve(4, 100, Some(&both), Some(&both));
+        assert_eq!(a.status, MilpStatus::Optimal, "lazy-only status");
+        assert_eq!(b.status, MilpStatus::Optimal, "both-hooks status");
+        assert!(b.node_calls > 0, "the fractional separator never fired");
+        assert!(
+            (a.obj - b.obj).abs() < 1e-9,
+            "adding fractional separation moved the certified optimum: {} vs {}",
+            a.obj,
+            b.obj
+        );
+        // The constraint the hooks hold is what makes -7 the answer; -8 would mean
+        // it was dropped on both arms and the agreement is vacuous.
+        assert!((a.obj + 7.0).abs() < 1e-9, "lazy-only optimum: {}", a.obj);
+        assert!(b.bound <= b.obj + 1e-9, "dual bound above the incumbent");
+    }
+
+    #[test]
+    fn the_cut_cap_bounds_the_rows() {
+        let k = FracKnapsack::new();
+        let hook = CapPair::new();
+        let r = k.solve(4, 1, Some(&hook), Some(&hook));
+        assert!(r.node_calls > 0, "the fractional separator never fired");
+        assert!(
+            r.node_cuts_added <= 1,
+            "cap ignored: {} rows",
+            r.node_cuts_added
+        );
+    }
+
+    #[test]
+    fn exhausting_the_round_budget_keeps_the_certificate() {
+        // A node separation is never a veto: when the per-node round budget runs
+        // out the node's own valid LP bound is imported and the search continues,
+        // certified. (The lazy hook still enforces the constraint, so the answer
+        // is the constrained optimum either way.)
+        let k = FracKnapsack::new();
+        let hook = CapPair::new();
+        let r = k.solve(1, 100, Some(&hook), Some(&hook));
+        assert!(r.node_calls > 0, "the fractional separator never fired");
+        assert_eq!(
+            r.status,
+            MilpStatus::Optimal,
+            "a spent round budget must not cost certification"
+        );
+        assert!((r.obj + 7.0).abs() < 1e-9, "optimum: {}", r.obj);
+        assert!(r.bound <= r.obj + 1e-9);
+    }
+
+    #[test]
+    fn a_failed_node_separator_stops_the_search_uncertified() {
+        let k = FracKnapsack::new();
+        let r = k.solve(4, 100, None, Some(&NodeSeparatorFails));
+        assert!(r.node_calls > 0, "the fractional separator never fired");
+        assert_ne!(
+            r.status,
+            MilpStatus::Optimal,
+            "a separator that failed left rows unenforced; the run must not certify"
+        );
     }
 }

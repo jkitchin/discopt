@@ -85,6 +85,11 @@ for name in names:
             rec[arm] = {"error": f"load: {type(exc).__name__}: {exc}"}
             print(f"{name:22s} {arm:4s} LOAD FAILED {exc}", flush=True)
             continue
+        # Sense matters for every bound assertion below: for a MAXIMIZE model the
+        # solver's `bound` is an UPPER bound, so `bound >= objective` is the sound
+        # relation, not a violation. A sense-blind check flags every `syn*` row.
+        sense = 1.0 if model._objective.sense.name == "MINIMIZE" else -1.0
+        rec.setdefault("sense", sense)
         t = time.perf_counter()
         try:
             r = model.solve(solver="mip-nlp", mip_nlp_method="lp_nlp_bb",
@@ -93,8 +98,13 @@ for name in names:
             wall = time.perf_counter() - t
             x = flat_point(model, getattr(r, "x", None))
             feas = None if x is None else max_violation(model, x)
+            cb = ((r.mip_nlp_trace or {}).get("summary", {}) or {}).get("callback_stats", {}) or {}
             rec[arm] = {"status": str(r.status), "objective": r.objective, "bound": r.bound,
-                        "wall": wall, "feas": feas, "nodes": getattr(r, "node_count", None)}
+                        "wall": wall, "feas": feas, "nodes": getattr(r, "node_count", None),
+                        # Anti-vacuity per row (§6): an ON row with mipnode == 0 did
+                        # not exercise the flag at all, and must not be counted as
+                        # evidence either way.
+                        "mipnode": cb.get("mipnode_calls"), "node_cuts": cb.get("driver_node_cuts")}
         except Exception as exc:
             wall = time.perf_counter() - t
             rec[arm] = {"error": f"{type(exc).__name__}: {exc}", "wall": wall}
@@ -105,9 +115,10 @@ for name in names:
         bd = "None" if d["bound"] is None else f"{d['bound']:.10g}"
         fs = "None" if d["feas"] is None else f"{d['feas']:.2e}"
         print(f"{name:22s} {arm:4s} {d['status']:12s} {ob:>18s} {bd:>18s} "
-              f"{d['wall']:7.2f} {fs:>9s}", flush=True)
+              f"{d['wall']:7.2f} {fs:>9s} mipnode={d.get('mipnode')}", flush=True)
 
     off, on = rec.get("off", {}), rec.get("on", {})
+    sense = rec.get("sense", 1.0)
     # --- soundness: the ON bound may not exceed any VERIFIED feasible objective
     for src, d in (("off", off), ("on", on)):
         obj, feas = d.get("objective"), d.get("feas")
@@ -116,7 +127,7 @@ for name in names:
         if on.get("bound") is not None:
             checks += 1
             tol = 1e-6 * max(1.0, abs(obj))
-            if on["bound"] > obj + tol:
+            if sense * on["bound"] > sense * obj + tol:
                 violations.append(f"{name}: ON bound {on['bound']!r} > verified {src} "
                                   f"incumbent {obj!r}")
     try:
@@ -125,7 +136,7 @@ for name in names:
         opt = None
     if opt is not None and on.get("bound") is not None:
         checks += 1
-        if on["bound"] > float(opt) + 1e-6 * max(1.0, abs(float(opt))):
+        if sense * on["bound"] > sense * float(opt) + 1e-6 * max(1.0, abs(float(opt))):
             violations.append(f"{name}: ON bound {on['bound']!r} > ORACLE optimum {opt!r}")
     # --- certification regression
     if off.get("status") == "optimal":
@@ -135,7 +146,9 @@ for name in names:
     rows.append(rec)
 
 pathlib.Path(a.out).write_text(json.dumps(rows, indent=1, default=str))
-print(f"\nEXECUTED SOUNDNESS CHECKS: {checks}   VIOLATIONS: {len(violations)}")
+exercised = sum(1 for r in rows if (r.get("on", {}).get("mipnode") or 0) > 0)
+print(f"\nROWS THAT EXERCISED THE FLAG: {exercised}/{len(rows)}")
+print(f"EXECUTED SOUNDNESS CHECKS: {checks}   VIOLATIONS: {len(violations)}")
 for v in violations:
     print("  !!", v)
 if checks == 0:
