@@ -139,6 +139,9 @@ from discopt.modeling import (
     Constraint as Constraint,
 )
 from discopt.modeling import (
+    DisjunctionSemantics as DisjunctionSemantics,
+)
+from discopt.modeling import (
     Expression as Expression,
 )
 from discopt.modeling import (

@@ -358,8 +358,11 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "add_either_or",
             "description": (
-                "Add a disjunctive constraint: exactly one group of constraints "
-                "must hold. Each group is a list of constraints."
+                "Add a disjunctive constraint: exactly one disjunct is SELECTED and "
+                "its constraints enforced. The feasible set is the UNION of the "
+                "disjuncts -- an unselected disjunct's constraints are not enforced "
+                "but may still happen to hold. This is not 'exactly one group holds'. "
+                "Each group is a list of constraints."
             ),
             "parameters": {
                 "type": "object",

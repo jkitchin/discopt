@@ -16,10 +16,13 @@ from collections.abc import Callable
 import numpy as np
 
 from discopt.modeling.core import (
+    _SELECT_ONE_ROWS,
+    GDP_AUX_PREFIX,
     BinaryOp,
     BooleanVar,
     Constant,
     Constraint,
+    DisjunctionSemantics,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -33,12 +36,16 @@ from discopt.modeling.core import (
     LogicalNot,
     LogicalOr,
     Model,
+    SelectorActivation,
+    SelectorCardinality,
     UnaryOp,
     Variable,
     VarType,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
     _LogicalConstraint,
+    _require_semantics_supported,
+    _semantics_supported_by,
     _SOSConstraint,
     _wrap,
 )
@@ -55,6 +62,35 @@ _DEFAULT_BIG_M = 1e4
 # false optimal). Both big-M paths refuse rather than emit a vacuous M. This is
 # orthogonal to the GDP-1/#413 "M too small cuts feasible points" guard.
 _BIGM_SENTINEL = 1e15
+
+
+# What the rows emitted below actually mean. Every reformulation in this module
+# emits *one-way* activation (``y_k = 1 => disjunct k holds``) under
+# ``sum_k y_k == 1`` — the same pair ``Model.add_disjunction`` emits, so both
+# share one declaration and one predicate rather than each spelling out its own
+# gate. A semantics is served iff its (activation, cardinality) is what these
+# rows encode, so a future member carrying the same pair is supported for free
+# and a member carrying a different pair is refused without touching this code.
+_SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _SELECT_ONE_ROWS
+
+
+def _semantics_is_supported(semantics: DisjunctionSemantics) -> bool:
+    """True when the rows this module emits encode *semantics* exactly."""
+    return _semantics_supported_by(semantics, _SUPPORTED_SEMANTICS)
+
+
+def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
+    """Refuse any disjunction whose declared semantics these rows do not encode.
+
+    Emitting one-way/exactly-one rows for a disjunction declared ``OR`` or
+    ``EXACTLY_ONE_TRUE`` would silently hand back a different feasible set than
+    the model declares — a truth-semantics model would be solved as select-one
+    and certified. Refuse loudly instead (issue #1124).
+    """
+    semantics = getattr(dc, "semantics", DisjunctionSemantics.SELECT_ONE)
+    _require_semantics_supported(
+        semantics, _SUPPORTED_SEMANTICS, f"disjunction {dc.name or '<anon>'!r}"
+    )
 
 
 def reformulate_gdp(
@@ -110,9 +146,22 @@ def reformulate_gdp(
     # Track auxiliary binaries added by the reformulation
     _aux_counter = [0]
 
+    # Names already live in the model being built. Generated auxiliaries are
+    # allocated against this set so a selector can never reuse a name that
+    # already exists — the counter alone does not guarantee that, since the
+    # pass may run over a model that already carries auxiliaries (a second
+    # lowering, an imported model). ``Model._check_name`` keeps *user* names
+    # out of the reserved prefix; this keeps generated names unique among
+    # themselves.
+    _taken: set[str] = {v.name for v in new_model._variables}
+
     def _add_aux_binary(prefix: str, shape=()) -> Variable:
-        name = f"_gdp_aux_{prefix}_{_aux_counter[0]}"
+        name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
         _aux_counter[0] += 1
+        while name in _taken:
+            name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
+            _aux_counter[0] += 1
+        _taken.add(name)
         var = Variable(
             name,
             VarType.BINARY,
@@ -731,6 +780,7 @@ def _reformulate_disjunction(
 
     Returns new variables and constraints.
     """
+    _require_supported_semantics(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -831,6 +881,7 @@ def _reformulate_disjunction_nested(
     When parent_selector = 0, all inner selectors must be 0.
     When parent_selector = 1, exactly one inner selector must be 1.
     """
+    _require_supported_semantics(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -915,6 +966,28 @@ def _reformulate_disjunction_nested(
 # ── Hull reformulation ──
 
 
+def _reject_nested_under_hull(dc: _DisjunctiveConstraint) -> None:
+    """Refuse a nested disjunction on the hull path, which cannot lower it.
+
+    Only the big-M path implements nesting (``_reformulate_disjunction_nested``).
+    The hull path walks ``con.body`` over every item in a disjunct, and a nested
+    ``_DisjunctiveConstraint`` has no ``.body`` — so without this guard the pass
+    dies on a bare ``AttributeError`` from deep inside the disaggregation, which
+    names neither the disjunction nor the real limitation (issue #1124).
+    """
+    for k, disjunct in enumerate(dc.disjuncts):
+        for item in disjunct:
+            if isinstance(item, _DisjunctiveConstraint):
+                raise NotImplementedError(
+                    f"the hull reformulation does not support nested disjunctions: "
+                    f"disjunct {k} of {dc.name or '<anon>'!r} contains the nested "
+                    f"disjunction {item.name or '<anon>'!r}. Use "
+                    "gdp_method='big-m' (or 'mbigm'), which implements nesting, or "
+                    "flatten the disjunction. Tracking issue: "
+                    "https://github.com/jkitchin/discopt/issues/1124"
+                )
+
+
 def _reformulate_disjunction_hull(
     dc: _DisjunctiveConstraint,
     model: Model,
@@ -948,6 +1021,8 @@ def _reformulate_disjunction_hull(
     tuple of (list[Variable], list[Constraint])
         New variables and constraints.
     """
+    _require_supported_semantics(dc)
+    _reject_nested_under_hull(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars: list[Variable] = []
     new_cons: list[Constraint] = []
