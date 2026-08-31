@@ -5391,6 +5391,53 @@ _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT = 0.25
 #: That look-back window, as a fraction of the checkpoint.
 _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION = 0.5
 
+#: #1143: the *decision point*, as a fraction of the caller's limit, used instead
+#: of :data:`_CONVEX_ROUTE_BUDGET_FRACTION` when the early-decision policy is on.
+#:
+#: 0.10 is measured, not chosen. Across 24 classified instances the route either
+#: certifies FAST or not at all: every one of the 19 rows it certifies it certifies
+#: within 2.96 s of a 60 s limit (``syn20m02m`` 2.91 s is the slowest; ``syn40m``
+#: 2.05 s, ``syn15m03m`` 0.90 s, ``rsyn0805m`` 0.82 s), while every abstain costs
+#: >= 28 s. The win distribution and the waste are separated by an order of
+#: magnitude, so the decision does not need a model property or a gap trend -- it
+#: needs to be taken early.
+#:
+#: The fraction is bounded on BOTH sides by measurement, which is why it is not
+#: smaller: at 0.05 (3.0 s) the cut lands *inside* the win distribution and
+#: ``syn20m02m`` loses its certificate outright (optimal 2.91 s -> feasible 60.4 s),
+#: while ``tls2`` regresses 30.3 s -> 57.6 s. At 0.10 both recover (2.96 s optimal,
+#: 29.7 s) and the savings survive nearly intact. See #1143 and the falsification
+#: record in ``docs/dev/performance-plan.md``.
+_CONVEX_ROUTE_DECISION_POINT_FRACTION = 0.10
+
+
+def _convex_route_decision_point_enabled() -> bool:
+    """Is the #1143 early-decision policy switched on? **Default OFF.**
+
+    Changing when the route hands over changes the bounds that come back, so this
+    is CLAUDE.md §5 regime 2 and ships default-off until a corpus-wide differential
+    panel clears both bars. ``DISCOPT_CONVEX_ROUTE_DECISION_POINT=1`` turns it on.
+    Read per call, not cached at import, so a test can flip it without reloading.
+
+    **What it changes.** The #1066 guard cannot fire before
+    :data:`_CONVEX_ROUTE_BUDGET_FRACTION` (half the limit) by construction, so an
+    abstaining route always costs at least that much -- routinely 3-8x the whole
+    unrouted solve (#1143). With this on, the checkpoint moves to
+    :data:`_CONVEX_ROUTE_DECISION_POINT_FRACTION` and the verdict there becomes
+    unconditional: reaching the decision point *is* the verdict, because the route
+    has not certified by the time every measured win had.
+
+    The gap-trend test is deliberately not consulted at the decision point. It is
+    what kept ``cvxnonsep_nsig30`` running for 28.2 s -- its gap improves steadily
+    the whole way (0.298 -> 0.0013) and it still never certifies, so "is it
+    improving?" is the wrong question and answering it correctly still costs the
+    budget. "Has it finished?" is the right one. The convergence branch is kept:
+    a route whose gap has closed is owned by the loop's own termination test.
+    """
+    # Default OFF: the opposite default to the #1066 guard just below, which has
+    # graduated. Any truthy spelling other than "0"/"" turns it on.
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_DECISION_POINT", "0") not in ("0", "")
+
 
 def _convex_route_progress_guard_enabled() -> bool:
     """Is the #1066 progress-gated route budget switched on?
@@ -5502,11 +5549,18 @@ class _RouteProgressGuard:
     ) -> None:
         self.time_limit = float(time_limit)
         limit = self.time_limit
-        fraction = (
-            _CONVEX_ROUTE_BUDGET_FRACTION if check_fraction is None else float(check_fraction)
+        #: #1143: reaching the checkpoint *is* the verdict when this is on.
+        self.decision_point = check_fraction is None and _convex_route_decision_point_enabled()
+        default_fraction = (
+            _CONVEX_ROUTE_DECISION_POINT_FRACTION
+            if self.decision_point
+            else _CONVEX_ROUTE_BUDGET_FRACTION
         )
+        fraction = default_fraction if check_fraction is None else float(check_fraction)
         # The same expression the fixed split used, so "never fires before the
-        # checkpoint" means "never fires before the old wall".
+        # checkpoint" means "never fires before the old wall". The floor still
+        # applies under #1143: below it a fallback cannot do anything useful, so
+        # handing over early would trade a routed result for nothing.
         self.checkpoint = max(limit * fraction, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
         self.window = self.checkpoint * (
             _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION
@@ -5552,6 +5606,19 @@ class _RouteProgressGuard:
 
     def _verdict(self, now: float) -> tuple[bool, Optional[str]]:
         """Has the route earned the rest of the budget as of ``now``?"""
+        if self.decision_point:
+            # #1143: arriving here means the route has not certified by the time
+            # every measured win had, so hand over. The gap trend is deliberately
+            # not consulted -- see `_convex_route_decision_point_enabled`.
+            if self.history and self.history[-1][1] <= 0.0:
+                # Converged; the loop's own termination test owns this, exactly as
+                # in the trend policy below. Stopping here would discard a result
+                # that is about to be returned anyway.
+                return False, None
+            return True, (
+                f"not certified by the {self.checkpoint:.2f}s decision point "
+                f"of a {self.time_limit:.1f}s budget (#1143)"
+            )
         if len(self.history) < 2:
             return True, (
                 f"only {len(self.history)} finite dual-bound observation(s) by "
