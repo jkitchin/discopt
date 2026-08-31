@@ -304,6 +304,31 @@ loss. So the sole blocker to a refreshed reference is **#1143**, quantified.
 > 45 of the reference's 52 rows … four more than #1134 anticipated" is that
 > box's speed, not a property of the tree: here the same script admits **51**.
 
+**Both framings were half right; the dated history is neither.** The retraction
+just above reads "#1100 made the route reachable *generally*, not on one class of
+machine", which over-corrects in the other direction. The pre-#1100 gate was
+`import highspy`, so it *succeeded* on a machine with `highspy` — that box was
+already routing before #1100, and observing that it routes after is consistent
+with the highspy-free framing rather than a counterexample to it. What #1100
+actually changed is routing on machines *without* `highspy`, which is why the
+bisect on such a box lands there. `git log -S` dates the whole sequence:
+
+| commit | date | what |
+|---|---|---|
+| `23a64ab6` | 08-11 | reference regenerated — **the route does not exist yet** |
+| `6442d7e3` | 08-17 | #1059 introduces the route, default-off |
+| `d9fec841` | 08-19 | #1059 graduates it **default-ON** — fires on `highspy` machines |
+| `533c05e1` | 08-20 | #1100 corrects the gate — fires everywhere |
+
+This also settles the loose end in Cause 2's evidence: the reference's
+`cvxnonsep_nsig30` row (165 nodes, 1.12 s) is unrouted not because that machine
+lacked `highspy` but because on 08-11 **there was no route to take**. And it
+re-scopes #1143: the abstain cost has been live since `d9fec841`, one day before
+#1100, so it is a property of the #1059 graduation that #1100 extended to the
+remaining machines — not a regression #1100 introduced. A bisect for it on a
+`highspy` box would name `d9fec841`; on a `highspy`-free box, `533c05e1`. Same
+mechanism, two different first-bad commits, and neither is wrong.
+
 **Disposition.** #1134 asked whether the panel regressed since v0.8.0. It did
 not: no soundness fault, no reproducible lost certification, and node drift that
 predates v0.8.0 and was accepted when it shipped (Cause 1). #1134 is closed on
