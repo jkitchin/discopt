@@ -4581,7 +4581,7 @@ Outcome, up front:
 | `DISCOPT_OA_ELASTIC_RESTORATION` | **default ON** | §25.6 |
 | `DISCOPT_OA_INFEASIBLE_NOGOOD` | **stays OFF** | §25.7 |
 | `DISCOPT_ROOT_CUT_DEADLINE` (§24's) | **default ON** | §25.9 |
-| convex route target: HiGHS → in-house master | **retargeted** | §25.10–25.11 |
+| convex route target: HiGHS → `"oa"` | **retargeted** | §25.10–25.11 |
 
 ### 25.1 The capability
 
@@ -5045,60 +5045,114 @@ panel in §25.4 measured it with `mip_nlp_method="lp_nlp_bb"` forced onto the
 in-house master, i.e. with the route bypassed. That is not a wrong measurement,
 but it is a measurement of a configuration no default solve reached.
 
-### 25.11 GRADUATED: the route targets the in-house master (2026-08-31)
+**And it still does not reach it.** §25.11 retargets the route to `"oa"` on the
+evidence, not to `lp_nlp_bb`, so the fractional-node hook remains off the default
+path — it is reached by `mip_nlp_method="lp_nlp_bb"`, which no longer needs
+Gurobi or HiGHS to get there. Closing that gap needs the in-house MILP master to
+become competitive, which §25.11's last section states as the remaining work
+rather than leaving implied.
 
-The route now returns **no** `milp_solver` key, which resolves through the MIP-NLP
-layer's own `"auto"` default to the in-house simplex driver.
+### 25.11 The route targets `"oa"` — and two of my own claims, retracted (2026-08-31)
+
+The route now returns **no** `milp_solver` key at all, and targets `"oa"`.
 `milp_solver="highs"` stays available as an explicit caller opt-in and still
 outranks the route's pick (the call site uses `setdefault`).
 
-**The blocker was a stale refusal, not a missing capability.**
-`solve_milp_with_lazy_cuts` refused a `terminate_callback` because "the driver
-enforces `time_limit` itself and has no callback-termination hook". The first
-half is true and irrelevant; the second was false. The Rust driver has a
-per-iteration checkpoint carrying `incumbent`/`bound`/`gap`/`elapsed` with a
-`Stop` control, already exposed to Python as `debug_hook`, since the interactive
-debugger landed. The check-in is therefore a **composition** — the debugger keeps
-the slot when attached, either party voting to stop stops the search, and with
-neither attached the slot stays `None` so the search is bit-for-bit the unhooked
-one. No Rust change.
+Getting here took two wrong answers, both published before they were checked.
 
-That refusal was not inert. The #1066 route progress guard installs a
-`termination_hook` on **every** auto-routed solve, so the moment the route pointed
-at a discopt-native master the refusal raised on every routed convex MINLP and
-the route fell all the way back to the spatial path — a far worse regression than
-the one it was guarding against. It is why the naive retarget looked like a
-disaster and was committed as explicitly INCOMPLETE.
+#### The measurement that was wrong (CLAUDE.md §8)
 
-**Which native target.** Four arms on the 26 instances the router itself diverts
-(population asked of `_convex_minlp_auto_route`, not guessed), 30 s, interleaved
-per instance, incumbents feasibility-verified from the model's own evaluator,
-every arm's bound checked against every arm's verified incumbent and the
-reference optimum — 164 executed checks, **0 violations**
-(`scratchpad/1141/panel_route_target.py`):
+The first panel forced `mip_nlp_method="lp_nlp_bb"` and `milp_solver=…`, so it
+measured the **master**. On the default path the route also brings the #1066
+progress guard, a fixed 50 % budget reserve and a spatial fallback, and **none of
+them ran**. On that panel `bb_inhouse` scored 26/26 certificates and `"oa"` came
+last, and I reported "for a default install this change is a strict improvement,
+24 → 26 certificates". That sentence describes a configuration no default solve
+takes. **Retracted.**
+
+What a plain `solve(time_limit=30)` actually did on `tls2` under that target:
+
+```
+route: ...in-house master... did not certify in 15.12s -> fell back with 14.88s
+status=time_limit  objective=None  bound=2.87
+```
+
+against `optimal` 5.3 in 0.58 s before the retarget — a lost certificate *and* a
+lost incumbent.
+
+#### The hypothesis that was wrong (CLAUDE.md §4, §11)
+
+`clay0303hfsg` certifies in ~30 s driven directly but returns `feasible` through
+the route under **both** guard settings, and both hand the route ~50 % of the
+limit. So: *the fixed fallback reserve is truncating a master that would have
+finished.* Kill criterion, written next to the arm before running it — if
+removing the reserve does not recover those rows, or costs certificates on rows
+the fallback rescues, the hypothesis is wrong.
+
+It is wrong. Removing the reserve is the **worst** arm of five. The spatial
+fallback is *rescuing* rows, not stealing from them.
+
+#### The measurement that decided it
+
+Five arms, plain `solve(time_limit=30)` with no kwargs so guard, reserve and
+fallback all participate, interleaved per instance over the 26 instances the
+router itself diverts, on an idle machine, 215 executed soundness checks and
+**0 violations** (`scratchpad/1141/panel_route_default.py`):
 
 | arm | certificates | incumbents | total wall |
 |---|---|---|---|
-| `spatial` (no route) | 24/26 | 26 | 92.9 s |
-| `oa` (the old no-highspy fallback) | 24/26 | 26 | 108.1 s |
-| **`bb_inhouse`** (the new target) | **26/26** | 26 | **90.5 s** |
-| `bb_highs` (opt-in) | 26/26 | 26 | 30.5 s |
+| `pre` (route → HiGHS) | 26 | 26 | 35.6 s |
+| `lp_nlp_bb`, in-house master | 23 | 25 | 174.2 s |
+| …same, guard off | 24 | 25 | 162.3 s |
+| **`oa`** | **24** | **26** | 118.7 s |
+| …in-house, no fallback reserve | 20 | 25 | 200.7 s |
 
-`bb_inhouse` is the best target reachable without an optional dependency: +2
-certificates over both alternatives and the fastest of the three. `tls2` is the
-shape of it — `spatial` `feasible` 8.3, `oa` `feasible` 5.3, `bb_inhouse`
-**`optimal` 5.3**, `bb_highs` `optimal` 5.3 in 0.58 s.
+Rows losing a certificate against `pre`: `lp_nlp_bb` loses
+`clay0303hfsg`/`cvxnonsep_nsig30`/`tls2` and `tls2`'s incumbent entirely; `"oa"`
+loses `clay0303hfsg`/`tls2` and **no incumbent**; no-reserve loses six.
 
-**Who wins and who pays, stated plainly.** `"oa"` — what every machine *without*
-`highspy` was silently getting — is the **worst** arm. For a default install this
-change is a strict improvement: 24 → 26 certificates, 108.1 → 90.5 s. Users who
-had `highspy` installed and were being routed to it implicitly trade wall time
-(30.5 → 90.5 s) for **no lost certificate**, and can opt back in with one kwarg.
-There is no reading on which this is a speed-up over HiGHS, and §25.8's
-superseding note retracts the claim that there was.
+`"oa"` is therefore the best target reachable without an optional dependency, and
+the master-only ranking that put it last **inverts** once the route's own
+machinery is in play — the guard's `master_checkin_deadline` limb was built for
+`"oa"`, while `lp_nlp_bb` on the in-house master is truncated by a budget policy
+calibrated on a master that certified in a fraction of its budget.
 
-**What this does not fix.** The in-house master is ~3× slower than HiGHS on this
-population and the fractional-node hook does not close that gap (97.3 s vs 97.7 s
-over the same rows). Making the in-house MILP engine competitive is the real
-remaining work behind #1141's headline number, and it is a master-engine problem
-— root-gap closure, cut management, node throughput — not a separation-hook one.
+#### Who wins and who pays
+
+`"oa"` is exactly what an install **without** `highspy` already got, so for the
+default install this is a **no-op**. Only callers who had `highspy` present are
+affected: they lose two certificates (`clay0303hfsg`, `tls2`) and no incumbents,
+and `mip_nlp_method="lp_nlp_bb", milp_solver="highs"` opts them straight back in.
+There is no reading on which this is a speed-up; it buys a default path that does
+not silently depend on an optional package.
+
+#### What was kept, and what remains
+
+The in-house master's **termination check-in** stays, and it is a real capability
+rather than scaffolding: `lp_nlp_bb` now runs on the in-house master with
+fractional-node cuts *and* a progress hook, where it previously required Gurobi
+or HiGHS. The blocker had been a stale refusal — "the driver enforces
+`time_limit` itself and has no callback-termination hook" — whose second half
+was false: the Rust driver has had a per-iteration checkpoint carrying
+`incumbent`/`bound`/`gap`/`elapsed` with a `Stop` control, exposed to Python as
+`debug_hook`, since the interactive debugger landed. The check-in is a
+composition over it, with no Rust change; a hook-stopped search reports
+uncertified, as an interrupted tree must.
+
+What remains is the honest #1141 headline: **the in-house MILP master is ~3×
+slower than HiGHS on this population and the fractional-node hook does not close
+that gap** (97.3 s vs 97.7 s over the same rows). Until it does, the default
+route cannot use `lp_nlp_bb`. That is a master-engine problem — root-gap closure,
+cut management, node throughput — not a separation-hook one, and it is what a
+follow-up should attack.
+
+#### A panel thrown away
+
+One run of this panel was invalidated and is kept as
+`panel_route_default_CONTAMINATED.json` rather than deleted. A leftover
+subprocess from a killed `pytest` run — the JAX-fallback test, whose command line
+did not match the `pkill` pattern used — ran at **100 % CPU for 15 minutes**
+across the whole panel, with load averaging 2.5–2.9 for a single-process
+measurement. This is the incident CLAUDE.md §9 already records, repeated. The
+re-run waited for load below 0.4 and checks for stray load at the **end** of the
+run, not only at the start.
