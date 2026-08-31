@@ -72,7 +72,10 @@ class TestRouteGates:
     def test_fires_on_convex_minlp(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        assert method == "lp_nlp_bb"
+        # `"oa"` since #1141: see `test_the_route_never_names_an_optional_backend`
+        # for why, and performance-plan §25.11 for the panel that chose it over
+        # `lp_nlp_bb` on the in-house master.
+        assert method == "oa"
         assert "certified convex" in reason
         # The route names NO backend (#1141). An empty options dict resolves
         # through the MIP-NLP layer's own `"auto"` default to the in-house
@@ -118,7 +121,7 @@ class TestRouteGates:
 
         monkeypatch.setattr(builtins, "__import__", _no_highs)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        assert method == "lp_nlp_bb"
+        assert method == "oa"
         assert "certified convex" in reason
         assert opts == {}
 
@@ -188,7 +191,7 @@ class TestRouteDispatch:
         m = _load("gbd")
         result = m.solve(time_limit=30)
         assert result.algorithm_route is not None
-        assert "mip-nlp/lp_nlp_bb" in result.algorithm_route
+        assert "mip-nlp/oa" in result.algorithm_route
 
     def test_route_off_leaves_the_field_unset(self, monkeypatch):
         """The opt-out must restore the pre-graduation behaviour exactly."""
