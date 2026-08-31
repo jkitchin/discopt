@@ -5156,3 +5156,70 @@ across the whole panel, with load averaging 2.5–2.9 for a single-process
 measurement. This is the incident CLAUDE.md §9 already records, repeated. The
 re-run waited for load below 0.4 and checks for stray load at the **end** of the
 run, not only at the start.
+
+### 25.12 ROOT CAUSE: the lazy separator was called on INFEASIBLE nodes (2026-08-31)
+
+This is #1141's item 4, and the reason the certified-convex class was unusable on
+our own MILP master. Everything in §25.10–25.11 about "the in-house master is
+~3× slower" was reasoning about a symptom.
+
+`INFEAS_SENTINEL` is a **finite** `1e30`, so the lazy path's admission test
+
+```rust
+let integral = out.result.lower_bound.is_finite()
+    && (out.result.is_feasible || solution_is_integral(&out.result.solution, &is_int));
+```
+
+admitted an **infeasible** node. Such a node carries a placeholder solution
+vector of zeros, which `solution_is_integral` accepts. The separator was handed a
+point that is not a solution of anything, returned a cut for it, and the node was
+re-queued — against a matrix the point still violates, because it was never a
+solution of that matrix. The loop runs to `LAZY_REQUEUE_CAP`, which sets
+`gap_certified = false` and `search_incomplete = true`.
+
+Measured on MINLPLib `tls2`, in-house master, 30 s:
+
+| | before | after |
+|---|---|---|
+| separations | 1477 | **27** |
+| distinct assignments | **1** | 25 |
+| re-proposals | 1476 | **2** |
+| fixed-NLP subproblems | 1537, all infeasible | — |
+| result | `iteration_limit`, no incumbent | **`optimal` 5.3** |
+
+Confirmed from inside the driver: the returned point violated **31 of the 35 cut
+rows already present in its own LP**. The same path on the HiGHS master needed
+**13** subproblems and reached `optimal` 5.3 — identical NLP layer, identical cut
+logic, only the master differs, which is what localised the defect to ours.
+`cvxnonsep_nsig30` falls to 6 re-proposals across 1219 assignments (the issue
+reported "7 of 172" — the same defect, sampled on an instance where it happened
+not to lock up).
+
+The fix is the test the **fractional** hook already applies
+(`node_result_usable`), added in this same issue. §25.4 recorded "the lazy path's
+`integral` predicate is left byte-identical" as a *safety* property. It was the
+bug: the new path was guarded and the old one left carrying it.
+
+**Effect on the route question.** Re-running §25.11's arm comparison on the fixed
+master (26 routed instances, 30 s, interleaved, 160 checks / 0 violations):
+
+| arm | certificates | incumbents | total wall |
+|---|---|---|---|
+| `spatial` | 24 | 26 | 96.0 s |
+| `oa` (the shipped target) | 24 | 26 | 108.3 s |
+| `lp_nlp_bb`, in-house master | **24** | **26** | 102.4 s |
+| `lp_nlp_bb`, HiGHS (opt-in) | 26 | 26 | 30.9 s |
+
+`lp_nlp_bb` on the in-house master rises from 23 certificates / 25 incumbents to
+parity with `"oa"` — so the shipped `"oa"` target is **not** a regression, and the
+choice between the two native options is now a coin flip rather than a
+2-certificate gap. Pointing the route at `lp_nlp_bb` would additionally put
+fractional-node separation on the default path; that is the natural next step and
+it now rests on a tie rather than on a deficit.
+
+**Method note.** Two earlier rounds of this investigation attributed the symptom
+to budget policy, guard calibration and master speed in turn, and each was
+falsified. What ended it was instrumenting the driver to ask the matrix directly
+whether the returned point satisfied its own rows — a question with a yes/no
+answer, unlike "is the master too slow". Reach for the invariant check earlier.
+
