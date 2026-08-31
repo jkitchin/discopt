@@ -235,9 +235,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     # `python-coverage` below runs the SAME pytest invocation as this job — same
-    # `-m` marker expression, same `--ignore`, same worker count — plus
-    # test_amp.py and the optional-extra deps, i.e. a strict superset, with
-    # coverage instrumentation on top. Whenever it runs (every push to main, and
+    # test paths, same `-m` marker expression, same `--ignore`, same worker
+    # count — plus test_amp.py and the optional-extra deps, i.e. a strict
+    # superset, with coverage instrumentation on top. Adding a test path to one
+    # of the two and not the other silently drops it from whichever event runs
+    # the other job, so change them together. Whenever it runs (every push to main, and
     # any PR carrying the `coverage` label) this job was re-running that superset
     # for a second time on the same tree, for ~15 min of runner time that bought
     # no signal. Skip here and let the superset be the signal; on an ordinary PR
@@ -307,7 +309,20 @@ jobs:
           # `python-coverage` job (main pushes + the `coverage` label) instead.
           # That parenthetical used to read "nightly + label-triggered";
           # `python-coverage` has never had a schedule trigger.
+          # The cert-tooling tests join this lane. `cert-baseline.jsonl` is the
+          # §0.2.5 bound-neutrality reference every solver change is judged
+          # against, and until #1134 NOTHING in CI exercised the code that
+          # generates, validates or reads it: ci.yml pulled exactly one file out
+          # of discopt_benchmarks/tests, so both cert modules could only ever be
+          # run by hand. This one is unmarked and lands here; its sibling
+          # `test_cert_neutrality_regime.py` is `pytest.mark.correctness` and
+          # would collect ZERO tests under this lane's `not correctness`, so it
+          # joins `python-correctness` instead. Both are pure functions over the
+          # committed reference — no solve, no .nl file, numpy their only
+          # third-party import — so they cost ~a second and cannot flake on a
+          # runner's wall clock.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
+            discopt_benchmarks/tests/test_1134_cert_baseline_shrink_guard.py \
             -q --tb=short --timeout=120 \
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \
@@ -401,8 +416,13 @@ jobs:
           # the consumer of #1116's `deterministic=`) and it lived its whole life
           # skipping. It resolves instances from python/tests/data/minlplib_nl/,
           # which is in the checkout, and skips the ones that are not.
+          # test_cert_neutrality_regime.py joins for the same reason as #1134's
+          # shrink-guard module joins python-fast: it is `correctness`-marked, so
+          # this is the only lane whose marker expression selects it, and until
+          # now nothing in CI ran it at all.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             discopt_benchmarks/tests/test_correctness.py \
+            discopt_benchmarks/tests/test_cert_neutrality_regime.py \
             -q --tb=short --timeout=120 -p no:cacheprovider \
             -m "correctness and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_amp.py \
@@ -660,7 +680,12 @@ jobs:
       - name: Run pytest with coverage
         run: |
           source .venv/bin/activate
+          # Kept a strict superset of `python-fast` (see that job's comment):
+          # the cert-tooling tests are added HERE TOO, or they would silently
+          # stop running on every push to main, which is the only event that
+          # skips python-fast.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
+            discopt_benchmarks/tests/test_1134_cert_baseline_shrink_guard.py \
             -q --tb=short --timeout=120 \
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \

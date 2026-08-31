@@ -380,6 +380,10 @@ class BenchmarkRunner:
                 jax_time_fraction=jax_frac,
                 python_time_fraction=py_frac,
                 pounce_time_fraction=pounce_frac,
+                # #1134: carry the solver's own routing note. A wall regression
+                # caused by an auto-routed algorithm that then abstains is
+                # invisible in a table of nodes and seconds.
+                algorithm_route=getattr(result, "algorithm_route", None),
             )
         except Exception as e:
             elapsed = time.monotonic() - start_time

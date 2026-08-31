@@ -98,6 +98,270 @@ Stop work and surface to the maintainer (do not improvise) when:
 - the baseline (`cert-baseline.jsonl`) is missing or stale relative to `main` such
   that neutrality cannot be asserted.
 
+### 0.6.1 The reference's own drift (falsification, #1134, 2026-08-31)
+
+§0.6 makes "the baseline is stale relative to `main`" a stop-and-escalate
+condition, but nothing in the tooling could *detect* it, so it was never raised.
+#1134 is the bill: 7 rows of the committed reference read as regressions on
+`main`, the #1130 graduation gate charged that drift to all 7 flags as
+`soundness=FAIL`, and answering "when did this reference last match the tree?"
+cost a bisect that the reference should have answered by inspection.
+
+There are **two** independent causes, both found by `git bisect --first-parent`
+over `23a64ab6` (2026-08-11, the reference's actual last regeneration) → `main`.
+
+#### Cause 1 — the LU pivoting default (`bd9c4c5c`, PR #1025): the node drift
+
+Bisected on `nvs14`'s node count (deterministic, well inside its budget, so
+unconfounded by wall clock), 104 first-parent revisions, 7 steps. The first bad
+commit is the `feral` 0.15.1 → 0.16.0 bump, whose one breaking item is
+`SparseLu::factor` defaulting to threshold Markowitz instead of AMD-on-AtA +
+Gilbert–Peierls. Confirmed forward on `main` by an A/B whose arms differ only in
+`LuParams::pivoting` and are distinguished by a marker string baked into the
+extension: the `GilbertPeierls` arm restores **`nvs02` 421 → 345** and **`tspn05`
+51 → 39**, i.e. *exactly* the committed values, and takes **`nvs14` 839 → 175**.
+The drift was already recorded and accepted by the bump itself
+(`crates/discopt-core/Cargo.toml`, regime (b)); the reference was simply never
+refreshed after it.
+
+#### Cause 2 — the convex-MINLP route becoming reachable (`533c05e1`, PR #1100): the wall
+
+`cvxnonsep_nsig30` does not fit Cause 1: it certifies the *same* 165-node tree
+with the *same* objective and dual bound at every point measured, yet its wall
+went 1.12 s (reference) → 42.5 s, far past what the machine explains. Bisected on
+wall at a 60 s budget, **with both arms pinned to `GilbertPeierls` so the
+pivoting rule is not the variable**, it names `533c05e1` — "#1060 opt-in HiGHS
+master so `lp_nlp_bb` finishes without Gurobi". Measured at `533c05e1^1` vs
+`533c05e1`: **4.5 s → 38.9 s**, tree unchanged.
+
+The mechanism is not the HiGHS master. That PR also corrected
+`_convex_minlp_auto_route`'s availability gate, which used to be `import
+highspy` — a package `get_milp_solver("auto")` has not touched since #356, so the
+gate tested something the master would never load. Its own comment says it "refused
+on machines whose master was perfectly available and routed on machines whose
+master was not". The correction is right; what it exposed is that **on a
+highspy-free machine a large part of the cert panel now takes the `oa` route, and
+a route that abstains costs 50–66% of the budget before the default path starts
+from scratch**. Measured on `main` (`algorithm_route` quotes the solver's own note):
+
+| instance | reference | now | what the route did |
+|---|---|---|---|
+| `cvxnonsep_nsig30` | 165 nodes, 1.12 s | 165 nodes, 49.6 s | OA did not certify in **39.63 s** of 60; default path then solved the same tree |
+| `clay0303hfsg` | 283 nodes, 15.29 s | no certificate at 60 s | OA `unknown` after **30.64 s**; fallback left 29.36 s |
+| `fac2` | 39 nodes, 2.77 s | 39 nodes, 38.9 s | OA `feasible` after **30.13 s**; fallback certified in ~8.8 s |
+| `cvxnonsep_psig30` | 89 nodes, 0.41 s | 89 nodes, 8.5 s | routed |
+| `alan` | 21 nodes, 0.21 s | 13 nodes, 1.3 s | routed |
+
+The 30 s cut-offs are `_CONVEX_ROUTE_BUDGET_FRACTION` (0.5) and the 39.6 s one is
+the #1066 progress guard, whose `checkpoint` is that same 50% by construction.
+Nothing here is malfunctioning — this is the #1059/#1066 policy doing exactly what
+it specifies. The finding is that the policy's *price*, on instances the default
+path certifies in 4–9 s, is half the budget, and that price only became visible on
+highspy-free machines when #1100 fixed the gate. Re-tuning it is a bound-changing
+default and owes the CLAUDE.md §5 graduation pair; it is **not** taken under #1134.
+
+#### Row-by-row, and what is *not* a regression
+
+Measured on a 4-vCPU box, interleaved A/B, 3 reps, per-instance sd reported
+(CLAUDE.md §9). The host-speed calibration — median wall ratio over the **21**
+instances that reproduced their node count exactly — is **3.45x** the reference
+machine.
+
+> **Correction (review of PR #1144, CLAUDE.md §11).** That 3.45x admitted rows that
+> reproduce their node count but are **auto-routed**, which Cause 2 above is the
+> proof cannot be treated as equal work: `cvxnonsep_nsig30` (165 → 165 nodes,
+> 1.12 → 49.6 s), `fac2` (39 → 39, 2.77 → 38.9) and `cvxnonsep_psig30` (89 → 89,
+> 0.41 → 8.5) each clear the equal-node filter carrying a 14-44x inflation that is
+> the router, not the box. Three contaminated samples in a 21-row median move it by
+> ~1.5 rank positions, so **3.45x is an upper bound on the machine ratio, not the
+> measurement**; the arithmetic below that multiplies a reference wall by 3.45
+> (`clay0303hfsg`, `nvs05`) is correspondingly an upper bound, and it does not
+> change either row's attribution — both still exceed the budget at any ratio in
+> the plausible range. `host_speed_ratio` now excludes routed rows on either side,
+> so the next run's figure is the one to quote.
+>
+> **Re-measured (2026-08-31, same box, idle).** `check_cert_neutrality.py` over all
+> 52 reference instances at their budgets, with the corrected filter:
+> **3.46x on 17 unrouted instances** that reproduced their node count exactly. So
+> the contaminated figure was high by 0.01x — the three inflated samples all landed
+> above the median, which is exactly the ~1.5 rank positions predicted, and a median
+> absorbed them. The correction above stands as a method fix, not as a number that
+> moved: every conclusion drawn from 3.45x holds unchanged at 3.46x, and this is now
+> a measurement rather than an upper bound. The same run confirms the annotation
+> path end to end — `clay0303hfsg`, `nvs05` and `tanksize` each report their
+> `status` violation carrying the ratio, and none is suppressed by it.
+
+| instance | issue's reading | measured cause |
+|---|---|---|
+| `nvs14` 129→839 | node regression | Cause 1 (GP arm → 175) |
+| `nvs02` 345→421 | node regression | Cause 1 (GP arm → 345, exact) |
+| `tspn05` 39→51 | node regression | Cause 1 (GP arm → 39, exact) |
+| `nvs09` 5→31 | node regression | **does not reproduce** — 5 nodes, both arms, 3/3 reps |
+| `cvxnonsep_nsig30` marginal | budget cliff | **Cause 2** — route burns 39.6 s of 60 |
+| `clay0303hfsg` → `time_limit` | lost certification | **Cause 2 + the box** (15.29 s x 3.45 ≈ 53 s before the route's 30.6 s) |
+| `nvs05` → `feasible` | lost certification | **the box**: not routed, identical 175-node tree, 20.53 s x 3.45 ≈ 71 s > 60 s |
+| `tanksize` → `time_limit` | lost certification | **the box**: not routed, ~2.3x per node |
+
+#### What the LU bump costs at panel scale (retraction, CLAUDE.md §11)
+
+The #1025 record asserts that "the certifying panel cannot" see an LU kernel bump
+and measures net-positive only on captured relaxation LPs. It cannot see the
+benefit — that stands — but it does see a cost. Measured mk-vs-gp on `main`, 3
+reps, restricted to **unrouted** instances whose node count is identical in both
+arms (so the comparison is per-node cost, not search):
+
+    nvs09 2.78/2.65   st_e29 2.07/2.03   ex1224 2.03/2.00   ex1225 1.88/1.84
+    gkocis 1.35/1.39  ex1226 1.53/1.35   oaer 1.32/1.32     st_e36 6.83/7.03
+    nvs22 15.35/12.11 nvs05 >=60.32/56.62 (mk censored at the limit)
+
+Median ratio ~1.03 — small. Two rows carry it: `nvs22` **+27%** and `nvs05`
+**>=+7%**, the latter enough to lose a certification 3/3 reps that the GP arm
+holds at 56.6 s (sd 1.35). It is two-sided: on the routed `m3` Markowitz is 2.4x
+*faster* (1.53 s vs 3.70 s). So the retraction is narrow — the panel sees a
+per-node cost of a few percent with a +27% tail, not the large regression the
+first reading of #1134 suggested. The bump stands. Size-routed pivoting
+(Gilbert–Peierls on small low-fill bases, Markowitz on large) is the general
+follow-up and these are its entry numbers.
+
+#### The issue's window was wrong, and could not have been right
+
+#1134 placed the regression in 2026-08-17…08-24 because the reference was assumed
+to be the v0.8.0 snapshot (`deba4ce`, 08-16). It is not: `git log --follow` puts
+its last regeneration at `23a64ab6`, 08-11, five days *before* v0.8.0 and three
+before Cause 1. `nvs14` measures 839 at `deba4ce` and at `1a0df198`, both inside
+the supposed window's "good" end. **A reference that does not carry its own
+provenance cannot be reasoned about, only bisected.**
+
+#### Do not regenerate the reference on an arbitrary box
+
+The admission filter drops anything not certifying inside `_MARGIN_FRAC` (0.6) of
+its budget, and three of its four rejection reasons are properties of the machine.
+Run on the 4-vCPU box above, `gen_cert_baseline.py` admitted **45** of the
+reference's 52 rows: it would have dropped `clay0303hfsg`, `cvxnonsep_nsig30`,
+`fac2`, `nvs05`, `nvs17`, `nvs22` and `tanksize` — four more than #1134
+anticipated — and the resulting 45-row reference would still have read as green.
+Regeneration belongs on the reference machine, and Cause 2 should be settled
+first: `cvxnonsep_nsig30`, `clay0303hfsg` and `fac2` will sit near their budgets
+*there* too, because the route flip is machine-independent.
+
+#### Resolution (2026-08-31): the panel re-run on a verified-fresh build
+
+Everything above was measured on a 4-vCPU box. Re-run on a second machine
+(14-core, `highspy` installed, `_rust.abi3.so` rebuilt from the tree under test
+and asserted at import per §8 — the previous local build was a two-week-old
+`_rust.cpython-*.so` **shadowing** the real extension, which is its own lesson:
+`test_rust_extension_not_shadowed` was failing and saying so). Host-speed
+calibration on this box: **1.53x** the reference machine over 17 unrouted rows
+that reproduced their node count exactly.
+
+**The three lost certifications do not reproduce. All 52 rows certify
+`optimal`.** `clay0303hfsg`, `nvs05` and `tanksize` — the whole of #1134's
+"lost certification" table — come back `optimal`, as does `cvxnonsep_nsig30` and
+even the perf-gated `nvs17` (60451 nodes, exact). The losses were the reporting
+box's wall: at 3.45x, `nvs05` (20.53 s) and `tanksize` (30.39 s) exceed a 60 s
+budget arithmetically, and at 1.53x they do not.
+
+**No soundness fault.** `incorrect_count = 0` against 58 oracles. Eleven rows
+drift beyond the 1e-8 byte-reproducibility tolerance; every one was bracketed
+against `cert-optima.json` and **none** disagrees with the true optimum — and
+**eight of the eleven land closer to it than the committed reference does**
+(`st_test1` -1.65e-08 → exactly 0, `gbd` → 2.2000000009 vs 2.2, `m3` →
+37.80000007 vs 37.8, `st_miqp5` → -333.88888889 exact). On those rows the
+*reference* is the less accurate artifact.
+
+**The node regressions are real, and are Cause 1.** `nvs14` 129 → 839, `nvs02`
+345 → 421, `clay0303hfsg` 283 → 315, `tspn05` 39 → 43 (51 on the other box —
+this row is not machine-invariant), `nvs09` 5 → **31**.
+
+> **Retraction (CLAUDE.md §11).** The row-by-row table above records `nvs09`
+> 5 → 31 as "**does not reproduce** — 5 nodes, both arms, 3/3 reps". It
+> reproduces here: **31 nodes**, on current `main` with a build asserted fresh.
+> Read the "does not reproduce" as scoped to that box and that build, not to the
+> tree.
+
+**Why the reference still cannot be refreshed — and it is one row, one
+mechanism.** `gen_cert_baseline.py --time-limit 60` admitted **51 of the
+reference's 52** and the shrink guard refused the write, naming exactly one
+loss: `clay0303hfsg`, `near-limit(wall 49 s/60 s)` at 315 nodes against the
+reference's 283 at 15.29 s. An +11% tree cannot cost 3.2x wall, and
+`algorithm_route` — the field added by #1144 for this exact question — answers
+it without a bisect:
+
+    clay0303hfsg  48.74s  oa: ... did not certify in 30.27s (unknown)  -> fallback got 29.73s
+    fac2          35.45s  oa: ... did not certify in 30.08s (feasible) -> fallback got 29.92s
+    cvxnonsep_nsig30 28.89s oa: ... did not certify in 28.20s (feasible) -> fallback got 31.80s
+
+Strip the 30.27 s the abstaining route burns and `clay0303hfsg` finishes in
+~18.5 s, inside the 36 s margin, and the panel refreshes with **zero** coverage
+loss. So the sole blocker to a refreshed reference is **#1143**, quantified.
+
+> **Retraction (CLAUDE.md §11).** Cause 2 above frames the route cost as what
+> "#1100 exposed **on a highspy-free machine**". That framing is wrong. This box
+> has `highspy` installed and the route still fires on **23 of 56** panel
+> instances and abstains on **5** of them. The post-#1100 gate asks
+> `get_milp_solver()`, which succeeds with or without `highspy`; #1100 made the
+> route reachable *generally*, not on one class of machine. Likewise "admitted
+> 45 of the reference's 52 rows … four more than #1134 anticipated" is that
+> box's speed, not a property of the tree: here the same script admits **51**.
+
+**Both framings were half right; the dated history is neither.** The retraction
+just above reads "#1100 made the route reachable *generally*, not on one class of
+machine", which over-corrects in the other direction. The pre-#1100 gate was
+`import highspy`, so it *succeeded* on a machine with `highspy` — that box was
+already routing before #1100, and observing that it routes after is consistent
+with the highspy-free framing rather than a counterexample to it. What #1100
+actually changed is routing on machines *without* `highspy`, which is why the
+bisect on such a box lands there. `git log -S` dates the whole sequence:
+
+| commit | date | what |
+|---|---|---|
+| `23a64ab6` | 08-11 | reference regenerated — **the route does not exist yet** |
+| `6442d7e3` | 08-17 | #1059 introduces the route, default-off |
+| `d9fec841` | 08-19 | #1059 graduates it **default-ON** — fires on `highspy` machines |
+| `533c05e1` | 08-20 | #1100 corrects the gate — fires everywhere |
+
+This also settles the loose end in Cause 2's evidence: the reference's
+`cvxnonsep_nsig30` row (165 nodes, 1.12 s) is unrouted not because that machine
+lacked `highspy` but because on 08-11 **there was no route to take**. And it
+re-scopes #1143: the abstain cost has been live since `d9fec841`, one day before
+#1100, so it is a property of the #1059 graduation that #1100 extended to the
+remaining machines — not a regression #1100 introduced. A bisect for it on a
+`highspy` box would name `d9fec841`; on a `highspy`-free box, `533c05e1`. Same
+mechanism, two different first-bad commits, and neither is wrong.
+
+**Disposition.** #1134 asked whether the panel regressed since v0.8.0. It did
+not: no soundness fault, no reproducible lost certification, and node drift that
+predates v0.8.0 and was accepted when it shipped (Cause 1). #1134 is closed on
+this evidence. Refreshing the reference is **an acceptance criterion on #1143**,
+not a separate task — the guard added here will refuse until #1143 is fixed, and
+that refusal is the correct behavior, not a blocker to route around with
+`--allow-shrink`.
+
+#### Tooling fixed under #1134, so this is a lookup next time
+
+`gen_cert_baseline.py` writes `docs/dev/data/cert-baseline-meta.json` (generating
+commit, timestamp, budget, host, and the full drop record with each dropped row's
+previous verdict) and **refuses to overwrite the reference when coverage would
+shrink** unless `--allow-shrink` is passed — verified end-to-end on the 56-instance
+panel, where it refused and named all 7 losses. `check_cert_neutrality.py` prints
+that provenance and the host-speed calibration, and annotates `status` violations
+with it. The calibration is reporting-only: no violation is ever suppressed (§0.3).
+
+Two corrections from the review of that PR, both about the tooling telling the
+truth about itself:
+
+* the meta is written on **every** run, a refused one included — so it records
+  `baseline_written`, and a refused run's meta is reported as
+  `provenance: UNKNOWN … records a REFUSED regeneration` rather than having its
+  commit and host attributed to the reference still on disk. Claiming a refused
+  run's provenance would be a *confidently wrong* answer to the one question this
+  section exists to make answerable, which is worse than the missing answer it
+  replaces; and
+* the calibration excludes **routed** rows on either side (see the correction
+  above). A row routed in both arms is excluded too, and for the opposite reason:
+  the route's price is a fraction of the wall-clock *budget*, i.e. the same seconds
+  on a fast box and a slow one, so it biases the ratio *down* toward 1.
+
 ### 0.7 Definition of done (per phase)
 
 A phase is done when: its §4–§9 exit gate is green on the committed baseline's

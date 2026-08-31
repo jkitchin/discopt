@@ -97,6 +97,20 @@ class SolveResult:
     # Iteration count (NLP solver iterations or B&B iterations)
     iterations: int = 0
 
+    # Why an algorithm other than the default B&B ran, when the solver's own
+    # router chose it (discopt SolveResult.algorithm_route). None when no
+    # automatic routing happened -- which is every row written before #1134.
+    #
+    # #1134: without this the panel could see that `cvxnonsep_nsig30` went 1.12 s
+    # -> 42.5 s on an IDENTICAL 165-node tree, and could not see that 39.6 s of it
+    # was an auto-routed `oa` master that abstained at its budget checkpoint before
+    # the default path solved the instance from scratch. A wall regression whose
+    # cause is a routing decision is invisible in a table of nodes and seconds, and
+    # it took a second bisect to recover something the solver already knew and was
+    # already reporting. Additive and optional: rows written before this default to
+    # None, so every existing report and the committed cert baseline still load.
+    algorithm_route: Optional[str] = None
+
     @property
     def is_solved(self) -> bool:
         return self.status == SolveStatus.OPTIMAL
