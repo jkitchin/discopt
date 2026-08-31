@@ -167,6 +167,20 @@ Measured on a 4-vCPU box, interleaved A/B, 3 reps, per-instance sd reported
 instances that reproduced their node count exactly — is **3.45x** the reference
 machine.
 
+> **Correction (review of PR #1144, CLAUDE.md §11).** That 3.45x admitted rows that
+> reproduce their node count but are **auto-routed**, which Cause 2 above is the
+> proof cannot be treated as equal work: `cvxnonsep_nsig30` (165 → 165 nodes,
+> 1.12 → 49.6 s), `fac2` (39 → 39, 2.77 → 38.9) and `cvxnonsep_psig30` (89 → 89,
+> 0.41 → 8.5) each clear the equal-node filter carrying a 14-44x inflation that is
+> the router, not the box. Three contaminated samples in a 21-row median move it by
+> ~1.5 rank positions, so **3.45x is an upper bound on the machine ratio, not the
+> measurement**; the arithmetic below that multiplies a reference wall by 3.45
+> (`clay0303hfsg`, `nvs05`) is correspondingly an upper bound, and it does not
+> change either row's attribution — both still exceed the budget at any ratio in
+> the plausible range. `host_speed_ratio` now excludes routed rows on either side,
+> so the next run's figure is the one to quote. Not re-measured here: it needs the
+> panel re-run, and no conclusion in this section turns on it.
+
 | instance | issue's reading | measured cause |
 |---|---|---|
 | `nvs14` 129→839 | node regression | Cause 1 (GP arm → 175) |
@@ -229,6 +243,21 @@ shrink** unless `--allow-shrink` is passed — verified end-to-end on the 56-ins
 panel, where it refused and named all 7 losses. `check_cert_neutrality.py` prints
 that provenance and the host-speed calibration, and annotates `status` violations
 with it. The calibration is reporting-only: no violation is ever suppressed (§0.3).
+
+Two corrections from the review of that PR, both about the tooling telling the
+truth about itself:
+
+* the meta is written on **every** run, a refused one included — so it records
+  `baseline_written`, and a refused run's meta is reported as
+  `provenance: UNKNOWN … records a REFUSED regeneration` rather than having its
+  commit and host attributed to the reference still on disk. Claiming a refused
+  run's provenance would be a *confidently wrong* answer to the one question this
+  section exists to make answerable, which is worse than the missing answer it
+  replaces; and
+* the calibration excludes **routed** rows on either side (see the correction
+  above). A row routed in both arms is excluded too, and for the opposite reason:
+  the route's price is a fraction of the wall-clock *budget*, i.e. the same seconds
+  on a fast box and a slow one, so it biases the ratio *down* toward 1.
 
 ### 0.7 Definition of done (per phase)
 

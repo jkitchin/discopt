@@ -128,6 +128,15 @@ def build_meta(
     the *previous* reference covered are marked ``in_previous_baseline`` and carry
     that row's status/nodes/objective, so the record says what was lost, not merely
     that something was.
+
+    ``baseline_written`` says whether this run's rows actually became
+    ``cert-baseline.jsonl``. The meta is written unconditionally — a refused run is
+    exactly the run whose evidence matters — so without this field a refused run
+    leaves a provenance record describing a reference that was never written, and a
+    reader (``check_cert_neutrality._print_reference_provenance``) reports this
+    run's commit and host as the committed reference's. That is a *confidently
+    wrong* answer to the question #1134 was opened to make answerable, which is
+    worse than the missing one it replaces.
     """
     lost = set(coverage_loss(previous, certifying))
     return {
@@ -139,6 +148,9 @@ def build_meta(
         "previous_instances_certifying": len(previous),
         "coverage_lost": sorted(lost),
         "allow_shrink": allow_shrink,
+        # The write condition, recorded rather than left to be re-derived: this
+        # must stay in lockstep with the guard in main() below.
+        "baseline_written": not lost or allow_shrink,
         "host": {
             "platform": platform.platform(),
             "processor": platform.processor(),
@@ -284,7 +296,10 @@ def main() -> int:
     )
     _CERT_BASELINE_META.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
-    if not lost or args.allow_shrink:
+    # The write is driven by the recorded flag, not by a second evaluation of the
+    # same condition: the meta's `baseline_written` is what every later reader
+    # trusts, so it cannot be allowed to drift from what actually happened.
+    if meta["baseline_written"]:
         with open(_CERT_BASELINE, "w") as fh:
             for r in cert_rows:
                 fh.write(json.dumps(r.to_dict(), sort_keys=True) + "\n")
