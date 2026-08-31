@@ -280,15 +280,38 @@ class TestOAEdgeCases:
     """Edge cases and degenerate problems."""
 
     def test_no_discrete_short_circuit(self):
-        """No integer variables: MIP-NLP should solve one continuous NLP."""
+        """No integer variables: MIP-NLP should solve one continuous NLP.
+
+        The point found is right, but it is NOT certified: ``x**2 >= 1`` is a convex
+        body under a ``>=``, so the feasible set it declares is nonconvex and a
+        single local NLP solve proves nothing about the global optimum. (It happens
+        to be convex once intersected with ``x >= 0``, which the syntactic
+        classifier cannot see — but "happens to be" is not a certificate.) #1141:
+        this used to come back ``optimal`` with ``bound = objective, gap = 0`` for
+        every integer-free model regardless of convexity, and on MINLPLib ``trig``
+        that certified a local minimum 34 % above the true one.
+        """
         m = dm.Model("no_discrete_short_circuit")
         x = m.continuous("x", lb=0, ub=10)
         m.subject_to(x**2 >= 1)
         m.minimize(x)
 
         result = _solve_oa(m)
-        _assert_complete_optimal_result(result, 1.0, ["x"], abs_tol=0.01)
+        assert result.status == "feasible"
+        assert result.bound is None
+        assert result.objective == pytest.approx(1.0, abs=0.01)
         assert result.x["x"] == pytest.approx(1.0, abs=0.01)
+
+    def test_no_discrete_short_circuit_certifies_when_convex(self):
+        """The same short circuit, on a model whose convexity IS provable."""
+        m = dm.Model("no_discrete_short_circuit_convex")
+        x = m.continuous("x", lb=0, ub=10)
+        m.subject_to(x**2 <= 9)
+        m.minimize((x - 1) ** 2)
+
+        result = _solve_oa(m)
+        _assert_complete_optimal_result(result, 0.0, ["x"], abs_tol=1e-6)
+        assert result.x["x"] == pytest.approx(1.0, abs=1e-3)
 
     def test_pure_milp_all_linear(self):
         """All-linear MINLP: OA should converge in one iteration."""

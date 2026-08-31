@@ -69,12 +69,21 @@ def test_pounce_backend_is_refused_not_silently_substituted():
 
 
 @pytest.mark.smoke
-def test_shot_profile_still_requires_gurobi():
-    # SHOT separates hyperplanes at fractional node relaxations (MIPNODE); the
-    # native hook only fires at integer-feasible points.
-    with pytest.raises(RuntimeError, match="MIPNODE"):
-        _resolve_lp_nlp_bb_backend("simplex", shot_profile=True)
+def test_shot_profile_runs_on_any_backend_with_a_fractional_node_hook():
+    # SHOT separates hyperplanes at *fractional* node relaxations. Until #1141 only
+    # Gurobi's MIPNODE could do that and this resolution refused everything else;
+    # the native driver now has the hook too, so 'simplex'/'auto' resolve as well.
+    assert _resolve_lp_nlp_bb_backend("simplex", shot_profile=True) == "simplex"
+    assert _resolve_lp_nlp_bb_backend("auto", shot_profile=True) == "simplex"
     assert _resolve_lp_nlp_bb_backend("gurobi", shot_profile=True) == "gurobi"
+
+
+@pytest.mark.smoke
+def test_shot_profile_still_refuses_the_highs_master():
+    # The HiGHS master separates only at integer-feasible incumbents, so running
+    # SHOT there would report a SHOT run that never ran SHOT's cut generation.
+    with pytest.raises(RuntimeError, match="fractional-node cut hook"):
+        _resolve_lp_nlp_bb_backend("highs", shot_profile=True)
 
 
 # --------------------------------------------------------------------------
@@ -203,10 +212,67 @@ def test_unsupported_callbacks_are_refused_loudly():
 
     with pytest.raises(ValueError, match="lazy_callback"):
         solve_milp_with_lazy_cuts(**kw, lazy_callback=None)
-    # Accepting these while ignoring them would report cuts that were never added.
-    with pytest.raises(NotImplementedError, match="node_callback"):
-        solve_milp_with_lazy_cuts(**kw, lazy_callback=lambda _x: [], node_callback=lambda _x: [])
-    with pytest.raises(NotImplementedError, match="terminate_callback"):
+    # #1141 gave the driver a fractional-node hook, so `node_callback` is honoured
+    # now -- but only with a budget it can actually spend. A zero budget makes the
+    # separator unfireable, and `mipnode_calls == 0` would then be indistinguishable
+    # from "it ran and found nothing" (CLAUDE.md §6), so it is refused.
+    with pytest.raises(ValueError, match="node_hook_rounds"):
         solve_milp_with_lazy_cuts(
-            **kw, lazy_callback=lambda _x: [], terminate_callback=lambda _s: False
+            **kw,
+            lazy_callback=lambda _x: [],
+            node_callback=lambda _x: [],
+            node_hook_rounds=0,
         )
+    with pytest.raises(ValueError, match="node_hook_cut_cap"):
+        solve_milp_with_lazy_cuts(
+            **kw,
+            lazy_callback=lambda _x: [],
+            node_callback=lambda _x: [],
+            node_hook_cut_cap=0,
+        )
+
+
+@pytest.mark.smoke
+def test_a_terminate_callback_is_honoured_and_counted():
+    """#1141: this used to be refused; the driver's checkpoint now serves it.
+
+    The old refusal said "the driver enforces time_limit itself and has no
+    callback-termination hook". The first half is true and irrelevant; the second
+    was stale -- the per-iteration checkpoint behind ``debug_hook`` has carried
+    incumbent/bound/gap/elapsed with a Stop control since the interactive
+    debugger landed.
+
+    Both halves are asserted, because either alone is weak: a callback that is
+    counted but not obeyed, and one that is obeyed but never counted, would each
+    pass half of this.
+    """
+    c, A_ub, b_ub, bounds, integrality = _knapsack()
+    kw = dict(
+        c=c, A_ub=A_ub, b_ub=b_ub, A_eq=None, b_eq=None, bounds=bounds, integrality=integrality
+    )
+
+    seen = {"n": 0}
+
+    def _never_stop(snapshot):
+        seen["n"] += 1
+        assert "dual_bound" in snapshot
+        # A true single tree: nothing restarts, so 0 is the fact, not a stand-in.
+        assert snapshot["restarts"] == 0
+        return False
+
+    res = solve_milp_with_lazy_cuts(
+        **kw, lazy_callback=lambda _x: [], terminate_callback=_never_stop
+    )
+    assert seen["n"] > 0, "the callback never fired; the rest of this proves nothing"
+    assert res.callback_stats["terminate_calls"] == seen["n"]
+    assert res.callback_stats["terminated"] is False
+    assert res.status == SolveStatus.OPTIMAL
+
+    stopped = solve_milp_with_lazy_cuts(
+        **kw, lazy_callback=lambda _x: [], terminate_callback=lambda _s: True
+    )
+    assert stopped.callback_stats["terminated"] is True
+    assert stopped.status != SolveStatus.OPTIMAL, (
+        "a search cut short by a callback has not proved its bound and must not "
+        "report a certificate"
+    )

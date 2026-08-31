@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 import warnings
 from collections import Counter
@@ -858,6 +859,21 @@ class _NLPAttempt:
     objective: Optional[float]
     multipliers: Optional[np.ndarray]
     status: Optional[object] = None
+    #: The subsolver's own terminal code (``NLPResult.raw_status``), kept because
+    #: ``status`` collapses several distinct Ipopt outcomes onto ``ERROR`` and the
+    #: collapse is not reversible. Diagnosing #1141 needed exactly this
+    #: distinction: 401 fixed-NLP solves behind one OA separator returned 281
+    #: successes, 60 ``Infeasible_Problem_Detected`` and 57
+    #: ``Error_In_Step_Computation``, and the callback trace recorded all 118
+    #: failures identically as "failed". A genuinely infeasible integer assignment
+    #: and a subsolver that fell over are different problems with different fixes.
+    raw_status: Optional[int] = None
+    #: The point the subsolver exited at, even when the attempt was NOT accepted.
+    #: Never an incumbent candidate and never used as one -- ``x`` is the accepted
+    #: point and stays ``None`` on a failure. This is for *verifying* a failure
+    #: verdict (e.g. re-measuring the constraint violation at the exit point of an
+    #: "infeasible" solve) rather than for using it.
+    raw_x: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -1504,6 +1520,7 @@ def _solve_nlp_attempt(
                 objective=float(evaluator.evaluate_objective(result.x)),
                 multipliers=result.multipliers,
                 status=result.status,
+                raw_status=getattr(result, "raw_status", None),
             )
 
         # Accept iteration- and time-limited results if the solution is primal
@@ -1525,7 +1542,25 @@ def _solve_nlp_attempt(
                     objective=float(evaluator.evaluate_objective(result.x)),
                     multipliers=result.multipliers,
                     status=result.status,
+                    # Carried on the ACCEPTED path too (#1141): without it a
+                    # restoration that converged and one that merely stopped at the
+                    # iteration limit both record ``raw=None``, and the outcome
+                    # tally cannot tell them apart — the exact ambiguity this
+                    # field exists to remove.
+                    raw_status=getattr(result, "raw_status", None),
                 )
+        # Not accepted as a usable point — but WHY is not thrown away (#1141).
+        # ``status``/``raw_status`` ride along on the empty attempt so the caller
+        # (and the callback trace) can tell "this assignment is infeasible" from
+        # "the subsolver fell over", which the single empty attempt could not.
+        return _NLPAttempt(
+            x=None,
+            objective=None,
+            multipliers=None,
+            status=result.status,
+            raw_status=getattr(result, "raw_status", None),
+            raw_x=None if result.x is None else np.asarray(result.x, dtype=np.float64),
+        )
     except Exception as exc:  # noqa: BLE001 - an empty attempt is handled by the caller
         # Capability-disabling: no NLP point means no OA linearization from this
         # node, which reads as "OA cuts don't help" rather than as a failure.
@@ -1553,6 +1588,35 @@ def _maybe_return_nlp_attempt(attempt: _NLPAttempt, return_attempt: bool):
     if return_attempt:
         return attempt
     return attempt.x, attempt.objective
+
+
+def _fixed_nlp_status_label(attempt: _NLPAttempt) -> str:
+    """Name a fixed-NLP subproblem outcome for the callback trace (#1141).
+
+    ``"feasible"`` when the attempt produced a usable point. Otherwise the
+    subsolver's own verdict, so the record distinguishes the outcomes that used to
+    collapse into one ``"failed"``:
+
+    * ``"infeasible_local"`` — Ipopt/POUNCE code 2, restoration converged to a
+      local minimizer of the constraint violation. On a **convex** subproblem that
+      is a genuine infeasibility proof; on a nonconvex one it proves nothing, which
+      is why it is labelled ``local`` here and is NOT mapped to
+      :attr:`SolveStatus.INFEASIBLE` upstream (see
+      :data:`discopt.solvers.nlp_ipopt.IPOPT_LOCALLY_INFEASIBLE`). Nothing in this
+      driver prunes on the label; it is a diagnostic.
+    * ``"failed:<code>"`` — any other terminal code, named rather than erased.
+    * ``"failed"`` — the subsolver raised, so there is no code to report.
+    """
+    if attempt.x is not None:
+        return "feasible"
+    raw = attempt.raw_status
+    if raw is None:
+        return "failed"
+    from discopt.solvers.nlp_ipopt import IPOPT_LOCALLY_INFEASIBLE
+
+    if int(raw) == IPOPT_LOCALLY_INFEASIBLE:
+        return "infeasible_local"
+    return f"failed:{int(raw)}"
 
 
 def _coerce_nlp_attempt(result) -> _NLPAttempt:
@@ -1646,6 +1710,68 @@ def _solve_fixed_nlp_subproblem_attempt(
             if not any(name in str(exc) for name in remaining):
                 raise
     return _coerce_nlp_attempt(result)
+
+
+def _infeasible_nogood_enabled() -> bool:
+    """``DISCOPT_OA_INFEASIBLE_NOGOOD``: exclude an integer assignment the fixed NLP
+    *proved* infeasible, even when ``add_no_good_cuts`` is off.
+
+    Default-OFF. It adds rows to the master, so it changes the master's dual bound
+    (CLAUDE.md §5 regime 2) and ships behind a flag until a corpus panel clears
+    both bars. ``=1`` turns it on.
+    """
+    return os.environ.get("DISCOPT_OA_INFEASIBLE_NOGOOD", "0") not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+
+def _assignment_proven_infeasible(
+    attempt: _NLPAttempt,
+    evaluator,
+    constraint_convex_mask: Optional[list[bool]],
+    tol: float = 1e-6,
+) -> bool:
+    """Is the fixed-integer subproblem PROVEN infeasible, not merely unsolved?
+
+    A no-good cut deletes an integer assignment from the master permanently, so it
+    is sound only against a proof. "The NLP did not return a point" is not one:
+    #1141 measured 401 fixed-NLP solves behind one separator returning 281
+    successes, 60 ``Infeasible_Problem_Detected`` and **57**
+    ``Error_In_Step_Computation`` — and excluding an assignment on the strength of
+    a step-computation failure would delete a subtree that may hold the optimum.
+
+    Two conditions, both required:
+
+    * the subsolver's own verdict is
+      :data:`~discopt.solvers.nlp_ipopt.IPOPT_LOCALLY_INFEASIBLE` (Ipopt code 2:
+      restoration converged to a local minimizer of the constraint violation, with
+      the violation still positive), and
+    * **every** constraint of the model defines a convex feasible set
+      (``constraint_convex_mask`` all true). Fixing the integers narrows the box,
+      which preserves convexity, so the subproblem's feasible set is convex — and
+      on a convex set the violation measure is convex, so a *local* minimizer of it
+      is a *global* one and a positive value is a genuine emptiness proof. Without
+      that certificate code 2 says only that the algorithm got stuck, which proves
+      nothing (see ``IPOPT_LOCALLY_INFEASIBLE``).
+
+    Plus one independent check that costs one evaluation: the point the subsolver
+    exited at must still violate a constraint by more than ``tol``. A code 2
+    reported from an essentially feasible point is a solver artefact, not a proof,
+    and this is the cheapest way to refuse it without trusting the code alone.
+    """
+    from discopt.solvers.nlp_ipopt import IPOPT_LOCALLY_INFEASIBLE
+
+    if attempt.raw_status is None or int(attempt.raw_status) != IPOPT_LOCALLY_INFEASIBLE:
+        return False
+    if not constraint_convex_mask or not all(constraint_convex_mask):
+        return False
+    if attempt.raw_x is None:
+        return False
+    violations, _signs = _constraint_violation_data(evaluator, attempt.raw_x)
+    return bool(violations.size and float(np.max(violations)) > tol)
 
 
 def _fixed_subproblem_rigorously_infeasible(
@@ -1867,6 +1993,202 @@ class _FeasibilityEvaluator:
         return np.empty((0, self.n_variables), dtype=np.float64)
 
 
+def _elastic_restoration_enabled() -> bool:
+    """``DISCOPT_OA_ELASTIC_RESTORATION``: pose the OA feasibility subproblem as a
+    constrained elastic NLP instead of an unconstrained violation merit.
+
+    Default-**ON** since the #1141 graduation panel; ``=0`` is the opt-out. It
+    changes which point the feasibility cut is built at, hence the master's rows and
+    its dual bound — CLAUDE.md §5 regime 2 — so it shipped default-OFF until that
+    panel. Over the 119 vendored MINLPLib instances it is **outcome-neutral**:
+    0 soundness violations, certificates 23/23, 0 bounds moved, wall −1.5 %, and on
+    all 7 rows where it actually runs the status, objective and wall are unchanged
+    while ``Error_In_Step_Computation`` failures turn into convergences
+    (``m3`` 313 -> 0, ``clay0303hfsg`` 46 -> 0). It pays on the class the issue is
+    about: 2.3x on ``meanvarx`` (the one real corpus row of that class, same
+    certificate) and 5–8x on reconstructions of ``portfol_classical050_1``.
+
+    Applies **only on a model whose constraints are all certified convex** (the
+    caller passes the mask). That gate is not a tuning knob, it is the condition
+    under which the elastic subproblem means anything: on a convex feasible set it
+    is a convex NLP, so its solution is the *global* minimum-violation point and
+    the restoration actually certifies something. On a nonconvex model it is one
+    more local solve — and, measured, a more expensive one. Every corpus row where
+    the elastic form was slower was nonconvex and produced no incumbent in either
+    arm (`bchoco06/07/08`, `beuster`, `heatexch_gen2`: +3.6 to +14.1 s each,
+    `constraints_convex=False`, `incumbent=False`); every convex row was neutral or
+    faster. See ``docs/dev/performance-plan.md`` §25.
+    """
+    return os.environ.get("DISCOPT_OA_ELASTIC_RESTORATION", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+
+class _ElasticFeasibilityEvaluator:
+    """The OA feasibility subproblem as a *constrained* elastic NLP (#1141).
+
+    :class:`_FeasibilityEvaluator` poses restoration as an **unconstrained**
+    minimization of a violation merit, and reports a **zero** Hessian for it. That
+    is not a modelling nicety — it is the reason restoration never converges. With
+    no constraints, an interior-point method's KKT matrix is ``σ_f ∇²f + Σ``, and
+    ``σ_f ∇²f`` is identically zero here; away from the variable bounds ``Σ`` is
+    tiny too, so the matrix is numerically singular, inertia correction runs out,
+    and the solve exits ``Error_In_Step_Computation``. #1141 measured exactly that
+    on ``portfol_classical050_1``: **0 of 60** restorations converged, 57 of them
+    with code −3, and switching the merit norm (L1 / L2 / L∞) changed nothing —
+    because the norm is not what is zero, the Hessian is.
+
+    This is the textbook elastic formulation instead (Fletcher & Leyffer 1994;
+    what BONMIN and SHOT solve), over ``z = [x | u]``::
+
+        min  ‖u‖   s.t.   cl ≤ g(x) ± u ≤ cu,   u ≥ 0,   integers fixed
+
+    with one slack per constraint row for ``L1``/``L2`` and a single shared slack
+    for ``L_infinity``. Three properties matter:
+
+    * it is **smooth** — the ``max``/``abs`` of the merit moves into the
+      constraints, where an IPM handles it natively;
+    * it has **real constraints and a real Hessian** — the ``x`` block is the
+      original problem's Lagrangian Hessian and the ``u`` block is ``2I`` (L2) or
+      structurally carried by the constraint Jacobian (L1/L∞), so the KKT system
+      is the one the solver was designed for rather than a bordered zero;
+    * its start is **feasible by construction** — ``u`` is initialised to the
+      violation at the master point, so the IPM begins inside its own feasible
+      set and any progress it makes strictly reduces the violation.
+
+    The point handed back is the ``x`` block. Soundness is unchanged either way:
+    the caller only uses the point to *linearize at*, and an OA cut taken at any
+    point is a supporting hyperplane of a convex constraint.
+    """
+
+    def __init__(self, evaluator, lb, ub, feasibility_norm: str):
+        from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+        self._eval = evaluator
+        self._lb = np.asarray(lb, dtype=np.float64)
+        self._ub = np.asarray(ub, dtype=np.float64)
+        self._norm = feasibility_norm
+        self._n = int(evaluator.n_variables)
+        cl, cu = _infer_constraint_bounds(evaluator)
+        self._cl = np.asarray(cl, dtype=np.float64)
+        self._cu = np.asarray(cu, dtype=np.float64)
+        # One elastic row per FINITE constraint bound. An equality contributes
+        # both, which is what makes ``|g| <= u`` come out of a formulation that
+        # only ever writes ``<=``.
+        rows: list[tuple[int, int]] = []  # (original row, +1 upper / -1 lower)
+        for i in range(self._cl.shape[0]):
+            if self._cu[i] < 1e19:
+                rows.append((i, +1))
+            if self._cl[i] > -1e19:
+                rows.append((i, -1))
+        self._rows = rows
+        # Slack layout: one per original row, or a single shared one for L∞.
+        self._shared = feasibility_norm not in ("L1", "L2")
+        self._k = 1 if self._shared else self._cl.shape[0]
+
+    # -- layout ----------------------------------------------------------------
+    @property
+    def n_variables(self) -> int:
+        return self._n + self._k
+
+    @property
+    def n_constraints(self) -> int:
+        return len(self._rows)
+
+    @property
+    def variable_bounds(self):
+        return (
+            np.concatenate([self._lb, np.zeros(self._k)]),
+            np.concatenate([self._ub, np.full(self._k, 1e20)]),
+        )
+
+    def constraint_bounds(self) -> list[tuple[float, float]]:
+        """Row bounds for the elastic rows, in this evaluator's own row order."""
+        out: list[tuple[float, float]] = []
+        for i, side in self._rows:
+            if side > 0:
+                out.append((-1e20, float(self._cu[i])))
+            else:
+                out.append((float(self._cl[i]), 1e20))
+        return out
+
+    def _slack_of(self, i: int) -> int:
+        return 0 if self._shared else i
+
+    def start_point(self, x0: np.ndarray) -> np.ndarray:
+        """``[x0 | violation(x0)]`` — elastic-feasible by construction."""
+        violations, _signs = _constraint_violation_data(self._eval, x0)
+        if self._shared:
+            u = np.array([float(np.max(violations)) if violations.size else 0.0])
+        else:
+            u = np.asarray(violations, dtype=np.float64).copy()
+        return np.concatenate([np.asarray(x0, dtype=np.float64), np.maximum(u, 0.0)])
+
+    # -- objective -------------------------------------------------------------
+    def evaluate_objective(self, z):
+        u = np.asarray(z, dtype=np.float64)[self._n :]
+        if self._norm == "L2":
+            return float(np.dot(u, u))
+        return float(np.sum(u))
+
+    def evaluate_gradient(self, z):
+        g = np.zeros(self.n_variables, dtype=np.float64)
+        if self._norm == "L2":
+            g[self._n :] = 2.0 * np.asarray(z, dtype=np.float64)[self._n :]
+        else:
+            g[self._n :] = 1.0
+        return g
+
+    def evaluate_hessian(self, z):
+        h = np.zeros((self.n_variables, self.n_variables), dtype=np.float64)
+        if self._norm == "L2":
+            idx = np.arange(self._n, self.n_variables)
+            h[idx, idx] = 2.0
+        return h
+
+    def evaluate_lagrangian_hessian(self, z, obj_factor, lagrange):
+        h = np.zeros((self.n_variables, self.n_variables), dtype=np.float64)
+        if self._norm == "L2":
+            idx = np.arange(self._n, self.n_variables)
+            h[idx, idx] = 2.0 * float(obj_factor)
+        x = np.asarray(z, dtype=np.float64)[: self._n]
+        lam = np.asarray(lagrange, dtype=np.float64).ravel()
+        # Both sides write ``+g_i``, so a row's multiplier accumulates with the
+        # same sign whichever bound it came from.
+        lam_orig = np.zeros(self._cl.shape[0], dtype=np.float64)
+        for r, (i, _side) in enumerate(self._rows):
+            if r < lam.shape[0]:
+                lam_orig[i] += lam[r]
+        # ``obj_factor = 0``: the elastic objective touches only the ``u`` block,
+        # which is filled above; the ``x`` block is purely the constraints'.
+        hx = np.asarray(self._eval.evaluate_lagrangian_hessian(x, 0.0, lam_orig), dtype=np.float64)
+        h[: self._n, : self._n] = hx
+        return h
+
+    # -- constraints -----------------------------------------------------------
+    def evaluate_constraints(self, z):
+        z = np.asarray(z, dtype=np.float64)
+        x, u = z[: self._n], z[self._n :]
+        g = np.asarray(self._eval.evaluate_constraints(x), dtype=np.float64)
+        out = np.empty(len(self._rows), dtype=np.float64)
+        for r, (i, side) in enumerate(self._rows):
+            out[r] = g[i] - side * u[self._slack_of(i)]
+        return out
+
+    def evaluate_jacobian(self, z):
+        z = np.asarray(z, dtype=np.float64)
+        x = z[: self._n]
+        jg = np.asarray(self._eval.evaluate_jacobian(x), dtype=np.float64)
+        j = np.zeros((len(self._rows), self.n_variables), dtype=np.float64)
+        for r, (i, side) in enumerate(self._rows):
+            j[r, : self._n] = jg[i]
+            j[r, self._n + self._slack_of(i)] = -float(side)
+        return j
+
+
 def _solve_feasibility_subproblem(
     evaluator,
     lb,
@@ -1876,6 +2198,7 @@ def _solve_feasibility_subproblem(
     nlp_solver,
     feasibility_norm,
     max_wall_time: Optional[float] = None,
+    constraint_convex_mask: Optional[list[bool]] = None,
 ):
     """Solve feasibility problem with fixed integers.
 
@@ -1896,10 +2219,28 @@ def _solve_feasibility_subproblem(
     best_merit = _constraint_violation_merit(evaluator, x0, feasibility_norm)
 
     try:
-        proxy = _FeasibilityEvaluator(evaluator, sub_lb, sub_ub, feasibility_norm)
-        x_feas, _obj_feas = _solve_nlp(
-            proxy, sub_lb, sub_ub, nlp_solver, x0=x0, max_wall_time=max_wall_time
-        )
+        if (
+            _elastic_restoration_enabled()
+            and evaluator.n_constraints > 0
+            and bool(constraint_convex_mask)
+            and all(constraint_convex_mask or ())
+        ):
+            x_feas = _solve_elastic_restoration(
+                evaluator, sub_lb, sub_ub, x0, feasibility_norm, max_wall_time
+            )
+        else:
+            proxy = _FeasibilityEvaluator(evaluator, sub_lb, sub_ub, feasibility_norm)
+            # ``_solve_nlp_attempt`` rather than ``_solve_nlp``: the two differ only
+            # in whether the subsolver's verdict survives, and #1141's whole
+            # diagnosis turned on that verdict. Restoration falls back to the
+            # clipped master point on failure, so a run where it NEVER converges
+            # looks, from the outside, exactly like one where it always did.
+            attempt = _solve_nlp_attempt(
+                proxy, sub_lb, sub_ub, nlp_solver, x0=x0, max_wall_time=max_wall_time
+            )
+            raw = attempt.raw_status
+            _RESTORATION_OUTCOMES[("merit", "ok" if raw in (0, 1) else f"raw={raw}")] += 1
+            x_feas = attempt.x
         if x_feas is not None:
             candidate = np.clip(np.asarray(x_feas, dtype=np.float64), sub_lb, sub_ub)
             candidate_merit = _constraint_violation_merit(evaluator, candidate, feasibility_norm)
@@ -1913,6 +2254,58 @@ def _solve_feasibility_subproblem(
         )
 
     return best_x
+
+
+#: Restoration outcomes of the LAST solve, by subsolver status label. Read by the
+#: callback trace and by the panels; reset per ``solve_lp_nlp_bb`` call.
+#:
+#: #1141's diagnosis needed this and had to add it by hand: the shipped code
+#: swallowed the restoration's outcome entirely (it falls back to the clipped
+#: master point either way), so "restoration converged 0 of 60 times" was
+#: invisible from the outside and the loop reported cuts as if they had been
+#: built at a converged point.
+_RESTORATION_OUTCOMES: Counter = Counter()
+
+
+def _solve_elastic_restoration(
+    evaluator,
+    sub_lb,
+    sub_ub,
+    x0,
+    feasibility_norm: str,
+    max_wall_time: Optional[float],
+):
+    """Solve the elastic feasibility subproblem; return the ``x`` block or ``None``.
+
+    Records the subsolver's own status in :data:`_RESTORATION_OUTCOMES` so a run
+    that never converges says so instead of looking like one that did.
+    """
+    from discopt.solvers.nlp_pounce import solve_nlp
+
+    proxy = _ElasticFeasibilityEvaluator(evaluator, sub_lb, sub_ub, feasibility_norm)
+    if proxy.n_constraints == 0:
+        return None
+    opts = pounce_option_defaults()
+    opts.update({"max_iter": 200})
+    if max_wall_time is not None:
+        opts["max_wall_time"] = max(float(max_wall_time), _NLP_WALL_FLOOR_S)
+    result = solve_nlp(
+        # ``solve_nlp`` is annotated against the concrete ``NLPEvaluator`` but
+        # consumes it structurally (``_IpoptCallbacks`` calls the same seven
+        # methods on whatever it is given) -- which is exactly how the sibling
+        # ``_FeasibilityEvaluator`` reaches it, via the untyped ``_solve_nlp``
+        # helper. The cast records that this class satisfies the same duck-typed
+        # contract rather than widening it.
+        cast(Any, proxy),
+        proxy.start_point(x0),
+        constraint_bounds=proxy.constraint_bounds(),
+        options=opts,
+    )
+    raw = getattr(result, "raw_status", None)
+    _RESTORATION_OUTCOMES[("elastic", "ok" if raw in (0, 1) else f"raw={raw}")] += 1
+    if result.x is None:
+        return None
+    return np.asarray(result.x, dtype=np.float64)[: evaluator.n_variables]
 
 
 def _is_integer_feasible(decomp: _DecomposedProblem, x: np.ndarray, tol: float = 1e-5) -> bool:
@@ -2222,6 +2615,7 @@ def _run_feasibility_pump(
             nlp_solver,
             feasibility_norm,
             max_wall_time=_remaining_wall(t_start, time_limit),
+            constraint_convex_mask=decomp.oa_constraint_mask,
         )
         if x_feas is not None:
             current = x_feas
@@ -4393,6 +4787,80 @@ def solve_feasibility_pump(
     )
 
 
+def _continuous_model_is_certified_convex(decomp: "_DecomposedProblem") -> bool:
+    """Is the *continuous* model provably convex — objective AND every constraint?
+
+    The gate on certifying a single local NLP solve as the global optimum. Without
+    it, ``solve_oa``/``solve_lp_nlp_bb`` returned ``status="optimal"`` with
+    ``bound = objective`` and ``gap = 0.0`` for ANY integer-free model, because an
+    integer-free OA "loop" is one NLP solve and the code read that as a proof.
+
+    Measured on MINLPLib ``trig`` (one continuous variable on ``[-2, 5]``, one
+    nonconvex row): ``mip_nlp_method="lp_nlp_bb"`` returned ``optimal`` at
+    ``-2.479027828`` with ``bound = -2.479027828``, while the true minimum over the
+    declared box is ``-3.762500358`` (brute force at ``x = 2.667``, and MINLPLib's
+    own value). A local NLP found a local minimum and the caller was handed it as a
+    certificate. Found by #1141's corpus panel; it predates that work and is
+    identical with the panel's flag on or off.
+
+    Convex objective + convex constraints is exactly the condition under which a
+    local minimum is global, which is what the certificate claims.
+    """
+    if not (decomp.obj_is_linear or decomp.oa_objective_is_convex):
+        return False
+    mask = decomp.oa_constraint_mask
+    if decomp.n_cons == 0:
+        return True
+    if not mask:
+        return False
+    return all(mask)
+
+
+def _oa_node_cuts_enabled() -> bool:
+    """``DISCOPT_OA_NODE_CUTS``: separate ECP cuts at *fractional* master nodes.
+
+    Default-**ON** since the #1141 graduation panel. Adding a supporting hyperplane
+    at a fractional node is sound (a convex constraint's tangent underestimates it
+    everywhere, so the row is globally valid) but it CHANGES the master's dual
+    bound — CLAUDE.md §5 regime 2 — so it shipped default-OFF until a corpus-wide
+    differential panel cleared both bars.
+
+    That panel, over the 119 vendored MINLPLib instances (``lp_nlp_bb`` on the
+    in-house simplex master, 30 s per arm, interleaved, incumbents
+    feasibility-verified): 37/119 rows exercised it, 189 soundness checks,
+    **0 violations**, certificates **42 -> 44** with none lost, total wall
+    601.9 s -> 536.8 s (**−10.8 %**), **10 dual bounds tighter and 2 looser**
+    (``clay0303hfsg`` and ``fac2``, neither certified by either arm). On the class
+    the issue is about it is 6–16x. Recorded in
+    ``docs/dev/performance-plan.md`` §25.
+
+    ``DISCOPT_OA_NODE_CUTS=0`` is the opt-out and restores the pre-#1141 master
+    exactly. Ignored on the SHOT profile, which is *defined* by fractional-point
+    hyperplane generation and therefore always separates at nodes.
+    """
+    return os.environ.get("DISCOPT_OA_NODE_CUTS", "1") not in ("0", "", "false", "False")
+
+
+def _oa_node_cut_rounds() -> int:
+    """Separation rounds one master node may run (``DISCOPT_OA_NODE_CUT_ROUNDS``).
+
+    Each round is one gradient evaluation plus one warm LP re-solve of that node.
+    The rows are global, so what one node does not separate the next one will —
+    a small budget is the design, not a compromise.
+    """
+    return max(1, int(os.environ.get("DISCOPT_OA_NODE_CUT_ROUNDS", "2")))
+
+
+def _oa_node_cut_cap() -> int:
+    """Cap on fractional-node rows per solve (``DISCOPT_OA_NODE_CUT_CAP``).
+
+    A fractional cut only tightens, so it is optional and budgeted: an unbounded
+    stream of gradient cuts densifies every node LP and trades the node win back
+    for wall time.
+    """
+    return max(1, int(os.environ.get("DISCOPT_OA_NODE_CUT_CAP", "500")))
+
+
 def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     """Pick the single-tree MILP backend for LP/NLP branch-and-bound.
 
@@ -4423,24 +4891,32 @@ def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     hook, and silently substituting a different backend would hide that the
     caller's choice was ignored.
 
-    The SHOT profile also still requires Gurobi. Its ESH/hyperplane strategy adds
-    user cuts at *fractional* node relaxations (Gurobi MIPNODE); the Rust hook
-    fires only at integer-feasible points, so there is nothing to map it onto,
-    and accepting the request while dropping those cuts would report a SHOT run
-    that never ran SHOT's cut generation.
+    The SHOT profile no longer requires Gurobi (#1141). Its ESH/hyperplane
+    strategy adds user cuts at *fractional* node relaxations, and until #1141 the
+    Rust hook fired only at integer-feasible points, so there was nothing to map
+    it onto; the driver now has a fractional-node hook
+    (``solve_milp_lazy_csc_py(node_callback=...)``) and ``"simplex"``/``"auto"``
+    serve SHOT too. ``"highs"`` is still refused for SHOT: that master separates
+    only at integer-feasible incumbents, and accepting the request while dropping
+    the fractional cuts would report a SHOT run that never ran SHOT's cut
+    generation.
     """
     backend = milp_solver.strip().lower() if isinstance(milp_solver, str) else ""
     if backend == "gurobi":
         return "gurobi"
-    if shot_profile:
-        raise RuntimeError(
-            "mip_nlp_method='lp_nlp_bb' with mip_nlp_profile='shot' requires "
-            "milp_solver='gurobi': the SHOT profile separates hyperplanes at "
-            "fractional node relaxations (MIPNODE user cuts), which the in-house "
-            f"simplex backend does not expose. Got milp_solver={milp_solver!r}."
-        )
     if backend in {"auto", "simplex"}:
         return "simplex"
+    if shot_profile:
+        # The SHOT profile separates hyperplanes at fractional node relaxations.
+        # Only Gurobi and the in-house simplex driver (#1141) expose that hook;
+        # the HiGHS master does not, and accepting the request while dropping
+        # those cuts would report a SHOT run that never ran SHOT's cut generation.
+        raise RuntimeError(
+            "mip_nlp_method='lp_nlp_bb' with mip_nlp_profile='shot' requires a "
+            "backend with a fractional-node cut hook: 'gurobi' or 'simplex' (also "
+            "reachable as 'auto'). The HiGHS master separates only at "
+            f"integer-feasible incumbents. Got milp_solver={milp_solver!r}."
+        )
     if backend == "highs":
         return "highs"
     raise RuntimeError(
@@ -4540,14 +5016,6 @@ def solve_lp_nlp_bb(
     # unsupported request costs a message rather than a decomposition.
     lazy_backend = _resolve_lp_nlp_bb_backend(milp_solver, shot_profile=shot_profile)
     hook = _normalize_optional_hook("termination_hook", termination_hook)
-    if hook is not None and lazy_backend == "simplex":
-        raise NotImplementedError(
-            "termination_hook is not available on the in-house simplex master: the "
-            "driver enforces time_limit itself and offers no check-in point, so the "
-            "hook could never be called and any budget built on it would be a "
-            "fiction. Use milp_solver='highs' (checks in at every master restart) "
-            "or milp_solver='gurobi'."
-        )
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
     fp_config = _normalize_fp_config(
@@ -4569,6 +5037,15 @@ def solve_lp_nlp_bb(
         add_no_good_cuts=add_no_good_cuts,
     )
 
+    # Restoration outcomes are per solve, not per process (#1141).
+    _RESTORATION_OUTCOMES.clear()
+    # Read once per solve, not per callback: a flag that changed mid-search would
+    # make the run's own record unreadable.
+    _oa_infeasible_nogood = _infeasible_nogood_enabled()
+    #: Assignments excluded because the fixed NLP PROVED them infeasible. The
+    #: anti-vacuity counter for the flag (§6): zero means it never fired, which is
+    #: not the same as "there was nothing to exclude".
+    proven_infeasible_count = [0]
     decomp = _decompose_model(model)
     integer_binary_expansion = _build_integer_binary_expansion(
         decomp,
@@ -4685,18 +5162,27 @@ def solve_lp_nlp_bb(
             max_wall_time=_remaining_wall(t_start, time_limit),
         )
         wall_time = time.perf_counter() - t_start
+        certified = _continuous_model_is_certified_convex(decomp) and not heuristic_nonconvex
         if x_sol is not None:
+            # An integer-free OA "loop" is a single local NLP solve. That is the
+            # global optimum only on a convex model; on a nonconvex one it is a
+            # local minimum, and reporting it with ``bound = objective, gap = 0``
+            # is a false certificate (see ``_continuous_model_is_certified_convex``:
+            # ``trig`` returned -2.479 as optimal against a true -3.7625).
             return SolveResult(
-                status="optimal",
+                status="optimal" if certified else "feasible",
                 objective=obj_sign * obj,
-                bound=obj_sign * obj,
-                gap=0.0,
+                bound=obj_sign * obj if certified else None,
+                gap=0.0 if certified else None,
+                gap_certified=certified,
                 x=_build_x_dict(x_sol, model),
                 wall_time=wall_time,
                 mip_count=0,
             )
+        # A local NLP that found no point has not PROVED the model infeasible
+        # either -- the same asymmetry, in the other direction.
         return SolveResult(
-            status="infeasible",
+            status="infeasible" if certified else "no_feasible_point",
             objective=None,
             bound=None,
             gap=None,
@@ -4940,9 +5426,8 @@ def solve_lp_nlp_bb(
                 hyperplane_selection_factor=shot_config.hyperplane_selection_factor,
             )
         nlp_subproblem_count += 1
-        fixed_nlp_status = "failed"
         integer_cut_added = False
-        x_nlp, obj_nlp = _solve_nlp_subproblem(
+        fixed_attempt = _solve_fixed_nlp_subproblem_attempt(
             evaluator,
             decomp.lb,
             decomp.ub,
@@ -4952,8 +5437,13 @@ def solve_lp_nlp_bb(
             initial_point=x_master,
             max_wall_time=_remaining_wall(t_start, time_limit),
         )
+        x_nlp, obj_nlp = fixed_attempt.x, fixed_attempt.objective
+        # #1141: the trace used to record every non-success as the single word
+        # "failed", which made a genuinely infeasible integer assignment and a
+        # subsolver that fell over indistinguishable in the record — and those are
+        # different problems with different fixes. Name the outcome instead.
+        fixed_nlp_status = _fixed_nlp_status_label(fixed_attempt)
         if x_nlp is not None:
-            fixed_nlp_status = "feasible"
             if obj_nlp is not None:
                 accept_incumbent(x_nlp, obj_nlp)
                 _record_interior_point(
@@ -4974,6 +5464,7 @@ def solve_lp_nlp_bb(
                     nlp_solver,
                     feasibility_norm,
                     max_wall_time=_remaining_wall(t_start, time_limit),
+                    constraint_convex_mask=decomp.oa_constraint_mask,
                 )
                 if x_feas is not None:
                     _add_feasibility_cuts(
@@ -4987,7 +5478,21 @@ def solve_lp_nlp_bb(
                         oa_cut_relaxable=oa_cut_relaxable,
                         cut_provenance=cut_provenance,
                     )
-            if add_no_good_cuts and (
+            # #1141 item 4: 7 of 172 integer assignments were re-proposed on
+            # `portfol_classical050_1`, one of them six times, because an OA cut
+            # excludes the *point* it was taken at, not the *assignment* -- with a
+            # linear objective and no epigraph there is nothing forcing the master
+            # away from the same integer point at a different continuous one. A
+            # no-good cut is what excludes the assignment, and it is sound exactly
+            # when the assignment is PROVEN infeasible (see
+            # `_assignment_proven_infeasible`; "the NLP returned nothing" is not a
+            # proof and must never be treated as one).
+            proven_infeasible = _oa_infeasible_nogood and _assignment_proven_infeasible(
+                fixed_attempt, evaluator, decomp.oa_constraint_mask
+            )
+            if proven_infeasible:
+                proven_infeasible_count[0] += 1
+            if (add_no_good_cuts or proven_infeasible) and (
                 not decomp.general_integer_indices or integer_binary_expansion is not None
             ):
                 integer_cut_added = _add_no_good_cut(
@@ -5144,18 +5649,34 @@ def solve_lp_nlp_bb(
         lazy_callback=lazy_callback,
         mip_start=master_mip_start,
     )
+    # All three masters now carry the progress check-in; only the fractional-node
+    # hook is backend-specific.
+    lazy_kwargs["terminate_callback"] = callback_terminate
     if lazy_backend == "gurobi":
-        # MIPNODE user cuts are Gurobi-only; the native driver has no
-        # fractional-node hook.
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
-        lazy_kwargs["terminate_callback"] = callback_terminate
-    elif lazy_backend == "highs":
-        # The HiGHS master checks in at every restart and, between them, on an
-        # interval. That is what lets a caller budget this method by progress
-        # (#1066) -- and, hook or no hook, what lets the driver notice its own
-        # certificate the moment the bound meets the incumbent instead of at
-        # whatever later instant the separator runs dry.
-        lazy_kwargs["terminate_callback"] = callback_terminate
+    elif lazy_backend == "simplex":
+        # #1141: the in-house driver now has a fractional-node hook, so the ECP
+        # cuts that used to require Gurobi's MIPNODE run here too. This is the
+        # capability the issue measured as missing: without it every node either
+        # pays a full NLP (38.9 ms/node against SCIP's 3.0) or gets a relaxation
+        # that ignores the nonlinear constraint. The SHOT profile *needs* it (its
+        # hyperplane strategy is defined at fractional points), so it is wired
+        # unconditionally there; for the plain convex path it is a bound-CHANGING
+        # knob and ships behind ``DISCOPT_OA_NODE_CUTS`` (CLAUDE.md §5 regime 2).
+        #
+        # Its check-in is the driver's per-iteration checkpoint (#1141). Until
+        # that was wired, `termination_hook` was REFUSED here, so the #1066 route
+        # progress guard raised on every routed solve and the convex-MINLP route
+        # fell all the way back to the spatial path.
+        if shot_profile or _oa_node_cuts_enabled():
+            lazy_kwargs["node_callback"] = node_callback
+            lazy_kwargs["node_hook_rounds"] = _oa_node_cut_rounds()
+            lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
+    # "highs" checks in at every restart and, between them, on an interval. That
+    # is what lets a caller budget this method by progress (#1066) -- and, hook or
+    # no hook, what lets a driver notice its own certificate the moment the bound
+    # meets the incumbent instead of at whatever later instant the separator runs
+    # dry.
     master_result = solve_milp_with_lazy_cuts(**lazy_kwargs)  # type: ignore[arg-type]
     wall_time = time.perf_counter() - t_start
 
@@ -5289,6 +5810,17 @@ def solve_lp_nlp_bb(
             "callback_event_count": int(len(callback_events)),
             "callback_stats": callback_stats,
             "node_count": int(master_result.node_count),
+            # #1141: how the feasibility restorations actually ended, by
+            # formulation and subsolver code. Restoration falls back to the
+            # clipped master point on failure, so without this a run where it
+            # never converged is indistinguishable from one where it always did.
+            "restoration_outcomes": {
+                f"{form}/{status}": int(n) for (form, status), n in _RESTORATION_OUTCOMES.items()
+            },
+            # Assignments the fixed NLP PROVED infeasible and that were therefore
+            # excluded by a no-good cut. Zero means the mechanism never fired --
+            # not that there was nothing to exclude (CLAUDE.md §6).
+            "proven_infeasible_assignments": int(proven_infeasible_count[0]),
         },
         "termination_reason": termination_reason,
         "master_bound_valid": bool(master_bound_valid),
@@ -6857,21 +7389,28 @@ def solve_oa(
             max_wall_time=_remaining_wall(t_start, time_limit),
         )
         wall_time = time.perf_counter() - t_start
+        certified = _continuous_model_is_certified_convex(decomp) and not heuristic_nonconvex
         if x_sol is not None:
             LB = float(obj)
             UB = float(obj)
-            _promote_certified_bound(obj, "continuous_nlp")
+            if certified:
+                _promote_certified_bound(obj, "continuous_nlp")
+            # See ``_continuous_model_is_certified_convex``: one local NLP solve is
+            # a global proof only on a convex model.
             return SolveResult(
-                status="optimal",
+                status="optimal" if certified else "feasible",
                 objective=_obj_sign * obj,
-                bound=_obj_sign * obj,
-                gap=0.0,
+                bound=_obj_sign * obj if certified else None,
+                gap=0.0 if certified else None,
+                gap_certified=certified,
                 x=_build_x_dict(x_sol, model),
                 wall_time=wall_time,
-                mip_nlp_trace=_build_mip_nlp_trace("continuous_nlp_optimal"),
+                mip_nlp_trace=_build_mip_nlp_trace(
+                    "continuous_nlp_optimal" if certified else "continuous_nlp_local"
+                ),
             )
         return SolveResult(
-            status="infeasible",
+            status="infeasible" if certified else "no_feasible_point",
             objective=None,
             bound=None,
             gap=None,
@@ -8038,6 +8577,7 @@ def solve_oa(
                         nlp_solver,
                         feasibility_norm,
                         max_wall_time=_remaining_wall(t_start, time_limit),
+                        constraint_convex_mask=decomp.oa_constraint_mask,
                     )
                     if x_feas is not None:
                         _add_feasibility_cuts(

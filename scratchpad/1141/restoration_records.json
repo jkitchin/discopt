@@ -1,0 +1,3602 @@
+[
+ {
+  "instance": "bchoco06",
+  "norm": "L_infinity",
+  "start": 10000.000999020001,
+  "a_raw": -1,
+  "a_merit": 1085512.392587867,
+  "b_raw": -1,
+  "b_merit": 3602.1285122586214
+ },
+ {
+  "instance": "bchoco07",
+  "norm": "L_infinity",
+  "start": 999999.999,
+  "a_raw": -1,
+  "a_merit": 22637776.003128,
+  "b_raw": -1,
+  "b_merit": 524202.9175567382
+ },
+ {
+  "instance": "bchoco08",
+  "norm": "L_infinity",
+  "start": 9999999.999,
+  "a_raw": -1,
+  "a_merit": 226377765.76742658,
+  "b_raw": -1,
+  "b_merit": 3960433.4570572707
+ },
+ {
+  "instance": "beuster",
+  "norm": "L_infinity",
+  "start": 8980.199999999984,
+  "a_raw": -1,
+  "a_merit": 1737.8907658407213,
+  "b_raw": 0,
+  "b_merit": 0.9000571682898291
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "carton7",
+  "norm": "L_infinity",
+  "start": 2500.0,
+  "a_raw": 0,
+  "a_merit": 2500.0,
+  "b_raw": 0,
+  "b_merit": 2500.0
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "clay0303hfsg",
+  "norm": "L_infinity",
+  "start": 12.5,
+  "a_raw": -3,
+  "a_merit": 12.458761240425943,
+  "b_raw": 0,
+  "b_merit": 12.0402889893152
+ },
+ {
+  "instance": "ex1225",
+  "norm": "L_infinity",
+  "start": 2.2490095854249432,
+  "a_raw": -1,
+  "a_merit": 0.2433178741034765,
+  "b_raw": 0,
+  "b_merit": 0.2423829220881073
+ },
+ {
+  "instance": "ex1252",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": -1,
+  "a_merit": 7.435581879213826,
+  "b_raw": 0,
+  "b_merit": 0.3333333351499907
+ },
+ {
+  "instance": "ex1252a",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "ex1263",
+  "norm": "L_infinity",
+  "start": 10.999999999999993,
+  "a_raw": -1,
+  "a_merit": 56.90080407970314,
+  "b_raw": 0,
+  "b_merit": 0.5477842607986034
+ },
+ {
+  "instance": "ex1264",
+  "norm": "L_infinity",
+  "start": 12.0,
+  "a_raw": -1,
+  "a_merit": 10.54228275526712,
+  "b_raw": 0,
+  "b_merit": 1.177956334903927
+ },
+ {
+  "instance": "ex1265",
+  "norm": "L_infinity",
+  "start": 13.999999999999998,
+  "a_raw": -1,
+  "a_merit": 5.1043451059579406,
+  "b_raw": 0,
+  "b_merit": 1.4915284578072576
+ },
+ {
+  "instance": "ex1265",
+  "norm": "L_infinity",
+  "start": 15.0,
+  "a_raw": -1,
+  "a_merit": 302.8145094097283,
+  "b_raw": 0,
+  "b_merit": 2.2510264132517497
+ },
+ {
+  "instance": "ex1265",
+  "norm": "L_infinity",
+  "start": 15.0,
+  "a_raw": -1,
+  "a_merit": 14.886242342500857,
+  "b_raw": 0,
+  "b_merit": 13.330760751972809
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 13.521251034734178,
+  "b_raw": 0,
+  "b_merit": 0.8216955405221756
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "ex1266",
+  "norm": "L_infinity",
+  "start": 16.0,
+  "a_raw": -1,
+  "a_merit": 15.981333066891771,
+  "b_raw": 0,
+  "b_merit": 15.181251464978892
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "fac2",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "gear4",
+  "norm": "L_infinity",
+  "start": 855720.67522724,
+  "a_raw": -1,
+  "a_merit": 21020.334998184146,
+  "b_raw": 0,
+  "b_merit": 1.4551915228366852e-10
+ },
+ {
+  "instance": "hda",
+  "norm": "L_infinity",
+  "start": 191.13594558821936,
+  "a_raw": -3,
+  "a_merit": 37.30351190926447,
+  "b_raw": -1,
+  "b_merit": 2.1438158564287733
+ },
+ {
+  "instance": "heatexch_gen1",
+  "norm": "L_infinity",
+  "start": 560000.0,
+  "a_raw": -1,
+  "a_merit": 11307.335305180572,
+  "b_raw": 0,
+  "b_merit": 1.1951063438537647e-07
+ },
+ {
+  "instance": "heatexch_gen1",
+  "norm": "L_infinity",
+  "start": 7400.0,
+  "a_raw": -1,
+  "a_merit": 15428.70375652023,
+  "b_raw": 0,
+  "b_merit": 733.3333333333335
+ },
+ {
+  "instance": "heatexch_gen1",
+  "norm": "L_infinity",
+  "start": 7400.0,
+  "a_raw": -1,
+  "a_merit": 15428.70375652023,
+  "b_raw": 0,
+  "b_merit": 733.3333333333335
+ },
+ {
+  "instance": "heatexch_gen1",
+  "norm": "L_infinity",
+  "start": 7400.0,
+  "a_raw": -1,
+  "a_merit": 15428.70375652023,
+  "b_raw": 0,
+  "b_merit": 733.3333333333335
+ },
+ {
+  "instance": "heatexch_gen1",
+  "norm": "L_infinity",
+  "start": 7400.0,
+  "a_raw": -1,
+  "a_merit": 15428.70375652023,
+  "b_raw": 0,
+  "b_merit": 733.3333333333335
+ },
+ {
+  "instance": "heatexch_gen2",
+  "norm": "L_infinity",
+  "start": 526000.0,
+  "a_raw": -1,
+  "a_merit": 99205.64575338466,
+  "b_raw": 0,
+  "b_merit": 5.557976793779561e-07
+ },
+ {
+  "instance": "heatexch_gen3",
+  "norm": "L_infinity",
+  "start": 2384.28,
+  "a_raw": -1,
+  "a_merit": 92013.73575187933,
+  "b_raw": -1,
+  "b_merit": 662.1397813328209
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 0.039673414065870105,
+  "a_raw": -3,
+  "a_merit": 0.2537798666904507,
+  "b_raw": 0,
+  "b_merit": 0.005537420640148838
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 0.03967341406587099,
+  "a_raw": -3,
+  "a_merit": 0.2537798666613469,
+  "b_raw": 0,
+  "b_merit": 0.005537420640195023
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "m3",
+  "norm": "L_infinity",
+  "start": 3.7498688706985615,
+  "a_raw": -3,
+  "a_merit": 2.7777084707831534,
+  "b_raw": 0,
+  "b_merit": 1.2500000031818175
+ },
+ {
+  "instance": "nvs01",
+  "norm": "L_infinity",
+  "start": 12605.08213993551,
+  "a_raw": 0,
+  "a_merit": 12605.08213993551,
+  "b_raw": 0,
+  "b_merit": 12605.08213993551
+ },
+ {
+  "instance": "nvs02",
+  "norm": "L_infinity",
+  "start": 85.334407,
+  "a_raw": 0,
+  "a_merit": 10.699039,
+  "b_raw": 0,
+  "b_merit": 10.699039
+ },
+ {
+  "instance": "nvs07",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 31622776629.683792,
+  "a_raw": 0,
+  "a_merit": 28.000000073034734,
+  "b_raw": 0,
+  "b_merit": 28.00000004848662
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 31622776609.683792,
+  "a_raw": 0,
+  "a_merit": 8.000000073034736,
+  "b_raw": 0,
+  "b_merit": 8.000000036055786
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 11.048267485815694,
+  "a_raw": 0,
+  "a_merit": 11.000000009424829,
+  "b_raw": 0,
+  "b_merit": 11.000000010788915
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 31622776620.664303,
+  "a_raw": 0,
+  "a_merit": 19.000000073034734,
+  "b_raw": 0,
+  "b_merit": 19.00000001081138
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 31622776609.683792,
+  "a_raw": 0,
+  "a_merit": 8.000000073034736,
+  "b_raw": 0,
+  "b_merit": 8.000000036055786
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 11.009434390055835,
+  "a_raw": 0,
+  "a_merit": 11.000000010079201,
+  "b_raw": 0,
+  "b_merit": 11.000000010788915
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 16.31361346933357,
+  "a_raw": 0,
+  "a_merit": 15.000000011130723,
+  "b_raw": 0,
+  "b_merit": 15.000000010801372
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 11.007831860989032,
+  "a_raw": 0,
+  "a_merit": 11.00000000922377,
+  "b_raw": 0,
+  "b_merit": 11.000000010788915
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 33.80574373638598,
+  "a_raw": 0,
+  "a_merit": 19.00000001607156,
+  "b_raw": 0,
+  "b_merit": 19.00000001081138
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 11.0078125034175,
+  "a_raw": 0,
+  "a_merit": 11.000000009221726,
+  "b_raw": 0,
+  "b_merit": 11.000000010788915
+ },
+ {
+  "instance": "nvs08",
+  "norm": "L_infinity",
+  "start": 11.0078125034175,
+  "a_raw": 0,
+  "a_merit": 11.000000009221726,
+  "b_raw": 0,
+  "b_merit": 11.000000010788915
+ },
+ {
+  "instance": "nvs11",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "nvs11",
+  "norm": "L_infinity",
+  "start": 44.0,
+  "a_raw": 0,
+  "a_merit": 44.0,
+  "b_raw": 0,
+  "b_merit": 44.0
+ },
+ {
+  "instance": "nvs11",
+  "norm": "L_infinity",
+  "start": 1.0,
+  "a_raw": 0,
+  "a_merit": 1.0,
+  "b_raw": 0,
+  "b_merit": 1.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 32.0,
+  "a_raw": 0,
+  "a_merit": 32.0,
+  "b_raw": 0,
+  "b_merit": 32.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 11.0,
+  "a_raw": 0,
+  "a_merit": 11.0,
+  "b_raw": 0,
+  "b_merit": 11.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 7.0,
+  "a_raw": 0,
+  "a_merit": 7.0,
+  "b_raw": 0,
+  "b_merit": 7.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 42.0,
+  "a_raw": 0,
+  "a_merit": 42.0,
+  "b_raw": 0,
+  "b_merit": 42.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 74.0,
+  "a_raw": 0,
+  "a_merit": 74.0,
+  "b_raw": 0,
+  "b_merit": 74.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 12.0,
+  "a_raw": 0,
+  "a_merit": 12.0,
+  "b_raw": 0,
+  "b_merit": 12.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 18.0,
+  "a_raw": 0,
+  "a_merit": 18.0,
+  "b_raw": 0,
+  "b_merit": 18.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 24.0,
+  "a_raw": 0,
+  "a_merit": 24.0,
+  "b_raw": 0,
+  "b_merit": 24.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 7.0,
+  "a_raw": 0,
+  "a_merit": 7.0,
+  "b_raw": 0,
+  "b_merit": 7.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 25.0,
+  "a_raw": 0,
+  "a_merit": 25.0,
+  "b_raw": 0,
+  "b_merit": 25.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 2.0,
+  "a_raw": 0,
+  "a_merit": 2.0,
+  "b_raw": 0,
+  "b_merit": 2.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 10.0,
+  "a_raw": 0,
+  "a_merit": 10.0,
+  "b_raw": 0,
+  "b_merit": 10.0
+ },
+ {
+  "instance": "nvs12",
+  "norm": "L_infinity",
+  "start": 15.0,
+  "a_raw": 0,
+  "a_merit": 15.0,
+  "b_raw": 0,
+  "b_merit": 15.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 1348.0,
+  "a_raw": 0,
+  "a_merit": 1348.0,
+  "b_raw": 0,
+  "b_merit": 1348.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 530.0,
+  "a_raw": 0,
+  "a_merit": 530.0,
+  "b_raw": 0,
+  "b_merit": 530.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 624.0,
+  "a_raw": 0,
+  "a_merit": 624.0,
+  "b_raw": 0,
+  "b_merit": 624.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 226.0,
+  "a_raw": 0,
+  "a_merit": 226.0,
+  "b_raw": 0,
+  "b_merit": 226.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 237.0,
+  "a_raw": 0,
+  "a_merit": 237.0,
+  "b_raw": 0,
+  "b_merit": 237.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 285.0,
+  "a_raw": 0,
+  "a_merit": 285.0,
+  "b_raw": 0,
+  "b_merit": 285.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 157.0,
+  "a_raw": 0,
+  "a_merit": 157.0,
+  "b_raw": 0,
+  "b_merit": 157.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 42.0,
+  "a_raw": 0,
+  "a_merit": 42.0,
+  "b_raw": 0,
+  "b_merit": 42.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 89.0,
+  "a_raw": 0,
+  "a_merit": 89.0,
+  "b_raw": 0,
+  "b_merit": 89.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 50.0,
+  "a_raw": 0,
+  "a_merit": 50.0,
+  "b_raw": 0,
+  "b_merit": 50.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 21.0,
+  "a_raw": 0,
+  "a_merit": 21.0,
+  "b_raw": 0,
+  "b_merit": 21.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 17.0,
+  "a_raw": 0,
+  "a_merit": 17.0,
+  "b_raw": 0,
+  "b_merit": 17.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 3.0,
+  "a_raw": 0,
+  "a_merit": 3.0,
+  "b_raw": 0,
+  "b_merit": 3.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 39.0,
+  "a_raw": 0,
+  "a_merit": 39.0,
+  "b_raw": 0,
+  "b_merit": 39.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 78.0,
+  "a_raw": 0,
+  "a_merit": 78.0,
+  "b_raw": 0,
+  "b_merit": 78.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 71.0,
+  "a_raw": 0,
+  "a_merit": 71.0,
+  "b_raw": 0,
+  "b_merit": 71.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 95.0,
+  "a_raw": 0,
+  "a_merit": 95.0,
+  "b_raw": 0,
+  "b_merit": 95.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 21.0,
+  "a_raw": 0,
+  "a_merit": 21.0,
+  "b_raw": 0,
+  "b_merit": 21.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 40.0,
+  "a_raw": 0,
+  "a_merit": 40.0,
+  "b_raw": 0,
+  "b_merit": 40.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 42.0,
+  "a_raw": 0,
+  "a_merit": 42.0,
+  "b_raw": 0,
+  "b_merit": 42.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 56.0,
+  "a_raw": 0,
+  "a_merit": 56.0,
+  "b_raw": 0,
+  "b_merit": 56.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 58.0,
+  "a_raw": 0,
+  "a_merit": 58.0,
+  "b_raw": 0,
+  "b_merit": 58.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 17.0,
+  "a_raw": 0,
+  "a_merit": 17.0,
+  "b_raw": 0,
+  "b_merit": 17.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 50.0,
+  "a_raw": 0,
+  "a_merit": 50.0,
+  "b_raw": 0,
+  "b_merit": 50.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 5.0,
+  "a_raw": 0,
+  "a_merit": 5.0,
+  "b_raw": 0,
+  "b_merit": 5.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 11.0,
+  "a_raw": 0,
+  "a_merit": 11.0,
+  "b_raw": 0,
+  "b_merit": 11.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 18.0,
+  "a_raw": 0,
+  "a_merit": 18.0,
+  "b_raw": 0,
+  "b_merit": 18.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 11.0,
+  "a_raw": 0,
+  "a_merit": 11.0,
+  "b_raw": 0,
+  "b_merit": 11.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 2.0,
+  "a_raw": 0,
+  "a_merit": 2.0,
+  "b_raw": 0,
+  "b_merit": 2.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 99.0,
+  "a_raw": 0,
+  "a_merit": 99.0,
+  "b_raw": 0,
+  "b_merit": 99.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 50.0,
+  "a_raw": 0,
+  "a_merit": 50.0,
+  "b_raw": 0,
+  "b_merit": 50.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 37.0,
+  "a_raw": 0,
+  "a_merit": 37.0,
+  "b_raw": 0,
+  "b_merit": 37.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 97.0,
+  "a_raw": 0,
+  "a_merit": 97.0,
+  "b_raw": 0,
+  "b_merit": 97.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 8.0,
+  "a_raw": 0,
+  "a_merit": 8.0,
+  "b_raw": 0,
+  "b_merit": 8.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 17.0,
+  "a_raw": 0,
+  "a_merit": 17.0,
+  "b_raw": 0,
+  "b_merit": 17.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 25.0,
+  "a_raw": 0,
+  "a_merit": 25.0,
+  "b_raw": 0,
+  "b_merit": 25.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 6.0,
+  "a_raw": 0,
+  "a_merit": 6.0,
+  "b_raw": 0,
+  "b_merit": 6.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 27.0,
+  "a_raw": 0,
+  "a_merit": 27.0,
+  "b_raw": 0,
+  "b_merit": 27.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 14.0,
+  "a_raw": 0,
+  "a_merit": 14.0,
+  "b_raw": 0,
+  "b_merit": 14.0
+ },
+ {
+  "instance": "nvs13",
+  "norm": "L_infinity",
+  "start": 9.0,
+  "a_raw": 0,
+  "a_merit": 9.0,
+  "b_raw": 0,
+  "b_merit": 9.0
+ }
+]

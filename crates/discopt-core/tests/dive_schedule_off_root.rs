@@ -67,6 +67,8 @@ fn options() -> MilpOptions {
         sb_max_cands: 0,
         sb_node_budget: 0,
         initial_incumbent: None,
+        node_hook_rounds: 0,
+        node_hook_cut_cap: 0,
         simplex: SimplexOptions::default(),
     }
 }

@@ -107,6 +107,21 @@ _STRONG_CUT_PROFILE: dict[str, object] = {
 #: ``docs/dev/performance-plan.md`` §23.
 _MILP_CUT_BUDGET_DEFAULT = True
 
+#: Default separation rounds one node may run against a supplied
+#: ``node_callback`` (#1141). Each round costs one callback plus one warm re-solve
+#: of that node's LP and buys a tighter bound there; because the rows are global,
+#: what one node does not separate the next one will, so a small budget is the
+#: point rather than a compromise. Overridable per call and by
+#: ``DISCOPT_MILP_NODE_HOOK_ROUNDS``.
+_NODE_HOOK_ROUNDS_DEFAULT = int(os.environ.get("DISCOPT_MILP_NODE_HOOK_ROUNDS", "2"))
+
+#: Default cap on the rows a supplied ``node_callback`` may fold into the shared
+#: relaxation over one solve. A fractional cut is optional (it only tightens), so
+#: unlike a lazy cut it is budgeted: an unbounded stream of gradient cuts would
+#: densify every node LP and trade the node win back for wall time. Overridable
+#: per call and by ``DISCOPT_MILP_NODE_HOOK_CUT_CAP``.
+_NODE_HOOK_CUT_CAP_DEFAULT = int(os.environ.get("DISCOPT_MILP_NODE_HOOK_CUT_CAP", "500"))
+
 _U64 = 2.0**-53  # float64 unit roundoff
 
 
@@ -820,6 +835,35 @@ def _marshal_std_form(
     )
 
 
+def _certified_bound(obj: float, bound: float) -> float:
+    """The dual bound to publish for a driver exit of ``"optimal"``.
+
+    ``"optimal"`` from the Rust driver means *optimal within* ``gap_tol``
+    (:func:`TreeManager::gap` <= ``opts.gap_tol``), NOT gap zero. This module used
+    to publish ``bound = objective`` there, on the reasoning that a proven optimum
+    has incumbent == dual bound. That reasoning holds only at gap zero; at any
+    positive tolerance it over-states the dual bound by up to that tolerance, and
+    the engine's gap is normalised by ``max(|incumbent|, 1.0)`` — so on an
+    objective of magnitude 0.1 a 1e-4 "relative" tolerance is 1e-4 ABSOLUTE,
+    i.e. 1e-3 relative. That is not a rounding artefact: measured on the #1141
+    convex-MINLP panel, an OA master whose true optimum was −0.10091959 exited
+    ``optimal`` with incumbent −0.10088167 and published −0.10088167 as a lower
+    bound — 3.8e-5 ABOVE the true optimum, a false certificate that
+    ``solve_lp_nlp_bb`` then republished as the MINLP's dual bound.
+
+    The engine's own ``global_lower_bound`` is the honest answer: the frontier
+    minimum, already floored by the unresolved-fathom floor and capped at the
+    incumbent (``TreeManager::update_global_lower_bound``). It equals the
+    incumbent exactly when the tree really did drain, so a genuinely proven
+    optimum loses nothing. Take the incumbent only when the engine's bound is not
+    finite (an empty frontier reports ``+inf``), and never publish a bound above
+    the incumbent.
+    """
+    if not np.isfinite(bound):
+        return float(obj)
+    return min(float(bound), float(obj))
+
+
 def solve_milp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -900,12 +944,13 @@ def solve_milp(
 
         x_struct = np.asarray(x_full, dtype=np.float64)[:n]
         if status == "optimal":
-            # Proven optimum: incumbent == dual bound, a tight valid lower bound.
+            # Optimal WITHIN ``gap_tolerance`` — publish the engine's dual bound,
+            # not the incumbent (see :func:`_certified_bound`).
             return MILPResult(
                 status=SolveStatus.OPTIMAL,
                 x=x_struct,
                 objective=float(obj),
-                bound=float(obj),
+                bound=_certified_bound(obj, bound),
                 node_count=int(nodes),
             )
 
@@ -1047,6 +1092,8 @@ def solve_milp_with_lazy_cuts(
     max_nodes: int = 1_000_000,
     lazy_callback: Optional[Callable[[np.ndarray], object]] = None,
     node_callback: Optional[Callable[[np.ndarray], object]] = None,
+    node_hook_rounds: int = _NODE_HOOK_ROUNDS_DEFAULT,
+    node_hook_cut_cap: int = _NODE_HOOK_CUT_CAP_DEFAULT,
     terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
     mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
@@ -1061,22 +1108,50 @@ def solve_milp_with_lazy_cuts(
     is not a proof that the box is empty, so the node is re-queued rather than
     fathomed.
 
-    Not supported here, and refused rather than silently dropped:
+    ``node_callback`` (#1141) is the *fractional*-node counterpart, the in-house
+    equivalent of Gurobi's MIPNODE user cuts: it is called with each fractional node
+    relaxation solution and returns rows in the same ``coefficients @ x <= rhs``
+    form, which must be **globally valid** (for a convex MINLP, the first-order
+    linearization ``g(x̄) + ∇g(x̄)·(x − x̄) ≤ 0`` of a violated constraint is a
+    supporting hyperplane and therefore is). The rows fold into the shared
+    relaxation and the node re-solves against them, so a node costs one LP plus one
+    gradient evaluation instead of a full NLP. ``node_hook_rounds`` caps the
+    separation rounds one node may run (``0`` disables the hook) and
+    ``node_hook_cut_cap`` caps the rows it may add over the whole solve. Unlike a
+    lazy veto -- which is mandatory, since it is the only thing keeping a point out
+    of the incumbent -- a fractional separation only tightens a relaxation, so
+    exhausting either budget is benign and never touches certification.
 
-    ``node_callback``
-        Gurobi's MIPNODE user cuts fire at *fractional* node relaxations. The Rust
-        driver's hook fires only at integer-feasible points, so there is nothing to
-        map it onto; accepting and ignoring it would silently disable the caller's
-        cut strategy.
-    ``terminate_callback``
-        The driver enforces ``time_limit`` itself. A callback that can never fire
-        would make ``callback_stats["terminated"]`` a lie.
+    ``terminate_callback`` (#1141) is consulted at the driver's per-iteration
+    checkpoint -- the in-house analogue of the HiGHS master's per-restart
+    check-in. It is handed the snapshot shape the other backends pass
+    (``dual_bound``, ``restarts``, ``lazy_cuts``), and returning true stops the
+    search, keeping the incumbent and the bound and reporting the result
+    **uncertified**, exactly as the driver's own time limit does. ``restarts`` is
+    always ``0``, and that is a fact rather than a placeholder: this is a true
+    single tree, so there is nothing to restart.
+
+    This used to be refused, on the grounds that "the driver enforces
+    ``time_limit`` itself and has no callback-termination hook". The first half is
+    true and irrelevant; the second was stale. The driver has had a per-iteration
+    checkpoint carrying ``incumbent``/``bound``/``gap``/``elapsed`` with a ``Stop``
+    control since the interactive debugger landed, already exposed to Python as
+    ``debug_hook``, so this is a composition rather than a new capability. The
+    refusal was what stopped #1141's convex-MINLP route from targeting a
+    discopt-native master: the #1066 route progress guard installs a
+    ``termination_hook``, the refusal raised, and the whole route fell back to the
+    spatial path.
 
     ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
     ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
     count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
     the search). ``mipsol_calls == 0`` means the separator never saw a point — NOT
-    that it accepted everything (CLAUDE.md §6).
+    that it accepted everything (CLAUDE.md §6). With a ``node_callback`` attached it
+    also reports ``mipnode_calls`` (fractional separator invocations, counted on
+    this side), ``node_cuts`` (rows it returned) and ``driver_node_cuts`` (rows the
+    driver actually folded in, after dedup and the cap). ``mipnode_calls == 0`` is
+    the same kind of signal: the fractional separator never ran, which is NOT the
+    same as it having found nothing to cut.
     """
     try:
         from discopt._rust import solve_milp_lazy_csc_py
@@ -1090,17 +1165,16 @@ def solve_milp_with_lazy_cuts(
             "solve_milp_with_lazy_cuts requires lazy_callback; use solve_milp for a "
             "plain MILP solve"
         )
-    if node_callback is not None:
-        raise NotImplementedError(
-            "the simplex lazy-cut backend has no MIPNODE equivalent: its separator "
-            "fires only at integer-feasible points, so node_callback (fractional "
-            "user cuts) cannot be honoured. Use milp_solver='gurobi' for that."
-        )
-    if terminate_callback is not None:
-        raise NotImplementedError(
-            "the simplex lazy-cut backend enforces time_limit in the driver and has "
-            "no callback-termination hook; pass time_limit instead of "
-            "terminate_callback."
+    if node_callback is not None and (node_hook_rounds <= 0 or node_hook_cut_cap <= 0):
+        # A separator wired in with a zero budget can never fire, and would report
+        # ``mipnode_calls == 0`` -- indistinguishable from a separator that ran and
+        # found nothing (CLAUDE.md §6). Refuse rather than silently dropping the
+        # caller's cut strategy.
+        raise ValueError(
+            "node_callback was supplied with node_hook_rounds="
+            f"{node_hook_rounds}/node_hook_cut_cap={node_hook_cut_cap}: a zero budget "
+            "means the separator can never fire, which is indistinguishable from one "
+            "that found nothing. Pass positive budgets, or omit node_callback."
         )
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
@@ -1121,22 +1195,32 @@ def solve_milp_with_lazy_cuts(
 
     def _separate(x_full: np.ndarray) -> list[tuple[np.ndarray, float]]:
         stats["mipsol_calls"] = int(cast(int, stats["mipsol_calls"])) + 1
-        # The driver works in standard form and hands over `[structural | slacks]`.
-        # The caller's contract is the master's own variable vector, exactly as the
-        # Gurobi wrapper delivers it, so trim the slacks rather than leaking a
-        # layout the caller never declared.
+        out = _rows_from(lazy_callback, x_full, "lazy_callback")
+        stats["lazy_cuts"] = int(cast(int, stats["lazy_cuts"])) + len(out)
+        return out
+
+    def _rows_from(callback, x_full: np.ndarray, kind: str) -> list[tuple[np.ndarray, float]]:
+        """Marshal one separator return into the driver's row list.
+
+        Shared by the integer-feasible and fractional separators so the two cannot
+        drift in what they accept: the callback sees the master's own structural
+        vector (the driver works in standard form and hands over
+        ``[structural | slacks]``, so the slacks are trimmed rather than leaking a
+        layout the caller never declared), and every row is checked against the
+        structural width.
+        """
         x_arr = np.asarray(x_full, dtype=np.float64).ravel()
         if x_arr.shape[0] < n:
             raise ValueError(
                 f"driver returned a {x_arr.shape[0]}-vector for a master with {n} "
                 "structural columns"
             )
-        rows = lazy_callback(x_arr[:n])
+        rows = callback(x_arr[:n])
         if rows is None:
             return []
         if not isinstance(rows, Iterable):
             raise TypeError(
-                "lazy_callback must return None or an iterable of (coefficients, rhs) "
+                f"{kind} must return None or an iterable of (coefficients, rhs) "
                 f"rows, got {type(rows).__name__}"
             )
         out: list[tuple[np.ndarray, float]] = []
@@ -1144,12 +1228,55 @@ def solve_milp_with_lazy_cuts(
             row = np.asarray(coeffs, dtype=np.float64).ravel()
             if row.shape[0] != n:
                 raise ValueError(
-                    f"lazy_callback returned a row with {row.shape[0]} coefficients "
+                    f"{kind} returned a row with {row.shape[0]} coefficients "
                     f"but the master has {n} variables"
                 )
             out.append((row, float(rhs)))
-        stats["lazy_cuts"] = int(cast(int, stats["lazy_cuts"])) + len(out)
         return out
+
+    def _separate_node(x_full: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        assert node_callback is not None  # guarded by `_node_hook` below
+        stats["mipnode_calls"] = int(cast(int, stats["mipnode_calls"])) + 1
+        out = _rows_from(node_callback, x_full, "node_callback")
+        stats["node_cuts"] = int(cast(int, stats["node_cuts"])) + len(out)
+        return out
+
+    _node_hook = None if node_callback is None else _separate_node
+
+    # The driver has ONE hook slot and the interactive debugger already owns it,
+    # so a caller's ``terminate_callback`` COMPOSES with it rather than replacing
+    # it: silently dropping either would be the "callback that can never fire"
+    # this function refuses everywhere else. Either one voting to stop stops the
+    # search, and with neither attached the slot stays ``None`` so the search is
+    # bit-for-bit the unhooked one.
+    from discopt import debug as _debug
+
+    _debug_hook = _debug.rust_hook()
+    _term_state: dict[str, object] = {"calls": 0, "terminated": False}
+
+    def _checkin(state: dict) -> bool:
+        stop = False
+        if _debug_hook is not None:
+            stop = bool(_debug_hook(state))
+        if terminate_callback is not None and str(state.get("checkpoint")) == "after_select":
+            # One checkpoint of the five: this is a budget decision, and asking it
+            # at every checkpoint would multiply its cost and make its own call
+            # count meaningless as a signal.
+            _term_state["calls"] = int(cast(int, _term_state["calls"])) + 1
+            if bool(
+                terminate_callback(
+                    {
+                        "dual_bound": state.get("bound"),
+                        "restarts": 0,
+                        "lazy_cuts": stats["lazy_cuts"],
+                    }
+                )
+            ):
+                _term_state["terminated"] = True
+                stop = True
+        return stop
+
+    _checkin_arg = None if (_debug_hook is None and terminate_callback is None) else _checkin
 
     # A caller-supplied start is a plain incumbent candidate: the driver validates
     # it against the constraints AND offers it to the separator before seeding, so
@@ -1177,8 +1304,6 @@ def solve_milp_with_lazy_cuts(
             )
         seed = np.ascontiguousarray(seed_arr)
 
-    from discopt import debug as _debug
-
     t0 = time.perf_counter()
     (
         status,
@@ -1189,6 +1314,8 @@ def solve_milp_with_lazy_cuts(
         _iters,
         lazy_calls,
         lazy_requeues,
+        node_calls,
+        node_cuts_added,
     ) = solve_milp_lazy_csc_py(
         std.c,
         m,
@@ -1207,7 +1334,10 @@ def solve_milp_with_lazy_cuts(
         float(gap_tolerance),
         time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
         initial_incumbent=seed,
-        debug_hook=_debug.rust_hook(),
+        debug_hook=_checkin_arg,
+        node_callback=_node_hook,
+        node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
+        node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
         **std.lp_kwargs,
     )
     wall_time = time.perf_counter() - t0
@@ -1217,6 +1347,17 @@ def solve_milp_with_lazy_cuts(
     # let the discrepancy surface rather than papering over it.
     stats["driver_lazy_calls"] = int(lazy_calls)
     stats["lazy_requeues"] = int(lazy_requeues)
+    # Reported unconditionally so a caller can tell "the check-in ran and never
+    # asked to stop" from "the check-in never ran" -- the same anti-vacuity rule
+    # the separator counters follow (CLAUDE.md §6).
+    stats["terminate_calls"] = int(cast(int, _term_state["calls"]))
+    stats["terminated"] = bool(_term_state["terminated"])
+    # Same two-sided bookkeeping for the fractional separator: this side counts
+    # the calls it served, the driver counts the rows it actually folded in (after
+    # dedup and the cap). A `node_cuts` far above `driver_node_cuts` means the
+    # separator is re-deriving rows the relaxation already carries.
+    stats["driver_node_calls"] = int(node_calls)
+    stats["driver_node_cuts"] = int(node_cuts_added)
 
     if status == "infeasible":
         return MILPResult(
@@ -1235,12 +1376,17 @@ def solve_milp_with_lazy_cuts(
 
     x_struct = np.asarray(x_full, dtype=np.float64)[:n]
     if status == "optimal":
+        # Optimal WITHIN ``gap_tolerance``: the dual bound is the engine's, and the
+        # gap that goes with it is the real one, not a hardcoded 0.0 (which is what
+        # made an OA caller read a tolerance-wide interval as a closed certificate).
+        # See :func:`_certified_bound`.
+        certified = _certified_bound(obj, bound)
         return MILPResult(
             status=SolveStatus.OPTIMAL,
             x=x_struct,
             objective=float(obj),
-            bound=float(obj),
-            gap=0.0,
+            bound=certified,
+            gap=abs(float(obj) - certified) / max(1.0, abs(float(obj))),
             node_count=int(nodes),
             wall_time=wall_time,
             callback_stats=stats,
