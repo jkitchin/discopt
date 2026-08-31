@@ -16,6 +16,7 @@ from collections.abc import Callable
 import numpy as np
 
 from discopt.modeling.core import (
+    _SELECT_ONE_ROWS,
     GDP_AUX_PREFIX,
     BinaryOp,
     BooleanVar,
@@ -43,6 +44,8 @@ from discopt.modeling.core import (
     _DisjunctiveConstraint,
     _IndicatorConstraint,
     _LogicalConstraint,
+    _require_semantics_supported,
+    _semantics_supported_by,
     _SOSConstraint,
     _wrap,
 )
@@ -63,18 +66,17 @@ _BIGM_SENTINEL = 1e15
 
 # What the rows emitted below actually mean. Every reformulation in this module
 # emits *one-way* activation (``y_k = 1 => disjunct k holds``) under
-# ``sum_k y_k == 1``. The gate is keyed on that pair, not on a member name: a
-# semantics is served iff its (activation, cardinality) is what these rows
-# encode, so a future member carrying the same pair is supported for free and a
-# member carrying a different pair is refused without touching this code.
-_SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = frozenset(
-    {(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}
-)
+# ``sum_k y_k == 1`` — the same pair ``Model.add_disjunction`` emits, so both
+# share one declaration and one predicate rather than each spelling out its own
+# gate. A semantics is served iff its (activation, cardinality) is what these
+# rows encode, so a future member carrying the same pair is supported for free
+# and a member carrying a different pair is refused without touching this code.
+_SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _SELECT_ONE_ROWS
 
 
 def _semantics_is_supported(semantics: DisjunctionSemantics) -> bool:
     """True when the rows this module emits encode *semantics* exactly."""
-    return (semantics.activation, semantics.cardinality) in _SUPPORTED_SEMANTICS
+    return _semantics_supported_by(semantics, _SUPPORTED_SEMANTICS)
 
 
 def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
@@ -86,17 +88,8 @@ def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
     and certified. Refuse loudly instead (issue #1124).
     """
     semantics = getattr(dc, "semantics", DisjunctionSemantics.SELECT_ONE)
-    if _semantics_is_supported(semantics):
-        return
-    supported = ", ".join(sorted(f"({a.value}, {c.value})" for a, c in _SUPPORTED_SEMANTICS))
-    raise NotImplementedError(
-        f"disjunction {dc.name or '<anon>'!r} declares "
-        f"DisjunctionSemantics.{semantics.name} "
-        f"({semantics.activation.value}, {semantics.cardinality.value}), which no GDP "
-        f"lowering implements. These reformulations emit {supported} only; that is "
-        "not a valid substitute, since a different (activation, cardinality) pair "
-        "has a different feasible set. Tracking issue: "
-        "https://github.com/jkitchin/discopt/issues/1124"
+    _require_semantics_supported(
+        semantics, _SUPPORTED_SEMANTICS, f"disjunction {dc.name or '<anon>'!r}"
     )
 
 

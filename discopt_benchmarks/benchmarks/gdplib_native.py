@@ -97,7 +97,7 @@ def build_ex1_linan_2023():
     Minimize the (nonconvex) six-hump camel function while two select-one
     disjunctions pin ``alpha`` and ``beta`` to grid points. The disjuncts are
     mutually exclusive equalities, so select-one and truth semantics coincide
-    here (see ``docs/design/disjunction-semantics.md``). A logical constraint forces the
+    here (see ``docs/disjunction_semantics.md``). A logical constraint forces the
     third ``alpha`` disjunct false, so ``alpha = 0.1`` is removed from its grid.
     Certified optimum -0.9996.
     """

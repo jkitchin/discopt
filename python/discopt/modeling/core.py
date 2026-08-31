@@ -469,6 +469,61 @@ def _coerce_disjunction_semantics(value) -> DisjunctionSemantics:
     raise ValueError(f"unknown disjunction semantics {value!r}; use one of: {allowed}")
 
 
+# ── Pair-based dispatch, shared by every lowering ──
+#
+# A lowering never asks *which member* it was handed; it declares the
+# ``(activation, cardinality)`` its rows encode and serves a disjunction iff the
+# declared semantics carries that pair. Keeping one predicate here means the
+# immediate lowerings in this module and the GDP pass in ``_relax`` cannot drift
+# apart on what "supported" means.
+
+# The pair emitted by one-way activation under ``sum_k y_k == 1`` — what
+# ``Model.add_disjunction`` (``if_then`` + ``exactly(1)``) and every
+# reformulation in ``_relax.gdp_reformulate`` actually build.
+_SELECT_ONE_ROWS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = frozenset(
+    {(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}
+)
+
+
+def _semantics_pair(
+    semantics: DisjunctionSemantics,
+) -> tuple[SelectorActivation, SelectorCardinality]:
+    """The ``(activation, cardinality)`` pair *semantics* stands for."""
+    return (semantics.activation, semantics.cardinality)
+
+
+def _semantics_supported_by(
+    semantics: DisjunctionSemantics,
+    supported: frozenset[tuple[SelectorActivation, SelectorCardinality]],
+) -> bool:
+    """True when rows encoding one of *supported* mean exactly *semantics*."""
+    return _semantics_pair(semantics) in supported
+
+
+def _require_semantics_supported(
+    semantics: DisjunctionSemantics,
+    supported: frozenset[tuple[SelectorActivation, SelectorCardinality]],
+    where: str,
+) -> None:
+    """Refuse a declared semantics whose pair *where* does not emit.
+
+    Substituting a different pair would hand back a different feasible set than
+    the model declares and then certify it, so this refuses rather than
+    approximating (issue #1124).
+    """
+    if _semantics_supported_by(semantics, supported):
+        return
+    emitted = ", ".join(sorted(f"({a.value}, {c.value})" for a, c in supported))
+    raise NotImplementedError(
+        f"{where} declares DisjunctionSemantics.{semantics.name} "
+        f"({semantics.activation.value}, {semantics.cardinality.value}), which is not "
+        f"implemented. This path emits {emitted} only; that is not a valid "
+        "substitute, since a different (activation, cardinality) pair has a "
+        "different feasible set. Tracking issue: "
+        "https://github.com/jkitchin/discopt/issues/1124"
+    )
+
+
 # Reserved namespace for compiler-generated existential auxiliaries. A user
 # Boolean identity may never take it (see ``Model._check_name``) and the GDP
 # pass allocates only inside it, so the two kinds of Boolean stay separable by
@@ -4241,15 +4296,11 @@ class Model:
         >>> d2.subject_to(x >= 7)
         >>> m.add_disjunction([d1, d2], name="mode_select")
         """
+        # This path lowers immediately (``if_then`` + ``exactly(1)``), so it gates
+        # here rather than in the GDP pass — but on the pair it emits, via the
+        # same predicate that pass uses, not on which member it was handed.
         resolved = _coerce_disjunction_semantics(semantics)
-        if resolved is not DisjunctionSemantics.SELECT_ONE:
-            raise NotImplementedError(
-                f"add_disjunction() implements only "
-                f"DisjunctionSemantics.SELECT_ONE; {resolved.value!r} "
-                f"({resolved.activation.value}, {resolved.cardinality.value}) is not "
-                "implemented. Tracking issue: "
-                "https://github.com/jkitchin/discopt/issues/1124"
-            )
+        _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "add_disjunction()")
         for d in disjuncts:
             self.if_then(d.indicator.variable, d._constraints, name=d.name)
         indicators = [d.indicator.variable for d in disjuncts]
