@@ -342,3 +342,181 @@ def test_fixed_nlp_status_label_names_the_outcome():
     # No code at all (the subsolver raised) still reports honestly.
     empty = _NLPAttempt(x=None, objective=None, multipliers=None)
     assert _fixed_nlp_status_label(empty) == "failed"
+
+
+# ---------------------------------------------------------------------------
+# #1141 item 3: the feasibility subproblem's formulation
+# ---------------------------------------------------------------------------
+
+
+def _mixed_sense_model():
+    """Convex rows of all three senses, so the elastic rewrite is exercised fully."""
+    import discopt.modeling as dm
+
+    m = dm.Model("elastic")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    m.subject_to(x * x + y * y <= 1.0)
+    m.subject_to(x + 2 * y >= 0.5)
+    m.subject_to(dm.exp(x) - y == 0.25)
+    m.minimize(x + y)
+    return m
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("norm", ["L1", "L2", "L_infinity"])
+def test_elastic_restoration_derivatives_match_finite_differences(norm):
+    """A wrong elastic model would not raise — it would restore to the wrong point.
+
+    So the Jacobian, gradient and Lagrangian Hessian are checked against finite
+    differences of this class's own constraint and objective functions.
+    """
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.solvers.oa import _ElasticFeasibilityEvaluator
+
+    ev = make_evaluator(_mixed_sense_model())
+    lo, hi = np.array([-2.0, -2.0]), np.array([2.0, 2.0])
+    el = _ElasticFeasibilityEvaluator(ev, lo, hi, norm)
+    z = el.start_point(np.array([0.7, 0.9]))
+
+    assert el.n_constraints == 4, "an equality must contribute BOTH elastic rows"
+    assert el.n_variables == (2 + (1 if norm == "L_infinity" else 3))
+
+    h = 1e-6
+    g0 = el.evaluate_constraints(z)
+    jac = el.evaluate_jacobian(z)
+    jac_fd = np.column_stack(
+        [
+            (el.evaluate_constraints(z + h * np.eye(el.n_variables)[j]) - g0) / h
+            for j in range(el.n_variables)
+        ]
+    )
+    assert np.abs(jac - jac_fd).max() < 1e-4
+
+    f0 = el.evaluate_objective(z)
+    grad = el.evaluate_gradient(z)
+    grad_fd = np.array(
+        [
+            (el.evaluate_objective(z + h * np.eye(el.n_variables)[j]) - f0) / h
+            for j in range(el.n_variables)
+        ]
+    )
+    assert np.abs(grad - grad_fd).max() < 1e-4
+
+    rng = np.random.default_rng(0)
+    lam = rng.normal(size=el.n_constraints)
+    sigma = 1.3
+    hess = el.evaluate_lagrangian_hessian(z, sigma, lam)
+
+    def lagrangian(zz):
+        return sigma * el.evaluate_objective(zz) + float(lam @ el.evaluate_constraints(zz))
+
+    hh = 1e-5
+    n = el.n_variables
+    hess_fd = np.zeros((n, n))
+    eye = np.eye(n)
+    for i in range(n):
+        for j in range(n):
+            hess_fd[i, j] = (
+                lagrangian(z + hh * eye[i] + hh * eye[j])
+                - lagrangian(z + hh * eye[i] - hh * eye[j])
+                - lagrangian(z - hh * eye[i] + hh * eye[j])
+                + lagrangian(z - hh * eye[i] - hh * eye[j])
+            ) / (4 * hh * hh)
+    assert np.abs(hess - hess_fd).max() < 1e-3
+    # The defect this class exists for: the shipped merit formulation reports an
+    # identically zero Hessian, which is what makes the KKT system singular.
+    assert np.abs(hess).max() > 0.0
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("norm", ["L1", "L2", "L_infinity"])
+def test_elastic_restoration_start_point_is_feasible(norm):
+    """The IPM starts inside its own feasible set, so any progress reduces violation."""
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.solvers.oa import _ElasticFeasibilityEvaluator
+
+    ev = make_evaluator(_mixed_sense_model())
+    el = _ElasticFeasibilityEvaluator(ev, np.array([-2.0, -2.0]), np.array([2.0, 2.0]), norm)
+    for x0 in (np.array([0.7, 0.9]), np.array([-1.5, 1.9]), np.array([0.0, 0.0])):
+        z = el.start_point(x0)
+        rows = el.evaluate_constraints(z)
+        lo = np.array([b[0] for b in el.constraint_bounds()])
+        hi = np.array([b[1] for b in el.constraint_bounds()])
+        assert np.all(rows <= hi + 1e-9) and np.all(rows >= lo - 1e-9), (
+            f"elastic start is infeasible for {norm} at {x0}"
+        )
+
+
+@pytest.mark.smoke
+def test_merit_formulation_reports_a_zero_hessian():
+    """Pins the defect itself, so a future rewrite of the merit path is noticed."""
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.solvers.oa import _FeasibilityEvaluator
+
+    ev = make_evaluator(_mixed_sense_model())
+    merit = _FeasibilityEvaluator(ev, np.array([-2.0, -2.0]), np.array([2.0, 2.0]), "L1")
+    z = np.array([0.7, 0.9])
+    assert merit.n_constraints == 0
+    assert np.abs(np.asarray(merit.evaluate_lagrangian_hessian(z, 1.0, np.empty(0)))).max() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# a false certificate #1141's corpus panel uncovered (pre-existing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("method", ["lp_nlp_bb", "oa"])
+def test_integer_free_nonconvex_model_is_not_certified_optimal(method):
+    """One local NLP solve is a global proof only on a CONVEX model.
+
+    An integer-free OA loop is a single NLP solve, and both drivers reported it as
+    ``status="optimal", bound=objective, gap=0.0`` unconditionally. On MINLPLib
+    ``trig`` — one continuous variable on ``[-2, 5]``, one nonconvex row — that
+    returned ``-2.479027828`` as *optimal* while the true minimum over the declared
+    box is ``-3.762500358`` (MINLPLib's value; reproduced here by brute force in
+    ``scratchpad/1141/``). A local minimum was handed back as a certificate.
+    """
+    from discopt.modeling.core import from_nl
+
+    model = from_nl("python/tests/data/minlplib/trig.nl")
+    r = model.solve(
+        solver="mip-nlp",
+        mip_nlp_method=method,
+        milp_solver="simplex",
+        time_limit=60,
+        gap_tolerance=1e-4,
+    )
+    true_min = -3.762500358
+    assert r.objective is not None
+    # The point found is a genuine local minimum well above the global one, which
+    # is exactly why certifying it would be a false claim.
+    assert r.objective > true_min + 1e-3
+    assert r.status != "optimal", f"{method} certified a local minimum as optimal"
+    assert r.bound is None, f"{method} published {r.bound!r} as a dual bound"
+    assert getattr(r, "gap_certified", False) is False
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("method", ["lp_nlp_bb", "oa"])
+def test_integer_free_convex_model_still_certifies(method):
+    """The guard must not cost a certificate a convex model has actually earned."""
+    import discopt.modeling as dm
+
+    m = dm.Model("convex_continuous")
+    x = m.continuous("x", lb=-3.0, ub=3.0)
+    y = m.continuous("y", lb=-3.0, ub=3.0)
+    m.subject_to(x * x + y * y <= 4.0)
+    m.subject_to(x + y >= -1.0)
+    m.minimize((x - 0.5) ** 2 + (y + 0.25) ** 2)
+    r = m.solve(
+        solver="mip-nlp",
+        mip_nlp_method=method,
+        milp_solver="simplex",
+        time_limit=60,
+        gap_tolerance=1e-6,
+    )
+    assert r.status == "optimal", f"{method} lost a certificate it had earned"
+    assert r.bound is not None
+    assert r.objective == pytest.approx(0.0, abs=1e-6)

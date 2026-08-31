@@ -1425,6 +1425,18 @@ pub fn solve_milp_node_hooked(
                                 // bound, which is valid over its box, and the
                                 // re-solve can only sharpen it.
                                 node_rounds.insert(id, rounds + 1);
+                                // Keep the bound this evaluation proved before
+                                // re-opening. `requeue_node` alone would leave
+                                // the node on its parent-inherited bound, and the
+                                // frontier minimum is what the driver reports as
+                                // the dual bound — so discarding a valid, tighter
+                                // node bound shows up directly as a weaker
+                                // certificate at the time limit (`clay0303hfsg`:
+                                // 1700.0 -> 3.98e-12). Sound: the node's LP
+                                // optimum over its own box is a valid lower bound
+                                // for that box, and the cuts just staged can only
+                                // tighten it further.
+                                tm.raise_node_bound(id, out.result.lower_bound);
                                 tm.requeue_node(id);
                                 continue;
                             }
