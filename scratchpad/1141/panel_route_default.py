@@ -44,6 +44,7 @@ DIRS = [pathlib.Path("python/tests/data/minlplib_nl"),
         pathlib.Path("python/tests/data/minlplib")]
 TL = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0
 _real_route = _solver._convex_minlp_auto_route
+_REAL_FRACTION = _solver._CONVEX_ROUTE_BUDGET_FRACTION
 
 
 def _route_as_highs(model):
@@ -69,8 +70,23 @@ def _route_as_oa(model):
     return "oa", reason, {k: v for k, v in opts.items() if k != "milp_solver"}
 
 
-ARMS = {"pre": ("1", _route_as_highs), "inhouse": ("1", _real_route),
-        "noguard": ("0", _real_route), "oa": ("1", _route_as_oa)}
+# (guard env, route fn, budget-fraction override or None)
+ARMS = {
+    "pre": ("1", _route_as_highs, None),
+    "inhouse": ("1", _real_route, None),
+    "noguard": ("0", _real_route, None),
+    "oa": ("1", _route_as_oa, None),
+    # The hypothesis under test (CLAUDE.md §4): the FIXED FALLBACK RESERVE, not
+    # the guard's criterion, is what truncates the in-house master. Both the
+    # guard arm and the noguard arm hand the route ~50% of the limit, and
+    # clay0303hfsg needs ~30 s of 30 to certify -- driven directly with the whole
+    # budget it returns `optimal` 26669, through the route `feasible` 42098.
+    # This arm gives the route the entire limit and keeps no reserve.
+    # KILL CRITERION: if it does not recover clay0303hfsg/tls2, or if it costs
+    # certificates on rows the fallback currently rescues, the reserve is not the
+    # binding constraint and the hypothesis is wrong.
+    "full": ("0", _real_route, 1.0),
+}
 
 
 def flat_point(model, xd):
@@ -117,9 +133,12 @@ print(f"{'instance':22s} {'arm':8s} {'status':12s} {'objective':>17s} {'bound':>
 rows, checks, viol = [], 0, []
 for name in routed:
     rec = {"instance": name}
-    for arm, (guard, route_fn) in ARMS.items():
+    for arm, (guard, route_fn, frac) in ARMS.items():
         os.environ["DISCOPT_CONVEX_ROUTE_GUARD"] = guard
         _solver._convex_minlp_auto_route = route_fn
+        _solver._CONVEX_ROUTE_BUDGET_FRACTION = (
+            _REAL_FRACTION if frac is None else float(frac)
+        )
         try:
             m = from_nl(str(paths[name]))
             rec.setdefault("sense",
@@ -138,6 +157,7 @@ for name in routed:
             continue
         finally:
             _solver._convex_minlp_auto_route = _real_route
+            _solver._CONVEX_ROUTE_BUDGET_FRACTION = _REAL_FRACTION
         d = rec[arm]
         ob = "None" if d["objective"] is None else f"{d['objective']:.10g}"
         bd = "None" if d["bound"] is None else f"{d['bound']:.10g}"
