@@ -520,3 +520,75 @@ def test_integer_free_convex_model_still_certifies(method):
     assert r.status == "optimal", f"{method} lost a certificate it had earned"
     assert r.bound is not None
     assert r.objective == pytest.approx(0.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# flag defaults and their opt-outs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_graduated_flag_defaults_and_opt_outs(monkeypatch):
+    """A graduated flag is a default, never a dead flag: ``=0`` must restore the old
+    behaviour, and a flag that did NOT graduate must stay off."""
+    from discopt.solvers.oa import (
+        _elastic_restoration_enabled,
+        _infeasible_nogood_enabled,
+        _oa_node_cuts_enabled,
+    )
+
+    for name in (
+        "DISCOPT_OA_NODE_CUTS",
+        "DISCOPT_OA_ELASTIC_RESTORATION",
+        "DISCOPT_OA_INFEASIBLE_NOGOOD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Graduated on the #1141 panel: 42 -> 44 certificates, -10.8 % wall (node cuts);
+    # outcome-neutral on the corpus and 2.3-8x on the class (elastic restoration).
+    assert _oa_node_cuts_enabled() is True
+    assert _elastic_restoration_enabled() is True
+    # Sound, fires (up to 1709 exclusions on st_miqp1), and changes nothing on the
+    # corpus (+0.8 % wall, 0 bounds moved) while costing `portfol` its incumbent —
+    # the DISCOPT_CUT_INHERIT rule, so it stays off.
+    assert _infeasible_nogood_enabled() is False
+
+    monkeypatch.setenv("DISCOPT_OA_NODE_CUTS", "0")
+    monkeypatch.setenv("DISCOPT_OA_ELASTIC_RESTORATION", "0")
+    monkeypatch.setenv("DISCOPT_OA_INFEASIBLE_NOGOOD", "1")
+    assert _oa_node_cuts_enabled() is False
+    assert _elastic_restoration_enabled() is False
+    assert _infeasible_nogood_enabled() is True
+
+
+@pytest.mark.smoke
+def test_elastic_restoration_is_gated_on_certified_convex_constraints(monkeypatch):
+    """The gate is what keeps the elastic form free on nonconvex models.
+
+    Every corpus row where it was slower was nonconvex and produced no incumbent in
+    either arm; every convex row was neutral or faster. So an unproven-convex model
+    must keep the cheap merit path even with the flag on.
+    """
+    import discopt.solvers.oa as oa
+
+    monkeypatch.setenv("DISCOPT_OA_ELASTIC_RESTORATION", "1")
+    seen = []
+    real = oa._solve_elastic_restoration
+    monkeypatch.setattr(
+        oa, "_solve_elastic_restoration", lambda *a, **k: seen.append(1) or real(*a, **k)
+    )
+
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    ev = make_evaluator(_mixed_sense_model())
+    lo, hi = np.array([-2.0, -2.0]), np.array([2.0, 2.0])
+    x_master = np.array([1.9, -1.9])
+
+    oa._solve_feasibility_subproblem(
+        ev, lo, hi, [], x_master, "ipm", "L_infinity", constraint_convex_mask=[True, True, False]
+    )
+    assert not seen, "the elastic form ran on a model with an unproven-convex row"
+
+    oa._solve_feasibility_subproblem(
+        ev, lo, hi, [], x_master, "ipm", "L_infinity", constraint_convex_mask=[True, True, True]
+    )
+    assert seen, "the elastic form did not run on a certified-convex model"

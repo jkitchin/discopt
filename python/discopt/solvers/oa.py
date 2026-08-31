@@ -1520,6 +1520,7 @@ def _solve_nlp_attempt(
                 objective=float(evaluator.evaluate_objective(result.x)),
                 multipliers=result.multipliers,
                 status=result.status,
+                raw_status=getattr(result, "raw_status", None),
             )
 
         # Accept iteration- and time-limited results if the solution is primal
@@ -1541,6 +1542,12 @@ def _solve_nlp_attempt(
                     objective=float(evaluator.evaluate_objective(result.x)),
                     multipliers=result.multipliers,
                     status=result.status,
+                    # Carried on the ACCEPTED path too (#1141): without it a
+                    # restoration that converged and one that merely stopped at the
+                    # iteration limit both record ``raw=None``, and the outcome
+                    # tally cannot tell them apart — the exact ambiguity this
+                    # field exists to remove.
+                    raw_status=getattr(result, "raw_status", None),
                 )
         # Not accepted as a usable point — but WHY is not thrown away (#1141).
         # ``status``/``raw_status`` ride along on the empty attempt so the caller
@@ -1990,11 +1997,29 @@ def _elastic_restoration_enabled() -> bool:
     """``DISCOPT_OA_ELASTIC_RESTORATION``: pose the OA feasibility subproblem as a
     constrained elastic NLP instead of an unconstrained violation merit.
 
-    Default-OFF. It changes which point the feasibility cut is built at, hence the
-    master's rows and its dual bound — CLAUDE.md §5 regime 2 — so it ships behind
-    a flag pending a corpus panel. ``=1`` turns it on.
+    Default-**ON** since the #1141 graduation panel; ``=0`` is the opt-out. It
+    changes which point the feasibility cut is built at, hence the master's rows and
+    its dual bound — CLAUDE.md §5 regime 2 — so it shipped default-OFF until that
+    panel. Over the 119 vendored MINLPLib instances it is **outcome-neutral**:
+    0 soundness violations, certificates 23/23, 0 bounds moved, wall −1.5 %, and on
+    all 7 rows where it actually runs the status, objective and wall are unchanged
+    while ``Error_In_Step_Computation`` failures turn into convergences
+    (``m3`` 313 -> 0, ``clay0303hfsg`` 46 -> 0). It pays on the class the issue is
+    about: 2.3x on ``meanvarx`` (the one real corpus row of that class, same
+    certificate) and 5–8x on reconstructions of ``portfol_classical050_1``.
+
+    Applies **only on a model whose constraints are all certified convex** (the
+    caller passes the mask). That gate is not a tuning knob, it is the condition
+    under which the elastic subproblem means anything: on a convex feasible set it
+    is a convex NLP, so its solution is the *global* minimum-violation point and
+    the restoration actually certifies something. On a nonconvex model it is one
+    more local solve — and, measured, a more expensive one. Every corpus row where
+    the elastic form was slower was nonconvex and produced no incumbent in either
+    arm (`bchoco06/07/08`, `beuster`, `heatexch_gen2`: +3.6 to +14.1 s each,
+    `constraints_convex=False`, `incumbent=False`); every convex row was neutral or
+    faster. See ``docs/dev/performance-plan.md`` §24.
     """
-    return os.environ.get("DISCOPT_OA_ELASTIC_RESTORATION", "0") not in (
+    return os.environ.get("DISCOPT_OA_ELASTIC_RESTORATION", "1") not in (
         "0",
         "",
         "false",
@@ -2173,6 +2198,7 @@ def _solve_feasibility_subproblem(
     nlp_solver,
     feasibility_norm,
     max_wall_time: Optional[float] = None,
+    constraint_convex_mask: Optional[list[bool]] = None,
 ):
     """Solve feasibility problem with fixed integers.
 
@@ -2193,7 +2219,12 @@ def _solve_feasibility_subproblem(
     best_merit = _constraint_violation_merit(evaluator, x0, feasibility_norm)
 
     try:
-        if _elastic_restoration_enabled() and evaluator.n_constraints > 0:
+        if (
+            _elastic_restoration_enabled()
+            and evaluator.n_constraints > 0
+            and bool(constraint_convex_mask)
+            and all(constraint_convex_mask or ())
+        ):
             x_feas = _solve_elastic_restoration(
                 evaluator, sub_lb, sub_ub, x0, feasibility_norm, max_wall_time
             )
@@ -2584,6 +2615,7 @@ def _run_feasibility_pump(
             nlp_solver,
             feasibility_norm,
             max_wall_time=_remaining_wall(t_start, time_limit),
+            constraint_convex_mask=decomp.oa_constraint_mask,
         )
         if x_feas is not None:
             current = x_feas
@@ -4787,16 +4819,26 @@ def _continuous_model_is_certified_convex(decomp: "_DecomposedProblem") -> bool:
 def _oa_node_cuts_enabled() -> bool:
     """``DISCOPT_OA_NODE_CUTS``: separate ECP cuts at *fractional* master nodes.
 
-    Default-OFF. Adding a supporting hyperplane at a fractional node is sound (a
-    convex constraint's tangent underestimates it everywhere, so the row is
-    globally valid), but it CHANGES the master's dual bound — CLAUDE.md §5 regime
-    2 — so it ships behind a flag until a corpus-wide differential panel clears
-    both bars, cert-clean and net-positive. ``=1`` turns it on.
+    Default-**ON** since the #1141 graduation panel. Adding a supporting hyperplane
+    at a fractional node is sound (a convex constraint's tangent underestimates it
+    everywhere, so the row is globally valid) but it CHANGES the master's dual
+    bound — CLAUDE.md §5 regime 2 — so it shipped default-OFF until a corpus-wide
+    differential panel cleared both bars.
 
-    Ignored on the SHOT profile, which is *defined* by fractional-point
+    That panel, over the 119 vendored MINLPLib instances (``lp_nlp_bb`` on the
+    in-house simplex master, 30 s per arm, interleaved, incumbents
+    feasibility-verified): 37/119 rows exercised it, 189 soundness checks,
+    **0 violations**, certificates **42 -> 44** with none lost, total wall
+    601.9 s -> 536.8 s (**−10.8 %**), **10 dual bounds tighter and 2 looser**
+    (``clay0303hfsg`` and ``fac2``, neither certified by either arm). On the class
+    the issue is about it is 6–16x. Recorded in
+    ``docs/dev/performance-plan.md`` §24.
+
+    ``DISCOPT_OA_NODE_CUTS=0`` is the opt-out and restores the pre-#1141 master
+    exactly. Ignored on the SHOT profile, which is *defined* by fractional-point
     hyperplane generation and therefore always separates at nodes.
     """
-    return os.environ.get("DISCOPT_OA_NODE_CUTS", "0") not in ("0", "", "false", "False")
+    return os.environ.get("DISCOPT_OA_NODE_CUTS", "1") not in ("0", "", "false", "False")
 
 
 def _oa_node_cut_rounds() -> int:
@@ -5430,6 +5472,7 @@ def solve_lp_nlp_bb(
                     nlp_solver,
                     feasibility_norm,
                     max_wall_time=_remaining_wall(t_start, time_limit),
+                    constraint_convex_mask=decomp.oa_constraint_mask,
                 )
                 if x_feas is not None:
                     _add_feasibility_cuts(
@@ -8536,6 +8579,7 @@ def solve_oa(
                         nlp_solver,
                         feasibility_norm,
                         max_wall_time=_remaining_wall(t_start, time_limit),
+                        constraint_convex_mask=decomp.oa_constraint_mask,
                     )
                     if x_feas is not None:
                         _add_feasibility_cuts(

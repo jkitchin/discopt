@@ -49,7 +49,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--n", type=int, default=8)
 ap.add_argument("--K", type=int, default=3)
 ap.add_argument("--seeds", type=int, default=3)
-ap.add_argument("--cap-scale", type=float, default=0.55)
+ap.add_argument("--cap-scale", type=float, default=0.9)
 a = ap.parse_args()
 
 compared = 0
