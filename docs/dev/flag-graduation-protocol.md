@@ -69,8 +69,8 @@ PYTHONPATH=<worktree>/python JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
 
 2. **Cert-panel neutrality** — re-runs the cert-neutrality check
    (`check_cert_neutrality.py`'s logic) **in a fresh subprocess with the flag ON**
-   (so the fresh interpreter reads the env flag at import) against the committed
-   41-instance `docs/dev/data/cert-baseline.jsonl`:
+   (so the fresh interpreter reads the env flag at import) over the vendored cert
+   panel (`docs/dev/data/cert-baseline.jsonl`, 52 instances):
    - a **bound-neutral** flag must be **byte-identical** (node_count + objective);
    - a **bound-changing / heuristic-policy** flag must keep the certified
      **objective** unchanged and the **optimal status** (soundness), while a
@@ -160,7 +160,7 @@ So a corpus-wide nightly **cannot** run in GitHub Actions. The split:
 
 - **CI subset (GitHub Actions)** — `.github/workflows/graduation-gate.yml`
   (scheduled `cron:` + `workflow_dispatch`) runs **only the cert-neutrality +
-  `incorrect_count`** portion over the **vendored** cert panel (the 41 instances
+  `incorrect_count`** portion over the **vendored** cert panel (the 52 instances
   that ARE in the repo), via `graduation_gate.py --ci-subset`. It:
   - proves that turning a parked flag ON does not change a certified objective or
     lose an optimal status on the panel (a regression guard);
@@ -168,6 +168,32 @@ So a corpus-wide nightly **cannot** run in GitHub Actions. The split:
     verdict (a nightly-only fact).
 
   Reproduce the CI subset locally with `make graduation-gate-ci`.
+
+  **The CI subset's reference is a flag-OFF control panel measured in the same
+  run, not the committed snapshot.** Like the held-out arm in (1), the OFF solve
+  is shared across arms, so an N-flag run pays for it once (8 panels for the 7
+  gated arms). This matters because a flag guard has to isolate
+
+      (flag ON  vs  flag OFF)       <- what it is for
+      (today's `main`  vs  snapshot) <- drift, identical for every flag
+
+  and comparing ON against the snapshot mixes the two. Measured 2026-08-29: the
+  OFF control alone produced 9 violations against the committed baseline, and
+  `root_fixpoint` and `lu_density_route` each produced the *same* 9 — so all
+  seven arms failed identically and reported `soundness=FAIL` for something no
+  flag did. That is why this gate was red from run 32706094552 (2026-08-24)
+  onward while #1058 and #1122 were opened and closed against it.
+
+  The drift is not a soundness fault — across every comparison there were **zero**
+  objective violations. It is three instances (`clay0303hfsg`, `nvs05`,
+  `tanksize`) no longer certifying inside their 60 s wall-clock budget, plus
+  node-count movement. A wall-clock budget deciding a `soundness=FAIL` verdict is
+  the "the bar measures the runner" failure named in `_assert_budget_not_clock`.
+
+  The snapshot comparison is **kept and printed** as an explicit drift report, and
+  the gate still hard-fails on the hardware-independent soundness question: any
+  instance it **certified** whose objective disagrees with `cert-optima.json`
+  beyond correctness tolerance. That check refuses to pass if it compared nothing.
 
 ## Determinism
 
@@ -184,7 +210,7 @@ the seed + N + time-limit with each verdict.
 - `discopt_benchmarks/scripts/check_cert_neutrality.py` +
   `discopt_benchmarks/utils/cert_neutrality.py` — the cert-baseline neutrality
   check the gate reuses.
-- `docs/dev/data/cert-baseline.jsonl` — the 41-instance cert baseline (the
+- `docs/dev/data/cert-baseline.jsonl` — the 52-instance cert baseline (the
   neutrality reference).
 - `docs/dev/data/graduation-ledger.jsonl` — the append-only verdict ledger.
 - `.github/workflows/graduation-gate.yml` — the CI subset workflow.

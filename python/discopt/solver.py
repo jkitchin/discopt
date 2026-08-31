@@ -3146,6 +3146,103 @@ def _reduce_node_and_stage(
     return False
 
 
+# The unbounded sentinel, matching the ``cu[j] < 1e19`` / ``cl[j] > -1e19``
+# guards at this function's call site.  Bounds at or beyond it are treated as
+# infinite: their terms are counted, never summed.
+_FBBT_INF = 1e19
+
+
+def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
+    """One FBBT sweep of a single *linear* row, in Gauss-Seidel order.
+
+    For row ``j`` linearised at ``mid``, the bound implied for variable ``i`` is
+
+        J_i * (x_i - mid_i)  <=  rhs - g_j - sum_{k != i} J_k * (bound_k - mid_k)
+
+    where ``bound_k`` is whichever of ``lb_k``/``ub_k`` leaves the row the most
+    room.  The pre-#1066 code recomputed that ``k`` sum *inside* the ``i`` loop,
+    so a row cost O(n^2) and the sweep O(m * n^2) -- 14M Python iterations per
+    call on a 150-variable, 103-row instance, measured as 9.9 s of self time
+    (40% of a 60 s ``portfol_classical050_1`` solve) and 56M ``abs()`` calls.
+
+    The sum over ``k != i`` differs between consecutive ``i`` only in which
+    single term is excluded, so it is formed once and the excluded term is
+    subtracted, at O(n) per row.
+
+    Nothing is lost by hoisting it, even though the original read ``lb``/``ub``
+    live and so *could* have seen a bound tightened earlier in the same sweep:
+    in either sense the update writes the bound **opposite** the one the terms
+    read.  For ``<=``, a ``J_k > 0`` term draws on ``lb_k`` while a ``J_i > 0``
+    update writes ``ub_i``; for ``J < 0`` the two swap together.  The clamps
+    (``max(lb[i], ...)``/``min(ub[i], ...)``) and the ``lb == ub`` skip only
+    ever touch ``i``'s own bounds.  So no update inside a sweep can change any
+    term of that sweep, and the hoisted sum is the same sum -- this is not a
+    Jacobi relaxation of a Gauss-Seidel loop.  (Between the two senses the
+    bounds *have* moved, which is why each sense forms its terms afresh.)
+
+    ``is_upper`` selects the sense: ``True`` for ``g_j(x) <= rhs``, ``False``
+    for ``g_j(x) >= rhs``.  In both senses the predicate ``(J_k > 0) ==
+    is_upper`` picks *both* the bound that enters the term and the bound the
+    update writes, which is why one body serves both.
+
+    Terms are only ever infinite in the direction that makes the residual
+    infinite (a ``J_k > 0`` term draws on ``lb_k``, so it can only be ``-inf``
+    for the ``<=`` sense), and an infinite residual leaves every comparison
+    below false.  Rather than form ``inf - inf``, infinite terms are counted
+    and any ``i`` with another infinite term is skipped -- which is exactly
+    what the arithmetic did, without the NaN.
+
+    Returns ``True`` if any bound moved.  ``lb``/``ub`` are updated in place.
+    """
+    active = np.flatnonzero(np.abs(J_row) >= 1e-12)
+    if active.size == 0:
+        return False
+
+    bound = np.where((J_row[active] > 0.0) == is_upper, lb[active], ub[active])
+    term = J_row[active] * (bound - mid[active])
+    # The unbounded marker here is the sentinel ``1e20``, not ``inf``, so
+    # ``np.isfinite`` is *not* the test -- ``9.999e19`` is an ordinary float and
+    # passes it.  Its term then enters the running total, and the ulp of
+    # ``1e20`` is 16384: every ordinary-scale term added to it is annihilated,
+    # so ``sum - term_i`` returns ``0`` where the true partial sum was the small
+    # remainder, and the row over-tightens.  The pre-#1066 loop never formed
+    # that sum -- it subtracted the ``k != i`` terms one at a time.  Test the
+    # *bound*, as the sentinel rule requires, and keep those terms out of the
+    # total; they are counted below exactly as true infinities are.
+    finite = np.isfinite(term) & (np.abs(bound) < _FBBT_INF)
+    n_inf = int(active.size - np.count_nonzero(finite))
+    sum_finite = float(np.sum(np.where(finite, term, 0.0)))
+
+    slack = rhs - g_j
+    changed = False
+
+    for pos in range(active.size):
+        i = int(active[pos])
+        if lb[i] == ub[i]:
+            continue
+        term_i = float(term[pos])
+        finite_i = bool(finite[pos])
+        if n_inf - (0 if finite_i else 1) > 0:
+            # Some *other* term is infinite: the residual is infinite and no
+            # comparison below can fire.  Skip, as the original arithmetic did.
+            continue
+        residual = slack - (sum_finite - (term_i if finite_i else 0.0))
+
+        J_i = float(J_row[i])
+        new_bound = mid[i] + residual / J_i
+        if (J_i > 0.0) == is_upper:
+            if not new_bound < ub[i] - 1e-10:
+                continue
+            ub[i] = max(lb[i], new_bound)
+        else:
+            if not new_bound > lb[i] + 1e-10:
+                continue
+            lb[i] = min(ub[i], new_bound)
+        changed = True
+
+    return changed
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -3253,68 +3350,10 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
         for j in range(m):
             if not is_linear[j]:
                 continue
-            # For constraint g_j(x) <= cu_j:
-            # Linear approx: g_j(mid) + J[j,:] @ (x - mid) <= cu_j
-            # To find max x_i, set other vars to MINIMIZE g (most room):
-            #   J[j,k] > 0 → use lb[k];  J[j,k] < 0 → use ub[k]
-            if cu[j] < 1e19:
-                for i in range(n):
-                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
-                        continue
-                    residual = cu[j] - g[j]
-                    for k in range(n):
-                        if k == i:
-                            continue
-                        if abs(J[j, k]) < 1e-12:
-                            # Zero Jacobian entry contributes nothing; skip to
-                            # avoid ``0 * inf = nan`` when var k is unbounded.
-                            continue
-                        if J[j, k] > 0:
-                            residual -= J[j, k] * (lb[k] - mid[k])
-                        else:
-                            residual -= J[j, k] * (ub[k] - mid[k])
-                    # J[j,i] * (x_i - mid_i) <= residual
-                    if J[j, i] > 1e-12:
-                        new_ub = mid[i] + residual / J[j, i]
-                        if new_ub < ub[i] - 1e-10:
-                            ub[i] = max(lb[i], new_ub)
-                            changed = True
-                    elif J[j, i] < -1e-12:
-                        new_lb = mid[i] + residual / J[j, i]
-                        if new_lb > lb[i] + 1e-10:
-                            lb[i] = min(ub[i], new_lb)
-                            changed = True
-
-            # For constraint g_j(x) >= cl_j:
-            # To find min x_i, set other vars to MAXIMIZE g (most room):
-            #   J[j,k] > 0 → use ub[k];  J[j,k] < 0 → use lb[k]
-            if cl[j] > -1e19:
-                for i in range(n):
-                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
-                        continue
-                    residual = cl[j] - g[j]
-                    for k in range(n):
-                        if k == i:
-                            continue
-                        if abs(J[j, k]) < 1e-12:
-                            # Zero Jacobian entry contributes nothing; skip to
-                            # avoid ``0 * inf = nan`` when var k is unbounded.
-                            continue
-                        if J[j, k] > 0:
-                            residual -= J[j, k] * (ub[k] - mid[k])
-                        else:
-                            residual -= J[j, k] * (lb[k] - mid[k])
-                    # J[j,i] * (x_i - mid_i) >= residual
-                    if J[j, i] > 1e-12:
-                        new_lb = mid[i] + residual / J[j, i]
-                        if new_lb > lb[i] + 1e-10:
-                            lb[i] = min(ub[i], new_lb)
-                            changed = True
-                    elif J[j, i] < -1e-12:
-                        new_ub = mid[i] + residual / J[j, i]
-                        if new_ub < ub[i] - 1e-10:
-                            ub[i] = max(lb[i], new_ub)
-                            changed = True
+            if cu[j] < 1e19 and _fbbt_linear_row_sweep(J[j], g[j], cu[j], mid, lb, ub, True):
+                changed = True
+            if cl[j] > -1e19 and _fbbt_linear_row_sweep(J[j], g[j], cl[j], mid, lb, ub, False):
+                changed = True
 
         if not changed:
             break
@@ -5153,13 +5192,15 @@ def _convex_minlp_route_enabled() -> bool:
     return raw.strip() != "0"
 
 
-def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
+def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
 
-    Returns ``(method, reason)`` where ``method`` is the ``mip_nlp_method`` to
-    use, or ``None`` to leave the model on the default spatial/NLP
-    branch-and-bound. ``reason`` always explains the verdict and is surfaced on
-    ``SolveResult.algorithm_route`` so the decision is never invisible.
+    Returns ``(method, reason, options)`` where ``method`` is the
+    ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
+    spatial/NLP branch-and-bound, and ``options`` are the extra MIP-NLP kwargs the
+    route picked with it (empty when there are none). ``reason`` always explains
+    the verdict and is surfaced on ``SolveResult.algorithm_route`` so the decision
+    is never invisible.
 
     Why this exists: discopt certifies models like the MINLPLib ``syn``/``rsyn``
     family fully convex at the root in hundredths of a second (286/286
@@ -5178,10 +5219,27 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     ``syn20m02m``   feasible, 63.7% off     optimal, 23.5 s
     ==============  ======================  ====================
 
-    ``"oa"`` is the route target rather than the faster ``"lp_nlp_bb"``
-    (optimal on all three in 1.5-3.4 s) because ``lp_nlp_bb`` hard-requires a
-    Gurobi license — see #1060, which must land before that becomes selectable
-    automatically.
+    The target used to be ``"oa"``, "because ``lp_nlp_bb`` hard-requires a Gurobi
+    license — see #1060, which must land before that becomes selectable
+    automatically". #1060 landed on 2026-08-20 and brought a free HiGHS master
+    with it, so that reason has expired and the target moves to ``lp_nlp_bb`` on
+    the HiGHS master. Measured 2026-08-29 at the default 60 s on the #1066 rows
+    the ``"oa"`` target did not close, reference optimum in brackets:
+
+    ==========================  =====================  ========================
+    instance                    ``"oa"`` (the target    ``lp_nlp_bb`` + HiGHS
+                                until now)             (the target now)
+    ==========================  =====================  ========================
+    ``rsyn0830m`` [510.072]     feasible, 60.2 s       **optimal, 4.9 s**
+    ``rsyn0840m`` [325.555]     feasible, 62.7 s       **optimal, 8.4 s**
+    ``rsyn0820m02m`` [1092.09]  feasible 102% off      **optimal, 39.3 s**
+    ==========================  =====================  ========================
+
+    The master engine is the whole difference, not the tree topology:
+    ``lp_nlp_bb`` on the *in-house* master is measurably WORSE than ``"oa"`` on
+    the same rows (``rsyn0840m`` 103.5% off vs 0.0%), which is why the HiGHS
+    master is a precondition of the retarget rather than an optimization on top
+    of it. Without ``highspy`` the target stays ``"oa"``.
 
     Every gate below is a *refusal* to route: an unknown convexity verdict, a
     nonconvex model, a missing MILP backend, or an opaque ``dm.custom`` body all
@@ -5189,17 +5247,17 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
     whose convexity is merely unproven.
     """
     if not _convex_minlp_route_enabled():
-        return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)"
+        return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
-        return None, "not routed: model is pure continuous"
+        return None, "not routed: model is pure continuous", {}
 
     if _model_contains_custom_call(model):
         # dm.custom is an opaque AD-only callable; the MILP master cannot
         # linearize what it cannot read.
-        return None, "not routed: model contains an opaque dm.custom body"
+        return None, "not routed: model contains an opaque dm.custom body", {}
 
     try:
         from discopt._relax.problem_classifier import ProblemClass, classify_problem
@@ -5207,20 +5265,20 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
         problem_class = classify_problem(model)
     except Exception as exc:  # noqa: BLE001 - classification failure => stay put
         logger.debug("convex-MINLP route: problem classification failed: %s", exc)
-        return None, "not routed: problem classification failed"
+        return None, "not routed: problem classification failed", {}
 
     if not isinstance(problem_class, ProblemClass):  # pragma: no cover - defensive
-        return None, "not routed: problem classification returned an unknown value"
+        return None, "not routed: problem classification returned an unknown value", {}
     if problem_class.value not in _CONVEX_MINLP_ROUTE_CLASSES:
-        return None, f"not routed: problem class {problem_class.value} is not a discrete NLP"
+        return None, f"not routed: problem class {problem_class.value} is not a discrete NLP", {}
 
     known, is_convex, _mask = _classify_model_convexity(
         model, failure_label="convex-MINLP route convexity detection failed"
     )
     if not known:
-        return None, "not routed: model convexity is unproven"
+        return None, "not routed: model convexity is unproven", {}
     if not is_convex:
-        return None, "not routed: model is not convex"
+        return None, "not routed: model is not convex", {}
 
     # The OA master is a MILP. Refuse to route when no MILP backend can be
     # loaded rather than routing into an import error (CLAUDE.md §3: a loud
@@ -5238,11 +5296,33 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str]:
 
         get_milp_solver()
     except ImportError:
-        return None, "not routed: no MILP backend available for the OA master"
+        return None, "not routed: no MILP backend available for the OA master", {}
 
-    return "oa", (
-        f"mip-nlp/oa: {problem_class.value} certified convex at the root "
-        "(DISCOPT_CONVEX_MINLP_ROUTE)"
+    # ``lp_nlp_bb`` is the target only when the HiGHS master it needs is actually
+    # importable. On the in-house master the same method is worse than ``"oa"``
+    # (see the table above), so this is not a preference between two good options
+    # -- it is the difference between the retarget being an improvement and a
+    # regression. No highspy, no retarget.
+    try:
+        from discopt.solvers.milp_highs import solve_milp_with_lazy_cuts  # noqa: F401
+    except ImportError:
+        return (
+            "oa",
+            (
+                f"mip-nlp/oa: {problem_class.value} certified convex at the root; "
+                "lp_nlp_bb not selected (highspy unavailable) "
+                "(DISCOPT_CONVEX_MINLP_ROUTE)"
+            ),
+            {},
+        )
+
+    return (
+        "lp_nlp_bb",
+        (
+            f"mip-nlp/lp_nlp_bb on the HiGHS master: {problem_class.value} certified "
+            "convex at the root (DISCOPT_CONVEX_MINLP_ROUTE)"
+        ),
+        {"milp_solver": "highs"},
     )
 
 
@@ -5485,13 +5565,23 @@ def _route_progress_guard_options(
     """
     if not _convex_route_progress_guard_enabled():
         return mip_nlp_options, None
-    if method_key != "oa":
+    if method_key not in ("oa", "lp_nlp_bb"):
         return mip_nlp_options, None
     if mip_nlp_options is not None and mip_nlp_options.get("termination_hook") is not None:
         return mip_nlp_options, None
     guard = _RouteProgressGuard(time_limit)
     options = dict(mip_nlp_options or {})
     options["termination_hook"] = guard
+    if method_key == "lp_nlp_bb":
+        # The single-tree method checks in at every master restart, so it needs no
+        # deadline to get the hook called -- and has no separate master to give one
+        # to. The fixed split cost it ``rsyn0820m02m``, which certifies at 37.5s of
+        # a 60s limit and was cut at the 30s wall (measured 2026-08-29, both arms
+        # back to back). The reserve is not waste, though: ``squfl015-060`` is
+        # certified by the FALLBACK, not the route, and giving the route the whole
+        # limit loses it (optimal -> feasible in the same panel). Progress is what
+        # separates those two rows; the clock cannot.
+        return options, guard
     # A hook that only runs at the top of an OA iteration cannot budget anything
     # unless the loop actually gets back there. OA's first master expands to fill
     # whatever budget it is handed (``_MASTER_NO_INCUMBENT_BUDGET_FRAC``), so
@@ -5695,7 +5785,31 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         winner.bound = float(l_b)
     obj, bnd = winner.objective, winner.bound
     if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
-        winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
+        # A bound past the incumbent is a broken certificate whichever side it
+        # came from -- the check above covers only the LOSER's bound, so a
+        # winner that arrives already inverted sailed through. Measured on
+        # ``squfl020-150`` at default settings: the OA route won with
+        # ``objective=557.848649973387`` and its own ``bound=557.9460019817818``
+        # (MINLPLib ``=best=`` 557.84865), and this merge published that bound.
+        #
+        # Note what the gap formula below does with such a pair on its own:
+        # ``abs(bnd - obj)`` turns an inversion of 0.097 into a 1.75e-4 gap
+        # that reads as nearly converged -- precisely backwards. The guard has
+        # to come first; the formula cannot detect this case at all.
+        if _bound_crosses_objective(float(bnd), obj, is_maximize):
+            logger.warning(
+                "#1059 merge: the %s side's dual bound %.12g crosses the incumbent "
+                "%.12g it is reported against; suppressing it rather than "
+                "publishing a bound known to be invalid.",
+                "route" if route_wins else "fallback",
+                float(bnd),
+                float(obj),
+            )
+            winner.bound = None
+            winner.gap = None
+            winner.gap_certified = False
+        else:
+            winner.gap = abs(bnd - obj) / max(abs(obj), 1e-10)
     # ``node_count`` is a WORK statistic, not part of the answer, so it belongs to
     # the solve rather than to whichever side won it. Reporting only the winner's
     # made a routed ``squfl025-040`` say ``nodes=0`` after 61 s in which the
@@ -6705,7 +6819,9 @@ _ROUTE_FALLBACK_NOTE: list[str] = []
 #: default path's ~67 return sites and can reach none of them. Same
 #: list-not-scalar discipline as the note: the wrapper restores the exact depth
 #: it entered at, so a raised exception cannot leak state into the next solve.
-_ROUTE_FALLBACK_STATE: list[tuple["SolveResult", bool]] = []
+# ``None`` is a real state here: an auto-route that RAISED has no result to
+# carry forward, and ``_merge_route_and_fallback`` returns the fallback for it.
+_ROUTE_FALLBACK_STATE: list[tuple[Optional["SolveResult"], bool]] = []
 
 
 def _stamp_layer_timing(fn: _F) -> _F:
@@ -7591,11 +7707,19 @@ def solve_model(
                 + ")"
             )
         else:
-            _auto_route_method, _auto_route_reason = _convex_minlp_auto_route(model)
+            (
+                _auto_route_method,
+                _auto_route_reason,
+                _auto_route_options,
+            ) = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
             kwargs.setdefault("mip_nlp_method", _auto_route_method)
+            # setdefault, not assignment: an explicit milp_solver= from the caller
+            # outranks the route's pick.
+            for _route_opt, _route_val in _auto_route_options.items():
+                kwargs.setdefault(_route_opt, _route_val)
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":
@@ -7724,17 +7848,45 @@ def solve_model(
                     min(time_limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S),
                 )
         _route_t0 = time.perf_counter()
-        _mip_nlp_result = solve_mip_nlp(
-            model,
-            method=mip_nlp_method,
-            mip_nlp_options=mip_nlp_options,
-            time_limit=_route_budget,
-            gap_tolerance=gap_tolerance,
-            max_iterations=max_nodes,
-            nlp_solver=nlp_solver,
-            initial_point=initial_point,
-            **mip_nlp_kwargs,
-        )
+        _route_raised: Optional[BaseException] = None
+        try:
+            _mip_nlp_result = solve_mip_nlp(
+                model,
+                method=mip_nlp_method,
+                mip_nlp_options=mip_nlp_options,
+                time_limit=_route_budget,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                **mip_nlp_kwargs,
+            )
+        except Exception as _route_exc:  # noqa: BLE001 - see below
+            # #1066: a route the *router* chose is a decision, not a promise. The
+            # decomposition can refuse a model outright -- the HiGHS master
+            # rejects a lazy cut whose coefficients it cannot represent on an
+            # unbounded column, and raises rather than silently dropping terms
+            # (which is right: CLAUDE.md §3). But an auto-routed refusal must not
+            # become the caller's answer when the default path solves the model:
+            # ``st_test1`` and ``st_test5`` are ``optimal`` on the default path
+            # and raised ``HiGHS rejected the master model`` once the retarget
+            # sent them to the single-tree master (measured on the 104-instance
+            # route panel, 2026-08-29). Treat it exactly like a route that did
+            # not certify and spend the rest of the budget on the fallback.
+            #
+            # Narrow by construction, not by exception type: this arm is reached
+            # only when ``_auto_route_reason is not None``. An explicit
+            # ``solver="mip-nlp"`` re-raises, because the caller chose the
+            # algorithm and there is no fallback to reserve for.
+            if _auto_route_reason is None:
+                raise
+            _route_raised = _route_exc
+            _mip_nlp_result = None
+            logger.info(
+                "Convex MINLP auto-route raised %s: %s; falling back to the default path",
+                type(_route_exc).__name__,
+                _route_exc,
+            )
         _route_elapsed = time.perf_counter() - _route_t0
         # #1059: record WHY this algorithm ran. Only set on the auto-route, so an
         # explicit solver="mip-nlp" leaves the field None (the caller already
@@ -7783,12 +7935,16 @@ def solve_model(
                 logger.debug("MIP-NLP dual recovery skipped: %s", _dual_exc)
 
         _route_remaining = time_limit - _route_elapsed
-        if (
+        if _route_raised is None and (
             _auto_route_reason is None
             or _route_result_is_certified(_mip_nlp_result, gap_tolerance)
             or _route_remaining < _CONVEX_ROUTE_FALLBACK_FLOOR_S
         ):
+            assert _mip_nlp_result is not None  # only a raise leaves this None
             return _mip_nlp_result
+        # A route that RAISED has no result to return, so the floor above cannot
+        # apply to it -- returning ``None`` from ``solve_model`` would turn a
+        # solvable model into an ``AttributeError`` at the call site.
 
         # --- #1059: the auto-route did not certify -- fall back to the default path ---
         #
@@ -7818,9 +7974,14 @@ def solve_model(
         # 29.9 s limit and returned ``time_limit`` after 1 node with no
         # incumbent, which is the failure this whole change exists to remove.
         _ROUTE_FALLBACK_NOTE.append(
-            f"{_auto_route_reason}; did not certify in {_route_elapsed:.2f}s "
-            f"(status={getattr(_mip_nlp_result, 'status', None)}) -> fell back to the "
-            f"default path with {_route_remaining:.2f}s"
+            f"{_auto_route_reason}; "
+            + (
+                f"raised {type(_route_raised).__name__}: {_route_raised}"
+                if _route_raised is not None
+                else f"did not certify in {_route_elapsed:.2f}s "
+                f"(status={getattr(_mip_nlp_result, 'status', None)})"
+            )
+            + f" -> fell back to the default path with {_route_remaining:.2f}s"
         )
         # #1059: hand the routed result forward so the wrapper can return the
         # better of the two. This is the "never worse than the route" contract;
@@ -20049,6 +20210,104 @@ _ROUND_TIME_FRAC = 0.2
 _ROUND_ATTEMPT_CAP = 64
 
 
+class _RoundBudget:
+    """The spend rule for #1064's round-fix-resolve, as an object.
+
+    The real bound is *time*, not calls: one attempt is up to two
+    ``_pounce_recover_node_bound`` re-solves whose cost varies by orders of
+    magnitude across instances, so an attempt count bounds nothing.
+    ``_ROUND_ATTEMPT_CAP`` is only a backstop for a family whose roundings are
+    each cheap enough that the time budget alone would allow unboundedly many.
+
+    Split out of ``_solve_miqp_bb``'s node loop so the rule can be exercised
+    directly. Counting attempts through a real solve measures the machine, not
+    the budget: how many times a wall-clock-bounded search reaches this gate is
+    not reproducible even on one box (measured 2026-08-29, ten identical runs of
+    the UFL fixture -- 0, 7 or 15 gate visits, 0/31/97 nodes, status flipping
+    between ``optimal`` and ``feasible``), which is how the end-to-end version of
+    this test came to compare two coin flips and fail on main.
+    """
+
+    __slots__ = ("attempts", "secs", "budget")
+
+    def __init__(self, time_limit: float, frac: float | None = None) -> None:
+        # Read the module global at construction time so a test can retune it.
+        self.budget = (_ROUND_TIME_FRAC if frac is None else float(frac)) * float(time_limit)
+        self.attempts = 0
+        self.secs = 0.0
+
+    def may_attempt(self) -> bool:
+        return self.attempts < _ROUND_ATTEMPT_CAP and self.secs < self.budget
+
+    def attempt_deadline(self, time_limit: float, elapsed: float) -> float:
+        """Per-attempt limit: what is left of the budget, never past the solve.
+
+        ``_pounce_recover_node_bound`` derives its own limit as
+        ``time_limit - (now - t_start)``, so handing it the global limit would
+        let one attempt run all the way to the solve deadline.
+        """
+        return min(float(time_limit), float(elapsed) + max(0.0, self.budget - self.secs))
+
+    def begin_attempt(self) -> None:
+        self.attempts += 1
+
+    def add_spend(self, secs: float) -> None:
+        self.secs += float(secs)
+
+
+def _round_fix_resolve_attempt(
+    x_row,
+    int_offsets,
+    int_sizes,
+    node_lb_i,
+    node_ub_i,
+    c,
+    obj_const,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start,
+    time_limit,
+    Q,
+    budget,
+    *,
+    enabled,
+    has_incumbent,
+):
+    """#1064's round-fix-resolve gate: a rounded completion, or a declined gate.
+
+    Spent only while the tree has no incumbent -- with one in hand there is
+    already a primal bound, and a rounded completion can only ever supply an
+    upper bound (see :func:`_pounce_round_incumbent`) -- and only while
+    ``budget`` allows. The spend is recorded even when the attempt raises, so a
+    failing rounding cannot buy unlimited retries.
+    """
+    if not enabled or has_incumbent or not budget.may_attempt():
+        return None
+    budget.begin_attempt()
+    t0 = time.perf_counter()
+    try:
+        return _pounce_round_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            c,
+            obj_const,
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            t_start,
+            budget.attempt_deadline(time_limit, t0 - t_start),
+            Q=Q,
+        )
+    finally:
+        budget.add_spend(time.perf_counter() - t0)
+
+
 def _round_into_box(vals: np.ndarray, lo: np.ndarray, hi: np.ndarray):
     """Round to the nearest integer that actually lies inside ``[lo, hi]``.
 
@@ -22274,20 +22533,16 @@ def _solve_miqp_bb(
         )
 
     # #1064: round-fix-resolve is a *first incumbent* mechanism, so it is spent
-    # only while the tree has none, and it is capped so a family where every
-    # rounding is infeasible cannot eat the search. Both are counted, not
-    # assumed: ``_round_attempts`` is what the regression test asserts on.
-    _round_attempts = 0
-    # The real bound is time, not calls (see _ROUND_TIME_FRAC). Both are
-    # counted, not assumed: the regression test asserts on _round_attempts and
-    # on the seconds actually spent here.
-    _round_budget = _ROUND_TIME_FRAC * float(time_limit)
-    _round_secs = 0.0
+    # only while the tree has none, and it is bounded by time (with an attempt
+    # cap as a backstop) so a family where every rounding is infeasible cannot
+    # eat the search. The rule lives in :class:`_RoundBudget` /
+    # :func:`_round_fix_resolve_attempt` so it is testable without racing a
+    # wall-clock-bounded search to this gate.
+    _round = _RoundBudget(time_limit)
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
         # exact incumbents via snap-fix-resolve.
-        nonlocal _round_attempts, _round_secs
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -22305,28 +22560,10 @@ def _solve_miqp_bb(
             Q=_Q_m,
         )
         how = "snapped"
-        if (
-            inc is None
-            and _tuning().round_fix_resolve
-            and tree.incumbent() is None
-            and _round_attempts < _ROUND_ATTEMPT_CAP
-            and _round_secs < _round_budget
-        ):
+        if inc is None:
             # The snap path declined, i.e. this point is genuinely fractional.
-            # With no incumbent in hand there is no primal bound at all, so a
-            # rounded completion is strictly better than nothing — and it can
-            # only ever supply an upper bound (see _pounce_round_incumbent).
-            _round_attempts += 1
-            # Bound this single attempt by whatever is left of the heuristic's
-            # budget as well as by the solve deadline: _pounce_recover_node_bound
-            # derives its own limit as ``time_limit - (now - t_start)``, so
-            # handing it the global limit lets one attempt run to the deadline.
-            _t_round = time.perf_counter()
-            _round_tl = min(
-                float(time_limit),
-                (_t_round - t_start) + max(0.0, _round_budget - _round_secs),
-            )
-            inc = _pounce_round_incumbent(
+            # The gate itself decides whether an attempt is affordable.
+            inc = _round_fix_resolve_attempt(
                 x_row,
                 int_offsets,
                 int_sizes,
@@ -22339,11 +22576,14 @@ def _solve_miqp_bb(
                 _A_eq_m,
                 _b_eq_m,
                 t_start,
-                _round_tl,
-                Q=_Q_m,
+                time_limit,
+                _Q_m,
+                _round,
+                enabled=_tuning().round_fix_resolve,
+                has_incumbent=tree.incumbent() is not None,
             )
-            _round_secs += time.perf_counter() - _t_round
-            how = "rounded"
+            if inc is not None:
+                how = "rounded"
         if inc is not None:
             x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
             # #952: an injected incumbent goes straight into the tree as a

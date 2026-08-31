@@ -40,6 +40,7 @@ HiGHS reports no usable dual bound, ``bound`` is ``None``; it is never synthesiz
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Optional, Union
 
@@ -75,6 +76,127 @@ def _to_highs_inf(arr: np.ndarray, highspy) -> np.ndarray:
     out[out >= _INF] = highspy.kHighsInf
     out[out <= -_INF] = -highspy.kHighsInf
     return out
+
+
+def _highs_matrix_window(h, highspy) -> tuple[float, float]:
+    """HiGHS's ``(small_matrix_value, large_matrix_value)`` -- the window it accepts.
+
+    An entry at or below the small value is DROPPED and reported as ``kWarning``;
+    one at or above the large value is refused outright. Both are read from the live
+    solver rather than hardcoded, so a caller that moves either option stays in sync
+    with the row preparation below instead of silently disagreeing with it.
+    """
+    out = []
+    for key in ("small_matrix_value", "large_matrix_value"):
+        st, val = h.getOptionValue(key)
+        if st != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"HiGHS would not report {key} (status {st})")
+        out.append(float(val))
+    return out[0], out[1]
+
+
+def _prepare_cut_row(
+    coeffs: np.ndarray,
+    rhs: float,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    small_tol: float,
+    large_tol: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Make ``coeffs @ x <= rhs`` safe to hand :meth:`highspy.Highs.addRow`.
+
+    HiGHS silently discards any matrix entry with ``|value| <= small_matrix_value``
+    and reports the discard as ``kWarning`` -- neither an error nor a clean add.
+    Both readings are wrong: treating it as a rejection killed every ``squfl``
+    instance under ``lp_nlp_bb`` (#1066; ``squfl025-040`` died in 1.0 s), and
+    treating it as a clean add would let HiGHS *change the cut* behind the
+    separator's back. So the row is fitted to HiGHS's window here:
+
+    1. **Scale.** An OA cut is an inequality, so multiplying it by any ``s > 0``
+       leaves it mathematically identical. ``squfl025-040``'s first cut spans
+       ``2.05e-19`` to ``114`` -- 21 orders -- but HiGHS's window is 24 wide, so the
+       whole row fits once lifted. ``s`` is rounded down to a power of two, which
+       makes the scaled row *bit-for-bit* the original one rescaled: no coefficient
+       is perturbed, so there is no question of a rounding-tightened cut.
+    2. **Drop what still will not fit**, on the valid side only: with ``rhs``
+       untouched when ``a_j * x_j >= 0`` over the whole column box (removing a
+       non-negative term can only make the row easier to satisfy), otherwise with
+       ``rhs`` loosened by the most that term can contribute. Either way the result
+       is *implied by* the original row -- every point the cut kept, it keeps.
+    3. **Refuse loudly** when neither applies, rather than ship a row that is not
+       implied by the cut.
+
+    The unboundedness test is on the *bound* (``>= _INF``), never on the product:
+    ``1e-9 * 1e20`` is an unremarkable ``1e11``, which is exactly how an open bound
+    sneaks past a finiteness check (CLAUDE.md).
+    """
+    nz = np.flatnonzero(coeffs)
+    if nz.size == 0:
+        return nz, coeffs[nz], rhs
+
+    a_abs = np.abs(coeffs[nz])
+    a_max = float(np.max(a_abs))
+    # The largest scale the big end tolerates, i.e. without bringing it within a
+    # decade of the value HiGHS refuses. Scale UP only: scaling down would push
+    # entries that fit today below the threshold.
+    scale_cap = large_tol / (10.0 * a_max)
+    # Only terms this scale can actually lift clear of the drop threshold get a
+    # say in how far to scale. A term too small to be rescued is dropped below no
+    # matter what, so letting it set the scale buys nothing and costs the whole
+    # row its conditioning -- measured on ``squfl020-150`` (#1066): a perspective
+    # row at reference ``z=1.2e-16`` spans 3e-32 (its ``q*z**2`` term) to 1, the
+    # 3e-32 drove ``headroom`` to 46, and ``2**46 * 3e-32 = 2.1e-18`` was still
+    # under ``small_matrix_value`` and dropped -- so the row was scaled by
+    # 7.04e13 to rescue a term it discarded, and what reached the master was a
+    # redundant ``s_k >= 0`` carrying a 7.04e13 coefficient.
+    liftable = a_abs[a_abs * scale_cap > small_tol]
+    # ``a_max`` itself always qualifies (``a_max * scale_cap`` is ``large_tol/10``,
+    # far above ``small_tol``), so this is never empty.
+    a_min = float(np.min(liftable))
+    room = min(10.0 * small_tol / a_min, scale_cap)
+    headroom = math.floor(math.log2(room))
+    if headroom > 0:
+        scale = 2.0**headroom
+        coeffs = coeffs * scale
+        rhs *= scale
+
+    tiny = (coeffs != 0.0) & (np.abs(coeffs) <= small_tol)
+    if not tiny.any():
+        nz = np.flatnonzero(coeffs)
+        return nz, coeffs[nz], rhs
+
+    a = coeffs[tiny]
+    lo, hi = lb[tiny], ub[tiny]
+    # ``a_j * x_j >= 0`` everywhere: a positive coefficient on a non-negative
+    # column, or a negative one on a non-positive column. Those drop for free.
+    free = np.where(a > 0.0, lo >= 0.0, hi <= 0.0)
+    # Otherwise rhs must absorb the term's worst contribution, which needs the
+    # bound on the binding side to be finite.
+    binding_open = np.where(a > 0.0, lo <= -_INF, hi >= _INF)
+    stuck = ~free & binding_open
+    if stuck.any():
+        bad = np.flatnonzero(tiny)[stuck][:5]
+        raise ValueError(
+            "cannot add this lazy cut to the HiGHS master: even rescaled it has "
+            f"coefficients at or below HiGHS's small_matrix_value ({small_tol:g}) on "
+            f"columns that are unbounded on the binding side (columns {bad.tolist()}), "
+            "so HiGHS would drop those terms and no finite right-hand side can "
+            "compensate. The cut would silently stop being valid. Bound those "
+            "columns, or separate a cut that does not touch them."
+        )
+    absorb = ~free
+    if absorb.any():
+        aa, lo_a, hi_a = a[absorb], lo[absorb], hi[absorb]
+        # One ulp up, because the loosening can be smaller than the ulp of ``rhs``
+        # and round straight back off it -- which would leave the row a hair
+        # TIGHTER than the one that is provably implied. Rounding the slack up is
+        # always the safe direction: it can only weaken the cut.
+        rhs = float(np.nextafter(rhs + float(np.sum(np.maximum(-aa * lo_a, -aa * hi_a))), np.inf))
+
+    kept = coeffs.copy()
+    kept[tiny] = 0.0
+    nz = np.flatnonzero(kept)
+    return nz, kept[nz], rhs
 
 
 def _stack_rows(
@@ -262,6 +384,7 @@ def solve_milp_with_lazy_cuts(
     lazy_callback=None,
     node_callback=None,
     terminate_callback=None,
+    terminate_poll_s: float = 1.0,
     mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
@@ -296,6 +419,26 @@ def solve_milp_with_lazy_cuts(
 
     ``callback_stats["mipsol_calls"] == 0`` means the separator never ran — NOT
     that it accepted everything (CLAUDE.md §6).
+
+    ``terminate_callback`` is consulted at two kinds of instant: **at each
+    restart**, after a tree has finished and produced cuts; and **inside the
+    tree**, through ``kCallbackMipInterrupt``. The snapshot is the running
+    ``callback_stats`` plus ``context`` (``"restart"`` or ``"interrupt"``),
+    ``elapsed`` and ``dual_bound`` — the master's current dual bound, ``None``
+    when HiGHS has none yet. Returning true stops the search and sets
+    ``callback_stats["terminated"]``.
+
+    The in-tree poll is what makes a progress budget honest: restarts alone are
+    not a clock. On ``rsyn0820m02m`` the master separates rarely enough that a
+    restart-only hook had nothing to judge at the checkpoint and abandoned a run
+    that certifies 2 s later. But HiGHS fires that callback about **3000 times a
+    second** (measured), which is neither affordable to answer in Python nor a
+    sensible sampling rate for a trend, so it is answered at most once every
+    ``terminate_poll_s`` seconds. That interval is the hook's real resolution and
+    a caller budgeting by it should size its window accordingly.
+
+    The hook can only ever give budget *back*: ``time_limit`` is still enforced
+    through the HiGHS option on every run, so nothing here can overrun it.
     """
     highspy = _require_highspy()
     t0 = time.time()
@@ -310,11 +453,6 @@ def solve_milp_with_lazy_cuts(
             "the HiGHS lazy-cut backend has no MIPNODE equivalent: it separates only "
             "at integer-feasible incumbents, so node_callback (fractional user cuts) "
             "cannot be honoured. Use milp_solver='gurobi' for that."
-        )
-    if terminate_callback is not None:
-        raise NotImplementedError(
-            "the HiGHS lazy-cut backend enforces time_limit through the HiGHS option "
-            "and has no callback-termination hook; pass time_limit instead."
         )
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
@@ -363,7 +501,24 @@ def solve_milp_with_lazy_cuts(
         sol.col_value = seed
         h.setSolution(sol)
 
-    counts = {"mipsol_calls": 0, "mipnode_calls": 0, "lazy_cuts": 0, "node_cuts": 0, "restarts": 0}
+    small_tol, large_tol = _highs_matrix_window(h, highspy)
+    counts = {
+        "mipsol_calls": 0,
+        "mipnode_calls": 0,
+        "lazy_cuts": 0,
+        "node_cuts": 0,
+        "restarts": 0,
+        # How many times the hook was actually asked. Zero with a hook installed
+        # is "it never got a look in", NOT "it kept saying continue" (§6).
+        "terminate_polls": 0,
+    }
+    terminated = False
+    terminate_context: Optional[str] = None
+    stop = [False]
+    last_poll = [t0]
+    poll_interval = float(terminate_poll_s)
+    if poll_interval < 0.0:
+        raise ValueError(f"terminate_poll_s must be non-negative, got {terminate_poll_s!r}")
     pending: list[tuple[np.ndarray, float]] = []
     # The accepted incumbent is tracked separately from HiGHS's own: HiGHS's best
     # solution may be a point the separator VETOED, and returning that as the OA
@@ -372,7 +527,37 @@ def solve_milp_with_lazy_cuts(
     best: list[Optional[np.ndarray]] = [None]
     best_obj: list[Optional[float]] = [None]
 
+    def _consult(context: str, dual_bound, elapsed: float) -> bool:
+        """Ask the caller's hook whether to stop. Never swallows (CLAUDE.md §7)."""
+        snapshot: dict[str, object] = dict(counts)
+        snapshot["context"] = context
+        snapshot["elapsed"] = elapsed
+        snapshot["dual_bound"] = dual_bound
+        counts["terminate_polls"] += 1
+        return bool(terminate_callback(snapshot))
+
     def _callback(callback_type, message, data_out, data_in, user_data):
+        if callback_type == highspy.cb.HighsCallbackType.kCallbackMipInterrupt:
+            # HiGHS hands every callback the SAME input struct, so the flag the
+            # separator sets to request a restart is still set when the rebuilt
+            # tree's first interrupt arrives -- and interrupts it before it has
+            # done anything. Measured: with this branch not writing the flag, the
+            # toy model below dropped from 7 restarts / optimal 9.0 to 1 restart /
+            # feasible 15.0. Every path through here states the flag it wants.
+            if stop[0]:
+                data_in.user_interrupt = True
+                return
+            # Fires thousands of times a second, so it is answered on an interval.
+            now = time.time()
+            if now - last_poll[0] < poll_interval:
+                data_in.user_interrupt = False
+                return
+            last_poll[0] = now
+            raw_lb = float(data_out.mip_dual_bound)
+            stop[0] = _consult("interrupt", raw_lb if np.isfinite(raw_lb) else None, now - t0)
+            data_in.user_interrupt = stop[0]
+            return
+
         x = np.asarray(data_out.mip_solution, dtype=np.float64).ravel()[:n]
         counts["mipsol_calls"] += 1
         # CLAUDE.md §7: a separator that raises must crash the solve, not be read
@@ -394,6 +579,8 @@ def solve_milp_with_lazy_cuts(
 
     h.setCallback(_callback, None)
     h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
+    if terminate_callback is not None:
+        h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
 
     status = SolveStatus.ERROR
     bound = None
@@ -418,29 +605,57 @@ def solve_milp_with_lazy_cuts(
         if np.isfinite(raw_bound):
             bound = raw_bound if bound is None else max(bound, raw_bound)
 
+        if stop[0]:
+            # The hook interrupted the tree. HiGHS reports that as kInterrupt,
+            # which is true but says nothing about who asked; record who.
+            terminated = True
+            terminate_context = "interrupt"
+            status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
+            break
+
         if not pending:
             status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
             break
 
         # A cut was requested, so this tree is stale: append the rows and rebuild.
         counts["restarts"] += 1
+        if terminate_callback is not None:
+            last_poll[0] = time.time()
+            if _consult("restart", bound, last_poll[0] - t0):
+                terminated = True
+                terminate_context = "restart"
+                status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
+                if status == SolveStatus.OPTIMAL:
+                    # The tree that just finished was solved to optimality, but its
+                    # rows are stale -- the separator vetoed its incumbent. Calling
+                    # that "optimal" would hand the caller a certificate for a
+                    # master that is missing the cut we are about to not add.
+                    status = SolveStatus.TIME_LIMIT
+                break
         for coeffs, rhs in pending:
             if coeffs.shape[0] != n:
                 raise ValueError(f"lazy cut has {coeffs.shape[0]} coefficients, expected {n}")
-            nz = np.flatnonzero(coeffs)
-            if (
-                h.addRow(
-                    -highspy.kHighsInf,
-                    rhs,
-                    int(nz.size),
-                    nz.astype(np.int32),
-                    coeffs[nz],
+            idx, vals, row_rhs = _prepare_cut_row(coeffs, float(rhs), lb, ub, small_tol, large_tol)
+            if idx.size == 0:
+                # Nothing survived, so there is no row to add. Adding nothing would
+                # restart an identical tree forever on a point the separator keeps
+                # vetoing, so refuse instead of spinning.
+                raise ValueError(
+                    "the separator returned a lazy cut with no coefficient HiGHS will "
+                    f"accept (small_matrix_value {small_tol:g}); there is no row to "
+                    "add and the master would not change."
                 )
-                != highspy.HighsStatus.kOk
-            ):
-                raise RuntimeError("HiGHS rejected a lazy cut row")
+            st = h.addRow(-highspy.kHighsInf, row_rhs, int(idx.size), idx.astype(np.int32), vals)
+            if st != highspy.HighsStatus.kOk:
+                raise RuntimeError(
+                    f"HiGHS rejected a lazy cut row (status {st}): {idx.size} nonzeros, "
+                    f"|coef| in [{np.min(np.abs(vals)):.3g}, {np.max(np.abs(vals)):.3g}], "
+                    f"rhs {row_rhs:.6g}"
+                )
 
     h.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
+    if terminate_callback is not None:
+        h.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
     h.clearCallbacks()
 
     x_out, obj_out = best[0], best_obj[0]
@@ -457,5 +672,5 @@ def solve_milp_with_lazy_cuts(
         node_count=nodes,
         iterations=iters,
         wall_time=time.time() - t0,
-        callback_stats={**counts, "terminated": False, "terminate_context": None},
+        callback_stats={**counts, "terminated": terminated, "terminate_context": terminate_context},
     )

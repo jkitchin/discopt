@@ -60,7 +60,7 @@ class TestRouteFlag:
     def test_disabled_flag_declines_a_routable_model(self, monkeypatch):
         """With the flag off the router declines a model it would otherwise take."""
         monkeypatch.setenv(ROUTE_ENV, "0")
-        method, reason = _convex_minlp_auto_route(_load("gbd"))
+        method, reason, _opts = _convex_minlp_auto_route(_load("gbd"))
         assert method is None
         assert "disabled" in reason
 
@@ -71,9 +71,31 @@ class TestRouteGates:
 
     def test_fires_on_convex_minlp(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
-        method, reason = _convex_minlp_auto_route(_load("gbd"))
-        assert method == "oa"
+        method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
+        assert method == "lp_nlp_bb"
         assert "certified convex" in reason
+        # The master engine is not incidental: on the in-house master this method
+        # is measurably worse than the "oa" it replaced (#1066), so the route must
+        # carry the HiGHS pick with it or the retarget is a regression.
+        assert opts == {"milp_solver": "highs"}
+
+    def test_without_highspy_the_target_stays_on_the_old_oa_path(self, monkeypatch):
+        """No HiGHS master, no retarget -- and still a route, not a refusal."""
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _no_highs(name, *a, **kw):
+            if name == "discopt.solvers.milp_highs":
+                raise ImportError("highspy is not installed")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _no_highs)
+        method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
+        assert method == "oa"
+        assert "highspy unavailable" in reason
+        assert opts == {}
 
     def test_declines_pure_continuous(self, monkeypatch):
         """A convex NLP is already served by the continuous convex fast path."""
@@ -82,7 +104,7 @@ class TestRouteGates:
         x = m.continuous("x", lb=-5, ub=5)
         m.minimize(dm.exp(x) + x**2)
         m.subject_to(x >= -2)
-        method, reason = _convex_minlp_auto_route(m)
+        method, reason, _opts = _convex_minlp_auto_route(m)
         assert method is None
         assert "pure continuous" in reason
 
@@ -94,7 +116,7 @@ class TestRouteGates:
         y = m.binary("y")
         m.minimize(x + 2 * y)
         m.subject_to(x + y >= 1)
-        method, reason = _convex_minlp_auto_route(m)
+        method, reason, _opts = _convex_minlp_auto_route(m)
         assert method is None
         assert "not a discrete NLP" in reason
 
@@ -107,7 +129,7 @@ class TestRouteGates:
         z = m.binary("z")
         m.minimize(x * y + z)  # bilinear: nonconvex
         m.subject_to(x + y + z >= 1)
-        method, reason = _convex_minlp_auto_route(m)
+        method, reason, _opts = _convex_minlp_auto_route(m)
         assert method is None
         assert reason.startswith("not routed")
 
@@ -120,7 +142,7 @@ class TestRouteGates:
         opaque = dm.custom(lambda v: v**2)
         m.minimize(opaque(x) + y)
         m.subject_to(x + y >= 1)
-        method, reason = _convex_minlp_auto_route(m)
+        method, reason, _opts = _convex_minlp_auto_route(m)
         assert method is None
         assert "dm.custom" in reason
 
@@ -141,7 +163,7 @@ class TestRouteDispatch:
         m = _load("gbd")
         result = m.solve(time_limit=30)
         assert result.algorithm_route is not None
-        assert "mip-nlp/oa" in result.algorithm_route
+        assert "mip-nlp/lp_nlp_bb" in result.algorithm_route
 
     def test_route_off_leaves_the_field_unset(self, monkeypatch):
         """The opt-out must restore the pre-graduation behaviour exactly."""
