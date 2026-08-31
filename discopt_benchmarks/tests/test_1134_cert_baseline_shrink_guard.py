@@ -181,3 +181,49 @@ def test_speed_ratio_of_the_reference_machine_against_itself_is_one():
     ratio, n = host_speed_ratio(dict(baseline), baseline)
     assert n == 6
     assert abs(ratio - 1.0) < 1e-9
+
+
+# --------------------------------------------------------------------------- #
+# The routing note the panel could not see (#1134, Cause 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_solve_result_round_trips_the_routing_note():
+    """`algorithm_route` survives `to_dict`/`from_dict`.
+
+    #1134's second cause — `cvxnonsep_nsig30` going 1.12 s → 42.5 s on an
+    *identical* 165-node tree because the auto-routed `oa` master burned 39.6 s and
+    abstained before the default path solved it — was invisible in a table of nodes
+    and seconds, and cost a second bisect to recover something the solver already
+    knew and was already reporting on `SolveResult.algorithm_route`.
+    """
+    from benchmarks.metrics import SolveResult, SolveStatus  # noqa: PLC0415
+
+    note = "mip-nlp/oa: minlp certified convex at the root; did not certify in 39.63s"
+    r = SolveResult(
+        instance="cvxnonsep_nsig30",
+        solver="discopt",
+        status=SolveStatus.OPTIMAL,
+        algorithm_route=note,
+    )
+    d = r.to_dict()
+    assert d["algorithm_route"] == note
+    assert SolveResult.from_dict(d).algorithm_route == note
+
+
+def test_rows_written_before_the_field_still_load():
+    """Backward compatibility, and the reason the field is optional: every row of
+    the committed `cert-baseline.jsonl` predates it, and `load`/`from_dict` must
+    not start rejecting the reference the neutrality check is built on."""
+    from benchmarks.metrics import SolveResult  # noqa: PLC0415
+    from scripts.check_cert_neutrality import _CERT_BASELINE  # noqa: PLC0415
+    from utils.cert_neutrality import load_baseline  # noqa: PLC0415
+
+    baseline = load_baseline(_CERT_BASELINE)
+    assert baseline, "committed cert baseline is empty"
+    loaded = 0
+    for row in baseline.values():
+        assert "algorithm_route" not in row, "test premise: committed rows predate the field"
+        assert SolveResult.from_dict(row).algorithm_route is None
+        loaded += 1
+    assert loaded == len(baseline), (loaded, len(baseline))

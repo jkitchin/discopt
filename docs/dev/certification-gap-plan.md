@@ -100,77 +100,135 @@ Stop work and surface to the maintainer (do not improvise) when:
 
 ### 0.6.1 The reference's own drift (falsification, #1134, 2026-08-31)
 
-§0.6 makes "the baseline is stale relative to `main`" a stop-and-escalate condition,
-but nothing in the tooling could *detect* it, so it was never raised. #1134 is the
-bill: 7 rows of the committed reference read as regressions on `main`, the #1130
-graduation gate charged that drift to all 7 flags as `soundness=FAIL`, and answering
-"when did this reference last match the tree?" cost a bisect that the reference
-should have answered by inspection.
+§0.6 makes "the baseline is stale relative to `main`" a stop-and-escalate
+condition, but nothing in the tooling could *detect* it, so it was never raised.
+#1134 is the bill: 7 rows of the committed reference read as regressions on
+`main`, the #1130 graduation gate charged that drift to all 7 flags as
+`soundness=FAIL`, and answering "when did this reference last match the tree?"
+cost a bisect that the reference should have answered by inspection.
 
-**Root cause, bisected.** `git bisect --first-parent` on `nvs14`'s node count
-(deterministic, well inside its budget, so unconfounded by wall clock) over
-`23a64ab6` (2026-08-11, the reference's actual generating commit) → `main`, 104
-first-parent revisions, 7 steps, names **`bd9c4c5c` (PR #1025)** — the `feral`
-0.15.1 → 0.16.0 bump, whose one breaking item is `SparseLu::factor` defaulting to
-threshold Markowitz instead of AMD-on-AtA + Gilbert–Peierls. Confirmed forward by an
-A/B on `main` distinguished by a marker string baked into the extension: a
-`LuPivoting::GilbertPeierls` arm restores **`nvs02` 421 → 345** and **`tspn05` 51 →
-39**, i.e. *exactly* the committed reference's values, and takes **`nvs14` 839 →
-175**. The drift is a rounding-trajectory reshuffle of degenerate pivot choices, and
-it was already recorded as such by the bump itself (`crates/discopt-core/Cargo.toml`
-names nvs02, nvs14, nvs11, nvs12, tanksize under its regime-(b) acceptance). Nothing
-regressed since v0.8.0 — the reference simply predates v0.8.0 and was never
-refreshed after a deliberate, accepted bound-changing change.
+There are **two** independent causes, both found by `git bisect --first-parent`
+over `23a64ab6` (2026-08-11, the reference's actual last regeneration) → `main`.
 
-**The issue's window was wrong, and could not have been right.** #1134 placed the
-regression in 2026-08-17…08-24 because the reference was assumed to be the v0.8.0
-snapshot (`deba4ce`, 08-16). It is not: `git log --follow` puts its last
-regeneration at `23a64ab6`, 08-11, five days *before* v0.8.0 and three before the
-bump. `nvs14` measures 839 at `deba4ce` and at `1a0df198`, both inside the supposed
-window's "good" end. **A reference that does not carry its own provenance cannot be
-reasoned about, only bisected** — which is what #1134 fixed in the tooling.
+#### Cause 1 — the LU pivoting default (`bd9c4c5c`, PR #1025): the node drift
 
-**Not every row is the bump.** Measured on a 4-vCPU box, interleaved A/B, 3 reps,
-per-instance sd reported (CLAUDE.md §9):
+Bisected on `nvs14`'s node count (deterministic, well inside its budget, so
+unconfounded by wall clock), 104 first-parent revisions, 7 steps. The first bad
+commit is the `feral` 0.15.1 → 0.16.0 bump, whose one breaking item is
+`SparseLu::factor` defaulting to threshold Markowitz instead of AMD-on-AtA +
+Gilbert–Peierls. Confirmed forward on `main` by an A/B whose arms differ only in
+`LuParams::pivoting` and are distinguished by a marker string baked into the
+extension: the `GilbertPeierls` arm restores **`nvs02` 421 → 345** and **`tspn05`
+51 → 39**, i.e. *exactly* the committed values, and takes **`nvs14` 839 → 175**.
+The drift was already recorded and accepted by the bump itself
+(`crates/discopt-core/Cargo.toml`, regime (b)); the reference was simply never
+refreshed after it.
 
-| instance | issue's reading | measured |
+#### Cause 2 — the convex-MINLP route becoming reachable (`533c05e1`, PR #1100): the wall
+
+`cvxnonsep_nsig30` does not fit Cause 1: it certifies the *same* 165-node tree
+with the *same* objective and dual bound at every point measured, yet its wall
+went 1.12 s (reference) → 42.5 s, far past what the machine explains. Bisected on
+wall at a 60 s budget, **with both arms pinned to `GilbertPeierls` so the
+pivoting rule is not the variable**, it names `533c05e1` — "#1060 opt-in HiGHS
+master so `lp_nlp_bb` finishes without Gurobi". Measured at `533c05e1^1` vs
+`533c05e1`: **4.5 s → 38.9 s**, tree unchanged.
+
+The mechanism is not the HiGHS master. That PR also corrected
+`_convex_minlp_auto_route`'s availability gate, which used to be `import
+highspy` — a package `get_milp_solver("auto")` has not touched since #356, so the
+gate tested something the master would never load. Its own comment says it "refused
+on machines whose master was perfectly available and routed on machines whose
+master was not". The correction is right; what it exposed is that **on a
+highspy-free machine a large part of the cert panel now takes the `oa` route, and
+a route that abstains costs 50–66% of the budget before the default path starts
+from scratch**. Measured on `main` (`algorithm_route` quotes the solver's own note):
+
+| instance | reference | now | what the route did |
+|---|---|---|---|
+| `cvxnonsep_nsig30` | 165 nodes, 1.12 s | 165 nodes, 49.6 s | OA did not certify in **39.63 s** of 60; default path then solved the same tree |
+| `clay0303hfsg` | 283 nodes, 15.29 s | no certificate at 60 s | OA `unknown` after **30.64 s**; fallback left 29.36 s |
+| `fac2` | 39 nodes, 2.77 s | 39 nodes, 38.9 s | OA `feasible` after **30.13 s**; fallback certified in ~8.8 s |
+| `cvxnonsep_psig30` | 89 nodes, 0.41 s | 89 nodes, 8.5 s | routed |
+| `alan` | 21 nodes, 0.21 s | 13 nodes, 1.3 s | routed |
+
+The 30 s cut-offs are `_CONVEX_ROUTE_BUDGET_FRACTION` (0.5) and the 39.6 s one is
+the #1066 progress guard, whose `checkpoint` is that same 50% by construction.
+Nothing here is malfunctioning — this is the #1059/#1066 policy doing exactly what
+it specifies. The finding is that the policy's *price*, on instances the default
+path certifies in 4–9 s, is half the budget, and that price only became visible on
+highspy-free machines when #1100 fixed the gate. Re-tuning it is a bound-changing
+default and owes the CLAUDE.md §5 graduation pair; it is **not** taken under #1134.
+
+#### Row-by-row, and what is *not* a regression
+
+Measured on a 4-vCPU box, interleaved A/B, 3 reps, per-instance sd reported
+(CLAUDE.md §9). The host-speed calibration — median wall ratio over the **21**
+instances that reproduced their node count exactly — is **3.45x** the reference
+machine.
+
+| instance | issue's reading | measured cause |
 |---|---|---|
-| `nvs14` 129→839 | node regression | the bump (GP arm → 175) |
-| `nvs02` 345→421 | node regression | the bump (GP arm → 345, exact) |
-| `tspn05` 39→51 | node regression | the bump (GP arm → 39, exact) |
-| `nvs09` 5→31 | node regression | **does not reproduce** — 5 nodes in both arms, 3/3 reps |
-| `clay0303hfsg` → `time_limit` | lost certification | **the box**: non-certifying in *both* arms (ref 15.3 s / 283 nodes) |
-| `tanksize` → `time_limit` | lost certification | **the box**: non-certifying in *both* arms (ref 30.4 s / 16879 nodes) |
-| `nvs05` → `feasible` | lost certification | **per-node wall**: identical 175-node tree; GP 57.0 s (sd 0.24), Markowitz > 60 s |
-| `cvxnonsep_nsig30` marginal | budget cliff | **per-node wall**: identical 165-node tree; GP 39.5 s (sd 1.05) vs Markowitz 59.4 s (sd 0.80) |
+| `nvs14` 129→839 | node regression | Cause 1 (GP arm → 175) |
+| `nvs02` 345→421 | node regression | Cause 1 (GP arm → 345, exact) |
+| `tspn05` 39→51 | node regression | Cause 1 (GP arm → 39, exact) |
+| `nvs09` 5→31 | node regression | **does not reproduce** — 5 nodes, both arms, 3/3 reps |
+| `cvxnonsep_nsig30` marginal | budget cliff | **Cause 2** — route burns 39.6 s of 60 |
+| `clay0303hfsg` → `time_limit` | lost certification | **Cause 2 + the box** (15.29 s x 3.45 ≈ 53 s before the route's 30.6 s) |
+| `nvs05` → `feasible` | lost certification | **the box**: not routed, identical 175-node tree, 20.53 s x 3.45 ≈ 71 s > 60 s |
+| `tanksize` → `time_limit` | lost certification | **the box**: not routed, ~2.3x per node |
 
-The last two are the finding the #1025 acceptance does not cover. That record's
-net-positive arm was measured on captured *relaxation* LPs — large, high-fill bases,
-where Markowitz wins 8.32x → 1.28x fill — and it says outright that "the certifying
-panel cannot" see the change. It can: on this panel's small bases Markowitz's
-ordering search does not amortize, and it *costs* wall (`cvxnonsep_nsig30` +49%,
-same tree). Two of #1134's three "lost certifications" are that cost pushing an
-instance across a 60 s line it was already near. This does not retract the bump —
-`numerical` refusals and fill both improved, and no verdict was ever false — but it
-does retract "the certifying panel cannot see it", and it is the entry measurement
-for size-routed pivoting (Gilbert–Peierls on small bases, Markowitz on large).
+#### What the LU bump costs at panel scale (retraction, CLAUDE.md §11)
 
-**Do not regenerate the reference on an arbitrary box.** The admission filter drops
-anything not certifying inside `_MARGIN_FRAC` (0.6) of its budget, and three of its
-four rejection reasons are properties of the machine. The 4-vCPU box above runs
-**≈3x** the reference machine's wall on equal-node work (`nvs09` 0.82 → 2.8 s at 5
-nodes; `tspn05` 2.44 → 7.30 s at 39 nodes), which is enough on its own to drop
-`clay0303hfsg`, `nvs05` and `tanksize` — the exact silent shrink #1134 warned about.
-Regeneration belongs on the reference machine.
+The #1025 record asserts that "the certifying panel cannot" see an LU kernel bump
+and measures net-positive only on captured relaxation LPs. It cannot see the
+benefit — that stands — but it does see a cost. Measured mk-vs-gp on `main`, 3
+reps, restricted to **unrouted** instances whose node count is identical in both
+arms (so the comparison is per-node cost, not search):
 
-**Tooling fixed under #1134**, so this is a lookup next time, not a bisect:
+    nvs09 2.78/2.65   st_e29 2.07/2.03   ex1224 2.03/2.00   ex1225 1.88/1.84
+    gkocis 1.35/1.39  ex1226 1.53/1.35   oaer 1.32/1.32     st_e36 6.83/7.03
+    nvs22 15.35/12.11 nvs05 >=60.32/56.62 (mk censored at the limit)
+
+Median ratio ~1.03 — small. Two rows carry it: `nvs22` **+27%** and `nvs05`
+**>=+7%**, the latter enough to lose a certification 3/3 reps that the GP arm
+holds at 56.6 s (sd 1.35). It is two-sided: on the routed `m3` Markowitz is 2.4x
+*faster* (1.53 s vs 3.70 s). So the retraction is narrow — the panel sees a
+per-node cost of a few percent with a +27% tail, not the large regression the
+first reading of #1134 suggested. The bump stands. Size-routed pivoting
+(Gilbert–Peierls on small low-fill bases, Markowitz on large) is the general
+follow-up and these are its entry numbers.
+
+#### The issue's window was wrong, and could not have been right
+
+#1134 placed the regression in 2026-08-17…08-24 because the reference was assumed
+to be the v0.8.0 snapshot (`deba4ce`, 08-16). It is not: `git log --follow` puts
+its last regeneration at `23a64ab6`, 08-11, five days *before* v0.8.0 and three
+before Cause 1. `nvs14` measures 839 at `deba4ce` and at `1a0df198`, both inside
+the supposed window's "good" end. **A reference that does not carry its own
+provenance cannot be reasoned about, only bisected.**
+
+#### Do not regenerate the reference on an arbitrary box
+
+The admission filter drops anything not certifying inside `_MARGIN_FRAC` (0.6) of
+its budget, and three of its four rejection reasons are properties of the machine.
+Run on the 4-vCPU box above, `gen_cert_baseline.py` admitted **45** of the
+reference's 52 rows: it would have dropped `clay0303hfsg`, `cvxnonsep_nsig30`,
+`fac2`, `nvs05`, `nvs17`, `nvs22` and `tanksize` — four more than #1134
+anticipated — and the resulting 45-row reference would still have read as green.
+Regeneration belongs on the reference machine, and Cause 2 should be settled
+first: `cvxnonsep_nsig30`, `clay0303hfsg` and `fac2` will sit near their budgets
+*there* too, because the route flip is machine-independent.
+
+#### Tooling fixed under #1134, so this is a lookup next time
+
 `gen_cert_baseline.py` writes `docs/dev/data/cert-baseline-meta.json` (generating
 commit, timestamp, budget, host, and the full drop record with each dropped row's
 previous verdict) and **refuses to overwrite the reference when coverage would
-shrink** unless `--allow-shrink` is passed; `check_cert_neutrality.py` prints that
-provenance and a host-speed calibration measured only on instances whose
-`node_count` reproduced exactly, and annotates `status` violations with it. The
-calibration is reporting-only — no violation is ever suppressed by it (§0.3).
+shrink** unless `--allow-shrink` is passed — verified end-to-end on the 56-instance
+panel, where it refused and named all 7 losses. `check_cert_neutrality.py` prints
+that provenance and the host-speed calibration, and annotates `status` violations
+with it. The calibration is reporting-only: no violation is ever suppressed (§0.3).
 
 ### 0.7 Definition of done (per phase)
 

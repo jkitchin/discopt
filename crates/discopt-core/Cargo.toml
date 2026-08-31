@@ -172,34 +172,43 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # build; POUNCE 0.10.0 pins feral 0.15.1, so the shared-release alignment noted
 # above returns as soon as POUNCE follows to 0.16.0.
 #
-# RETRACTION (#1134, 2026-08-31, CLAUDE.md §11). The (b) paragraph above asserts
-# that "the certifying panel cannot" see an LU kernel bump's benefit, and so
-# measures net-positive only on the captured relaxation LPs. The panel cannot see
-# the benefit — that part stands — but it does see a COST that this record does
-# not carry, and two of the three certifications #1134 reports lost are it.
-# Measured on `main`, interleaved A/B, 3 reps, the two arms differing only in
+# RETRACTION (#1134, 2026-08-31, CLAUDE.md §11), narrow. The (b) paragraph above
+# asserts that "the certifying panel cannot" see an LU kernel bump, and so measures
+# net-positive only on the captured relaxation LPs. It cannot see the BENEFIT --
+# that part stands -- but it does see a per-node COST that this record does not
+# carry. Measured on `main`, interleaved A/B, 3 reps, arms differing only in
 # `LuParams::pivoting` and distinguished by a marker string baked into the
-# extension:
+# extension, restricted to instances that are NOT auto-routed and whose node count
+# is identical in both arms (so the comparison is per-node cost, not search) --
+# wall in seconds, Markowitz / GilbertPeierls:
 #
-#   cvxnonsep_nsig30   identical 165-node tree, identical objective.
-#                      GilbertPeierls 39.5 s (sd 1.05) vs Markowitz 59.4 s
-#                      (sd 0.80) — +49% wall, against a 60 s budget it used to
-#                      clear in 1.12 s on the reference machine.
-#   nvs05              identical 175-node tree. GilbertPeierls 57.0 s (sd 0.24)
-#                      certifies; Markowitz does not finish inside 60 s.
+#   nvs09  2.78/2.65   st_e29 2.07/2.03   ex1224 2.03/2.00   ex1225 1.88/1.84
+#   gkocis 1.35/1.39   ex1226 1.53/1.35   oaer   1.32/1.32   st_e36 6.83/7.03
+#   nvs22 15.35/12.11  nvs05 >=60.32/56.62  (the Markowitz arm censored at 60 s)
 #
-# Same trees, same answers: this is per-factorization overhead, not search. It is
-# the expected shape — Markowitz chooses its column order DURING factorization, and
-# on the panel's small, low-fill bases that search has nothing to amortize against,
-# while the 0.16.0 win (fill 8.32x -> 1.28x) is measured on large high-fill QPLIB
-# relaxation bases. The bump is NOT retracted: fill, `numerical` refusals and wall
-# on the LPs that dominate a real solve all improved, and no verdict was ever false.
-# What is retracted is the claim that this panel is blind to the change, and with it
-# the assumption that a kernel bump needs no wall measurement at panel scale.
+# Median ratio ~1.03. Two rows carry it: `nvs22` +27%, and `nvs05` >=+7%, which is
+# enough to lose a certification 3/3 reps that the GilbertPeierls arm holds at
+# 56.6 s (sd 1.35) -- one of the three #1134 reports lost. It is two-sided: on the
+# routed `m3` Markowitz is 2.4x FASTER (1.53 s vs 3.70 s). The shape is expected --
+# Markowitz chooses its column order DURING factorization, and on the panel's small
+# low-fill bases that search has little to amortize against, while the 0.16.0 win
+# (fill 8.32x -> 1.28x) is measured on large high-fill QPLIB relaxation bases.
+#
+# The bump is NOT retracted: fill, `numerical` refusals and wall on the LPs that
+# dominate a real solve all improved, and no verdict was ever false. What is
+# retracted is the claim that this panel is blind to the change, and with it the
+# assumption that a kernel bump needs no wall measurement at panel scale.
+#
+# WITHDRAWN from this evidence: `cvxnonsep_nsig30`, which a first pass under #1134
+# read as +49% from pivoting. It is auto-routed to the `oa` master on `main`, where
+# the route runs to a wall-clock budget checkpoint before abstaining, so a wall
+# difference there is not a per-factorization measurement. Its real regression
+# bisects to `533c05e1` (PR #1100), not to this bump -- see
+# docs/dev/certification-gap-plan.md §0.6.1, Cause 2.
 #
 # FOLLOW-UP: size-routed pivoting (GilbertPeierls below a basis-size/fill
 # threshold, Markowitz above) is the general fix and the numbers above are its
-# entry measurement. Not taken here — it is a bound-changing default and owes the
+# entry measurement. Not taken here -- it is a bound-changing default and owes the
 # CLAUDE.md §5 graduation pair on a machine that can run it.
 feral = "0.16.0"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
