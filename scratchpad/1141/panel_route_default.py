@@ -54,8 +54,23 @@ def _route_as_highs(model):
     return method, reason, {**opts, "milp_solver": "highs"}
 
 
+def _route_as_oa(model):
+    """Route to `"oa"`, the other discopt-native target.
+
+    Not an afterthought: the #1066 guard's `master_checkin_deadline` limb was
+    built FOR `"oa"`, so `"oa"` may survive the budget policy that the in-house
+    `lp_nlp_bb` master does not -- and on the master-only panel `"oa"` looked
+    worst, which is exactly the kind of ranking a default-path measurement can
+    invert.
+    """
+    method, reason, opts = _real_route(model)
+    if method != "lp_nlp_bb":
+        return method, reason, opts
+    return "oa", reason, {k: v for k, v in opts.items() if k != "milp_solver"}
+
+
 ARMS = {"pre": ("1", _route_as_highs), "inhouse": ("1", _real_route),
-        "noguard": ("0", _real_route)}
+        "noguard": ("0", _real_route), "oa": ("1", _route_as_oa)}
 
 
 def flat_point(model, xd):
