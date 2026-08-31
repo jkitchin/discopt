@@ -2017,7 +2017,7 @@ def _elastic_restoration_enabled() -> bool:
     the elastic form was slower was nonconvex and produced no incumbent in either
     arm (`bchoco06/07/08`, `beuster`, `heatexch_gen2`: +3.6 to +14.1 s each,
     `constraints_convex=False`, `incumbent=False`); every convex row was neutral or
-    faster. See ``docs/dev/performance-plan.md`` §24.
+    faster. See ``docs/dev/performance-plan.md`` §25.
     """
     return os.environ.get("DISCOPT_OA_ELASTIC_RESTORATION", "1") not in (
         "0",
@@ -4832,7 +4832,7 @@ def _oa_node_cuts_enabled() -> bool:
     601.9 s -> 536.8 s (**−10.8 %**), **10 dual bounds tighter and 2 looser**
     (``clay0303hfsg`` and ``fac2``, neither certified by either arm). On the class
     the issue is about it is 6–16x. Recorded in
-    ``docs/dev/performance-plan.md`` §24.
+    ``docs/dev/performance-plan.md`` §25.
 
     ``DISCOPT_OA_NODE_CUTS=0`` is the opt-out and restores the pre-#1141 master
     exactly. Ignored on the SHOT profile, which is *defined* by fractional-point

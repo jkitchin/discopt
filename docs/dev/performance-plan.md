@@ -4438,7 +4438,125 @@ The escalation is not exposed to it in any measurement here — the strong arm i
 entered only after a node-capped probe has already returned, and no panel row hit
 it — but the loop should honour the deadline regardless of who calls it.
 
-## 24. #1141 convex-MINLP class: the missing capability, a false dual bound, and a restoration that never converged (2026-08-31)
+## 24. #1066 root cuts: the stage's time budget never covered the stage (2026-08-29)
+
+§23's probe-then-escalate fixed the OA *master*. It did not close `rsyn0830m`
+or `rsyn0840m` at default settings, so this is where the remaining wall went.
+
+### The measurement
+
+A default solve of `rsyn0830m` (`time_limit=150`, `gap_tolerance=1e-4`) under
+`cProfile`, against the escalation-ON tree. Top of the cumulative profile:
+
+```
+   ncalls  tottime  cumtime  filename:lineno(function)
+        1   81.281   81.281  discopt/solvers/_root_cuts.py:276(_solve_lp)
+        1    0.003   75.230  discopt/solvers/mip_nlp.py:662(solve_mip_nlp)
+        8   74.469   74.469  {built-in method discopt._rust.solve_milp_csc_py}
+```
+
+**A single `_solve_lp` call cost 81.3 s of a 150 s solve.** The two figures are
+disjoint (81.3 + 75.2 ≈ the 150.6 s wall): the root cutting-plane stage runs to
+completion, and only then does the OA search get what is left. The instance
+finishes `feasible`, not `optimal`, having spent 54% of its budget in a stage
+whose caller allots it `max(2.0, min(10.0, 0.2 * time_limit))` = **10.0 s**.
+
+### The defect
+
+`generate_root_cuts`' docstring says "``time_budget_s`` bounds the stage's wall
+time." It did not, in two independent ways:
+
+1. **The clock started in the wrong place.** `t0 = _time.perf_counter()` sat
+   *below* the initial `obj, x, duals, h = oa_converge()`. The whole OA
+   prologue — up to `OA_MAX_ITERS` = 60 LP solves — ran before the budget was
+   armed. Nothing measured it and nothing could stop it.
+2. **The check was between rounds, and the overrun is inside one call.** Even
+   with the clock started correctly, `if perf_counter() - t0 > time_budget_s`
+   is only consulted at the top of the round loop. `_solve_lp` passed no
+   `time_limit` to HiGHS, so one LP could run arbitrarily long — and on
+   `rsyn0830m` exactly one did. **A between-rounds budget cannot bound a stage
+   whose unit of work is unbounded.** This is the same shape as the Rust
+   root-cut-loop deadline defect recorded in §23.6.
+
+Note which of these the 81.3 s was: `ncalls` is **1**. Not 60 cheap LPs adding
+up past a budget — one LP that never had a deadline.
+
+### The fix (`DISCOPT_ROOT_CUT_DEADLINE`, default-OFF)
+
+- The stage clock (`t_stage`) starts before the prologue, and `_remaining()`
+  is what every LP is bounded by.
+- `_solve_lp` gains a `time_limit` and sets HiGHS' own `time_limit` option,
+  floored at 1e-3 — HiGHS reads `<= 0` as *no limit*, which would silently
+  restore the overrun.
+- `oa_converge` checks the remaining budget between its iterations.
+- Budget exhausted before the first LP closes → the stage returns no cuts,
+  which is identical to the stage being switched off.
+
+**Soundness.** Truncation can only ever *remove* cuts. A partially converged OA
+is an outer approximation over *fewer* constraints than the true feasible set —
+a relaxation of a relaxation — so its bound and every cut separated from it stay
+valid; only their strength is given up. There is no arm of this change that can
+produce a bound tighter than the truth.
+
+**Why it still ships default-off.** It is bound-changing (CLAUDE.md §5 regime 2):
+on an instance whose prologue outruns the budget it changes which cuts the stage
+separates, hence that instance's root bound. Soundness is not the open question —
+*net-positive* is. Spending 81 s of root cuts is not obviously worse than not
+spending it; the graduation panel is what answers that, and until it clears both
+bars the flag stays off.
+
+### Verification
+
+Deterministic and load-immune: a fake `perf_counter` the stub advances, so no
+assertion here depends on machine load (CLAUDE.md §9). Five new tests in
+`python/tests/test_nlpbb_root_cuts_781.py`. Mutation battery, each restored to
+identical afterwards:
+
+| mutation | result |
+| --- | --- |
+| round-loop clock starts late in both arms (the original bug) | 1 failed |
+| prologue LPs unbounded (deadline only inside the round loop) | 1 failed |
+| HiGHS never gets the `time_limit` option | 1 failed |
+| no positive floor on the limit handed to HiGHS | 1 failed |
+| the flag defaults ON | 1 failed |
+| flag OFF also gets a deadline (legacy path not intact) | 1 failed |
+
+A first battery run reported the bug-revert mutation as *surviving*. It was the
+mutation that was wrong, not the test: it neutralised `_remaining()` but left
+`t0 = t_stage`, so the round-loop check still fired at the same point. Recorded
+because "the mutation survived" and "the test is vacuous" look identical from
+the exit code, and only reading the mutation apart from the result tells them
+apart.
+
+### The owed panel (tracked in #1141)
+
+`DISCOPT_ROOT_CUT_DEADLINE` merges default-OFF, which means the shipped default
+is the arm where the docstring's promise is false. That is acceptable only for
+as long as the graduation panel is actually owed to someone, so it is recorded
+here and in **#1141**: the flag graduates or is deleted, and "neither" is not an
+outcome. A flag that ships off and is never panelled is the dead flag CLAUDE.md
+§3 forbids; the difference between this and that is whether the debt is written
+down.
+
+Re-confirmed live on `main` at 2026-08-30, before merging — the defect is not an
+artefact of the #1066-era tree:
+
+- `_root_cuts.py` calls `oa_converge()` and only *then* sets `t0`, so the
+  prologue is still outside the budget.
+- `_solve_lp` still sets `output_flag` and nothing else, so no LP carries a
+  deadline.
+- `nlpbb_root_cuts_enabled()` is **default-ON** (graduated 2026-08-20, §21) and
+  `solver.py` hands the stage `max(2.0, min(10.0, 0.2 * time_limit))`, so this
+  is a default-path stage with a budget it cannot enforce, not an opt-in one.
+
+The panel to run is the standard §5 regime-2 A/B — `DISCOPT_ROOT_CUT_DEADLINE`
+ON vs OFF over the in-repo corpus — under a load gate (§9), since *net-positive*
+here is entirely a wall-clock claim. Soundness is not what the panel is for:
+truncation only removes cuts, so neither arm can produce a bound tighter than
+the truth. The question is whether 81 s of root cuts buys more than 81 s of
+branch-and-bound, and only the panel answers it.
+
+## 25. #1141 convex-MINLP class: the missing capability, a false dual bound, and a restoration that never converged (2026-08-31)
 
 #1066 closed at 14/15. The row it could not close, `portfol_classical050_1`, is not
 closeable by tuning the OA loop: on the certified-convex class discopt solves an
@@ -4453,11 +4571,11 @@ Outcome, up front:
 
 | flag | verdict | evidence |
 |---|---|---|
-| `DISCOPT_OA_NODE_CUTS` | **default ON** | §24.4 |
-| `DISCOPT_OA_ELASTIC_RESTORATION` | **default ON** | §24.6 |
-| `DISCOPT_OA_INFEASIBLE_NOGOOD` | **stays OFF** | §24.7 |
+| `DISCOPT_OA_NODE_CUTS` | **default ON** | §25.4 |
+| `DISCOPT_OA_ELASTIC_RESTORATION` | **default ON** | §25.6 |
+| `DISCOPT_OA_INFEASIBLE_NOGOOD` | **stays OFF** | §25.7 |
 
-### 24.1 The capability
+### 25.1 The capability
 
 `oa.py`'s `node_callback` — gradient (ECP) cuts separated at **fractional** node LP
 solutions, which is exactly what SCIP does — has existed since the SHOT work. It was
@@ -4491,7 +4609,7 @@ The SHOT profile no longer requires Gurobi — the hook it needs now exists in-h
 while the HiGHS master is still refused for SHOT, since it separates only at
 integer-feasible incumbents.
 
-### 24.2 Soundness defect 1: `bound = objective` at an `"optimal"` exit
+### 25.2 Soundness defect 1: `bound = objective` at an `"optimal"` exit
 
 Building the differential panel produced an arm that certified `optimal` at
 −0.10088167 on an instance whose optimum is −0.10091959. The cuts were not at fault:
@@ -4522,7 +4640,7 @@ The same `bound = objective`-at-`"optimal"` reading should be audited in the oth
 MILP wrappers (`milp_highs`, `milp_pounce`, `gurobi`); only `milp_simplex` was touched
 here.
 
-### 24.3 Soundness defect 2: an integer-free OA loop certified a local minimum
+### 25.3 Soundness defect 2: an integer-free OA loop certified a local minimum
 
 The corpus panel flagged `trig` (MINLPLib: one continuous variable on `[-2, 5]`, one
 nonconvex row): `mip_nlp_method="lp_nlp_bb"` returned `status="optimal"`,
@@ -4541,7 +4659,7 @@ This predates #1141 and is identical with its flags on or off; the panel found i
 did not cause it. `test_oa.py::test_no_discrete_short_circuit` asserted the old
 behaviour and is updated, with a convex companion that still certifies.
 
-### 24.4 GRADUATED: `DISCOPT_OA_NODE_CUTS` clears both §5 bars
+### 25.4 GRADUATED: `DISCOPT_OA_NODE_CUTS` clears both §5 bars
 
 Corpus panel over the 119 vendored MINLPLib instances (`scratchpad/1141/panel_corpus.py`,
 both `python/tests/data/minlplib_nl/` and `python/tests/data/minlplib/`),
@@ -4558,7 +4676,7 @@ word:
 | dual bounds moved | **10 tighter, 2 looser** |
 | incumbents failing an independent feasibility check | 0 |
 
-(An earlier run of the same panel, before §24.3's certificate gate landed, read
+(An earlier run of the same panel, before §25.3's certificate gate landed, read
 42 → 44. The gate correctly demotes ~19 integer-free nonconvex rows from `optimal`
 to `feasible` in **both** arms, so the absolute count fell and the delta did not.
 The numbers above are the shipping build's.)
@@ -4575,7 +4693,7 @@ The two looser bounds are `clay0303hfsg` (1700.0 → 3.98e-12) and `fac2`
 investigated rather than waved through: its bound is **frozen across budgets** in both
 arms (identical at 25 s, 30 s and 35 s), so it is an early plateau, not degradation
 over time; the separator costs 0.02 s of a 30 s solve, so it is not a cost effect; and
-the obvious mechanical explanation was **falsified** — see §24.5. The largest single
+the obvious mechanical explanation was **falsified** — see §25.5. The largest single
 gain is `st_miqp1`, `feasible` after 30 s with bound 244.07 → **optimal in 0.03 s** at
 the oracle 281.0.
 
@@ -4583,7 +4701,7 @@ Both bars clear on one run, which under the 2026-07-17 policy suffices, so the d
 flips to ON. `DISCOPT_OA_NODE_CUTS=0` remains the opt-out and restores the pre-#1141
 master exactly; `DISCOPT_OA_NODE_CUT_ROUNDS` / `DISCOPT_OA_NODE_CUT_CAP` tune it.
 
-### 24.5 FALSIFIED: the re-queue was not discarding the bound that mattered
+### 25.5 FALSIFIED: the re-queue was not discarding the bound that mattered
 
 Hypothesis: `clay0303hfsg` loses its bound because re-opening a separated node throws
 its evaluation away and leaves it on the parent-inherited bound, and the frontier
@@ -4596,7 +4714,7 @@ It moved the node count (283 → 351) and **did not move the bound at all**
 because discarding a proved bound was wrong regardless, but it is not the explanation,
 and `clay0303hfsg`'s plateau remains unattributed.
 
-### 24.6 GRADUATED: `DISCOPT_OA_ELASTIC_RESTORATION` — item 3's root cause
+### 25.6 GRADUATED: `DISCOPT_OA_ELASTIC_RESTORATION` — item 3's root cause
 
 #1141 measured 0 of 60 restorations converging on `portfol_classical050_1`, 57 of them
 `Error_In_Step_Computation`, and recorded that switching the merit norm
@@ -4671,7 +4789,7 @@ point on failure, so a run where it *never* converged looked exactly like one wh
 always did; `_RESTORATION_OUTCOMES` now records the subsolver's own verdict per
 formulation and the trace summary reports it.
 
-### 24.7 REJECTED as a default: `DISCOPT_OA_INFEASIBLE_NOGOOD` (items 2 and 4)
+### 25.7 REJECTED as a default: `DISCOPT_OA_INFEASIBLE_NOGOOD` (items 2 and 4)
 
 An OA cut excludes the *point* it is taken at, not the *assignment* — with a linear
 objective and no epigraph nothing stops the master returning the same integers at a
@@ -4706,7 +4824,7 @@ at all**, because the no-good rows steer the master away from the assignments wh
 feasible point lives. The `DISCOPT_CUT_INHERIT` rule applies: sound, fires, not
 helpful — stays OFF, with the measurement recorded.
 
-### 24.8 The class measurement, and what would close #1141's own row
+### 25.8 The class measurement, and what would close #1141's own row
 
 `lp_nlp_bb`, 60 s cap, gap 1e-4. Three arms A/B/C **interleaved**, three repetitions
 each, mean ± sd (`scratchpad/1141/timing_class.py`, 27 runs, load average 0.68 before /
@@ -4731,3 +4849,4 @@ shows the in-house master **with** fractional separation beating HiGHS on the
 portfolio family; whether it also holds on `rsyn*` is the measurement that decides the
 retarget, and `rsyn*` is not vendored. **Do not retarget the route on the portfolio
 evidence alone.**
+

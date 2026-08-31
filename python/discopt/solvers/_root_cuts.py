@@ -93,6 +93,38 @@ def nlpbb_root_cuts_enabled() -> bool:
     return val not in ("0", "false", "off", "no")
 
 
+#: Whether an unset ``DISCOPT_ROOT_CUT_DEADLINE`` enforces the stage budget on
+#: the individual LPs. Enforcing it changes which cuts the stage separates on an
+#: instance whose OA prologue outruns the budget, hence that instance's root
+#: bound -- a bound-changing knob (CLAUDE.md §5 regime 2), so it ships
+#: default-off pending a graduation panel that clears both bars. The truncation
+#: is sound in either arm (fewer cuts can only loosen a bound, never invalidate
+#: one); the open question the panel answers is whether it is *net-positive*.
+#:
+#: That panel is owed, not optional: OFF is the arm in which ``generate_root_cuts``'
+#: docstring promise ("``time_budget_s`` bounds the stage's wall time") is false,
+#: and the stage is default-ON, so the shipped default is a default-path stage
+#: with a budget it cannot enforce. **Tracked in #1141** -- this flag graduates
+#: or is deleted; leaving it off forever is the dead flag CLAUDE.md §3 forbids.
+_ROOT_CUT_DEADLINE_DEFAULT = False
+
+
+def _deadline_enabled() -> bool:
+    """Is the #1066 per-LP stage deadline switched on (``DISCOPT_ROOT_CUT_DEADLINE``)?
+
+    With it off, ``generate_root_cuts`` behaves exactly as before: the initial OA
+    convergence and every LP inside it run unbounded, and ``time_budget_s`` is
+    consulted only between cut rounds. That legacy path stays tested.
+
+    Read per call, not cached at import, so a test can flip it without reloading
+    the module and an A/B panel can drive both arms from one build.
+    """
+    raw = os.environ.get("DISCOPT_ROOT_CUT_DEADLINE")
+    if raw is None:
+        return _ROOT_CUT_DEADLINE_DEFAULT
+    return raw.strip().lower() not in ("0", "false", "off", "no")
+
+
 def flat_column_terms(model) -> list:
     """One modeling term per *flat* column, in the model's own column order.
 
@@ -273,8 +305,15 @@ class _RootLP:
         return out
 
 
-def _solve_lp(root: _RootLP, cuts_a, cuts_b):
-    """Solve the root LP with HiGHS. Returns (obj_in_model_sense, x, duals, highs)."""
+def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
+    """Solve the root LP with HiGHS. Returns (obj_in_model_sense, x, duals, highs).
+
+    ``time_limit`` (seconds) is handed to HiGHS so a single LP cannot outrun the
+    stage budget. Measured on ``rsyn0830m`` (#1066): one unbounded call here
+    burned 81.3 s of a 150 s solve against a 10 s stage budget. A run that stops
+    on the limit returns a non-optimal status and is reported as a declined LP
+    (all-``None``), exactly as any other non-optimal status already was.
+    """
     import highspy
 
     inf = highspy.kHighsInf
@@ -304,6 +343,10 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b):
     lp.a_matrix_.value_ = np.array(vals, float)
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
+    if time_limit is not None:
+        # Floor at a strictly positive value: HiGHS treats <= 0 as "no limit",
+        # which would restore the very overrun this bounds.
+        h.setOptionValue("time_limit", max(1e-3, float(time_limit)))
     h.passModel(lp)
     h.run()
     if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
@@ -523,16 +566,38 @@ def generate_root_cuts(
                 added += 1
         return added
 
+    # The STAGE clock starts HERE, before the first OA convergence -- not after
+    # it. #1066: the round loop's clock used to start below, so the whole
+    # prologue ran outside the budget the docstring promises, and on rsyn0830m
+    # that prologue took 81.3 s against a 10 s budget. ``_remaining`` is what
+    # every LP below is bounded by. With the flag off, ``t_stage`` is read and
+    # never used: the round loop keeps its own late clock (see ``t0``), so the
+    # legacy path is unchanged to the instruction.
+    t_stage = _time.perf_counter()
+
+    def _remaining() -> float:
+        return time_budget_s - (_time.perf_counter() - t_stage)
+
     def oa_converge():
-        obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b)
+        deadline = _deadline_enabled()
+        obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
         for _ in range(OA_MAX_ITERS):
             if x is None or add_oa(x) == 0:
                 break
-            obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b)
+            if deadline and _remaining() <= 0.0:
+                # Out of budget mid-convergence. The OA is incomplete, so the LP
+                # is over FEWER constraints than the true feasible set -- a
+                # relaxation of a relaxation. Its bound and every cut separated
+                # from it stay valid; only their strength is given up.
+                break
+            obj, x, duals, h = _solve_lp(root, cuts_a, cuts_b, _remaining() if deadline else None)
         return obj, x, duals, h
 
     obj, x, duals, h = oa_converge()
     if x is None:
+        # Includes "the budget expired before the first LP closed": the stage
+        # then contributes no cuts, which is always sound -- it is the same
+        # outcome as the stage being switched off.
         return RootCutResult()
     b0 = obj  # OA-only root LP bound (pre-cut baseline for the quality gate)
 
@@ -547,7 +612,9 @@ def generate_root_cuts(
     # quality gate uses, so "not improving" here means "on track to be
     # discarded there" rather than a second, unrelated notion of progress.
     gate_tol = 1e-6 * max(1.0, abs(b0))
-    t0 = _time.perf_counter()
+    # Flag ON: the round loop is bounded by what is LEFT of the stage budget.
+    # Flag OFF: it restarts the clock here, exactly as it always did.
+    t0 = t_stage if _deadline_enabled() else _time.perf_counter()
     lb_s = np.where(np.isfinite(root.lb_sep), root.lb_sep, 0.0)
     ub_s = np.where(np.isfinite(root.ub_sep), root.ub_sep, 1e5)
 
