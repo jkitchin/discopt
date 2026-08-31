@@ -98,6 +98,80 @@ Stop work and surface to the maintainer (do not improvise) when:
 - the baseline (`cert-baseline.jsonl`) is missing or stale relative to `main` such
   that neutrality cannot be asserted.
 
+### 0.6.1 The reference's own drift (falsification, #1134, 2026-08-31)
+
+§0.6 makes "the baseline is stale relative to `main`" a stop-and-escalate condition,
+but nothing in the tooling could *detect* it, so it was never raised. #1134 is the
+bill: 7 rows of the committed reference read as regressions on `main`, the #1130
+graduation gate charged that drift to all 7 flags as `soundness=FAIL`, and answering
+"when did this reference last match the tree?" cost a bisect that the reference
+should have answered by inspection.
+
+**Root cause, bisected.** `git bisect --first-parent` on `nvs14`'s node count
+(deterministic, well inside its budget, so unconfounded by wall clock) over
+`23a64ab6` (2026-08-11, the reference's actual generating commit) → `main`, 104
+first-parent revisions, 7 steps, names **`bd9c4c5c` (PR #1025)** — the `feral`
+0.15.1 → 0.16.0 bump, whose one breaking item is `SparseLu::factor` defaulting to
+threshold Markowitz instead of AMD-on-AtA + Gilbert–Peierls. Confirmed forward by an
+A/B on `main` distinguished by a marker string baked into the extension: a
+`LuPivoting::GilbertPeierls` arm restores **`nvs02` 421 → 345** and **`tspn05` 51 →
+39**, i.e. *exactly* the committed reference's values, and takes **`nvs14` 839 →
+175**. The drift is a rounding-trajectory reshuffle of degenerate pivot choices, and
+it was already recorded as such by the bump itself (`crates/discopt-core/Cargo.toml`
+names nvs02, nvs14, nvs11, nvs12, tanksize under its regime-(b) acceptance). Nothing
+regressed since v0.8.0 — the reference simply predates v0.8.0 and was never
+refreshed after a deliberate, accepted bound-changing change.
+
+**The issue's window was wrong, and could not have been right.** #1134 placed the
+regression in 2026-08-17…08-24 because the reference was assumed to be the v0.8.0
+snapshot (`deba4ce`, 08-16). It is not: `git log --follow` puts its last
+regeneration at `23a64ab6`, 08-11, five days *before* v0.8.0 and three before the
+bump. `nvs14` measures 839 at `deba4ce` and at `1a0df198`, both inside the supposed
+window's "good" end. **A reference that does not carry its own provenance cannot be
+reasoned about, only bisected** — which is what #1134 fixed in the tooling.
+
+**Not every row is the bump.** Measured on a 4-vCPU box, interleaved A/B, 3 reps,
+per-instance sd reported (CLAUDE.md §9):
+
+| instance | issue's reading | measured |
+|---|---|---|
+| `nvs14` 129→839 | node regression | the bump (GP arm → 175) |
+| `nvs02` 345→421 | node regression | the bump (GP arm → 345, exact) |
+| `tspn05` 39→51 | node regression | the bump (GP arm → 39, exact) |
+| `nvs09` 5→31 | node regression | **does not reproduce** — 5 nodes in both arms, 3/3 reps |
+| `clay0303hfsg` → `time_limit` | lost certification | **the box**: non-certifying in *both* arms (ref 15.3 s / 283 nodes) |
+| `tanksize` → `time_limit` | lost certification | **the box**: non-certifying in *both* arms (ref 30.4 s / 16879 nodes) |
+| `nvs05` → `feasible` | lost certification | **per-node wall**: identical 175-node tree; GP 57.0 s (sd 0.24), Markowitz > 60 s |
+| `cvxnonsep_nsig30` marginal | budget cliff | **per-node wall**: identical 165-node tree; GP 39.5 s (sd 1.05) vs Markowitz 59.4 s (sd 0.80) |
+
+The last two are the finding the #1025 acceptance does not cover. That record's
+net-positive arm was measured on captured *relaxation* LPs — large, high-fill bases,
+where Markowitz wins 8.32x → 1.28x fill — and it says outright that "the certifying
+panel cannot" see the change. It can: on this panel's small bases Markowitz's
+ordering search does not amortize, and it *costs* wall (`cvxnonsep_nsig30` +49%,
+same tree). Two of #1134's three "lost certifications" are that cost pushing an
+instance across a 60 s line it was already near. This does not retract the bump —
+`numerical` refusals and fill both improved, and no verdict was ever false — but it
+does retract "the certifying panel cannot see it", and it is the entry measurement
+for size-routed pivoting (Gilbert–Peierls on small bases, Markowitz on large).
+
+**Do not regenerate the reference on an arbitrary box.** The admission filter drops
+anything not certifying inside `_MARGIN_FRAC` (0.6) of its budget, and three of its
+four rejection reasons are properties of the machine. The 4-vCPU box above runs
+**≈3x** the reference machine's wall on equal-node work (`nvs09` 0.82 → 2.8 s at 5
+nodes; `tspn05` 2.44 → 7.30 s at 39 nodes), which is enough on its own to drop
+`clay0303hfsg`, `nvs05` and `tanksize` — the exact silent shrink #1134 warned about.
+Regeneration belongs on the reference machine.
+
+**Tooling fixed under #1134**, so this is a lookup next time, not a bisect:
+`gen_cert_baseline.py` writes `docs/dev/data/cert-baseline-meta.json` (generating
+commit, timestamp, budget, host, and the full drop record with each dropped row's
+previous verdict) and **refuses to overwrite the reference when coverage would
+shrink** unless `--allow-shrink` is passed; `check_cert_neutrality.py` prints that
+provenance and a host-speed calibration measured only on instances whose
+`node_count` reproduced exactly, and annotates `status` violations with it. The
+calibration is reporting-only — no violation is ever suppressed by it (§0.3).
+
 ### 0.7 Definition of done (per phase)
 
 A phase is done when: its §4–§9 exit gate is green on the committed baseline's
