@@ -74,27 +74,52 @@ class TestRouteGates:
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
         assert method == "lp_nlp_bb"
         assert "certified convex" in reason
-        # The master engine is not incidental: on the in-house master this method
-        # is measurably worse than the "oa" it replaced (#1066), so the route must
-        # carry the HiGHS pick with it or the retarget is a regression.
-        assert opts == {"milp_solver": "highs"}
+        # The route names NO backend (#1141). An empty options dict resolves
+        # through the MIP-NLP layer's own `"auto"` default to the in-house
+        # simplex master. See the next test for why naming one was wrong.
+        assert opts == {}
 
-    def test_without_highspy_the_target_stays_on_the_old_oa_path(self, monkeypatch):
-        """No HiGHS master, no retarget -- and still a route, not a refusal."""
+    def test_the_route_never_names_an_optional_backend(self, monkeypatch):
+        """#1141: the default route must not depend on an opt-in dependency.
+
+        Between 2026-08-29 and 2026-08-31 this route pinned
+        ``{"milp_solver": "highs"}``, so the default *algorithm* for a whole
+        problem class changed with whether ``highspy`` happened to be installed
+        (with it, ``lp_nlp_bb``/highs; without it, a silent fall back to
+        ``"oa"``). ``_resolve_lp_nlp_bb_backend`` forbids exactly this one layer
+        down -- ``"auto"`` deliberately does not pick HiGHS -- and the router
+        overrode it from above.
+
+        Asserting on the value rather than the absence of a key: a route that
+        starts naming `"gurobi"` would be the same defect wearing a different
+        name.
+        """
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        for name in ("gbd", "st_miqp1", "alan"):
+            _method, _reason, opts = _convex_minlp_auto_route(_load(name))
+            assert "milp_solver" not in opts, f"{name}: route pinned a backend: {opts}"
+
+    def test_the_route_is_unchanged_when_highspy_cannot_be_imported(self, monkeypatch):
+        """No HiGHS anywhere, same route -- it does not participate any more.
+
+        This is the test that would have caught the coupling: before #1141 the
+        same model routed to ``"oa"`` here and to ``lp_nlp_bb`` with highspy
+        present.
+        """
         monkeypatch.setenv(ROUTE_ENV, "1")
         import builtins
 
         real_import = builtins.__import__
 
         def _no_highs(name, *a, **kw):
-            if name == "discopt.solvers.milp_highs":
+            if name == "discopt.solvers.milp_highs" or name == "highspy":
                 raise ImportError("highspy is not installed")
             return real_import(name, *a, **kw)
 
         monkeypatch.setattr(builtins, "__import__", _no_highs)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        assert method == "oa"
-        assert "highspy unavailable" in reason
+        assert method == "lp_nlp_bb"
+        assert "certified convex" in reason
         assert opts == {}
 
     def test_declines_pure_continuous(self, monkeypatch):

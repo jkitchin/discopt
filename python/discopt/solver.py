@@ -5222,24 +5222,44 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     The target used to be ``"oa"``, "because ``lp_nlp_bb`` hard-requires a Gurobi
     license — see #1060, which must land before that becomes selectable
     automatically". #1060 landed on 2026-08-20 and brought a free HiGHS master
-    with it, so that reason has expired and the target moves to ``lp_nlp_bb`` on
-    the HiGHS master. Measured 2026-08-29 at the default 60 s on the #1066 rows
-    the ``"oa"`` target did not close, reference optimum in brackets:
+    with it, so that reason expired and the target moved to ``lp_nlp_bb``.
+    Measured 2026-08-29 at the default 60 s on the #1066 rows the ``"oa"`` target
+    did not close, reference optimum in brackets:
 
     ==========================  =====================  ========================
-    instance                    ``"oa"`` (the target    ``lp_nlp_bb`` + HiGHS
-                                until now)             (the target now)
+    instance                    ``"oa"``               ``lp_nlp_bb``
     ==========================  =====================  ========================
     ``rsyn0830m`` [510.072]     feasible, 60.2 s       **optimal, 4.9 s**
     ``rsyn0840m`` [325.555]     feasible, 62.7 s       **optimal, 8.4 s**
     ``rsyn0820m02m`` [1092.09]  feasible 102% off      **optimal, 39.3 s**
     ==========================  =====================  ========================
 
-    The master engine is the whole difference, not the tree topology:
-    ``lp_nlp_bb`` on the *in-house* master is measurably WORSE than ``"oa"`` on
-    the same rows (``rsyn0840m`` 103.5% off vs 0.0%), which is why the HiGHS
-    master is a precondition of the retarget rather than an optimization on top
-    of it. Without ``highspy`` the target stays ``"oa"``.
+    **The route runs on the in-house master (#1141).** Between 2026-08-29 and
+    2026-08-31 it pinned ``{"milp_solver": "highs"}``, because at the time
+    ``lp_nlp_bb`` on the in-house master was measurably worse than ``"oa"``
+    (``rsyn0840m`` 103.5% off vs 0.0%) and the HiGHS master looked like a
+    precondition of the retarget. That was wrong on two counts.
+
+    It was wrong on **policy**: HiGHS is an opt-in optional dependency, and the
+    default route must never depend on one. :func:`_resolve_lp_nlp_bb_backend`
+    says so in as many words — ``"auto"`` deliberately does not pick HiGHS,
+    "routing it there would make the default depend on an optional package" —
+    and this function then did exactly that, one layer up. The visible symptom
+    was that the default *algorithm* for a whole problem class changed with
+    whether ``highspy`` happened to be installed: with it, ``lp_nlp_bb``/highs;
+    without it, a silent fall back to ``"oa"``.
+
+    It was wrong on **evidence**: the in-house master's measured weakness was
+    that it could not close its own gap at the root, and the thing that closes a
+    master's gap — separating gradient cuts at *fractional* node relaxations, as
+    SCIP does — did not exist in that master when the comparison was run. #1141
+    built it (``DISCOPT_OA_NODE_CUTS``, graduated ON). Comparing against the
+    pre-hook master is comparing against a version of the code that is gone.
+
+    So the route now returns no ``milp_solver`` at all, which resolves through
+    ``"auto"`` to the in-house simplex master. ``milp_solver="highs"`` stays
+    available as an explicit caller opt-in and is still honoured over the route's
+    pick (the call site uses ``setdefault``).
 
     Every gate below is a *refusal* to route: an unknown convexity verdict, a
     nonconvex model, a missing MILP backend, or an opaque ``dm.custom`` body all
@@ -5298,31 +5318,23 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     except ImportError:
         return None, "not routed: no MILP backend available for the OA master", {}
 
-    # ``lp_nlp_bb`` is the target only when the HiGHS master it needs is actually
-    # importable. On the in-house master the same method is worse than ``"oa"``
-    # (see the table above), so this is not a preference between two good options
-    # -- it is the difference between the retarget being an improvement and a
-    # regression. No highspy, no retarget.
-    try:
-        from discopt.solvers.milp_highs import solve_milp_with_lazy_cuts  # noqa: F401
-    except ImportError:
-        return (
-            "oa",
-            (
-                f"mip-nlp/oa: {problem_class.value} certified convex at the root; "
-                "lp_nlp_bb not selected (highspy unavailable) "
-                "(DISCOPT_CONVEX_MINLP_ROUTE)"
-            ),
-            {},
-        )
-
+    # No highspy gate here any more (#1141). It used to fall back to ``"oa"``
+    # when highspy was missing, which made the default algorithm for this whole
+    # problem class depend on an OPTIONAL dependency being installed. The route
+    # targets the in-house master, which is always present, so there is nothing
+    # left to gate on -- `get_milp_solver()` above already refused the route if
+    # no MILP backend can be loaded at all.
     return (
         "lp_nlp_bb",
         (
-            f"mip-nlp/lp_nlp_bb on the HiGHS master: {problem_class.value} certified "
-            "convex at the root (DISCOPT_CONVEX_MINLP_ROUTE)"
+            f"mip-nlp/lp_nlp_bb on the in-house master: {problem_class.value} "
+            "certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE)"
         ),
-        {"milp_solver": "highs"},
+        # Deliberately empty: no `milp_solver` key means the MIP-NLP layer's own
+        # default `"auto"` applies, which `_resolve_lp_nlp_bb_backend` resolves to
+        # the in-house simplex driver. Naming a backend here is what coupled the
+        # default path to an opt-in package.
+        {},
     )
 
 
