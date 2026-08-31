@@ -244,6 +244,74 @@ Regeneration belongs on the reference machine, and Cause 2 should be settled
 first: `cvxnonsep_nsig30`, `clay0303hfsg` and `fac2` will sit near their budgets
 *there* too, because the route flip is machine-independent.
 
+#### Resolution (2026-08-31): the panel re-run on a verified-fresh build
+
+Everything above was measured on a 4-vCPU box. Re-run on a second machine
+(14-core, `highspy` installed, `_rust.abi3.so` rebuilt from the tree under test
+and asserted at import per §8 — the previous local build was a two-week-old
+`_rust.cpython-*.so` **shadowing** the real extension, which is its own lesson:
+`test_rust_extension_not_shadowed` was failing and saying so). Host-speed
+calibration on this box: **1.53x** the reference machine over 17 unrouted rows
+that reproduced their node count exactly.
+
+**The three lost certifications do not reproduce. All 52 rows certify
+`optimal`.** `clay0303hfsg`, `nvs05` and `tanksize` — the whole of #1134's
+"lost certification" table — come back `optimal`, as does `cvxnonsep_nsig30` and
+even the perf-gated `nvs17` (60451 nodes, exact). The losses were the reporting
+box's wall: at 3.45x, `nvs05` (20.53 s) and `tanksize` (30.39 s) exceed a 60 s
+budget arithmetically, and at 1.53x they do not.
+
+**No soundness fault.** `incorrect_count = 0` against 58 oracles. Eleven rows
+drift beyond the 1e-8 byte-reproducibility tolerance; every one was bracketed
+against `cert-optima.json` and **none** disagrees with the true optimum — and
+**eight of the eleven land closer to it than the committed reference does**
+(`st_test1` -1.65e-08 → exactly 0, `gbd` → 2.2000000009 vs 2.2, `m3` →
+37.80000007 vs 37.8, `st_miqp5` → -333.88888889 exact). On those rows the
+*reference* is the less accurate artifact.
+
+**The node regressions are real, and are Cause 1.** `nvs14` 129 → 839, `nvs02`
+345 → 421, `clay0303hfsg` 283 → 315, `tspn05` 39 → 43 (51 on the other box —
+this row is not machine-invariant), `nvs09` 5 → **31**.
+
+> **Retraction (CLAUDE.md §11).** The row-by-row table above records `nvs09`
+> 5 → 31 as "**does not reproduce** — 5 nodes, both arms, 3/3 reps". It
+> reproduces here: **31 nodes**, on current `main` with a build asserted fresh.
+> Read the "does not reproduce" as scoped to that box and that build, not to the
+> tree.
+
+**Why the reference still cannot be refreshed — and it is one row, one
+mechanism.** `gen_cert_baseline.py --time-limit 60` admitted **51 of the
+reference's 52** and the shrink guard refused the write, naming exactly one
+loss: `clay0303hfsg`, `near-limit(wall 49 s/60 s)` at 315 nodes against the
+reference's 283 at 15.29 s. An +11% tree cannot cost 3.2x wall, and
+`algorithm_route` — the field added by #1144 for this exact question — answers
+it without a bisect:
+
+    clay0303hfsg  48.74s  oa: ... did not certify in 30.27s (unknown)  -> fallback got 29.73s
+    fac2          35.45s  oa: ... did not certify in 30.08s (feasible) -> fallback got 29.92s
+    cvxnonsep_nsig30 28.89s oa: ... did not certify in 28.20s (feasible) -> fallback got 31.80s
+
+Strip the 30.27 s the abstaining route burns and `clay0303hfsg` finishes in
+~18.5 s, inside the 36 s margin, and the panel refreshes with **zero** coverage
+loss. So the sole blocker to a refreshed reference is **#1143**, quantified.
+
+> **Retraction (CLAUDE.md §11).** Cause 2 above frames the route cost as what
+> "#1100 exposed **on a highspy-free machine**". That framing is wrong. This box
+> has `highspy` installed and the route still fires on **23 of 56** panel
+> instances and abstains on **5** of them. The post-#1100 gate asks
+> `get_milp_solver()`, which succeeds with or without `highspy`; #1100 made the
+> route reachable *generally*, not on one class of machine. Likewise "admitted
+> 45 of the reference's 52 rows … four more than #1134 anticipated" is that
+> box's speed, not a property of the tree: here the same script admits **51**.
+
+**Disposition.** #1134 asked whether the panel regressed since v0.8.0. It did
+not: no soundness fault, no reproducible lost certification, and node drift that
+predates v0.8.0 and was accepted when it shipped (Cause 1). #1134 is closed on
+this evidence. Refreshing the reference is **an acceptance criterion on #1143**,
+not a separate task — the guard added here will refuse until #1143 is fixed, and
+that refusal is the correct behavior, not a blocker to route around with
+`--allow-shrink`.
+
 #### Tooling fixed under #1134, so this is a lookup next time
 
 `gen_cert_baseline.py` writes `docs/dev/data/cert-baseline-meta.json` (generating
