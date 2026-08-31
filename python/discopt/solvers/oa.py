@@ -5016,14 +5016,6 @@ def solve_lp_nlp_bb(
     # unsupported request costs a message rather than a decomposition.
     lazy_backend = _resolve_lp_nlp_bb_backend(milp_solver, shot_profile=shot_profile)
     hook = _normalize_optional_hook("termination_hook", termination_hook)
-    if hook is not None and lazy_backend == "simplex":
-        raise NotImplementedError(
-            "termination_hook is not available on the in-house simplex master: the "
-            "driver enforces time_limit itself and offers no check-in point, so the "
-            "hook could never be called and any budget built on it would be a "
-            "fiction. Use milp_solver='highs' (checks in at every master restart) "
-            "or milp_solver='gurobi'."
-        )
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
     fp_config = _normalize_fp_config(
@@ -5657,10 +5649,12 @@ def solve_lp_nlp_bb(
         lazy_callback=lazy_callback,
         mip_start=master_mip_start,
     )
+    # All three masters now carry the progress check-in; only the fractional-node
+    # hook is backend-specific.
+    lazy_kwargs["terminate_callback"] = callback_terminate
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
-        lazy_kwargs["terminate_callback"] = callback_terminate
-    elif lazy_backend == "simplex" and (shot_profile or _oa_node_cuts_enabled()):
+    elif lazy_backend == "simplex":
         # #1141: the in-house driver now has a fractional-node hook, so the ECP
         # cuts that used to require Gurobi's MIPNODE run here too. This is the
         # capability the issue measured as missing: without it every node either
@@ -5669,16 +5663,20 @@ def solve_lp_nlp_bb(
         # hyperplane strategy is defined at fractional points), so it is wired
         # unconditionally there; for the plain convex path it is a bound-CHANGING
         # knob and ships behind ``DISCOPT_OA_NODE_CUTS`` (CLAUDE.md §5 regime 2).
-        lazy_kwargs["node_callback"] = node_callback
-        lazy_kwargs["node_hook_rounds"] = _oa_node_cut_rounds()
-        lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
-    elif lazy_backend == "highs":
-        # The HiGHS master checks in at every restart and, between them, on an
-        # interval. That is what lets a caller budget this method by progress
-        # (#1066) -- and, hook or no hook, what lets the driver notice its own
-        # certificate the moment the bound meets the incumbent instead of at
-        # whatever later instant the separator runs dry.
-        lazy_kwargs["terminate_callback"] = callback_terminate
+        #
+        # Its check-in is the driver's per-iteration checkpoint (#1141). Until
+        # that was wired, `termination_hook` was REFUSED here, so the #1066 route
+        # progress guard raised on every routed solve and the convex-MINLP route
+        # fell all the way back to the spatial path.
+        if shot_profile or _oa_node_cuts_enabled():
+            lazy_kwargs["node_callback"] = node_callback
+            lazy_kwargs["node_hook_rounds"] = _oa_node_cut_rounds()
+            lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
+    # "highs" checks in at every restart and, between them, on an interval. That
+    # is what lets a caller budget this method by progress (#1066) -- and, hook or
+    # no hook, what lets a driver notice its own certificate the moment the bound
+    # meets the incumbent instead of at whatever later instant the separator runs
+    # dry.
     master_result = solve_milp_with_lazy_cuts(**lazy_kwargs)  # type: ignore[arg-type]
     wall_time = time.perf_counter() - t_start
 

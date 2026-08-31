@@ -1122,11 +1122,25 @@ def solve_milp_with_lazy_cuts(
     of the incumbent -- a fractional separation only tightens a relaxation, so
     exhausting either budget is benign and never touches certification.
 
-    Not supported here, and refused rather than silently dropped:
+    ``terminate_callback`` (#1141) is consulted at the driver's per-iteration
+    checkpoint -- the in-house analogue of the HiGHS master's per-restart
+    check-in. It is handed the snapshot shape the other backends pass
+    (``dual_bound``, ``restarts``, ``lazy_cuts``), and returning true stops the
+    search, keeping the incumbent and the bound and reporting the result
+    **uncertified**, exactly as the driver's own time limit does. ``restarts`` is
+    always ``0``, and that is a fact rather than a placeholder: this is a true
+    single tree, so there is nothing to restart.
 
-    ``terminate_callback``
-        The driver enforces ``time_limit`` itself. A callback that can never fire
-        would make ``callback_stats["terminated"]`` a lie.
+    This used to be refused, on the grounds that "the driver enforces
+    ``time_limit`` itself and has no callback-termination hook". The first half is
+    true and irrelevant; the second was stale. The driver has had a per-iteration
+    checkpoint carrying ``incumbent``/``bound``/``gap``/``elapsed`` with a ``Stop``
+    control since the interactive debugger landed, already exposed to Python as
+    ``debug_hook``, so this is a composition rather than a new capability. The
+    refusal was what stopped #1141's convex-MINLP route from targeting a
+    discopt-native master: the #1066 route progress guard installs a
+    ``termination_hook``, the refusal raised, and the whole route fell back to the
+    spatial path.
 
     ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
     ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
@@ -1161,12 +1175,6 @@ def solve_milp_with_lazy_cuts(
             f"{node_hook_rounds}/node_hook_cut_cap={node_hook_cut_cap}: a zero budget "
             "means the separator can never fire, which is indistinguishable from one "
             "that found nothing. Pass positive budgets, or omit node_callback."
-        )
-    if terminate_callback is not None:
-        raise NotImplementedError(
-            "the simplex lazy-cut backend enforces time_limit in the driver and has "
-            "no callback-termination hook; pass time_limit instead of "
-            "terminate_callback."
         )
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
@@ -1235,6 +1243,41 @@ def solve_milp_with_lazy_cuts(
 
     _node_hook = None if node_callback is None else _separate_node
 
+    # The driver has ONE hook slot and the interactive debugger already owns it,
+    # so a caller's ``terminate_callback`` COMPOSES with it rather than replacing
+    # it: silently dropping either would be the "callback that can never fire"
+    # this function refuses everywhere else. Either one voting to stop stops the
+    # search, and with neither attached the slot stays ``None`` so the search is
+    # bit-for-bit the unhooked one.
+    from discopt import debug as _debug
+
+    _debug_hook = _debug.rust_hook()
+    _term_state: dict[str, object] = {"calls": 0, "terminated": False}
+
+    def _checkin(state: dict) -> bool:
+        stop = False
+        if _debug_hook is not None:
+            stop = bool(_debug_hook(state))
+        if terminate_callback is not None and str(state.get("checkpoint")) == "after_select":
+            # One checkpoint of the five: this is a budget decision, and asking it
+            # at every checkpoint would multiply its cost and make its own call
+            # count meaningless as a signal.
+            _term_state["calls"] = int(cast(int, _term_state["calls"])) + 1
+            if bool(
+                terminate_callback(
+                    {
+                        "dual_bound": state.get("bound"),
+                        "restarts": 0,
+                        "lazy_cuts": stats["lazy_cuts"],
+                    }
+                )
+            ):
+                _term_state["terminated"] = True
+                stop = True
+        return stop
+
+    _checkin_arg = None if (_debug_hook is None and terminate_callback is None) else _checkin
+
     # A caller-supplied start is a plain incumbent candidate: the driver validates
     # it against the constraints AND offers it to the separator before seeding, so
     # an infeasible or lazily-excluded start cannot prune the true optimum.
@@ -1260,8 +1303,6 @@ def solve_milp_with_lazy_cuts(
                 "only (the driver derives the slacks from the row residuals)"
             )
         seed = np.ascontiguousarray(seed_arr)
-
-    from discopt import debug as _debug
 
     t0 = time.perf_counter()
     (
@@ -1293,7 +1334,7 @@ def solve_milp_with_lazy_cuts(
         float(gap_tolerance),
         time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
         initial_incumbent=seed,
-        debug_hook=_debug.rust_hook(),
+        debug_hook=_checkin_arg,
         node_callback=_node_hook,
         node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
@@ -1306,6 +1347,11 @@ def solve_milp_with_lazy_cuts(
     # let the discrepancy surface rather than papering over it.
     stats["driver_lazy_calls"] = int(lazy_calls)
     stats["lazy_requeues"] = int(lazy_requeues)
+    # Reported unconditionally so a caller can tell "the check-in ran and never
+    # asked to stop" from "the check-in never ran" -- the same anti-vacuity rule
+    # the separator counters follow (CLAUDE.md §6).
+    stats["terminate_calls"] = int(cast(int, _term_state["calls"]))
+    stats["terminated"] = bool(_term_state["terminated"])
     # Same two-sided bookkeeping for the fractional separator: this side counts
     # the calls it served, the driver counts the rows it actually folded in (after
     # dedup and the cap). A `node_cuts` far above `driver_node_cuts` means the

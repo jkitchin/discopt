@@ -230,8 +230,49 @@ def test_unsupported_callbacks_are_refused_loudly():
             node_callback=lambda _x: [],
             node_hook_cut_cap=0,
         )
-    # Accepting this while ignoring it would report a termination that never fired.
-    with pytest.raises(NotImplementedError, match="terminate_callback"):
-        solve_milp_with_lazy_cuts(
-            **kw, lazy_callback=lambda _x: [], terminate_callback=lambda _s: False
-        )
+
+
+@pytest.mark.smoke
+def test_a_terminate_callback_is_honoured_and_counted():
+    """#1141: this used to be refused; the driver's checkpoint now serves it.
+
+    The old refusal said "the driver enforces time_limit itself and has no
+    callback-termination hook". The first half is true and irrelevant; the second
+    was stale -- the per-iteration checkpoint behind ``debug_hook`` has carried
+    incumbent/bound/gap/elapsed with a Stop control since the interactive
+    debugger landed.
+
+    Both halves are asserted, because either alone is weak: a callback that is
+    counted but not obeyed, and one that is obeyed but never counted, would each
+    pass half of this.
+    """
+    c, A_ub, b_ub, bounds, integrality = _knapsack()
+    kw = dict(
+        c=c, A_ub=A_ub, b_ub=b_ub, A_eq=None, b_eq=None, bounds=bounds, integrality=integrality
+    )
+
+    seen = {"n": 0}
+
+    def _never_stop(snapshot):
+        seen["n"] += 1
+        assert "dual_bound" in snapshot
+        # A true single tree: nothing restarts, so 0 is the fact, not a stand-in.
+        assert snapshot["restarts"] == 0
+        return False
+
+    res = solve_milp_with_lazy_cuts(
+        **kw, lazy_callback=lambda _x: [], terminate_callback=_never_stop
+    )
+    assert seen["n"] > 0, "the callback never fired; the rest of this proves nothing"
+    assert res.callback_stats["terminate_calls"] == seen["n"]
+    assert res.callback_stats["terminated"] is False
+    assert res.status == SolveStatus.OPTIMAL
+
+    stopped = solve_milp_with_lazy_cuts(
+        **kw, lazy_callback=lambda _x: [], terminate_callback=lambda _s: True
+    )
+    assert stopped.callback_stats["terminated"] is True
+    assert stopped.status != SolveStatus.OPTIMAL, (
+        "a search cut short by a callback has not proved its bound and must not "
+        "report a certificate"
+    )

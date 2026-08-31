@@ -1,0 +1,834 @@
+[
+ {
+  "instance": "alan",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 2.9249999999513205,
+   "bound": 2.9249999999509586,
+   "wall": 0.06207577000168385,
+   "feas": 8.122391648157645e-11
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 2.9249999999513205,
+   "bound": 2.9249999999509586,
+   "wall": 1.012296177999815,
+   "feas": 8.122391648157645e-11
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 2.9249999999513205,
+   "bound": 2.9249999999509586,
+   "wall": 0.04375663500104565,
+   "feas": 8.122391648157645e-11
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 2.9249999999513205,
+   "bound": 2.9249999999509586,
+   "wall": 0.0925841339994804,
+   "feas": 8.122391648157645e-11
+  }
+ },
+ {
+  "instance": "clay0303hfsg",
+  "sense": 1.0,
+  "spatial": {
+   "status": "feasible",
+   "objective": 26669.109572842735,
+   "bound": 19513.27233706069,
+   "wall": 30.559165402999497,
+   "feas": 2.697836550010709e-12
+  },
+  "oa": {
+   "status": "feasible",
+   "objective": 55092.5206193507,
+   "bound": 2899.2974531868135,
+   "wall": 30.538591573000303,
+   "feas": 2.427597795258873e-12
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 26669.109572842746,
+   "bound": 26669.10955160342,
+   "wall": 30.59048607299883,
+   "feas": 2.6978365499842393e-12
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 26669.10957258355,
+   "bound": 26669.109572485962,
+   "wall": 2.7075369300000602,
+   "feas": 8.400516192121336e-13
+  }
+ },
+ {
+  "instance": "cvxnonsep_nsig30",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 130.62871268683438,
+   "bound": 130.61841392487688,
+   "wall": 2.3496295109998755,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 130.62871268683438,
+   "bound": 130.61841392487688,
+   "wall": 19.48561909899945,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 130.62871268683438,
+   "bound": 130.61841392487688,
+   "wall": 2.2160368580007344,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 130.62871268683438,
+   "bound": 130.61841392487688,
+   "wall": 22.00184001299931,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "cvxnonsep_psig30",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 78.998854365269,
+   "bound": 78.99701703820377,
+   "wall": 0.8477058829994348,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 78.998854365269,
+   "bound": 78.99701703820377,
+   "wall": 3.0916326540009322,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 78.998854365269,
+   "bound": 78.99701703820377,
+   "wall": 0.8040798019992508,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 78.998854365269,
+   "bound": 78.99701703820377,
+   "wall": 0.8255818199995701,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "cvxnonsep_psig40r",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 86.54528682800984,
+   "bound": 86.53935904063198,
+   "wall": 1.4168599940003332,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 86.5451538163194,
+   "bound": 86.54035590678737,
+   "wall": 0.28505223200045293,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 86.54528682800984,
+   "bound": 86.53935904063198,
+   "wall": 1.381610485001147,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 86.5451538163194,
+   "bound": 86.53908160805126,
+   "wall": 0.5696564310001122,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "fac2",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 331837498.1769339,
+   "bound": 331837497.545634,
+   "wall": 7.935354090999681,
+   "feas": 7.105427357601002e-14
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 331837498.1769339,
+   "bound": 331837497.545634,
+   "wall": 20.997865235000063,
+   "feas": 7.105427357601002e-14
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 331837498.1769339,
+   "bound": 331837497.545634,
+   "wall": 7.817550108999058,
+   "feas": 7.105427357601002e-14
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 331837498.17687935,
+   "bound": 331837498.17676985,
+   "wall": 0.8535522830006812,
+   "feas": 8.526512829121202e-14
+  }
+ },
+ {
+  "instance": "flay02m",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 37.94733200611268,
+   "bound": 37.94733186298532,
+   "wall": 4.0328678940004465,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 37.94733194457007,
+   "bound": 37.947331917031384,
+   "wall": 0.053391060000649304,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 37.94733200611268,
+   "bound": 37.94733186298532,
+   "wall": 4.065810607000458,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 37.94733194457007,
+   "bound": 37.94733191717457,
+   "wall": 0.14217254299910564,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "flay03m",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 48.9897949738358,
+   "bound": 48.98979479317761,
+   "wall": 5.2806405760002235,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 48.9897948882318,
+   "bound": 48.98979484863503,
+   "wall": 0.339055925998764,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 48.9897949738358,
+   "bound": 48.98979479317761,
+   "wall": 5.401475507000214,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 48.98979488823173,
+   "bound": 48.989794848782665,
+   "wall": 0.7422202069992636,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "gbd",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 2.19999999855173,
+   "bound": 2.19999999855173,
+   "wall": 0.013513636000425322,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 2.200000000909095,
+   "bound": 2.2,
+   "wall": 0.02082538200011186,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 2.19999999855173,
+   "bound": 2.19999999855173,
+   "wall": 0.013927578998846002,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 2.200000000909095,
+   "bound": 2.2,
+   "wall": 0.022003183999913745,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "m3",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 37.80000026375472,
+   "bound": 37.799999670024405,
+   "wall": 3.0622521549994417,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 37.80000007276868,
+   "bound": 37.80000000000001,
+   "wall": 1.2187294119994476,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 37.80000026375472,
+   "bound": 37.799999670024405,
+   "wall": 3.0388824109995767,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 37.800000072875854,
+   "bound": 37.79999999999998,
+   "wall": 0.12498551700082317,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "nvs03",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 0.08569831400018302,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 0.023765163001371548,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 0.08702635699955863,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 16.0,
+   "bound": 16.0,
+   "wall": 0.07598469399999885,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "nvs10",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -310.8,
+   "bound": -310.8,
+   "wall": 0.13310003100014,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -310.80000000000007,
+   "bound": -310.80000000000007,
+   "wall": 0.036714366999149206,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -310.8,
+   "bound": -310.8,
+   "wall": 0.1334175160009181,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -310.80000000000007,
+   "bound": -310.79999999999984,
+   "wall": 0.1366874689992983,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "nvs11",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -431.0000000000085,
+   "bound": -431.0000000000085,
+   "wall": 0.6730622720006068,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -431.0,
+   "bound": -431.0,
+   "wall": 0.08255179300067539,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -431.0000000000085,
+   "bound": -431.0000000000085,
+   "wall": 0.5476618680004322,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -431.0,
+   "bound": -431.0,
+   "wall": 0.15984343499985698,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "nvs12",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -481.20000000001,
+   "bound": -481.20000000001,
+   "wall": 2.286968230000639,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -481.2,
+   "bound": -481.2,
+   "wall": 0.07650552300037816,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -481.20000000001,
+   "bound": -481.20000000001,
+   "wall": 2.0291631419986516,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -481.2,
+   "bound": -481.2231972439682,
+   "wall": 0.22104274199955398,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "nvs15",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 1.0,
+   "wall": 0.060446928000601474,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 1.0,
+   "wall": 0.05208029200002784,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 1.0,
+   "wall": 0.06328338399907807,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 1.0,
+   "bound": 1.0,
+   "wall": 0.08909813399986888,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_miqp1",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 280.99999994415066,
+   "bound": 280.99999994415066,
+   "wall": 0.020658804000049713,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 281.0,
+   "bound": 280.99999999999994,
+   "wall": 0.03564175400060776,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 280.99999994415066,
+   "bound": 280.99999994415066,
+   "wall": 0.0187659490002261,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 281.0,
+   "bound": 281.0,
+   "wall": 0.05312253400006739,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_miqp2",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 1.9999999992978914,
+   "bound": 1.9999999992978914,
+   "wall": 0.02845424099905358,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 2.0,
+   "bound": 2.0,
+   "wall": 0.055250711000553565,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 1.9999999992978914,
+   "bound": 1.9999999992978914,
+   "wall": 0.028411416000380996,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 2.0,
+   "bound": 1.999999999999993,
+   "wall": 0.077376433999234,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_miqp3",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -5.999999999908182,
+   "bound": -5.999999999908182,
+   "wall": 0.008786300999418017,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -5.999999997493812,
+   "bound": -6.000000003759528,
+   "wall": 0.0178768219993799,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -5.999999999908182,
+   "bound": -5.999999999908182,
+   "wall": 0.008945173998654354,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -5.999999997493812,
+   "bound": -5.999999992480941,
+   "wall": 0.017498273999080993,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_miqp4",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -4574.000000000435,
+   "bound": -4574.000000000435,
+   "wall": 0.027805465000710683,
+   "feas": 3.064215547965432e-12
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -4573.999999984964,
+   "bound": -4574.000000000008,
+   "wall": 0.028020531000947813,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -4574.000000000435,
+   "bound": -4574.000000000435,
+   "wall": 0.02732087600088562,
+   "feas": 3.064215547965432e-12
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -4573.999999984964,
+   "bound": -4574.000000000002,
+   "wall": 0.04228233200046816,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_miqp5",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -333.8888889023808,
+   "bound": -333.8888889023808,
+   "wall": 0.02560806200017396,
+   "feas": 1.4293968786383004e-10
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -333.88888886028724,
+   "bound": -333.888888959832,
+   "wall": 0.051368984999498934,
+   "feas": 1.3877787807814457e-16
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -333.8888889023808,
+   "bound": -333.8888889023808,
+   "wall": 0.026872329000980244,
+   "feas": 1.4293968786383004e-10
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -333.88888889258936,
+   "bound": -333.8888888779652,
+   "wall": 0.07096601300145267,
+   "feas": 5.868106001116757e-11
+  }
+ },
+ {
+  "instance": "st_test1",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -1.6495994490692313e-08,
+   "bound": -1.6495994490692313e-08,
+   "wall": 0.04233721699893067,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 0.0,
+   "bound": 1.3554131812425043e-14,
+   "wall": 0.058362892999866745,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -1.6495994490692313e-08,
+   "bound": -1.6495994490692313e-08,
+   "wall": 0.04355674999897019,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -1.6495994490692313e-08,
+   "bound": -1.6495994490692313e-08,
+   "wall": 0.05278421999901184,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "st_testgr3",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": -20.589999999999392,
+   "bound": -20.59070709795548,
+   "wall": 0.32593817799897806,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": -20.59,
+   "bound": -20.59,
+   "wall": 0.2277499629999511,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": -20.589999999999392,
+   "bound": -20.59070709795548,
+   "wall": 0.346385310000187,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": -20.59,
+   "bound": -20.590000000000593,
+   "wall": 0.31737753699962923,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "tls2",
+  "sense": 1.0,
+  "spatial": {
+   "status": "feasible",
+   "objective": 8.299999999985033,
+   "bound": 3.2999997357791875,
+   "wall": 30.355553618999693,
+   "feas": 8.510747662171525e-11
+  },
+  "oa": {
+   "status": "feasible",
+   "objective": 5.29999999998647,
+   "bound": 3.077777758989929,
+   "wall": 30.059804008000356,
+   "feas": 1.1424060057965674e-12
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 5.299999999988158,
+   "bound": 5.299999875321444,
+   "wall": 28.735057784000674,
+   "feas": 9.969025605016668e-11
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 5.29999999998647,
+   "bound": 5.3,
+   "wall": 0.5774937229998613,
+   "feas": 1.1424060057965674e-12
+  }
+ },
+ {
+  "instance": "ex1223a",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 4.579582447775543,
+   "bound": 4.579582414865666,
+   "wall": 0.042121638000025996,
+   "feas": 0.0
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 4.579582414865666,
+   "bound": 4.579582402436708,
+   "wall": 0.03159747500103549,
+   "feas": 0.0
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 4.579582447775543,
+   "bound": 4.579582414865666,
+   "wall": 0.04298391300108051,
+   "feas": 0.0
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 4.579582414865529,
+   "bound": 4.5795824024367064,
+   "wall": 0.06662854999922274,
+   "feas": 0.0
+  }
+ },
+ {
+  "instance": "meanvarx",
+  "sense": 1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 14.369232111812684,
+   "bound": 14.369232111812684,
+   "wall": 0.438532602000123,
+   "feas": 1.0218426105268463e-10
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 14.369232119289892,
+   "bound": 14.368210095645823,
+   "wall": 0.13805002799927024,
+   "feas": 4.595884603951585e-16
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 14.369232111812684,
+   "bound": 14.369232111812684,
+   "wall": 0.2935836479991849,
+   "feas": 1.0218426105268463e-10
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 14.369232119289887,
+   "bound": 14.368210087751342,
+   "wall": 0.2985571629997139,
+   "feas": 4.595884603951611e-16
+  }
+ },
+ {
+  "instance": "syn05m",
+  "sense": -1.0,
+  "spatial": {
+   "status": "optimal",
+   "objective": 837.7324006908559,
+   "bound": 837.7324574661859,
+   "wall": 2.738965165999616,
+   "feas": 5.1607162987465927e-11
+  },
+  "oa": {
+   "status": "optimal",
+   "objective": 837.7324008529274,
+   "bound": 837.7324008979798,
+   "wall": 0.08235312900069403,
+   "feas": 2.566789765338262e-13
+  },
+  "bb_inhouse": {
+   "status": "optimal",
+   "objective": 837.7324006908559,
+   "bound": 837.7324574661859,
+   "wall": 2.7427686669998366,
+   "feas": 5.1607162987465927e-11
+  },
+  "bb_highs": {
+   "status": "optimal",
+   "objective": 837.7324008529274,
+   "bound": 837.7324008979799,
+   "wall": 0.15049679199910315,
+   "feas": 2.566789765338262e-13
+  }
+ }
+]
