@@ -178,8 +178,18 @@ machine.
 > (`clay0303hfsg`, `nvs05`) is correspondingly an upper bound, and it does not
 > change either row's attribution — both still exceed the budget at any ratio in
 > the plausible range. `host_speed_ratio` now excludes routed rows on either side,
-> so the next run's figure is the one to quote. Not re-measured here: it needs the
-> panel re-run, and no conclusion in this section turns on it.
+> so the next run's figure is the one to quote.
+>
+> **Re-measured (2026-08-31, same box, idle).** `check_cert_neutrality.py` over all
+> 52 reference instances at their budgets, with the corrected filter:
+> **3.46x on 17 unrouted instances** that reproduced their node count exactly. So
+> the contaminated figure was high by 0.01x — the three inflated samples all landed
+> above the median, which is exactly the ~1.5 rank positions predicted, and a median
+> absorbed them. The correction above stands as a method fix, not as a number that
+> moved: every conclusion drawn from 3.45x holds unchanged at 3.46x, and this is now
+> a measurement rather than an upper bound. The same run confirms the annotation
+> path end to end — `clay0303hfsg`, `nvs05` and `tanksize` each report their
+> `status` violation carrying the ratio, and none is suppressed by it.
 
 | instance | issue's reading | measured cause |
 |---|---|---|
