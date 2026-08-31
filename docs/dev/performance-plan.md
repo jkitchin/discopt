@@ -4581,6 +4581,7 @@ Outcome, up front:
 | `DISCOPT_OA_ELASTIC_RESTORATION` | **default ON** | §25.6 |
 | `DISCOPT_OA_INFEASIBLE_NOGOOD` | **stays OFF** | §25.7 |
 | `DISCOPT_ROOT_CUT_DEADLINE` (§24's) | **default ON** | §25.9 |
+| convex route target: HiGHS → in-house master | **retargeted** | §25.10–25.11 |
 
 ### 25.1 The capability
 
@@ -4849,13 +4850,22 @@ Every arm exits `optimal` and the three dual bounds agree to ~1e-8 per row
 certificate. With both graduated flags on, the same rows are 0.67 s, 2.00 s and 2.59 s.
 
 Closing #1141's own row additionally needs the **route** to reach this master.
-`_convex_minlp_route_target` sends the certified-convex class to `lp_nlp_bb` on the
+`_convex_minlp_auto_route` sent the certified-convex class to `lp_nlp_bb` on the
 **HiGHS** master, chosen in #1066 because the in-house master lost on `rsyn*`
 (`rsyn0840m`: in-house root loop 0 % of the gap closed, HiGHS 86.1 %). The table above
 shows the in-house master **with** fractional separation beating HiGHS on the
-portfolio family; whether it also holds on `rsyn*` is the measurement that decides the
-retarget, and `rsyn*` is not vendored. **Do not retarget the route on the portfolio
-evidence alone.**
+portfolio family; whether it also holds on `rsyn*` is the measurement that would
+decide the retarget on speed, and `rsyn*` is not vendored.
+
+> **Superseded by §25.11 (2026-08-31).** The route was retargeted, but not on the
+> portfolio evidence and not on a speed argument — on a *dependency-policy* one:
+> HiGHS is an opt-in extra and the default route must never name it. §25.11 also
+> **retracts** the claim, made in this section's spirit and stated outright in the
+> route-panel commit, that #1066's HiGHS evidence was "stale by construction"
+> because it predated the fractional-node hook. Measured head to head on the 26
+> routed instances, node cuts do **not** close the gap between the masters
+> (simplex 97.3 s vs simplex+node 97.7 s). HiGHS is the stronger MILP engine and
+> the portfolio table above does not generalise.
 
 
 ### 25.9 The added work item: `DISCOPT_ROOT_CUT_DEADLINE` GRADUATES ON (2026-08-31)
@@ -5007,3 +5017,88 @@ and the stage returned root bounds up to 32092 against a verified incumbent of
 86.5: **8 "violations" in both arms that were the probe's contract breach, not a
 defect in the stage** (the shipped path solves that instance to `optimal` at
 86.539). Capturing the caller's own arguments removed all 8.
+
+
+### 25.10 The route was pinning an opt-in dependency (2026-08-31)
+
+Owner directive, mid-#1141: *"`_convex_minlp_auto_route` returns
+`{"milp_solver": "highs"}` — that should never happen, we should always route to
+a discopt solver. highs is only available as opt-in."*
+
+It is a defect independent of any performance argument, and the codebase already
+said so one layer down. `_resolve_lp_nlp_bb_backend`:
+
+> `"auto"` deliberately does **not** pick HiGHS. Routing it there would make the
+> default depend on an optional package and would move every existing caller's
+> node counts; the opt-in keeps #356 and the current defaults intact.
+
+`_convex_minlp_auto_route` then pinned `{"milp_solver": "highs"}` and did exactly
+that from above. The visible symptom: the default **algorithm** for a whole
+problem class changed with whether `highspy` happened to be installed — with it,
+`lp_nlp_bb`/HiGHS; without it, a silent fall back to `"oa"`. Two users on the
+same model and the same version got different algorithms, and neither was told.
+
+It also silently voided §25.4. `DISCOPT_OA_NODE_CUTS` graduated ON, but the HiGHS
+master has no fractional-node hook at all, so on the **default path** for the very
+class #1141 is about, the capability the issue exists to add never ran. Every
+panel in §25.4 measured it with `mip_nlp_method="lp_nlp_bb"` forced onto the
+in-house master, i.e. with the route bypassed. That is not a wrong measurement,
+but it is a measurement of a configuration no default solve reached.
+
+### 25.11 GRADUATED: the route targets the in-house master (2026-08-31)
+
+The route now returns **no** `milp_solver` key, which resolves through the MIP-NLP
+layer's own `"auto"` default to the in-house simplex driver.
+`milp_solver="highs"` stays available as an explicit caller opt-in and still
+outranks the route's pick (the call site uses `setdefault`).
+
+**The blocker was a stale refusal, not a missing capability.**
+`solve_milp_with_lazy_cuts` refused a `terminate_callback` because "the driver
+enforces `time_limit` itself and has no callback-termination hook". The first
+half is true and irrelevant; the second was false. The Rust driver has a
+per-iteration checkpoint carrying `incumbent`/`bound`/`gap`/`elapsed` with a
+`Stop` control, already exposed to Python as `debug_hook`, since the interactive
+debugger landed. The check-in is therefore a **composition** — the debugger keeps
+the slot when attached, either party voting to stop stops the search, and with
+neither attached the slot stays `None` so the search is bit-for-bit the unhooked
+one. No Rust change.
+
+That refusal was not inert. The #1066 route progress guard installs a
+`termination_hook` on **every** auto-routed solve, so the moment the route pointed
+at a discopt-native master the refusal raised on every routed convex MINLP and
+the route fell all the way back to the spatial path — a far worse regression than
+the one it was guarding against. It is why the naive retarget looked like a
+disaster and was committed as explicitly INCOMPLETE.
+
+**Which native target.** Four arms on the 26 instances the router itself diverts
+(population asked of `_convex_minlp_auto_route`, not guessed), 30 s, interleaved
+per instance, incumbents feasibility-verified from the model's own evaluator,
+every arm's bound checked against every arm's verified incumbent and the
+reference optimum — 164 executed checks, **0 violations**
+(`scratchpad/1141/panel_route_target.py`):
+
+| arm | certificates | incumbents | total wall |
+|---|---|---|---|
+| `spatial` (no route) | 24/26 | 26 | 92.9 s |
+| `oa` (the old no-highspy fallback) | 24/26 | 26 | 108.1 s |
+| **`bb_inhouse`** (the new target) | **26/26** | 26 | **90.5 s** |
+| `bb_highs` (opt-in) | 26/26 | 26 | 30.5 s |
+
+`bb_inhouse` is the best target reachable without an optional dependency: +2
+certificates over both alternatives and the fastest of the three. `tls2` is the
+shape of it — `spatial` `feasible` 8.3, `oa` `feasible` 5.3, `bb_inhouse`
+**`optimal` 5.3**, `bb_highs` `optimal` 5.3 in 0.58 s.
+
+**Who wins and who pays, stated plainly.** `"oa"` — what every machine *without*
+`highspy` was silently getting — is the **worst** arm. For a default install this
+change is a strict improvement: 24 → 26 certificates, 108.1 → 90.5 s. Users who
+had `highspy` installed and were being routed to it implicitly trade wall time
+(30.5 → 90.5 s) for **no lost certificate**, and can opt back in with one kwarg.
+There is no reading on which this is a speed-up over HiGHS, and §25.8's
+superseding note retracts the claim that there was.
+
+**What this does not fix.** The in-house master is ~3× slower than HiGHS on this
+population and the fractional-node hook does not close that gap (97.3 s vs 97.7 s
+over the same rows). Making the in-house MILP engine competitive is the real
+remaining work behind #1141's headline number, and it is a master-engine problem
+— root-gap closure, cut management, node throughput — not a separation-hook one.
