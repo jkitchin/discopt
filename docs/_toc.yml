@@ -47,6 +47,7 @@ parts:
       - file: notebooks/problem_classes
   - caption: Advanced Features
     chapters:
+      - file: disjunction_semantics
       - file: global_optimization
       - file: notebooks/advanced_features
       - file: notebooks/solver_internals

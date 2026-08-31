@@ -384,18 +384,23 @@ class DisjunctionSemantics(Enum):
     ``(ONE_WAY, AT_MOST_ONE)``) is an added member and not a redefinition of
     what the enum means.
 
+    The member's ``value`` **is** that pair, so the axes are carried by the
+    member itself rather than by a side table that could drift out of sync. A
+    lowering asks ``(sem.activation, sem.cardinality)`` what it must emit; it
+    never asks which member it was handed.
+
     Attributes
     ----------
-    SELECT_ONE : str
+    SELECT_ONE : tuple
         ``(ONE_WAY, EXACTLY_ONE)``. Exactly one disjunct is *selected*; an
         unselected disjunct's predicate may nonetheless be true. This is the
         meaning of :meth:`Model.either_or` and the only semantics any lowering
         currently implements.
-    OR : str
+    OR : tuple
         ``(ONE_WAY, AT_LEAST_ONE)``. At least one disjunct is selected. Its
         projection onto ``x`` equals ``SELECT_ONE``'s; the two differ only in
         the selector space.
-    EXACTLY_ONE_TRUE : str
+    EXACTLY_ONE_TRUE : tuple
         ``(REIFIED, EXACTLY_ONE)``. Exactly one *predicate* is true, which
         requires full reification of every selector. Deliberately **not**
         called ``XOR``: over three or more operands XOR is odd parity, not
@@ -408,39 +413,30 @@ class DisjunctionSemantics(Enum):
     convexity one: with ``S_1 = {x <= 1}`` and ``S_2 = {x >= 0}``, the point
     ``x = 1/2`` is feasible under ``SELECT_ONE`` and infeasible under
     ``EXACTLY_ONE_TRUE`` — and the same holds verbatim for nonconvex ``S_k``.
+
+    The lowercase spelling (``"select_one"``) is accepted wherever a semantics
+    is passed, and is what :attr:`label` returns; it is a *coercion alias*, not
+    the member's value.
     """
 
-    SELECT_ONE = "select_one"
-    OR = "or"
-    EXACTLY_ONE_TRUE = "exactly_one_true"
+    SELECT_ONE = (SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)
+    OR = (SelectorActivation.ONE_WAY, SelectorCardinality.AT_LEAST_ONE)
+    EXACTLY_ONE_TRUE = (SelectorActivation.REIFIED, SelectorCardinality.EXACTLY_ONE)
 
     @property
     def activation(self) -> SelectorActivation:
         """The selector/predicate activation direction this semantics implies."""
-        return _DISJUNCTION_SEMANTICS_PAIRS[self][0]
+        return self.value[0]
 
     @property
     def cardinality(self) -> SelectorCardinality:
         """The selector cardinality this semantics implies."""
-        return _DISJUNCTION_SEMANTICS_PAIRS[self][1]
+        return self.value[1]
 
-
-_DISJUNCTION_SEMANTICS_PAIRS: dict[
-    DisjunctionSemantics, tuple[SelectorActivation, SelectorCardinality]
-] = {
-    DisjunctionSemantics.SELECT_ONE: (
-        SelectorActivation.ONE_WAY,
-        SelectorCardinality.EXACTLY_ONE,
-    ),
-    DisjunctionSemantics.OR: (
-        SelectorActivation.ONE_WAY,
-        SelectorCardinality.AT_LEAST_ONE,
-    ),
-    DisjunctionSemantics.EXACTLY_ONE_TRUE: (
-        SelectorActivation.REIFIED,
-        SelectorCardinality.EXACTLY_ONE,
-    ),
-}
+    @property
+    def label(self) -> str:
+        """The lowercase string spelling accepted by the ``semantics=`` argument."""
+        return self.name.lower()
 
 
 def _coerce_disjunction_semantics(value) -> DisjunctionSemantics:
@@ -464,11 +460,21 @@ def _coerce_disjunction_semantics(value) -> DisjunctionSemantics:
                 "*predicate* true, requiring full reification)."
             )
         try:
-            return DisjunctionSemantics(key)
-        except ValueError:
+            # Members are keyed by name: the value is the (activation,
+            # cardinality) pair, so the string spelling is a coercion alias.
+            return DisjunctionSemantics[key.upper()]
+        except KeyError:
             pass
-    allowed = ", ".join(repr(s.value) for s in DisjunctionSemantics)
+    allowed = ", ".join(repr(s.label) for s in DisjunctionSemantics)
     raise ValueError(f"unknown disjunction semantics {value!r}; use one of: {allowed}")
+
+
+# Reserved namespace for compiler-generated existential auxiliaries. A user
+# Boolean identity may never take it (see ``Model._check_name``) and the GDP
+# pass allocates only inside it, so the two kinds of Boolean stay separable by
+# name — which is what AC-5 of issue #1124 requires and what name-based result
+# mapping relies on.
+GDP_AUX_PREFIX = "_gdp_aux_"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -5583,15 +5589,29 @@ class Model:
         return to_nl(self, path)
 
     def _check_name(self, name: str):
-        """Ensure variable/parameter name is unique.
+        """Ensure a variable/parameter name is unique and not compiler-reserved.
 
         Consults the persistent ``self._names`` set (kept in sync at every
         registration site) for an O(1) check instead of rebuilding the full name
         set from ``_variables``/``_parameters`` on every declaration (M7 — that
         rebuild was O(n) per call, O(n²) over a model build).
+
+        Also refuses the :data:`GDP_AUX_PREFIX` namespace. That prefix is the
+        documented boundary between a user's Boolean *identity* and a
+        compiler-generated existential *auxiliary* (#1124 AC-5); a user name
+        inside it would collide with a generated selector, leaving two distinct
+        variables sharing one name and making name-keyed result lookup
+        ambiguous. Refuse loudly rather than silently produce the ambiguity.
         """
         if name in self._names:
             raise ValueError(f"Name '{name}' already used in model")
+        if name.startswith(GDP_AUX_PREFIX):
+            raise ValueError(
+                f"Name {name!r} is reserved: the {GDP_AUX_PREFIX!r} prefix belongs to "
+                "GDP compiler auxiliaries (disjunction selectors, Tseitin variables), "
+                "which are generated during lowering and are not source-level "
+                "identities. Choose a name outside that namespace."
+            )
 
 
 # Internal constraint types (not part of public API)

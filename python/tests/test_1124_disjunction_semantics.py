@@ -20,11 +20,18 @@ predicates. Note that the pre-existing ``test_hull_overlapping_disjuncts`` does
 
 import discopt.modeling as dm
 import pytest
-from discopt._relax.gdp_reformulate import reformulate_gdp
+from discopt._relax.gdp_reformulate import (
+    _SUPPORTED_SEMANTICS,
+    _semantics_is_supported,
+    reformulate_gdp,
+)
 from discopt.modeling.core import (
+    GDP_AUX_PREFIX,
     DisjunctionSemantics,
     SelectorActivation,
     SelectorCardinality,
+    Variable,
+    VarType,
     _DisjunctiveConstraint,
 )
 
@@ -50,6 +57,48 @@ def _overlap_model():
 
 
 class TestSemanticsEnum:
+    def test_member_value_is_the_pair_itself(self):
+        """The axes are carried BY the member, not by a side lookup table.
+
+        A separate table can drift out of sync with the members; the member's
+        own ``value`` cannot. This also pins the public ``.value`` shape.
+        """
+        assert DisjunctionSemantics.SELECT_ONE.value == (
+            SelectorActivation.ONE_WAY,
+            SelectorCardinality.EXACTLY_ONE,
+        )
+        assert DisjunctionSemantics.OR.value == (
+            SelectorActivation.ONE_WAY,
+            SelectorCardinality.AT_LEAST_ONE,
+        )
+        assert DisjunctionSemantics.EXACTLY_ONE_TRUE.value == (
+            SelectorActivation.REIFIED,
+            SelectorCardinality.EXACTLY_ONE,
+        )
+        for member in DisjunctionSemantics:
+            assert member.value == (member.activation, member.cardinality)
+
+    def test_string_spelling_is_a_coercion_alias_not_the_value(self):
+        m = dm.Model("alias")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        m.either_or([[x <= 0.5], [x >= 0.5]], name="d", semantics="select_one")
+        (dc,) = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
+        assert dc.semantics is DisjunctionSemantics.SELECT_ONE
+        assert DisjunctionSemantics.SELECT_ONE.label == "select_one"
+
+    def test_lowering_dispatch_is_keyed_on_the_pair_not_the_member(self):
+        """The gate asks what the emitted rows encode, never which member it got."""
+        assert _SUPPORTED_SEMANTICS == frozenset(
+            {(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}
+        )
+        for member in DisjunctionSemantics:
+            expected = (member.activation, member.cardinality) in _SUPPORTED_SEMANTICS
+            assert _semantics_is_supported(member) is expected
+        # Only the select-one pair is served today.
+        assert _semantics_is_supported(DisjunctionSemantics.SELECT_ONE)
+        assert not _semantics_is_supported(DisjunctionSemantics.OR)
+        assert not _semantics_is_supported(DisjunctionSemantics.EXACTLY_ONE_TRUE)
+
     def test_members_decompose_into_activation_and_cardinality(self):
         """Lowerings must be able to branch on the axes, not on the name."""
         assert DisjunctionSemantics.SELECT_ONE.activation is SelectorActivation.ONE_WAY
@@ -300,14 +349,65 @@ class TestIdentitiesVersusAuxiliaries:
         assert not any(n.startswith("_") for n in ("mode_is_hot",))
         assert "mode_is_hot" not in generated
 
-    def test_user_boolean_cannot_collide_with_the_reserved_aux_prefix(self):
-        """The prefix is what separates the two, so a user must not be able to take it."""
+    @pytest.mark.parametrize(
+        "reserved",
+        [
+            GDP_AUX_PREFIX + "disj_d_0_0",  # the exact name the lowering would mint
+            GDP_AUX_PREFIX,  # the bare prefix
+            GDP_AUX_PREFIX + "anything",
+        ],
+    )
+    def test_user_name_in_the_reserved_namespace_is_refused(self, reserved):
+        """A user must not be able to take the namespace that marks an auxiliary.
+
+        Before this was enforced, ``m.boolean("_gdp_aux_disj_d_0_0")`` followed by
+        ``either_or(..., name="d")`` produced FOUR variables under THREE distinct
+        names: the lowering minted the identical name for its own selector. Two
+        different variables then shared one name, which breaks the AC-5 identity /
+        auxiliary distinction and makes name-keyed result lookup ambiguous.
+        """
         m = dm.Model("collision")
+        with pytest.raises(ValueError, match="reserved"):
+            m.boolean(reserved)
+        # Every user-facing factory funnels through the same check.
+        with pytest.raises(ValueError, match="reserved"):
+            m.continuous(reserved)
+        with pytest.raises(ValueError, match="reserved"):
+            m.binary(reserved)
+
+    def test_the_collision_that_motivated_the_reservation_cannot_recur(self):
+        """End-to-end: the exact reviewed reproducer must not produce a duplicate name."""
+        m = dm.Model("collide_e2e")
+        x = m.continuous("x", lb=0.0, ub=10.0)
+        m.minimize(x)
+        with pytest.raises(ValueError, match="reserved"):
+            m.boolean(GDP_AUX_PREFIX + "disj_d_0_0")
+        # ... and with the user name refused, lowering still yields unique names.
+        m.either_or([[x <= 3.0], [x >= 7.0]], name="d")
+        names = [v.name for v in reformulate_gdp(m, method="big-m")._variables]
+        assert len(names) == len(set(names)), f"duplicate variable names: {names}"
+
+    def test_generated_names_are_unique_even_against_preexisting_auxiliaries(self):
+        """The allocator, not just the reservation, guarantees uniqueness.
+
+        A model can already carry reserved-prefix names without any user having
+        typed one — a second lowering pass, or an imported model. The counter
+        alone does not prevent a clash there, so the allocator checks the names
+        actually present.
+        """
+        m = dm.Model("preexisting")
         x = m.continuous("x", lb=0.0, ub=10.0)
         m.minimize(x)
         m.either_or([[x <= 3.0], [x >= 7.0]], name="d")
-        ref = reformulate_gdp(m, method="big-m")
-        generated = [v.name for v in ref._variables if v.name.startswith("_gdp_aux_")]
-        # Every generated name is unique and reserved-prefixed.
-        assert len(set(generated)) == len(generated)
-        assert all(n.startswith("_gdp_aux_") for n in generated)
+        # Simulate a model that already carries the names the pass would mint,
+        # bypassing the user-facing check exactly as an earlier pass would.
+        for k in range(2):
+            m._variables.append(
+                Variable(f"{GDP_AUX_PREFIX}disj_d_{k}_{k}", VarType.BINARY, (), 0.0, 1.0, m)
+            )
+
+        names = [v.name for v in reformulate_gdp(m, method="big-m")._variables]
+        assert len(names) == len(set(names)), f"duplicate variable names: {names}"
+        generated = [n for n in names if n.startswith(GDP_AUX_PREFIX)]
+        assert len(generated) == 4  # 2 pre-existing + 2 freshly allocated
+        assert len(set(generated)) == 4

@@ -16,6 +16,7 @@ from collections.abc import Callable
 import numpy as np
 
 from discopt.modeling.core import (
+    GDP_AUX_PREFIX,
     BinaryOp,
     BooleanVar,
     Constant,
@@ -34,6 +35,8 @@ from discopt.modeling.core import (
     LogicalNot,
     LogicalOr,
     Model,
+    SelectorActivation,
+    SelectorCardinality,
     UnaryOp,
     Variable,
     VarType,
@@ -58,26 +61,41 @@ _DEFAULT_BIG_M = 1e4
 _BIGM_SENTINEL = 1e15
 
 
-def _require_select_one(dc: _DisjunctiveConstraint) -> None:
-    """Refuse any disjunction semantics no lowering here implements.
+# What the rows emitted below actually mean. Every reformulation in this module
+# emits *one-way* activation (``y_k = 1 => disjunct k holds``) under
+# ``sum_k y_k == 1``. The gate is keyed on that pair, not on a member name: a
+# semantics is served iff its (activation, cardinality) is what these rows
+# encode, so a future member carrying the same pair is supported for free and a
+# member carrying a different pair is refused without touching this code.
+_SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = frozenset(
+    {(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}
+)
 
-    Every reformulation in this module emits *one-way* activation
-    (``y_k = 1 => disjunct k holds``) under ``sum_k y_k == 1``, which is
-    exactly ``SELECT_ONE``. Emitting those same rows for a disjunction declared
-    ``OR`` or ``EXACTLY_ONE_TRUE`` would silently hand back a different feasible
-    set than the model declares — a truth-XOR model would be solved as
-    select-one and certified. Refuse loudly instead (issue #1124).
+
+def _semantics_is_supported(semantics: DisjunctionSemantics) -> bool:
+    """True when the rows this module emits encode *semantics* exactly."""
+    return (semantics.activation, semantics.cardinality) in _SUPPORTED_SEMANTICS
+
+
+def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
+    """Refuse any disjunction whose declared semantics these rows do not encode.
+
+    Emitting one-way/exactly-one rows for a disjunction declared ``OR`` or
+    ``EXACTLY_ONE_TRUE`` would silently hand back a different feasible set than
+    the model declares — a truth-semantics model would be solved as select-one
+    and certified. Refuse loudly instead (issue #1124).
     """
     semantics = getattr(dc, "semantics", DisjunctionSemantics.SELECT_ONE)
-    if semantics is DisjunctionSemantics.SELECT_ONE:
+    if _semantics_is_supported(semantics):
         return
+    supported = ", ".join(sorted(f"({a.value}, {c.value})" for a, c in _SUPPORTED_SEMANTICS))
     raise NotImplementedError(
         f"disjunction {dc.name or '<anon>'!r} declares "
         f"DisjunctionSemantics.{semantics.name} "
         f"({semantics.activation.value}, {semantics.cardinality.value}), which no GDP "
-        "lowering implements. Only SELECT_ONE (exactly one disjunct *selected*, "
-        "one-way activation) is available; it is not a valid substitute, since "
-        f"{semantics.name} has a different feasible set. Tracking issue: "
+        f"lowering implements. These reformulations emit {supported} only; that is "
+        "not a valid substitute, since a different (activation, cardinality) pair "
+        "has a different feasible set. Tracking issue: "
         "https://github.com/jkitchin/discopt/issues/1124"
     )
 
@@ -135,9 +153,22 @@ def reformulate_gdp(
     # Track auxiliary binaries added by the reformulation
     _aux_counter = [0]
 
+    # Names already live in the model being built. Generated auxiliaries are
+    # allocated against this set so a selector can never reuse a name that
+    # already exists — the counter alone does not guarantee that, since the
+    # pass may run over a model that already carries auxiliaries (a second
+    # lowering, an imported model). ``Model._check_name`` keeps *user* names
+    # out of the reserved prefix; this keeps generated names unique among
+    # themselves.
+    _taken: set[str] = {v.name for v in new_model._variables}
+
     def _add_aux_binary(prefix: str, shape=()) -> Variable:
-        name = f"_gdp_aux_{prefix}_{_aux_counter[0]}"
+        name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
         _aux_counter[0] += 1
+        while name in _taken:
+            name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
+            _aux_counter[0] += 1
+        _taken.add(name)
         var = Variable(
             name,
             VarType.BINARY,
@@ -756,7 +787,7 @@ def _reformulate_disjunction(
 
     Returns new variables and constraints.
     """
-    _require_select_one(dc)
+    _require_supported_semantics(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -857,7 +888,7 @@ def _reformulate_disjunction_nested(
     When parent_selector = 0, all inner selectors must be 0.
     When parent_selector = 1, exactly one inner selector must be 1.
     """
-    _require_select_one(dc)
+    _require_supported_semantics(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -997,7 +1028,7 @@ def _reformulate_disjunction_hull(
     tuple of (list[Variable], list[Constraint])
         New variables and constraints.
     """
-    _require_select_one(dc)
+    _require_supported_semantics(dc)
     _reject_nested_under_hull(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars: list[Variable] = []

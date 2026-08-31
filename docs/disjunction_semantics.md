@@ -25,10 +25,18 @@ disjunction means:
 **Cardinality** — how many selectors may be active: `AT_LEAST_ONE` (`sum_k y_k >= 1`),
 `EXACTLY_ONE` (`sum_k y_k == 1`), `AT_MOST_ONE` (`sum_k y_k <= 1`).
 
-`DisjunctionSemantics` members are defined *as* the pair, and lowerings branch on
-the pair rather than on the member name. Adding a combination later (an
-optional-mode disjunction is `(ONE_WAY, AT_MOST_ONE)`) is then an added member,
-not a redefinition of the enum's meaning.
+`DisjunctionSemantics` members are defined *as* the pair: a member's `.value`
+**is** its `(activation, cardinality)` tuple, so the axes are carried by the
+member itself rather than by a side table that could drift out of sync. The
+lowercase spelling (`"select_one"`, available as `.label`) is a coercion alias
+accepted by the `semantics=` argument, not the value.
+
+Lowerings branch on the pair, never on the member name: the GDP pass declares
+the pair its rows encode and serves a disjunction iff its pair matches. Adding a
+combination later (an optional-mode disjunction is `(ONE_WAY, AT_MOST_ONE)`) is
+then an added member, not a redefinition of the enum's meaning — and a future
+member carrying an already-implemented pair is served without touching the
+lowering.
 
 | member | pair | status |
 |---|---|---|
@@ -88,8 +96,19 @@ Two kinds of Boolean live in a lowered model and must not be conflated:
   needed for such a variable when it occurs positively in exactly one clause (see
   `_cardinality_implication_constraints`).
 
-A user Boolean is never given the reserved prefix, and no auxiliary is ever
-presented as a source identity.
+The separation is **enforced**, not merely conventional:
+
+- `Model._check_name` — the single choke point for every user-facing variable
+  and parameter factory — refuses any name inside the reserved prefix, so a user
+  Boolean cannot take an auxiliary's namespace.
+- The GDP pass allocates auxiliary names against the names already present in
+  the model, so a generated selector cannot reuse a reserved-prefix name that a
+  previous pass (or an imported model) already introduced.
+
+Without both, a user Boolean named `_gdp_aux_disj_d_0_0` and the selector the
+lowering mints for disjunction `d` collide: two distinct variables share one
+name, the identity/auxiliary distinction breaks, and name-keyed result lookup
+becomes ambiguous.
 
 ## 5. Unimplemented semantics refuse loudly
 
