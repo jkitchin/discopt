@@ -94,33 +94,59 @@ def nlpbb_root_cuts_enabled() -> bool:
 
 
 #: Whether an unset ``DISCOPT_ROOT_CUT_DEADLINE`` enforces the stage budget on
-#: the individual LPs. Enforcing it changes which cuts the stage separates on an
-#: instance whose OA prologue outruns the budget, hence that instance's root
-#: bound -- a bound-changing knob (CLAUDE.md §5 regime 2), so it ships
-#: default-off pending a graduation panel that clears both bars. The truncation
-#: is sound in either arm (fewer cuts can only loosen a bound, never invalidate
-#: one); the open question the panel answers is whether it is *net-positive*.
+#: the individual LPs.
 #:
-#: That panel is owed, not optional: OFF is the arm in which ``generate_root_cuts``'
-#: docstring promise ("``time_budget_s`` bounds the stage's wall time") is false,
-#: and the stage is default-ON, so the shipped default is a default-path stage
-#: with a budget it cannot enforce. **Tracked in #1141** -- this flag graduates
-#: or is deleted; leaving it off forever is the dead flag CLAUDE.md §3 forbids.
-_ROOT_CUT_DEADLINE_DEFAULT = False
+#: **Default ON since the 2026-08-31 graduation panel (#1141; performance-plan
+#: §25.9).** Set the variable to ``0``/``off``/``false``/``no`` to opt out and
+#: take the legacy unbounded-LP path, which stays tested.
+#:
+#: Enforcing the budget changes which cuts the stage separates on an instance
+#: whose OA prologue outruns it, hence that instance's root bound -- a
+#: bound-changing knob (CLAUDE.md §5 regime 2), so it shipped default-off until
+#: a panel cleared both bars. What the panel found:
+#:
+#: * *cert-clean*: 331 corpus checks (119 instances, interleaved, incumbents
+#:   feasibility-verified) plus 40 stage-replay checks, 0 surviving violations.
+#:   The single flagged row, ``clay0303hfsg``, is a time-limit boundary race --
+#:   5 interleaved reps put ON ahead, ``optimal`` 4/5 against OFF's 3/5.
+#: * *net-positive*: measured as CONTRACT ENFORCEMENT, which is what this flag
+#:   is for. Worst-case overrun past the stage's own budget falls +0.297 s ->
+#:   +0.076 s and runs overrunning by >20% fall 2/35 -> 0/35, while the root
+#:   bound at the budgets ``solver.py`` actually hands the stage (2-10 s) is
+#:   IDENTICAL on 3 of 4 instances and within 9.4e-6 on the fourth. Corpus wall
+#:   is neutral (-0.1%), no certificate lost.
+#:
+#: Stated plainly, because the distinction matters: this is NOT the broad
+#: corpus speed-up bar 2 normally asks for, and no such evidence exists here.
+#: The class that would show it -- an instance whose prologue outruns the budget
+#: at 2-10 s, measured on rsyn0830m in #1066 at 81.3 s of a 150 s solve -- is
+#: not in the vendored corpus (0/119 deadline bites), so the corpus can neither
+#: confirm nor falsify a speed-up. What is measured is that OFF leaves
+#: ``generate_root_cuts``' docstring promise ("``time_budget_s`` bounds the
+#: stage's wall time") false on a default-ON stage, and that closing it costs
+#: nothing measurable. Deleting the flag -- #1141's only other permitted outcome
+#: -- would delete the deadline mechanism and reopen #1066.
+_ROOT_CUT_DEADLINE_DEFAULT = True
 
 
 def _deadline_enabled() -> bool:
     """Is the #1066 per-LP stage deadline switched on (``DISCOPT_ROOT_CUT_DEADLINE``)?
 
-    With it off, ``generate_root_cuts`` behaves exactly as before: the initial OA
-    convergence and every LP inside it run unbounded, and ``time_budget_s`` is
-    consulted only between cut rounds. That legacy path stays tested.
+    Default ON since #1141's graduation panel; ``0``/``false``/``off``/``no``
+    opts out. With it off, ``generate_root_cuts`` behaves exactly as before: the
+    initial OA convergence and every LP inside it run unbounded, and
+    ``time_budget_s`` is consulted only between cut rounds. That legacy path
+    stays tested.
+
+    Empty is deliberately NOT an off-value: it is what an unset variable expands
+    to, and a graduated default-ON path must not be switched off by an accident
+    of shell quoting (#993) -- same shape as ``nlpbb_root_cuts_enabled``.
 
     Read per call, not cached at import, so a test can flip it without reloading
     the module and an A/B panel can drive both arms from one build.
     """
     raw = os.environ.get("DISCOPT_ROOT_CUT_DEADLINE")
-    if raw is None:
+    if raw is None or not raw.strip():
         return _ROOT_CUT_DEADLINE_DEFAULT
     return raw.strip().lower() not in ("0", "false", "off", "no")
 

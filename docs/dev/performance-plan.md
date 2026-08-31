@@ -4481,7 +4481,7 @@ time." It did not, in two independent ways:
 Note which of these the 81.3 s was: `ncalls` is **1**. Not 60 cheap LPs adding
 up past a budget — one LP that never had a deadline.
 
-### The fix (`DISCOPT_ROOT_CUT_DEADLINE`, default-OFF)
+### The fix (`DISCOPT_ROOT_CUT_DEADLINE`, shipped default-OFF; default-ON since §25.9)
 
 - The stage clock (`t_stage`) starts before the prologue, and `_remaining()`
   is what every LP is bounded by.
@@ -4528,10 +4528,16 @@ because "the mutation survived" and "the test is vacuous" look identical from
 the exit code, and only reading the mutation apart from the result tells them
 apart.
 
-### The owed panel (tracked in #1141)
+### The owed panel (tracked in #1141) — PAID, and the flag graduated: see §25.9
 
-`DISCOPT_ROOT_CUT_DEADLINE` merges default-OFF, which means the shipped default
-is the arm where the docstring's promise is false. That is acceptable only for
+> **Settled 2026-08-31.** The panel below was run, failed bar 1 on `tls2`, the
+> mechanism behind that failure was found and fixed, and the re-run cleared both
+> bars. `DISCOPT_ROOT_CUT_DEADLINE` is **default-ON** as of §25.9; everything
+> from here to the end of §24 is the debt as it stood, kept for the record. Note
+> that §25.9 also **retracts** the root cause the first panel published.
+
+`DISCOPT_ROOT_CUT_DEADLINE` merged default-OFF, which meant the shipped default
+was the arm where the docstring's promise is false. That is acceptable only for
 as long as the graduation panel is actually owed to someone, so it is recorded
 here and in **#1141**: the flag graduates or is deleted, and "neither" is not an
 outcome. A flag that ships off and is never panelled is the dead flag CLAUDE.md
@@ -4574,6 +4580,7 @@ Outcome, up front:
 | `DISCOPT_OA_NODE_CUTS` | **default ON** | §25.4 |
 | `DISCOPT_OA_ELASTIC_RESTORATION` | **default ON** | §25.6 |
 | `DISCOPT_OA_INFEASIBLE_NOGOOD` | **stays OFF** | §25.7 |
+| `DISCOPT_ROOT_CUT_DEADLINE` (§24's) | **default ON** | §25.9 |
 
 ### 25.1 The capability
 
@@ -4851,52 +4858,152 @@ retarget, and `rsyn*` is not vendored. **Do not retarget the route on the portfo
 evidence alone.**
 
 
-### 25.9 The added work item: `DISCOPT_ROOT_CUT_DEADLINE` FAILS bar 1 (2026-08-31)
+### 25.9 The added work item: `DISCOPT_ROOT_CUT_DEADLINE` GRADUATES ON (2026-08-31)
 
 #1141 gained a second work item after #1129 merged: graduate or delete
 `DISCOPT_ROOT_CUT_DEADLINE`, the §24 flag that bounds the root cutting-plane
-stage's individual LPs. The issue asks for the standard §5 regime-2 A/B over the
-in-repo corpus under a load gate. It was run. **The flag fails bar 1.**
+stage's individual LPs, with the bar stated as "the flag graduates or it is
+deleted; 'neither' is not an acceptable outcome." The first panel had it failing
+bar 1. The mechanism behind that failure was then found and fixed, and the
+re-run panel clears both bars. **The flag graduates default-ON**, keeping the
+`=0` opt-out and the legacy path.
 
-**Populating the panel.** The stage runs only when the model is convexity-certified
-and has integer variables, on a top-level solve, and `generate_root_cuts` returns
-before its first LP when there are no integers. That population is 25 of the 119
-vendored instances. Run on the plain default path the stage is nearly unreachable —
-`DISCOPT_CONVEX_MINLP_ROUTE` diverts convex MINLPs to `mip-nlp`, so only **2 of 25**
-rows enter the stage and only **1** reaches an LP, with the deadline never biting
-(122 LPs, 0 declined). A panel over that population would have printed "0
-violations" while measuring nothing (CLAUDE.md §6). With the convex route off, so
-the NLP-BB path that owns the stage actually runs it, the population is real:
-**12/25** rows enter the stage, **8/25** run LPs under a deadline, **1/25** has the
-deadline bite.
+**Populating the panel.** The stage runs only when the model is
+convexity-certified and has integer variables, on a top-level solve, and
+`generate_root_cuts` returns before its first LP when there are no integers.
+That population is 25 of the 119 vendored instances. Run on the plain default
+path the stage is nearly unreachable — `DISCOPT_CONVEX_MINLP_ROUTE` diverts
+convex MINLPs to `mip-nlp`, so only **2 of 25** rows enter the stage and only
+**1** reaches an LP, with the deadline never biting (122 LPs, 0 declined). A
+panel over that population would have printed "0 violations" while measuring
+nothing (CLAUDE.md §6). With the convex route off, so the NLP-BB path that owns
+the stage actually runs it, the population is real: **12/25** rows enter the
+stage, **8/25** run LPs under a deadline.
 
-**The result.** 86 soundness checks, and the one violation is the one that matters:
+#### RETRACTED: the first panel's stated root cause was wrong
 
-| `tls2`, 3 reps per arm | OFF | ON |
+CLAUDE.md §11. The 2026-08-31 first draft of this section, and PR #1142's body,
+both stated:
+
+> an LP that stops on the deadline returns the all-`None` declined tuple, which
+> inside `oa_converge` sets `x = None`, breaks the loop, and makes
+> `generate_root_cuts` return an **empty** result — one truncated LP discards
+> every cut the stage had accumulated.
+
+Measured on `tls2` (pre-fix tree, deadline ON, convex route off): the stage runs
+240 LPs, declines 1, exits `no_lp`, and returns **90 cuts**. Not an empty
+result — the opposite. On a `no_lp` exit `x` is `None`, which SKIPS the
+end-of-loop binding-cut filter, so the entire applied set ships into the model.
+That is precisely the row flood `generate_root_cuts`' own docstring exists to
+prevent ("the full applied set — measured: ~170 dense rows on rsyn0805m —
+collapses node NLP throughput"), and it is why `tls2` lost its certificate: not
+too few cuts, **too many**, priced into every node NLP.
+
+The empty-result path is real, but it needs the decline to land *mid*-convergence,
+where `oa_converge` overwrote `obj, x, duals, h` in place and lost an LP from the
+same call that had already closed optimally. `tls2` does not take that path.
+
+A second claim made in the same session — that the deadline arm was live-shipping
+invalid GMI cuts from a stale basis — is also retracted. `separate_gmi` does pair
+`binv[r]` / `row_st[r]` with `a_all[r]` positionally, so a row system wider than
+the basis would multiply an equality row's basis entry by a cut row, but the
+mid-convergence break fires on `_remaining() <= 0` and the round loop's
+top-of-loop check reads the same clock, so it exits before another separation
+round. Measured live on `tls2`: **0 mismatches in 38 `separate_gmi` calls**. It
+is a hazard the retention fix would have introduced, not one that existed.
+
+#### The fix
+
+Three parts, all confined to the deadline arm so the A/B measures exactly one
+change (with the flag off a decline is a structural or numerical LP failure
+rather than a budget stop, and restoring an earlier solve there would change the
+default path's cuts — a bound-changing edit owed its own panel):
+
+1. `oa_converge` keeps the last LP that reached **optimality** instead of
+   returning the declined tuple. That LP is over a *subset* of the OA rows, hence
+   a relaxation, so its optimum is a valid root bound and cuts separated from it
+   are valid.
+2. It rolls `cuts_a` / `cuts_b` back to the rows that LP was solved from, so the
+   returned basis and row system agree — the invariant `separate_gmi` depends on
+   and cannot check for itself.
+3. `separate_gmi` now refuses a mismatched basis outright rather than reading
+   equality-row entries as cut rows.
+
+The round loop's `no_lp` exit keeps the previous round's optimum for the binding
+filter instead of leaving `x = None`.
+
+Effect on `tls2`, everything else held fixed: same 240 LPs, same 38 rounds, same
+`lp_bound` — and **90 cuts → 19**, stage-to-answer wall 35.5 s → 30.4 s.
+
+#### Bar 1: cert-clean
+
+119 vendored instances, `DISCOPT_CONVEX_MINLP_ROUTE=0`, 30 s per arm, OFF vs ON
+interleaved per instance, incumbents feasibility-verified from the model's own
+evaluator (`scratchpad/1141/panel_root_cut_deadline.py`, log and JSON committed):
+**331 executed soundness checks, 1 flagged row**, plus **40** stage-replay checks
+with **0** violations (`scratchpad/1141/panel_budget_contract.py`).
+
+The flagged row, `clay0303hfsg` (`optimal` → `feasible`), is a time-limit
+boundary race, not a regression — 5 interleaved reps, load gate checked
+(`scratchpad/1141/reps_tls2.py`):
+
+| `clay0303hfsg`, 5 reps | `optimal` | `feasible` | wall |
+|---|---|---|---|
+| OFF | 3/5 | 2/5 | 30.01 ± 0.81 s |
+| ON | **4/5** | 1/5 | 29.17 ± 0.94 s |
+
+Both arms miss the certificate on some reps; ON misses it *less* often. And the
+instance that failed 6/6 before the fix now certifies in both arms, with ON
+faster — 3 reps at 60 s: OFF `optimal` 3/3 in 34.00 ± 1.14 s, ON `optimal` 3/3 in
+**26.20 ± 7.04 s**.
+
+#### Bar 2: net-positive — measured as contract enforcement, and why
+
+State the limitation first. This is **not** the broad corpus speed-up bar 2
+normally asks for, and no such evidence exists here. The flag's benefit shows
+only on an instance whose OA prologue outruns the stage budget at the 2–10 s
+`solver.py` hands it, and **no vendored instance does** — 0/119 deadline bites.
+#1066 measured that pathology on `rsyn0830m` (one LP burned 81.3 s of a 150 s
+solve against a 10 s budget) and `rsyn*` is not vendored, nor is minlplib.org
+reachable from this environment. So the corpus can neither confirm nor falsify a
+speed-up, and claiming one would be inventing the measurement.
+
+What *is* measurable is the contract itself: does the stage return within
+`time_budget_s`? That is a wall-clock question, so it reads the same wherever it
+is exercised — the #727 lesson (a mechanism validated on a synthetic proxy can be
+a no-op on the real class) is about *gains*, not contracts. Measured by replaying
+the stage over a budget range on the real instances that run it, with the
+arguments **captured from the real caller** so the docstring's caller contract
+("`lb`/`ub` are the FBBT-tightened root bounds") holds by construction:
+
+| | OFF | ON |
 |---|---|---|
-| 30 s budget | `optimal` 5.3 / `feasible` 5.3 ×2 | **`time_limit`, no incumbent** ×3 |
-| 60 s budget | **`optimal` 5.3** ×3, in 31–36 s | `feasible` ×3, incumbents 5.3 / **7.3** / **8.3**, using the full 60 s |
+| worst-case overrun past its own budget | **+0.297 s** | **+0.076 s** |
+| stage runs overrunning by >20% | 2/35 | **0/35** |
+| root bound at the budgets `solver.py` uses (≥2 s) | — | identical on 3 of 4 instances, 9.4e-6 on the 4th |
+| corpus wall, 119 instances | 1065.0 s | 1063.5 s (−0.1 %) |
+| certificates | 89 | 88, the one difference falsified above |
 
-Reproducible 6/6 across two budgets, and every ON run shows `declined: 1` — exactly
-one LP stopped on the deadline. That is a **certification regression**, which bar 1
-forbids with zero slack, and at 60 s it also costs the incumbent (5.3 → 8.3).
+Bound differences elsewhere on the corpus are noise, and the panel calibrates
+it: 9 of 119 rows show a bound difference, but only **2** of those are rows the
+flag can touch at all. The other 7 are search jitter on rows where the stage
+never ran.
 
-**Why one declined LP costs the whole stage.** The deadline is enforced by handing
-HiGHS a `time_limit`, and an LP that stops on it returns the all-`None` declined
-tuple — which is what any non-optimal status already returned. But inside
-`oa_converge` that sets `x = None`, the loop breaks, and `generate_root_cuts`
-returns an empty `RootCutResult()`. So a single truncated LP anywhere in the
-convergence discards **every cut the stage had accumulated**, and the search that
-follows runs on no root cuts at all. The counters show it is not early truncation —
-both arms run ~240 LPs on `tls2`; it is the cliff at the end.
+So the flag costs nothing measurable and closes a documented promise that is
+otherwise false on a default-ON stage. The alternative #1141 permits — deleting
+it — would delete the deadline mechanism and reopen #1066. It graduates.
 
-This is soundness-neutral (fewer cuts can only loosen a bound), so it is a bar-2
-question in the usual sense — except that losing a proof is a bar-1 event, and it
-does. **The flag stays OFF.**
-
-It is also fixable rather than fatal, and the fix is not a tolerance tweak: keep the
-cuts accumulated so far when an LP stops on the deadline, instead of discarding the
-stage's whole output. That would bound the stage *and* leave `tls2` its proof, and
-it is what the flag needs before this panel can be re-run for graduation. Not done
-here: it is a redesign of #1129's mechanism rather than #1141's, and this PR is
-already scoped to the fractional-node work.
+**A probe that measured nothing, and the guard that caught it.** The first cut of
+the contract panel rebuilt `is_int` from a guessed `v.var_type` spelling
+(`v.vtype`, which does not exist), so the mask was all-False,
+`generate_root_cuts` took its `not np.any(is_int)` early return, and all 28 rows
+measured a 0.00 s no-op. The executed-check counter and its non-zero exit are
+what surfaced it (CLAUDE.md §6), and the real spelling was one `grep` away (§
+"look up an API before calling it"). Its second cut then rebuilt `lb`/`ub` from
+`flat_variable_bounds` — the **raw declared box**, not the FBBT-tightened one the
+caller contract specifies. On `cvxnonsep_psig40r` that box leaves 42 of 82
+columns unbounded, the separators substitute a fake `1e5` for an infinite bound,
+and the stage returned root bounds up to 32092 against a verified incumbent of
+86.5: **8 "violations" in both arms that were the probe's contract breach, not a
+defect in the stage** (the shipped path solves that instance to `optimal` at
+86.539). Capturing the caller's own arguments removed all 8.

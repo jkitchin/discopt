@@ -578,15 +578,21 @@ def test_each_lp_is_handed_what_is_left_of_the_stage_budget(monkeypatch):
     assert len(limits) * 3.0 <= 10.0 + 3.0, f"{len(limits)} LPs x 3.0 s overran a 10 s budget"
 
 
-def test_the_deadline_flag_is_default_off_with_an_opt_in(monkeypatch):
-    """CLAUDE.md §5 regime 2: bound-changing, so it ships default-off."""
+@pytest.mark.smoke
+def test_the_deadline_flag_is_default_on_with_an_opt_out(monkeypatch):
+    """Graduated by #1141's panel (performance-plan §25.9); the opt-out stays.
+
+    Empty must NOT read as off: an unset variable expands to empty in a shell,
+    and a graduated default-ON path that a stray ``$VAR`` can switch off is the
+    #993 defect. Same shape as ``nlpbb_root_cuts_enabled``.
+    """
     import discopt.solvers._root_cuts as rc
 
     monkeypatch.delenv("DISCOPT_ROOT_CUT_DEADLINE", raising=False)
-    assert rc._deadline_enabled() is False
-    for on in ("1", "true", "on", "yes"):
+    assert rc._deadline_enabled() is True
+    for on in ("1", "true", "on", "yes", "", "   "):
         monkeypatch.setenv("DISCOPT_ROOT_CUT_DEADLINE", on)
-        assert rc._deadline_enabled() is True, f"{on!r} did not switch it on"
+        assert rc._deadline_enabled() is True, f"{on!r} did not leave it on"
     for off in ("0", "false", "off", "no"):
         monkeypatch.setenv("DISCOPT_ROOT_CUT_DEADLINE", off)
         assert rc._deadline_enabled() is False, f"{off!r} did not switch it off"
