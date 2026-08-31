@@ -4508,11 +4508,15 @@ def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     hook, and silently substituting a different backend would hide that the
     caller's choice was ignored.
 
-    The SHOT profile also still requires Gurobi. Its ESH/hyperplane strategy adds
-    user cuts at *fractional* node relaxations (Gurobi MIPNODE); the Rust hook
-    fires only at integer-feasible points, so there is nothing to map it onto,
-    and accepting the request while dropping those cuts would report a SHOT run
-    that never ran SHOT's cut generation.
+    The SHOT profile no longer requires Gurobi (#1141). Its ESH/hyperplane
+    strategy adds user cuts at *fractional* node relaxations, and until #1141 the
+    Rust hook fired only at integer-feasible points, so there was nothing to map
+    it onto; the driver now has a fractional-node hook
+    (``solve_milp_lazy_csc_py(node_callback=...)``) and ``"simplex"``/``"auto"``
+    serve SHOT too. ``"highs"`` is still refused for SHOT: that master separates
+    only at integer-feasible incumbents, and accepting the request while dropping
+    the fractional cuts would report a SHOT run that never ran SHOT's cut
+    generation.
     """
     backend = milp_solver.strip().lower() if isinstance(milp_solver, str) else ""
     if backend == "gurobi":
