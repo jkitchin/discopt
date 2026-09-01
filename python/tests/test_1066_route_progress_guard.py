@@ -39,6 +39,19 @@ GUARD_ENV = "DISCOPT_CONVEX_ROUTE_GUARD"
 
 pytest.importorskip("highspy", reason="the OA master needs a MILP backend")
 
+#: #1143 graduated an earlier *decision point* to default-on, which replaces the
+#: half-budget checkpoint and the gap-trend verdict this module is about. That is
+#: not a conflict: §5 requires the superseded policy to be KEPT INTACT AND TESTED
+#: behind its opt-out, and this module is that test. Pin it explicitly for the
+#: whole module rather than letting these assertions read whichever policy happens
+#: to be the default -- a test of the legacy path must select the legacy path.
+DECISION_POINT_ENV = "DISCOPT_CONVEX_ROUTE_DECISION_POINT"
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_1066_policy(monkeypatch):
+    monkeypatch.setenv(DECISION_POINT_ENV, "0")
+
 
 def _load(name: str) -> Model:
     path = NL_DIR / f"{name}.nl"
