@@ -344,18 +344,17 @@ def test_solve_result_round_trips_the_routing_note():
     assert SolveResult.from_dict(d).algorithm_route == note
 
 
-def test_rows_written_before_the_field_still_load():
-    """Backward compatibility, and the reason the field is optional: `load`/`from_dict`
-    must not start rejecting the reference the neutrality check is built on.
+def test_every_committed_reference_row_loads_whatever_its_vintage():
+    """`load`/`from_dict` must not reject the reference the neutrality check is
+    built on, on either side of the `algorithm_route` field.
 
-    Asserted on the *value*, not on the key's absence. `to_dict` is `asdict`, so it
-    emits `"algorithm_route": null` on every row including unrouted ones — the next
-    regeneration on the reference machine (which §0.6.1 prescribes) therefore writes
-    the key into all 52 rows. A test keyed to `"algorithm_route" not in row` would
-    fail on that regeneration while nothing was wrong, i.e. it would pin the
-    accident of when the file was generated rather than the compatibility contract.
-    Every row must LOAD and read as unrouted, whichever side of the field it was
-    written on.
+    The contract is that every row LOADS, not what the field contains. This test
+    has been wrong twice in the other direction and both errors are instructive:
+    it first asserted `"algorithm_route" not in row`, which a regeneration would
+    break because `to_dict` is `asdict` and emits the key on every row; it was then
+    corrected to assert the *value* is None, which the #1143 regeneration broke for
+    the honest reason that routed rows now carry a real note. A compatibility test
+    must pin the compatibility, not the vintage of the file it happens to read.
     """
     from benchmarks.metrics import SolveResult  # noqa: PLC0415
     from scripts.check_cert_neutrality import _CERT_BASELINE  # noqa: PLC0415
@@ -364,11 +363,33 @@ def test_rows_written_before_the_field_still_load():
     baseline = load_baseline(_CERT_BASELINE)
     assert baseline, "committed cert baseline is empty"
     loaded = 0
-    for row in baseline.values():
-        assert row.get("algorithm_route") is None, row.get("algorithm_route")
-        assert SolveResult.from_dict(row).algorithm_route is None
+    for name, row in baseline.items():
+        note = SolveResult.from_dict(row).algorithm_route
+        assert note is None or isinstance(note, str), (name, note)
         loaded += 1
     assert loaded == len(baseline), (loaded, len(baseline))
+
+
+def test_the_committed_reference_carries_the_routing_notes_it_measured():
+    """Prove the field is actually exercised rather than uniformly null (§6).
+
+    A reference generated before #1134 carries no notes at all, and one generated
+    on a machine where nothing routes carries none either -- in both cases the test
+    above passes while proving nothing. This asserts the stronger property the
+    current reference has: it was generated with the route live, so some rows carry
+    a note naming the algorithm that ran. If a future regeneration legitimately
+    routes nothing, this is the test to revisit deliberately.
+    """
+    from benchmarks.metrics import SolveResult  # noqa: PLC0415
+    from scripts.check_cert_neutrality import _CERT_BASELINE  # noqa: PLC0415
+    from utils.cert_neutrality import load_baseline  # noqa: PLC0415
+
+    baseline = load_baseline(_CERT_BASELINE)
+    routed = {n: SolveResult.from_dict(r).algorithm_route for n, r in baseline.items()}
+    with_note = {n: v for n, v in routed.items() if v}
+    assert with_note, "no committed row carries a routing note -- the field is inert"
+    for name, note in with_note.items():
+        assert isinstance(note, str) and note.strip(), (name, note)
 
 
 def test_an_unrouted_result_still_serializes_the_field():

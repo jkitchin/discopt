@@ -5223,3 +5223,130 @@ falsified. What ended it was instrumenting the driver to ask the matrix directly
 whether the returned point satisfied its own rows — a question with a yes/no
 answer, unlike "is the master too slow". Reach for the invariant check earlier.
 
+## CC-1143 The convex-MINLP route's abstain cost: three hypotheses falsified, one survived
+
+**Context.** #1143: `_convex_minlp_auto_route` sends a convex MINLP to an OA
+master; when the route does not certify, the caller pays at least
+`_CONVEX_ROUTE_BUDGET_FRACTION` (half the limit) before the default path starts
+from scratch. On the cert panel that is routinely 3-8x the entire unrouted solve.
+The issue named three candidate mechanisms. All three are **falsified**; the
+survivor came out of the measurements rather than the list.
+
+Measured 2026-08-31, 14-core box, idle, `_rust.abi3.so` rebuilt from the tree
+under test and asserted at import (§8), 60 s budgets, corpus instances from
+`python/tests/data/minlplib_nl` and the MINLPLib snapshot.
+
+### Falsified 1 — gate the route on the default path's root gap
+
+The issue's reasoning: `cvxnonsep_nsig30`'s root gap is 0.0011, so "a model
+already almost closed at the root has little for an OA master to win". Measured
+the default path's `root_gap` (route OFF) for 24 instances and classified each by
+what the route actually did:
+
+    route-won root gaps : min 0        max 32.01   (n=19)
+    abstained root gaps : min 0.001139 max  8.109  (n=5)
+
+**Complete overlap; no separating threshold exists.** `cvxnonsep_nsig30`
+(abstains, 0.001139) sits *between* `cvxnonsep_psig40r` (won, 6.8e-05) and
+`st_miqp4` (won, 5.5e-04). The same overlap kills the variant that predicts the
+fallback's cost from the root gap: `rsyn0805m` (gap 0.2173) needs 60.2 s unrouted
+while `flay02m` (gap 0.1875) needs 1.64 s.
+
+### Falsified 2 — an early checkpoint on the "no finite dual-bound observation" verdict
+
+The issue's candidate 2: fire early on the cheap verdict the guard already
+implements. Measured the guard's observation count at 10% of the budget:
+
+| instance | obs by 10% | what the rule would do |
+|---|---|---|
+| `fac2` | 5 | **not fire** — but this is a target |
+| `cvxnonsep_nsig30` | 155 | **not fire** — also a target |
+| `rsyn0840m` | 0 | **fire** — a row #1066 protects |
+| `rsyn0820m02m` | 0 | **fire** — ditto |
+
+The rule is **anti-correlated with what it needs to do**: it misses both expensive
+abstainers and fires on the two rows the #1066 record says to keep.
+
+### Falsified 3 — moving `master_checkin_deadline` earlier on its own
+
+Necessary but not sufficient, and harmful alone. With the check-in at 10% and the
+verdict left at 50%, the first master is shortened but the route still keeps the
+budget: **`fac2` optimal 35.8 s -> feasible 60.7 s** and **`squfl015-060` optimal
+-> feasible**, against `rsyn0840m` feasible -> optimal. Two certificates lost, one
+gained. A half-measure is worse than either endpoint.
+
+### Survived — the decision point (implemented, default-off)
+
+The measurements say the route **either certifies fast or not at all**. Over 24
+classified instances every row the route certifies it certifies within **2.96 s**
+of a 60 s limit (`syn20m02m` 2.91 s is the slowest, `syn40m` 2.05 s, `syn15m03m`
+0.90 s, `rsyn0805m` 0.82 s); every abstain costs **>= 28 s**. Win time and waste
+are separated by an order of magnitude, so the decision needs neither a model
+property nor a gap trend — only to be taken early.
+
+`_CONVEX_ROUTE_DECISION_POINT_FRACTION = 0.10` is bounded on both sides by
+measurement, which is why it is not smaller. At **0.05** the cut lands inside the
+win distribution: `syn20m02m` loses its certificate outright (optimal 2.91 s ->
+feasible 60.4 s) and `tls2` regresses 30.3 s -> 57.6 s. At **0.10** both recover
+and the savings survive (flag OFF vs ON, interleaved, shipped flag):
+
+| instance | OFF | ON | |
+|---|---|---|---|
+| `cvxnonsep_nsig30` | optimal 29.71 s | optimal **6.69 s** | -23.0 s |
+| `clay0303hfsg` | optimal 43.16 s | optimal **22.23 s** | -20.9 s |
+| `fac2` | optimal 35.78 s | optimal **14.69 s** | -21.1 s |
+| `squfl015-060` | optimal 60.20 s | optimal **40.05 s** | -20.2 s |
+| `tls2` | optimal 30.48 s | optimal 30.47 s | neutral |
+| `syn20m02m` | optimal 2.90 s | optimal 2.91 s | win preserved |
+| `rsyn0805m` | optimal 0.76 s | optimal 0.76 s | win preserved |
+
+Zero lost certificates, zero objective disagreements. The gap-trend test is
+deliberately **not** consulted at the decision point: it is what kept
+`cvxnonsep_nsig30` running 28.2 s while its gap improved the whole way
+(0.298 -> 0.0013) without ever certifying. "Is it improving?" is the wrong
+question; answering it correctly still costs the budget.
+
+### The floor the in-repo panel could not see
+
+A fraction alone is unsound on a short budget, and the first panel missed it. A
+route's win time is **absolute** (`syn20m02m` certifies in ~2.9 s at every limit)
+while a fraction **shrinks** with the limit: at a 20 s budget the bare 10% gives
+2.0 s, which cuts inside the win distribution. Measured, `syn20m02m` goes
+**optimal 3.16 s -> feasible 20.12 s**. The 61-instance in-repo corpus is blind to
+this because it holds no `syn`/`rsyn` instance — the class the route exists for —
+so the 66-pair panel passed both bars while the policy carried a latent lost
+certificate.
+
+`_CONVEX_ROUTE_DECISION_POINT_FLOOR_S = 5.0` clears the slowest measured win
+(2.96 s) with margin, and the decision point is additionally capped at
+`_CONVEX_ROUTE_BUDGET_FRACTION` so that on a budget too short for the floor the
+policy degrades to the #1066 behavior rather than to something worse:
+
+    limit    2 s ->  1.00 s   (= #1066)     limit   20 s ->  5.00 s  (#1066: 10 s)
+    limit    8 s ->  4.00 s   (= #1066)     limit   60 s ->  6.00 s  (#1066: 30 s)
+
+With the floor, `syn20m02m` at 20 s is back to **optimal 2.91 s**.
+
+**Generalisable lesson.** A policy parameterised as a fraction of the caller's
+budget must be checked against the *absolute* quantity it is racing. The in-repo
+corpus cannot falsify a claim about a class it does not contain; #1059 knew this
+and supplemented with `syn`/`rsyn`, and the same supplement is what caught this.
+
+### Status: default-ON (graduated 2026-08-31)
+
+Graduation panel — in-repo corpus, 66 pairs at 20 s, OFF/ON interleaved:
+
+| criterion | result |
+|---|---|
+| certificates lost | **0** |
+| certificates gained | 1 (`clay0303hfsg`) |
+| objective vs oracle beyond correctness tol | **0** |
+| total wall OFF / ON | 417.9 / 407.9 s |
+| materially faster / slower | 3 / 1 |
+
+Cert-clean **and** net-positive. The single slower row, `bchoco08`
+(20.01 -> 20.96 s), certifies in neither arm at a 20 s limit — a wall difference
+between two time-limited runs, not a lost result. Supplemented with the
+`syn`/`rsyn`/`squfl` class at 20 s and 60 s: no route win lost at either budget.
+`DISCOPT_CONVEX_ROUTE_DECISION_POINT=0` restores the #1066 policy, which is kept
+intact and tested.

@@ -5391,6 +5391,97 @@ _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT = 0.25
 #: That look-back window, as a fraction of the checkpoint.
 _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION = 0.5
 
+#: #1143: the *decision point*, as a fraction of the caller's limit, used instead
+#: of :data:`_CONVEX_ROUTE_BUDGET_FRACTION` when the early-decision policy is on.
+#:
+#: 0.10 is measured, not chosen. Across 24 classified instances the route either
+#: certifies FAST or not at all: every one of the 19 rows it certifies it certifies
+#: within 2.96 s of a 60 s limit (``syn20m02m`` 2.91 s is the slowest; ``syn40m``
+#: 2.05 s, ``syn15m03m`` 0.90 s, ``rsyn0805m`` 0.82 s), while every abstain costs
+#: >= 28 s. The win distribution and the waste are separated by an order of
+#: magnitude, so the decision does not need a model property or a gap trend -- it
+#: needs to be taken early.
+#:
+#: The fraction is bounded on BOTH sides by measurement, which is why it is not
+#: smaller: at 0.05 (3.0 s) the cut lands *inside* the win distribution and
+#: ``syn20m02m`` loses its certificate outright (optimal 2.91 s -> feasible 60.4 s),
+#: while ``tls2`` regresses 30.3 s -> 57.6 s. At 0.10 both recover (2.96 s optimal,
+#: 29.7 s) and the savings survive nearly intact. See #1143 and the falsification
+#: record in ``docs/dev/performance-plan.md``.
+_CONVEX_ROUTE_DECISION_POINT_FRACTION = 0.10
+
+#: Absolute floor under the #1143 decision point, in seconds.
+#:
+#: The fraction alone is unsound on a short budget, and the in-repo corpus cannot
+#: see it: a route's win time is ABSOLUTE (``syn20m02m`` certifies in ~2.9 s at
+#: every limit) while a fraction SHRINKS with the limit. At a 20 s budget the bare
+#: fraction gives 2.0 s, which cuts inside the win distribution -- measured,
+#: ``syn20m02m`` goes optimal 3.16 s -> feasible 20.12 s. The 61-instance in-repo
+#: panel is blind to this because it holds no ``syn``/``rsyn`` instance, which is
+#: the class the route exists for.
+#:
+#: 5.0 s clears the slowest measured win (2.96 s) with margin. The decision point
+#: is additionally capped at :data:`_CONVEX_ROUTE_BUDGET_FRACTION` of the limit, so
+#: on a budget too short for the floor the policy degrades to the #1066 behavior it
+#: replaces rather than to something worse.
+_CONVEX_ROUTE_DECISION_POINT_FLOOR_S = 5.0
+
+
+def _convex_route_decision_point_enabled() -> bool:
+    """Is the #1143 early-decision policy switched on? **Default ON since #1143.**
+
+    Changing when the route hands over changes the bounds that come back, so this
+    is CLAUDE.md §5 regime 2: it shipped default-off and graduated on the panel
+    below. ``DISCOPT_CONVEX_ROUTE_DECISION_POINT=0`` restores the #1066
+    half-budget policy, which is kept intact and tested. Read per call, not cached
+    at import, so a test can flip it without reloading.
+
+    Graduation panel (2026-08-31, 14-core box, idle, extension rebuilt from the
+    tree under test and asserted at import): the 61-instance in-repo corpus at
+    20 s, OFF/ON interleaved per instance (66 pairs), scored on both bars --
+
+    ==============================  ==================
+    criterion                       result
+    ==============================  ==================
+    certificates lost                                0
+    certificates gained              1 (clay0303hfsg)
+    objective vs oracle beyond tol                   0
+    total wall OFF / ON               417.9 / 407.9 s
+    materially faster / slower                   3 / 1
+    ==============================  ==================
+
+    Cert-clean AND net-positive. The in-repo corpus holds no ``syn``/``rsyn``
+    instance -- the class the route exists for -- so it was supplemented, as the
+    #1059 graduation was, with ``syn20m02m``/``syn40m``/``syn15m03m``/
+    ``rsyn0805m``/``rsyn0840m``/``rsyn0820m02m``/``rsyn0830m``/``syn30m03m``/
+    ``squfl015-060`` at 20 s and 60 s: no route win lost at either budget. At 60 s
+    the targeted rows move ``cvxnonsep_nsig30`` 29.7 -> 6.7 s, ``fac2``
+    35.8 -> 14.7 s, ``clay0303hfsg`` 43.2 -> 22.2 s and ``squfl015-060``
+    60.2 -> 40.1 s, all still ``optimal``.
+
+    The one materially slower row is ``bchoco08`` (20.01 -> 20.96 s), which
+    certifies in neither arm at a 20 s limit -- a wall difference between two
+    time-limited runs, not a lost result.
+
+    **What it changes.** The #1066 guard cannot fire before
+    :data:`_CONVEX_ROUTE_BUDGET_FRACTION` (half the limit) by construction, so an
+    abstaining route always costs at least that much -- routinely 3-8x the whole
+    unrouted solve (#1143). With this on, the checkpoint moves to
+    :data:`_CONVEX_ROUTE_DECISION_POINT_FRACTION` and the verdict there becomes
+    unconditional: reaching the decision point *is* the verdict, because the route
+    has not certified by the time every measured win had.
+
+    The gap-trend test is deliberately not consulted at the decision point. It is
+    what kept ``cvxnonsep_nsig30`` running for 28.2 s -- its gap improves steadily
+    the whole way (0.298 -> 0.0013) and it still never certifies, so "is it
+    improving?" is the wrong question and answering it correctly still costs the
+    budget. "Has it finished?" is the right one. The convergence branch is kept:
+    a route whose gap has closed is owned by the loop's own termination test.
+    """
+    # Graduated to default-on; "0" is the preserved opt-out, the same spelling and
+    # direction as the #1066 guard's `DISCOPT_CONVEX_ROUTE_GUARD=0` just below.
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_DECISION_POINT", "1") != "0"
+
 
 def _convex_route_progress_guard_enabled() -> bool:
     """Is the #1066 progress-gated route budget switched on?
@@ -5499,15 +5590,46 @@ class _RouteProgressGuard:
         check_fraction: Optional[float] = None,
         min_improvement: Optional[float] = None,
         window_fraction: Optional[float] = None,
+        decision_point_eligible: bool = True,
     ) -> None:
         self.time_limit = float(time_limit)
         limit = self.time_limit
-        fraction = (
-            _CONVEX_ROUTE_BUDGET_FRACTION if check_fraction is None else float(check_fraction)
+        #: #1143: reaching the checkpoint *is* the verdict when this is on.
+        #:
+        #: Scoped to the OA route, because that is the whole of the evidence: every
+        #: instance in the #1143 measurement routed to ``mip-nlp/oa``. ``lp_nlp_bb``
+        #: is a different mechanism -- a single tree that checks in at every master
+        #: restart rather than a sequence of masters -- and the #1066 record says
+        #: plainly that cutting it early is what cost ``rsyn0820m02m``, which
+        #: certifies at 37.5 s of a 60 s limit. Applying an unmeasured policy to it
+        #: on the strength of measurements from the other path is exactly the
+        #: single-problem generalisation CLAUDE.md §2 forbids.
+        self.decision_point = (
+            decision_point_eligible
+            and check_fraction is None
+            and _convex_route_decision_point_enabled()
         )
+        default_fraction = (
+            _CONVEX_ROUTE_DECISION_POINT_FRACTION
+            if self.decision_point
+            else _CONVEX_ROUTE_BUDGET_FRACTION
+        )
+        fraction = default_fraction if check_fraction is None else float(check_fraction)
+        point = limit * fraction
+        if self.decision_point:
+            # Never cut inside the measured win distribution (the absolute floor),
+            # and never spend MORE than the policy this replaces (the cap). On a
+            # budget too short for the floor the cap wins and the behavior is the
+            # #1066 half-budget split, not something worse.
+            point = min(
+                max(point, _CONVEX_ROUTE_DECISION_POINT_FLOOR_S),
+                limit * _CONVEX_ROUTE_BUDGET_FRACTION,
+            )
         # The same expression the fixed split used, so "never fires before the
-        # checkpoint" means "never fires before the old wall".
-        self.checkpoint = max(limit * fraction, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
+        # checkpoint" means "never fires before the old wall". The fallback floor
+        # still applies under #1143: below it a fallback cannot do anything useful,
+        # so handing over early would trade a routed result for nothing.
+        self.checkpoint = max(point, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
         self.window = self.checkpoint * (
             _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION
             if window_fraction is None
@@ -5552,6 +5674,19 @@ class _RouteProgressGuard:
 
     def _verdict(self, now: float) -> tuple[bool, Optional[str]]:
         """Has the route earned the rest of the budget as of ``now``?"""
+        if self.decision_point:
+            # #1143: arriving here means the route has not certified by the time
+            # every measured win had, so hand over. The gap trend is deliberately
+            # not consulted -- see `_convex_route_decision_point_enabled`.
+            if self.history and self.history[-1][1] <= 0.0:
+                # Converged; the loop's own termination test owns this, exactly as
+                # in the trend policy below. Stopping here would discard a result
+                # that is about to be returned anyway.
+                return False, None
+            return True, (
+                f"not certified by the {self.checkpoint:.2f}s decision point "
+                f"of a {self.time_limit:.1f}s budget (#1143)"
+            )
         if len(self.history) < 2:
             return True, (
                 f"only {len(self.history)} finite dual-bound observation(s) by "
@@ -5596,7 +5731,8 @@ def _route_progress_guard_options(
         return mip_nlp_options, None
     if mip_nlp_options is not None and mip_nlp_options.get("termination_hook") is not None:
         return mip_nlp_options, None
-    guard = _RouteProgressGuard(time_limit)
+    # #1143 applies to the OA route only -- see `_RouteProgressGuard.decision_point`.
+    guard = _RouteProgressGuard(time_limit, decision_point_eligible=(method_key == "oa"))
     options = dict(mip_nlp_options or {})
     options["termination_hook"] = guard
     if method_key == "lp_nlp_bb":
