@@ -280,3 +280,31 @@ def test_the_policy_never_spends_more_than_the_one_it_replaces(flag):
         off = _RouteProgressGuard(limit).checkpoint
         flag(True)
         assert on <= off + 1e-9, (limit, on, off)
+
+
+# --------------------------------------------------------------------------- #
+# Scope: the OA route only
+# --------------------------------------------------------------------------- #
+
+
+def test_the_single_tree_route_keeps_the_1066_policy(flag):
+    """`lp_nlp_bb` is a different mechanism and was never measured under #1143.
+
+    It is a single tree that checks in at every master restart, not a sequence of
+    masters, and the #1066 record says cutting it early is what cost
+    `rsyn0820m02m` -- which certifies at 37.5 s of a 60 s limit. Every instance in
+    the #1143 measurement routed to `mip-nlp/oa`, so the policy stops there.
+    """
+    flag(True)
+    _, guard = _route_progress_guard_options(None, method_key="lp_nlp_bb", time_limit=60.0)
+    assert guard is not None
+    assert guard.decision_point is False
+    assert guard.checkpoint == pytest.approx(60.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
+
+
+def test_the_oa_route_does_take_the_decision_point(flag):
+    """The discriminator for the test above: same flag, other method, other policy."""
+    flag(True)
+    _, guard = _route_progress_guard_options(None, method_key="oa", time_limit=60.0)
+    assert guard.decision_point is True
+    assert guard.checkpoint == pytest.approx(60.0 * _CONVEX_ROUTE_DECISION_POINT_FRACTION)

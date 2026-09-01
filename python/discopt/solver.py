@@ -5590,11 +5590,25 @@ class _RouteProgressGuard:
         check_fraction: Optional[float] = None,
         min_improvement: Optional[float] = None,
         window_fraction: Optional[float] = None,
+        decision_point_eligible: bool = True,
     ) -> None:
         self.time_limit = float(time_limit)
         limit = self.time_limit
         #: #1143: reaching the checkpoint *is* the verdict when this is on.
-        self.decision_point = check_fraction is None and _convex_route_decision_point_enabled()
+        #:
+        #: Scoped to the OA route, because that is the whole of the evidence: every
+        #: instance in the #1143 measurement routed to ``mip-nlp/oa``. ``lp_nlp_bb``
+        #: is a different mechanism -- a single tree that checks in at every master
+        #: restart rather than a sequence of masters -- and the #1066 record says
+        #: plainly that cutting it early is what cost ``rsyn0820m02m``, which
+        #: certifies at 37.5 s of a 60 s limit. Applying an unmeasured policy to it
+        #: on the strength of measurements from the other path is exactly the
+        #: single-problem generalisation CLAUDE.md §2 forbids.
+        self.decision_point = (
+            decision_point_eligible
+            and check_fraction is None
+            and _convex_route_decision_point_enabled()
+        )
         default_fraction = (
             _CONVEX_ROUTE_DECISION_POINT_FRACTION
             if self.decision_point
@@ -5717,7 +5731,8 @@ def _route_progress_guard_options(
         return mip_nlp_options, None
     if mip_nlp_options is not None and mip_nlp_options.get("termination_hook") is not None:
         return mip_nlp_options, None
-    guard = _RouteProgressGuard(time_limit)
+    # #1143 applies to the OA route only -- see `_RouteProgressGuard.decision_point`.
+    guard = _RouteProgressGuard(time_limit, decision_point_eligible=(method_key == "oa"))
     options = dict(mip_nlp_options or {})
     options["termination_hook"] = guard
     if method_key == "lp_nlp_bb":
