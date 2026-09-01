@@ -5306,5 +5306,47 @@ deliberately **not** consulted at the decision point: it is what kept
 (0.298 -> 0.0013) without ever certifying. "Is it improving?" is the wrong
 question; answering it correctly still costs the budget.
 
-**Status: default-OFF.** Bound-changing under §5, so the default moves only on a
-corpus-wide differential panel meeting both bars.
+### The floor the in-repo panel could not see
+
+A fraction alone is unsound on a short budget, and the first panel missed it. A
+route's win time is **absolute** (`syn20m02m` certifies in ~2.9 s at every limit)
+while a fraction **shrinks** with the limit: at a 20 s budget the bare 10% gives
+2.0 s, which cuts inside the win distribution. Measured, `syn20m02m` goes
+**optimal 3.16 s -> feasible 20.12 s**. The 61-instance in-repo corpus is blind to
+this because it holds no `syn`/`rsyn` instance — the class the route exists for —
+so the 66-pair panel passed both bars while the policy carried a latent lost
+certificate.
+
+`_CONVEX_ROUTE_DECISION_POINT_FLOOR_S = 5.0` clears the slowest measured win
+(2.96 s) with margin, and the decision point is additionally capped at
+`_CONVEX_ROUTE_BUDGET_FRACTION` so that on a budget too short for the floor the
+policy degrades to the #1066 behavior rather than to something worse:
+
+    limit    2 s ->  1.00 s   (= #1066)     limit   20 s ->  5.00 s  (#1066: 10 s)
+    limit    8 s ->  4.00 s   (= #1066)     limit   60 s ->  6.00 s  (#1066: 30 s)
+
+With the floor, `syn20m02m` at 20 s is back to **optimal 2.91 s**.
+
+**Generalisable lesson.** A policy parameterised as a fraction of the caller's
+budget must be checked against the *absolute* quantity it is racing. The in-repo
+corpus cannot falsify a claim about a class it does not contain; #1059 knew this
+and supplemented with `syn`/`rsyn`, and the same supplement is what caught this.
+
+### Status: default-ON (graduated 2026-08-31)
+
+Graduation panel — in-repo corpus, 66 pairs at 20 s, OFF/ON interleaved:
+
+| criterion | result |
+|---|---|
+| certificates lost | **0** |
+| certificates gained | 1 (`clay0303hfsg`) |
+| objective vs oracle beyond correctness tol | **0** |
+| total wall OFF / ON | 417.9 / 407.9 s |
+| materially faster / slower | 3 / 1 |
+
+Cert-clean **and** net-positive. The single slower row, `bchoco08`
+(20.01 -> 20.96 s), certifies in neither arm at a 20 s limit — a wall difference
+between two time-limited runs, not a lost result. Supplemented with the
+`syn`/`rsyn`/`squfl` class at 20 s and 60 s: no route win lost at either budget.
+`DISCOPT_CONVEX_ROUTE_DECISION_POINT=0` restores the #1066 policy, which is kept
+intact and tested.

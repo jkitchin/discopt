@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 from discopt.solver import (
     _CONVEX_ROUTE_BUDGET_FRACTION,
+    _CONVEX_ROUTE_DECISION_POINT_FLOOR_S,
     _CONVEX_ROUTE_DECISION_POINT_FRACTION,
     _CONVEX_ROUTE_FALLBACK_FLOOR_S,
     _convex_route_decision_point_enabled,
@@ -53,16 +54,26 @@ def flag(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_the_policy_is_default_off(flag):
-    """CLAUDE.md §5: changing when the route hands over is bound-changing, so it
-    ships default-off until a corpus panel clears it."""
+def test_the_policy_is_default_on_after_graduation(flag):
+    """CLAUDE.md §5: bound-changing, so it shipped default-off and graduated on the
+    panel recorded in `_convex_route_decision_point_enabled` -- cert-clean (0 lost,
+    1 gained, 0 objective violations) and net-positive (3 faster, 1 slower)."""
     flag(None)
+    assert _convex_route_decision_point_enabled() is True
+
+
+def test_the_opt_out_restores_the_1066_policy(flag):
+    """The `=0` escape hatch and the legacy path are kept intact (§5)."""
+    flag(False)
     assert _convex_route_decision_point_enabled() is False
+    g = _RouteProgressGuard(60.0)
+    assert g.decision_point is False
+    assert g.checkpoint == pytest.approx(60.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
 
 
 def test_the_flag_is_read_per_call_not_cached(flag):
     flag(None)
-    assert _convex_route_decision_point_enabled() is False
+    assert _convex_route_decision_point_enabled() is True
     flag(True)
     assert _convex_route_decision_point_enabled() is True
     flag(False)
@@ -74,8 +85,8 @@ def test_the_flag_is_read_per_call_not_cached(flag):
 # --------------------------------------------------------------------------- #
 
 
-def test_default_off_keeps_the_1066_half_budget_checkpoint(flag):
-    flag(None)
+def test_the_opt_out_keeps_the_1066_half_budget_checkpoint(flag):
+    flag(False)
     g = _RouteProgressGuard(60.0)
     assert g.decision_point is False
     assert g.checkpoint == pytest.approx(60.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
@@ -218,3 +229,54 @@ def test_a_caller_supplied_hook_still_declines_the_guard(flag):
         {"termination_hook": lambda ctx: False}, method_key="oa", time_limit=60.0
     )
     assert guard is None
+
+
+# --------------------------------------------------------------------------- #
+# The absolute floor: a fraction alone is unsound on a short budget
+# --------------------------------------------------------------------------- #
+
+#: The slowest route win measured over 24 classified instances (``syn20m02m``).
+#: A decision point at or below this cuts inside the win distribution.
+_SLOWEST_MEASURED_WIN_S = 2.96
+
+
+def test_the_decision_point_never_cuts_inside_the_win_distribution(flag):
+    """The regression witness, and the reason the floor exists.
+
+    A route's win time is ABSOLUTE -- ``syn20m02m`` certifies in ~2.9 s at every
+    limit -- while a fraction SHRINKS with the limit. At a 20 s budget the bare
+    10% gives 2.0 s and ``syn20m02m`` went optimal 3.16 s -> **feasible 20.12 s**.
+    The 61-instance in-repo panel could not see it: it holds no ``syn``/``rsyn``
+    instance, which is the class the route exists for.
+    """
+    flag(True)
+    for limit in (20.0, 30.0, 60.0, 600.0):
+        g = _RouteProgressGuard(limit)
+        assert g.checkpoint > _SLOWEST_MEASURED_WIN_S, (limit, g.checkpoint)
+
+
+def test_the_floor_binds_on_a_short_budget(flag):
+    flag(True)
+    g = _RouteProgressGuard(20.0)
+    assert g.checkpoint == pytest.approx(_CONVEX_ROUTE_DECISION_POINT_FLOOR_S)
+    # still well under the policy it replaces
+    assert g.checkpoint < 20.0 * _CONVEX_ROUTE_BUDGET_FRACTION
+
+
+def test_the_fraction_binds_on_a_long_budget(flag):
+    flag(True)
+    for limit in (60.0, 600.0):
+        g = _RouteProgressGuard(limit)
+        assert g.checkpoint == pytest.approx(limit * _CONVEX_ROUTE_DECISION_POINT_FRACTION)
+
+
+def test_the_policy_never_spends_more_than_the_one_it_replaces(flag):
+    """On a budget too short for the floor the cap wins, so the behavior degrades
+    to the #1066 half-budget split rather than to something worse."""
+    flag(True)
+    for limit in (2.0, 4.0, 8.0, 10.0, 20.0, 60.0):
+        on = _RouteProgressGuard(limit).checkpoint
+        flag(False)
+        off = _RouteProgressGuard(limit).checkpoint
+        flag(True)
+        assert on <= off + 1e-9, (limit, on, off)

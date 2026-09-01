@@ -1,0 +1,42 @@
+{
+  "allow_shrink": false,
+  "baseline_written": true,
+  "commit": "227845025e0b71990672e1198f398b83e1f718a6",
+  "coverage_lost": [],
+  "dropped": [
+    {
+      "in_previous_baseline": false,
+      "instance": "carton7",
+      "previous": null,
+      "reason": "not-optimal(time_limit/time_limit/time_limit)"
+    },
+    {
+      "in_previous_baseline": false,
+      "instance": "casctanks",
+      "previous": null,
+      "reason": "not-optimal(feasible/feasible/feasible)"
+    },
+    {
+      "in_previous_baseline": false,
+      "instance": "ex1252",
+      "previous": null,
+      "reason": "not-optimal(feasible/feasible/feasible)"
+    },
+    {
+      "in_previous_baseline": false,
+      "instance": "hda",
+      "previous": null,
+      "reason": "not-optimal(time_limit/time_limit/time_limit)"
+    }
+  ],
+  "generated_at": "2026-08-31T19:40:29.722151",
+  "host": {
+    "cpu_count": 14,
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "processor": "arm"
+  },
+  "instances_attempted": 56,
+  "instances_certifying": 52,
+  "previous_instances_certifying": 52,
+  "time_limit": 60.0
+}

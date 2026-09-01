@@ -5410,14 +5410,58 @@ _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION = 0.5
 #: record in ``docs/dev/performance-plan.md``.
 _CONVEX_ROUTE_DECISION_POINT_FRACTION = 0.10
 
+#: Absolute floor under the #1143 decision point, in seconds.
+#:
+#: The fraction alone is unsound on a short budget, and the in-repo corpus cannot
+#: see it: a route's win time is ABSOLUTE (``syn20m02m`` certifies in ~2.9 s at
+#: every limit) while a fraction SHRINKS with the limit. At a 20 s budget the bare
+#: fraction gives 2.0 s, which cuts inside the win distribution -- measured,
+#: ``syn20m02m`` goes optimal 3.16 s -> feasible 20.12 s. The 61-instance in-repo
+#: panel is blind to this because it holds no ``syn``/``rsyn`` instance, which is
+#: the class the route exists for.
+#:
+#: 5.0 s clears the slowest measured win (2.96 s) with margin. The decision point
+#: is additionally capped at :data:`_CONVEX_ROUTE_BUDGET_FRACTION` of the limit, so
+#: on a budget too short for the floor the policy degrades to the #1066 behavior it
+#: replaces rather than to something worse.
+_CONVEX_ROUTE_DECISION_POINT_FLOOR_S = 5.0
+
 
 def _convex_route_decision_point_enabled() -> bool:
-    """Is the #1143 early-decision policy switched on? **Default OFF.**
+    """Is the #1143 early-decision policy switched on? **Default ON since #1143.**
 
     Changing when the route hands over changes the bounds that come back, so this
-    is CLAUDE.md §5 regime 2 and ships default-off until a corpus-wide differential
-    panel clears both bars. ``DISCOPT_CONVEX_ROUTE_DECISION_POINT=1`` turns it on.
-    Read per call, not cached at import, so a test can flip it without reloading.
+    is CLAUDE.md §5 regime 2: it shipped default-off and graduated on the panel
+    below. ``DISCOPT_CONVEX_ROUTE_DECISION_POINT=0`` restores the #1066
+    half-budget policy, which is kept intact and tested. Read per call, not cached
+    at import, so a test can flip it without reloading.
+
+    Graduation panel (2026-08-31, 14-core box, idle, extension rebuilt from the
+    tree under test and asserted at import): the 61-instance in-repo corpus at
+    20 s, OFF/ON interleaved per instance (66 pairs), scored on both bars --
+
+    ==============================  ==================
+    criterion                       result
+    ==============================  ==================
+    certificates lost                                0
+    certificates gained              1 (clay0303hfsg)
+    objective vs oracle beyond tol                   0
+    total wall OFF / ON               417.9 / 407.9 s
+    materially faster / slower                   3 / 1
+    ==============================  ==================
+
+    Cert-clean AND net-positive. The in-repo corpus holds no ``syn``/``rsyn``
+    instance -- the class the route exists for -- so it was supplemented, as the
+    #1059 graduation was, with ``syn20m02m``/``syn40m``/``syn15m03m``/
+    ``rsyn0805m``/``rsyn0840m``/``rsyn0820m02m``/``rsyn0830m``/``syn30m03m``/
+    ``squfl015-060`` at 20 s and 60 s: no route win lost at either budget. At 60 s
+    the targeted rows move ``cvxnonsep_nsig30`` 29.7 -> 6.7 s, ``fac2``
+    35.8 -> 14.7 s, ``clay0303hfsg`` 43.2 -> 22.2 s and ``squfl015-060``
+    60.2 -> 40.1 s, all still ``optimal``.
+
+    The one materially slower row is ``bchoco08`` (20.01 -> 20.96 s), which
+    certifies in neither arm at a 20 s limit -- a wall difference between two
+    time-limited runs, not a lost result.
 
     **What it changes.** The #1066 guard cannot fire before
     :data:`_CONVEX_ROUTE_BUDGET_FRACTION` (half the limit) by construction, so an
@@ -5434,9 +5478,9 @@ def _convex_route_decision_point_enabled() -> bool:
     budget. "Has it finished?" is the right one. The convergence branch is kept:
     a route whose gap has closed is owned by the loop's own termination test.
     """
-    # Default OFF: the opposite default to the #1066 guard just below, which has
-    # graduated. Any truthy spelling other than "0"/"" turns it on.
-    return os.environ.get("DISCOPT_CONVEX_ROUTE_DECISION_POINT", "0") not in ("0", "")
+    # Graduated to default-on; "0" is the preserved opt-out, the same spelling and
+    # direction as the #1066 guard's `DISCOPT_CONVEX_ROUTE_GUARD=0` just below.
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_DECISION_POINT", "1") != "0"
 
 
 def _convex_route_progress_guard_enabled() -> bool:
@@ -5557,11 +5601,21 @@ class _RouteProgressGuard:
             else _CONVEX_ROUTE_BUDGET_FRACTION
         )
         fraction = default_fraction if check_fraction is None else float(check_fraction)
+        point = limit * fraction
+        if self.decision_point:
+            # Never cut inside the measured win distribution (the absolute floor),
+            # and never spend MORE than the policy this replaces (the cap). On a
+            # budget too short for the floor the cap wins and the behavior is the
+            # #1066 half-budget split, not something worse.
+            point = min(
+                max(point, _CONVEX_ROUTE_DECISION_POINT_FLOOR_S),
+                limit * _CONVEX_ROUTE_BUDGET_FRACTION,
+            )
         # The same expression the fixed split used, so "never fires before the
-        # checkpoint" means "never fires before the old wall". The floor still
-        # applies under #1143: below it a fallback cannot do anything useful, so
-        # handing over early would trade a routed result for nothing.
-        self.checkpoint = max(limit * fraction, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
+        # checkpoint" means "never fires before the old wall". The fallback floor
+        # still applies under #1143: below it a fallback cannot do anything useful,
+        # so handing over early would trade a routed result for nothing.
+        self.checkpoint = max(point, min(limit, _CONVEX_ROUTE_FALLBACK_FLOOR_S))
         self.window = self.checkpoint * (
             _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION
             if window_fraction is None
