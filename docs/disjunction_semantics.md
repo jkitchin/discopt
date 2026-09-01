@@ -42,7 +42,7 @@ lowering.
 |---|---|---|
 | `SELECT_ONE` | `(ONE_WAY, EXACTLY_ONE)` | **implemented** — the meaning of `either_or` |
 | `OR` | `(ONE_WAY, AT_LEAST_ONE)` | declared, not implemented |
-| `EXACTLY_ONE_TRUE` | `(REIFIED, EXACTLY_ONE)` | declared, not implemented |
+| `EXACTLY_ONE_TRUE` | `(REIFIED, EXACTLY_ONE)` | declared, not implemented — owes a boundary policy, §2 |
 
 ## 2. `either_or` is `SELECT_ONE`
 
@@ -62,6 +62,34 @@ true there. The same holds verbatim for nonconvex `S_k`; convexity governs
 relaxation strength and whether a hull formulation is ideal, not the Boolean
 meaning. Both cases are pinned in
 `python/tests/test_1124_disjunction_semantics.py`.
+
+### Truth semantics owes a boundary policy
+
+`EXACTLY_ONE_TRUE` over **closed** predicates that overlap does not merely exclude
+the interior of the overlap — it excludes the overlap's *boundary* too, and that
+can leave a problem with no optimum at all.
+
+Take the discriminator above, `min (x - 1/2)^2` over `[x <= 1] v [x >= 0]` with
+`x in [-2, 3]`. Both predicates hold on all of `[0, 1]`, endpoints included, so
+"exactly one true" admits only the **open** set `[-2, 0) u (1, 3]`. On it the
+objective approaches `0.25` at either boundary and never reaches it: `0.25` is an
+**infimum, not an attained optimum**, and writing "the optimum is 0.25 at
+`x in {0, 1}`" locates it at two points the semantics has just excluded.
+
+This is not a defect in `SELECT_ONE` — every lowering this repo ships is
+select-one, and the select-one optimum `0` at `x = 1/2` is attained and asserted.
+It is a constraint on work not yet written: **before `EXACTLY_ONE_TRUE` is
+implemented it needs an explicit strict-complement/boundary policy**, deciding
+what a lowering does when the complement of a closed predicate is open. Candidates
+are refusing such a disjunction, requiring strict predicates, or introducing an
+epsilon-margin — each with different soundness consequences, none of them free,
+and the choice must be made deliberately rather than falling out of whichever
+big-M happens to be emitted.
+
+Until then the value is useful only as a bound to compare against, which is how
+the test module uses it (`TRUTH_INF`, never `TRUTH_OPT`).
+
+*Raised in the #1128 review, after merge.*
 
 ### The indicator trap
 

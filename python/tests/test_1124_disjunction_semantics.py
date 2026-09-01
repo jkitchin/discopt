@@ -12,10 +12,21 @@ The discriminator throughout is
 
     min (x - 1/2)^2   s.t.   [x <= 1]  or  [x >= 0],   x in [-2, 3]
 
-whose optimum is ``0`` at ``x = 1/2`` under union/select-one and ``0.25`` (at
-``x in {0, 1}``) under truth semantics, since ``x = 1/2`` satisfies *both*
-predicates. Note that the pre-existing ``test_hull_overlapping_disjuncts`` does
-**not** discriminate: its ``min x`` objective is ``0`` under either reading.
+whose optimum is ``0`` at ``x = 1/2`` under union/select-one, since ``x = 1/2``
+satisfies *both* predicates and select-one only requires one to be *selected*.
+
+Under truth semantics the same problem has **infimum 0.25, not attained**. The
+predicates are closed and overlap on ``[0, 1]``, so "exactly one true" excludes
+every point of that interval — including its endpoints, where *both* predicates
+hold. The feasible set is the open ``[-2, 0) u (1, 3]``, on which ``(x - 1/2)^2``
+approaches ``0.25`` at either boundary without reaching it. So ``0.25`` is a bound
+to compare against, never a value to assert as an optimum, and a future
+``EXACTLY_ONE_TRUE`` lowering owes an explicit strict-complement/boundary policy
+before this problem has a solution at all (see ``docs/disjunction_semantics.md``
+§2). Raised by the #1128 review; it does not affect any select-one assertion here.
+
+Note that the pre-existing ``test_hull_overlapping_disjuncts`` does **not**
+discriminate: its ``min x`` objective is ``0`` under either reading.
 """
 
 import discopt.modeling as dm
@@ -38,9 +49,12 @@ from discopt.modeling.core import (
     _semantics_supported_by,
 )
 
-# Objective value under union / select-one semantics vs. under truth semantics.
+#: Objective value under union / select-one semantics -- an attained optimum.
 SELECT_ONE_OPT = 0.0
-TRUTH_OPT = 0.25
+#: The truth-semantics INFIMUM, deliberately not named ``_OPT``: it is approached
+#: at the boundary of the open feasible set and never attained (see the module
+#: docstring). It is only ever used as a value the select-one answer must NOT be.
+TRUTH_INF = 0.25
 
 ALL_METHODS = ["big-m", "mbigm", "hull", "auto"]
 
@@ -153,12 +167,15 @@ class TestSelectOneIsTheDefault:
     def test_overlap_point_stays_feasible(self, method):
         """AC-1/AC-2: a point in the overlap is feasible — the projection is the union.
 
-        Under EXACTLY_ONE_TRUE, x=1/2 would be infeasible and the optimum 0.25.
+        Under EXACTLY_ONE_TRUE, x=1/2 would be infeasible and the objective could
+        only approach 0.25 without attaining it -- both predicates hold at x=0 and
+        x=1, so the truth-semantics feasible set is open. The assertion below is a
+        select-one one; 0.25 appears only as a value this answer must not equal.
         """
         r = _overlap_model().solve(gdp_method=method)
         assert r.status == "optimal"
         assert r.objective == pytest.approx(SELECT_ONE_OPT, abs=1e-4)
-        assert r.objective != pytest.approx(TRUTH_OPT, abs=1e-2)
+        assert r.objective != pytest.approx(TRUTH_INF, abs=1e-2)
         assert float(r.x["x"]) == pytest.approx(0.5, abs=1e-3)
 
     @pytest.mark.parametrize("method", ["big-m", "hull"])
@@ -462,3 +479,58 @@ class TestIdentitiesVersusAuxiliaries:
         generated = [n for n in names if n.startswith(GDP_AUX_PREFIX)]
         assert len(generated) == 4  # 2 pre-existing + 2 freshly allocated
         assert len(set(generated)) == 4
+
+
+class TestTruthSemanticsBoundary:
+    """The overlap's BOUNDARY is excluded too, which is why 0.25 is an infimum.
+
+    Prose asserting "the optimum is 0.25 at ``x in {0, 1}``" shipped in #1128 and
+    was corrected after review. These tests make the correction executable: the
+    claim is arithmetic about the predicates, so it can be checked exactly rather
+    than restated, and it will fail if the docstring drifts back.
+
+    This constrains unwritten code. Nothing here exercises a lowering — discopt
+    ships no ``EXACTLY_ONE_TRUE`` lowering, and §5 of the contract says one that
+    cannot honor the declared semantics must raise rather than approximate.
+    """
+
+    @staticmethod
+    def _exactly_one_true(x: float) -> bool:
+        """The declared predicate pair of the module discriminator, evaluated."""
+        return (x <= 1.0) != (x >= 0.0)
+
+    def test_both_predicates_hold_on_the_whole_closed_overlap(self):
+        for x in (0.0, 0.25, 0.5, 0.75, 1.0):
+            assert (x <= 1.0) and (x >= 0.0), x
+            assert not self._exactly_one_true(x), x
+
+    def test_the_overlap_endpoints_are_excluded_not_optimal(self):
+        """The specific error: x=0 and x=1 are where the prose located the optimum,
+        and they are exactly the points where BOTH predicates hold."""
+        for x in (0.0, 1.0):
+            assert not self._exactly_one_true(x), x
+
+    def test_the_truth_feasible_set_is_open_at_the_overlap(self):
+        """Feasible arbitrarily close to the boundary, never at it — so the
+        infimum is approached and not attained."""
+        for eps in (1e-3, 1e-6, 1e-9):
+            assert self._exactly_one_true(0.0 - eps), eps
+            assert self._exactly_one_true(1.0 + eps), eps
+        assert not self._exactly_one_true(0.0)
+        assert not self._exactly_one_true(1.0)
+
+    def test_the_infimum_is_approached_but_never_attained(self):
+        """`(x - 1/2)^2` tends to TRUTH_INF at either boundary and always exceeds it."""
+        for eps in (1e-2, 1e-4, 1e-8):
+            for x in (0.0 - eps, 1.0 + eps):
+                assert self._exactly_one_true(x), x
+                assert (x - 0.5) ** 2 > TRUTH_INF, (x, (x - 0.5) ** 2)
+        assert (1e-12 - 0.5) ** 2 == pytest.approx(TRUTH_INF, abs=1e-9)
+
+    def test_select_one_by_contrast_attains_its_optimum(self):
+        """The discriminator's other half: x=1/2 IS feasible under select-one and
+        the optimum is attained there, which is what the rest of this module
+        asserts against a real solve."""
+        x = 0.5
+        assert (x <= 1.0) or (x >= 0.0)
+        assert (x - 0.5) ** 2 == pytest.approx(SELECT_ONE_OPT)
