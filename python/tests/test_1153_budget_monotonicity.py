@@ -57,7 +57,13 @@ from pathlib import Path
 import pytest
 from discopt import solver_tuning
 from discopt.modeling.core import from_nl
-from discopt.solver_tuning import ROLE2_SATURATION_S, SolverTuning, saturate_role2
+from discopt.solver_tuning import (
+    HEURISTIC_ENTRY_SHARE,
+    ROLE2_SATURATION_S,
+    SolverTuning,
+    heuristic_entry_share,
+    saturate_role2,
+)
 
 _PKG = Path(__file__).resolve().parents[1] / "discopt"
 _DATA = Path(__file__).resolve().parent / "data" / "minlplib_nl"
@@ -97,6 +103,36 @@ def test_carve_is_inert_when_flag_off():
     try:
         for seconds in (0.5, 15.0, 2_500.0):
             assert saturate_role2(seconds, 0.25) == pytest.approx(seconds)
+    finally:
+        solver_tuning.reset_current(token)
+
+
+# --------------------------------------------------------------------------- #
+# The finder-entry share                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _with_entry_share(on: bool):
+    return solver_tuning.enter_scope(SolverTuning(heuristic_entry_share=on))
+
+
+@pytest.mark.unit
+def test_finder_entry_share_is_bounded_when_on():
+    """A finder heuristic must fit a SHARE of the remainder, not all of it."""
+    token = _with_entry_share(True)
+    try:
+        assert heuristic_entry_share() == pytest.approx(HEURISTIC_ENTRY_SHARE)
+        assert 0.0 < HEURISTIC_ENTRY_SHARE < 1.0
+    finally:
+        solver_tuning.reset_current(token)
+
+
+@pytest.mark.unit
+def test_finder_entry_share_is_the_legacy_rule_when_off():
+    """Flag off must reproduce "it may consume everything" exactly."""
+    token = _with_entry_share(False)
+    try:
+        assert heuristic_entry_share() == 1.0
     finally:
         solver_tuning.reset_current(token)
 
@@ -336,44 +372,90 @@ def test_the_saturated_sites_stay_saturated():
 # The behavioural gate                                                        #
 # --------------------------------------------------------------------------- #
 
-#: A ladder that straddles the saturation reference, so the arm under test is
-#: genuinely exercised: below ``ROLE2_SATURATION_S`` the flag changes nothing.
-_LADDER = (30.0, 90.0, 240.0)
+#: The budgets the throughput collapse was measured at. 5 s refuses the
+#: feasibility pump and 10 s admits it; see the plan doc §6.2.
+_SMALL, _LARGE = 5.0, 10.0
 
-#: Instances that do not close inside the smallest rung, so how the budget is
-#: SPENT still decides the answer. Chosen by that measured property, never by
-#: name (CLAUDE.md §2); the list is the panel's seed, and the assertion below is
-#: over whatever subset actually produces two comparable incumbents.
-_PANEL = ("tspn10", "tspn12", "bchoco07", "heatexch_gen3", "4stufen")
+#: Instances where the collapse reproduced with ZERO spread over three
+#: repetitions (7 -> 3 and 7 -> 3 nodes). Selected by that measured property, not
+#: by name (CLAUDE.md §2) — the selection run is
+#: ``scratchpad/i1153/reps.py``. ``tspn12`` is deliberately excluded: the pump is
+#: PRODUCTIVE there (it finds 262.647 against 282.244), so it is the case the
+#: share rule should *not* be judged on, and §6.3 records that it loses that
+#: incumbent.
+_COLLAPSE_PANEL = ("heatexch_gen2", "tspn10")
+
+#: A ladder for the general property, over the budgets where #1153's harm lives.
+_LADDER = (5.0, 10.0, 20.0)
 
 
-def _solve(path: Path, tl: float):
-    result = from_nl(str(path)).solve(time_limit=tl, gap_tolerance=1e-4)
-    return result.objective, result.status
+def _nodes(path: Path, tl: float) -> int:
+    return int(from_nl(str(path)).solve(time_limit=tl, gap_tolerance=1e-4).node_count or 0)
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+@pytest.mark.skipif(not _DATA.is_dir(), reason="MINLPLib corpus not vendored")
+def test_finder_entry_share_stops_the_throughput_collapse():
+    """Doubling the budget must not HALVE the tree (#1153's throughput half).
+
+    The legacy arm is run as a **control**, not for symmetry: without it, an arm
+    that collapsed for some unrelated reason — or a panel where the pump stopped
+    being admitted at all — would read as a pass (CLAUDE.md §6). The control must
+    reproduce the collapse for the treatment arm's result to mean anything.
+    """
+    control_collapsed = 0
+    failures: list[str] = []
+    compared = 0
+    for name in _COLLAPSE_PANEL:
+        path = _DATA / f"{name}.nl"
+        if not path.exists():
+            continue
+        token = _with_entry_share(False)
+        try:
+            off_small, off_large = _nodes(path, _SMALL), _nodes(path, _LARGE)
+        finally:
+            solver_tuning.reset_current(token)
+        token = _with_entry_share(True)
+        try:
+            on_small, on_large = _nodes(path, _SMALL), _nodes(path, _LARGE)
+        finally:
+            solver_tuning.reset_current(token)
+        compared += 1
+        if off_large < off_small:
+            control_collapsed += 1
+        if on_large < on_small:
+            failures.append(
+                f"{name}: share ON still collapses {on_small} -> {on_large} nodes "
+                f"({_SMALL}s -> {_LARGE}s); control {off_small} -> {off_large}"
+            )
+
+    assert compared > 0, "no panel instance was vendored — this test measured nothing"
+    assert control_collapsed > 0, (
+        "the legacy arm did not reproduce the collapse on any instance, so the "
+        "treatment arm's result is unfalsifiable here (CLAUDE.md §6) — re-derive "
+        "the panel with scratchpad/i1153/reps.py"
+    )
+    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
 @pytest.mark.skipif(not _DATA.is_dir(), reason="MINLPLib corpus not vendored")
 def test_incumbent_quality_is_monotone_in_time_limit():
-    """More budget must never yield a worse incumbent (#1153's gate).
-
-    Marked ``slow``: the ladder tops out well past the saturation reference on
-    purpose, because a run that stays under it cannot distinguish the fix from
-    its absence.
-    """
-    token = _with_saturation(True)
+    """More budget must never yield a worse incumbent (#1153's gate)."""
+    token = _with_entry_share(True)
     comparisons = 0
     violations: list[str] = []
     try:
-        for name in _PANEL:
+        for name in _COLLAPSE_PANEL + ("tspn12",):
             path = _DATA / f"{name}.nl"
             if not path.exists():
                 continue
-            rung: list[tuple[float, float | None]] = []
-            for tl in _LADDER:
-                obj, _status = _solve(path, tl)
-                rung.append((tl, obj))
+            rung = [
+                (tl, from_nl(str(path)).solve(time_limit=tl, gap_tolerance=1e-4).objective)
+                for tl in _LADDER
+            ]
             for (tl_a, obj_a), (tl_b, obj_b) in zip(rung, rung[1:]):
                 if obj_a is None:
                     continue  # nothing to be monotone about yet
@@ -386,8 +468,8 @@ def test_incumbent_quality_is_monotone_in_time_limit():
         solver_tuning.reset_current(token)
 
     assert comparisons > 0, (
-        "no instance in the panel produced an incumbent at two budgets — this "
-        "test measured nothing (CLAUDE.md §6)"
+        "no instance produced an incumbent at two budgets — this test measured "
+        "nothing (CLAUDE.md §6)"
     )
     assert not violations, (
         f"incumbent quality fell as the budget grew, over {comparisons} comparison(s):\n"

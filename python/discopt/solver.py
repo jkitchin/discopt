@@ -46,6 +46,7 @@ from discopt.modeling.core import (
 )
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
+from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_share
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import saturate_role2 as _role2_saturate
 from discopt.solver_tuning import set_current as _set_tuning
@@ -11765,7 +11766,19 @@ def solve_model(
             return True
         _remaining = _deadline - time.perf_counter()
         # No budget left to absorb even one typical (already-compiled) solve.
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost()):
+        #
+        # #1153: "absorb" used to mean 100 % of what is left, so a heuristic
+        # costing the entire remainder was still admitted — and crossing that
+        # threshold then costs more than the budget increment that unlocked it.
+        # Measured on heatexch_gen2 (3 reps, zero spread): at 5 s the feasibility
+        # pump is refused here and the tree explores 7 nodes; at 10 s it is
+        # admitted, its sub-NLPs spend 6.4 s of the 10 s budget, return no
+        # incumbent, and the tree explores 3. Dividing by the admitted share turns
+        # "does it fit at all?" into "does it fit the way an optional stage
+        # should?"; the share is 1.0 (this exact rule) with the flag off.
+        if _remaining <= max(
+            _DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _heuristic_entry_share()
+        ):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the

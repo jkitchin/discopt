@@ -1210,6 +1210,43 @@ class SolverTuning:
     invalid one, so no bound can rise above its true value and no certificate can
     be fabricated. The flag can only change *which* valid answer path is walked."""
 
+    heuristic_entry_share: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HEUR_ENTRY_SHARE", default=False)
+    )
+    """Require an optional root primal heuristic to fit a bounded SHARE of the
+    remaining budget, not merely to fit inside it. ``DISCOPT_HEUR_ENTRY_SHARE``,
+    default **OFF** (heuristic-policy, CLAUDE.md §5).
+
+    The measured #1153 mechanism. ``heatexch_gen2``, three repetitions, zero
+    spread: a 5 s budget explores **7** nodes and a 10 s budget explores **3**.
+    The layer profile says where the extra five seconds went — ``root_time`` is
+    3.5 s of 5.1 s at the small budget and *the entire* 10.1 s at the large one —
+    and the NLP probe names the consumer: at 5 s the feasibility pump never
+    starts, at 10 s it starts and its two sub-NLPs spend 6.4 s of the 10 s budget
+    and return **no incumbent** (identical ``obj=None``, identical bound, in both
+    arms). Doubling the budget bought one extra heuristic that consumed 64 % of it
+    and produced nothing, and the tree paid for it.
+
+    The entry gate is what admits that. It refuses a heuristic only when the time
+    left cannot absorb *one whole* solve of the largest size seen so far — so a
+    heuristic may consume up to 100 % of the remaining budget and still be
+    admitted. Crossing that threshold therefore costs more than the budget
+    increment that unlocked it, which is precisely a non-monotone step.
+
+    The repository already applies the right doctrine one role over: an
+    *improver*-role heuristic must fit a success-weighted, node-proportional
+    contingent (``_improver_allowed``). The *finder* role is deliberately exempt,
+    because securing a first incumbent takes priority — but priority should mean
+    *runs first*, not *may consume everything*. This flag keeps the exemption and
+    bounds it: a finder may start when its measured cost fits
+    :data:`HEURISTIC_ENTRY_SHARE` of what is left. A large budget still admits it;
+    a budget that would be eaten by it does not.
+
+    Sound: every gated call is a primal heuristic, so refusing one can change
+    which incumbent is found and when, never the dual bound or the certificate
+    (§0.3 heuristic-policy). ``DISCOPT_ROOT_BUDGET_GATE=0`` still disables the
+    whole gate, flag or no flag."""
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
@@ -1834,3 +1871,20 @@ def saturate_role2(seconds: float, frac: float) -> float:
     if not current().budget_saturation:
         return float(seconds)
     return min(float(seconds), float(frac) * ROLE2_SATURATION_S)
+
+
+#: The share of the REMAINING budget an optional root primal heuristic must fit
+#: inside before it may start, under ``SolverTuning.heuristic_entry_share``
+#: (#1153). 1.0 is the legacy rule — "it may consume everything" — which is what
+#: lets a 6.4 s feasibility pump be admitted into an 8 s remainder and collapse
+#: the tree from 7 nodes to 3.
+HEURISTIC_ENTRY_SHARE = 0.25
+
+
+def heuristic_entry_share() -> float:
+    """The budget share a finder-role heuristic must fit in (#1153).
+
+    Returns ``1.0`` — the legacy rule, byte-identical — unless
+    ``SolverTuning.heuristic_entry_share`` is on.
+    """
+    return HEURISTIC_ENTRY_SHARE if current().heuristic_entry_share else 1.0
