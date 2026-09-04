@@ -7642,7 +7642,8 @@ def solve_model(
             return None
         if not math.isfinite(float(time_limit)):
             return None
-        return _role2_deadline(_solve_t0 + float(time_limit) - _rr_reserve_s)
+        _dl = _role2_deadline(_solve_t0 + float(time_limit) - _rr_reserve_s)
+        return None if _dl is None else float(_dl)
 
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
