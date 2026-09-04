@@ -202,10 +202,14 @@ class Complementarity:
     source : Complementarity, optional
         For an element, the parent relation it came from — so an elementwise
         residual can be attributed back to the declared vector relation.
-    lowering : str, optional
-        The method (``"gdp"`` / ``"sos1"`` / ``"scholtes"``) this relation was
-        lowered by, or ``None`` if it has not been lowered. See
-        :meth:`mark_lowered`.
+
+    Notes
+    -----
+    Which method lowered the relation is deliberately **not** a field here: it
+    is per-model state (see :meth:`mark_lowered` / :meth:`lowering_in`). One
+    relation object may be lowered by GDP into one model and by SOS1 into
+    another, and a field would hold only whichever ran last, so the first
+    model's provenance would stop describing its own rows.
     """
 
     f: Expression
@@ -220,7 +224,6 @@ class Complementarity:
     g_shape: Optional[tuple[int, ...]] = None
     index: Optional[tuple[int, ...]] = None
     source: Optional["Complementarity"] = None
-    lowering: Optional[str] = None
 
     # ── provenance queries ──
 
@@ -291,21 +294,31 @@ class Complementarity:
         mark when they carry a relation forward, so a lowered model's clone is
         not re-lowered either (#1147).
 
-        The mark lives on the **model** (``Model._lowered_complementarities``,
-        an identity set), not on the relation. It first lived here as a list of
-        ``weakref``s, which made a ``Model`` carrying a relation unpicklable
-        (``TypeError: cannot pickle 'weakref.ReferenceType'``) and made
-        ``copy.deepcopy`` silently drop the mark — so the clone then refused to
-        solve, a regression against a plain model copy on ``main`` (review of
-        #1149, HIGH 3). Model-owned state also says the thing more directly:
-        "these are the relations whose rows I already carry".
+        Both the mark **and the method** live on the model
+        (``Model._lowered_complementarities``, an identity map from relation to
+        method), not on the relation. The mark lived here as a list of
+        ``weakref``s first, which made a ``Model`` carrying a relation
+        unpicklable and made ``copy.deepcopy`` silently drop it — so the clone
+        then refused to solve. The *method* then stayed behind as a plain field,
+        which was the same mistake one level down: lowering one relation by GDP
+        into ``m1`` and by SOS1 into ``m2`` left the field reading ``"sos1"``,
+        so ``m1``'s provenance no longer described its own disjunctive rows
+        (reviews of #1149, HIGH 3 and blocking 2). A relation is shared; what a
+        given model did with it is that model's fact.
         """
-        self.lowering = method
-        _lowered_set(model).add(self)
+        _lowered_map(model)[self] = method
 
     def is_lowered_into(self, model: Model) -> bool:
         """True when ``model`` already carries the rows generated from this relation."""
         return self in getattr(model, "_lowered_complementarities", ())
+
+    def lowering_in(self, model: Model) -> Optional[str]:
+        """The method that lowered this relation into ``model``, or ``None``.
+
+        Per-model on purpose — see :meth:`mark_lowered`. Ask the model that
+        carries the rows you are reasoning about, never the relation.
+        """
+        return getattr(model, "_lowered_complementarities", {}).get(self)
 
     # ── elementwise view ──
 
@@ -320,16 +333,15 @@ class Complementarity:
         return _scalarize_pairs(model, [self])
 
 
-def _lowered_set(model: Model) -> set:
-    """The model's identity set of already-lowered relations, created on demand.
+def _lowered_map(model: Model) -> dict:
+    """The model's identity map ``relation -> lowering method``, created on demand.
 
     ``getattr``-with-default rather than a bare attribute read: a ``Model``
-    restored from a pickle written before this attribute existed, or one built
-    by a code path that bypasses ``__init__``, must not crash here.
+    built by a code path that bypasses ``__init__`` must not crash here.
     """
     got = getattr(model, "_lowered_complementarities", None)
     if got is None:
-        got = set()
+        got = {}
         model._lowered_complementarities = got
     return got
 
@@ -578,12 +590,39 @@ def flat_source_indices(model: Model, pair: Complementarity) -> list[int]:
     """
     resolved = resolve_source_variables(model, pair, context="flat_source_indices")
     slots = _read_slots(pair)
+    offsets = _target_flat_offsets(model)
     out: list[int] = []
     for v in resolved:
-        off = model._flat_var_offset(v)
+        off = offsets[id(v)]
         elems = slots.get(id(v))
         out.extend(range(off, off + v.size) if elems is None else sorted(off + e for e in elems))
     return out
+
+
+def _target_flat_offsets(model: Model) -> dict[int, int]:
+    """Exclusive prefix sums over ``model._variables``, keyed by variable identity.
+
+    Deliberately not ``Model._flat_var_offset``: that indexes its prefix table by
+    ``Variable._index``, which is the variable's position in the model it was
+    *declared* on. A relation's operands are shared objects, and a target model
+    may hold them in a different order — a two-element ``x`` and a scalar ``y``
+    declared in that order but held as ``[y, x]`` resolved to ``[0, 1, 1]``
+    instead of the target's true ``[1, 2, 0]``, so a #1148 residual masked by
+    those columns would have read the wrong ones (review of #1149, blocking 1).
+    The rebuilding passes happen to preserve declaration order, which is why
+    ``_flat_var_offset`` is right for them and wrong as a general provenance
+    accessor.
+
+    O(n) per call and not memoized: this is a boundary accessor called once per
+    relation, and a cache keyed on anything but the live list is how the stale
+    answer got here in the first place.
+    """
+    offsets: dict[int, int] = {}
+    off = 0
+    for v in model._variables:
+        offsets.setdefault(id(v), off)
+        off += v.size
+    return offsets
 
 
 def _read_slots(pair: Complementarity) -> dict[int, Optional[set[int]]]:
@@ -657,10 +696,16 @@ def carry_complementarities(src: Model, dst: Model, *, pass_name: str) -> None:
     The **same relation objects** are forwarded (not copies), so identity-keyed
     provenance holds across any number of passes, and each is checked to resolve
     against ``dst`` first — an unresolvable one raises
-    :class:`ComplementarityProvenanceError` rather than being dropped. A
-    relation already lowered into ``src`` is marked lowered into ``dst`` too,
-    because ``dst`` was rebuilt from ``src``'s rows and therefore already
-    carries the generated ones.
+    :class:`ComplementarityProvenanceError` rather than being dropped.
+
+    A relation lowered **into ``src``** is marked lowered into ``dst`` with
+    ``src``'s method, because ``dst`` was rebuilt from ``src``'s rows and
+    therefore already carries the generated ones. The test is
+    ``pair.is_lowered_into(src)`` and nothing weaker: keying it on "the relation
+    has been lowered somewhere" let an *unlowered* ``src`` sharing a relation
+    with some other model hand ``dst`` a lowered mark, so ``dst`` claimed rows
+    neither model had and walked straight past the solve guard (review of
+    #1149, blocking 2).
     """
     relations = list(src._complementarities)
     if not relations:
@@ -668,8 +713,9 @@ def carry_complementarities(src: Model, dst: Model, *, pass_name: str) -> None:
     for pair in relations:
         resolve_source_variables(model=dst, pair=pair, context=f"{pass_name}")
         dst._complementarities.append(pair)
-        if pair.lowering is not None:
-            pair.mark_lowered(dst, pair.lowering)
+        method = pair.lowering_in(src)
+        if method is not None:
+            pair.mark_lowered(dst, method)
 
 
 def unlowered_relations(model: Model) -> list[Complementarity]:

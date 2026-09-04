@@ -30,7 +30,11 @@ The release procedure that produces these entries is documented in
   than dropping one it cannot resolve. Resolution is by **object identity**, and
   backend-facing flat indices are derived at the solver boundary
   (`flat_source_indices`) instead of persisted through it, because presolve/FBBT
-  renumber columns exactly when a stored index would be needed.
+  renumber columns exactly when a stored index would be needed. They are prefix
+  sums over the **target model's** variable list, not `Variable._index` (the
+  declaring model's position): a relation's operands are shared objects, so a
+  model holding them in a different order needs its own layout, and a provenance
+  query must never write shared state to get the right answer.
 - **The box-bounded MCP form**, `Model.mcp(F, z, lb=..., ub=...)` /
   `mpec.box_mcp`: a residual paired with a variable on `[l, u]`, with the
   symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
@@ -46,11 +50,18 @@ The release procedure that produces these entries is documented in
   with box bounds and the default `role=NCP_PAIR` must not be able to talk its way
   into a two-branch lowering.
 
-- **The lowering marks are model state**, `Model._lowered_complementarities` — an
-  identity set of the relations whose generated rows that model already carries.
-  Keeping them on the relation as weak references would have made any model
-  carrying a relation unpicklable and made `copy.deepcopy` silently drop the mark,
-  so the clone refused to solve.
+- **Lowering state is model state**, `Model._lowered_complementarities` — an
+  identity map from relation to the method that lowered it into *that* model, read
+  via `pair.is_lowered_into(model)` / `pair.lowering_in(model)`. A relation is
+  shared, so neither the mark nor the method can live on it: weak references on the
+  relation made any model carrying one unpicklable and made `copy.deepcopy`
+  silently drop the mark (the clone then refused to solve), and a plain `lowering`
+  field held only whichever lowering ran last, so a relation lowered by GDP into
+  one model and SOS1 into another stopped describing the first model's rows.
+  `carry_complementarities` propagates the source model's own method, and only when
+  the source actually carries the rows — keying it on "lowered somewhere" let an
+  unlowered source hand the destination a mark for rows neither model had,
+  bypassing the solve guard.
 
 ### Changed
 

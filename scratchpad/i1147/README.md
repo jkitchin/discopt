@@ -55,3 +55,26 @@ and objective identical 66/66, every recorded field identical on all 45
 instances that converged in both arms, and the 4 remaining differences are
 unconverged rows whose node count varies with how much wall clock the fixed
 10 s budget buys.
+
+## Second review round (PR #1149, review 5115268644)
+
+`verify_review2.py` reproduces both blocking findings against head `1bd4641` and
+re-checks them after the fix:
+
+* **Blocking 1** — `flat_source_indices` read offsets off `Variable._index` (the
+  declaring model's position). A target model holding a two-element `x` and a
+  scalar `y` as `[y, x]` returned `[0, 1, 1]`; its true layout is `[1, 2, 0]`.
+  Reproduced exactly, including the predicted `[0, 1, 1]`.
+* **Blocking 2** — the lowering *method* was a plain field on the shared
+  relation. GDP into `m1` then SOS1 into `m2` left it reading `"sos1"`; and
+  `carry_complementarities` took any non-`None` value as proof that `src` was
+  lowered, so an unlowered `src` handed `dst` a lowered mark for rows neither
+  model carried — walking past the solve guard added for the first review's
+  HIGH 1.
+
+`panel_before3.json` / `panel_after3.json` are the bound-neutral panel for the
+fixed head, both arms on the same boot of an idle host (the container had
+restarted since the `*2` pair, so those are superseded as well): status
+identical 66/66, every recorded field identical on all 45 instances converged in
+both arms, and the 7 differing rows are all unconverged (`time_limit`/`feasible`)
+ones whose node count tracks how much wall clock the fixed 10 s budget buys.

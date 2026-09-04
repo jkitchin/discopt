@@ -84,7 +84,7 @@ available: `Expression.__eq__` builds a `Constraint`.)
 | `scale` | characteristic residual magnitude, for a meaningful tolerance when the operands carry unrelated physical magnitudes; `effective_scale` derives one from the declared bounds when it is not given |
 | `parent` | identity of the construct that generated the relation (the lower-level row for a KKT pair, the disjunction for a disjunct pair) |
 | `f_shape`, `g_shape`, `index`, `source` | shape/index information for vectorized relations: `elements(model)` yields one scalar relation per index, each with its multi-index and a back-pointer to the declared relation (a scalar relation yields `[self]`, so the identity key holds there too) |
-| `lowering` + per-model marks | which method lowered it, and which models already carry the generated rows |
+| (no lowering field) | which models carry the generated rows, and by which method, is **model** state — `Model._lowered_complementarities`, read via `pair.is_lowered_into(model)` / `pair.lowering_in(model)` |
 
 `role` is *provenance*, never a lowering switch. Every lowering and every bound
 rule branches on `Complementarity.is_symmetric_nonnegative` — the **declared
@@ -98,11 +98,18 @@ semantics.
 `FROM_DISJUNCT` is reserved vocabulary with no in-tree producer yet — exactly as
 `DisjunctionSemantics.OR` was defined by #1124 before any lowering emitted it.
 
-The lowering marks live on the **model** (`Model._lowered_complementarities`, an
-identity set), not on the relation. They were weak references on the relation
-first, which made a model carrying one unpicklable and made `copy.deepcopy`
-silently drop the mark — so the clone then refused to solve. Model-owned state
-also states the fact more directly: *these are the relations whose rows I carry*.
+The lowering marks — **and the method** — live on the model
+(`Model._lowered_complementarities`, an identity map from relation to method),
+not on the relation. The mark was weak references on the relation first, which
+made a model carrying one unpicklable and made `copy.deepcopy` silently drop it,
+so the clone refused to solve. The *method* then stayed behind as a plain field,
+which was the same mistake one level down: lowering a relation by GDP into `m1`
+and by SOS1 into `m2` left the field reading `"sos1"`, so `m1`'s provenance no
+longer described its own disjunctive rows.
+
+The rule this settles: **a relation is shared; what a given model did with it is
+that model's fact.** Ask the model that carries the rows you are reasoning
+about, never the relation.
 
 ## 4. Provenance is keyed to objects, never to indices or names
 
@@ -119,6 +126,14 @@ exactly when it becomes useful; and a name-keyed one matches a generated
   columns it reads, not all of `x`), and widens to the whole variable for an index
   it cannot resolve statically — conservative, never narrower than the truth, so a
   consumer can rely on the set covering everything the relation reads.
+* Those columns are prefix sums over **the target model's own `_variables`**, not
+  `Variable._index`. `_index` is the variable's position in the model it was
+  *declared* on, and a relation's operands are shared objects: a model holding a
+  two-element `x` and a scalar `y` as `[y, x]` has them at `[1, 2]` and `[0]`,
+  while `_index` reports `[0, 1]` and `[1]`. `Model._flat_var_offset` is right for
+  the rebuilding passes (they preserve declaration order) and wrong as a general
+  provenance accessor. A provenance query must also never *write* shared state —
+  no renumbering, no renaming — since other live models hold the same objects.
 * An expression node the walker cannot descend into raises rather than
   contributing nothing, so resolution can never report success without having
   looked at the operand.
@@ -128,9 +143,14 @@ exactly when it becomes useful; and a name-keyed one matches a generated
 A pass that constructs a fresh `Model` **must** call
 `mpec.carry_complementarities(src, dst, pass_name=...)`. It forwards the same
 relation objects (so identity-keyed provenance holds across any number of
-passes), checks each against `dst` first, and propagates the lowering mark —
-`dst` was rebuilt from `src`'s rows, so it already carries the generated ones and
-must not be re-lowered.
+passes), checks each against `dst` first, and propagates the lowering mark with
+`src`'s own method — `dst` was rebuilt from `src`'s rows, so it already carries
+the generated ones and must not be re-lowered.
+
+The propagation test is `pair.is_lowered_into(src)` and nothing weaker. Keying it
+on "the relation has been lowered *somewhere*" let an unlowered `src` sharing a
+relation with another model hand `dst` a lowered mark, so `dst` claimed rows
+neither model had and walked straight past the solve guard of §2.
 
 Passes with a defensive `except Exception: return model` handler re-raise
 `ComplementarityProvenanceError` ahead of it. A broken provenance chain is not an

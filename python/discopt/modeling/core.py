@@ -2766,11 +2766,14 @@ class Model:
         # recorded for introspection and bound tightening (see ``discopt.mpec``),
         # and forwarded by every model-rebuilding pass (#1147).
         self._complementarities: list = []
-        # The subset of those whose generated rows THIS model already carries —
-        # an identity set (``Complementarity`` is identity-hashed). Model-owned
-        # so it deep-copies and pickles with the model; it lived on the relation
-        # as weakrefs first, which broke both.
-        self._lowered_complementarities: set = set()
+        # The subset of those whose generated rows THIS model already carries,
+        # mapped to the method that lowered them — an identity map
+        # (``Complementarity`` is identity-hashed). Model-owned so it deep-copies
+        # and pickles with the model, and so that one relation lowered by
+        # different methods into different models keeps a truthful record for
+        # each; the mark lived on the relation as weakrefs first and the method
+        # as a plain field, and both were wrong for the same reason.
+        self._lowered_complementarities: dict = {}
         # Decomposition annotations (Benders / Lagrangian). Populated by
         # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
         # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by

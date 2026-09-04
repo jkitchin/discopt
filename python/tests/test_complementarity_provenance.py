@@ -147,13 +147,17 @@ def test_resolution_survives_renumbering_and_renaming_of_variables():
 
     idx_before = flat_source_indices(out, pair)
 
-    # Simulate a renumbering pass: prepend a fresh column and renumber every
-    # variable, and rename the operands out from under the generated row names.
+    # Simulate a renumbering pass: prepend a fresh column so every later column
+    # moves, and rename the operands out from under the generated row names.
+    #
+    # Deliberately WITHOUT rewriting ``Variable._index``: that is shared state on
+    # objects other live models also hold, and rewriting it here made the flat
+    # offsets look right for the wrong reason — it hid that the offsets were read
+    # off the variable's home-model position rather than this model's layout
+    # (review of #1149, blocking 1). ``test_flat_indices_follow_the_target_models_order``
+    # is the direct test of that.
     victim = dm.Variable("_eliminated", dm.VarType.CONTINUOUS, (), 0.0, 1.0, out)
     out._variables.insert(0, victim)
-    for i, v in enumerate(out._variables):
-        v._index = i
-    out._flat_offsets = None  # invalidate the memoized prefix-sum table
     x.name, y.name = "x_renamed", "y_renamed"
     out._rebuild_name_index()
 
@@ -393,7 +397,7 @@ def test_lowering_state_is_recorded_and_prevents_duplicate_rows():
     from discopt.mpec import reformulate_gdp as mpec_gdp
 
     m, x, y, pair = _mpcc()
-    assert pair.lowering == "gdp"
+    assert pair.lowering_in(m) == "gdp"
     assert pair.is_lowered_into(m)
 
     n_cons = len(m._constraints)
@@ -697,3 +701,127 @@ def test_a_genuine_large_finite_bound_is_not_reinterpreted_as_infinite():
     b = m2.continuous("b", lb=0, ub=10)
     m2.minimize(a + b)
     assert box_mcp(b, a, name="d").g_bounds == (0.0, np.inf)
+
+
+# ── review 5115268644: two blocking provenance-correctness findings ──
+
+
+def test_flat_indices_follow_the_target_models_order():
+    """Blocking 1. ``Variable._index`` is the variable's position in the model it
+    was *declared* on. A relation's operands are shared objects, so a target model
+    may hold them in a different order — and reading offsets off ``_index``
+    returned ``[0, 1, 1]`` for a target laid out as ``[y, x]`` whose true layout
+    is ``[1, 2, 0]``. A #1148 residual masked by those columns would read the
+    wrong ones."""
+    home = dm.Model("home")
+    x = home.continuous("x", shape=2, lb=0, ub=5)  # declared first, size 2
+    y = home.continuous("y", lb=0, ub=5)  # declared second, size 1
+    home.minimize(dm.sum(x) + y)
+    pair = home.complementarity(x, y, name="p")
+
+    assert flat_source_indices(home, pair) == [0, 1, 2]
+
+    # A second model, live at the same time, holding the SAME variable objects in
+    # the other order. Nothing is mutated: no renumbering, no renaming.
+    target = dm.Model("target")
+    target._variables = [y, x]
+    target._rebuild_name_index()
+
+    assert flat_source_indices(target, pair) == [1, 2, 0]
+    # ...and the first model's answer is unchanged by asking the second.
+    assert flat_source_indices(home, pair) == [0, 1, 2]
+    assert [v._index for v in (x, y)] == [0, 1], "the query must not mutate shared state"
+
+
+def test_each_model_records_the_method_that_lowered_the_relation_into_it():
+    """Blocking 2a. The method was a plain field on the shared relation, so
+    lowering by GDP into one model and SOS1 into another left it reading
+    ``"sos1"`` — and the first model's provenance stopped describing its own
+    disjunctive rows."""
+    from discopt.mpec import complementarity as make_pair
+    from discopt.mpec import reformulate_gdp as mpec_gdp
+    from discopt.mpec import reformulate_sos1
+
+    m1 = dm.Model("m1")
+    a = m1.continuous("a", lb=0, ub=5)
+    b = m1.continuous("b", lb=0, ub=5)
+    m1.minimize(a + b)
+
+    m2 = dm.Model("m2")
+    m2._variables = [a, b]
+    m2._rebuild_name_index()
+    m2.minimize(a + b)
+
+    shared = make_pair(a, b, "shared")
+    mpec_gdp(m1, [shared])
+    reformulate_sos1(m2, [shared])
+
+    assert shared.lowering_in(m1) == "gdp"
+    assert shared.lowering_in(m2) == "sos1"
+    assert not hasattr(shared, "lowering"), (
+        "a global method field is the bug: one relation, two models, two answers"
+    )
+
+
+def test_carry_does_not_launder_a_lowered_mark_from_an_unlowered_source():
+    """Blocking 2b. ``carry_complementarities`` took any non-``None`` lowering as
+    proof that ``src`` was lowered, so an unlowered source sharing a relation with
+    some other model handed ``dst`` a lowered mark — ``dst`` then claimed rows
+    neither model carried and walked past the solve guard."""
+    from discopt.mpec import complementarity as make_pair
+    from discopt.mpec import reformulate_gdp as mpec_gdp
+
+    other = dm.Model("other")
+    a = other.continuous("a", lb=0, ub=5)
+    b = other.continuous("b", lb=0, ub=5)
+    other.minimize(a + b)
+    shared = make_pair(a, b, "shared")
+    mpec_gdp(other, [shared])  # lowered SOMEWHERE — but not into src below
+    assert shared.is_lowered_into(other)
+
+    src = dm.Model("src")
+    src._variables = [a, b]
+    src._rebuild_name_index()
+    src.minimize(a + b)
+    src._complementarities.append(shared)  # recorded, never lowered into src
+    assert not shared.is_lowered_into(src)
+
+    dst = dm.Model("dst")
+    dst._variables = [a, b]
+    dst._rebuild_name_index()
+    dst.minimize(a + b)
+    carry_complementarities(src, dst, pass_name="probe")
+
+    assert dst._complementarities == [shared], "the relation is still carried"
+    assert not shared.is_lowered_into(dst), "but not the mark src never had"
+    assert unlowered_relations(dst) == [shared]
+    with pytest.raises(NotImplementedError, match="shared"):
+        dst.solve(time_limit=5.0)
+
+
+def test_carry_preserves_the_sources_own_lowering_method():
+    """Blocking 2, the positive half: a rebuilt model inherits the method its
+    source actually used, not whichever ran most recently anywhere."""
+    from discopt.mpec import reformulate_sos1
+
+    m1 = dm.Model("m1")
+    a = m1.continuous("a", lb=0, ub=5)
+    b = m1.continuous("b", lb=0, ub=5)
+    m1.minimize(a + b)
+    # Through the fluent API, so the relation is RECORDED on m1 as well as
+    # lowered into it — ``mpec.reformulate_*`` lowers without recording, and a
+    # carry reads ``src._complementarities``.
+    shared = m1.complementarity(a, b, name="shared")
+
+    m2 = dm.Model("m2")
+    m2._variables = [a, b]
+    m2._rebuild_name_index()
+    m2.minimize(a + b)
+    reformulate_sos1(m2, [shared])  # a later, different lowering elsewhere
+
+    rebuilt = dm.Model("rebuilt_from_m1")
+    rebuilt._variables = [a, b]
+    rebuilt._rebuild_name_index()
+    carry_complementarities(m1, rebuilt, pass_name="probe")
+
+    assert shared.lowering_in(rebuilt) == "gdp", "inherit src's method, not the last one run"
