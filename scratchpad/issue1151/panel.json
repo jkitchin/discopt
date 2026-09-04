@@ -1,0 +1,3598 @@
+{
+ "marker": 3,
+ "time_limit": 20.0,
+ "results": {
+  "4stufen": {
+   "path": "python/tests/data/minlplib_nl/4stufen.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 19713.036064216834,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.635506863999808,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 19713.036064216834,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 27.844082328000013,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "alan": {
+   "path": "python/tests/data/minlplib_nl/alan.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "bound": 2.9249999999509586,
+    "node_count": 13,
+    "gap_certified": true,
+    "wall": 1.479079517000173,
+    "oracle_ok": true,
+    "oracle_obj": 2.9249999999513205,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "bound": 2.9249999999509586,
+    "node_count": 13,
+    "gap_certified": true,
+    "wall": 1.4092893869999443,
+    "oracle_ok": true,
+    "oracle_obj": 2.9249999999513205,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "bchoco06": {
+   "path": "python/tests/data/minlplib_nl/bchoco06.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.00000159880053,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.06991307200019,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.00000159880053,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.023339890999978,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "bchoco07": {
+   "path": "python/tests/data/minlplib_nl/bchoco07.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0000000000002498,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.138555935000113,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0000000000002498,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.134796037999877,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "bchoco08": {
+   "path": "python/tests/data/minlplib_nl/bchoco08.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999999999999977,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.147363171000052,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999999999999977,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.16831485800003,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "beuster": {
+   "path": "python/tests/data/minlplib_nl/beuster.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6352.049352237764,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.06697638699984,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6352.049352237764,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.073717064999983,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "carton7": {
+   "path": "python/tests/data/minlplib/carton7.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 25.999999999993026,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.156176148999975,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 25.999999999993026,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.13606867800013,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "casctanks": {
+   "path": "python/tests/data/minlplib_nl/casctanks.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 5.697893577917557,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.433111572999906,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 5.697893577917557,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.23726337700009,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "chance": {
+   "path": "python/tests/data/minlplib_nl/chance.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 29.89437816661339,
+    "bound": 29.89437816661339,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.019918311000083122,
+    "oracle_ok": true,
+    "oracle_obj": 29.89437816661339,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 29.89437816661339,
+    "bound": 29.89437816661339,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.020650471999942965,
+    "oracle_ok": true,
+    "oracle_obj": 29.89437816661339,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "clay0303hfsg": {
+   "path": "python/tests/data/minlplib_nl/clay0303hfsg.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -1.2309049000588746e-05,
+    "node_count": 63,
+    "gap_certified": false,
+    "wall": 20.878233917999978,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -1.2309049000588746e-05,
+    "node_count": 63,
+    "gap_certified": false,
+    "wall": 20.802828149000106,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "contvar": {
+   "path": "python/tests/data/minlplib_nl/contvar.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 180787.39933204107,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.78103655400014,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 180787.39933204107,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.822244804999855,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "cvxnonsep_nsig30": {
+   "path": "python/tests/data/minlplib_nl/cvxnonsep_nsig30.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 130.6287126868344,
+    "bound": 130.6184139248769,
+    "node_count": 171,
+    "gap_certified": true,
+    "wall": 8.311423697999999,
+    "oracle_ok": true,
+    "oracle_obj": 130.6287126868344,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 130.6287126868344,
+    "bound": 130.6184139248769,
+    "node_count": 171,
+    "gap_certified": true,
+    "wall": 8.173473025000021,
+    "oracle_ok": true,
+    "oracle_obj": 130.6287126868344,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "cvxnonsep_psig30": {
+   "path": "python/tests/data/minlplib_nl/cvxnonsep_psig30.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 78.998854365269,
+    "bound": 78.99701703820377,
+    "node_count": 89,
+    "gap_certified": true,
+    "wall": 3.978567159999784,
+    "oracle_ok": true,
+    "oracle_obj": 78.998854365269,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 78.998854365269,
+    "bound": 78.99701703820377,
+    "node_count": 89,
+    "gap_certified": true,
+    "wall": 3.987524581999878,
+    "oracle_ok": true,
+    "oracle_obj": 78.998854365269,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "cvxnonsep_psig40r": {
+   "path": "python/tests/data/minlplib_nl/cvxnonsep_psig40r.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 86.54515381631941,
+    "bound": 86.54035590678734,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.42882916899998236,
+    "oracle_ok": true,
+    "oracle_obj": 86.54515381631941,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 86.54515381631941,
+    "bound": 86.54035590678734,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.37768457100037267,
+    "oracle_ok": true,
+    "oracle_obj": 86.54515381631941,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "dispatch": {
+   "path": "python/tests/data/minlplib_nl/dispatch.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 3155.2879268631687,
+    "bound": 3155.2878615366694,
+    "node_count": 23,
+    "gap_certified": true,
+    "wall": 0.21536240399973394,
+    "oracle_ok": true,
+    "oracle_obj": 3155.2879268631687,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 3155.2879268631687,
+    "bound": 3155.2878615366694,
+    "node_count": 23,
+    "gap_certified": true,
+    "wall": 0.23156045999985508,
+    "oracle_ok": true,
+    "oracle_obj": 3155.2879268631687,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1221": {
+   "path": "python/tests/data/minlplib_nl/ex1221.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 7.667180068675583,
+    "bound": 7.6671800686755205,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.5787627869999596,
+    "oracle_ok": true,
+    "oracle_obj": 7.667180068675583,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 7.667180068675583,
+    "bound": 7.6671800686755205,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.5596950210001523,
+    "oracle_ok": true,
+    "oracle_obj": 7.667180068675583,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1222": {
+   "path": "python/tests/data/minlplib_nl/ex1222.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.0765431015621298,
+    "bound": 1.0765430833322571,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.2950367010002992,
+    "oracle_ok": true,
+    "oracle_obj": 1.0765431015621298,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.0765431015621298,
+    "bound": 1.0765430833322571,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.28873559599969667,
+    "oracle_ok": true,
+    "oracle_obj": 1.0765431015621298,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1223a": {
+   "path": "python/tests/data/minlplib/ex1223a.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 4.579582414865666,
+    "bound": 4.57958240243671,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.03545660500003578,
+    "oracle_ok": true,
+    "oracle_obj": 4.579582414865666,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 4.579582414865666,
+    "bound": 4.57958240243671,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.03876676700019743,
+    "oracle_ok": true,
+    "oracle_obj": 4.579582414865666,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1224": {
+   "path": "python/tests/data/minlplib_nl/ex1224.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -0.9434704909173716,
+    "bound": -0.9434705000000067,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 5.28745280000021,
+    "oracle_ok": true,
+    "oracle_obj": -0.9434704909173716,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -0.9434704909173716,
+    "bound": -0.9434705000000067,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 5.221941294000317,
+    "oracle_ok": true,
+    "oracle_obj": -0.9434704909173716,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1225": {
+   "path": "python/tests/data/minlplib_nl/ex1225.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 31.0,
+    "bound": 30.999999999999844,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 6.803787069000009,
+    "oracle_ok": true,
+    "oracle_obj": 31.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 31.0,
+    "bound": 30.999999999999844,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 7.025920968000264,
+    "oracle_ok": true,
+    "oracle_obj": 31.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1226": {
+   "path": "python/tests/data/minlplib_nl/ex1226.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -17.000000000000288,
+    "bound": -17.000000000000416,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 6.166572920999897,
+    "oracle_ok": true,
+    "oracle_obj": -17.000000000000288,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -17.000000000000288,
+    "bound": -17.000000000000416,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 6.156732526000269,
+    "oracle_ok": true,
+    "oracle_obj": -17.000000000000288,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1233": {
+   "path": "python/tests/data/minlplib/ex1233.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 45440.787919487055,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.014451535999797,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 45440.787919487055,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.40515418699988,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1252": {
+   "path": "python/tests/data/minlplib/ex1252.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 26.196359545000178,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 25.971757387000252,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1252a": {
+   "path": "python/tests/data/minlplib/ex1252a.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.231839674000184,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.134685322999758,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1263": {
+   "path": "python/tests/data/minlplib/ex1263.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 19.6,
+    "bound": 19.6,
+    "node_count": 9051,
+    "gap_certified": true,
+    "wall": 2.1181243399996674,
+    "oracle_ok": true,
+    "oracle_obj": 19.6,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 19.6,
+    "bound": 19.6,
+    "node_count": 9051,
+    "gap_certified": true,
+    "wall": 2.038346335999904,
+    "oracle_ok": true,
+    "oracle_obj": 19.6,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1264": {
+   "path": "python/tests/data/minlplib/ex1264.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 8.6,
+    "bound": 8.6,
+    "node_count": 35827,
+    "gap_certified": true,
+    "wall": 7.218599239000014,
+    "oracle_ok": true,
+    "oracle_obj": 8.6,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 8.6,
+    "bound": 8.6,
+    "node_count": 35827,
+    "gap_certified": true,
+    "wall": 6.915643435999755,
+    "oracle_ok": true,
+    "oracle_obj": 8.6,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1265": {
+   "path": "python/tests/data/minlplib/ex1265.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 10.299999999999999,
+    "bound": 10.299999999999999,
+    "node_count": 4887,
+    "gap_certified": true,
+    "wall": 2.946696455000165,
+    "oracle_ok": true,
+    "oracle_obj": 10.3,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 10.299999999999999,
+    "bound": 10.299999999999999,
+    "node_count": 4887,
+    "gap_certified": true,
+    "wall": 2.845124955999836,
+    "oracle_ok": true,
+    "oracle_obj": 10.3,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex1266": {
+   "path": "python/tests/data/minlplib/ex1266.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 16.3,
+    "bound": 16.3,
+    "node_count": 2769,
+    "gap_certified": true,
+    "wall": 3.017646689999765,
+    "oracle_ok": true,
+    "oracle_obj": 16.3,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 16.3,
+    "bound": 16.3,
+    "node_count": 2769,
+    "gap_certified": true,
+    "wall": 2.970956809999734,
+    "oracle_ok": true,
+    "oracle_obj": 16.3,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex14_1_9": {
+   "path": "python/tests/data/minlplib_nl/ex14_1_9.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.8181780366064842e-08,
+    "bound": 0.0,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.1602987490000487,
+    "oracle_ok": true,
+    "oracle_obj": 1.8181780366064842e-08,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.8181780366064842e-08,
+    "bound": 0.0,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.15820570400001088,
+    "oracle_ok": true,
+    "oracle_obj": 1.8181780366064842e-08,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex8_1_1": {
+   "path": "python/tests/data/minlplib/ex8_1_1.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -2.0218067749612763,
+    "bound": -2.0218067966601336,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.8639837989999251,
+    "oracle_ok": true,
+    "oracle_obj": -2.0218067743846437,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -2.0218067749612763,
+    "bound": -2.0218067966601336,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.8577482129999225,
+    "oracle_ok": true,
+    "oracle_obj": -2.0218067743846437,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "ex8_5_4": {
+   "path": "python/tests/data/minlplib/ex8_5_4.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 1.005890648553276e-06,
+    "bound": null,
+    "node_count": 1,
+    "gap_certified": false,
+    "wall": 0.5750697839998793,
+    "oracle_ok": true,
+    "oracle_obj": 1.005890648553276e-06,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 1.005890648553276e-06,
+    "bound": null,
+    "node_count": 1,
+    "gap_certified": false,
+    "wall": 0.5873170220002066,
+    "oracle_ok": true,
+    "oracle_obj": 1.005890648553276e-06,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "fac2": {
+   "path": "python/tests/data/minlplib_nl/fac2.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 331837498.17693394,
+    "bound": 331837497.5456339,
+    "node_count": 39,
+    "gap_certified": true,
+    "wall": 13.299377883000034,
+    "oracle_ok": true,
+    "oracle_obj": 331837498.17693394,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 331837498.17693394,
+    "bound": 331837497.5456339,
+    "node_count": 39,
+    "gap_certified": true,
+    "wall": 12.933869878999758,
+    "oracle_ok": true,
+    "oracle_obj": 331837498.17693394,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "flay02m": {
+   "path": "python/tests/data/minlplib_nl/flay02m.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 37.94733194457008,
+    "bound": 37.94733191703139,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.08895271400024285,
+    "oracle_ok": true,
+    "oracle_obj": 37.94733194457008,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 37.94733194457008,
+    "bound": 37.94733191703139,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.07843005499989886,
+    "oracle_ok": true,
+    "oracle_obj": 37.94733194457008,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "flay03m": {
+   "path": "python/tests/data/minlplib_nl/flay03m.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 48.98979488823184,
+    "bound": 48.98979484858592,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.49420058200030326,
+    "oracle_ok": true,
+    "oracle_obj": 48.98979488823184,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 48.98979488823184,
+    "bound": 48.98979484858592,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.5106949179998992,
+    "oracle_ok": true,
+    "oracle_obj": 48.98979488823184,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "fuel": {
+   "path": "python/tests/data/minlplib/fuel.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 8566.11896169769,
+    "bound": 8566.11888594184,
+    "node_count": 161,
+    "gap_certified": true,
+    "wall": 0.34706749299994044,
+    "oracle_ok": true,
+    "oracle_obj": 8566.11896169769,
+    "oracle_reason": "",
+    "verify_calls": 5,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 8566.11896169769,
+    "bound": 8566.11888594184,
+    "node_count": 161,
+    "gap_certified": true,
+    "wall": 0.3519570170001316,
+    "oracle_ok": true,
+    "oracle_obj": 8566.11896169769,
+    "oracle_reason": "",
+    "verify_calls": 5,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gbd": {
+   "path": "python/tests/data/minlplib_nl/gbd.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 2.2000000009090948,
+    "bound": 2.2,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.035137965999638254,
+    "oracle_ok": true,
+    "oracle_obj": 2.2000000009090948,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 2.2000000009090948,
+    "bound": 2.2,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.032257418999961374,
+    "oracle_ok": true,
+    "oracle_obj": 2.2000000009090948,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gear": {
+   "path": "python/tests/data/minlplib/gear.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 8.606434189258208e-07,
+    "bound": 0.0,
+    "node_count": 31,
+    "gap_certified": true,
+    "wall": 0.6928080729999238,
+    "oracle_ok": true,
+    "oracle_obj": 8.606434189258208e-07,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 8.606434189258208e-07,
+    "bound": 0.0,
+    "node_count": 31,
+    "gap_certified": true,
+    "wall": 0.6323441189997538,
+    "oracle_ok": true,
+    "oracle_obj": 8.606434189258208e-07,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gear2": {
+   "path": "python/tests/data/minlplib/gear2.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.2492237113364516e-07,
+    "bound": 0.0,
+    "node_count": 159,
+    "gap_certified": true,
+    "wall": 5.669112777000009,
+    "oracle_ok": true,
+    "oracle_obj": 1.2492237113364516e-07,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.2492237113364516e-07,
+    "bound": 0.0,
+    "node_count": 159,
+    "gap_certified": true,
+    "wall": 5.362012110000251,
+    "oracle_ok": true,
+    "oracle_obj": 1.2492237113364516e-07,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gear3": {
+   "path": "python/tests/data/minlplib/gear3.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.8273692126536336e-08,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.6447163769998951,
+    "oracle_ok": true,
+    "oracle_obj": 1.8273692126536336e-08,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.8273692126536336e-08,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.6595003490001545,
+    "oracle_ok": true,
+    "oracle_obj": 1.8273692126536336e-08,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gear4": {
+   "path": "python/tests/data/minlplib/gear4.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.6434284830542525,
+    "bound": 1.6434274739574035,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 1.1236661259999892,
+    "oracle_ok": true,
+    "oracle_obj": 1.6434284830542525,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.6434284830542525,
+    "bound": 1.6434274739574035,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.9950044180000077,
+    "oracle_ok": true,
+    "oracle_obj": 1.6434284830542525,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "gkocis": {
+   "path": "python/tests/data/minlplib_nl/gkocis.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -1.9230987195861302,
+    "bound": -1.9230987411871627,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 1.574900470999637,
+    "oracle_ok": true,
+    "oracle_obj": -1.9230987195861302,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -1.9230987195861302,
+    "bound": -1.9230987411871627,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 1.5687790900001346,
+    "oracle_ok": true,
+    "oracle_obj": -1.9230987195861302,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "hda": {
+   "path": "python/tests/data/minlplib_nl/hda.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -106237.54862638067,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.600458734999847,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -106237.505574573,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.536984330999985,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "heatexch_gen1": {
+   "path": "python/tests/data/minlplib_nl/heatexch_gen1.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.53174601901,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.124215671,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.53174601901,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.193386809999993,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "heatexch_gen2": {
+   "path": "python/tests/data/minlplib_nl/heatexch_gen2.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 555767.7902857282,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 23.946391322999716,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 555767.7902857282,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 24.29000348799991,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "heatexch_gen3": {
+   "path": "python/tests/data/minlplib_nl/heatexch_gen3.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.087561473999813,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.093371251000008,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "kall_circles_c8a": {
+   "path": "python/tests/data/minlplib/kall_circles_c8a.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 2.7591769608450956,
+    "bound": 0.0,
+    "node_count": 63,
+    "gap_certified": false,
+    "wall": 20.063964233000206,
+    "oracle_ok": true,
+    "oracle_obj": 2.7591769608450956,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 2.7591769608450956,
+    "bound": 0.0,
+    "node_count": 63,
+    "gap_certified": false,
+    "wall": 20.105206169000212,
+    "oracle_ok": true,
+    "oracle_obj": 2.7591769608450956,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "m3": {
+   "path": "python/tests/data/minlplib_nl/m3.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 37.8000000726712,
+    "bound": 37.8,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.1361905939997996,
+    "oracle_ok": true,
+    "oracle_obj": 37.8000000726712,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 37.8000000726712,
+    "bound": 37.8,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.13143078599978253,
+    "oracle_ok": true,
+    "oracle_obj": 37.8000000726712,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "mathopt3": {
+   "path": "python/tests/data/minlplib/mathopt3.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 4.549632796543292e-09,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.8390518019996307,
+    "oracle_ok": true,
+    "oracle_obj": 4.549632796541776e-09,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 4.549632796543292e-09,
+    "bound": 0.0,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.7674834340000416,
+    "oracle_ok": true,
+    "oracle_obj": 4.549632796541776e-09,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "mathopt5_2": {
+   "path": "python/tests/data/minlplib/mathopt5_2.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.000000000000003,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.07371117100001356,
+    "oracle_ok": true,
+    "oracle_obj": -1.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.000000000000003,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.06813758299995243,
+    "oracle_ok": true,
+    "oracle_obj": -1.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "meanvar": {
+   "path": "python/tests/data/minlplib/meanvar.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 5.243399082324368,
+    "bound": 5.243399082324368,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.03284158499991463,
+    "oracle_ok": true,
+    "oracle_obj": 5.243399082324368,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 5.243399082324368,
+    "bound": 5.243399082324368,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.03373237899995729,
+    "oracle_ok": true,
+    "oracle_obj": 5.243399082324368,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "meanvarx": {
+   "path": "python/tests/data/minlplib/meanvarx.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 14.369232119289887,
+    "bound": 14.368210095439071,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.19035129299982145,
+    "oracle_ok": true,
+    "oracle_obj": 14.369232119289887,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 14.369232119289887,
+    "bound": 14.368210095439071,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.2045094909999534,
+    "oracle_ok": true,
+    "oracle_obj": 14.369232119289887,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs01": {
+   "path": "python/tests/data/minlplib_nl/nvs01.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 3.514856213999792,
+    "oracle_ok": true,
+    "oracle_obj": 12.46966882156821,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 3.7191565800003445,
+    "oracle_ok": true,
+    "oracle_obj": 12.46966882156821,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs02": {
+   "path": "python/tests/data/minlplib_nl/nvs02.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 421,
+    "gap_certified": true,
+    "wall": 0.48646761400004834,
+    "oracle_ok": true,
+    "oracle_obj": 5.96418452307,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 421,
+    "gap_certified": true,
+    "wall": 0.526726354999937,
+    "oracle_ok": true,
+    "oracle_obj": 5.96418452307,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs03": {
+   "path": "python/tests/data/minlplib_nl/nvs03.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 16.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.028163753999706387,
+    "oracle_ok": true,
+    "oracle_obj": 16.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 16.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.0347972050003591,
+    "oracle_ok": true,
+    "oracle_obj": 16.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs04": {
+   "path": "python/tests/data/minlplib_nl/nvs04.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.25512265000043044,
+    "oracle_ok": true,
+    "oracle_obj": 0.720000000000006,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.23255982299997413,
+    "oracle_ok": true,
+    "oracle_obj": 0.720000000000006,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs05": {
+   "path": "python/tests/data/minlplib_nl/nvs05.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 1107.8904814191037,
+    "bound": 1.9925997792360297,
+    "node_count": 27,
+    "gap_certified": false,
+    "wall": 20.128792152000187,
+    "oracle_ok": true,
+    "oracle_obj": 1107.8904814191037,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 1107.8904814191037,
+    "bound": 1.9925997792360297,
+    "node_count": 27,
+    "gap_certified": false,
+    "wall": 20.359066328000154,
+    "oracle_ok": true,
+    "oracle_obj": 1107.8904814191037,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs06": {
+   "path": "python/tests/data/minlplib_nl/nvs06.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.7703124999998527,
+    "bound": 1.7703124999998527,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.7262911510001686,
+    "oracle_ok": true,
+    "oracle_obj": 1.7703125,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.7703124999998527,
+    "bound": 1.7703124999998527,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.713665323999976,
+    "oracle_ok": true,
+    "oracle_obj": 1.7703125,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs07": {
+   "path": "python/tests/data/minlplib_nl/nvs07.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.054932323999764776,
+    "oracle_ok": true,
+    "oracle_obj": 4.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.05184547799990469,
+    "oracle_ok": true,
+    "oracle_obj": 4.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs08": {
+   "path": "python/tests/data/minlplib_nl/nvs08.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 23.449727356690495,
+    "bound": 23.449727347447233,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.142092713999773,
+    "oracle_ok": true,
+    "oracle_obj": 23.449727356690495,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 23.449727356690495,
+    "bound": 23.449727347447233,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.2418863379998584,
+    "oracle_ok": true,
+    "oracle_obj": 23.449727356690495,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs09": {
+   "path": "python/tests/data/minlplib_nl/nvs09.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -43.134336918035466,
+    "bound": -43.134336918043346,
+    "node_count": 31,
+    "gap_certified": true,
+    "wall": 10.778983437000079,
+    "oracle_ok": true,
+    "oracle_obj": -43.13433691803531,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -43.134336918035466,
+    "bound": -43.134336918043346,
+    "node_count": 31,
+    "gap_certified": true,
+    "wall": 8.089840697,
+    "oracle_ok": true,
+    "oracle_obj": -43.13433691803531,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs10": {
+   "path": "python/tests/data/minlplib_nl/nvs10.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -310.80000000000007,
+    "bound": -310.80000000000007,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.049158655000155704,
+    "oracle_ok": true,
+    "oracle_obj": -310.80000000000007,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -310.80000000000007,
+    "bound": -310.80000000000007,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.044470047000231716,
+    "oracle_ok": true,
+    "oracle_obj": -310.80000000000007,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs11": {
+   "path": "python/tests/data/minlplib_nl/nvs11.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -431.0,
+    "bound": -431.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.20852233200002956,
+    "oracle_ok": true,
+    "oracle_obj": -431.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -431.0,
+    "bound": -431.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.20185545899994395,
+    "oracle_ok": true,
+    "oracle_obj": -431.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs12": {
+   "path": "python/tests/data/minlplib_nl/nvs12.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -481.20000000000005,
+    "bound": -481.20000000000005,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.13897073099997215,
+    "oracle_ok": true,
+    "oracle_obj": -481.20000000000005,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -481.20000000000005,
+    "bound": -481.20000000000005,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.13716518999990512,
+    "oracle_ok": true,
+    "oracle_obj": -481.20000000000005,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs13": {
+   "path": "python/tests/data/minlplib_nl/nvs13.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.2000000000182,
+    "node_count": 637,
+    "gap_certified": true,
+    "wall": 1.7114110319998872,
+    "oracle_ok": true,
+    "oracle_obj": -585.2,
+    "oracle_reason": "",
+    "verify_calls": 12,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.2000000000182,
+    "node_count": 637,
+    "gap_certified": true,
+    "wall": 1.8215117199997621,
+    "oracle_ok": true,
+    "oracle_obj": -585.2,
+    "oracle_reason": "",
+    "verify_calls": 12,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs14": {
+   "path": "python/tests/data/minlplib_nl/nvs14.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -40358.1547693,
+    "bound": -40358.1547693,
+    "node_count": 839,
+    "gap_certified": true,
+    "wall": 0.6035737910001444,
+    "oracle_ok": true,
+    "oracle_obj": -40358.1547693,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -40358.1547693,
+    "bound": -40358.1547693,
+    "node_count": 839,
+    "gap_certified": true,
+    "wall": 0.6607244520000677,
+    "oracle_ok": true,
+    "oracle_obj": -40358.1547693,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs15": {
+   "path": "python/tests/data/minlplib_nl/nvs15.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.06827604000000065,
+    "oracle_ok": true,
+    "oracle_obj": 1.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.06998435500008782,
+    "oracle_ok": true,
+    "oracle_obj": 1.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs16": {
+   "path": "python/tests/data/minlplib/nvs16.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 0.7031251550000004,
+    "bound": 0.7031249894697975,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 1.0151719420000518,
+    "oracle_ok": true,
+    "oracle_obj": 0.703125,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 0.7031251550000004,
+    "bound": 0.7031249894697975,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 0.96718551999993,
+    "oracle_ok": true,
+    "oracle_obj": 0.703125,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs17": {
+   "path": "python/tests/data/minlplib/nvs17.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": -1100.4,
+    "bound": -1494.1000000000588,
+    "node_count": 17964,
+    "gap_certified": true,
+    "wall": 20.01843223800006,
+    "oracle_ok": true,
+    "oracle_obj": -1100.4,
+    "oracle_reason": "",
+    "verify_calls": 80,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": -1100.4,
+    "bound": -1486.4000000000879,
+    "node_count": 18205,
+    "gap_certified": true,
+    "wall": 20.017941871999938,
+    "oracle_ok": true,
+    "oracle_obj": -1100.4,
+    "oracle_reason": "",
+    "verify_calls": 80,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs18": {
+   "path": "python/tests/data/minlplib/nvs18.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -778.4000000000001,
+    "bound": -778.4000000000315,
+    "node_count": 7593,
+    "gap_certified": true,
+    "wall": 6.899603303999811,
+    "oracle_ok": true,
+    "oracle_obj": -778.4000000000001,
+    "oracle_reason": "",
+    "verify_calls": 26,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -778.4000000000001,
+    "bound": -778.4000000000315,
+    "node_count": 7593,
+    "gap_certified": true,
+    "wall": 6.64430117899974,
+    "oracle_ok": true,
+    "oracle_obj": -778.4000000000001,
+    "oracle_reason": "",
+    "verify_calls": 26,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs19": {
+   "path": "python/tests/data/minlplib/nvs19.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": -1098.1999999999998,
+    "bound": -7094.833980860724,
+    "node_count": 4911,
+    "gap_certified": true,
+    "wall": 20.01915144900022,
+    "oracle_ok": true,
+    "oracle_obj": -1098.1999999999998,
+    "oracle_reason": "",
+    "verify_calls": 122,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": -1098.1999999999998,
+    "bound": -6977.175834918041,
+    "node_count": 5130,
+    "gap_certified": true,
+    "wall": 20.018624128999818,
+    "oracle_ok": true,
+    "oracle_obj": -1098.1999999999998,
+    "oracle_reason": "",
+    "verify_calls": 122,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs20": {
+   "path": "python/tests/data/minlplib/nvs20.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": 230.9221652227349,
+    "bound": 193.49829641989894,
+    "node_count": 1368,
+    "gap_certified": true,
+    "wall": 20.011139288000322,
+    "oracle_ok": true,
+    "oracle_obj": 230.92216522273463,
+    "oracle_reason": "",
+    "verify_calls": 33,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": 230.9221652227349,
+    "bound": 193.49829641989894,
+    "node_count": 1405,
+    "gap_certified": true,
+    "wall": 20.011955758000113,
+    "oracle_ok": true,
+    "oracle_obj": 230.92216522273463,
+    "oracle_reason": "",
+    "verify_calls": 33,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs21": {
+   "path": "python/tests/data/minlplib_nl/nvs21.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -5.684782472248295,
+    "bound": -5.684782500000946,
+    "node_count": 9,
+    "gap_certified": true,
+    "wall": 3.4208190109998213,
+    "oracle_ok": true,
+    "oracle_obj": -5.684782472248293,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -5.684782472248295,
+    "bound": -5.684782500000946,
+    "node_count": 9,
+    "gap_certified": true,
+    "wall": 3.305174939999688,
+    "oracle_ok": true,
+    "oracle_obj": -5.684782472248293,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs22": {
+   "path": "python/tests/data/minlplib/nvs22.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 33.55166,
+    "bound": 4.130214060146871,
+    "node_count": 53,
+    "gap_certified": false,
+    "wall": 20.040508298000077,
+    "oracle_ok": true,
+    "oracle_obj": 33.55166,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 33.55166,
+    "bound": 4.130214060146871,
+    "node_count": 53,
+    "gap_certified": false,
+    "wall": 20.391833102999954,
+    "oracle_ok": true,
+    "oracle_obj": 33.55166,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs23": {
+   "path": "python/tests/data/minlplib/nvs23.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": -1124.8000000000002,
+    "bound": -26922.11250000329,
+    "node_count": 2045,
+    "gap_certified": true,
+    "wall": 20.028140064000127,
+    "oracle_ok": true,
+    "oracle_obj": -1124.8000000000002,
+    "oracle_reason": "",
+    "verify_calls": 88,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": -1124.8000000000002,
+    "bound": -26922.11250000329,
+    "node_count": 2046,
+    "gap_certified": true,
+    "wall": 20.02735088999998,
+    "oracle_ok": true,
+    "oracle_obj": -1124.8000000000002,
+    "oracle_reason": "",
+    "verify_calls": 88,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "nvs24": {
+   "path": "python/tests/data/minlplib/nvs24.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": -1031.7999999999997,
+    "bound": -174473.51515154916,
+    "node_count": 1248,
+    "gap_certified": true,
+    "wall": 20.054484596000293,
+    "oracle_ok": true,
+    "oracle_obj": -1031.7999999999997,
+    "oracle_reason": "",
+    "verify_calls": 113,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": -1031.7999999999997,
+    "bound": -174626.8565830966,
+    "node_count": 1234,
+    "gap_certified": true,
+    "wall": 20.03240251399984,
+    "oracle_ok": true,
+    "oracle_obj": -1031.7999999999997,
+    "oracle_reason": "",
+    "verify_calls": 113,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "oaer": {
+   "path": "python/tests/data/minlplib_nl/oaer.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -1.9230984953152737,
+    "bound": -1.9230985682784596,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 2.2119314020001184,
+    "oracle_ok": true,
+    "oracle_obj": -1.9230984953152737,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -1.9230984953152737,
+    "bound": -1.9230985682784596,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 2.1135850180003217,
+    "oracle_ok": true,
+    "oracle_obj": -1.9230984953152737,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "prob02": {
+   "path": "python/tests/data/minlplib/prob02.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 112235.00000000004,
+    "bound": 112235.00000000004,
+    "node_count": 195,
+    "gap_certified": true,
+    "wall": 0.1533813339997323,
+    "oracle_ok": true,
+    "oracle_obj": 112235.00000000004,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 112235.00000000004,
+    "bound": 112235.00000000004,
+    "node_count": 195,
+    "gap_certified": true,
+    "wall": 0.16372468899999149,
+    "oracle_ok": true,
+    "oracle_obj": 112235.00000000004,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "prob03": {
+   "path": "python/tests/data/minlplib/prob03.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 10.0,
+    "bound": 10.0,
+    "node_count": 11,
+    "gap_certified": true,
+    "wall": 0.01357937500006301,
+    "oracle_ok": true,
+    "oracle_obj": 10.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 10.0,
+    "bound": 10.0,
+    "node_count": 11,
+    "gap_certified": true,
+    "wall": 0.009007268999994267,
+    "oracle_ok": true,
+    "oracle_obj": 10.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "prob06": {
+   "path": "python/tests/data/minlplib/prob06.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 1.1771243494508505,
+    "bound": 1.1771220696861038,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.16435593500000323,
+    "oracle_ok": true,
+    "oracle_obj": 1.1771243494508505,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 1.1771243494508505,
+    "bound": 1.1771220696861038,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.1743695520003712,
+    "oracle_ok": true,
+    "oracle_obj": 1.1771243494508505,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "prob10": {
+   "path": "python/tests/data/minlplib/prob10.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 3.4455038033931125,
+    "bound": 3.4455037943263886,
+    "node_count": 17,
+    "gap_certified": true,
+    "wall": 1.194519315999969,
+    "oracle_ok": true,
+    "oracle_obj": 3.4455038033931125,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 3.4455038033931125,
+    "bound": 3.4455037943263886,
+    "node_count": 17,
+    "gap_certified": true,
+    "wall": 1.2199763409998923,
+    "oracle_ok": true,
+    "oracle_obj": 3.4455038033931125,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e01": {
+   "path": "python/tests/data/minlplib/st_e01.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -6.666666703480139,
+    "bound": -6.666666703480139,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.07578716099988014,
+    "oracle_ok": true,
+    "oracle_obj": -6.666666703480139,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -6.666666703480139,
+    "bound": -6.666666703480139,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.08327730000019073,
+    "oracle_ok": true,
+    "oracle_obj": -6.666666703480139,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e02": {
+   "path": "python/tests/data/minlplib/st_e02.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 201.1593340608648,
+    "bound": 201.15927111912038,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.09961190499961958,
+    "oracle_ok": true,
+    "oracle_obj": 201.1593340608648,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 201.1593340608648,
+    "bound": 201.15927111912038,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.09660215999974753,
+    "oracle_ok": true,
+    "oracle_obj": 201.1593340608648,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e03": {
+   "path": "python/tests/data/minlplib/st_e03.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -1161.3366023124036,
+    "bound": -1161.4392654207943,
+    "node_count": 53,
+    "gap_certified": true,
+    "wall": 8.683308547999786,
+    "oracle_ok": true,
+    "oracle_obj": -1161.3366023124036,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -1161.3366023124036,
+    "bound": -1161.4392654207943,
+    "node_count": 53,
+    "gap_certified": true,
+    "wall": 8.247821287000079,
+    "oracle_ok": true,
+    "oracle_obj": -1161.3366023124036,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e04": {
+   "path": "python/tests/data/minlplib/st_e04.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 5194.866244316917,
+    "bound": 5194.86624420274,
+    "node_count": 11,
+    "gap_certified": true,
+    "wall": 2.5314760189999106,
+    "oracle_ok": true,
+    "oracle_obj": 5194.866244316917,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 5194.866244316917,
+    "bound": 5194.86624420274,
+    "node_count": 11,
+    "gap_certified": true,
+    "wall": 2.6745168709999234,
+    "oracle_ok": true,
+    "oracle_obj": 5194.866244316917,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e05": {
+   "path": "python/tests/data/minlplib/st_e05.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 7049.249272475995,
+    "bound": 7049.0217895253545,
+    "node_count": 63,
+    "gap_certified": true,
+    "wall": 2.2249770459998217,
+    "oracle_ok": true,
+    "oracle_obj": 7049.249272475995,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 7049.249272475995,
+    "bound": 7049.0217895253545,
+    "node_count": 63,
+    "gap_certified": true,
+    "wall": 2.2151614790000167,
+    "oracle_ok": true,
+    "oracle_obj": 7049.249272475995,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e06": {
+   "path": "python/tests/data/minlplib/st_e06.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.16088483900011852,
+    "oracle_ok": true,
+    "oracle_obj": 0.0,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.17687166600035198,
+    "oracle_ok": true,
+    "oracle_obj": 0.0,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e07": {
+   "path": "python/tests/data/minlplib/st_e07.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -399.999999979953,
+    "bound": -400.0000000000354,
+    "node_count": 55,
+    "gap_certified": true,
+    "wall": 0.39176800900031594,
+    "oracle_ok": true,
+    "oracle_obj": -399.999999979953,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -399.999999979953,
+    "bound": -400.0000000000354,
+    "node_count": 55,
+    "gap_certified": true,
+    "wall": 0.3980680639997445,
+    "oracle_ok": true,
+    "oracle_obj": -399.999999979953,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e08": {
+   "path": "python/tests/data/minlplib/st_e08.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 0.7417819764238542,
+    "bound": 0.741781951685738,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.4552769729998545,
+    "oracle_ok": true,
+    "oracle_obj": 0.7417819764238542,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 0.7417819764238542,
+    "bound": 0.741781951685738,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 0.43780964899997343,
+    "oracle_ok": true,
+    "oracle_obj": 0.7417819764238542,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e09": {
+   "path": "python/tests/data/minlplib/st_e09.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -0.4999999909112735,
+    "bound": -0.500000623215261,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 0.42622064099987256,
+    "oracle_ok": true,
+    "oracle_obj": -0.4999999909112735,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -0.4999999909112735,
+    "bound": -0.500000623215261,
+    "node_count": 7,
+    "gap_certified": true,
+    "wall": 0.4250946560000557,
+    "oracle_ok": true,
+    "oracle_obj": -0.4999999909112735,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e11": {
+   "path": "python/tests/data/minlplib_nl/st_e11.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 189.31166468662212,
+    "bound": 189.31162968662062,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.2230290170000444,
+    "oracle_ok": true,
+    "oracle_obj": 189.31166468662212,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 189.31166468662212,
+    "bound": 189.31162968662062,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.2876844340003117,
+    "oracle_ok": true,
+    "oracle_obj": 189.31166468662212,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e13": {
+   "path": "python/tests/data/minlplib_nl/st_e13.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 2.000000002518795,
+    "bound": 2.0,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.036112288999902376,
+    "oracle_ok": true,
+    "oracle_obj": 2.000000002518795,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 2.000000002518795,
+    "bound": 2.0,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.03533746799985238,
+    "oracle_ok": true,
+    "oracle_obj": 2.000000002518795,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e15": {
+   "path": "python/tests/data/minlplib/st_e15.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 7.667180068675583,
+    "bound": 7.6671800686755205,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.75164350499972,
+    "oracle_ok": true,
+    "oracle_obj": 7.667180068675583,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 7.667180068675583,
+    "bound": 7.6671800686755205,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 2.585716889000196,
+    "oracle_ok": true,
+    "oracle_obj": 7.667180068675583,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e17": {
+   "path": "python/tests/data/minlplib/st_e17.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 376.29193232909694,
+    "bound": 376.29193232909694,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.012650061999920581,
+    "oracle_ok": true,
+    "oracle_obj": 376.29193232909694,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 376.29193232909694,
+    "bound": 376.29193232909694,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.011486359000173252,
+    "oracle_ok": true,
+    "oracle_obj": 376.29193232909694,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e18": {
+   "path": "python/tests/data/minlplib/st_e18.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -2.828427122261057,
+    "bound": -2.8284271247462125,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.13446371300005922,
+    "oracle_ok": true,
+    "oracle_obj": -2.828427122261057,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -2.828427122261057,
+    "bound": -2.8284271247462125,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.13510888700011492,
+    "oracle_ok": true,
+    "oracle_obj": -2.828427122261057,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e27": {
+   "path": "python/tests/data/minlplib/st_e27.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 2.000000000000003,
+    "bound": 1.9999999999999858,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.1204619800000728,
+    "oracle_ok": true,
+    "oracle_obj": 2.000000000000003,
+    "oracle_reason": "",
+    "verify_calls": 5,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 2.000000000000003,
+    "bound": 1.9999999999999858,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.11664733500037983,
+    "oracle_ok": true,
+    "oracle_obj": 2.000000000000003,
+    "oracle_reason": "",
+    "verify_calls": 5,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e29": {
+   "path": "python/tests/data/minlplib_nl/st_e29.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -0.9434704909173716,
+    "bound": -0.9434705000000067,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 5.2994973859999845,
+    "oracle_ok": true,
+    "oracle_obj": -0.9434704909173716,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -0.9434704909173716,
+    "bound": -0.9434705000000067,
+    "node_count": 5,
+    "gap_certified": true,
+    "wall": 5.250226109000323,
+    "oracle_ok": true,
+    "oracle_obj": -0.9434704909173716,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e31": {
+   "path": "python/tests/data/minlplib/st_e31.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": -1.999999989992619,
+    "bound": -2.0042212823337513,
+    "node_count": 2760,
+    "gap_certified": true,
+    "wall": 20.01867460099993,
+    "oracle_ok": true,
+    "oracle_obj": -1.999999989992619,
+    "oracle_reason": "",
+    "verify_calls": 12,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": -1.999999989992619,
+    "bound": -2.003745716054418,
+    "node_count": 2819,
+    "gap_certified": true,
+    "wall": 20.0164416839998,
+    "oracle_ok": true,
+    "oracle_obj": -1.999999989992619,
+    "oracle_reason": "",
+    "verify_calls": 12,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e35": {
+   "path": "python/tests/data/minlplib/st_e35.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 13756.628415310204,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.369943654000053,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 13756.628415310204,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.334284817000025,
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e36": {
+   "path": "python/tests/data/minlplib_nl/st_e36.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -245.99999999999994,
+    "bound": -246.00000000007242,
+    "node_count": 89,
+    "gap_certified": true,
+    "wall": 17.193712925,
+    "oracle_ok": true,
+    "oracle_obj": -245.99999999999994,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -245.99999999999994,
+    "bound": -246.00000000007242,
+    "node_count": 89,
+    "gap_certified": true,
+    "wall": 16.574765497000044,
+    "oracle_ok": true,
+    "oracle_obj": -245.99999999999994,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e38": {
+   "path": "python/tests/data/minlplib_nl/st_e38.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 7197.727148526158,
+    "bound": 7197.727148526158,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.7582933539997612,
+    "oracle_ok": true,
+    "oracle_obj": 7197.727148526158,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 7197.727148526158,
+    "bound": 7197.727148526158,
+    "node_count": 3,
+    "gap_certified": true,
+    "wall": 0.7815243300001384,
+    "oracle_ok": true,
+    "oracle_obj": 7197.727148526158,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_e40": {
+   "path": "python/tests/data/minlplib/st_e40.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 31.071067499999998,
+    "bound": 22.541148128630677,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.339667226000074,
+    "oracle_ok": true,
+    "oracle_obj": 31.071067499999998,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 31.071067499999998,
+    "bound": 22.541148128630677,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 20.5005332730002,
+    "oracle_ok": true,
+    "oracle_obj": 31.071067499999998,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_miqp1": {
+   "path": "python/tests/data/minlplib_nl/st_miqp1.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 281.0,
+    "bound": 281.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.04475669100020241,
+    "oracle_ok": true,
+    "oracle_obj": 281.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 281.0,
+    "bound": 281.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.041817442999672494,
+    "oracle_ok": true,
+    "oracle_obj": 281.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_miqp2": {
+   "path": "python/tests/data/minlplib_nl/st_miqp2.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.05566313200006334,
+    "oracle_ok": true,
+    "oracle_obj": 2.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.06656688499970187,
+    "oracle_ok": true,
+    "oracle_obj": 2.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_miqp3": {
+   "path": "python/tests/data/minlplib_nl/st_miqp3.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -5.999999997493812,
+    "bound": -6.000000003759528,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.033080914999573,
+    "oracle_ok": true,
+    "oracle_obj": -5.999999997493812,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -5.999999997493812,
+    "bound": -6.000000003759528,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.03279857199959224,
+    "oracle_ok": true,
+    "oracle_obj": -5.999999997493812,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_miqp4": {
+   "path": "python/tests/data/minlplib_nl/st_miqp4.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -4573.999999984964,
+    "bound": -4574.000000000009,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.04920334799999182,
+    "oracle_ok": true,
+    "oracle_obj": -4573.999999984964,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -4573.999999984964,
+    "bound": -4574.000000000009,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.05138748700028373,
+    "oracle_ok": true,
+    "oracle_obj": -4573.999999984964,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_miqp5": {
+   "path": "python/tests/data/minlplib_nl/st_miqp5.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -333.88888888727394,
+    "bound": -333.888888981183,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.10296878300005119,
+    "oracle_ok": true,
+    "oracle_obj": -333.88888888727394,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -333.88888888727394,
+    "bound": -333.888888981183,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.0979842040001131,
+    "oracle_ok": true,
+    "oracle_obj": -333.88888888727394,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_ph10": {
+   "path": "python/tests/data/minlplib/st_ph10.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -10.499999994988112,
+    "bound": -10.500000020511939,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.25841126999966946,
+    "oracle_ok": true,
+    "oracle_obj": -10.499999994988112,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -10.499999994988112,
+    "bound": -10.500000020511939,
+    "node_count": 1,
+    "gap_certified": true,
+    "wall": 0.2647696960002577,
+    "oracle_ok": true,
+    "oracle_obj": -10.499999994988112,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_test1": {
+   "path": "python/tests/data/minlplib_nl/st_test1.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 1.3554131812425043e-14,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.08650798400003623,
+    "oracle_ok": true,
+    "oracle_obj": 0.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 1.3554131812425043e-14,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.07582272199988438,
+    "oracle_ok": true,
+    "oracle_obj": 0.0,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "st_testgr3": {
+   "path": "python/tests/data/minlplib_nl/st_testgr3.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.31149309900001754,
+    "oracle_ok": true,
+    "oracle_obj": -20.59,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.31669791100011935,
+    "oracle_ok": true,
+    "oracle_obj": -20.59,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "syn05hfsg": {
+   "path": "python/tests/data/minlplib_nl/syn05hfsg.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 837.7323676875476,
+    "bound": 840.4893941019103,
+    "node_count": 169,
+    "gap_certified": false,
+    "wall": 20.051059302999874,
+    "oracle_ok": true,
+    "oracle_obj": 837.7323676875725,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 837.7323676875476,
+    "bound": 840.4893941019103,
+    "node_count": 147,
+    "gap_certified": false,
+    "wall": 20.098927094999908,
+    "oracle_ok": true,
+    "oracle_obj": 837.7323676875725,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "syn05m": {
+   "path": "python/tests/data/minlplib/syn05m.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 837.7324008529273,
+    "bound": 837.7324008979798,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.1631493650002085,
+    "oracle_ok": true,
+    "oracle_obj": 837.7324008529273,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 837.7324008529273,
+    "bound": 837.7324008979798,
+    "node_count": 0,
+    "gap_certified": true,
+    "wall": 0.17016151799998624,
+    "oracle_ok": true,
+    "oracle_obj": 837.7324008529273,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tanksize": {
+   "path": "python/tests/data/minlplib_nl/tanksize.nl",
+   "on": {
+    "status": "time_limit",
+    "objective": 1.2686437535708868,
+    "bound": 1.2395720210508778,
+    "node_count": 1505,
+    "gap_certified": true,
+    "wall": 20.01498900000024,
+    "oracle_ok": true,
+    "oracle_obj": 1.2686437535708868,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": 1.2686437535708868,
+    "bound": 1.2371312445403368,
+    "node_count": 1433,
+    "gap_certified": true,
+    "wall": 20.014558256999862,
+    "oracle_ok": true,
+    "oracle_obj": 1.2686437535708868,
+    "oracle_reason": "",
+    "verify_calls": 3,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tls2": {
+   "path": "python/tests/data/minlplib_nl/tls2.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 5.299999999987505,
+    "bound": 2.003761171751075,
+    "node_count": 205,
+    "gap_certified": false,
+    "wall": 21.79552089100025,
+    "oracle_ok": true,
+    "oracle_obj": 5.299999999987505,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 5.299999999987505,
+    "bound": 2.003761171751075,
+    "node_count": 205,
+    "gap_certified": false,
+    "wall": 21.949290096999903,
+    "oracle_ok": true,
+    "oracle_obj": 5.299999999987505,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "trig": {
+   "path": "python/tests/data/minlplib/trig.nl",
+   "on": {
+    "status": "optimal",
+    "objective": -3.7625014913925883,
+    "bound": -3.76267854772412,
+    "node_count": 63,
+    "gap_certified": true,
+    "wall": 0.7200604310000926,
+    "oracle_ok": true,
+    "oracle_obj": -3.7625014913925883,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": -3.7625014913925883,
+    "bound": -3.76267854772412,
+    "node_count": 63,
+    "gap_certified": true,
+    "wall": 0.713594686000306,
+    "oracle_ok": true,
+    "oracle_obj": -3.7625014913925883,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tspn05": {
+   "path": "python/tests/data/minlplib_nl/tspn05.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 191.25520784466977,
+    "bound": 191.25507754683323,
+    "node_count": 55,
+    "gap_certified": true,
+    "wall": 20.14079198799982,
+    "oracle_ok": true,
+    "oracle_obj": 191.25520784466977,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 191.25520784466977,
+    "bound": 191.25510621101427,
+    "node_count": 53,
+    "gap_certified": true,
+    "wall": 20.153595686000244,
+    "oracle_ok": true,
+    "oracle_obj": 191.25520784466977,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tspn08": {
+   "path": "python/tests/data/minlplib_nl/tspn08.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 290.5668539674932,
+    "bound": 231.98278334376207,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.435511843999848,
+    "oracle_ok": true,
+    "oracle_obj": 290.5668539674932,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 290.5668539674932,
+    "bound": 231.98278334376207,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.39337299800036,
+    "oracle_ok": true,
+    "oracle_obj": 290.5668539674932,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tspn10": {
+   "path": "python/tests/data/minlplib_nl/tspn10.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 225.12607170016818,
+    "bound": 161.1607988617327,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.356331902999955,
+    "oracle_ok": true,
+    "oracle_obj": 225.12607170016818,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 225.12607170016818,
+    "bound": 161.1607988617327,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 21.45032666499992,
+    "oracle_ok": true,
+    "oracle_obj": 225.12607170016818,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "tspn12": {
+   "path": "python/tests/data/minlplib_nl/tspn12.nl",
+   "on": {
+    "status": "feasible",
+    "objective": 262.64739579632794,
+    "bound": 183.32594881561485,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 22.32296764900002,
+    "oracle_ok": true,
+    "oracle_obj": 262.64739579632794,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 262.64739579632794,
+    "bound": 183.32594881561485,
+    "node_count": 3,
+    "gap_certified": false,
+    "wall": 22.481672854999943,
+    "oracle_ok": true,
+    "oracle_obj": 262.64739579632794,
+    "oracle_reason": "",
+    "verify_calls": 0,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  },
+  "util": {
+   "path": "python/tests/data/minlplib/util.nl",
+   "on": {
+    "status": "optimal",
+    "objective": 999.5787502353422,
+    "bound": 999.5787502353421,
+    "node_count": 509,
+    "gap_certified": true,
+    "wall": 11.48552910799981,
+    "oracle_ok": true,
+    "oracle_obj": 999.5787502353422,
+    "oracle_reason": "",
+    "verify_calls": 15,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   },
+   "off": {
+    "status": "optimal",
+    "objective": 999.5787502353422,
+    "bound": 999.5787502353421,
+    "node_count": 509,
+    "gap_certified": true,
+    "wall": 11.379410091999944,
+    "oracle_ok": true,
+    "oracle_obj": 999.5787502353422,
+    "oracle_reason": "",
+    "verify_calls": 15,
+    "row_scale_calls": 0,
+    "divergent_rows": 0
+   }
+  }
+ },
+ "stats": {
+  "verify_calls": 1076,
+  "row_scale_calls": 0,
+  "divergent_rows": 0
+ }
+}

@@ -293,7 +293,13 @@ def test_bb_reported_objective_is_attained_by_its_own_incumbent(floor: float) ->
     model = _division_gp(floor)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = model.solve(solver="bb", time_limit=30.0)
+        # Bounded budget, and deliberately shorter than an honest certificate
+        # needs on the tight floors (measured: 37.6 s at 1e-3, 227.8 s at 1e-2 —
+        # ``scratchpad/issue1151/cert_cost.py``). The assertions are about the
+        # reported VALUE, which is right from the first incumbent, not about
+        # reaching ``optimal``; the defect certified in 0.6 s, so a short budget
+        # discriminates just as sharply and keeps this off the slow critical path.
+        result = model.solve(solver="bb", time_limit=20.0)
 
     assert result.objective is not None, "no incumbent to check"
     assert result.x is not None, "an incumbent value with no point is not checkable"
