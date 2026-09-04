@@ -3941,6 +3941,7 @@ class Model:
         *,
         method: str = "gdp",
         name: Optional[str] = None,
+        scale: Optional[float] = None,
     ):
         r"""Add a complementarity constraint :math:`0 \le x \perp y \ge 0`.
 
@@ -3979,6 +3980,18 @@ class Model:
             :func:`discopt.mpec.solve_mpec` with ``method="scholtes"``.
         name : str, optional
             Base name for the generated constraints.
+        scale : float, optional
+            Characteristic magnitude of the relation's residual, recorded as
+            provenance for a meaningful residual tolerance when the two
+            operands carry unrelated physical magnitudes (#1147). It changes
+            no lowering and no solver behaviour.
+
+        Returns
+        -------
+        discopt.mpec.Complementarity
+            The recorded relation. It keeps the *source* operands and survives
+            every model-rebuilding pass, so a residual computed from it is a
+            residual of the declared condition rather than of the lowered rows.
 
         Examples
         --------
@@ -3987,12 +4000,10 @@ class Model:
         """
         from discopt import mpec
 
-        pair = mpec.Complementarity(_wrap(x), _wrap(y), name)
-        self._complementarities.append(pair)
         if method == "gdp":
-            mpec.reformulate_gdp(self, [pair])
+            lower = mpec.reformulate_gdp
         elif method == "sos1":
-            mpec.reformulate_sos1(self, [pair])
+            lower = mpec.reformulate_sos1
         elif method == "scholtes":
             raise ValueError(
                 "method='scholtes' is a solve-time regularization homotopy, not "
@@ -4005,6 +4016,83 @@ class Model:
                 f"unknown complementarity method {method!r}; use 'gdp' or 'sos1' "
                 "(or discopt.mpec.solve_mpec for 'scholtes')."
             )
+
+        # The relation is the durable record (#1147): it keeps the SOURCE
+        # operands, the bounds the relation declares on them, its role and its
+        # scale, and every rebuilding pass forwards it. The rows emitted below
+        # are the lowering; they are not recoverable back into a source residual.
+        pair = mpec.Complementarity(
+            _wrap(x),
+            _wrap(y),
+            name,
+            role=mpec.ComplementarityRole.NCP_PAIR,
+            scale=scale,
+        )
+        lower(self, [pair])
+        self._complementarities.append(pair)
+        return pair
+
+    def mcp(
+        self,
+        residual: "Expression",
+        variable: "Expression",
+        *,
+        lb: Optional[float] = None,
+        ub: Optional[float] = None,
+        name: Optional[str] = None,
+        scale: Optional[float] = None,
+    ):
+        r"""Declare the box-bounded mixed-complementarity relation
+        :math:`F(z) \perp z \in [l, u]`.
+
+        The MCP form pairs a *residual* with a **bounded** variable rather than
+        with a second nonnegative expression:
+
+        * :math:`z = l`       ⇒ :math:`F(z) \ge 0`
+        * :math:`l < z < u`   ⇒ :math:`F(z) = 0`
+        * :math:`z = u`       ⇒ :math:`F(z) \le 0`
+
+        :math:`l = 0, u = +\infty` is exactly :meth:`complementarity`, and is
+        recorded as such so the two forms never diverge on the case they share.
+
+        This slice **represents** the relation and does not lower it (#1147).
+        Consequently a model carrying a general box relation is *refused* by
+        :meth:`solve` — a declared condition that no lowering emitted would
+        otherwise be solved as if it were absent, and certified. The relation
+        still round-trips through every rebuilding pass, which is what the
+        source-residual work of #1148 needs.
+
+        Parameters
+        ----------
+        residual : Expression
+            The residual :math:`F(z)`.
+        variable : Expression
+            The complementary variable :math:`z`.
+        lb, ub : float, optional
+            The box. Default to ``variable``'s declared bounds when it is a
+            plain scalar :class:`Variable`; required otherwise, since the
+            relation's semantics *are* those bounds.
+        name : str, optional
+            Name of the relation.
+        scale : float, optional
+            Characteristic residual magnitude, for a meaningful tolerance when
+            the residual and the variable carry unrelated physical magnitudes.
+
+        Returns
+        -------
+        discopt.mpec.Complementarity
+            The recorded relation.
+        """
+        from discopt import mpec
+
+        pair = mpec.box_mcp(_wrap(residual), _wrap(variable), lb=lb, ub=ub, name=name, scale=scale)
+        if pair.role is mpec.ComplementarityRole.NCP_PAIR:
+            # l=0, u=+inf IS the symmetric pair; lower it exactly as
+            # ``complementarity`` would rather than leaving an unlowered
+            # relation the solver must refuse.
+            mpec.reformulate_gdp(self, [pair])
+        self._complementarities.append(pair)
+        return pair
 
     def _branch_bounds(
         self, then_expr: "Expression", else_expr: "Expression"
@@ -4654,6 +4742,27 @@ class Model:
                     f"Unknown solver options are rejected rather than silently "
                     f"ignored (a swallowed option would leave the solver at its "
                     f"default while you believe it was set)."
+                )
+
+        # A declared complementarity relation that no lowering emitted rows for
+        # would be solved as if the condition were absent — and certified
+        # optimal against a feasible set the model does not describe. Refuse
+        # loudly instead (#1147). Every relation ``Model.complementarity``
+        # records is lowered on the spot, and the rebuilding passes carry the
+        # mark forward, so this fires only on the box-MCP form this slice
+        # represents without lowering.
+        if self._complementarities:
+            from discopt.mpec import unlowered_relations
+
+            pending = unlowered_relations(self)
+            if pending:
+                raise NotImplementedError(
+                    "model declares complementarity relation(s) with no lowering: "
+                    + "; ".join(p.describe() for p in pending)
+                    + ". The box-bounded MCP form is represented but not lowered "
+                    "(#1147), so solving would silently drop the condition. Restrict "
+                    "the complementary variable to [0, +inf) and use "
+                    "Model.complementarity, or reformulate the relation explicitly."
                 )
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
@@ -6183,8 +6292,8 @@ def from_nl(path: str) -> Model:
     # ``constraint_tuples`` above (consumed by the relation), so there is no
     # double-add.
     compl_pairs = reconstruct_complementarities(nl_repr, m._variables)
-    for body, var_index, flag in compl_pairs:
-        _add_nl_complementarity(m, body, var_index, flag)
+    for k, (body, var_index, flag) in enumerate(compl_pairs):
+        _add_nl_complementarity(m, body, var_index, flag, index=k)
 
     # Keep nl_repr for backward compatibility (Rust evaluator for validation)
     m._nl_repr = nl_repr
@@ -6205,7 +6314,9 @@ def from_nl(path: str) -> Model:
     return m
 
 
-def _add_nl_complementarity(m: "Model", body: "Expression", var_index: int, flag: int) -> None:
+def _add_nl_complementarity(
+    m: "Model", body: "Expression", var_index: int, flag: int, *, index: int = 0
+) -> None:
     r"""Lower one ``.nl`` complementarity row into ``Model.complementarity``.
 
     The row asserts ``body ⊥ x`` where ``x = m._variables[var_index]`` and
@@ -6252,7 +6363,13 @@ def _add_nl_complementarity(m: "Model", body: "Expression", var_index: int, flag
     # product but not whether it is zero, so ``a * b == 0`` is preserved exactly.
     a = body if body_ge0 else -body
     b = x if x_ge0 else -x
-    m.complementarity(a, b, method="gdp")
+    # Name the relation after its ``.nl`` row. Two things depend on it: the rows
+    # generated below are named from it (an unnamed relation falls back to
+    # ``compl0`` for *every* pair, since the fallback counts within the single
+    # pair handed to the lowering — a name collision across a multi-pair file),
+    # and the provenance record #1147 carries through the rebuilding passes is
+    # identifiable in an error message without parsing generated identifiers.
+    m.complementarity(a, b, method="gdp", name=f"nl_compl{index}")
 
 
 def from_gams(path: str) -> Model:

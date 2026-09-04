@@ -58,6 +58,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+from discopt.mpec import ComplementarityProvenanceError, carry_complementarities
 
 from .gdp_reformulate import _bound_expression, _collect_variables, _is_linear
 from .term_classifier import _get_flat_index, distribute_products
@@ -1555,7 +1556,13 @@ def canonicalize_entropy(model: Model) -> Model:
         new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = new_objective
         new_model._constraints = new_constraints
+        # Complementarity provenance (#1147): forward the relation set onto the
+        # rebuilt model. An unresolvable relation raises past the defensive
+        # handler rather than degrading to a silent drop.
+        carry_complementarities(model, new_model, pass_name="entropy canonicalization")
         return new_model
+    except ComplementarityProvenanceError:
+        raise
     except Exception:  # pragma: no cover - defensive: never break a solve
         return model
 
@@ -1653,6 +1660,12 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         # under the flag) so the solver can keep them branchable. Always set the
         # attribute (empty by default) for a stable, easy-to-read contract.
         new_model._zero_spanning_factor_auxes = set(lifter.zero_spanning_factor_auxes)
+        # Complementarity provenance (#1147). The lifts rewrite constraint
+        # *bodies*; the relation's source operands are untouched and still read
+        # the shared Variable objects, so the relation set forwards intact.
+        carry_complementarities(model, new_model, pass_name="factorable reformulation")
         return new_model
+    except ComplementarityProvenanceError:
+        raise
     except Exception:  # pragma: no cover - defensive: never break a solve
         return model

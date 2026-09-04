@@ -10,7 +10,57 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Complementarity is a first-class relation with durable source provenance**
+  (#1147, RFC #1123 slice 1). `mpec.Complementarity` was three fields (`f`, `g`,
+  `name`) recorded on `Model._complementarities` and then discarded by **every**
+  model-rebuilding pass — measured on `main`, `before=1 / after=0` for GDP
+  lowering under `big-m`/`hull`/`mbigm`, integer-product expansion and factorable
+  reformulation alike. All that survived a lowering was string-level: the pair
+  name baked into generated identifiers (`_gdp_aux_disj_pair0_0_0`). A source
+  complementarity residual computed against such a model would have measured the
+  *relaxed row* rather than the source product, printed a small number, and been
+  believed. The relation now carries its source operands, the bounds it declares
+  on them, a residual scale, a role (`ComplementarityRole`: NCP pair / box MCP /
+  generated-from-KKT / generated-from-disjunct), the generating parent's
+  identity, shape/index for vectorized pairs, and per-model lowering state; each
+  of the four rebuilding passes forwards the relation set explicitly and raises
+  `ComplementarityProvenanceError` — naming the relation and the pass — rather
+  than dropping one it cannot resolve. Resolution is by **object identity**, and
+  backend-facing flat indices are derived at the solver boundary
+  (`flat_source_indices`) instead of persisted through it, because presolve/FBBT
+  renumber columns exactly when a stored index would be needed.
+- **The box-bounded MCP form**, `Model.mcp(F, z, lb=..., ub=...)` /
+  `mpec.box_mcp`: a residual paired with a variable on `[l, u]`, with the
+  symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
+  that pair, so the two forms cannot diverge on the case they share). #1147
+  **represents** the general box form and deliberately does not lower it; a model
+  carrying an unlowered relation is refused by `Model.solve` and by every
+  `mpec.reformulate_*` entry point, rather than being solved as though the
+  condition were absent and certified.
+
 ### Changed
+
+- **`binary_multilinear_reform`'s abstain guard no longer keys on
+  `_complementarities`** (#1147). The guard existed so the pass would not drop
+  structure it does not copy — but every earlier rebuilding pass emptied that
+  list, so its premise evaporated at a pass boundary: after GDP lowering the
+  condition is materialized into ordinary rows and the list was empty. The
+  relation set is now forwarded explicitly, so there is nothing left to protect;
+  the SOS/indicator and builder-block clauses of the guard are unchanged.
+- **`from_nl` names each `.nl` complementarity relation `nl_compl{k}`** (#1147).
+  An unnamed relation fell back to `compl0` for *every* pair (the fallback counts
+  within the single pair handed to the lowering), so a multi-pair `.nl` file
+  generated colliding constraint names; the name also makes a relation
+  identifiable in a provenance error without parsing generated identifiers.
+- No behavior change to solving. Per CLAUDE.md's bound-neutral regime, over the
+  66-instance in-repo `.nl` corpus at a 10 s limit, status and objective are
+  identical on 66/66 instances, and status, objective, bound, `node_count` and
+  `gap_certified` are identical on all 44 instances that converged. The two
+  `node_count` differences are both on unconverged (`time_limit`/`feasible`)
+  runs and reproduce *within* an arm across interleaved repeats, i.e. they are
+  wall-clock artifacts, not a bound change.
 
 - **`solver="surrogate"`: the initial design is sized from the dimension alone,
   `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,
