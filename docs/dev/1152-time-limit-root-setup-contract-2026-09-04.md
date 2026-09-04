@@ -131,18 +131,34 @@ present and minlplib.org is not reachable through the egress proxy. The in-repo
 corpus does contain `casctanks`, one of the four overrun instances the issue names,
 and it reproduces both symptoms — so the class is exercised, at a smaller size.
 
-**To re-run it where the corpus exists.** The flag is now default-ON, so the control
-arm has to turn it OFF — `DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0` is the baseline and
-the unset default is the treatment, the reverse of `generality_sweep`'s convention
-for a parked flag. (`generality_sweep`'s `root_build_deadline` arm has the same
-problem since #832 graduated it: it sets `=1` against a control that no longer
-turns it off, so that arm is a no-op today. Fixing that registry is out of scope
-here; it is noted so the next person does not read its verdict as an A/B.) The two
-instances the issue names, `sonet23v4` at `tl=2` and `watercontamination0202` at
-`tl=30` and `tl=60`, are the two that close #1152's own tests:
+**That gap is now closed** (2026-09-04, on the owner's machine, commit `fe4d69c`
+during the review of PR #1155 — so the paragraph above stands as the state of the
+panel, not as the state of the evidence). The two instances the issue names were run
+there, and they are the two that close #1152's own tests:
 `test_issue654_deadline_root_setup.py::test_sonet23v4_bound_survives_the_deadline_gating`
-and `test_875_root_setup_budget.py::test_watercontamination0202_honours_its_time_limit`
-both skip without the snapshot and are left with every threshold unchanged.
+(`tl=2`) and `test_875_root_setup_budget.py::test_watercontamination0202_honours_its_time_limit`
+(`tl=30`, `tl=60`). Back-to-back on one machine at load 5.4 — elevated, which only
+strengthens the result, since load pushes the overrun test toward failing:
+
+| arm | result | wall |
+|---|---|---|
+| flag ON (the default) | **3 XPASS** | 101.6 s |
+| `DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0` | 3 XFAIL | 158.0 s |
+| xfail markers removed | **3 passed** | 100.6 s |
+
+The OFF arm is the load-bearing one: it reproduces the defect exactly as documented,
+which attributes the pass to the flag rather than to the machine, and it is an
+end-to-end check that the graduated flag's §5 opt-out is genuinely live. The strict
+xfails #1150 had added for #1152 came off in the same commit — every threshold and
+soundness assertion is still the one #875 and #654 set.
+
+**To re-run it.** The flag is default-ON, so the control arm has to turn it OFF —
+`DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0` is the baseline and the unset default is the
+treatment, the reverse of `generality_sweep`'s convention for a parked flag.
+(`generality_sweep`'s `root_build_deadline` arm has the same problem since #832
+graduated it: it sets `=1` against a control that no longer turns it off, so that arm
+is a no-op today. Fixing that registry is out of scope here; it is noted so the next
+person does not read its verdict as an A/B.)
 
 ## 7. Panel result
 

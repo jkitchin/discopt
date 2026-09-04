@@ -1333,12 +1333,16 @@ class SolverTuning:
     more nodes and the last one straddles the deadline: the pre-existing per-node
     overrun (#966), given more chances to fire, not a setup overrun.
 
-    Scope of that panel, stated rather than glossed: the full-MINLPLib held-out arm
-    (``graduation_gate.py --flags``) and the two instances issue #1152 names
-    (``sonet23v4``, ``watercontamination0202``) were **not** reachable from the
-    environment this ran in. The in-repo corpus does contain ``casctanks`` — one of
-    the four overrun instances the issue lists — and it reproduces both symptoms, so
-    the class is exercised at a smaller size. See
+    Scope of that panel, stated rather than glossed: it is the in-repo corpus, which
+    does contain ``casctanks`` (one of the four overrun instances the issue lists,
+    reproducing both symptoms) but not the two the issue names. Those were run
+    separately on the owner's machine during the PR review and are the arm that
+    closes it — ``sonet23v4`` at ``tl=2`` and ``watercontamination0202`` at
+    ``tl=30``/``tl=60``, the instances behind #1152's own two tests: **3 pass** with
+    the flag on its default and **3 xfail** under
+    ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0``, back to back at load 5.4. The OFF arm is
+    what attributes the pass to this flag rather than to the machine, and doubles as
+    an end-to-end check that the §5 opt-out is live. See
     ``docs/dev/1152-time-limit-root-setup-contract-2026-09-04.md``."""
 
     node_round_budget: bool = field(
