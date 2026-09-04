@@ -38,6 +38,7 @@ from discopt.modeling.core import (
     Model,
     SelectorActivation,
     SelectorCardinality,
+    SumOverExpression,
     UnaryOp,
     Variable,
     VarType,
@@ -572,6 +573,34 @@ def _precompute_lp_relaxation(model: Model) -> tuple | None:
         return None
 
 
+def _sumover_enabled() -> bool:
+    """Is #1154 ``SumOverExpression`` support on? (``DISCOPT_GDP_SUMOVER``, default ON).
+
+    Read only when a :class:`SumOverExpression` node is actually reached, so the
+    flag costs nothing on any expression that does not contain one, and the ``=0``
+    opt-out is byte-identical to the pre-#1154 walkers. Graduated default-ON by the
+    §5 panel in ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
+    """
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().gdp_sumover)
+
+
+def _sumover_terms(expr: Expression) -> list[Expression] | None:
+    """``expr.terms`` when *expr* is an enabled ``SumOverExpression``, else ``None``.
+
+    ``Σ[t1, …, tn]`` is treated by every walker in this module **exactly** as the
+    left-folded chain ``t1 + … + tn`` — the desugaring the modeling layer could
+    equally have produced. That equivalence is the whole contract; it is
+    machine-checked per walker in ``python/tests/test_1154_gdp_sumover_hull.py``.
+    """
+    if not isinstance(expr, SumOverExpression):
+        return None
+    if not _sumover_enabled():
+        return None
+    return list(expr.terms)
+
+
 def _bound_expression(
     expr: Expression,
     model: Model,
@@ -608,6 +637,22 @@ def _bound_expression(
             hi = float(np.max(ub_slice))
             return lo, hi
         return base_lo, base_hi
+
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        # Left-fold, exactly as the equivalent ``t1 + ... + tn`` BinaryOp chain
+        # is folded by the ``BinaryOp`` "+" branch below. Infinities are handled
+        # explicitly
+        # rather than left to ``+``: an unbounded-below term and an unbounded-above
+        # term in the same sum would make plain float addition produce NaN,
+        # which reads as "no bound" nowhere and silently poisons the big-M.
+        lo_total = 0.0
+        hi_total = 0.0
+        for term in terms:
+            t_lo, t_hi = _bound_expression(term, model)
+            lo_total = -np.inf if (lo_total == -np.inf or t_lo == -np.inf) else lo_total + t_lo
+            hi_total = np.inf if (hi_total == np.inf or t_hi == np.inf) else hi_total + t_hi
+        return float(lo_total), float(hi_total)
 
     if isinstance(expr, BinaryOp):
         left_lo, left_hi = _bound_expression(expr.left, model)
@@ -1064,6 +1109,7 @@ def _reformulate_disjunction_hull(
     for disjunct in dc.disjuncts:
         for con in disjunct:
             all_vars.update(_collect_variables(con.body))
+    _assert_hull_saw_every_variable(dc, all_vars)
 
     # --- Per-disjunct bounds and disaggregated variables ---
     # disjunct_bounds[k][var_name] = (dlb, dub)
@@ -1232,6 +1278,73 @@ def _reformulate_disjunction_hull(
     return new_vars, new_cons
 
 
+class HullVariableCoverageError(ValueError):
+    """A disjunct body holds a variable the hull walkers cannot see.
+
+    Raised by :func:`_assert_hull_saw_every_variable`. See its docstring for why
+    this is a refusal and not a best-effort reformulation.
+    """
+
+
+def _assert_hull_saw_every_variable(
+    dc: _DisjunctiveConstraint,
+    all_vars: dict[str, Variable],
+) -> None:
+    """Cross-check ``_collect_variables`` against an *independent* DAG walker.
+
+    Everything downstream of ``all_vars`` in :func:`_reformulate_disjunction_hull` -- the
+    disaggregated variables, the aggregation rows ``x = Σ_k v_k``, the bound
+    linking rows ``dlb·y_k ≤ v_k ≤ dub·y_k``, the substitution map handed to
+    :func:`_hull_linear_substitute` / :func:`_substitute_vars` -- is keyed on it.
+    A variable the collector misses is therefore not merely under-disaggregated:
+    it survives into the reformulated row **un-substituted**, so the disjunct
+    body is imposed *globally* rather than under its selector.
+
+    That is not hypothetical. PR #1150 widened :func:`_is_linear` to admit
+    ``SumOverExpression`` while this collector still had no case for the node.
+    ``all_vars`` came back empty, no disaggregated variable was created, and hull
+    emitted ``Σ[3 terms] - (0 * y0) <= 0`` — the arm's own constraint, always on,
+    with its selector coefficient collapsed to zero. On a model whose true
+    minimum is −30.0 both ``auto`` and ``hull`` then returned
+    ``status=optimal, objective=−3.0, bound=−3.0``: a dual bound **above** the
+    optimum, i.e. a false certificate (CLAUDE.md §1).
+
+    The check is deliberately built on a walker this module does not own:
+    :func:`discopt.modeling.core._iter_model_leaves`, which enumerates the
+    model-owning leaves (``Variable`` / ``Parameter``) and already handles
+    ``SumExpression``, ``SumOverExpression``, ``MatMulExpression`` and
+    ``CustomCall``. A cross-check against the *same* walker would be a no-op
+    (CLAUDE.md §6): if the collector cannot see a node, neither could the probe.
+
+    Refuses loudly rather than falling back, per CLAUDE.md §3: there is no sound
+    cheaper answer here — the alternative is exactly the silent wrong row above.
+    Every construct that can trip this refusal is one that ``main`` already
+    refuses on the nonlinear route (``_body_at_zero`` raises
+    :class:`HullPerspectiveOriginError` for the same node types), so no model
+    that reformulates today starts failing.
+    """
+    from discopt.modeling.core import Parameter, _iter_model_leaves
+
+    seen: dict[str, Variable] = {}
+    for disjunct in dc.disjuncts:
+        for con in disjunct:
+            for leaf in _iter_model_leaves(con.body):
+                if isinstance(leaf, Parameter):
+                    continue
+                seen[leaf.name] = leaf
+    missed = sorted(name for name in seen if name not in all_vars)
+    if missed:
+        raise HullVariableCoverageError(
+            "GDP hull reformulation cannot see every variable in the disjunct "
+            f"bodies: {missed} are reachable from the expression DAG but were not "
+            "collected, so they would be emitted un-disaggregated and the "
+            "disjunct's constraints would be imposed globally (a false "
+            "certificate -- see issue #1154). Reformulate this disjunction with "
+            "method='big-m', or express the body with +/-/* so the hull walkers "
+            "can take it apart."
+        )
+
+
 class HullPerspectiveOriginError(ValueError):
     """``g(0)`` is not finite, so the hull perspective cannot be formed.
 
@@ -1298,6 +1411,14 @@ def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
             if e.op not in _BIN:
                 raise HullPerspectiveOriginError(f"unsupported binary op {e.op!r}")
             return float(_BIN[e.op](_walk(e.left), _walk(e.right)))
+        sum_terms = _sumover_terms(e)
+        if sum_terms is not None:
+            # g(0) of a sum is the sum of the terms' g(0); left-folded to match
+            # the equivalent ``t1 + ... + tn`` chain bit for bit.
+            total = 0.0
+            for term in sum_terms:
+                total = total + _walk(term)
+            return float(total)
         if isinstance(e, FunctionCall):
             args = [_walk(a) for a in e.args]
             if e.func_name in _NARY:
@@ -1369,6 +1490,12 @@ def _hull_linear_substitute(
         if expr.op in ("neg", "-"):
             new_operand = _hull_linear_substitute(expr.operand, var_map, y_k)
             return UnaryOp(expr.op, new_operand)
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        # Term by term: each term contributes ``a_i v_k + b_i y_k``, so the sum
+        # contributes ``a v_k + b y_k`` -- the same expression the equivalent
+        # ``t1 + ... + tn`` chain produces through the "+" branch above.
+        return SumOverExpression([_hull_linear_substitute(t, var_map, y_k) for t in terms])
     # Fallback
     return _substitute_vars(expr, var_map)
 
@@ -1400,6 +1527,11 @@ def _collect_variables(expr: Expression) -> dict[str, Variable]:
         elif isinstance(e, FunctionCall):
             for arg in e.args:
                 _walk(arg)
+        else:
+            terms = _sumover_terms(e)
+            if terms is not None:
+                for term in terms:
+                    _walk(term)
 
     _walk(expr)
     return found
@@ -1438,6 +1570,10 @@ def _is_linear(expr: Expression) -> bool:
         return False
     if isinstance(expr, FunctionCall):
         return False
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        # A sum is linear iff every term is; an empty sum is the constant 0.
+        return all(_is_linear(t) for t in terms)
     return False
 
 
@@ -1476,6 +1612,12 @@ def _substitute_vars(
         if all(n is o for n, o in zip(new_args, expr.args)):
             return expr
         return FunctionCall(expr.func_name, *new_args)
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        new_terms = [_substitute_vars(t, var_map) for t in terms]
+        if all(n is o for n, o in zip(new_terms, terms)):
+            return expr
+        return SumOverExpression(new_terms)
     # Constant or unknown — pass through
     return expr
 
