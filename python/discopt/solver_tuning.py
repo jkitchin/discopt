@@ -1173,6 +1173,43 @@ class SolverTuning:
     limit.
     """
 
+    # --- budget saturation (#1153) --------------------------------------------
+    budget_saturation: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_BUDGET_SATURATION", default=False)
+    )
+    """Stop role-2 sub-budgets from growing without bound in the caller's
+    ``time_limit``. ``DISCOPT_BUDGET_SATURATION``, default **OFF** (bound-changing,
+    CLAUDE.md §5).
+
+    #1153 is the harm. On ``nvs19`` a 30 s budget reached ``-1098.2`` over 38 403
+    nodes and a 60 s budget reached ``-1001.2`` over 7 619 — doubling the budget
+    made the answer *worse* and explored **5x fewer nodes**. A user who doubles
+    ``time_limit`` and gets a worse answer has no way to reason about the solver,
+    and node throughput falling as the wall budget grows is measurable
+    independently of whether that instance is ever solved.
+
+    The mechanism is #1116's role-1/role-2 split read one step further. Role 1
+    (*"when do we stop?"*) is the user's ``time_limit``. Role 2 (*"how much work
+    does this stage do?"*) is a sub-budget carved as a fraction of it. Carving
+    role 2 out of role 1 is fine as long as it **saturates**: a root stage whose
+    grant keeps growing with the caller's budget goes on separating cuts that
+    every subsequent node LP then carries, so the per-node cost rises with
+    ``time_limit`` and the tree covered by the remaining budget shrinks.
+
+    Under this flag each such sub-budget is capped at the value it would take at a
+    :data:`ROLE2_SATURATION_S` (150 s) role-1 budget, so beyond
+    that point every additional second the caller grants goes to the *search*.
+    150 s is not a new number: it is the reference the root OBBT grant already
+    carries (``min(max(0.1 * time_limit, 2.0), 15.0)``), and it is the loosest
+    choice consistent with the ceilings the sibling root stages already have — the
+    conservative direction for a default-path change. Below it nothing changes at
+    all, which is why the flag is inert on short solves.
+
+    Sound in every arm: each capped stage is optional *tightening* whose truncation
+    only ever yields a weaker relaxation (fewer cuts, fewer OBBT rounds), never an
+    invalid one, so no bound can rise above its true value and no certificate can
+    be fabricated. The flag can only change *which* valid answer path is walked."""
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
@@ -1755,3 +1792,45 @@ def enter_scope(tuning: SolverTuning | None):
 
 def reset_current(token) -> None:
     _current.reset(token)
+
+
+#: The role-1 budget at which every role-2 sub-budget saturates (#1153).
+#:
+#: Not a new number. It is the reference the root OBBT grant already carries —
+#: ``min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())`` ceilings at
+#: 15 s, i.e. at ``time_limit = 150`` — and it is the LOOSEST of the ceilings the
+#: sibling root stages carry (the 0.25-fraction presolve grant ceilings at 30 s /
+#: 120 s, the 0.2-fraction convexity grant at 20 s / 100 s, the 0.15-fraction NBT
+#: grant at 30 s / 200 s). Taking the loosest is the conservative direction for a
+#: change that moves the default path: it caps the stages written without a
+#: ceiling at the point their already-ceilinged siblings stop, and nowhere tighter.
+ROLE2_SATURATION_S = 150.0
+
+
+def saturate_role2(seconds: float, frac: float) -> float:
+    """Cap a role-2 sub-budget carved as ``frac`` of ``time_limit`` (#1153).
+
+    ``seconds`` is what the site computed; ``frac`` is the fraction of
+    ``time_limit`` it was carved from. The cap is the value that carve reaches at
+    a :data:`ROLE2_SATURATION_S` role-1 budget, so the grant *saturates* instead
+    of tracking the caller's budget upward forever.
+
+    Why saturation and not merely "a fraction". A fraction is monotone in
+    ``time_limit`` but not harmless: a root stage whose grant keeps growing keeps
+    separating cuts, and every subsequent node LP carries them, so the per-node
+    cost rises with the caller's budget and the tree the remaining budget can
+    cover *shrinks*. #1153 measured the end of that: ``nvs19`` at 30 s reached
+    -1098.2 over 38 403 nodes and at 60 s reached -1001.2 over 7 619 — a worse
+    answer from twice the budget. Saturating the carve makes every second granted
+    beyond :data:`ROLE2_SATURATION_S` go to the search.
+
+    Default-off behind ``SolverTuning.budget_saturation`` (bound-changing,
+    CLAUDE.md §5); with the flag off this returns ``seconds`` unchanged, so the
+    legacy path is byte-identical.
+
+    Sound either way: every site this guards is optional *tightening*, and a
+    truncated tightening pass yields a weaker relaxation, never an invalid one.
+    """
+    if not current().budget_saturation:
+        return float(seconds)
+    return min(float(seconds), float(frac) * ROLE2_SATURATION_S)

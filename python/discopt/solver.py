@@ -47,6 +47,7 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
 from discopt.solver_tuning import reset_current as _reset_tuning
+from discopt.solver_tuning import saturate_role2 as _role2_saturate
 from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
@@ -11097,7 +11098,11 @@ def solve_model(
                         else:
                             _probe_remaining = time_limit - (time.perf_counter() - t_start)
                             _probe_budget = min(
-                                max(time_limit * 0.1, 2.0),
+                                # #1153: the comment above says this mirrors the
+                                # root OBBT heuristic — and it did, except for that
+                                # site's 15 s ceiling, so this grant alone tracked
+                                # the caller's budget upward forever.
+                                _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
                                 max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _probe = _mc_lp_relaxer.solve_at_node(
@@ -11174,7 +11179,12 @@ def solve_model(
                             _pool_chunks: list = []
                             _root_remaining = time_limit - (time.perf_counter() - t_start)
                             _pool_budget = min(
-                                max(time_limit * 0.25, 5.0),
+                                # #1153: the pool this separates is inherited by
+                                # EVERY node LP, so an uncapped grant here raises
+                                # the per-node cost in step with the caller's
+                                # budget and shrinks the tree the rest of it can
+                                # cover. Saturate the carve.
+                                _role2_saturate(max(time_limit * 0.25, 5.0), 0.25),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _pool_res = _mc_lp_relaxer.solve_at_node(
@@ -11250,7 +11260,12 @@ def solve_model(
                             _pool_chunks = []
                             _root_remaining = time_limit - (time.perf_counter() - t_start)
                             _pool_budget = min(
-                                max(time_limit * 0.25, 5.0),
+                                # #1153: the pool this separates is inherited by
+                                # EVERY node LP, so an uncapped grant here raises
+                                # the per-node cost in step with the caller's
+                                # budget and shrinks the tree the rest of it can
+                                # cover. Saturate the carve.
+                                _role2_saturate(max(time_limit * 0.25, 5.0), 0.25),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             # CUT-INHERIT-GRAD structure predicate: snapshot the
@@ -11867,7 +11882,12 @@ def solve_model(
     _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
     _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
     _pn_obbt_spent = 0.0
-    _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
+    # #1153: a cumulative IN-TREE grant, so an uncapped carve spends a fixed
+    # 60 % of however long the caller waits on bound tightening instead of on
+    # the search. Saturate it like the root carves.
+    _pn_obbt_budget_total = _role2_saturate(
+        time_limit * _PER_NODE_OBBT_BUDGET_FRAC, _PER_NODE_OBBT_BUDGET_FRAC
+    )
     if _per_node_obbt_enabled:
         from discopt._relax.obbt import obbt_tighten_root
 
@@ -14823,7 +14843,12 @@ def solve_model(
                         _rf_gap_ok = _rf_rel_gap > _ROOT_FIXPOINT_MIN_GAP
                 # R1 budget: ~10% of the time limit (loop converges in <=2 iters,
                 # S3 OBBT gets ~85% of it inside the loop). Hard deadline-bounded.
-                _rf_budget = min(max(time_limit * 0.10, 1.0), max(_remaining_budget(), 0.0))
+                # #1153: saturate the carve — the fixpoint's own round cap
+                # (<=2 iterations) is what should end it, not the caller's budget.
+                _rf_budget = min(
+                    _role2_saturate(max(time_limit * 0.10, 1.0), 0.10),
+                    max(_remaining_budget(), 0.0),
+                )
                 if _rf_gap_ok and _rf_budget > _DEADLINE_NODE_FLOOR_S:
                     _rf_res = run_root_fixpoint(
                         model,
