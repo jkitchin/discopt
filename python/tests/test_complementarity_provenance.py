@@ -518,3 +518,182 @@ def test_nl_imported_complementarity_survives_the_gdp_pass():
     out = reformulate_gdp(m, "big-m")
     assert out._complementarities == [pair]
     resolve_source_variables(out, pair, context="test")
+
+
+# ── review of PR #1149: each finding gets a test that fails before its fix ──
+
+
+def test_solve_model_refuses_an_unlowered_relation_too():
+    """HIGH 1. The refusal must sit at the boundary every solve passes through.
+
+    It lived only on ``Model.solve``, so the four in-tree callers of
+    ``solve_model`` (differentiable_solve, primal_heuristics) went straight past
+    it: this model returned ``optimal`` at ``z = 1``, and the MCP's ``z = u``
+    branch requires ``F <= 0`` while ``F = z + 1 = +2``. A certified point that
+    violates the declared relation is a CLAUDE.md §1 violation.
+    """
+    from discopt.solver import solve_model
+
+    m = dm.Model("bypass")
+    z = m.continuous("z", lb=-1, ub=1)
+    m.maximize(z)
+    m.mcp(z + 1.0, z, name="p0")
+
+    with pytest.raises(NotImplementedError, match="p0"):
+        solve_model(m, time_limit=5.0)
+    with pytest.raises(NotImplementedError, match="p0"):
+        m.solve(time_limit=5.0)
+
+
+def test_lowering_is_gated_on_declared_bounds_not_on_role():
+    """HIGH 2. ``Complementarity`` is public and constructible directly, so a
+    relation with box bounds and the default ``role=NCP_PAIR`` reaches the
+    lowerings. Gating on the label let it through and emitted ``g >= 0`` against
+    a declared ``lb = -1``, certifying a point the relation forbids."""
+    from discopt.mpec import reformulate_gdp as mpec_gdp
+    from discopt.mpec import reformulate_scholtes, reformulate_sos1
+
+    m = dm.Model("mislabelled")
+    z = m.continuous("z", lb=-1, ub=1)
+    w = m.continuous("w", lb=0, ub=1)
+    m.maximize(z + w)
+    boxed = Complementarity(z + w, z, "p0", g_bounds=(-1.0, 1.0))
+
+    assert boxed.role is ComplementarityRole.NCP_PAIR, "the label says NCP..."
+    assert boxed.is_box_mcp, "...but the declared bounds say box, and bounds decide"
+    for lower in (mpec_gdp, reformulate_sos1):
+        with pytest.raises(NotImplementedError, match="box-MCP"):
+            lower(m, [boxed])
+    with pytest.raises(NotImplementedError, match="box-MCP"):
+        reformulate_scholtes(m, [boxed], 0.1)
+
+
+def test_a_mislabelled_box_relation_is_skipped_by_bound_tightening():
+    """HIGH 2, same hole in ``tighten_complementarity_bounds``."""
+    from discopt.mpec import tighten_complementarity_bounds
+
+    m = dm.Model("tighten_mislabelled")
+    driver = m.continuous("driver", lb=1.0, ub=5.0)
+    partner = m.continuous("partner", lb=-3.0, ub=4.0)
+    mislabelled = Complementarity(driver, partner, "p0", g_bounds=(-3.0, 4.0))
+    assert mislabelled.role is ComplementarityRole.NCP_PAIR
+    assert tighten_complementarity_bounds(m, [mislabelled]) == 0
+    assert float(np.max(np.asarray(partner.ub))) == 4.0
+
+
+def test_a_model_carrying_a_relation_deep_copies_and_pickles():
+    """HIGH 3. The lowering mark was a list of ``weakref``s on the relation,
+    which made the model unpicklable and made ``deepcopy`` silently drop the
+    mark — so the clone then refused to solve, a regression against ``main``."""
+    import copy
+    import pickle
+
+    m, x, y, pair = _mpcc()
+
+    clone = copy.deepcopy(m)
+    assert unlowered_relations(clone) == [], (
+        "a deep copy carries the lowered rows, so it must carry the mark too"
+    )
+    assert clone.solve(time_limit=30.0).objective == pytest.approx(1.0, abs=1e-3)
+
+    pickle.loads(pickle.dumps(m))  # must not raise
+
+
+def test_two_unnamed_relations_do_not_collide():
+    """MEDIUM 4. The fallback name counted within the list handed to the
+    lowering, and ``Model.complementarity`` hands over exactly one relation — so
+    every unnamed declaration became ``compl0``."""
+    m = dm.Model("unnamed")
+    p = m.continuous("p", lb=0, ub=5)
+    q = m.continuous("q", lb=0, ub=5)
+    r = m.continuous("r", lb=0, ub=5)
+    t = m.continuous("t", lb=0, ub=5)
+    m.minimize(p + q + r + t)
+    m.complementarity(p, q)
+    m.complementarity(r, t)
+
+    names = [c.name for c in m._constraints if getattr(c, "name", None)]
+    assert len(names) == len(set(names)), f"colliding generated names: {names}"
+    assert {rel.name for rel in m._complementarities} == {"compl0", "compl1"}
+
+
+def test_bilevel_kkt_pairs_reach_the_model_so_their_provenance_is_live():
+    """MEDIUM 5. ``build_kkt`` labelled its pairs FROM_KKT with a parent, but
+    nothing under ``bilevel/`` recorded them on the model, so the rebuilding
+    passes never saw them and the labels were dead metadata."""
+    from discopt.bilevel.problem import BilevelProblem
+
+    m = dm.Model("bl")
+    xu = m.continuous("xu", lb=0, ub=10)
+    yl = m.continuous("yl", lb=0, ub=10)
+    m.minimize(xu + yl)
+    con = dm.Constraint(body=yl - xu, sense="<=", rhs=0.0, name="follow")
+
+    prob = BilevelProblem(
+        model=m,
+        upper_vars=[xu],
+        lower_vars=[yl],
+        lower_objective=yl,
+        lower_constraints=[con],
+        multiplier_ub=100.0,
+    )
+    prob.formulate(method="kkt", mpec_method="gdp")
+
+    assert m._complementarities, "the KKT pairs must be recorded on the model"
+    rel = m._complementarities[0]
+    assert rel.role is ComplementarityRole.FROM_KKT
+    assert rel.parent == "follow"
+    assert rel.is_lowered_into(m), "recorded after lowering, so solve must not refuse"
+
+    out = reformulate_gdp(m, "big-m")
+    assert rel in out._complementarities, "and the passes must now carry them"
+
+
+def test_flat_indices_are_element_accurate_for_an_indexed_operand():
+    """MEDIUM 6. Extending by the whole parent variable over-reported: a
+    consumer masking a residual by these indices would touch columns the
+    relation never reads."""
+    m = dm.Model("indexed")
+    x = m.continuous("x", shape=3, lb=0, ub=5)
+    y = m.continuous("y", lb=0, ub=5)
+    m.minimize(dm.sum(x) + y)
+    pair = m.complementarity(x[2], y, name="ix")
+
+    assert flat_source_indices(m, pair) == [2, 3]
+
+    # A bare reference to the same variable elsewhere widens it back — the safe
+    # direction, never narrower than the truth.
+    m2 = dm.Model("indexed_wide")
+    x2 = m2.continuous("x", shape=3, lb=0, ub=5)
+    y2 = m2.continuous("y", lb=0, ub=5)
+    m2.minimize(dm.sum(x2) + y2)
+    pair2 = m2.complementarity(x2[2] + dm.sum(x2), y2, name="wide")
+    assert flat_source_indices(m2, pair2) == [0, 1, 2, 3]
+
+
+def test_elements_of_a_scalar_relation_is_the_relation_itself():
+    """LOW 7. ``elements()`` documented "a scalar relation yields ``[self]``" but
+    returned a fresh child on every call, so the identity-keyed provenance this
+    module advertises did not hold for scalar relations."""
+    m, x, y, pair = _mpcc()
+    first, second = pair.elements(m), pair.elements(m)
+    assert first == [pair]
+    assert first[0] is pair
+    assert first[0] is second[0]
+
+
+def test_a_genuine_large_finite_bound_is_not_reinterpreted_as_infinite():
+    """LOW 8. The threshold was a private 1e19, which swallowed a real ``ub=2e19``
+    and reported it as ``+inf`` — turning a box relation into an NCP pair."""
+    m = dm.Model("bigbound")
+    z = m.continuous("z", lb=0, ub=2e19)
+    rel = box_mcp(z, z, lb=0.0, ub=2e19, name="s")
+    assert rel.g_bounds == (0.0, 2e19)
+    assert rel.role is ComplementarityRole.BOX_MCP
+
+    # The declared default (9.999e19) is still the sentinel, and still infinite.
+    m2 = dm.Model("defaulted")
+    a = m2.continuous("a", lb=0)
+    b = m2.continuous("b", lb=0, ub=10)
+    m2.minimize(a + b)
+    assert box_mcp(b, a, name="d").g_bounds == (0.0, np.inf)

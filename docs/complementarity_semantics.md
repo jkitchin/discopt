@@ -56,10 +56,18 @@ infinities first; comparing `ub == inf` literally would misclassify
 The general box form is **represented and not lowered** in this slice. It is a
 three-branch condition, so handing it to a two-branch lowering would encode a
 different feasible set and certify it. Both entry points refuse loudly instead:
-`mpec.reformulate_{gdp,sos1,scholtes}` raise `NotImplementedError`, and
-`Model.solve` refuses any model carrying a relation no lowering emitted rows for
-— a declared condition solved as if it were absent is a false certificate, not a
-missing feature.
+`mpec.reformulate_{gdp,sos1,scholtes}` raise `NotImplementedError`, and the
+**solver boundary** refuses any model carrying a relation no lowering emitted
+rows for — a declared condition solved as if it were absent is a false
+certificate, not a missing feature.
+
+That boundary is `solve_model`, not `Model.solve`. `Model.solve` checks too (so
+an alternate backend is refused before it dispatches), but the check must sit
+where every solve passes through: the differentiable-solve paths and the primal
+heuristics call `solve_model` directly, and with the guard only on `Model.solve`
+they certified `optimal` on a point the declared relation forbids. Use
+`mpec.require_all_relations_lowered(model, context=...)` from any new entry
+point.
 
 ## 3. What the relation carries
 
@@ -75,13 +83,26 @@ available: `Expression.__eq__` builds a `Constraint`.)
 | `f_bounds`, `g_bounds` | the bounds the *relation* declares — its semantics, not the operand's interval enclosure, which presolve moves |
 | `scale` | characteristic residual magnitude, for a meaningful tolerance when the operands carry unrelated physical magnitudes; `effective_scale` derives one from the declared bounds when it is not given |
 | `parent` | identity of the construct that generated the relation (the lower-level row for a KKT pair, the disjunction for a disjunct pair) |
-| `f_shape`, `g_shape`, `index`, `source` | shape/index information for vectorized relations: `elements(model)` yields one scalar relation per index, each with its multi-index and a back-pointer to the declared relation |
+| `f_shape`, `g_shape`, `index`, `source` | shape/index information for vectorized relations: `elements(model)` yields one scalar relation per index, each with its multi-index and a back-pointer to the declared relation (a scalar relation yields `[self]`, so the identity key holds there too) |
 | `lowering` + per-model marks | which method lowered it, and which models already carry the generated rows |
 
-`role` is *provenance*, never a lowering switch: a lowering branches on the
-declared operand bounds, never on the role. `FROM_DISJUNCT` is reserved
-vocabulary with no in-tree producer yet — exactly as `DisjunctionSemantics.OR`
-was defined by #1124 before any lowering emitted it.
+`role` is *provenance*, never a lowering switch. Every lowering and every bound
+rule branches on `Complementarity.is_symmetric_nonnegative` — the **declared
+bounds** — and never on `role`. This is not a stylistic preference: `Complementarity`
+is public and constructible directly, so a relation with `g_bounds=(-1, 1)` and
+the default `role=NCP_PAIR` reaches the lowerings. A `role`-gated refusal let
+exactly that through and emitted `g >= 0` against a declared `lb = -1`, certifying
+a point the relation forbids. A label can be wrong; the declared bounds *are* the
+semantics.
+
+`FROM_DISJUNCT` is reserved vocabulary with no in-tree producer yet — exactly as
+`DisjunctionSemantics.OR` was defined by #1124 before any lowering emitted it.
+
+The lowering marks live on the **model** (`Model._lowered_complementarities`, an
+identity set), not on the relation. They were weak references on the relation
+first, which made a model carrying one unpicklable and made `copy.deepcopy`
+silently drop the mark — so the clone then refused to solve. Model-owned state
+also states the fact more directly: *these are the relations whose rows I carry*.
 
 ## 4. Provenance is keyed to objects, never to indices or names
 
@@ -93,7 +114,11 @@ exactly when it becomes useful; and a name-keyed one matches a generated
   identity** and raises `ComplementarityProvenanceError` — naming the relation
   and the caller — when the model does not hold one of the source variables.
 * `flat_source_indices(model, pair)` derives backend-facing flat columns **on
-  demand at the solver boundary**; no index is ever persisted on the relation.
+  demand at the solver boundary**; no index is ever persisted on the relation. It
+  is element-accurate for a statically indexed operand (`x[2] ⊥ y` returns the two
+  columns it reads, not all of `x`), and widens to the whole variable for an index
+  it cannot resolve statically — conservative, never narrower than the truth, so a
+  consumer can rely on the set covering everything the relation reads.
 * An expression node the walker cannot descend into raises rather than
   contributing nothing, so resolution can never report success without having
   looked at the operand.
@@ -116,3 +141,14 @@ One guard was *removed* under this contract rather than kept:
 `binary_multilinear_reform` used to abstain whenever `_complementarities` was
 non-empty — a guard keyed on state every earlier pass emptied, so its premise
 evaporated at a pass boundary. Forwarding the relation set replaces it.
+
+
+## 6. Naming
+
+A relation's name is the base name of every row generated from it, so an unnamed
+relation must not reuse one. `_ensure_relation_name` assigns `compl{k}` unique
+against the model's existing relation and constraint names, at the single point
+every lowering funnels through (`_scalarize_pairs`) — not at a call site. The
+fallback previously counted *within the list handed to the lowering*, and
+`Model.complementarity` hands over exactly one relation, so every unnamed
+declaration on a model became `compl0` and emitted `compl0_f_nonneg` twice.

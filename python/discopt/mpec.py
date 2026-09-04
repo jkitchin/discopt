@@ -35,13 +35,13 @@ Example
 
 from __future__ import annotations
 
-import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, cast
 
 import numpy as np
 
+from discopt.constants import CONSTRAINT_INF
 from discopt.modeling.core import Expression, Model, Variable
 
 __all__ = [
@@ -55,6 +55,7 @@ __all__ = [
     "reformulate_gdp",
     "reformulate_scholtes",
     "reformulate_sos1",
+    "require_all_relations_lowered",
     "resolve_source_variables",
     "source_variables",
     "tighten_complementarity_bounds",
@@ -66,13 +67,19 @@ _INF = float("inf")
 
 # A declared bound at or beyond this magnitude is discopt's "unbounded"
 # sentinel, not a real bound: ``Model.continuous`` defaults to +/-9.999e19 and
-# the Rust LP layer's INF is 1e20. A box-MCP whose complementary variable is
-# left at the default must reduce to the NCP pair (l=0, u=+inf), so the
-# sentinel is normalized to an infinity here rather than compared literally —
-# comparing ``ub == inf`` would classify ``m.continuous("a", lb=0)`` as a
-# general box relation and refuse a model the symmetric lowering handles
-# exactly (CLAUDE.md's "INF is the sentinel 1e20" rule).
-_UNBOUNDED_SENTINEL = 1e19
+# the LP layer's INF is ``CONSTRAINT_INF`` (1e20). A box relation whose
+# complementary variable is left at that default must reduce to the NCP pair
+# (l=0, u=+inf), so the sentinel is normalized to an infinity rather than
+# compared literally — comparing ``ub == inf`` would classify
+# ``m.continuous("a", lb=0)`` as a general box and refuse a model the symmetric
+# lowering handles exactly (CLAUDE.md's "INF is the sentinel 1e20" rule).
+#
+# The threshold is the repo's shared ``CONSTRAINT_INF`` scaled just below the
+# default bound, NOT a fourth private copy: it was 1e19, which swallowed a
+# genuine finite ``ub=2e19`` and reported it as ``+inf`` (review of #1149,
+# LOW 8). Anything strictly below the default sentinel magnitude is now kept as
+# the finite bound the user declared.
+_UNBOUNDED_SENTINEL = 0.9999 * CONSTRAINT_INF  # 9.999e19 — the declared default
 
 
 def _normalize_bound(value: float) -> float:
@@ -214,17 +221,28 @@ class Complementarity:
     index: Optional[tuple[int, ...]] = None
     source: Optional["Complementarity"] = None
     lowering: Optional[str] = None
-    # Models whose rows already carry this relation's lowering. Weak, so a
-    # relation never keeps a discarded intermediate model alive, and keyed by
-    # model *object* rather than by ``id`` (which CPython recycles).
-    _lowered_into: list = field(default_factory=list, repr=False)
 
     # ── provenance queries ──
 
     @property
+    def is_symmetric_nonnegative(self) -> bool:
+        """True when the relation is the symmetric pair ``0 <= f ⊥ g >= 0``.
+
+        Read off the **declared bounds**, never off :attr:`role`. Role is
+        provenance — ``docs/complementarity_semantics.md`` §3 and
+        :class:`ComplementarityRole` both say so — and a lowering that branched
+        on it would be steered by a label. ``Complementarity`` is public and
+        constructible directly, so a relation with ``g_bounds=(-1, 1)`` and the
+        default ``role=NCP_PAIR`` reaches the lowerings; gating on the label let
+        that through and emitted ``g >= 0`` against a declared ``lb = -1``,
+        certifying a point the relation forbids (review of #1149, HIGH 2).
+        """
+        return self.f_bounds == (0.0, _INF) and self.g_bounds == (0.0, _INF)
+
+    @property
     def is_box_mcp(self) -> bool:
-        """True when this is a box-MCP relation (``g`` bounded away from ``[0, inf)``)."""
-        return self.role is ComplementarityRole.BOX_MCP
+        """True when the declared bounds are a general box, not the ``[0, inf)`` pair."""
+        return not self.is_symmetric_nonnegative
 
     @property
     def shape(self) -> Optional[tuple[int, ...]]:
@@ -272,15 +290,22 @@ class Complementarity:
         duplicates every generated row. The rebuilding passes propagate this
         mark when they carry a relation forward, so a lowered model's clone is
         not re-lowered either (#1147).
+
+        The mark lives on the **model** (``Model._lowered_complementarities``,
+        an identity set), not on the relation. It first lived here as a list of
+        ``weakref``s, which made a ``Model`` carrying a relation unpicklable
+        (``TypeError: cannot pickle 'weakref.ReferenceType'``) and made
+        ``copy.deepcopy`` silently drop the mark — so the clone then refused to
+        solve, a regression against a plain model copy on ``main`` (review of
+        #1149, HIGH 3). Model-owned state also says the thing more directly:
+        "these are the relations whose rows I already carry".
         """
         self.lowering = method
-        if not self.is_lowered_into(model):
-            self._lowered_into.append(weakref.ref(model))
+        _lowered_set(model).add(self)
 
     def is_lowered_into(self, model: Model) -> bool:
         """True when ``model`` already carries the rows generated from this relation."""
-        self._lowered_into = [r for r in self._lowered_into if r() is not None]
-        return any(r() is model for r in self._lowered_into)
+        return self in getattr(model, "_lowered_complementarities", ())
 
     # ── elementwise view ──
 
@@ -293,6 +318,20 @@ class Complementarity:
         relation after any number of rebuilding passes.
         """
         return _scalarize_pairs(model, [self])
+
+
+def _lowered_set(model: Model) -> set:
+    """The model's identity set of already-lowered relations, created on demand.
+
+    ``getattr``-with-default rather than a bare attribute read: a ``Model``
+    restored from a pickle written before this attribute existed, or one built
+    by a code path that bypasses ``__init__``, must not crash here.
+    """
+    got = getattr(model, "_lowered_complementarities", None)
+    if got is None:
+        got = set()
+        model._lowered_complementarities = got
+    return got
 
 
 def complementarity(
@@ -377,6 +416,32 @@ def box_mcp(
 # ───────────────────────── provenance resolution ──────────────────────────
 
 
+def _ensure_relation_name(model: Model, pair: Complementarity) -> str:
+    """Give ``pair`` a name unique on ``model``, and return it.
+
+    Every row generated from a relation is named from this, so an unnamed
+    relation must not reuse a name already in play. The fallback used to be
+    ``f"compl{i}"`` with ``i`` counted **within the list handed to the
+    lowering** — and ``Model.complementarity`` hands over exactly one relation,
+    so two unnamed declarations on the same model both became ``compl0`` and
+    emitted ``compl0_f_nonneg`` twice, silently (review of #1149, MEDIUM 4).
+
+    Fixing it here rather than at a call site fixes the class: every lowering
+    entry point scalarizes through :func:`_scalarize_pairs`, so the ``.nl``
+    importer, ``Model.complementarity``, and a hand-built pair handed to
+    ``reformulate_*`` all get a unique name from the same rule.
+    """
+    if pair.name is not None:
+        return pair.name
+    taken = {p.name for p in model._complementarities if p.name}
+    taken |= {c.name for c in model._constraints if getattr(c, "name", None)}
+    k = 0
+    while f"compl{k}" in taken or f"compl{k}_f_nonneg" in taken:
+        k += 1
+    pair.name = f"compl{k}"
+    return pair.name
+
+
 def _n_elements(shape: tuple[int, ...]) -> int:
     return int(np.prod(shape, dtype=np.int64)) if shape else 1
 
@@ -394,6 +459,40 @@ def source_variables(pair: Complementarity) -> list[Variable]:
     keep reporting "resolved" for a relation whose provenance is in fact broken
     — the probe-that-measures-nothing failure (CLAUDE.md §6).
     """
+    out: list[Variable] = []
+    for node in _walk_operands(pair):
+        if isinstance(node, Variable):
+            out.append(node)
+    return out
+
+
+def _walk_operands(pair: Complementarity):
+    """Yield every node of the relation's two operand graphs, each exactly once.
+
+    Iterative (a ``from_nl`` operand graph is deep enough to blow the recursion
+    limit) and deterministic in first-encounter order. An
+    :class:`IndexExpression` yields itself *and* its base, so a caller can see
+    both "this variable is read" and "only this element of it is read".
+    """
+    seen: set[int] = set()
+    stack: list[Expression] = [pair.g, pair.f]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        yield node
+        stack.extend(_operand_children(pair, node))
+
+
+def _operand_children(pair: Complementarity, node: Expression) -> tuple:
+    """The sub-expressions of ``node``, or ``()`` for a leaf.
+
+    A node type this dispatch does not know **raises** rather than returning
+    ``()``. A silent miss would leave resolution traversing less than the
+    operand actually reads, so it would keep reporting "resolved" for a relation
+    whose provenance is in fact broken (CLAUDE.md §6).
+    """
     from discopt.modeling.core import (
         BinaryOp,
         BooleanVar,
@@ -408,38 +507,26 @@ def source_variables(pair: Complementarity) -> list[Variable]:
         UnaryOp,
     )
 
-    out: list[Variable] = []
-    seen: set[int] = set()
-    stack: list[Expression] = [pair.g, pair.f]
-    while stack:
-        node = stack.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if isinstance(node, Variable):
-            out.append(node)
-        elif isinstance(node, (Constant, Parameter, BooleanVar)):
-            continue  # leaves that read no decision variable
-        elif isinstance(node, IndexExpression):
-            stack.append(node.base)
-        elif isinstance(node, (BinaryOp, MatMulExpression)):
-            stack.extend((node.right, node.left))
-        elif isinstance(node, UnaryOp):
-            stack.append(node.operand)
-        elif isinstance(node, SumExpression):
-            stack.append(node.operand)
-        elif isinstance(node, SumOverExpression):
-            stack.extend(reversed(list(node.terms)))
-        elif isinstance(node, (FunctionCall, CustomCall)):
-            stack.extend(reversed(list(node.args)))
-        else:
-            raise ComplementarityProvenanceError(
-                f"{pair.describe()}: cannot resolve provenance through expression node "
-                f"{type(node).__name__!r}. Add it to source_variables' dispatch — a node "
-                "silently skipped here would make every resolution check that follows "
-                "report success without having looked at the operand."
-            )
-    return out
+    if isinstance(node, (Variable, Constant, Parameter, BooleanVar)):
+        return ()
+    if isinstance(node, IndexExpression):
+        return (node.base,)
+    if isinstance(node, (BinaryOp, MatMulExpression)):
+        return (node.right, node.left)
+    if isinstance(node, UnaryOp):
+        return (node.operand,)
+    if isinstance(node, SumExpression):
+        return (node.operand,)
+    if isinstance(node, SumOverExpression):
+        return tuple(reversed(list(node.terms)))
+    if isinstance(node, (FunctionCall, CustomCall)):
+        return tuple(reversed(list(node.args)))
+    raise ComplementarityProvenanceError(
+        f"{pair.describe()}: cannot resolve provenance through expression node "
+        f"{type(node).__name__!r}. Add it to the operand walker's dispatch — a "
+        "node silently skipped here would make every resolution check that "
+        "follows report success without having looked at the operand."
+    )
 
 
 def resolve_source_variables(
@@ -471,18 +558,89 @@ def resolve_source_variables(
 
 
 def flat_source_indices(model: Model, pair: Complementarity) -> list[int]:
-    """Flat column indices of the relation's source variables in ``model``.
+    """Flat column indices the relation's operands actually read, in ``model``.
 
     Derived **on demand at the solver boundary**, never persisted on the
     relation: the flat layout changes whenever a pass appends auxiliaries or
     presolve eliminates a column, so an index stored at declaration time is a
     stale answer that still looks like a valid one (#1147 scope item 4).
+
+    Element-accurate for a statically indexed operand: ``x[2] ⊥ y`` over a
+    shape-``(3,)`` ``x`` returns the two columns it reads, not all four of
+    ``x`` and ``y``. Returning the whole parent variable was an
+    over-report — a consumer masking a residual by these indices would touch
+    columns the relation never reads (review of #1149, MEDIUM 6).
+
+    An index that cannot be resolved statically (a slice, a computed index)
+    falls back to the whole variable. That direction is deliberate: this is a
+    *conservative* answer, never a narrower one than the truth, so a consumer
+    can rely on the set covering everything the relation reads.
     """
+    resolved = resolve_source_variables(model, pair, context="flat_source_indices")
+    slots = _read_slots(pair)
     out: list[int] = []
-    for v in resolve_source_variables(model, pair, context="flat_source_indices"):
+    for v in resolved:
         off = model._flat_var_offset(v)
-        out.extend(range(off, off + v.size))
+        elems = slots.get(id(v))
+        out.extend(range(off, off + v.size) if elems is None else sorted(off + e for e in elems))
     return out
+
+
+def _read_slots(pair: Complementarity) -> dict[int, Optional[set[int]]]:
+    """Per-variable element slots the operands read, or ``None`` for "all of it".
+
+    A :class:`IndexExpression` over a variable with a statically resolvable
+    integer index contributes only the selected flat element; every other
+    appearance of that variable — a bare reference, a slice, a computed index —
+    widens it to the whole variable, which is the safe direction (see
+    :func:`flat_source_indices`).
+    """
+    from discopt.modeling.core import IndexExpression
+
+    slots: dict[int, Optional[set[int]]] = {}
+
+    def note(var, elem: Optional[int]) -> None:
+        if id(var) in slots and slots[id(var)] is None:
+            return  # already widened to the whole variable
+        if elem is None:
+            slots[id(var)] = None
+        else:
+            slots.setdefault(id(var), set()).add(elem)  # type: ignore[union-attr]
+
+    # Its own traversal rather than ``_walk_operands``: that walker descends
+    # from an ``x[2]`` into its base ``x``, which would then be noted as a bare
+    # reference and widen the slot straight back to the whole variable. Here an
+    # indexed leaf is consumed WITHOUT descending, so ``x[2]`` contributes one
+    # element while a bare ``x`` elsewhere in the same operand still widens it.
+    seen: set[int] = set()
+    stack: list[Expression] = [pair.g, pair.f]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
+            note(node.base, _static_flat_element(node.base, node.index))
+            continue
+        if isinstance(node, Variable):
+            note(node, None)
+            continue
+        stack.extend(_operand_children(pair, node))
+    return slots
+
+
+def _static_flat_element(var: Variable, index) -> Optional[int]:
+    """Flat element number ``var[index]`` selects, or ``None`` when not static."""
+    idx = (index,) if isinstance(index, (int, np.integer)) else index
+    if not (isinstance(idx, tuple) and idx and all(isinstance(i, (int, np.integer)) for i in idx)):
+        return None
+    shape = var.shape or (1,)
+    if len(idx) != len(shape):
+        return None
+    try:
+        return int(np.ravel_multi_index(tuple(int(i) for i in idx), shape))
+    except ValueError:
+        return None  # out of range — let the model's own guard report it
 
 
 def carry_complementarities(src: Model, dst: Model, *, pass_name: str) -> None:
@@ -522,6 +680,34 @@ def unlowered_relations(model: Model) -> list[Complementarity]:
     as if the condition were absent, and certified.
     """
     return [p for p in model._complementarities if not p.is_lowered_into(model)]
+
+
+def require_all_relations_lowered(model: Model, *, context: str) -> None:
+    """Refuse to solve a model that declares a relation no lowering emitted.
+
+    Call this at **every** solver entry point, not just the convenient one. The
+    guard first lived only in :meth:`Model.solve`, so the four in-tree callers of
+    :func:`discopt.solver.solve_model` — the differentiable-solve paths and the
+    primal heuristics — went straight past it and certified ``optimal`` on a
+    point the declared relation forbids: with ``z in [-1, 1]``, ``max z`` and
+    ``mcp(z + 1, z)``, ``solve_model`` returned ``z = 1`` (the MCP's ``z = u``
+    branch requires ``F <= 0``; ``F = +2``). That is a CLAUDE.md §1 violation
+    with no slack, so the check belongs at the boundary the solver actually
+    passes through (review of #1149, HIGH 1).
+    """
+    if not getattr(model, "_complementarities", None):
+        return
+    pending = unlowered_relations(model)
+    if not pending:
+        return
+    raise NotImplementedError(
+        f"{context}: model declares complementarity relation(s) with no lowering: "
+        + "; ".join(p.describe() for p in pending)
+        + ". The box-bounded MCP form is represented but not lowered (#1147), so "
+        "solving would silently drop the condition and certify a point it forbids. "
+        "Restrict the complementary variable to [0, +inf) and use "
+        "Model.complementarity, or reformulate the relation explicitly."
+    )
 
 
 # ─────────────────────────── scalarization ────────────────────────────
@@ -606,8 +792,8 @@ def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complem
     same decomposition without re-deriving it.
     """
     out: list[Complementarity] = []
-    for i, p in enumerate(pairs):
-        tag = p.name or f"compl{i}"
+    for p in pairs:
+        tag = _ensure_relation_name(model, p)
         fs = p.f_shape if p.f_shape is not None else _elem_shape(model, p.f)
         gs = p.g_shape if p.g_shape is not None else _elem_shape(model, p.g)
         p.f_shape, p.g_shape = fs, gs
@@ -615,7 +801,12 @@ def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complem
         ng = _n_elements(gs)
         n = max(nf, ng)
         if n == 1:
-            out.append(_element_of(p, p.f, p.g, tag, p.index))
+            # The relation IS its own single element. Returning a fresh child
+            # here broke the documented contract *and* the identity-keyed
+            # provenance this module advertises: ``elements(m)[0] is pair`` was
+            # False, and two calls returned two different objects (review of
+            # #1149, LOW 7).
+            out.append(p)
             continue
         if nf not in (1, n) or ng not in (1, n):
             raise ValueError(
@@ -654,9 +845,13 @@ def _require_lowerable(pairs: list[Complementarity], method: str) -> None:
     two-branch lowering would encode a *different* feasible set and certify it.
     #1147 represents the box form and deliberately does not lower it, so the
     refusal is loud rather than an approximation (CLAUDE.md §3).
+
+    The test is :attr:`Complementarity.is_symmetric_nonnegative` — the relation's
+    **declared bounds** — never its :attr:`~Complementarity.role`. See that
+    property for what gating on the label let through.
     """
     for p in pairs:
-        if p.role is ComplementarityRole.BOX_MCP:
+        if not p.is_symmetric_nonnegative:
             lo, hi = p.g_bounds
             raise NotImplementedError(
                 f"{p.describe()} is a box-MCP relation on [{lo:g}, {hi:g}] and has no "
@@ -802,11 +997,12 @@ def tighten_complementarity_bounds(model: Model, pairs: list[Complementarity]) -
     """
     fixed = 0
     for p in pairs:
-        if p.role is ComplementarityRole.BOX_MCP:
+        if not p.is_symmetric_nonnegative:
             # The implication "one side strictly positive => partner is 0" is a
-            # property of the *nonnegative* pair. On a box-MCP the partner is
+            # property of the *nonnegative* pair. On a box relation the partner is
             # pinned to a bound of [l, u], not to 0, so applying this rule would
-            # fabricate a bound and could cut the solution out of the box.
+            # fabricate a bound and could cut the solution out of the box. Keyed
+            # to the declared bounds, not to ``role`` (review of #1149, HIGH 2).
             continue
         f_var = p.f if isinstance(p.f, Variable) and p.f.size == 1 else None
         g_var = p.g if isinstance(p.g, Variable) and p.g.size == 1 else None

@@ -36,3 +36,22 @@ Run from the repository root.
   provide; CI is the authority on them.
 
 Zero failures in any file this change touches.
+
+## Review round (PR #1149)
+
+`verify_review.py` reproduces all eight review findings against the PR head and
+re-checks them after each fix (run it from the repository root). Every one
+reproduced exactly as reported; HIGH 1 in particular returned a **certified
+`optimal` at `z = 1`** on `max z s.t. mcp(z+1, z), z in [-1,1]` — the MCP's
+`z = u` branch requires `F <= 0` and `F = +2`.
+
+`panel_before2.json` / `panel_after2.json` re-run the bound-neutral panel with
+**both arms on the same idle host**, replacing the earlier pair: `panel_before`
+was measured under load and `panel_after2` on an idle box, so their unconverged
+rows are not comparable (13 rows differed across those conditions; the
+pre-review-fix arm `panel_after.json` matched `main` on almost all of them,
+which is the machine talking, not the code). Matched-conditions result: status
+and objective identical 66/66, every recorded field identical on all 45
+instances that converged in both arms, and the 4 remaining differences are
+unconverged rows whose node count varies with how much wall clock the fixed
+10 s budget buys.

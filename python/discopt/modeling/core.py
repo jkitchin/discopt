@@ -2762,9 +2762,15 @@ class Model:
         self._zero_spanning_factor_auxes: set[str] = set()
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
-        # Complementarity conditions added via ``complementarity()``; recorded
-        # for introspection and bound tightening (see ``discopt.mpec``).
+        # Complementarity conditions added via ``complementarity()``/``mcp()``;
+        # recorded for introspection and bound tightening (see ``discopt.mpec``),
+        # and forwarded by every model-rebuilding pass (#1147).
         self._complementarities: list = []
+        # The subset of those whose generated rows THIS model already carries —
+        # an identity set (``Complementarity`` is identity-hashed). Model-owned
+        # so it deep-copies and pickles with the model; it lived on the relation
+        # as weakrefs first, which broke both.
+        self._lowered_complementarities: set = set()
         # Decomposition annotations (Benders / Lagrangian). Populated by
         # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
         # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by
@@ -4747,23 +4753,14 @@ class Model:
         # A declared complementarity relation that no lowering emitted rows for
         # would be solved as if the condition were absent — and certified
         # optimal against a feasible set the model does not describe. Refuse
-        # loudly instead (#1147). Every relation ``Model.complementarity``
-        # records is lowered on the spot, and the rebuilding passes carry the
-        # mark forward, so this fires only on the box-MCP form this slice
-        # represents without lowering.
+        # loudly instead (#1147). Checked here so an alternate backend selected
+        # below (direct / amp / gurobi / mip-nlp) is refused too, and again in
+        # ``solve_model`` for the callers that reach the solver without going
+        # through this method.
         if self._complementarities:
-            from discopt.mpec import unlowered_relations
+            from discopt.mpec import require_all_relations_lowered
 
-            pending = unlowered_relations(self)
-            if pending:
-                raise NotImplementedError(
-                    "model declares complementarity relation(s) with no lowering: "
-                    + "; ".join(p.describe() for p in pending)
-                    + ". The box-bounded MCP form is represented but not lowered "
-                    "(#1147), so solving would silently drop the condition. Restrict "
-                    "the complementary variable to [0, +inf) and use "
-                    "Model.complementarity, or reformulate the relation explicitly."
-                )
+            require_all_relations_lowered(self, context="Model.solve")
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling

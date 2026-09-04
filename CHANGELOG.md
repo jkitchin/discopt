@@ -36,9 +36,21 @@ The release procedure that produces these entries is documented in
   symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
   that pair, so the two forms cannot diverge on the case they share). #1147
   **represents** the general box form and deliberately does not lower it; a model
-  carrying an unlowered relation is refused by `Model.solve` and by every
-  `mpec.reformulate_*` entry point, rather than being solved as though the
-  condition were absent and certified.
+  carrying an unlowered relation is refused by every `mpec.reformulate_*` entry
+  point and by the solver boundary — `solve_model`, so the callers that never go
+  through `Model.solve` (the differentiable-solve paths, the primal heuristics)
+  are refused too — rather than being solved as though the condition were absent
+  and certified. Which form a relation is, is read off its **declared bounds**
+  (`Complementarity.is_symmetric_nonnegative`), never off its `role`: the role is
+  provenance, and `Complementarity` is public, so a directly-constructed relation
+  with box bounds and the default `role=NCP_PAIR` must not be able to talk its way
+  into a two-branch lowering.
+
+- **The lowering marks are model state**, `Model._lowered_complementarities` — an
+  identity set of the relations whose generated rows that model already carries.
+  Keeping them on the relation as weak references would have made any model
+  carrying a relation unpicklable and made `copy.deepcopy` silently drop the mark,
+  so the clone refused to solve.
 
 ### Changed
 
@@ -49,18 +61,24 @@ The release procedure that produces these entries is documented in
   condition is materialized into ordinary rows and the list was empty. The
   relation set is now forwarded explicitly, so there is nothing left to protect;
   the SOS/indicator and builder-block clauses of the guard are unchanged.
-- **`from_nl` names each `.nl` complementarity relation `nl_compl{k}`** (#1147).
-  An unnamed relation fell back to `compl0` for *every* pair (the fallback counts
-  within the single pair handed to the lowering), so a multi-pair `.nl` file
-  generated colliding constraint names; the name also makes a relation
-  identifiable in a provenance error without parsing generated identifiers.
+- **Unnamed complementarity relations get a name unique on the model** (#1147).
+  The fallback counted within the list handed to the lowering, and
+  `Model.complementarity` hands over exactly one relation — so every unnamed
+  declaration became `compl0` and emitted `compl0_f_nonneg` twice, silently. The
+  name is now assigned at the single point every lowering funnels through, so the
+  `.nl` importer (`nl_compl{k}`), the fluent API and a hand-built pair all get a
+  unique one; it also makes a relation identifiable in a provenance error without
+  parsing generated identifiers.
+- **`bilevel`'s KKT complementarity pairs are recorded on the model**, so the
+  `FROM_KKT` role and the lower-level row named in `parent` are live provenance
+  the rebuilding passes carry, rather than labels nothing ever read (#1147).
 - No behavior change to solving. Per CLAUDE.md's bound-neutral regime, over the
-  66-instance in-repo `.nl` corpus at a 10 s limit, status and objective are
-  identical on 66/66 instances, and status, objective, bound, `node_count` and
-  `gap_certified` are identical on all 44 instances that converged. The two
-  `node_count` differences are both on unconverged (`time_limit`/`feasible`)
-  runs and reproduce *within* an arm across interleaved repeats, i.e. they are
-  wall-clock artifacts, not a bound change.
+  66-instance in-repo `.nl` corpus at a 10 s limit with both arms measured on the
+  same idle host: status and objective identical on 66/66 instances, and every
+  recorded field (status, objective, bound, `node_count`, `gap_certified`)
+  identical on all 45 instances that converged in both arms. The four remaining
+  differences are all unconverged (`time_limit`/`feasible`) rows whose node count
+  varies with how much wall clock the fixed budget buys — not a bound change.
 
 - **`solver="surrogate"`: the initial design is sized from the dimension alone,
   `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,
