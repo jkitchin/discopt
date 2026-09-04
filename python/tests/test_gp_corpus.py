@@ -196,9 +196,85 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
         # never-reached certification, not the assertions.
         result = model.solve(solver="bb", time_limit=5.0)
     assert result.status in ("optimal", "feasible")
-    assert result.objective == pytest.approx(2.0, abs=1e-4)
-    # The classic path does not set the convex single-NLP fast-path flag.
+    # The classic path does not set the convex single-NLP fast-path flag. This is
+    # what the test is actually about, and it holds today.
     assert result.convex_fast_path is False
+    # #1039: the objective assertion that used to live here now has its own test
+    # below -- it fails, and it fails for a soundness reason, so it is pinned as a
+    # strict xfail rather than having its tolerance widened past the defect.
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1039: reported objective is BELOW the true global minimum. The error is "
+        "the absolute constraint tolerance amplified by 1/denominator, so it is "
+        "unbounded as the denominator shrinks. Fix is in the Rust incumbent path."
+    ),
+)
+def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
+    """A reported objective must be the objective AT the returned point.
+
+    #1039 bucket E listed this as an accuracy miss --
+    ``assert 1.998683979470214 == 2.0 +- 1.0e-04`` -- and the obvious repair
+    would have been to widen the tolerance to 2e-3. That would have masked a
+    soundness defect.
+
+    ``minimize x/y + y/x`` over a positive box has global minimum exactly 2 by
+    AM-GM: no feasible point attains less. The solve returns ``status=optimal``
+    with ``objective=1.998683979470214``, which is 1.3e-3 BELOW that minimum --
+    a value no feasible point achieves. The returned point itself is fine
+    (x=0.0014052502011193727, y=0.0014073586395206353, inside the box, true
+    objective 2.000002247829649); it is the reported number that is wrong, by
+    -1.318268e-03 against its own incumbent.
+
+    Mechanism, measured (``scratchpad/issue1039/probe_gp2.py``, ``probe_gp3.py``):
+    the error is the absolute feasibility tolerance divided by the quotient's
+    denominator. Only the division case misbehaves -- an affine objective and a
+    *bilinear* one (which also needs a McCormick auxiliary) both agree with the
+    oracle to 4e-16, so this is specific to the quotient reformulation, not to
+    auxiliaries in general. Scaling the box floor confirms the 1/y law, with
+    ``|delta| * denominator`` flat at ~1.9e-6, i.e. ~2x the 1e-6 absolute
+    tolerance for the two quotient terms:
+
+        box floor   denominator   delta            |delta|*denominator
+        1e-3        0.00140525    -1.318268e-03    1.852e-06
+        1e-2        0.0106986     -1.850776e-04    1.980e-06
+        1e-1        8.13524       -4.360956e-13    3.548e-12
+        1e+0        479.758       -4.440892e-16    2.131e-13
+
+    (the last two land at large denominators, so the amplification vanishes).
+
+    A trace over the whole solve found ZERO Python frames returning the bad
+    value, so it is produced in the Rust B&B incumbent path and passed through --
+    which is why this is pinned here rather than fixed in this PR: the fix is a
+    bound-changing solver change and needs the §5 differential regime, not a
+    test-repair PR.
+
+    ``strict=True`` on purpose: when the incumbent objective is recomputed from
+    the original expression at the incumbent point (the general fix -- one
+    evaluation, and it can only make the number correct, since the point is
+    feasible and its true objective is a valid upper bound), this test XPASSes
+    and fails the suite, which is the signal to remove the xfail.
+    """
+    model = _monomial_balance()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = model.solve(solver="bb", time_limit=5.0)
+
+    x, y = model._variables[0], model._variables[1]
+    xv, yv = float(result.value(x)), float(result.value(y))
+    # Oracle written outside the system: plain Python arithmetic on the returned
+    # point, so a shared mistake in the solver cannot make this pass.
+    oracle = xv / yv + yv / xv
+
+    assert oracle >= 2.0 - 1e-9, f"the returned point itself is infeasible: f={oracle}"
+    assert result.objective == pytest.approx(oracle, abs=1e-9), (
+        f"reported objective {result.objective!r} is not attained by its own "
+        f"incumbent ({xv!r}, {yv!r}), whose true objective is {oracle!r} "
+        f"(delta {result.objective - oracle:+.6e})"
+    )
 
 
 def test_unknown_solver_is_rejected() -> None:
