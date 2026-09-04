@@ -1,5 +1,7 @@
 # #1147 — complementarity provenance: the measurements
 
+Run everything from the repository root.
+
 * `repro_1147.py` — the entry experiment. Prints the pair count before/after each
   rebuilding pass. On `main`: `after=0` for GDP (big-m/hull/mbigm),
   `expand_integer_products` and `factorable_reformulate`; `binary_multilinear`
@@ -7,21 +9,47 @@
 * `panel_1147.py` — the bound-neutral panel over the 66-instance in-repo `.nl`
   corpus. Asserts the loaded module and a version marker (CLAUDE.md §8), prints
   per-instance progress (§10) and an executed-solve count (§6).
-  `panel_before.json` / `panel_after.json` are its two arms at a 10 s limit
-  (`marker: false` / `marker: true`). Diff: status and objective identical
-  66/66; every recorded field identical on all 44 converged instances.
-* `probe_two.py` — the two instances whose `node_count` differed on the panel
-  (`bchoco07`, `tls2`). Both are unconverged (`time_limit` / `feasible`) runs,
-  and both values reproduce *within* an arm across interleaved repeats
-  (2 rounds x 3 reps per arm), so the panel difference is a wall-clock artifact,
-  not a bound change (CLAUDE.md §9).
+  Usage: `python -u scratchpad/i1147/panel_1147.py <arm-name> <out.json> [time_limit]`.
+* `probe_two.py` — re-runs the instances whose `node_count` moved between panel
+  arms, several times per arm, to separate a real bound change from a wall-clock
+  artifact on a time-limited run (CLAUDE.md §9).
+* `verify_review.py` / `verify_review2.py` — reproduce the findings of the two
+  PR #1149 reviews and re-check them after each fix.
 
-Run from the repository root.
+## The panel that stands
+
+`panel_before3.json` / `panel_after3.json` — `main` vs. the fixed head, 10 s per
+instance, **both arms on the same boot of an idle host** (`marker: false` /
+`marker: true` respectively):
+
+* status identical **66/66**;
+* every recorded field (status, objective, bound, `node_count`, `gap_certified`)
+  identical on all **45** instances that converged in both arms;
+* the 7 differing rows are all unconverged (`time_limit` / `feasible`) ones whose
+  node count tracks how much wall clock the fixed budget buys — not a bound change.
+
+### Two superseded pairs, and why
+
+Two earlier arm-pairs were measured and then **retracted** (CLAUDE.md §11); their
+raw JSON is not kept, since only the pair above supports a claim.
+
+1. The first pair compared arms measured under *different* machine load — the
+   container restarted between them — so their unconverged rows were never
+   comparable. 13 rows moved across those conditions, and the pre-review-fix arm
+   tracked `main` on almost all of them: the host talking, not the code. It had
+   been reported as "identical 66/66, 44 converged, 2 `node_count` differences".
+2. The second pair was matched (both arms idle) but on a boot that has since been
+   replaced, so it could not speak for the current head. It had been reported as
+   "45 converged, 4 differences".
+
+The lesson, recorded because it cost three rounds: an A/B over a **wall-clock
+budget** is only comparable when both arms run on the same host in the same
+state, and only its *converged* rows can carry a bound-neutrality claim at all.
 
 ## Full non-slow suite
 
-`pytest python/tests/ -m "not slow" -n 4` on this branch: **8 failed, 9119 passed,
-149 skipped, 9 xfailed, 2 xpassed** (638 s). Triaged:
+`pytest python/tests/ -m "not slow" -n 4`: **8 failed, 9119 passed, 149 skipped,
+9 xfailed, 2 xpassed** (638 s). Triaged, none in a file this change touches:
 
 * 4 are load-induced flakes of the 4-way parallel run — `test_lp_huge_finite_box_937`
   and the three `test_decomposition_adversarial::test_rand_lagrangian_dual_is_valid_lower_bound`
@@ -32,49 +60,24 @@ Run from the repository root.
   `test_75_tape_nlp_evaluator::test_solve_degrades_to_jax_when_pounce_is_missing`,
   `test_relax_compiler_convexity_units::TestDifferentiableSolvePaths::test_ipopt_backend_active_constraint_gradient`,
   `test_issue_1066_master_bound_inversion::test_lp_nlp_bb_refuses_a_master_bound_above_its_incumbent`.
-  They depend on optional backends (cyipopt / POUNCE behaviour) this container does not
-  provide; CI is the authority on them.
+  They depend on optional backends (cyipopt / POUNCE) this container does not provide;
+  CI is the authority on them.
 
-Zero failures in any file this change touches.
+## What the reviews found
 
-## Review round (PR #1149)
+`verify_review.py` — all eight findings of the first review, each reproduced
+before being fixed. HIGH 1 returned a **certified `optimal` at `z = 1`** on
+`max z s.t. mcp(z+1, z), z in [-1,1]`, where the MCP's `z = u` branch requires
+`F <= 0` and `F = +2`.
 
-`verify_review.py` reproduces all eight review findings against the PR head and
-re-checks them after each fix (run it from the repository root). Every one
-reproduced exactly as reported; HIGH 1 in particular returned a **certified
-`optimal` at `z = 1`** on `max z s.t. mcp(z+1, z), z in [-1,1]` — the MCP's
-`z = u` branch requires `F <= 0` and `F = +2`.
-
-`panel_before2.json` / `panel_after2.json` re-run the bound-neutral panel with
-**both arms on the same idle host**, replacing the earlier pair: `panel_before`
-was measured under load and `panel_after2` on an idle box, so their unconverged
-rows are not comparable (13 rows differed across those conditions; the
-pre-review-fix arm `panel_after.json` matched `main` on almost all of them,
-which is the machine talking, not the code). Matched-conditions result: status
-and objective identical 66/66, every recorded field identical on all 45
-instances that converged in both arms, and the 4 remaining differences are
-unconverged rows whose node count varies with how much wall clock the fixed
-10 s budget buys.
-
-## Second review round (PR #1149, review 5115268644)
-
-`verify_review2.py` reproduces both blocking findings against head `1bd4641` and
-re-checks them after the fix:
+`verify_review2.py` — the two blocking findings of review 5115268644:
 
 * **Blocking 1** — `flat_source_indices` read offsets off `Variable._index` (the
-  declaring model's position). A target model holding a two-element `x` and a
+  *declaring* model's position). A target model holding a two-element `x` and a
   scalar `y` as `[y, x]` returned `[0, 1, 1]`; its true layout is `[1, 2, 0]`.
   Reproduced exactly, including the predicted `[0, 1, 1]`.
-* **Blocking 2** — the lowering *method* was a plain field on the shared
-  relation. GDP into `m1` then SOS1 into `m2` left it reading `"sos1"`; and
+* **Blocking 2** — the lowering *method* was a plain field on the shared relation.
+  GDP into `m1` then SOS1 into `m2` left it reading `"sos1"`; and
   `carry_complementarities` took any non-`None` value as proof that `src` was
   lowered, so an unlowered `src` handed `dst` a lowered mark for rows neither
-  model carried — walking past the solve guard added for the first review's
-  HIGH 1.
-
-`panel_before3.json` / `panel_after3.json` are the bound-neutral panel for the
-fixed head, both arms on the same boot of an idle host (the container had
-restarted since the `*2` pair, so those are superseded as well): status
-identical 66/66, every recorded field identical on all 45 instances converged in
-both arms, and the 7 differing rows are all unconverged (`time_limit`/`feasible`)
-ones whose node count tracks how much wall clock the fixed 10 s budget buys.
+  model carried — walking past the solve guard added for the first review's HIGH 1.

@@ -1,10 +1,17 @@
 """Repeat the two panel instances that differed, to separate a real bound change
-from a wall-clock artifact on a time-limited run."""
-import sys, json
+from a wall-clock artifact on a time-limited run.
+
+Usage:  python -u scratchpad/i1147/probe_two.py [arm-label]
+
+``arm-label`` only labels the output lines, so before/after arms stay
+distinguishable when they are interleaved; it defaults to "arm".
+"""
+import sys
+
 import discopt.mpec as mpec
 from discopt.modeling.core import from_nl
 
-arm = sys.argv[1]
+arm = sys.argv[1] if len(sys.argv) > 1 else "arm"
 print(f"[{arm}] marker present: {hasattr(mpec, 'carry_complementarities')}", flush=True)
 n = 0
 for name in ("bchoco07", "tls2"):
