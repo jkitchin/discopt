@@ -11766,19 +11766,11 @@ def solve_model(
             return True
         _remaining = _deadline - time.perf_counter()
         # No budget left to absorb even one typical (already-compiled) solve.
-        #
-        # #1153: "absorb" used to mean 100 % of what is left, so a heuristic
-        # costing the entire remainder was still admitted — and crossing that
-        # threshold then costs more than the budget increment that unlocked it.
-        # Measured on heatexch_gen2 (3 reps, zero spread): at 5 s the feasibility
-        # pump is refused here and the tree explores 7 nodes; at 10 s it is
-        # admitted, its sub-NLPs spend 6.4 s of the 10 s budget, return no
-        # incumbent, and the tree explores 3. Dividing by the admitted share turns
-        # "does it fit at all?" into "does it fit the way an optional stage
-        # should?"; the share is 1.0 (this exact rule) with the flag off.
-        if _remaining <= max(
-            _DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _heuristic_entry_share()
-        ):
+        # (#1153 bounds how much such a stage may then SPEND — see
+        # ``_heur_stage_deadline`` — rather than tightening this entry rule: a
+        # productive heuristic usually succeeds early, so capping its clock keeps
+        # the win that refusing it outright throws away.)
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost()):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
@@ -11791,6 +11783,40 @@ def solve_model(
             if _compile_est > 0.0 and _remaining < _compile_est:
                 return False
         return True
+
+    def _heur_stage_deadline() -> float:
+        """The deadline a *finder*-role primal heuristic runs under (#1153).
+
+        These stages were handed ``_deadline`` — the whole SOLVE deadline — so
+        what they cost was set by the caller's ``time_limit`` rather than by the
+        stage. That is #1116's role-1 clock doing a role-2 job, and #1153
+        measured the harm: on ``heatexch_gen2`` (3 reps, zero spread) a 5 s budget
+        never admits the feasibility pump and explores 7 nodes, while a 10 s
+        budget admits it, its two sub-NLPs spend 6.4 s of the 10 s, they return
+        NO incumbent, and the tree explores 3. Doubling the budget bought one more
+        heuristic that ate 64 % of it and produced nothing.
+
+        Bounding the stage's own clock to a share of what is left fixes that by
+        construction and without an estimate: the stage can never take more than
+        its share, so the search always keeps the rest, at every budget. It is
+        also strictly better than refusing the stage — measured on ``tspn12``,
+        where the pump is PRODUCTIVE (it finds 262.647 against 282.244) and
+        refusing it loses that incumbent, while capping its clock does not.
+
+        Returns ``_deadline`` unchanged — the legacy behaviour, byte-identical —
+        when the share is 1.0 (``DISCOPT_HEUR_ENTRY_SHARE`` off).
+
+        Sound: a truncated primal heuristic changes which incumbent is found and
+        when, never the dual bound or the certificate (§0.3 heuristic-policy).
+        """
+        _share = _heuristic_entry_share()
+        if _share >= 1.0:
+            return _deadline
+        _now = time.perf_counter()
+        return min(
+            _deadline,
+            _now + max(_DEADLINE_NODE_FLOOR_S, _share * (_deadline - _now)),
+        )
 
     def _hess_compile_refuses(_ev) -> bool:
         """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
@@ -13558,7 +13584,7 @@ def solve_model(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=_deadline,
+                        deadline=_heur_stage_deadline(),
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_fp)
                     if fp_sol is not None:
@@ -13627,7 +13653,7 @@ def solve_model(
                                 max_rounds=5,
                                 backend=_resolve_heuristic_backend(nlp_solver),
                                 evaluator=evaluator,
-                                deadline=_deadline,
+                                deadline=_heur_stage_deadline(),
                             )
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
