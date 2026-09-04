@@ -38,6 +38,7 @@ from discopt.modeling.core import (
     Model,
     SelectorActivation,
     SelectorCardinality,
+    SumOverExpression,
     UnaryOp,
     Variable,
     VarType,
@@ -541,8 +542,24 @@ def _extract_body_coeffs(
                     if not rc:
                         return {k: ro * v for k, v in lc.items()}, lo * ro
                 return None
-        if isinstance(e, (SumExpression, SumOverExpression)):
-            # Skip complex sum forms
+        if isinstance(e, SumOverExpression):
+            # #1039: fold the indexed summation term by term. ``_is_linear``
+            # admits this node, so the extractor must be able to read it —
+            # returning None here would put an accepted row back on the
+            # silently-dropped path this fix exists to close.
+            acc: dict = {}
+            off_total = 0.0
+            for t in e.terms:
+                sub = _extract(t)
+                if sub is None:
+                    return None
+                sub_coeffs, sub_off = sub
+                for k, v in sub_coeffs.items():
+                    acc[k] = acc.get(k, 0.0) + v
+                off_total += sub_off
+            return acc, off_total
+        if isinstance(e, SumExpression):
+            # Reduction over an array-valued operand: not a single row.
             return None
         return None
 
@@ -1436,6 +1453,18 @@ def _is_linear(expr: Expression) -> bool:
             return False
         # ** is always nonlinear
         return False
+    if isinstance(expr, SumOverExpression):
+        # #1039: the indexed summation Σ[t0, t1, ...] is linear when every term
+        # is. Omitting this case made ``_is_linear`` reject the ``exactly-one``
+        # row that ``make_disjunct``/``add_disjunction`` emits, and LOA then
+        # dropped that row from its master MILP (``solve_gdpopt_loa`` only
+        # forwards rows this predicate accepts). The master was free to propose
+        # "no disjunct active", whose fixed-integer NLP is infeasible, and LOA
+        # returned ``status="unknown"`` on a trivially feasible model.
+        # ``SumExpression`` (a reduction over an array-valued operand, with an
+        # optional axis) stays a conservative False: its vector semantics are not
+        # something ``_extract_body_coeffs`` can turn into a single row.
+        return all(_is_linear(t) for t in expr.terms)
     if isinstance(expr, FunctionCall):
         return False
     return False
