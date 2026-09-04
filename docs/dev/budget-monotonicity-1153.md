@@ -102,6 +102,12 @@ heuristic may consume 100 % of the remainder and still be admitted.
 `solver_tuning.heuristic_entry_share()` turns that into a bounded share (25 %),
 returning `1.0` — the legacy rule, byte-identical — with the flag off.
 
+The flag additionally hands the two feasibility-pump call sites a stage-scoped
+deadline (`_heur_stage_deadline`) instead of `_deadline`, the whole *solve*
+deadline. That second half was tried **first, on its own, and measured inert**
+(§6.4); it is kept because it is sound, free, and turned up one incumbent the
+legacy arm missed, but the entry rule is what carries the effect.
+
 **Soundness.** Every gated call is a primal heuristic, so refusing one changes
 which incumbent is found and when, never the dual bound or the certificate
 (§0.3 heuristic-policy). `DISCOPT_ROOT_BUDGET_GATE=0` still disables the whole
@@ -253,4 +259,35 @@ Two causes of the residual, both identified and neither yet fixed:
   success-weighted contingent — is the next step, and would let a productive
   pump keep running while starving an unproductive one.
 
-Neither flag is proposed for default-ON on this evidence.
+### 6.4 The stage-deadline form, measured and falsified on its own
+
+Handing the pump a share-sized deadline instead of `_deadline` is the more
+attractive fix on paper — it bounds the cost by construction, needs no cost
+estimate, and does not deny a productive pump its win. It does not work:
+
+| @10 s, nodes | OFF | ON (stage deadline only) |
+|---|---|---|
+| `heatexch_gen2` | 3, 3 | 3, 3 |
+| `tspn12` | 3, 3 | 3, 3 |
+| `tspn10` | 3, 3 | 3, 3 |
+
+ON equals OFF on 15 of 16 cells across 5/10/20/40 s (the exception is a *gain*:
+`heatexch_gen2` at 20 s found `825180.5` where the legacy arm found none). The
+reason is visible in the NLP probe: the pump's sub-NLPs **overrun their own
+`max_wall_time`** (3.27 s against a 3.0 s grant), and the pump polls its deadline
+only between rounds, so a share-sized deadline does not bind on round one. A
+deadline is not a bound on a stage whose unit of work already exceeds it.
+
+The entry rule is therefore retained as the mechanism, with the clock cap kept
+alongside it.
+
+### 6.5 Status
+
+Neither flag is proposed for default-ON on this evidence, and #1153 is **not
+closed**. What is settled: the harm class reproduces here; its cause is
+identified and measured to the individual heuristic call; one intervention moves
+it and one does not; and the inventory, ratchet and monotonicity panel are in
+place so the next attempt starts from measurement rather than from scratch. What
+remains is a rule that separates the productive pump from the wasted one — the
+improver role's success weighting, `3 * (found + 1) / (calls + 1)`, extended to
+the finder role — and a corpus-wide panel of it.

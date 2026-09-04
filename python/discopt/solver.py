@@ -11766,11 +11766,28 @@ def solve_model(
             return True
         _remaining = _deadline - time.perf_counter()
         # No budget left to absorb even one typical (already-compiled) solve.
-        # (#1153 bounds how much such a stage may then SPEND — see
-        # ``_heur_stage_deadline`` — rather than tightening this entry rule: a
-        # productive heuristic usually succeeds early, so capping its clock keeps
-        # the win that refusing it outright throws away.)
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost()):
+        #
+        # #1153: "absorb" meant 100 % of what is left, so a heuristic costing the
+        # whole remainder was still admitted — and crossing that threshold then
+        # costs more than the budget increment that unlocked it. Measured on
+        # heatexch_gen2 (3 reps, zero spread): at 5 s the feasibility pump is
+        # refused here and the tree explores 7 nodes; at 10 s it is admitted, its
+        # sub-NLPs spend 6.4 s of the 10 s budget, return NO incumbent, and the
+        # tree explores 3. Dividing by the admitted share turns "does it fit at
+        # all?" into "does it fit the way an optional stage should?".
+        #
+        # Bounding the stage's own clock instead (``_heur_stage_deadline``) was
+        # tried first and MEASURED INERT: the pump's sub-NLPs overrun their own
+        # ``max_wall_time`` grant (3.27 s against 3.0 s), and the pump polls its
+        # deadline only between rounds, so a share-sized deadline does not bind on
+        # round one. heatexch_gen2 at 10 s stayed at 3 nodes in both arms. The cap
+        # is kept — it is sound, costs nothing, and did turn up an incumbent at
+        # 20 s that the legacy arm missed — but the entry rule is what works.
+        #
+        # The share is 1.0 (this exact rule, byte-identical) with the flag off.
+        if _remaining <= max(
+            _DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _heuristic_entry_share()
+        ):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
