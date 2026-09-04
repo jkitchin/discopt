@@ -267,8 +267,10 @@ class CategoryBenchmarkRunner:
                 )
             elapsed = time.monotonic() - start
 
-            # Map status through the shared table (#1148); unmapped -> UNKNOWN.
-            bench_status = DISCOPT_STATUS_MAP.get(result.status, SolveStatus.UNKNOWN)
+            # Shared table (#1148) plus this runner's own "unbounded" entry;
+            # unmapped -> UNKNOWN, which fails closed.
+            status_map = DISCOPT_STATUS_MAP | {"unbounded": SolveStatus.UNBOUNDED}
+            bench_status = status_map.get(result.status, SolveStatus.UNKNOWN)
 
             return SolveResult(
                 instance=problem.name,

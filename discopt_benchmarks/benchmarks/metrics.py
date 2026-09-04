@@ -51,19 +51,25 @@ class SolveStatus(Enum):
 
 
 #: discopt ``SolveResult.status`` -> benchmark :class:`SolveStatus`. One table so
-#: the in-process runner, the subprocess worker and the category runner cannot
-#: drift on what a status means. Anything absent maps to ``UNKNOWN`` at the call
-#: site, which fails closed.
+#: the in-process runner and the subprocess worker cannot drift on what a status
+#: means -- the same solve must not score differently under ``--subprocess``.
+#: Runners that see extra spellings (GDPLib's Pyomo/GAMS terminations) extend it
+#: rather than re-spelling the shared entries.
+#:
+#: Deliberately the exact set the panel runners already mapped, PLUS the #1148
+#: local statuses. Widening it further (``"unbounded"``, ``"error"``) would move
+#: rows between report outcome buckets on every existing panel -- a real
+#: improvement, but not this change's, and not one to fold into a baseline diff
+#: silently. Anything absent maps to ``UNKNOWN`` at the call site, which fails
+#: closed.
 DISCOPT_STATUS_MAP = {
     "optimal": SolveStatus.OPTIMAL,
     "feasible": SolveStatus.FEASIBLE,
     "infeasible": SolveStatus.INFEASIBLE,
-    "unbounded": SolveStatus.UNBOUNDED,
     "time_limit": SolveStatus.TIME_LIMIT,
     "node_limit": SolveStatus.TIME_LIMIT,
-    "iteration_limit": SolveStatus.TIME_LIMIT,
-    "error": SolveStatus.ERROR,
     # #1148: a local result is not a certificate and must never be scored as one.
+    # Both counters of the release gate skip a LOCAL row.
     "local_optimal": SolveStatus.LOCAL,
     "local_infeasible": SolveStatus.LOCAL,
 }

@@ -70,7 +70,10 @@ if TYPE_CHECKING:
 
 # discopt status string -> benchmark SolveStatus. The shared table plus the
 # Pyomo/GAMS spellings this runner also sees (``maxtimelimit``/``maxiterations``).
-_STATUS_MAP = dict(DISCOPT_STATUS_MAP) | {
+_STATUS_MAP = DISCOPT_STATUS_MAP | {
+    "unbounded": SolveStatus.UNBOUNDED,
+    "error": SolveStatus.ERROR,
+    # Pyomo/GAMS spellings this runner also sees.
     "maxtimelimit": SolveStatus.TIME_LIMIT,
     "maxiterations": SolveStatus.TIME_LIMIT,
 }
