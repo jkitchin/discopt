@@ -118,6 +118,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+from discopt.mpec import ComplementarityProvenanceError, carry_complementarities
 
 # A monomial is a frozenset of scalar-variable keys ``(var._index, elem)``;
 # the empty frozenset is the constant term. Binary factors collapse via set
@@ -912,12 +913,19 @@ def _poly_terms(poly: dict, ctx: _ExpandCtx, aux: dict[frozenset, Variable]) -> 
 
 def _model_carries_unsupported_state(model: Model) -> bool:
     """True when the model holds structure this pass does not copy into the
-    rebuilt model (SOS/indicator objects in ``_constraints``, complementarity
-    conditions, builder-side linear blocks/objectives). Firing on such a model
-    would silently drop that structure, so the pass abstains instead."""
+    rebuilt model (SOS/indicator objects in ``_constraints``, builder-side
+    linear blocks/objectives). Firing on such a model would silently drop that
+    structure, so the pass abstains instead.
+
+    ``_complementarities`` is deliberately **not** on this list any more (#1147).
+    The guard used to key on it, but every earlier rebuilding pass emptied that
+    list, so the premise evaporated at a pass boundary: after GDP lowering the
+    condition is materialized into ordinary rows and the list is empty, so the
+    guard fired only on a model the pass would have handled correctly anyway.
+    The relation set is now forwarded explicitly by
+    :func:`~discopt.mpec.carry_complementarities` — which raises rather than
+    drops — so there is nothing left for the guard to protect."""
     if any(not isinstance(c, Constraint) for c in model._constraints):
-        return True
-    if getattr(model, "_complementarities", None):
         return True
     if getattr(model, "_builder_linear_blocks", None):
         return True
@@ -936,6 +944,10 @@ def reformulate_binary_multilinear(model: Model) -> Model:
     pass never regresses a model it cannot handle exactly."""
     try:
         return _reformulate(model)
+    except ComplementarityProvenanceError:
+        # A relation that cannot be resolved against the rebuilt model is a
+        # broken provenance chain, not an out-of-scope model: raise (#1147).
+        raise
     except _Unsupported:
         return model
     except Exception:  # pragma: no cover - defensive
@@ -1122,6 +1134,12 @@ def _reformulate(model: Model) -> Model:
         "_bml_heuristic",
         _heuristic_meta(model, ctx, mu, objvar_row, obj_body, con_bodies, _flat_off, n_orig_flat),
     )
+    # Complementarity provenance (#1147). This pass Fortet-linearizes binary
+    # monomials in constraint/objective *bodies*; a relation's source operands
+    # are not rewritten and still read the shared Variable objects, so the
+    # relation set forwards intact. This forwarding is what replaced the
+    # ``_complementarities`` clause of ``_model_carries_unsupported_state``.
+    carry_complementarities(model, new_model, pass_name="binary-multilinear linearization")
     return new_model
 
 

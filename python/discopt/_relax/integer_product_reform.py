@@ -50,6 +50,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+from discopt.mpec import ComplementarityProvenanceError, carry_complementarities
 from discopt.solver_tuning import _env_flag
 
 from .factorable_reform import _collect_mul_factors
@@ -912,7 +913,16 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
         # (like the warm-start spec) — read back via ``getattr``.
         setattr(new_model, "_ipx_config_indicators", frozenset(exp.config_indicator_flats))
         setattr(new_model, "_ipx_config_counts", frozenset(exp.config_count_flats))
+        # Complementarity provenance (#1147): the rebuilt model shares the
+        # original Variable objects, so every declared relation still resolves
+        # against it — forward the relation set explicitly rather than dropping
+        # it, and let an unresolvable one raise past the defensive handler below.
+        carry_complementarities(model, new_model, pass_name="integer-product expansion")
         return new_model
+    except ComplementarityProvenanceError:
+        # Never swallowed into "returned the model unchanged": a dropped relation
+        # is exactly the silent failure #1147 exists to stop.
+        raise
     except Exception:
         return model
 

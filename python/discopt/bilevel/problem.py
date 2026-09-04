@@ -431,6 +431,15 @@ class BilevelProblem:
                     reformulate_gdp(self.model, kkt.comp_pairs)
                 else:
                     reformulate_sos1(self.model, kkt.comp_pairs)
+                # Record the relations ON THE MODEL so their provenance is live
+                # (#1147). ``build_kkt`` labels each pair FROM_KKT with the
+                # lower-level row as its parent, but nothing under ``bilevel/``
+                # touched ``model._complementarities``, so the rebuilding passes
+                # never saw these pairs and the labels were inert — dead metadata
+                # on the only in-tree path that produces it (review of #1149,
+                # MEDIUM 5). Recorded AFTER the lowering above, so the relations
+                # are already marked lowered and ``solve`` does not refuse them.
+                self.model._complementarities.extend(kkt.comp_pairs)
         else:  # strong_duality
             self._gate_convexity()
             extra = self._follower_bound_constraints() if self.include_follower_bounds else []

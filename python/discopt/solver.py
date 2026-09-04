@@ -7410,6 +7410,15 @@ def solve_model(
         Contains solution values, objective, gap, node count, and
         per-layer profiling times (Rust, JAX, Python).
     """
+    # --- Complementarity relations must be lowered before we solve (#1147) ---
+    # This is the boundary every solve passes through, including the callers
+    # that never touch ``Model.solve`` (differentiable_solve, primal_heuristics).
+    # A declared-but-unlowered relation would otherwise be solved as if absent
+    # and certified against a feasible set the model does not describe.
+    from discopt.mpec import require_all_relations_lowered
+
+    require_all_relations_lowered(model, context="solve_model")
+
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
     # JAX.  ``discopt/__init__.py`` sets that env var at import time, so x64 is

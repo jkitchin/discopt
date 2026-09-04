@@ -10,7 +10,86 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Complementarity is a first-class relation with durable source provenance**
+  (#1147, RFC #1123 slice 1). `mpec.Complementarity` was three fields (`f`, `g`,
+  `name`) recorded on `Model._complementarities` and then discarded by **every**
+  model-rebuilding pass — measured on `main`, `before=1 / after=0` for GDP
+  lowering under `big-m`/`hull`/`mbigm`, integer-product expansion and factorable
+  reformulation alike. All that survived a lowering was string-level: the pair
+  name baked into generated identifiers (`_gdp_aux_disj_pair0_0_0`). A source
+  complementarity residual computed against such a model would have measured the
+  *relaxed row* rather than the source product, printed a small number, and been
+  believed. The relation now carries its source operands, the bounds it declares
+  on them, a residual scale, a role (`ComplementarityRole`: NCP pair / box MCP /
+  generated-from-KKT / generated-from-disjunct), the generating parent's
+  identity, shape/index for vectorized pairs, and per-model lowering state; each
+  of the four rebuilding passes forwards the relation set explicitly and raises
+  `ComplementarityProvenanceError` — naming the relation and the pass — rather
+  than dropping one it cannot resolve. Resolution is by **object identity**, and
+  backend-facing flat indices are derived at the solver boundary
+  (`flat_source_indices`) instead of persisted through it, because presolve/FBBT
+  renumber columns exactly when a stored index would be needed. They are prefix
+  sums over the **target model's** variable list, not `Variable._index` (the
+  declaring model's position): a relation's operands are shared objects, so a
+  model holding them in a different order needs its own layout, and a provenance
+  query must never write shared state to get the right answer.
+- **The box-bounded MCP form**, `Model.mcp(F, z, lb=..., ub=...)` /
+  `mpec.box_mcp`: a residual paired with a variable on `[l, u]`, with the
+  symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
+  that pair, so the two forms cannot diverge on the case they share). #1147
+  **represents** the general box form and deliberately does not lower it; a model
+  carrying an unlowered relation is refused by every `mpec.reformulate_*` entry
+  point and by the solver boundary — `solve_model`, so the callers that never go
+  through `Model.solve` (the differentiable-solve paths, the primal heuristics)
+  are refused too — rather than being solved as though the condition were absent
+  and certified. Which form a relation is, is read off its **declared bounds**
+  (`Complementarity.is_symmetric_nonnegative`), never off its `role`: the role is
+  provenance, and `Complementarity` is public, so a directly-constructed relation
+  with box bounds and the default `role=NCP_PAIR` must not be able to talk its way
+  into a two-branch lowering.
+
+- **Lowering state is model state**, `Model._lowered_complementarities` — an
+  identity map from relation to the method that lowered it into *that* model, read
+  via `pair.is_lowered_into(model)` / `pair.lowering_in(model)`. A relation is
+  shared, so neither the mark nor the method can live on it: weak references on the
+  relation made any model carrying one unpicklable and made `copy.deepcopy`
+  silently drop the mark (the clone then refused to solve), and a plain `lowering`
+  field held only whichever lowering ran last, so a relation lowered by GDP into
+  one model and SOS1 into another stopped describing the first model's rows.
+  `carry_complementarities` propagates the source model's own method, and only when
+  the source actually carries the rows — keying it on "lowered somewhere" let an
+  unlowered source hand the destination a mark for rows neither model had,
+  bypassing the solve guard.
+
 ### Changed
+
+- **`binary_multilinear_reform`'s abstain guard no longer keys on
+  `_complementarities`** (#1147). The guard existed so the pass would not drop
+  structure it does not copy — but every earlier rebuilding pass emptied that
+  list, so its premise evaporated at a pass boundary: after GDP lowering the
+  condition is materialized into ordinary rows and the list was empty. The
+  relation set is now forwarded explicitly, so there is nothing left to protect;
+  the SOS/indicator and builder-block clauses of the guard are unchanged.
+- **Unnamed complementarity relations get a name unique on the model** (#1147).
+  The fallback counted within the list handed to the lowering, and
+  `Model.complementarity` hands over exactly one relation — so every unnamed
+  declaration became `compl0` and emitted `compl0_f_nonneg` twice, silently. The
+  name is now assigned at the single point every lowering funnels through, so the
+  `.nl` importer (`nl_compl{k}`), the fluent API and a hand-built pair all get a
+  unique one; it also makes a relation identifiable in a provenance error without
+  parsing generated identifiers.
+- **`bilevel`'s KKT complementarity pairs are recorded on the model**, so the
+  `FROM_KKT` role and the lower-level row named in `parent` are live provenance
+  the rebuilding passes carry, rather than labels nothing ever read (#1147).
+- No behavior change to solving. Per CLAUDE.md's bound-neutral regime, over the
+  66-instance in-repo `.nl` corpus at a 10 s limit with both arms measured on the
+  same idle host: status and objective identical on 66/66 instances, and every
+  recorded field (status, objective, bound, `node_count`, `gap_certified`)
+  identical on all 45 instances that converged in both arms. The four remaining
+  differences are all unconverged (`time_limit`/`feasible`) rows whose node count
+  varies with how much wall clock the fixed budget buys — not a bound change.
 
 - **`solver="surrogate"`: the initial design is sized from the dimension alone,
   `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,

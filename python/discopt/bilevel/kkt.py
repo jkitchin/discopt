@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from discopt.bilevel.symbolic_diff import diff
 from discopt.modeling.core import Constraint, Expression, Model, Variable
-from discopt.mpec import Complementarity, complementarity
+from discopt.mpec import Complementarity, ComplementarityRole, complementarity
 
 
 @dataclass
@@ -82,7 +82,18 @@ def build_kkt(
             mu = model.continuous(f"{prefix}_mu{i}", lb=0.0)  # μ_i >= 0
             comp_pairs.append(
                 # 0 <= μ_i ⊥ (-g_i) >= 0 :  μ_i >= 0, -g_i >= 0, μ_i·g_i = 0
-                complementarity(mu, -body, name=f"{prefix}_compl{i}")
+                #
+                # The pair is GENERATED, not user-declared, so it says so
+                # (#1147): ``parent`` names the lower-level row it came from, so
+                # a residual reported against it after several rebuilding passes
+                # is attributable to that row rather than to a bare index.
+                complementarity(
+                    mu,
+                    -body,
+                    name=f"{prefix}_compl{i}",
+                    role=ComplementarityRole.FROM_KKT,
+                    parent=con.name or f"lower_constraint_{i}",
+                )
             )
         elif con.sense == "==":
             mu = model.continuous(f"{prefix}_nu{i}")  # free multiplier (default bounds)

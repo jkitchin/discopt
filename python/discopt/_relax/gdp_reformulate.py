@@ -49,6 +49,7 @@ from discopt.modeling.core import (
     _SOSConstraint,
     _wrap,
 )
+from discopt.mpec import carry_complementarities
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,13 @@ def reformulate_gdp(
         else:
             # Regular Constraint -- keep as-is
             new_model._constraints.append(c)
+
+    # Complementarity provenance (#1147). The rows above materialize a declared
+    # ``0 <= f _|_ g >= 0`` into a selector binary and big-M/hull rows; the
+    # *relation* — its source operands, its bounds, its scale — lives only on
+    # ``_complementarities`` and was dropped here, leaving the pair name baked
+    # into generated identifiers as the sole surviving trace. Forward it.
+    carry_complementarities(model, new_model, pass_name="gdp lowering")
 
     return new_model
 
