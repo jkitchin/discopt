@@ -1283,7 +1283,7 @@ class _DecomposedProblem:
 def _decompose_model(model: Model) -> _DecomposedProblem:
     """Separate model into linear/nonlinear constraints, identify integers."""
     from discopt._relax.convexity import classify_oa_cut_convexity
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
     from discopt._tape_nlp_evaluator import make_evaluator
 
     # #1063: go through the canonical funnel, NOT ``NLPEvaluator(model)``.
@@ -1345,15 +1345,16 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
-        if _is_linear(c.body):
-            coeffs = _extract_body_coeffs(c.body, model, n_vars)
-            if coeffs is not None:
-                c_vec, off = coeffs
-                linear_A_rows.append(c_vec)
-                linear_b_rows.append(-off)
-                linear_senses.append(c.sense)
-            else:
-                nonlinear_indices.append(eval_idx)
+        # #1039: single-gate on the extractor, which answers with the row
+        # itself. See the companion comment in ``gdpopt_loa`` — the previous
+        # ``_is_linear`` pre-gate under-reported on ``SumOverExpression`` and
+        # pushed a genuinely linear row into the nonlinear set.
+        coeffs = _extract_body_coeffs(c.body, model, n_vars)
+        if coeffs is not None:
+            c_vec, off = coeffs
+            linear_A_rows.append(c_vec)
+            linear_b_rows.append(-off)
+            linear_senses.append(c.sense)
         else:
             nonlinear_indices.append(eval_idx)
         all_constraint_senses.append(c.sense)

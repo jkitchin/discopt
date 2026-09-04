@@ -361,13 +361,49 @@ def test_solve_gauss_newton_matches_full_nonlinear_ls():
         m.minimize(expr)
         return m, p, q
 
+    def sse(pv, qv):
+        """Oracle written outside the system: plain numpy on the returned point."""
+        return float(np.sum((pv * np.exp(qv * t) - y) ** 2))
+
     sols = {}
     for gn in (False, True):
         m, p, q = build()
         r = m.solve(gauss_newton=gn, time_limit=120, skip_convex_check=True)
         assert getattr(m, "_gauss_newton_hessian") is gn
-        assert r.status == "optimal"
-        sols[gn] = (r.value(p), r.value(q))
+
+        # #1039: this used to assert ``r.status == "optimal"``. Both arms return
+        # ``feasible`` with ``node_count == 0`` and ``bound is None``, and raising
+        # the budget 120 -> 600 changes nothing (probe_gn.py), so the root
+        # relaxation structurally yields no dual bound for a sum-of-squares-of-
+        # exponentials objective -- it is not a budget miss. Demanding
+        # certification the solver cannot deliver on this instance made the test
+        # fail for a reason unrelated to what it tests.
+        #
+        # The status assertion is therefore SOUNDNESS-shaped rather than
+        # completeness-shaped: an honest ``feasible`` is accepted, a claim of
+        # ``optimal`` is not accepted on faith.
+        assert r.status in ("optimal", "feasible"), f"gn={gn}: unexpected status {r.status}"
+        if r.status == "optimal":
+            assert r.bound is not None, f"gn={gn}: 'optimal' with no dual bound"
+            assert r.bound <= r.objective + 1e-9, (
+                f"gn={gn}: certificate inverted, bound {r.bound} > objective {r.objective}"
+            )
+
+        pv, qv = float(r.value(p)), float(r.value(q))
+        # The reported objective must be the one attained AT the returned point.
+        # (#1039 found a case where it was not -- see test_gp_corpus.py's
+        # test_bb_reported_objective_is_attained_by_its_own_incumbent.)
+        assert r.objective == pytest.approx(sse(pv, qv), rel=1e-9), (
+            f"gn={gn}: reported objective {r.objective!r} is not attained by its "
+            f"own point (p={pv!r}, q={qv!r}, true SSE {sse(pv, qv)!r})"
+        )
+        # Both backends must actually recover the generating parameters (2.0, 1.3),
+        # which is the substantive claim and is much stronger than a status check.
+        assert sse(pv, qv) < 1e-4, f"gn={gn}: poor fit, SSE {sse(pv, qv)}"
+        sols[gn] = (pv, qv)
+
+    # The point of the test: Gauss-Newton and the exact Hessian land on the same
+    # least-squares solution. Measured agreement is ~1e-12, far inside this.
     assert np.allclose(sols[False], sols[True], atol=1e-3)
 
 
