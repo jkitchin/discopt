@@ -500,6 +500,28 @@ elsewhere.
    §8.1/§8.2 remain un-circumvented: this changes the build's *precondition*, it does
    not truncate a native solve or add a Rust LP deadline.
 
+   **UPDATE (2026-09-04, #1152 — the fork is dissolved for root SETUP too, and the
+   "irreducible floor" claim above is now retired for this class.)** #832 graduated
+   `root_build_deadline` default-ON (2026-08-17) and gave the anytime build to the
+   *fallback*. #1152 measured what was left: the root-setup phases that run BEFORE
+   the fallback poll a deadline between their LP solves but not inside their
+   relaxation **build**, and each clamps its budget to ALL of the live remainder —
+   including the `_ROOT_FALLBACK_RESERVE_S` slice the fallback needs. Measured on
+   `casctanks` at `time_limit=5` (in-repo, quiet 4-core Linux): root OBBT enters its
+   round `build_milp_relaxation` at t=4.39 s with 0.61 s left and spends 1.85 s in
+   it, and the #654 short-circuit then logs `fallback grant 0.000s of the 1.500s
+   reserve` — wall 1.29x **and** `bound=None` from ONE defect, which is exactly the
+   pair of "contradictory" contracts #1152 opened on. Landed behind
+   `DISCOPT_ROOT_SETUP_BUILD_DEADLINE`: one root-setup deadline
+   (`time_limit` − reserve) threaded as the `build_deadline` of the root OBBT round
+   build, the root LP probe and both root cut pools, plus `_setup_remaining_budget`
+   so those phases' own clamps stop consuming the reserve. Same solve after: 5.35 s
+   (1.07x) with bound 1.2584. The native-kernel spec build is *declined* past the
+   deadline rather than truncated — its two builds' row sets must correspond, so a
+   prefix of each need not describe the same relaxation. See
+   `docs/dev/1152-time-limit-root-setup-contract-2026-09-04.md` for the decision
+   (option 3: `time_limit` is a hard wall with an anytime bound) and the panel.
+
 ---
 
 ## §9. Task table (verdicts land here)
