@@ -209,8 +209,28 @@ def test_nvs06_cut_inherit_certifies_like_default():
     stats = res.solver_stats or {}
     # The cold-path pool populated (the #551 extension under test)...
     assert stats.get("pool/size", 0) >= 1, f"cold-path pool did not populate: {stats}"
-    # ...and the destabilized root solve recovered by dropping it (the fix).
-    assert stats.get("pool/dropped_nodes", 0) >= 1, f"pool-drop retry never fired: {stats}"
+    # ...and was actually inherited from, which is the coverage that matters here.
+    assert stats.get("pool/inherited_nodes", 0) >= 1, f"pool never inherited: {stats}"
+    # #1039: this used to require the pool-drop retry to FIRE
+    # (``pool/dropped_nodes >= 1``). The retry is a *runtime recovery* for a
+    # destabilized root solve, and nvs06's root solve is no longer destabilized:
+    # measured on this branch, flag-ON returns ``optimal 1.7703124999998527`` with
+    # ``bound == objective`` in 5 nodes, pool size 3, 2 inherited nodes / 6
+    # inherited rows, and ``pool/dropped_nodes`` absent — while flag-OFF returns
+    # the identical objective and bound in the identical 5 nodes. Demanding the
+    # recovery fire made the test fail whenever the code was HEALTHY.
+    #
+    # This is the same disposition the C-44 sibling below already records for
+    # nvs22 ("the re-verify is now INERT ... kept only as defense-in-depth"), so
+    # assert inertness as a regression guard: if the drop starts firing on nvs06
+    # again, the root solve has destabilized and that is worth failing on. The
+    # mechanism itself is covered directly by
+    # ``test_pool_drop_retry_recovers_the_node_bound`` and
+    # ``test_pool_infeasible_reverify_recovers_false_fathom`` above, which assert
+    # ``_pool_stats["dropped_nodes"] == 1`` against a forced failure.
+    assert stats.get("pool/dropped_nodes", 0) == 0, (
+        f"pool-drop retry fired on nvs06 — the root solve destabilized again: {stats}"
+    )
 
 
 _CORPUS = Path.home() / "Dropbox" / "projects" / "discopt-minlp-benchmark" / "minlplib" / "nl"
@@ -286,7 +306,20 @@ def test_tspn05_cut_inherit_certifies_via_lazy_reseparation():
     assert res.objective == pytest.approx(191.25521, rel=1e-5)
     assert res.bound is not None and res.bound <= res.objective + 1e-6
     stats = res.solver_stats or {}
+    # The pool is genuinely carrying the solve — that is the contract this test
+    # is really pinning (inheritance-only used to stall at 190.28 and lose the
+    # certificate at budget; it now certifies).
+    assert stats.get("pool/inherited_nodes", 0) >= 1, f"pool never inherited: {stats}"
+    # #1039: this used to require a re-separation trigger to FIRE. Re-separation
+    # exists to break a *bound stall*, and tspn05 no longer stalls: measured on
+    # this branch, flag-ON returns ``optimal 191.2552078446688`` (oracle
+    # 191.25521) with bound 191.25476327248148 in 43 nodes, pool size 186, 39
+    # inherited nodes / 1833 inherited rows — and neither
+    # ``pool/stall_reseparations`` nor ``pool/lazy_reseparations`` present.
+    # Inheritance alone now reaches the certificate, so requiring the stall-breaker
+    # to engage failed on healthy code. Same disposition as the nvs06 drop-retry
+    # above and the C-44 nvs22 re-verify below.
     assert (
-        stats.get("pool/stall_reseparations", 0) >= 1
-        or stats.get("pool/lazy_reseparations", 0) >= 1
-    ), f"no re-separation trigger fired on the stalling class: {stats}"
+        stats.get("pool/stall_reseparations", 0) == 0
+        and stats.get("pool/lazy_reseparations", 0) == 0
+    ), f"tspn05 needed a re-separation trigger again — the bound stall returned: {stats}"
