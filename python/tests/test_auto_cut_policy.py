@@ -84,15 +84,52 @@ def test_auto_is_the_default():
 
 
 @pytest.mark.slow
-def test_auto_matches_best_family_and_preserves_optimum():
-    # Box-QP: auto should match PSD's node count.
-    base_b = _qcqp(6, 0, constrained=False).solve(cuts="manual", time_limit=120)
-    auto_b = _qcqp(6, 0, constrained=False).solve(cuts="auto", time_limit=120)
-    assert abs(float(base_b.objective) - float(auto_b.objective)) < 1e-3
-    assert auto_b.node_count < base_b.node_count / 2
+@pytest.mark.parametrize(("n", "seed"), [(6, 0), (10, 0), (10, 2)])
+@pytest.mark.parametrize("constrained", [False, True])
+def test_auto_matches_best_family_and_preserves_optimum(n, seed, constrained):
+    """Auto reproduces the family its structural rule selects, exactly.
 
-    # Constrained QCQP: auto should match RLT's node count.
-    base_c = _qcqp(6, 3, constrained=True).solve(cuts="manual", time_limit=120)
-    auto_c = _qcqp(6, 3, constrained=True).solve(cuts="auto", time_limit=120)
-    assert abs(float(base_c.objective) - float(auto_c.objective)) < 1e-3
-    assert auto_c.node_count < base_c.node_count / 2
+    #1039: this test is named for that claim but never asserted it. Both halves
+    compared ``auto`` against the *cut-free* baseline through an invented
+    ``< base/2`` ratio -- neither PSD nor RLT was ever solved, so "matches best
+    family" went untested. Worse, the box-QP half failed that ratio (111 vs a
+    demanded < 90.5 against a 181-node baseline), which meant the constrained
+    half below it never executed at all.
+
+    Measured over 8 draws (``scratchpad/issue1039/probe_auto_family.py``), auto
+    reproduces its selected family's node count **exactly**, 8/8:
+
+        n=6  s0 box     base=181  auto=111  psd=111  rlt=181
+        n=6  s0 constr  base= 13  auto= 11  psd= 13  rlt= 11
+        n=6  s3 constr  base=143  auto= 45  psd=121  rlt= 45
+        n=10 s0 box     base= 83  auto= 23  psd= 23  rlt= 83
+        n=10 s0 constr  base= 83  auto= 77  psd= 29  rlt= 77
+        n=10 s2 box     base= 39  auto= 19  psd= 19  rlt= 39
+        n=10 s2 constr  base=125  auto= 63  psd= 51  rlt= 63
+
+    So the assertion is now equality against the selected family -- the policy's
+    actual promise, deterministic, and strictly stronger than any ratio.
+
+    Note what the RLT rows show and this test deliberately does NOT assert: on
+    the two ``n=10`` constrained draws the structurally-selected family (RLT, 77
+    / 63) is beaten by the one the policy declined (PSD, 29 / 51). That is the
+    documented structural rule behaving as specified, not a defect -- both
+    families are sound and the optimum is preserved either way -- but "best
+    family" is a claim about the *rule*, not a measured optimality guarantee.
+    """
+    base = _qcqp(n, seed, constrained).solve(cuts="manual", time_limit=120)
+    auto = _qcqp(n, seed, constrained).solve(cuts="auto", time_limit=120)
+    selected = _qcqp(n, seed, constrained).solve(
+        **({"rlt_cuts": True} if constrained else {"psd_cuts": True}), time_limit=120
+    )
+
+    # Cut families are purely a performance choice: the optimum is preserved.
+    assert abs(float(base.objective) - float(auto.objective)) < 1e-3
+    assert abs(float(base.objective) - float(selected.objective)) < 1e-3
+
+    # The policy reproduces the family its structural rule picks.
+    family = "RLT" if constrained else "PSD"
+    assert auto.node_count == selected.node_count, (
+        f"n={n} seed={seed} constrained={constrained}: auto {auto.node_count} != "
+        f"{family} {selected.node_count} -- auto did not select {family}"
+    )

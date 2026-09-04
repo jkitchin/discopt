@@ -541,8 +541,28 @@ def _extract_body_coeffs(
                     if not rc:
                         return {k: ro * v for k, v in lc.items()}, lo * ro
                 return None
-        if isinstance(e, (SumExpression, SumOverExpression)):
-            # Skip complex sum forms
+        if isinstance(e, SumOverExpression):
+            # #1039: fold the indexed summation term by term. This is what
+            # lets the OA/LOA row extraction see the ``exactly-one`` row that
+            # ``make_disjunct``/``add_disjunction`` emits; returning None here
+            # dropped that row from the master MILP, which was then free to
+            # propose "no disjunct active" — a fixed-integer NLP that is
+            # infeasible, so LOA reported ``status="unknown"`` on a trivially
+            # feasible model. Succeeding here is safe for every caller because
+            # the returned ``(c_vec, offset)`` IS the linearity witness.
+            acc: dict = {}
+            off_total = 0.0
+            for t in e.terms:
+                sub = _extract(t)
+                if sub is None:
+                    return None
+                sub_coeffs, sub_off = sub
+                for k, v in sub_coeffs.items():
+                    acc[k] = acc.get(k, 0.0) + v
+                off_total += sub_off
+            return acc, off_total
+        if isinstance(e, SumExpression):
+            # Reduction over an array-valued operand: not a single row.
             return None
         return None
 
@@ -1436,6 +1456,23 @@ def _is_linear(expr: Expression) -> bool:
             return False
         # ** is always nonlinear
         return False
+    # #1039: ``SumOverExpression`` is deliberately NOT admitted here, even
+    # though the indexed summation Σ[t0, t1, ...] *is* linear when every term
+    # is. ``_is_linear`` is a shared gate with ~10 consumers, and several of
+    # them read a True as "and I can therefore take this apart": the hull
+    # substitution family (``_hull_linear_substitute`` → ``_substitute_vars``
+    # → ``_collect_variables``) and ``_bound_expression`` have no case for this
+    # node, so admitting it made hull emit ``Σ[3 terms] - (0 * y0) <= 0`` — the
+    # disjunct body imposed GLOBALLY, with the selector coefficient collapsed
+    # to zero and the disaggregated variables never created. That cut off the
+    # other mode and returned a false ``optimal`` certificate (-3.0 against a
+    # true -30.0) where this predicate's conservative False had previously
+    # produced a loud refusal. Callers that only need "can this body become one
+    # LP row" must ask ``_extract_body_coeffs`` directly — it returns the row as
+    # the witness, so it cannot promise more than it delivers. Widening
+    # ``_is_linear`` itself is tracked by #1154: it is a bound-changing change
+    # (it moves the FBBT structural mask at ``solver.py:3068`` and the aux-lift
+    # gate at ``factorable_reform.py:684``) and needs the §5 differential panel.
     if isinstance(expr, FunctionCall):
         return False
     return False
