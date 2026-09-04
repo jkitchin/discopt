@@ -200,21 +200,20 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
     # what the test is actually about, and it holds today.
     assert result.convex_fast_path is False
     # #1039: the objective assertion that used to live here now has its own test
-    # below -- it fails, and it fails for a soundness reason, so it is pinned as a
-    # strict xfail rather than having its tolerance widened past the defect.
+    # below. It was split out because it failed for a SOUNDNESS reason and was
+    # pinned as a strict xfail rather than having its tolerance widened past the
+    # defect; #1151 has since fixed the defect, so that test now passes on its
+    # original threshold and the xfail is gone.
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1151: reported objective is BELOW the true global minimum. The error is "
-        "the absolute constraint tolerance amplified by 1/denominator, so it is "
-        "unbounded as the denominator shrinks. Fix is in the Rust incumbent path."
-    ),
-)
 def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
     """A reported objective must be the objective AT the returned point.
+
+    **#1151 FIXED — the strict xfail this carried is retired, not its
+    assertions.** Every assertion and threshold below is #1150's, unchanged,
+    including the ``abs=1e-9`` equality; only the ``xfail`` marker is gone,
+    which is exactly the signal ``strict=True`` was set to give.
 
     #1039 bucket E listed this as an accuracy miss --
     ``assert 1.998683979470214 == 2.0 +- 1.0e-04`` -- and the obvious repair
@@ -246,17 +245,26 @@ def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
 
     (the last two land at large denominators, so the amplification vanishes).
 
-    A trace over the whole solve found ZERO Python frames returning the bad
-    value, so it is produced in the Rust B&B incumbent path and passed through --
-    which is why this is pinned here rather than fixed in this PR: the fix is a
-    bound-changing solver change and needs the §5 differential regime, not a
-    test-repair PR.
+    Two claims in the paragraphs above are corrected by the fix (CLAUDE.md §11),
+    and are left standing only because the measurements around them are right:
 
-    ``strict=True`` on purpose: when the incumbent objective is recomputed from
-    the original expression at the incumbent point (the general fix -- one
-    evaluation, and it can only make the number correct, since the point is
-    feasible and its true objective is a valid upper bound), this test XPASSes
-    and fails the suite, which is the signal to remove the xfail.
+    * "A trace found ZERO Python frames returning the bad value, so it is
+      produced in the Rust B&B incumbent path." A frame trace over the solve
+      does find one -- ``_tape_nlp_evaluator.evaluate_objective``. It looks like
+      a Rust value because the model being evaluated is the *reformulated* one,
+      whose objective is literally ``_fr_aux_0 + _fr_aux_1``, so re-evaluating
+      "the objective at the point" reproduces the relaxation reading exactly.
+    * "The fix is a bound-changing solver change." It is not. No bound, cut or
+      relaxation moved. The defect was in the incumbent *verifier*'s row-scale
+      term, ``max_j |J_ij| * max(1, |x_j|)``: the ``max(1, ...)`` floor
+      over-read a row's scale by ``1/|x_j|``, which is precisely the
+      amplification ``_clear_divisions``'s ``1/dmin`` scaling exists to remove.
+      Dropping the floor makes the scale a real term magnitude and bounds the
+      aux error *relatively*. See ``discopt.validation.feasibility``.
+
+    What the diagnosis above got exactly right is the mechanism -- absolute
+    tolerance over the denominator -- and the 1/y table, which is what made the
+    fix findable.
     """
     model = _monomial_balance()
     with warnings.catch_warnings():
@@ -334,8 +342,13 @@ def _division_gp(floor: float) -> Model:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("floor", [1e-3, 1e-2, 1e-1, 1.0], ids=lambda f: f"floor{f:g}")
-def test_bb_reported_objective_is_attained_by_its_own_incumbent(floor: float) -> None:
+def test_bb_reported_objective_is_attained_across_denominator_floors(floor: float) -> None:
     """#1151: ``objective`` and ``x`` must agree, at every denominator floor.
+
+    The sibling above pins the single box the issue reports. This sweeps the
+    denominator, which is the axis the defect was unbounded along, and adds the
+    two certificate-shaped checks that box alone cannot make: the reported value
+    is never below the true global minimum, and the dual bound never exceeds it.
 
     The defect this pins was a **false certificate**, not an accuracy miss. The
     solver reported ``objective = 1.998683979470214`` at ``status = optimal`` on
