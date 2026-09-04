@@ -241,7 +241,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     (
         "solver.py",
         "per_solve_limit = max(0.05, time_limit / (2 * len(candidate_var_indices) + 1))",
-        "derived",  # the helper's own ``time_limit`` parameter, bounded by its callers
+        "split",  # divides the helper's own budget across its candidate variables
     ),
     (
         "solver.py",
