@@ -57,6 +57,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from benchmarks.metrics import (
+    DISCOPT_STATUS_MAP,
     BenchmarkResults,
     InstanceInfo,
     SolveResult,
@@ -67,17 +68,11 @@ from benchmarks.metrics import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# discopt status string -> benchmark SolveStatus.
-_STATUS_MAP = {
-    "optimal": SolveStatus.OPTIMAL,
-    "feasible": SolveStatus.FEASIBLE,
-    "infeasible": SolveStatus.INFEASIBLE,
-    "unbounded": SolveStatus.UNBOUNDED,
-    "time_limit": SolveStatus.TIME_LIMIT,
+# discopt status string -> benchmark SolveStatus. The shared table plus the
+# Pyomo/GAMS spellings this runner also sees (``maxtimelimit``/``maxiterations``).
+_STATUS_MAP = dict(DISCOPT_STATUS_MAP) | {
     "maxtimelimit": SolveStatus.TIME_LIMIT,
-    "node_limit": SolveStatus.TIME_LIMIT,
     "maxiterations": SolveStatus.TIME_LIMIT,
-    "error": SolveStatus.ERROR,
 }
 
 
