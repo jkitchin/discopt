@@ -456,16 +456,16 @@ _BIG = Path(
 )
 
 
+# #1152 is fixed (PR #1155): the root-setup relaxation builds are now bounded by the
+# solve deadline minus the root-fallback reserve, so the phase that used to run past
+# ``time_limit`` stops inside it. The strict xfail that stood while the defect did is
+# removed here rather than left to XPASS. Measured on this instance, this machine:
+# both budgets return inside 1.25x with the flag on its default, and both still xfail
+# under ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0`` -- the opt-out arm is what attributes
+# the pass to the fix rather than to the machine. The 1.25x threshold below is still
+# the one #875 set; it was never relaxed.
 @pytest.mark.slow
 @pytest.mark.skipif(not _BIG.exists(), reason="needs the full MINLPLib snapshot")
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1152 (#1039 bucket B): root setup still overruns the deadline. #875 fixed "
-        "most of it (19.3x -> 2.0x) but not all of it. The 1.25x threshold is "
-        "DELIBERATELY unchanged -- relaxing it would retire the contract."
-    ),
-)
 @pytest.mark.parametrize("budget", [30.0, 60.0])
 def test_watercontamination0202_honours_its_time_limit(budget):
     """The issue's definition of done, on the instance that exposed the class.
@@ -498,14 +498,19 @@ def test_watercontamination0202_honours_its_time_limit(budget):
 
     so this is a class, per CLAUDE.md §2, not a watercontamination0202 quirk.
 
-    Pinned as a STRICT xfail rather than repaired: the 1.25x threshold and every
-    soundness assertion below are untouched, so this cannot pass by having its
-    goalposts moved -- it passes when root setup is actually bounded, and the
-    strictness then fails the suite to say so. See also
-    ``test_issue654_deadline_root_setup.py``'s
-    ``test_sonet23v4_bound_survives_the_deadline_gating``, which asserts the
-    OPPOSITE contract on the same mechanism; the two cannot both be satisfied
-    until the bound-producing op is made interruptible.
+    Held as a STRICT xfail while the defect stood, and repaired by #1155 rather than
+    by moving the goalposts: the 1.25x threshold and every soundness assertion below
+    are the ones #875 set, untouched. It now passes because root setup is actually
+    bounded -- the relaxation builds take the solve deadline (minus the root-fallback
+    reserve) as a ``build_deadline``, so the phase that used to run past the limit
+    stops inside it.
+
+    See also ``test_issue654_deadline_root_setup.py``'s
+    ``test_sonet23v4_bound_survives_the_deadline_gating``, which reads as asserting
+    the OPPOSITE contract on the same mechanism. That framing was wrong, and #1152
+    settled it: the two are one defect, not two contracts, and bounding the build
+    satisfies both at once. Both now pass on the default and both still xfail under
+    ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0``.
     """
     m = dm.from_nl(str(_BIG))
     t0 = time.perf_counter()

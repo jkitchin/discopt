@@ -164,6 +164,49 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`solve(time_limit=T)` overran its deadline AND lost its dual bound, from one
+  defect** (#1152). Two slow-tier tests encoded what read as opposing contracts —
+  "return within 1.25x of `T`" (#875) and "the deadline work must not cost the dual
+  bound" (#654) — and #1152 asked which one `time_limit` actually makes. Neither is
+  retired: both thresholds stand, because the fork was an artifact. A root-setup
+  phase polls a deadline between its LP solves but **not inside its relaxation
+  build**, and clamps its own budget to *all* of the live remainder — so it both
+  runs past `T` and spends the `_ROOT_FALLBACK_RESERVE_S` slice the last-ditch bound
+  producer needs. Measured on `casctanks` at `time_limit=5` (in-repo corpus): root
+  OBBT enters its round `build_milp_relaxation` at t=4.39 s with 0.61 s left and
+  spends 1.85 s in it, and the #654 short-circuit then reports `fallback grant
+  0.000s of the 1.500s reserve` — wall **1.29x** and `bound=None`, one cause, two
+  symptoms. Fixed as #1152's option 3 (make the long operations interruptible so
+  they yield a valid intermediate result), reusing the anytime-build mechanism #694
+  built and #832 graduated: `solve_model` threads one root-setup deadline
+  (`time_limit` minus the reserve) as the `build_deadline` of the root OBBT round
+  build (new `obbt_tighten_root(build_deadline=...)`), the root LP probe and both
+  root cut pools, and `_setup_remaining_budget` withholds the reserve from those
+  phases' own clamps. The native-kernel spec build is *declined* past that deadline
+  rather than truncated — its probe-box and real-box builds' row sets must
+  correspond. Same `casctanks` solve after: **5.35 s (1.07x) with bound 1.2584**.
+  Sound by construction in every direction the truncation reaches (dropping
+  constraint rows enlarges the relaxation polytope, so OBBT tightens less, the probe
+  bound is weaker, the pool separates fewer cuts — none of it invalid); the #208 aux
+  cascade, whose carried bounds are keyed by column index, is skipped on a truncated
+  build. `DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0` restores the legacy path.
+
+  Graduated default-ON per §5 on the in-repo differential panel (66 instances x
+  {5 s, 20 s}, both arms interleaved, 132 pairs / 559 comparisons): **0** soundness
+  violations, **0** certification regressions, 2 bounds recovered from `None` and 3
+  tightened against 1 marginally looser (`tanksize`, 4e-4 relative) and 0 lost; mean
+  `wall/time_limit` 0.447 -> 0.440 with no pair newly over 1.25x. The two instances
+  #1152 names are not in that corpus and were run separately on the owner's machine
+  — `sonet23v4` at `tl=2` and `watercontamination0202` at `tl=30`/`tl=60`, i.e.
+  #1152's own two tests: **3 pass** on the default and **3 xfail** under
+  `DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0`, back to back at load 5.4, with every
+  #875/#654 threshold untouched (the strict xfails #1150 had added come off here).
+  One measured counter-example is recorded rather than averaged away: `hda` at an
+  8 s budget goes 1.21x -> 1.28x with a bit-identical bound, because setup finishing
+  2.4 s earlier lets the search start two more nodes and the last one straddles the
+  deadline (#966's per-node residual, not a setup overrun). See
+  `docs/dev/1152-time-limit-root-setup-contract-2026-09-04.md`.
+
 - **`TestKnownOptima::test_bound_validity` tested the wrong inequality on every
   maximizing instance** (`discopt_benchmarks/tests/test_correctness.py`, #1050).
   Making the file executable (#1116) exposed a defect in the check itself: it

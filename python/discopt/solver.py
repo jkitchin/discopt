@@ -7596,6 +7596,55 @@ def solve_model(
         else 0.0
     )
 
+    def _setup_remaining_budget() -> float:
+        """What a pre-B&B root-setup phase may spend, in seconds (#1152).
+
+        The live remainder MINUS the root-fallback reserve. Every root-setup phase
+        used to clamp its own budget to ``_remaining_budget()``, i.e. to ALL of what
+        is left — so the last phase to run before the #654 short-circuit legitimately
+        consumed the slice that short-circuit then needs to prove any bound at all.
+        Measured on ``casctanks`` at ``time_limit=5``: root OBBT is granted the whole
+        0.55 s remainder, spends it, and the short-circuit reaches
+        ``fallback grant 0.000s of the 1.500s reserve`` -> ``bound=None``. The reserve
+        is only a reserve if it binds root setup too.
+
+        Equal to ``_remaining_budget()`` (byte-identical) when the #1152 flag is off.
+        """
+        if not getattr(_tuning(), "root_setup_build_deadline", False):
+            return _remaining_budget()
+        return max(0.0, _remaining_budget() - _rr_reserve_s)
+
+    def _root_setup_build_deadline() -> Optional[float]:
+        """Absolute deadline for a pre-B&B root-setup relaxation *build* (#1152).
+
+        ``_deadline_exhausted`` lets a root-setup phase decline to START, and each
+        phase clamps its LP budget to the live remainder — but the relaxation BUILD
+        inside a phase is uninterruptible, so a build entered just inside the budget
+        runs to completion past it. Measured on ``casctanks`` at ``time_limit=5``:
+        root OBBT enters its round build at t=4.39 s with 0.61 s left and spends
+        1.85 s there, and the #654 short-circuit below then reaches
+        ``_remaining_budget() == 0`` and skips the root-relaxation fallback — so the
+        overrun and the ``bound=None`` are one defect, not the two contradictory
+        contracts issue #1152 read them as.
+
+        The deadline is the solve deadline MINUS the fallback reserve, because the
+        fallback is the last-ditch bound producer and its slice has to survive root
+        setup for the bound to exist at all. Threaded into the setup builds as the
+        ``build_deadline`` the #694/#832 anytime mechanism already implements: the
+        constraint-row loop stops when spent and the partial relaxation is still a
+        valid (weaker) outer approximation.
+
+        ``None`` — no clamp, byte-identical to the pre-#1152 path — when the flag is
+        off, when there is no finite limit to honor, or under ``deterministic`` (a
+        wall clock that decides how many rows get built is role 2, #912).
+        """
+        if not getattr(_tuning(), "root_setup_build_deadline", False):
+            return None
+        if not math.isfinite(float(time_limit)):
+            return None
+        _dl = _role2_deadline(_solve_t0 + float(time_limit) - _rr_reserve_s)
+        return None if _dl is None else float(_dl)
+
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
     # set), and budget classification to a fraction of the time limit so it
@@ -10263,7 +10312,10 @@ def solve_model(
         try:
             from discopt._relax.obbt import obbt_tighten_root
 
-            _obbt_budget = min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())
+            # #1152: ``_setup_remaining_budget`` withholds the root-fallback
+            # reserve, so a root OBBT sweep entered near the deadline can no longer
+            # spend the slice the last-ditch bound producer needs.
+            _obbt_budget = min(min(max(time_limit * 0.1, 2.0), 15.0), _setup_remaining_budget())
 
             # #282 iterate-to-convergence lever (default OFF). The ``rounds=3`` cap
             # stops the root OBBT far short of the fixpoint on a wide-box dense
@@ -10301,6 +10353,10 @@ def solve_model(
                 ub,
                 rounds=_obbt_rounds,
                 deadline=_role2_deadline(time.perf_counter() + _obbt_budget),
+                # #1152: ``deadline`` above is polled between rounds and between the
+                # sweep's LPs; this one reaches INSIDE the per-round envelope build,
+                # the phase's only uninterruptible op.
+                build_deadline=_root_setup_build_deadline(),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
             )
@@ -10354,7 +10410,17 @@ def solve_model(
     # solution pool, warm-start, non-default McCormick modes, explicit tuning),
     # so a solve requesting any of those is routed to the trusted Python engine.
     _native_result: Optional[SolveResult] = None
-    if _native_kernel_feature_safe(
+    # #1152: the spec build is two WHOLE relaxation builds whose row sets must
+    # correspond (a probe box for the structure, the real box for the column
+    # bounds), so unlike the phases above it is not truncatable — a prefix of one
+    # and a prefix of the other need not describe the same relaxation. Decline to
+    # start it once the root-setup deadline is spent instead: falling through to
+    # the trusted Python path is the same sound outcome an out-of-scope model gets.
+    _native_setup_deadline = _root_setup_build_deadline()
+    _native_budget_spent = (
+        _native_setup_deadline is not None and time.perf_counter() >= _native_setup_deadline
+    )
+    if not _native_budget_spent and _native_kernel_feature_safe(
         mccormick_bounds=mccormick_bounds,
         initial_point=initial_point,
         lazy_constraints=lazy_constraints,
@@ -10445,7 +10511,11 @@ def solve_model(
                 _rr_bound = -_rr_val if _is_maximize else _rr_val
         logger.info(
             "time_limit spent before spatial search build (#654) — declining the "
-            "search apparatus; reporting the rigorous root-relaxation bound"
+            "search apparatus; reporting the rigorous root-relaxation bound "
+            "(fallback grant %.3fs of the %.3fs reserve, bound %s)",
+            _rr_budget if model._objective is not None else 0.0,
+            _rr_reserve_s,
+            "none" if _rr_bound is None else f"{_rr_bound:.6g}",
         )
         wall_time = time.perf_counter() - t_start
         # Interactive debugger: fire the terminal checkpoint on this early exit too,
@@ -11095,13 +11165,26 @@ def solve_model(
                             # skipping it never changes the reported bound's validity.
                             _probe = None
                         else:
-                            _probe_remaining = time_limit - (time.perf_counter() - t_start)
+                            # #1152: the remainder MINUS the root-fallback reserve
+                            # (``_setup_remaining_budget``); unchanged when the flag
+                            # is off.
+                            _probe_remaining = _setup_remaining_budget()
                             _probe_budget = min(
                                 max(time_limit * 0.1, 2.0),
                                 max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _probe = _mc_lp_relaxer.solve_at_node(
-                                _probe_lb, _probe_ub, time_limit=_role2_budget(_probe_budget)
+                                _probe_lb,
+                                _probe_ub,
+                                time_limit=_role2_budget(_probe_budget),
+                                # #1152: the probe's cold build is NOT bounded by the
+                                # solve ``time_limit`` above (only the Rust MILP solve
+                                # is) — the very overrun this comment block documents.
+                                # A truncated build only drops rows, so the keep/discard
+                                # verdict and the banked bound stay sound (weaker at
+                                # worst), and #928's cut-short objective floor keeps the
+                                # bound finite.
+                                build_deadline=_root_setup_build_deadline(),
                             )
                             # #930: bank the probe's proved bound WITH the box it was
                             # proved over. This solve costs real time (3.4 s on hda)
@@ -11172,7 +11255,9 @@ def solve_model(
                         # so an inherited row never cuts off a feasible point.
                         try:
                             _pool_chunks: list = []
-                            _root_remaining = time_limit - (time.perf_counter() - t_start)
+                            # #1152: see ``_setup_remaining_budget`` — the pool is
+                            # root setup and must leave the fallback its reserve.
+                            _root_remaining = _setup_remaining_budget()
                             _pool_budget = min(
                                 max(time_limit * 0.25, 5.0),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
@@ -11183,6 +11268,9 @@ def solve_model(
                                 time_limit=_role2_budget(_pool_budget),
                                 out_cuts=_pool_chunks,
                                 psd_max_rounds=_root_cut_rounds,
+                                # #1152: bound the pool's cold build too. Fewer
+                                # separated cuts only loosens per-node bounds.
+                                build_deadline=_root_setup_build_deadline(),
                             )
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 # solve_at_node captures each separated chunk as a
@@ -11248,7 +11336,9 @@ def solve_model(
                         # favour of the inherited pool (``skip_pool_separators``).
                         try:
                             _pool_chunks = []
-                            _root_remaining = time_limit - (time.perf_counter() - t_start)
+                            # #1152: see ``_setup_remaining_budget`` — the pool is
+                            # root setup and must leave the fallback its reserve.
+                            _root_remaining = _setup_remaining_budget()
                             _pool_budget = min(
                                 max(time_limit * 0.25, 5.0),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
@@ -11275,6 +11365,9 @@ def solve_model(
                                 _probe_ub,
                                 time_limit=_role2_budget(_pool_budget),
                                 out_cuts=_pool_chunks,
+                                # #1152: bound the pool's cold build too (see the PSD
+                                # pool above) — fewer cuts only loosens, never falsifies.
+                                build_deadline=_root_setup_build_deadline(),
                             )
                             _pool_solve_wall = time.perf_counter() - _pool_solve_t0
                             _sep_after = getattr(_mc_lp_relaxer, "_sep_timers", {})

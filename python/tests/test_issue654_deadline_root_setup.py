@@ -265,17 +265,16 @@ def test_issue654_dod_panel_honors_and_scales_with_time_limit(inst, oracle):
             )
 
 
+# #1152 is fixed (PR #1155). The two contracts were never contradictory: they were
+# two readings of ONE defect -- a root-setup phase polled its deadline between LP
+# solves but not inside its relaxation build, and clamped its budget to ALL of the
+# remainder, so it both ran past ``time_limit`` and spent the slice the last-ditch
+# bound producer needs. Bounding the build (#694/#832's anytime mechanism) and
+# withholding the fallback reserve satisfies both at once, so the strict xfail comes
+# off. Measured here: this passes on the default and still xfails under
+# ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0``. Nothing below is weakened.
 @pytest.mark.slow
 @pytest.mark.requires_pounce
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1152 (#1039 bucket F): at time_limit=2.0 the #654 deadline gating declines "
-        "to start the ~17s bound-producing op, so the bound is None. This test and "
-        "test_875's budget test encode CONTRADICTORY contracts; neither is "
-        "weakened here."
-    ),
-)
 def test_sonet23v4_bound_survives_the_deadline_gating():
     """§8 guard: sonet23v4's dual bound is produced by a single ~17s uninterruptible
     op inside the root-relaxation fallback (its LP *build* is not bounded by the
