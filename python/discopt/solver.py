@@ -15616,6 +15616,13 @@ def solve_model(
         for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
             if _pcount > 0:
                 _solver_stats[f"pool/{_pfam}"] = float(_pcount)
+    # #1039: the #671 failure-triggered row filter, surfaced so a test can assert
+    # the mechanism directly ("never fires on an already-solving instance")
+    # instead of inferring it from two whole solves compared across a wall clock.
+    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_row_filter_stats", None):
+        for _rfk, _rfv in _mc_lp_relaxer._row_filter_stats.items():
+            if _rfv > 0:
+                _solver_stats[f"row_filter/{_rfk}"] = float(_rfv)
     # C-42 Part 2: node solves the global-bound-stall governor re-separated
     # (driver-side; the relaxer's ``lazy_reseparations`` counts the stride net).
     if _lazy_resep_fires > 0:

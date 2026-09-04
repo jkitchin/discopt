@@ -122,28 +122,242 @@ def test_hda_optout_restores_loose_candidate_a_floor(monkeypatch):
         )
 
 
+# Instances whose *whole solve* is a valid ON/OFF comparison: under
+# ``deterministic=True`` they terminate on WORK with real slack against the wall
+# limit, which is the precondition #1116 attaches to reproducibility
+# (``solver_tuning.SolverTuning.deterministic``). Measured 3 reps x 2 arms each
+# (``scratchpad/issue1039/probe_deterministic.py``): byte-identical within and
+# across arms, 3/3.
+_WORK_TERMINATING = ["alan", "ex1221", "nvs09"]
+
+# Instances on which the whole-solve comparison is NOT affordably valid, so only
+# the *mechanism* claim is tested — see
+# ``test_failure_triggered_never_fires_on_solving_instances``. Two distinct
+# reasons, both measured:
+#   * bchoco07, beuster: cannot terminate on work at all within a budget this
+#     suite can spend (bchoco07 reached 3 nodes in 120 s, beuster 5-9), so both
+#     arms end on ``time_limit`` and are truncated at machine-speed-dependent
+#     points.
+#   * casctanks: DOES terminate on work and is byte-identical 6/6 under
+#     ``deterministic=True`` -- but each arm costs ~321 s (against the 120 s
+#     ``time_limit`` it was given; that 2.7x role-1 overrun is #1039 bucket B,
+#     tracked separately), so a two-arm comparison exceeds the suite's 300 s
+#     per-test timeout.
+_NOT_AFFORDABLY_COMPARABLE = ["bchoco07", "beuster", "casctanks"]
+
+# The instances that actually PROVOKE the failure-triggered branch. Measured by
+# sweeping all 66 vendored ``.nl`` instances with the #1039
+# ``row_filter/invocations`` counter (``scratchpad/issue1039/probe_bucketA.py``);
+# exactly three open it, and every other instance reports zero:
+#
+#     bchoco07  2 invocations / 158 rows dropped
+#     bchoco08  2 invocations / 144 rows dropped
+#     hda       2 invocations / 356 rows dropped
+#
+# This is the re-pointing target the issue's own bucket-A retraction comment
+# asked for. That comment measured ``filter_invocations=0`` in BOTH arms on hda
+# and concluded the mechanism was dormant; with the counter surfaced through
+# ``solver_stats`` the count on hda is 2, not 0, and the two arms are far apart
+# (FLAG=0 -> -13992288065.86, FLAG=1 -> -64509.85, 2 reps interleaved,
+# ``probe_hda_arms.py``). The opt-out is live and load-bearing here.
+_FILTER_FIRES = ["bchoco07", "bchoco08", "hda"]
+
+# The complement: vendored instances whose node LPs all certify, so the branch
+# never opens. Derived from the same sweep rather than hand-listed.
+_FILTER_DORMANT = [
+    n for n in _WORK_TERMINATING + _NOT_AFFORDABLY_COMPARABLE if n not in _FILTER_FIRES
+]
+
+_DETERMINISTIC_KW = {"deterministic": True, "max_nodes": 25, "time_limit": 120}
+
+
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "name",
-    # alan/ex1221: no wide rows. nvs09/bchoco07/beuster/casctanks: the always-on
-    # build-time filter LOOSENED these (nvs09 lost its `optimal` certificate) —
-    # the failure-triggered filter must be byte-identical on all of them, since
-    # their node LPs solve cleanly and the filter never fires.
-    ["alan", "ex1221", "nvs09", "bchoco07", "beuster", "casctanks"],
-)
+@pytest.mark.parametrize("name", _WORK_TERMINATING)
 def test_failure_triggered_is_byte_identical_on_solving_instances(name, monkeypatch):
-    """The failure-triggered filter is byte-identical ON vs OFF on every
-    already-solving instance: the un-filtered node LP is optimal/Farkas-infeasible,
-    so the filter never fires (it only re-solves a numerically-failed node)."""
+    """The failure-triggered filter is byte-identical ON vs OFF on an already-solving
+    instance: the un-filtered node LP is optimal/Farkas-infeasible, so the filter
+    never fires (it only re-solves a numerically-failed node).
+
+    #1039: this test used to run both arms under a bare ``time_limit=20`` and
+    compare the results. That is not a comparison. A solve cut off by the wall
+    clock is truncated at a point that depends on machine speed, so the two arms
+    are two *different amounts of search* and any difference measures the
+    stopwatch. Measured (``probe_deterministic.py``, 3 reps x 2 arms):
+
+        beuster (time_limit=120, truncated)   OFF -> {9 nodes / 8362.516450208394,
+                                                     9 nodes / 8362.516450208394,
+                                                     5 nodes / 6395.348953445055}
+                                              ON  -> {5 nodes / 6395.348953445055,
+                                                     9 nodes / 8362.516450208394,
+                                                     5 nodes / 6395.348953445055}
+
+    Both outcomes occur in BOTH arms -- the variation is within an arm, so the
+    old assertion was failing on truncation, not on the flag. bchoco07's
+    reported "bound drifted 1.0000000000002582 -> 1.0000000000002498" is the same
+    artifact: under ``deterministic=True`` all six of its runs return the
+    identical 0.9999818893334098.
+
+    So both arms now run with ``deterministic=True`` (which neutralizes the
+    role-2 wall sub-budgets that cause the drift, per #1116) on the instances
+    that terminate on work, and the precondition is ASSERTED rather than assumed
+    -- a run that ends on ``time_limit`` fails loudly here instead of silently
+    degrading back into the invalid comparison (CLAUDE.md §6).
+    """
     path = os.path.join(_NL_DATA, f"{name}.nl")
     if not os.path.exists(path):
         pytest.skip(f"{name}.nl not vendored")
 
     monkeypatch.setenv(_FLAG, "0")
-    off = dm.from_nl(path).solve(time_limit=20)
+    off = dm.from_nl(path).solve(**_DETERMINISTIC_KW)
     monkeypatch.setenv(_FLAG, "1")
-    on = dm.from_nl(path).solve(time_limit=20)
+    on = dm.from_nl(path).solve(**_DETERMINISTIC_KW)
+
+    # §6: the comparison is only meaningful if neither arm was truncated by the
+    # wall clock. Without this the test silently reverts to comparing two
+    # differently-truncated searches.
+    for arm, r in (("OFF", off), ("ON", on)):
+        assert r.status != "time_limit", (
+            f"{name}: the {arm} arm terminated on time_limit, so this ON/OFF "
+            "comparison is not valid -- raise the budget or move the instance to "
+            "_NOT_AFFORDABLY_COMPARABLE"
+        )
 
     assert off.status == on.status, f"{name}: status changed {off.status} -> {on.status}"
     assert off.objective == on.objective, f"{name}: objective drifted with the flag"
     assert off.bound == on.bound, f"{name}: bound drifted ({off.bound} -> {on.bound})"
+    assert off.node_count == on.node_count, f"{name}: node count drifted with the flag"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", _FILTER_DORMANT)
+def test_failure_triggered_never_fires_on_solving_instances(name, monkeypatch):
+    """The mechanism claim, asserted directly: the filter never fires on these.
+
+    #1039. The byte-identical comparison above is an *indirect* test of "the
+    filter never fires" -- and it is unavailable on the three instances that
+    cannot finish on work (beuster, casctanks), because a truncated search is not
+    comparable to another truncated search. Counting invocations tests the same
+    claim directly and truncation cannot invalidate it: whether or not the tree
+    finished, the filter either opened its branch or it did not.
+
+    So coverage of those instances is retained here rather than dropped with the
+    invalid comparison. Note bchoco07 is deliberately NOT in this list: the
+    corpus sweep shows it fires twice, so it was never an "already-solving
+    instance" and asserting zero on it was asserting a false premise. It is
+    covered by ``test_row_filter_fires_where_the_corpus_says_it_does`` instead.
+
+    ``row_filter/invocations`` is surfaced by
+    ``MccormickLPRelaxer._row_filter_stats`` (#1039) and is only present when
+    non-zero; the two positive controls below mean a zero here reads as "never
+    fired" rather than "never wired".
+    """
+    path = os.path.join(_NL_DATA, f"{name}.nl")
+    if not os.path.exists(path):
+        pytest.skip(f"{name}.nl not vendored")
+
+    monkeypatch.setenv(_FLAG, "1")
+    r = dm.from_nl(path).solve(time_limit=20)
+    stats = r.solver_stats or {}
+    assert stats.get("row_filter/invocations", 0) == 0, (
+        f"{name}: the failure-triggered filter fired "
+        f"{stats.get('row_filter/invocations')} time(s) on an already-solving "
+        "instance; its node LPs are supposed to certify without it"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", _FILTER_FIRES)
+def test_row_filter_fires_where_the_corpus_says_it_does(name, monkeypatch):
+    """The other half of the mechanism claim: on the instances that DO provoke an
+    uncertified node LP, the filter opens its branch and drops rows.
+
+    #1039. Without this, ``test_failure_triggered_never_fires_on_solving_instances``
+    is a one-sided test -- a mechanism deleted outright would pass every one of
+    its cases. It is also the direct rebuttal of the issue's bucket-A retraction
+    comment, which measured zero invocations on hda and concluded the branch
+    never opens: it opens twice.
+
+    This is a *real-instance* control, so unlike the monkeypatched one below it
+    also proves the provoking condition still exists in the corpus. If a future
+    numerics improvement makes all three of these certify cleanly, this test
+    fails and says so, instead of the mechanism quietly losing its last live
+    exercise the way #517's did.
+
+    The budget is pinned at the sweep's ``time_limit=15`` deliberately, because
+    whether the branch opens is itself budget-dependent -- a #1116-shaped role-2
+    effect, measured in ``probe_bchoco_tl.py``:
+
+        bchoco07  tl=15 -> 2 inv   tl=30 -> 2 inv   tl=60 -> 0 inv (status flips
+                  to ``feasible``, and the bound goes from 1.0000000000002498 to
+                  the LOOSER 0.9999909424984251)
+        bchoco08  tl=15 -> 2 inv   tl=30 -> 2 inv   tl=60 -> 2 inv
+        hda       tl=15 -> 2 inv   tl=30 -> 2 inv   tl=60 -> 2 inv
+
+    ``deterministic=True`` does not remove the dependence, it moves it: under it
+    bchoco07 reaches 0 nodes at tl<=60 and only opens the branch at tl=120. So a
+    larger budget is not a safer choice here, and 15s sits inside a plateau all
+    three instances share (15 and 30 agree for every one of them).
+    """
+    path = os.path.join(_NL_DATA, f"{name}.nl")
+    if not os.path.exists(path):
+        pytest.skip(f"{name}.nl not vendored")
+
+    monkeypatch.setenv(_FLAG, "1")
+    r = dm.from_nl(path).solve(time_limit=15)
+    stats = r.solver_stats or {}
+    assert stats.get("row_filter/invocations", 0) >= 1, (
+        f"{name}: the failure-triggered filter did not fire at time_limit=15, but "
+        "the corpus sweep recorded 2 invocations there -- either the branch "
+        "condition changed, the instance now certifies cleanly, or this machine "
+        "sits at a different point on the budget curve in the docstring; re-point "
+        "this test rather than deleting it"
+    )
+    assert stats.get("row_filter/rows_dropped", 0) >= 1, (
+        f"{name}: the filter was invoked but dropped no rows"
+    )
+    # Soundness is never conditional on which path produced the bound.
+    if r.bound is not None:
+        assert math.isfinite(r.bound), f"{name}: non-finite bound {r.bound}"
+
+
+def test_row_filter_counter_moves_when_the_branch_opens(monkeypatch):
+    """Positive control for the #1039 counter (CLAUDE.md §6).
+
+    ``test_failure_triggered_never_fires_on_solving_instances`` reads a zero as
+    "the mechanism did not fire". That inference is only valid if the counter can
+    move at all -- a miswired counter, or one whose stats never reach
+    ``solver_stats``, reports the same zero and reads as a pass. Force the branch
+    open by making the node LP report a non-certified verdict, and require the
+    count to appear.
+    """
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
+
+    _real_solve = MilpRelaxationModel.solve
+    state = {"doctored": 0}
+
+    def _uncertified_once(self, *a, **kw):
+        res = _real_solve(self, *a, **kw)
+        # Doctor only the first solve: "numerical" is neither ``optimal`` nor a
+        # Farkas-certified ``infeasible``, which is exactly the condition the
+        # failure-triggered filter exists to handle.
+        if state["doctored"] == 0:
+            state["doctored"] += 1
+            res.status = "numerical"
+            res.farkas_certified = False
+        return res
+
+    monkeypatch.setattr(MilpRelaxationModel, "solve", _uncertified_once)
+    monkeypatch.setenv(_FLAG, "1")
+
+    m = dm.Model("ctl")
+    x = m.continuous("x", shape=(2,), lb=0, ub=1)
+    m.minimize(x[0] * x[1] - x[0])
+    r = m.solve(time_limit=30)
+
+    assert state["doctored"] == 1, "the control never doctored a node LP verdict"
+    stats = r.solver_stats or {}
+    assert stats.get("row_filter/invocations", 0) >= 1, (
+        "the filter branch opened but row_filter/invocations did not move -- the "
+        "counter or its solver_stats plumbing is broken, which would make the "
+        "zero asserted above meaningless"
+    )
