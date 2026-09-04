@@ -258,11 +258,40 @@ def test_failure_triggered_never_fires_on_solving_instances(name, monkeypatch):
     monkeypatch.setenv(_FLAG, "1")
     r = dm.from_nl(path).solve(time_limit=20)
     stats = r.solver_stats or {}
-    assert stats.get("row_filter/invocations", 0) == 0, (
-        f"{name}: the failure-triggered filter fired "
-        f"{stats.get('row_filter/invocations')} time(s) on an already-solving "
-        "instance; its node LPs are supposed to certify without it"
-    )
+
+    # "The filter stayed dormant" has to be a POSITIVE observation. Asserting
+    # only `stats.get("row_filter/invocations", 0) == 0` passes identically when
+    # the counter was never wired up AND when the relaxer never ran at all --
+    # the §6 "probe never fired" shape. There are two honest ways to be dormant
+    # and each is asserted on its own terms:
+    #
+    #   (a) the McCormick-LP path ran and the failure branch never opened, so
+    #       the counter is present and zero; or
+    #   (b) the solve never reached that path, because it was routed to the
+    #       convex mip-nlp/oa algorithm, which has no McCormick LP relaxer to
+    #       filter rows for. `alan` is this case -- it emits NO solver_stats at
+    #       all, so before this assertion it was passing vacuously.
+    #
+    # `algorithm_route is None` means the DEFAULT path, which is case (a); only a
+    # named non-default route can excuse a missing counter.
+    route = r.algorithm_route
+    if "row_filter/invocations" in stats:
+        assert stats["row_filter/invocations"] == 0, (
+            f"{name}: the failure-triggered filter fired "
+            f"{stats['row_filter/invocations']} time(s) on an already-solving "
+            "instance; its node LPs are supposed to certify without it"
+        )
+    else:
+        assert route is not None and "mip-nlp/oa" in route, (
+            f"{name}: row_filter/invocations is absent but the solve was not "
+            f"routed away from the McCormick-LP path (algorithm_route={route!r}). "
+            "That is an unwired counter, not a dormant mechanism."
+        )
+        assert not stats, (
+            f"{name}: routed to mip-nlp/oa yet solver_stats is non-empty "
+            f"({sorted(stats)[:5]}); the row-filter counter should have been "
+            "emitted alongside them"
+        )
 
 
 @pytest.mark.slow

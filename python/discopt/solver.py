@@ -15619,10 +15619,18 @@ def solve_model(
     # #1039: the #671 failure-triggered row filter, surfaced so a test can assert
     # the mechanism directly ("never fires on an already-solving instance")
     # instead of inferring it from two whole solves compared across a wall clock.
-    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_row_filter_stats", None):
-        for _rfk, _rfv in _mc_lp_relaxer._row_filter_stats.items():
-            if _rfv > 0:
-                _solver_stats[f"row_filter/{_rfk}"] = float(_rfv)
+    #
+    # Emitted unconditionally, including zeros. The `pool/` block above drops
+    # zero counts, which is fine for "did this family fire" but wrong here: the
+    # dormant case IS the assertion (a test pins that the filter does not open
+    # on an already-solving instance), and a suppressed zero makes
+    # `stats.get("row_filter/invocations", 0) == 0` pass identically when the
+    # counter was never wired up at all -- the §6 "probe never fired" shape.
+    # Present-and-zero and absent must not be the same observation.
+    _rf_stats = getattr(_mc_lp_relaxer, "_row_filter_stats", None) if _mc_lp_relaxer else None
+    if _rf_stats is not None:
+        for _rfk, _rfv in _rf_stats.items():
+            _solver_stats[f"row_filter/{_rfk}"] = float(_rfv)
     # C-42 Part 2: node solves the global-bound-stall governor re-separated
     # (driver-side; the relaxer's ``lazy_reseparations`` counts the stride net).
     if _lazy_resep_fires > 0:

@@ -461,8 +461,8 @@ _BIG = Path(
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "#1039 bucket B: root setup still overruns the deadline. #875 fixed most "
-        "of it (19.3x -> 2.0x) but not all of it. The 1.25x threshold is "
+        "#1152 (#1039 bucket B): root setup still overruns the deadline. #875 fixed "
+        "most of it (19.3x -> 2.0x) but not all of it. The 1.25x threshold is "
         "DELIBERATELY unchanged -- relaxing it would retire the contract."
     ),
 )

@@ -25,6 +25,10 @@ caused the second, so both are pinned here.
 
 The real gate is ``_extract_body_coeffs``: it answers with the row itself, so it
 cannot promise more capability than it delivers.
+
+Completing the hull family so these routes *solve* the model instead of declining
+it is tracked by #1154; the parametrized test below is written to strengthen
+rather than break when that lands.
 """
 
 import discopt.modeling as dm

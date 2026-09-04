@@ -1470,7 +1470,7 @@ def _is_linear(expr: Expression) -> bool:
     # produced a loud refusal. Callers that only need "can this body become one
     # LP row" must ask ``_extract_body_coeffs`` directly — it returns the row as
     # the witness, so it cannot promise more than it delivers. Widening
-    # ``_is_linear`` itself is tracked separately; it is a bound-changing change
+    # ``_is_linear`` itself is tracked by #1154: it is a bound-changing change
     # (it moves the FBBT structural mask at ``solver.py:3068`` and the aux-lift
     # gate at ``factorable_reform.py:684``) and needs the §5 differential panel.
     if isinstance(expr, FunctionCall):

@@ -152,7 +152,6 @@ def _feasible(nl_path: Path, x: dict) -> tuple[bool, list[str]]:
     return (not msgs), msgs
 
 
-
 def _closed_its_tree(result) -> bool:
     """Did *result* actually finish the model, rather than merely report a valid gap?
 

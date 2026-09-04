@@ -270,8 +270,8 @@ def test_issue654_dod_panel_honors_and_scales_with_time_limit(inst, oracle):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "#1039 bucket F: at time_limit=2.0 the #654 deadline gating declines to "
-        "start the ~17s bound-producing op, so the bound is None. This test and "
+        "#1152 (#1039 bucket F): at time_limit=2.0 the #654 deadline gating declines "
+        "to start the ~17s bound-producing op, so the bound is None. This test and "
         "test_875's budget test encode CONTRADICTORY contracts; neither is "
         "weakened here."
     ),

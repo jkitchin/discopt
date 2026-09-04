@@ -64,8 +64,8 @@ def test_suboptimal_warm_start_never_false_certifies(seed):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "#1039 bucket F: nvs19 does not reach its optimum at ANY budget up to "
-        "480s, and MORE budget yields a WORSE incumbent. A completeness miss with "
+        "#1153 (#1039 bucket F): nvs19 does not reach its optimum at ANY budget up "
+        "to 480s, and MORE budget yields a WORSE incumbent. A completeness miss with "
         "no false certificate; the soundness sibling above still passes."
     ),
 )

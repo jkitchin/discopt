@@ -208,7 +208,7 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "#1039: reported objective is BELOW the true global minimum. The error is "
+        "#1151: reported objective is BELOW the true global minimum. The error is "
         "the absolute constraint tolerance amplified by 1/denominator, so it is "
         "unbounded as the denominator shrinks. Fix is in the Rust incumbent path."
     ),
