@@ -17,3 +17,22 @@
   not a bound change (CLAUDE.md §9).
 
 Run from the repository root.
+
+## Full non-slow suite
+
+`pytest python/tests/ -m "not slow" -n 4` on this branch: **8 failed, 9119 passed,
+149 skipped, 9 xfailed, 2 xpassed** (638 s). Triaged:
+
+* 4 are load-induced flakes of the 4-way parallel run — `test_lp_huge_finite_box_937`
+  and the three `test_decomposition_adversarial::test_rand_lagrangian_dual_is_valid_lower_bound`
+  parameters all PASS when re-run serially on this branch.
+* 4 are pre-existing in this container and fail **identically on `main`** (verified by
+  `git checkout <main> -- python/discopt`, asserting the version marker absent, then
+  restoring): `test_convex_nlp_certificate_853::test_neglog_interior_stall_not_false_optimal[ipopt]`,
+  `test_75_tape_nlp_evaluator::test_solve_degrades_to_jax_when_pounce_is_missing`,
+  `test_relax_compiler_convexity_units::TestDifferentiableSolvePaths::test_ipopt_backend_active_constraint_gradient`,
+  `test_issue_1066_master_bound_inversion::test_lp_nlp_bb_refuses_a_master_bound_above_its_incumbent`.
+  They depend on optional backends (cyipopt / POUNCE behaviour) this container does not
+  provide; CI is the authority on them.
+
+Zero failures in any file this change touches.
