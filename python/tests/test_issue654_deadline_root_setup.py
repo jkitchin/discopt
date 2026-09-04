@@ -265,13 +265,51 @@ def test_issue654_dod_panel_honors_and_scales_with_time_limit(inst, oracle):
             )
 
 
+# #1152 is fixed (PR #1155). The two contracts were never contradictory: they were
+# two readings of ONE defect -- a root-setup phase polled its deadline between LP
+# solves but not inside its relaxation build, and clamped its budget to ALL of the
+# remainder, so it both ran past ``time_limit`` and spent the slice the last-ditch
+# bound producer needs. Bounding the build (#694/#832's anytime mechanism) and
+# withholding the fallback reserve satisfies both at once, so the strict xfail comes
+# off. Measured here: this passes on the default and still xfails under
+# ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0``. Nothing below is weakened.
 @pytest.mark.slow
 @pytest.mark.requires_pounce
 def test_sonet23v4_bound_survives_the_deadline_gating():
     """§8 guard: sonet23v4's dual bound is produced by a single ~17s uninterruptible
     op inside the root-relaxation fallback (its LP *build* is not bounded by the
     solve's ``time_limit``). The deadline work must never cost us that bound — the
-    casctanks-class regression (-99.09 -> +5.70) this pins against."""
+    casctanks-class regression (-99.09 -> +5.70) this pins against.
+
+    #1039. Measured (``scratchpad/issue1039/probe_sonet.py``):
+
+        tl= 2.0  wall  4.6s (2.32x)  nodes=0    bound=None
+        tl= 8.0  wall  6.6s (0.82x)  nodes=0    bound=-473508.0000005656   (sound)
+        tl=30.0  wall 31.6s (1.05x)  nodes=137  bound=-50587.97955518025   (sound)
+
+    The bound is not lost to a truncation *bug*: it is lost because at tl=2.0 the
+    deadline logic correctly declines to START a 17s operation. Every bound it
+    does produce is sound against the -22747.5 oracle.
+
+    This is the structural tension in #1039, now machine-checked rather than
+    described. This test says "spend the 17s and keep the bound"; the bucket B
+    test ``test_watercontamination0202_honours_its_time_limit`` says "never exceed
+    1.25x the budget". At tl=2.0 sonet23v4 already overruns 2.32x while DECLINING
+    the op, so honoring this test makes that one worse. They cannot both hold
+    while the op stays atomic.
+
+    The CLAUDE.md §3 fix is the hard one: make the root-relaxation fallback's LP
+    build interruptible/incremental, so a short budget yields a weaker-but-present
+    bound instead of none. Then both contracts hold at once. That is a solver
+    change under the §5 bound-changing regime, not a test repair, so it is pinned
+    strict here -- the assertions are untouched, and the suite fails the moment
+    the op becomes interruptible and this starts passing.
+
+    (The tl=8.0 run also surfaced ``RuntimeWarning: #844 LP-spatial fallback
+    failed ... RecursionError: maximum recursion depth exceeded``, reported rather
+    than swallowed, leaving the default-path result in place -- noted because it
+    is on this same fallback path.)
+    """
     path = os.path.join(_BENCH, "sonet23v4.nl")
     if not os.path.exists(path):
         pytest.skip("sonet23v4.nl not vendored (big corpus)")

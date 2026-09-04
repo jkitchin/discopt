@@ -1,0 +1,26 @@
+"""#1039 (det arm): does the row-filter branch on bchoco07/bchoco08/hda depend on the wall
+budget?  The corpus sweep used time_limit=15 and saw 2 invocations on bchoco07;
+the re-pointed test used time_limit=60 and saw 0.  Measure the budget dependence
+directly instead of guessing.  CLAUDE.md §6: prints an executed count, exits
+non-zero at zero; §7: no exception is swallowed."""
+import os, sys
+import discopt, discopt.modeling as dm
+
+assert "/Users/jkitchin/projects/discopt/python/discopt" in discopt.__file__, discopt.__file__
+import discopt._relax.mccormick_lp as _mcl
+src = open(_mcl.__file__).read()
+assert "_row_filter_stats" in src, "loaded a mccormick_lp WITHOUT the #1039 counter"
+
+DATA = "python/tests/data/minlplib_nl"
+os.environ["DISCOPT_RELAX_ROW_FILTER"] = "1"
+n = 0
+for name in ("bchoco07", "bchoco08", "hda"):
+    for tl in (15, 30, 60, 120):
+        r = dm.from_nl(os.path.join(DATA, f"{name}.nl")).solve(time_limit=tl, deterministic=True)
+        st = r.solver_stats or {}
+        print(f"{name:10s} tl={tl:3d} inv={st.get('row_filter/invocations', 0):.0f} "
+              f"rows={st.get('row_filter/rows_dropped', 0):.0f} "
+              f"nodes={r.node_count} status={r.status} bound={r.bound}", flush=True)
+        n += 1
+print(f"EXECUTED SOLVES: {n}")
+sys.exit(0 if n else 1)

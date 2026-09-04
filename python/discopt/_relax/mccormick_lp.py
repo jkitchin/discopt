@@ -459,6 +459,19 @@ class MccormickLPRelaxer:
             "dropped_nodes": 0,
             "lazy_reseparations": 0,
         }
+        # #1039: observability for the #671 failure-triggered row filter. The
+        # filter is *failure*-triggered, so on an already-solving instance it
+        # never fires and the node is byte-identical with the flag ON or OFF.
+        # That claim used to be tested only indirectly, by comparing two whole
+        # solves under a wall-clock ``time_limit`` -- a proxy that a truncated
+        # search defeats (``beuster`` returned BOTH {9 nodes, bound 8362.52} and
+        # {5 nodes, bound 6395.35} within a single arm). Counting invocations
+        # tests the claim directly and is immune to where the clock happens to
+        # cut the tree.
+        #   * invocations: node solves where the filter branch opened (the LP
+        #     produced no certified verdict and the flag was on).
+        #   * rows_dropped: rows the filter actually removed across those.
+        self._row_filter_stats: dict[str, int] = {"invocations": 0, "rows_dropped": 0}
         # Skip-eligible node-solve counter for the lazy-trigger stride net
         # (see the module-level ``_LAZY_RESEP_STRIDE`` rationale).
         self._lazy_skip_ctr: int = 0
@@ -1650,7 +1663,10 @@ class MccormickLPRelaxer:
         ):
             from discopt._relax.milp_relaxation import _filter_unresolvable_rows
 
-            if _filter_unresolvable_rows(milp) > 0:
+            self._row_filter_stats["invocations"] += 1  # #1039
+            _n_filtered = _filter_unresolvable_rows(milp)
+            if _n_filtered > 0:
+                self._row_filter_stats["rows_dropped"] += _n_filtered  # #1039
                 res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
         # Lazy re-separation, stride safety net (C-42): every
