@@ -231,6 +231,18 @@ POUNCE Gate 0's documented floor
 `Residual.floor` carries it and `at_floor` says whether the number is at it. A
 report that omitted the floor would imply exact orthogonality.
 
+### This field set is the shared benchmark schema
+
+[jkitchin/pounce#780](https://github.com/jkitchin/pounce/issues/780) lists
+"define the common benchmark metadata/result schema" as an immediate action.
+That schema is this one: `SourceResidualReport.as_dict()` is its serialization,
+and it is defined here rather than as a separate artifact so the two repositories
+do not end up with two vocabularies for the same numbers. Every entry carries
+`value`, `definition`, `scale`, `scaled_value`, `floor` and `at_floor`; the
+report adds `n_scalar_relations` (the executed-measurement count), the
+per-relation breakdown with `source_name`/`index` attribution, the continuation
+trace, and `stationarity` (always `null` — see §8).
+
 ### The instrument checks itself
 
 Operands are evaluated with the interval evaluator over a **degenerate** box
