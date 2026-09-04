@@ -42,7 +42,7 @@ value of 2121.64).
 
 This module keys the tolerance on the **row's** scale::
 
-    violation_i <= abs_tol * max(1, |rhs_i|, max_j |J_ij| * max(1, |x_j|))
+    violation_i <= abs_tol * max(1, |rhs_i|, max_j |J_ij| * |x_j|)
 
 Two properties of that form are load-bearing and easy to get wrong:
 
@@ -53,6 +53,56 @@ Two properties of that form are load-bearing and easy to get wrong:
 
 ``test_vector_constraint_corpus.py`` carries a control for each naive widening of
 this form, showing that each one accepts a bad point this form rejects.
+
+Why the row scale is ``|J_ij| * |x_j|`` and not ``|J_ij| * max(1, |x_j|)`` (#1151)
+----------------------------------------------------------------------------------
+
+``|J_ij| * |x_j|`` is the first-order magnitude of the row's *j*-th term. Flooring
+``|x_j|`` at 1 does not make it a larger term — it makes it *not a term magnitude
+at all*, over-estimating the row's scale by ``1/|x_j|`` on every column whose
+value is below 1. The tolerance then grows without bound as a variable shrinks,
+which is the exact amplification the reformulation layer works to prevent:
+``_clear_divisions`` (``_relax/factorable_reform.py``) multiplies a cleared
+quotient row by ``1/dmin`` precisely so that a fixed absolute residual test on
+``w*D - N == 0`` bounds the error in ``w``; the floored scale divided that
+scaling straight back out, leaving the check exactly as loose as if the row had
+never been scaled.
+
+Measured consequence (#1151), ``minimize x/y + y/x`` over ``[1e-3, 1e3]^2`` whose
+global minimum is exactly 2 by AM-GM. The reformulation emits
+``1000*(w0*y - x) == 0``; at the accepted point ``x = y ~ 1.4e-3`` that row is
+violated by **9.28e-4** and was accepted, because ``max_j |J_ij| * max(1,|x_j|)``
+read the row's scale as 1000 (the coefficient on ``x``) rather than 1.4 (the
+magnitude ``1000*x`` actually attains), licensing a tolerance of 1e-3. The
+residual maps to an error of ``residual / (1000*y)`` in ``w0``, so the solver
+reported ``objective = 1.9987`` — **below the global minimum**, at
+``status=optimal``, a false certificate. With the term-magnitude scale the row's
+tolerance is 1.4e-6 and the point is rejected.
+
+The guarantee the term-magnitude form buys, for a defining row
+``s*(w*D - N) == 0`` (``s`` any positive scaling; ``1/dmin`` as emitted here).
+The row's derivative in ``w`` is ``s*D``, so the term-magnitude scale obeys
+``S >= s*|D|*|w|``, and for a monomial denominator every other column's term has
+that same magnitude, so ``S ~ s*|D|*|w|``. With ``|Δw| = |w*D - N| / |D|`` and a
+residual held to ``abs_tol * max(1, S)``:
+
+* when ``s*|D|*|w| >= 1``: ``|Δw| <= abs_tol * s*|D|*|w| / (s*|D|) = abs_tol*|w|``;
+* otherwise: ``|Δw| <= abs_tol / (s*|D|) <= abs_tol``, since the ``1/dmin``
+  scaling makes ``s*|D| >= 1`` everywhere in the box.
+
+So ``|Δw| <= abs_tol * max(1, |w|)`` — a bound on the *aux value*, keyed on the
+aux's own magnitude and on nothing about the denominator, which is exactly what
+the reported objective (linear in ``w``) needs. Under the floored form ``S`` is
+instead ``~ s*|D|*max(1,|w|)`` divided by nothing at all — it reads ``s`` itself
+when ``s*|D| > s*|D|*|w|`` — and the same algebra leaves ``|Δw|`` proportional to
+``1/|D|``, unbounded as the denominator shrinks. That 1/D law is what the issue
+measured: ``|Δ objective| x denominator`` flat at ~1.9e-6 across box floors.
+
+The change is narrow by construction: ``|x_j| <= max(1, |x_j|)`` columnwise, so
+the new scale never exceeds the old one and the two differ only when the column
+attaining the floored maximum carries ``|x_j| < 1``. It moves only in the strict
+direction — the accepted set shrinks — so no point this verifier now accepts was
+rejected before.
 """
 
 from __future__ import annotations
@@ -142,7 +192,16 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
 
 
 def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.ndarray]:
-    """``max_j |J_ij| * max(1, |x_j|)`` for the given row indices, or ``None``.
+    """``max_j |J_ij| * |x_j|`` for the given row indices, or ``None``.
+
+    That product is the first-order magnitude of the row's *j*-th term; see the
+    module docstring (#1151) for why flooring ``|x_j|`` at 1 turns this from a
+    row-scale estimate into a ``1/|x_j|`` amplification of the tolerance, and how
+    that produced a reported objective below the global minimum.
+
+    The result is floored at 1 by the caller (``max(anchor, scale)`` with
+    ``anchor >= 1``), so a row all of whose terms vanish at the point is held to
+    the plain absolute tolerance rather than to zero.
 
     ``None`` means the Jacobian was unavailable, and the caller must then fall
     back to the Jacobian-free bound — which is STRICTER, so the fallback can only
@@ -157,7 +216,7 @@ def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.
     if J.ndim != 2 or J.shape[0] <= int(rows.max()):
         logger.debug("feasibility: Jacobian shape %s cannot cover rows; stricter bound", J.shape)
         return None
-    xw = np.maximum(1.0, np.abs(np.asarray(x_flat, dtype=np.float64)))
+    xw = np.abs(np.asarray(x_flat, dtype=np.float64))
     sub = np.abs(J[rows, :]) * xw[None, :]
     if not np.all(np.isfinite(sub)):
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")

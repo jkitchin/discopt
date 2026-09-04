@@ -328,3 +328,99 @@ def test_constraint_rhs_is_honoured():
     )
     assert verify_point(m, np.array([3.0])).ok is True, "rhs=2 should admit x=3"
     assert verify_point(m, np.array([1.0])).ok is False, "rhs ignored: x=1 violates x>=2"
+
+
+# --------------------------------------------------------------------------
+# #1151 — the row scale must be a TERM magnitude, not a coefficient magnitude.
+# --------------------------------------------------------------------------
+def _quotient_aux_row_model():
+    """The shape ``factorable_reform`` emits for a quotient in the objective.
+
+    ``minimize x/y`` over a strictly-positive box is lifted to ``minimize w``
+    with the defining equality ``w == x/y``, which ``_clear_divisions`` clears to
+    the bilinear ``w*y - x == 0`` and then multiplies by ``1/dmin`` (``dmin`` the
+    box minimum of the denominator) — here ``1/1e-3 = 1000`` — precisely so that a
+    fixed ABSOLUTE residual test on the row bounds the error in ``w``.
+    """
+    m = Model("quotient_aux")
+    x = m.continuous("x", lb=1e-3, ub=1e3)
+    y = m.continuous("y", lb=1e-3, ub=1e3)
+    w = m.continuous("w", lb=1e-6, ub=1e6)
+    m.subject_to(1000.0 * (w * y) - 1000.0 * x == 0.0)
+    m.minimize(w)
+    return m
+
+
+def test_row_scale_is_a_term_magnitude_not_a_coefficient_magnitude():
+    """#1151: ``max_j |J_ij| * max(1,|x_j|)`` over-reads a scaled row's scale by
+    ``1/|x_j|``, and that slack is exactly the amplification the ``1/dmin``
+    scaling exists to remove.
+
+    The point below is the one the solver actually returned on
+    ``minimize x/y + y/x`` (global minimum 2 by AM-GM) before the fix. Its row is
+    violated by 9.3e-4; the old form read the row's scale as 1000 — the
+    coefficient on ``x`` — rather than 1.4, the magnitude ``1000*x`` attains at
+    the point, and so licensed a tolerance of 1e-3 and accepted it. The residual
+    maps to ``residual/(1000*y)`` of error in ``w``, which is how a reported
+    objective landed BELOW the global minimum at ``status=optimal``.
+    """
+    m = _quotient_aux_row_model()
+    pt = np.array([0.0014052502011193727, 0.0014073586395206353, 0.9978427215251631])
+
+    ev = NLPEvaluator(m)
+    resid = abs(float(np.asarray(ev.evaluate_constraints(pt))[0]))
+    J = np.abs(np.asarray(ev.evaluate_jacobian(pt), dtype=np.float64)[0])
+    old_scale = float((J * np.maximum(1.0, np.abs(pt))).max())
+    new_scale = float((J * np.abs(pt)).max())
+
+    # Preconditions: the case exercises the regime it claims to (§6 — an
+    # assertion that cannot fire is not a test).
+    assert resid == pytest.approx(9.276e-4, rel=1e-2), (
+        f"case no longer reproduces the #1151 residual (got {resid:.3e})"
+    )
+    assert old_scale == pytest.approx(1000.0, rel=1e-2), "old form no longer reads 1000"
+    assert new_scale == pytest.approx(1.405, rel=1e-2), "term magnitude is not ~1.4"
+    assert resid <= ABS_TOL * old_scale, "the old form would NOT have accepted this point"
+    assert resid > ABS_TOL * max(1.0, new_scale), "the term-magnitude form must reject it"
+
+    assert verify_point(m, pt).ok is False, (
+        "the incumbent verifier vouched for a row violated by 9.3e-4 — the #1151 false certificate"
+    )
+    assert _native_kernel_verify_point(m, pt)[0] is False
+
+
+def test_term_magnitude_scale_still_admits_the_nvs22_direction():
+    """The #1151 tightening must not undo #908's nvs22 widening.
+
+    The nvs22 case is a row whose terms genuinely reach ~2121, so the term
+    magnitude and the floored form agree and the 1.7e-5 absolute residual stays
+    inside tolerance.
+    """
+    m = Model("big_scale_terms")
+    x = m.continuous("x", lb=0.0, ub=1e4)
+    m.subject_to(2121.64 * x == 2121.64)
+    m.minimize(x)
+    pt = np.array([1.0 + 8.1e-9])
+
+    ev = NLPEvaluator(m)
+    resid = abs(float(np.asarray(ev.evaluate_constraints(pt))[0]))
+    J = np.abs(np.asarray(ev.evaluate_jacobian(pt), dtype=np.float64)[0])
+    assert 1e-6 < resid < 1e-3, f"case does not exercise the regime (resid={resid:.3e})"
+    assert float((J * np.abs(pt)).max()) == pytest.approx(2121.64, rel=1e-6)
+    assert verify_point(m, pt).ok is True, "#1151 tightening re-broke the nvs22 direction"
+
+
+def test_term_magnitude_scale_is_never_looser_than_the_floored_form():
+    """Direction guard: ``|J_ij|*|x_j| <= |J_ij|*max(1,|x_j|)`` pointwise, so the
+    new row scale — and hence the tolerance — can only ever shrink. No point this
+    verifier accepts was rejected by the pre-#1151 form."""
+    rng = np.random.default_rng(1151)
+    compared = 0
+    for _ in range(200):
+        J = rng.normal(scale=10.0, size=6)
+        x = rng.normal(scale=10.0, size=6)
+        old = float((np.abs(J) * np.maximum(1.0, np.abs(x))).max())
+        new = float((np.abs(J) * np.abs(x)).max())
+        assert new <= old + 1e-12
+        compared += 1
+    assert compared == 200, "the direction guard compared nothing"

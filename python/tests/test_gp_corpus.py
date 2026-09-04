@@ -239,3 +239,80 @@ def test_nonpositive_variable_is_not_log_convex() -> None:
     x = m.continuous("x", lb=-1.0, ub=1.0)
     m.minimize(x * x)
     assert is_log_convex(m) is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #1151 — the reported objective must be attained by the reported point
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _division_gp(floor: float) -> Model:
+    """``minimize x/y + y/x`` over ``[floor, 1e3]^2``. Global minimum exactly 2
+    by AM-GM (``t + 1/t >= 2`` for ``t > 0``), attained on the diagonal."""
+    m = Model("balance")
+    x = m.continuous("x", lb=floor, ub=1e3)
+    y = m.continuous("y", lb=floor, ub=1e3)
+    m.minimize(x / y + y / x)
+    return m
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("floor", [1e-3, 1e-2, 1e-1, 1.0], ids=lambda f: f"floor{f:g}")
+def test_bb_reported_objective_is_attained_by_its_own_incumbent(floor: float) -> None:
+    """#1151: ``objective`` and ``x`` must agree, at every denominator floor.
+
+    The defect this pins was a **false certificate**, not an accuracy miss. The
+    solver reported ``objective = 1.998683979470214`` at ``status = optimal`` on
+    a problem whose global minimum is exactly 2 — a value no feasible point
+    attains, its own incumbent included (true objective there: 2.000002247829649).
+
+    The mechanism: a quotient in the objective is lifted to an aux ``w == x/y``
+    whose defining equality is cleared to ``w*y - x == 0``. A residual ``eps`` on
+    that row is an error of ``eps/y`` in ``w`` — and ``w`` is what the objective
+    reads. The incumbent verifier's row-scale term over-read the (deliberately
+    ``1/dmin``-scaled) row's magnitude by ``1/|x_j|``, restoring exactly the
+    amplification the scaling removes, so the error grew without bound as the
+    denominator shrank:
+
+    ==========  ==========  =============  ==============
+    box floor   denominator  reported−true  |delta|×denom
+    ==========  ==========  =============  ==============
+    1e-3        0.00140525   -1.318268e-03   1.852e-06
+    1e-2        0.0106986    -1.850776e-04   1.980e-06
+    1e-1        8.13524      -4.360956e-13   3.548e-12
+    1e+0        479.758      -4.440892e-16   2.131e-13
+    ==========  ==========  =============  ==============
+
+    ``|delta| x denominator`` flat at ~1.9e-6 (twice the 1e-6 absolute tolerance,
+    for the two quotient terms) is the signature: no fixed tolerance widening
+    bounds it, because the amplification is unbounded as ``y -> 0``.
+
+    The assertion is therefore a *relative* one, keyed on the objective's own
+    magnitude and on nothing about an intermediate denominator.
+    """
+    model = _division_gp(floor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = model.solve(solver="bb", time_limit=30.0)
+
+    assert result.objective is not None, "no incumbent to check"
+    assert result.x is not None, "an incumbent value with no point is not checkable"
+    xv = float(result.x["x"])
+    yv = float(result.x["y"])
+    # Plain-Python oracle: the ORIGINAL objective, no solver machinery involved.
+    oracle = xv / yv + yv / xv
+    tol = 1e-6 * (1.0 + abs(oracle))
+
+    assert result.objective == pytest.approx(oracle, abs=tol), (
+        f"reported objective {result.objective!r} is not the objective at the "
+        f"reported point ({oracle!r}); delta {result.objective - oracle:.6e}"
+    )
+    # And the reported value must not be below the true global minimum at all.
+    assert result.objective >= 2.0 - tol, (
+        f"reported objective {result.objective!r} is BELOW the global minimum 2.0 "
+        f"— a false certificate"
+    )
+    if result.bound is not None:
+        assert result.bound <= 2.0 + 1e-6, (
+            f"dual bound {result.bound!r} exceeds the true global minimum 2.0"
+        )
