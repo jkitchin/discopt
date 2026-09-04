@@ -38,7 +38,6 @@ from discopt.modeling.core import (
     Model,
     SelectorActivation,
     SelectorCardinality,
-    SumOverExpression,
     UnaryOp,
     Variable,
     VarType,
@@ -543,10 +542,14 @@ def _extract_body_coeffs(
                         return {k: ro * v for k, v in lc.items()}, lo * ro
                 return None
         if isinstance(e, SumOverExpression):
-            # #1039: fold the indexed summation term by term. ``_is_linear``
-            # admits this node, so the extractor must be able to read it —
-            # returning None here would put an accepted row back on the
-            # silently-dropped path this fix exists to close.
+            # #1039: fold the indexed summation term by term. This is what
+            # lets the OA/LOA row extraction see the ``exactly-one`` row that
+            # ``make_disjunct``/``add_disjunction`` emits; returning None here
+            # dropped that row from the master MILP, which was then free to
+            # propose "no disjunct active" — a fixed-integer NLP that is
+            # infeasible, so LOA reported ``status="unknown"`` on a trivially
+            # feasible model. Succeeding here is safe for every caller because
+            # the returned ``(c_vec, offset)`` IS the linearity witness.
             acc: dict = {}
             off_total = 0.0
             for t in e.terms:
@@ -1453,18 +1456,23 @@ def _is_linear(expr: Expression) -> bool:
             return False
         # ** is always nonlinear
         return False
-    if isinstance(expr, SumOverExpression):
-        # #1039: the indexed summation Σ[t0, t1, ...] is linear when every term
-        # is. Omitting this case made ``_is_linear`` reject the ``exactly-one``
-        # row that ``make_disjunct``/``add_disjunction`` emits, and LOA then
-        # dropped that row from its master MILP (``solve_gdpopt_loa`` only
-        # forwards rows this predicate accepts). The master was free to propose
-        # "no disjunct active", whose fixed-integer NLP is infeasible, and LOA
-        # returned ``status="unknown"`` on a trivially feasible model.
-        # ``SumExpression`` (a reduction over an array-valued operand, with an
-        # optional axis) stays a conservative False: its vector semantics are not
-        # something ``_extract_body_coeffs`` can turn into a single row.
-        return all(_is_linear(t) for t in expr.terms)
+    # #1039: ``SumOverExpression`` is deliberately NOT admitted here, even
+    # though the indexed summation Σ[t0, t1, ...] *is* linear when every term
+    # is. ``_is_linear`` is a shared gate with ~10 consumers, and several of
+    # them read a True as "and I can therefore take this apart": the hull
+    # substitution family (``_hull_linear_substitute`` → ``_substitute_vars``
+    # → ``_collect_variables``) and ``_bound_expression`` have no case for this
+    # node, so admitting it made hull emit ``Σ[3 terms] - (0 * y0) <= 0`` — the
+    # disjunct body imposed GLOBALLY, with the selector coefficient collapsed
+    # to zero and the disaggregated variables never created. That cut off the
+    # other mode and returned a false ``optimal`` certificate (-3.0 against a
+    # true -30.0) where this predicate's conservative False had previously
+    # produced a loud refusal. Callers that only need "can this body become one
+    # LP row" must ask ``_extract_body_coeffs`` directly — it returns the row as
+    # the witness, so it cannot promise more than it delivers. Widening
+    # ``_is_linear`` itself is tracked separately; it is a bound-changing change
+    # (it moves the FBBT structural mask at ``solver.py:3068`` and the aux-lift
+    # gate at ``factorable_reform.py:684``) and needs the §5 differential panel.
     if isinstance(expr, FunctionCall):
         return False
     return False
