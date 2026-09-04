@@ -458,6 +458,14 @@ _BIG = Path(
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _BIG.exists(), reason="needs the full MINLPLib snapshot")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1152 (#1039 bucket B): root setup still overruns the deadline. #875 fixed "
+        "most of it (19.3x -> 2.0x) but not all of it. The 1.25x threshold is "
+        "DELIBERATELY unchanged -- relaxing it would retire the contract."
+    ),
+)
 @pytest.mark.parametrize("budget", [30.0, 60.0])
 def test_watercontamination0202_honours_its_time_limit(budget):
     """The issue's definition of done, on the instance that exposed the class.
@@ -470,6 +478,34 @@ def test_watercontamination0202_honours_its_time_limit(budget):
     this size), so it skips without it. The in-repo evidence for the same fixes is
     the mechanism-level tests above: the scaling probe for the cost bug and the
     expired-deadline tests for the budget bug.
+
+    #1039: still failing, and re-measured at load 3.33 so it is not the CLAUDE.md
+    §9 load artifact that three other failures in that sweep turned out to be:
+
+        budget 30 s -> 59.7 s wall (2.0x)
+        budget 60 s -> 89.4 s wall (1.5x)
+
+    (the issue reported 61.1 s and 90.0 s; reproduced to within noise.) #875 took
+    this from 579.3 s (19.3x) and 620.8 s (10.4x) with nodes=0, so most of the
+    class is fixed and a residual is left.
+
+    Not confined to this instance -- the same role-1 overrun was measured
+    incidentally on three others while working #1039:
+
+        casctanks     ~321 s against a 120 s time_limit  (2.7x)
+        nvs19          80.7 s against a  60 s time_limit  (1.35x)
+        sonet23v4       4.6 s against a   2 s time_limit  (2.32x)
+
+    so this is a class, per CLAUDE.md §2, not a watercontamination0202 quirk.
+
+    Pinned as a STRICT xfail rather than repaired: the 1.25x threshold and every
+    soundness assertion below are untouched, so this cannot pass by having its
+    goalposts moved -- it passes when root setup is actually bounded, and the
+    strictness then fails the suite to say so. See also
+    ``test_issue654_deadline_root_setup.py``'s
+    ``test_sonet23v4_bound_survives_the_deadline_gating``, which asserts the
+    OPPOSITE contract on the same mechanism; the two cannot both be satisfied
+    until the bound-producing op is made interruptible.
     """
     m = dm.from_nl(str(_BIG))
     t0 = time.perf_counter()

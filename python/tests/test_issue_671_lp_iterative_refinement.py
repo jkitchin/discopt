@@ -103,15 +103,55 @@ def test_hda_gets_a_tight_dual_bound_with_the_flag(monkeypatch):
 
 
 @pytest.mark.slow
-def test_hda_flag_off_is_the_candidate_a_baseline(monkeypatch):
-    """Flag OFF (default): hda's bound is the unchanged candidate-A floor — the
-    refinement path is inert, so the result is bound-neutral vs today."""
-    monkeypatch.setenv(_FLAG, "0")
+def test_hda_flag_off_is_looser_than_flag_on(monkeypatch):
+    """The ``=0`` opt-out is live and load-bearing: OFF is strictly looser than ON.
+
+    #1039: this test used to assert a hardcoded value -- that the OFF arm lands on
+    candidate A's loose floor, ``< -1e7`` (approx -1.8e10). Two things had moved
+    underneath it.
+
+    First, it did not pin ``DISCOPT_RELAX_ROW_FILTER``, which graduated to
+    default-ON after this test was written (#671, 2026-07-18) and supplies hda's
+    tight bound on its own. So the test was not varying only the flag it names:
+    both of its arms got the row filter's answer, which is why it reported
+    "flag OFF should be the loose candidate-A floor, got -64473.44".
+
+    Second, even with the row filter pinned OFF, the OFF arm no longer falls all
+    the way to candidate A's floor -- an intervening improvement now gets it to
+    -1.4e5. Measured, 3 reps interleaved, row filter pinned OFF, candidate A ON
+    (``scratchpad/issue1039/probe_671ref.py``):
+
+        DISCOPT_LP_ITERATIVE_REFINEMENT=0 -> -141647.03848991546  (sd 0, 3/3)
+        DISCOPT_LP_ITERATIVE_REFINEMENT=1 ->  -64509.850876897275 (sd 0, 3/3)
+
+    So the assertion is the DIFFERENTIAL rather than either endpoint's value: ON
+    is strictly tighter than OFF, and both are sound. That is what the graduated
+    ``=0`` opt-out actually promises, and unlike a hardcoded floor it does not go
+    stale the next time some other mechanism moves one of the endpoints.
+    """
+    # Pin the other rescue mechanisms so this flag is the ONLY variable. Without
+    # this the row filter answers for both arms and the comparison is vacuous.
+    monkeypatch.setenv("DISCOPT_RELAX_ROW_FILTER", "0")
     monkeypatch.setenv("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", "1")
-    r = dm.from_nl(_hda_path()).solve(time_limit=90)
-    assert r.bound is not None, "candidate A should still supply its loose floor"
-    # The loose candidate-A floor is far below -1e7 (≈ -1.8e10).
-    assert r.bound < -1e7, f"flag OFF should be the loose candidate-A floor, got {r.bound}"
+
+    monkeypatch.setenv(_FLAG, "0")
+    off = dm.from_nl(_hda_path()).solve(time_limit=90)
+    monkeypatch.setenv(_FLAG, "1")
+    on = dm.from_nl(_hda_path()).solve(time_limit=90)
+
+    for label, r in (("OFF", off), ("ON", on)):
+        assert r.bound is not None and math.isfinite(r.bound), (
+            f"{label}: no finite bound ({r.bound})"
+        )
+        # Soundness first: neither arm may cross the published optimum.
+        assert r.bound <= _HDA_OPT + 1e-2, f"UNSOUND ({label}): {r.bound:.6g} > {_HDA_OPT}"
+
+    # The opt-out genuinely gates a bound-improving path.
+    assert on.bound > off.bound, (
+        f"the =0 opt-out is inert: OFF {off.bound:.6g} vs ON {on.bound:.6g} -- "
+        "the refinement path no longer changes the bound on hda, so this test no "
+        "longer measures the flag and must be re-pointed"
+    )
 
 
 @pytest.mark.slow
