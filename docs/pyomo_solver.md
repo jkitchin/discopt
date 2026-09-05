@@ -41,7 +41,14 @@ Pyomo solver options map to `Model.solve` keyword arguments:
 | `timelimit` (or `time_limit`) | `time_limit` |
 | `mipgap` / `gap` | `gap_tolerance` |
 | `threads` | `threads` |
-| `tee=True` | `stream=True` |
+
+`tee=True` is not an option passed to `Model.solve`: for the duration of the solve
+the plugin attaches a stdout handler to the `discopt` logger (and lifts it to
+`INFO` if it is quieter), so the solver log streams to the terminal the way Pyomo
+users expect, then restores the logger. It is deliberately *not* mapped onto
+`Model.solve(stream=True)` — that kwarg asks for an iterator of `SolveUpdate`
+instead of a `SolveResult` and is not implemented, which used to make every
+`tee=True` solve return termination `error` with no solution loaded (issue #1178).
 
 Pass them per solve or persistently:
 

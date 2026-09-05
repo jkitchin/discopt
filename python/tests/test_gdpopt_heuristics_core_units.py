@@ -1550,7 +1550,7 @@ class TestSolveOptionPaths:
         m = dm.Model("stream")
         x = m.continuous("x", lb=0, ub=1)
         m.minimize(x)
-        with pytest.raises(NotImplementedError, match="Streaming solve"):
+        with pytest.raises(NotImplementedError, match=r"stream=True\) is not implemented"):
             m.solve(stream=True, llm=True)
 
     def test_gradient_vector_parameter_reshape(self):
