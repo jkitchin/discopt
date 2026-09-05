@@ -11751,12 +11751,18 @@ def solve_model(
             _heur_nlp_cost["sum"] += float(wall)
             _heur_nlp_cost["n"] += 1.0
 
-    def _mean_heur_nlp_cost() -> float:
-        """The running MAX, despite the name — kept for the legacy overrun guard.
+    def _worst_heur_nlp_cost() -> float:
+        """The running MAX observed heuristic/root NLP wall — the legacy guard.
 
-        The max is deliberate there (see the block comment above): a heuristic NLP
-        can overrun its own clamp by ~10 s, so once one long solve is seen another
-        must not be launched unless that much budget remains.
+        Renamed from ``_mean_heur_nlp_cost`` (#1153 review): it returned a max,
+        was named "mean", and was consumed as one at the division site. A name
+        that misreports its own statistic is how the share came to divide a
+        worst-case-ever by a fraction and read as "4x typical".
+
+        The max is right *here*: a heuristic NLP can overrun its own clamp by
+        ~10 s, so once one long solve is seen another must not be launched unless
+        that much budget remains. It answers "could another solve of the worst
+        size still fit?", not "what does one usually cost?".
         """
         if _heur_nlp_cost["max"] <= 0.0:
             return _heur_nlp_cost["default"]
@@ -11823,7 +11829,7 @@ def solve_model(
         # The share divides a MEAN; the legacy guard keeps the MAX. See
         # ``_typical_heur_nlp_cost``. With the flag off ``_share`` is 1.0 and the
         # cost is the max, i.e. the legacy rule byte-identically.
-        _cost = _typical_heur_nlp_cost() if _share < 1.0 else _mean_heur_nlp_cost()
+        _cost = _typical_heur_nlp_cost() if _share < 1.0 else _worst_heur_nlp_cost()
         if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _cost / _share):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
