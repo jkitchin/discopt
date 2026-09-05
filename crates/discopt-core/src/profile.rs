@@ -20,11 +20,42 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Enable profiling iff `DISCOPT_PROFILE` is present in the environment. Cheap to
 /// call repeatedly; the first call per process fixes the flag.
+///
+/// In a **test** build this yields to an explicit [`set_enabled(true)`] override
+/// (see [`TEST_OVERRIDE`]). Every MILP solve calls this on entry, and `cargo test`
+/// runs the suite on a thread pool, so without that yield a driver test on a
+/// sibling thread disarms a counter-based probe mid-measurement and it reads 0 —
+/// the CLAUDE.md §6 failure mode of an instrument that silently measures nothing.
+/// `TEST_LOCK` cannot cover this: the clobbering test never touches the profile
+/// API, it just runs a solve.
 pub fn init_from_env() {
+    #[cfg(test)]
+    if TEST_OVERRIDE.load(Ordering::Relaxed) {
+        return;
+    }
     ENABLED.store(
         std::env::var_os("DISCOPT_PROFILE").is_some(),
         Ordering::Relaxed,
     );
+}
+
+/// The profiling side of entering a MILP solve: arm from the environment, then
+/// clear the per-run counters so the numbers belong to this solve.
+///
+/// Both halves yield to [`TEST_OVERRIDE`]. The reset half matters as much as the
+/// arm half: `cargo test` runs the suite on a thread pool and *every* MILP solve
+/// passes through here, so a sibling test that merely calls the driver used to
+/// zero the counters of a test that had already armed them and started measuring —
+/// which reads as "this path never executed" rather than as interference
+/// (CLAUDE.md §6). A test that owns the measurement calls [`reset`] itself; that
+/// entry point stays unconditional.
+pub fn begin_solve() {
+    init_from_env();
+    #[cfg(test)]
+    if TEST_OVERRIDE.load(Ordering::Relaxed) {
+        return;
+    }
+    reset();
 }
 
 /// Whether profiling is currently active.
@@ -353,6 +384,13 @@ counters!(
     // `rsyn0840m` OA master: 14 cold root solves = 23.1 s of a 24.2 s cut loop).
     RootCutRounds,
     RootCutWarmReopt,
+    // Root cut cleanup: cuts separated at the root vs. cuts still in the LP after
+    // the slack ones are dropped. `Kept == Generated` means the cleanup found
+    // nothing to remove -- either every cut is tight at the final root solution or
+    // the dependency closure held them all -- and the per-node row count is the
+    // full separation output.
+    RootCutsGenerated,
+    RootCutsKept,
     // Why a warm DUAL re-optimize was refused, forcing the primal fallback. On the
     // `rsyn0840m` OA master with a real root cut pool, 588 of 589 node LPs took the
     // primal path at 556 pivots each -- these separate "the shape is wrong" from
@@ -495,11 +533,27 @@ pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
         .collect()
 }
 
+/// Set while a test holds profiling on via [`set_enabled`]. While it is set,
+/// [`init_from_env`] leaves `ENABLED` alone, so a solve running on a sibling test
+/// thread cannot switch the measurement off underneath the test that armed it.
+///
+/// Deliberately one-directional: `set_enabled(true)` raises it, `set_enabled(false)`
+/// clears it. A test that arms the counters through the env var instead (the
+/// `DISCOPT_PROFILE` route, which some driver tests need because they measure the
+/// driver's own `init_from_env` path) is therefore unaffected.
+#[cfg(test)]
+static TEST_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
 /// Force the profiling flag on/off. Test-only: production toggles it exactly once
 /// via [`init_from_env`]. Exposed so a Rust test can deterministically observe a
 /// [`counter`] without setting the `DISCOPT_PROFILE` env var process-wide.
+///
+/// `true` also raises [`TEST_OVERRIDE`], which keeps a concurrent solve's
+/// `init_from_env` from disarming the measurement; `false` clears it and restores
+/// the ordinary env-driven behaviour.
 #[cfg(test)]
 pub fn set_enabled(on: bool) {
+    TEST_OVERRIDE.store(on, Ordering::Relaxed);
     ENABLED.store(on, Ordering::Relaxed);
 }
 
@@ -544,5 +598,95 @@ pub fn dump() {
     for i in 0..NC {
         let v = CVALS[i].swap(0, Ordering::Relaxed);
         eprintln!("  {:<18} {:>10}", CNAMES[i], v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `init_from_env` must not disarm a measurement a test explicitly armed.
+    ///
+    /// Every MILP solve calls `init_from_env` on entry and `cargo test` runs the
+    /// suite on a thread pool, so before the `TEST_OVERRIDE` yield an unrelated
+    /// driver test on a sibling thread would switch `ENABLED` back off in the
+    /// middle of a counter-based probe, which then read 0 and failed as "this
+    /// path never executed" (CLAUDE.md §6). `TEST_LOCK` cannot cover that: the
+    /// clobbering test never touches the profile API, it just runs a solve.
+    ///
+    /// Asserted deterministically rather than by racing threads: the clobber is a
+    /// plain `init_from_env` call, so calling it directly is the same event.
+    #[test]
+    fn init_from_env_does_not_disarm_an_explicit_test_override() {
+        let _guard = test_guard();
+        // Precondition, or the test proves nothing: with the override cleared,
+        // `init_from_env` really does drive the flag from the (unset) env var.
+        set_enabled(false);
+        assert!(
+            std::env::var_os("DISCOPT_PROFILE").is_none(),
+            "this test reads the unset-env behaviour; DISCOPT_PROFILE is set"
+        );
+        ENABLED.store(true, Ordering::Relaxed);
+        init_from_env();
+        assert!(
+            !enabled(),
+            "without an override, init_from_env must follow the env var"
+        );
+
+        set_enabled(true);
+        init_from_env();
+        assert!(
+            enabled(),
+            "init_from_env disarmed an explicit set_enabled(true) -- a concurrent \
+             solve would silently zero a counter-based probe"
+        );
+        set_enabled(false);
+        assert!(!enabled(), "set_enabled(false) must clear the override");
+    }
+
+    /// The other half of the same hazard: `begin_solve` must not CLEAR the
+    /// counters of a measurement a test armed.
+    ///
+    /// The driver resets the per-run counters on entry to every solve. Under the
+    /// test thread pool that meant a sibling test's solve zeroed an armed probe
+    /// mid-measurement, and the probe read 0 -- indistinguishable from "the code
+    /// under test never ran". Observed as a ~2-in-3 flake on the root-cut cleanup
+    /// test, whose `RootCutsGenerated` came back 0 while `RootCutRounds` was
+    /// non-zero.
+    #[test]
+    fn begin_solve_does_not_clear_counters_under_a_test_override() {
+        let _guard = test_guard();
+        assert!(
+            std::env::var_os("DISCOPT_PROFILE").is_none(),
+            "this test reads the unset-env behaviour; DISCOPT_PROFILE is set"
+        );
+
+        // Precondition: with no override, `begin_solve` really does clear.
+        set_enabled(false);
+        set_enabled(true);
+        incr_by(Ctr::RootCutRounds, 7);
+        assert_eq!(counter(Ctr::RootCutRounds), 7, "counter did not record");
+        set_enabled(false);
+        // `set_enabled(false)` dropped the override but also `ENABLED`; the value
+        // stays in CVALS, which is what `begin_solve` clears.
+        begin_solve();
+        assert_eq!(
+            counter(Ctr::RootCutRounds),
+            0,
+            "without an override, begin_solve must clear the run counters"
+        );
+
+        set_enabled(true);
+        incr_by(Ctr::RootCutRounds, 5);
+        assert_eq!(counter(Ctr::RootCutRounds), 5);
+        begin_solve();
+        assert_eq!(
+            counter(Ctr::RootCutRounds),
+            5,
+            "begin_solve cleared an armed test's counters -- a concurrent solve \
+             would make the probe read 0 and look like dead code"
+        );
+        set_enabled(false);
+        reset();
     }
 }
