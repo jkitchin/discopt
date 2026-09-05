@@ -1961,15 +1961,30 @@ at its default:
 Cuts are worth 3.3× to HiGHS and branching 2.3×; the restart, node-LP cut
 retention, heuristics and symmetry are worth essentially nothing here. **The
 decisive row is `cut pool ~disabled`: HiGHS solves from a root bound of 71 in 516
-nodes, while discopt solves from a root bound of 169.4 in 2371.** A solver with a
+nodes, while discopt solves from a root bound of 169.4 in 2667 as shipped.** A solver with a
 *much stronger root* taking 4.6× more nodes is not losing on its relaxation.
 
 **A9e — confirming it on discopt's side.** On main, varying the strong-branching
 budget (`node_propagation` is already on by default here):
 
+> **Baseline label corrected, same day.** The row below first read
+> "defaults". It is not: it is the shipped root-cut budget **minus**
+> `cut_select`. The configuration a user actually gets is
+> `_milp_root_cut_budget` (`python/discopt/solver.py:21569-21637`, graduated
+> default-ON 2026-09-05), which sets `root_cuts=500, cut_rounds=50,
+> **cut_select=True**, root_cut_time_s`. Measured on main over the same
+> `i1183.mps`: binding defaults (`root_cuts=16, cut_rounds=1`) **10765**; the
+> shipped budget **2667**; the shipped budget with `cut_select=False` **1543**;
+> that plus SB 64/5000 **1109**. So `cut_select` *costs* 1.7× on this instance —
+> which is the documented shape of that graduation ("cuts buy the hard instances
+> by taxing the easy ones"), not a new defect, and one instance is not grounds to
+> touch a corpus-graduated default (§2). Two of my own scripts disagreed on "the
+> default" (1543 vs 2667) purely because one omitted `cut_select`; naming the
+> configuration rather than the word "defaults" is the fix.
+
 | discopt configuration | nodes |
 |---|---|
-| defaults (`sb_max_cands=6`, `sb_node_budget=48`) | 1543 |
+| shipped budget, `cut_select=False` (`sb_max_cands=6`, `sb_node_budget=48`) | 1543 |
 | SB 16 / 500 | 2323 — **worse than the default** |
 | SB 64 / 5000 | **1109** |
 | SB exhaustive (256 / 10⁶) | 1109 — *saturates at 64* |
@@ -1988,7 +2003,8 @@ shape of result as A6→A7.
 model-side levers moved the tree by at most 1.63×, and one (probing) moved it
 backwards. The search is: HiGHS with its cut pool disabled proves optimality from
 a root bound of **71** in **516** nodes; discopt, from a root bound of **169.4**,
-takes **1543**. Three times the nodes from more than twice the root bound. The
+takes **1543** with `cut_select` off and **2667** as shipped. Three to five
+times the nodes from more than twice the root bound. The
 open levers are per-node work and the cut families discopt lacks, not better
 bounds from the ones it has.
 
