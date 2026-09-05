@@ -33,12 +33,27 @@ repo. Read §0 and §8 first regardless of which task you take.
    diagnosis-first → any build that follows gets the full bound-changing gate.
 4. **Do-not-relitigate list is in §8.** TX2/TX2b (deadline truncation), TX3
    (JAX-free relaxation swap), PF5 (blanket native truncation) were falsified
-   with recorded evidence. Do not re-propose them in G-task PRs; G1 explicitly
+   with recorded evidence. **§8 item 3 (TX3) is now OBE** — the JAX removal
+   deleted its premise; see the entry. Do not re-propose them in G-task PRs; G1 explicitly
    *supersedes* TX3's kill with a different mechanism (see §3).
 
 ---
 
 ## §1. The measured decomposition (why we are 10–20× slower than BARON)
+
+> **Partly superseded — 2026-09-05, issue #1026.** Every JAX figure in §1.1 and
+> §1.3 below predates the JAX removal (#74/#75, `docs/dev/jax-removal-plan.md`).
+> The solve path no longer imports JAX at all: the POUNCE-tape evaluator
+> (`discopt/_tape_nlp_evaluator.py`, `DISCOPT_NLP_EVAL=tape`, opt out with
+> `=jax`) is default-ON since `a2fb90d2`, and **66 of 66** in-repo corpus
+> instances solve with `jax` never entering `sys.modules` (Stage 4, asserted in
+> clean subprocesses with a control arm that checks the JAX path *does* import
+> jax, so the check cannot pass vacuously).
+>
+> What survives: the *structure* — `wall_gap ≈ floor × per_node_cost ×
+> node_count` — and the finding that node-NLP dominates node-LP. What does not:
+> the per-layer *shares*, which have not been re-measured post-tape. That
+> re-measurement is the one open deliverable of #1026.
 
 `wall_gap ≈ floor × per_node_cost × node_count`, with different factors
 dominating different instance families. TX0's binding-constraint histogram
@@ -63,6 +78,13 @@ Fresh-subprocess decomposition, median of 3, trivial instance (alan), measured
 ~80ms *total*). Every fresh-process invocation — including every row of every
 benchmark sweep, which runs discopt in an isolated subprocess — pays the 513ms.
 
+> **The `import jax` row is gone — 2026-09-05.** Stage 4 of the JAX removal
+> takes it off the solve path entirely, so the residual floor is `import pounce`
+> + `import discopt` + parse. The floor *as a factor* survives (it still
+> dominates the easy class); it is simply smaller than 595 ms, and the exact
+> figure is un-remeasured. Anyone re-running §1.1 should report the new
+> total rather than subtracting 299 ms from this table.
+
 **The warm daemon (`python/discopt/daemon.py`, CLI `discopt solve`) already
 amortizes this.** Measured 2026-07-15, easy class, median of 3 vs BARON (June
 baseline times):
@@ -80,6 +102,14 @@ baseline times):
 → The daemon halves the easy-class gap today. The residual ~3.7× is engine
 time (F2) plus the ~150ms recurring per-solve engine constant
 (performance-plan.md Appendix B). G4 makes the benchmark measure this honestly.
+
+> **Status resolved — 2026-09-05, #1026 ask 3.** The daemon is no longer an
+> unused build: `discopt solve` routes through it by default and auto-spawns it
+> (`python/discopt/cli.py`), with `--no-daemon` as the opt-out and an in-process
+> solve as the fallback, so correctness never depends on the daemon being up.
+> The table above was measured before the tape landed and so still includes the
+> `import jax` cost in its `fresh-proc` column; the daemon/fresh-proc *ratio* is
+> therefore an upper bound on what the daemon buys today.
 
 ### §1.2 Factor N — node count (real, smallest factor)
 
@@ -108,6 +138,22 @@ solve**, each a Python→JAX→`float()` round-trip. Interop overhead alone:
 cumulative. **The optimizer spends its life marshaling scalars across the
 Python/JAX boundary one point at a time.** TX0 confirms panel-wide: node-NLP =
 69% of all wall (600.6s of ~870s); node-LP = 0.06%.
+
+> **That marshaling was removed, not optimized — 2026-09-05.** #645 (G1) first
+> fused the callbacks (2.45× on the access-pattern replay, but only 1.26×
+> end-to-end on nvs05); the tape evaluator then deleted the
+> Python→JAX→`float()` round-trip altogether. Measured on the 10 instances where
+> both arms prove optimality in the **same node count**, so the work is
+> identical and the difference is per-node cost: 10 faster / 0 slower, median
+> **1.80×**, total **−43.7 %** (`jax-removal-plan.md`, "Bar 2 — net-positive").
+>
+> A 1.80× median does not close a ~90× per-node gap, so **factor C is still the
+> dominant term** — but its attribution is now unknown. The remaining candidates
+> are POUNCE iteration count per node-NLP, Python frame overhead in
+> `_IpoptCallbacks`/`_BoundOverrideEvaluator`, and warm-start quality (is every
+> node re-solving from scratch?). They are *not* JAX dispatch or transfer, and
+> the §1.3 layer table above must not be cited as current: re-run it before
+> proposing a fix, per §0 rule 2.
 
 These NLP solves are the **bound source**, not a skippable heuristic: with the
 strided node-NLP fully off (`DISCOPT_NODE_NLP_STRIDE=1000000`), nvs05 wall and
@@ -424,11 +470,17 @@ elsewhere.
    git `b8c591f`): every warm-LP caller is bound-producing or a control-flow
    gate; the contvar "discarded" probe seeds relaxer state (truncating it =
    looser bound + no wall win).
-3. **Do not attempt the JAX-free relaxation swap** (TX3 KILL): `import jax` is
-   the first op of both nonlinear entry points via `nlp_evaluator.py:19`; the
-   evaluator, not the relaxation, is the JAX dependency. (G1 attacks the
-   marshaling *within* that dependency; a full numpy point-mode evaluator is a
-   separate, unplanned engine rewrite.)
+3. **~~Do not attempt the JAX-free relaxation swap~~** (TX3 KILL — **overtaken
+   by events, 2026-09-05; this entry no longer binds anything**). The kill's
+   premise was that `import jax` is the first op of both nonlinear entry points
+   via `nlp_evaluator.py:19`, so swapping the *relaxation* could not remove JAX
+   while the *evaluator* still pulled it in — and that a JAX-free evaluator was
+   "a separate, unplanned engine rewrite". That rewrite was subsequently planned,
+   built and graduated (#74/#75, `docs/dev/jax-removal-plan.md`): the POUNCE-tape
+   evaluator is default-ON and the solve path imports no JAX at all. There is no
+   longer a JAX import for a relaxation swap to avoid. Kept as a record of the
+   reasoning, not as a prohibition. The transferable lesson: attack the
+   dependency that actually imports the layer, not the caller in front of it.
 4. **Do not blanket-disable the node-NLP** (TX1 entry experiment): tls2 bound
    went LOOSER, tspn12 lost its incumbent, net panel wall got *worse*
    (870→893s). Only the adaptive form (G2) is admissible.
