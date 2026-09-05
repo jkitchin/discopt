@@ -5350,3 +5350,135 @@ between two time-limited runs, not a lost result. Supplemented with the
 `syn`/`rsyn`/`squfl` class at 20 s and 60 s: no route win lost at either budget.
 `DISCOPT_CONVEX_ROUTE_DECISION_POINT=0` restores the #1066 policy, which is kept
 intact and tested.
+
+## 26. #1182 exact continuous (simplex/CNF) lowering: the speed motive is falsified; a capability motive survives (2026-09-05)
+
+**Hypothesis under test** (RFC #1123, deferred to #1182, from Theorem 1 of
+[arXiv:2601.03906v1](https://arxiv.org/abs/2601.03906v1)): replacing each disjunction
+by its exact continuous simplex lowering removes the selector binaries and therefore
+gives a *faster certified* solve than discopt's big-M / hull lowering.
+
+**Kill criterion, fixed before running.** On the in-repo native GDP corpus
+(`benchmarks.gdplib_native`, SCIP/BARON-certified optima) the simplex arm must reach
+the same certified optimum as big-M/hull on at least one instance with strictly less
+wall time or fewer nodes. If it certifies nothing the classical lowerings certify, the
+hypothesis is falsified for certified global solving.
+
+**Probes** (`scratchpad/issue1182/`, each printing an executed-comparison count and
+exiting non-zero at zero, per CLAUDE.md §6): `E1_entry_experiment.py` (real GDP
+corpus), `E2_paper_class.py` (the paper's own obstacle-avoidance class),
+`E3_bigm_refusal.py` (capability), `E5_corpus_refusal_scan.py` (GDPlib scan). Logs
+are committed beside them. Both arms go through the same `Model.solve` certified path
+— which is the comparison the paper does *not* make: its §5 runs local Ipopt on both
+sides, and its "Big M" baseline also eliminates the binaries continuously.
+
+### E1 — real corpus, 60 s cap, `load average 0.17` at start
+
+| instance | arm | status | objective | bound | nodes | wall | clauses | literal occ. | weight vars | rows | Jac. nnz |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| jobshop | big-m | optimal | 11 | 11 | 13 | 0.32 s | – | – | 6 | 12 | 30 |
+| jobshop | hull | optimal | 11 | 11 | 7 | 0.04 s | – | – | 6 | 42 | 96 |
+| jobshop | **simplex** | optimal | 11 | 11 | **251** | **4.82 s** | 3 | 6 | 6 | 6 | 18 |
+| ex1_linan_2023 | big-m | optimal | −0.9996 | −0.9996 | 15 | 5.31 s | – | – | 9 | 20 | 45 |
+| ex1_linan_2023 | hull | optimal | −0.9996 | −0.9996 | 9 | 5.86 s | – | – | 9 | 40 | 92 |
+| ex1_linan_2023 | **simplex** | **feasible** | −0.9996 | −1.0166 | 437 | **60.1 s (cap)** | 48 | 224 | 224 | 96 | 144 |
+| small_batch | big-m | optimal | 167427.66 | 167427.65 | 3 | 7.21 s | – | – | 9 | 34 | 73 |
+| small_batch | hull | optimal | 167427.66 | 167427.65 | 3 | 10.07 s | – | – | 9 | 55 | 121 |
+| small_batch | **simplex** | optimal | 167427.66 | 167427.65 | 3 | 11.66 s | 24 | 72 | 72 | 48 | 100 |
+
+Two independent runs gave identical node counts (251 / 437 / 3), so the ordering is
+not a timing artefact. **0 of 3 instances** meet the kill criterion, and
+`ex1_linan_2023` regresses from certified to uncertified. The size table is also the
+answer to #1182's requirement 4: on `ex1_linan_2023` the *declared* rows barely move
+while clauses go 0 → 48 and weight variables 9 → 224, because each `a == v` disjunct
+is two predicates and CNF distribution is multiplicative (2⁴ + 2⁵ = 48 clauses). A
+clause count alone would have hidden that.
+
+### E2 — the paper's own class, where CNF distribution is a no-op
+
+Obstacle avoidance for a discrete-time double integrator: one 4-way disjunction of
+*single* linear predicates per step, i.e. 1 clause and 4 weights, the shape most
+favourable to the lowering. Two interleaved repetitions, 60 s cap:
+
+| steps | arm | status | objective | bound | nodes | wall (rep 0 / rep 1) |
+|---|---|---|---|---|---|---|
+| 3 | big-m | optimal | 15.2 | 15.2 | 97 | 0.89 s / 0.53 s |
+| 3 | hull | time_limit | – | 14.4 | 3999 / 4191 | 60.4 s / 60.1 s |
+| 3 | **simplex** | feasible | 15.2 | 15.156 | 761 | 31.8 s / 32.3 s |
+| 5 | big-m | optimal | 2.4414 | 2.4414 | 347 | 2.10 s / 2.28 s |
+| 5 | hull | time_limit | – | 2.4 | 2015 | 60.2 s / 60.2 s |
+| 5 | **simplex** | feasible | 2.4414 | 2.4 | 1433 / 1401 | 60.0 s / 60.1 s |
+
+The lowering finds the optimal incumbent and cannot close the gap; big-M certifies in
+under 3 s. So the loss is not an artefact of instance selection — it holds on the
+class the mechanism was designed for. **The speed motive is falsified and recorded as
+such: `"simplex"` is opt-in, is never selected by `gdp_method="auto"`, and this
+section is the reason.**
+
+### E3/E5 — what survives: a capability, not a speed claim
+
+discopt's big-M pass refuses a disjunct row whose interval enclosure is unbounded;
+the Furman–Sawaya–Grossmann hull refuses a row that is not finite at the origin
+(`HullPerspectiveOriginError`). Theorem 1 needs neither. E3 measures all four cells:
+
+| fixture | big-m | hull | simplex |
+|---|---|---|---|
+| unbounded `x` in `x <= 1` | **refused** | optimal | optimal |
+| finite box (control) | optimal | optimal | optimal |
+| `log(x) <= 0`, `x` unbounded above | optimal | **refused** | optimal |
+| `1/x <= 1` on a box straddling 0 | **refused** | **refused** | **optimal, bound 0** |
+
+The last row is a class no lowering in this tree could handle before. E5 asks how
+often it occurs on a real corpus rather than in a constructed fixture (the #727 RLT
+lesson), scanning every disjunct row of 17 GDPlib models with Pyomo's own interval
+propagation and an origin evaluation:
+
+| | disjunct rows | unbounded enclosure (big-M refuses) | non-finite at origin (hull refuses) | both |
+|---|---|---|---|---|
+| **17 GDPlib models** | **11,058** | 18 | 79 | **18** |
+
+The 79 are `gdp_col` (28), `hda` (33) and `stranded_gas` (18); the 18 that hit both
+are `stranded_gas`, where the row is `log` of a capacity sum whose box includes 0 —
+an economy-of-scale sizing idiom, not a one-off. That is the concrete fixture #1182's
+entry condition asks for, and it is a *capability* fixture: on those rows the exact
+continuous lowering is not faster than the alternatives, it is the only one there is.
+
+### E4 — the SOS1 reference, which only exists on MPEC models
+
+Requirement 4 of #1182 asks for a benchmark against "exact GDP/SOS1 references".
+E1/E2 cover the exact GDP references. SOS1 in this tree is not a general
+disjunction lowering — it is one of `discopt.mpec`'s complementarity encodings — so
+the SOS1 comparison exists only where a complementarity does. A relation
+`0 <= f ⊥ g >= 0` is reachable through four exact encodings, all through the same
+certified `Model.solve`; `method="scholtes"` is deliberately absent, being a
+homotopy of *local* solves whose result is not a certificate.
+
+| model | arm | status | objective | nodes | wall | source `min(f, g)` | certified |
+|---|---|---|---|---|---|---|---|
+| distance | sos1 | optimal | 1 | 3 | 0.36 s | 9.3e−11 | yes |
+| distance | gdp/big-m | optimal | 1 | 3 | 0.04 s | 6.1e−11 | yes |
+| distance | gdp/hull | optimal | 1 | 3 | 0.05 s | 7.5e−12 | yes |
+| distance | **gdp/simplex** | optimal | 1 | 11 | **15.70 s** | **1.4e−17** | yes |
+| chain4 | sos1 | optimal | 1 | 29 | 0.06 s | 2.2e−11 | yes |
+| chain4 | gdp/big-m | optimal | 1 | 9 | 0.06 s | 4.9e−12 | yes |
+| chain4 | gdp/hull | optimal | 1 | 9 | 0.18 s | 6.6e−12 | yes |
+| chain4 | **gdp/simplex** | optimal | 1 | **5** | **14.65 s** | 5.5e−08 | yes |
+
+All four certify the same optimum, so the encoding is sound here too. The
+node-count signal is **mixed** — the simplex arm wins on `chain4` (5 vs 9) and
+loses on `distance` (11 vs 3) — while the wall-time signal is uniformly bad:
+100–250× slower, and near-constant at ~15 s across two models of different size,
+which suggests a per-node cost in the spatial path rather than search. Stated
+plainly so it is not read as a partial win: a node-count win that costs 244× wall
+does not meet §5's *net-positive* bar, and one of the two models is a synthetic
+chain I wrote for this probe rather than a corpus instance (`distance` is the
+repo's own `test_mpec.py` fixture). The one column where the lowering is
+consistently better is the **source complementarity residual** on `distance`
+(1.4e−17 against 6.1e−11), which is a property of the encoding being exact rather
+than regularized — worth recording, not worth a default change.
+
+**Retraction of the framing in #1182's own text.** The issue asks for "a model where
+the deferred lowering is expected to beat the exact GDP/SOS1 path" and reads that as a
+performance question. E1/E2 answer it negatively and that answer is binding: no
+default may be changed on this mechanism, and any future claim that it is faster owes
+a measurement that contradicts these two tables first.
