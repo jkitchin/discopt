@@ -2039,6 +2039,68 @@ No selection bias in the split: zero instances changed certification status
 between arms, so the 21-instance subset is identical for both. #1173 was the right
 call, and this is the measurement that should have accompanied it.
 
+### A10 — the strong-branching budget, at corpus scale: FALSIFIED as a default
+
+A9e left the SB budget as the one open discopt-side lever with a measured gain
+(2667 → 1109 on #1183). Per §2 a single-instance gain is not a result, so it went
+to the 38-instance MIPLIB panel — `sbbudget.py`, `gap_tol=1e-4`, 20 s/instance,
+arms run back-to-back on each instance so they meet the same machine load.
+
+**The panel was extended from one dimension to two before it ever produced a
+number.** Its original arms varied `sb_node_budget` alone. A9e had by then
+measured that the budget alone is *non-monotonic* (16 candidates / 500 nodes is
+worse than the shipped 6/48) while 64 candidates / 5000 nodes gives 1.39× and then
+**saturates** at 64. A budget-only sweep would have reported a wash and falsified
+the wrong hypothesis. `n50k` was kept precisely so the budget-alone dimension was
+still *measured* rather than assumed.
+
+**Pre-registered kill criterion** (written before the run): geometric mean node
+reduction over the instances **every arm** drives to optimality — only there is a
+node count a complete quantity rather than a disguised timing measurement.
+≥ 1.5× survives; < 1.25× falsified; in between, weak — report, do not build on it.
+
+| arm | `sb_max_cands` | `sb_node_budget` | solved | geomean nodes vs shipped |
+|---|---|---|---|---|
+| shipped | 6 | 48 | **21/38** | — |
+| n50k | 6 | 50 000 | **21/38** | 1.22× |
+| c64n5000 | 64 | 5 000 | 20/38 | **1.43×** |
+| c64n50k | 64 | 50 000 | 20/38 | 1.42× |
+
+**Verdict: WEAK by the pre-registered criterion, and it fails the §5
+net-positive bar outright.** Cert-clean — 152 bound-vs-oracle comparisons and 82
+solved-incumbent-in-band checks executed, zero violations — but not helpful:
+
+- It **loses an instance**. `gt2` goes from *optimal in 0.06 s / 2643 nodes* to
+  *unproven after 20.4 s / 828 901 nodes*. Solved count 21 → 20.
+- Total wall over the 20-instance comparable set is **worse**: 29.1 s → 31.1 s,
+  *despite* 1.43× fewer nodes. The per-node strong-branching cost eats the entire
+  node gain and then some. A node-count win is not a win.
+- The distribution is violently **bimodal**: `fiber` 20.3×, `22433` 5.5×,
+  `dcmulti` 3.0×, `23588` 2.9× against `neos-3611689-kaihu` 0.59×, `gen` 0.73×,
+  `supportcase16` 0.78× — better on 8, worse on 4, neutral on 8.
+
+**The `gt2` mechanism is the useful part.** In every arm the dual bound is
+**21166.0 — exactly the reference optimum**. The wide-SB arms fail purely on the
+*primal* side: their incumbent is stuck at **72966** while the bound sits on the
+answer. Wide strong branching reorders the search so the dive never reaches the
+good solution, and the tree then cannot close a gap the dual side had already
+won. This is the same shape as A9e's non-monotonicity, seen from the other end.
+
+**Conclusion: the fixed-node-prefix *shape* is wrong, not its size.** Too small
+(6/48) under-informs the pseudocosts; too large starves the primal search and
+overspends per node — and no constant sits between those failures, which is what
+"non-monotonic and bimodal" means. HiGHS does not pick a constant: it budgets
+strong branching in **LP iterations**, about a third of all non-heuristic LP
+iterations, recomputed at every branching decision, so the budget never fully
+expires and never runs away (`HighsSearch.cpp:1272-1290`). That is a plausible
+next design, but per the pre-registered criterion **nothing is built on the 1.43×**;
+it would have to enter as its own hypothesis with its own entry experiment.
+
+With A10 closed the discopt-side ledger for this class is: relaxation levers all
+falsified (A9a-A9c), the SB budget falsified as a default (A10). What remains
+untested is node selection, conflict analysis and the restart-and-resolve loop —
+the mechanisms A9d showed HiGHS keeping when its cut pool is taken away.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
