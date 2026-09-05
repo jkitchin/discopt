@@ -21,7 +21,7 @@ Neumaier (1990), *Interval Methods for Systems of Equations*.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 
@@ -206,28 +206,22 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
         # relaxation, the g-convex injection), where it becomes an FBBT tightening
         # that cuts the optimum out of the box (#1158 review 3, MEDIUM 1).
         #
-        # numpy sums pairwise, whose forward error is bounded by
-        # ``(log2(n) + 1) * eps * sum |x_i|``. That is the widening applied here,
-        # with a slack term and a final ``nextafter`` to cover the rounding of the
-        # bound's own computation. ``_relax/convexity/eigenvalue.py`` already takes
-        # the rigorous route for its own accumulation, so the pattern is the
-        # repo's, not an invention.
+        # The size of that widening is ``_accumulation_factor``'s business, and
+        # this reduction shares ``_widen_sum`` with ``_eval_matmul`` (#1161) so the
+        # two cannot drift apart -- an earlier revision of this branch carried its
+        # own inline copy of the same arithmetic, which is exactly the drift the
+        # shared helper exists to prevent. Sharing also picks up the helper's
+        # non-finite guard, which the inline copy lacked: an infinite ``|x_i|``
+        # produced ``inf - inf = nan`` and silently destroyed the enclosure.
         #
         # Widening is always the SAFE direction: an enclosure may be loose and
         # remain sound, but must never be narrow.
         inner = _eval(expr.operand, model, box, cache)
         lo_arr = np.asarray(inner.lo, dtype=np.float64)
         hi_arr = np.asarray(inner.hi, dtype=np.float64)
-        lo = np.sum(lo_arr, axis=expr.axis)
-        hi = np.sum(hi_arr, axis=expr.axis)
         n_terms = _reduced_count(lo_arr, expr.axis)
-        if n_terms > 1:
-            # +2 rather than +1: one for the bound's own rounding, one of slack.
-            factor = (math.log2(n_terms) + 2.0) * float(np.finfo(np.float64).eps)
-            lo_err = factor * np.sum(np.abs(lo_arr), axis=expr.axis)
-            hi_err = factor * np.sum(np.abs(hi_arr), axis=expr.axis)
-            lo = lo - lo_err
-            hi = hi + hi_err
+        lo = _widen_sum(np.sum(lo_arr, axis=expr.axis), lo_arr, n_terms, expr.axis, -1.0)
+        hi = _widen_sum(np.sum(hi_arr, axis=expr.axis), hi_arr, n_terms, expr.axis, +1.0)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
 
     if isinstance(expr, SumOverExpression):
@@ -285,7 +279,7 @@ def _widen_sum(
     total: np.ndarray,
     terms: np.ndarray,
     n_terms: int,
-    axis: Optional[int],
+    axis: Union[int, tuple[int, ...], None],
     sign: float,
 ) -> np.ndarray:
     """Widen a reduced sum outward by its accumulation-error bound.
@@ -296,9 +290,9 @@ def _widen_sum(
     ``inf - inf = nan``, which would silently destroy the enclosure.
 
     ``axis`` mirrors ``np.sum``'s: ``_eval_matmul`` reduces a whole row and passes
-    ``None``, while the ``SumExpression`` reduction reduces along a declared axis.
-    Both go through this one helper so the two reductions cannot drift apart
-    (#1161).
+    ``None``, while the ``SumExpression`` reduction passes its declared ``axis``
+    (an int, a tuple of ints, or ``None`` for a full reduction). Both go through
+    this one helper so the two reductions cannot drift apart (#1161).
     """
     factor = _accumulation_factor(n_terms)
     if factor == 0.0:
