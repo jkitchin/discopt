@@ -223,3 +223,121 @@ and its derivative-callback time is left with the enclosing region. It is an
 attribution gap in the FFI instrument, not a solver bug, and it is why the
 cProfile arm is the primary instrument here.
 
+---
+
+## §3. Deliverable 3 — the three surviving candidates, separated
+
+`issue1180_node_nlp_candidates.py`, 10 instances chosen from §2.4 as the
+NLP-dominated ones, 20 s each. #1026's fourth candidate ("per-iterate JAX
+dispatch latency") is not measured because it no longer exists.
+
+**A measurement hazard found while building this probe, which invalidates any
+profile taken with a `node_callback` attached.** Attaching one is *not*
+observation-neutral: it is a documented routing signal — `_MIP_NLP_IGNORED_OPTIONS`
+refuses to auto-route when it is set, and the GP probe and the
+substitution-presolve gate do the same — so a probe that attaches one measures a
+different engine. Measured on `alan` in fresh subprocesses, both orders, same 13
+nodes and the same objective 2.925: **without a callback the solve runs 54 POUNCE
+NLP solves and 11 130 tape evaluations; with one it runs 1 and 0.** Neither this
+probe nor the layer-split probe attaches one; the root/tree split comes from a
+companion `max_nodes=1` run instead. (`profile_instance.py` attaches a
+`node_callback` by default — its `--no-trace` flag is not optional for an
+auto-routable instance.)
+
+### §3.1 Candidate 1 — POUNCE iterations per node-NLP
+
+| instance | nodes | NLP solves | root-only solves | median iters | ms/solve | callbacks/solve | NLP wall / solve wall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| alan | 13 | 54 | 4 | 36 | 16.3 | 211 | 69 % |
+| gkocis | 7 | 61 | 60 | 38 | 17.6 | 221 | 81 % |
+| nvs21 | 9 | 63 | 59 | 11 | 6.9 | 69 | 86 % |
+| ex1225 | 5 | 133 | 133 | 18 | 63.0 | 542 | 96 % |
+| st_e29 | 5 | 136 | 136 | 17 | 12.7 | 118 | 94 % |
+| tspn08 | 15 | 139 | 139 | 31 | 87.0 | 774 | 80 % |
+| tls2 | 245 | 320 | 17 | 15 | 15.0 | 89 | 90 % |
+| nvs05 | 27 | 60 | 55 | 14 | 9.6 | 79 | 30 % |
+| tanksize | 2607 | 33 | 72 | 53 | 233.5 | 1477 | 37 % |
+| 4stufen | 3 | 9 | 9 | 137 | 791.0 | 4322 | 88 % |
+
+Iteration counts are **ordinary** — a median of 11–53 on nine of ten instances,
+137 on the one 157-variable model. There is no pathology here: an IPM taking 15–40
+iterations on a node relaxation is what an IPM does. The lever is not "the solves
+take too many iterations".
+
+What the table does say is that **on most of these instances the NLP volume is
+root work, not per-node work**: a `max_nodes=1` solve runs essentially the same
+number of NLP solves as the full 20 s solve (ex1225 133/133, st_e29 136/136,
+tspn08 139/139, gkocis 60/61, nvs21 59/63, nvs05 55/60, 4stufen 9/9). The
+exceptions are `tls2` (17 of 320) and `tanksize`, whose root-only run does *more*
+NLP solves than the full run (72 vs 33) — the root-only companion is a separate
+solve with its own budget, not a prefix of the full one, so it is read as "a
+root-only solve costs about this much", never as a subtraction.
+
+### §3.2 Candidate 2 — Python frame overhead in the callback path
+
+Per-callback cost by layer, median of 7 interleaved rounds × 2000 reps, sd in the
+JSON record. The chain is `_IpoptCallbacks.<cb>` → `_charge_evaluator.wrapper` →
+`_timing.charge` → `_BoundOverrideEvaluator.__getattr__` →
+`TapeNLPEvaluator.evaluate_*` → `_x` → the native tape.
+
+| instance | n | native only | + `_x` list build | + tape wrapper | + proxy | **full callback** |
+|---|---:|---:|---:|---:|---:|---:|
+| alan | 8 | 0.35 µs | 2.04 | 2.37 | 2.50 | **6.55 µs** |
+| nvs05 | 15 | 0.38 | 2.63 | 2.89 | 3.11 | **6.92** |
+| tspn08 | 44 | 1.35 | 5.23 | 5.49 | 5.72 | **9.92** |
+| tanksize | 47 | 0.57 | 4.61 | 4.90 | 4.97 | **8.67** |
+| 4stufen | 157 | 1.52 | 12.29 | 12.72 | 12.58 | **16.88** |
+
+Two costs dominate, and both are pure plumbing:
+
+1. **`_timing.charge` — the layer-profile instrument itself — is the single
+   largest item**, ~4 µs of a 6.5 µs `alan` objective callback (the step from
+   "proxy" to "full callback"). It is a `@contextlib.contextmanager` generator
+   entered once per derivative callback.
+2. **`_x`'s per-callback Python list build** is the second, and it *scales with
+   n*: 1.7 µs at n=8, 10.8 µs at n=157, while the arithmetic underneath stays at
+   0.35–1.5 µs.
+
+So on `alan` the tape arithmetic is **5 %** of the callback that delivers it. The
+honest sizing, though, is the corpus one from §2.4: the whole callback path is
+9.2 % of wall, so removing all of it is worth at most 1.10×.
+
+### §3.3 Candidate 3 — warm-start quality
+
+Median iterations over up to 12 captured node subproblems per instance, each
+re-solved three ways after the solve (results discarded; the probe changes no
+bound):
+
+| instance | production warm `x0` | cold box midpoint | + full `pounce.WarmStart` |
+|---|---:|---:|---:|
+| alan | 36.0 | 41.0 | 19 |
+| gkocis | **11.5** | 39.5 | 18 |
+| nvs21 | 28.5 | 44.0 | 25 |
+| ex1225 | 15.5 | 19.0 | 16 |
+| st_e29 | 17.0 | 16.5 | 16 |
+| tspn08 | 47.0 | 47.5 | 37 |
+| tls2 | 19.0 | 14.5 | 37 *(1 replayable case of 12)* |
+| nvs05 | 90.5 | 104.0 | 75 |
+| tanksize | **52.5** | 166.0 | 61 |
+| 4stufen | 137 | 225 | 152 |
+
+**"Is every node re-solving from scratch?" — No.** The parent's point, clipped
+into the child box, already buys a real reduction against a cold start on 7 of 10
+instances (`gkocis` 3.4×, `tanksize` 3.2×, `4stufen` 1.6×, `nvs21` 1.5×), is
+neutral on `tspn08`, and is slightly *worse* on `st_e29` and `tls2`. The primal
+warm start is working.
+
+**The full dual warm start is falsified as a lever.** Handing POUNCE the previous
+solve's complete state (multipliers, bound multipliers, barrier parameter) via
+`pounce.WarmStart` — which POUNCE 0.11 supports and `discopt` never constructs —
+changes the median iteration count by a ratio of **0.53× to 1.95×, median
+0.99×**: better on 4 instances, worse on 4, neutral on 2. Kill criterion met; not
+built.
+
+There is also a **structural** reason it cannot be built as stated: on `tls2`,
+**10 of 12 consecutive node NLPs had different `(n, m)`** (captured n=37 m=24
+against target n=38 m=30) because the cut pool changes the row count between node
+NLPs. A dual state cannot be replayed across nodes that do not have the same
+dimensions, so any future attempt has to map the state through the cut pool, not
+merely carry it.
+
