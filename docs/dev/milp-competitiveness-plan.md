@@ -392,7 +392,7 @@ incumbent. That is a strict ordering, and it is why Track A precedes Track B. Bu
 Track B is not optional: on the `mik` family the bound is already within 2.6 % and
 the tree still does not close, so Track A alone does not reach 38/38 either.
 
-### Track A0′ — two measured defects that block whole mechanisms. Do these first.
+### Track A0′ — the audit's two candidate defects. One survives; do it first.
 
 Both were found by the 2026-09-05 engine audit and both are **confirmed by
 discopt's own split counters** (`scratchpad/miplib/verify_claims.py`, run with
@@ -419,34 +419,60 @@ start while cuts, warm starts and strong branching are all disabled at once.
 *Also add counters at `gomory.rs:233-235, 246-248, 271`: three silent early
 returns, none instrumented. CLAUDE.md §6.*
 
-**A0′.2 — zero-then-pin in the cut cleanup (`gsvm2rl3`, plus 6 at-risk).**
-`gsvm2rl3` separates 31 cuts and discards **all 31**. Confirmed here:
-`SubstDropUnbounded = 31`, `SubstDropDynamism = 0` — so the refusal is the
-infinite-bound pin at `milp_driver.rs:3213-3222`, **not** the dynamism backstop.
-(The earlier diagnosis blamed dynamism; the counter split shipped in
-`6375b1fb` is what disproved it.)
+**A0′.2 — `gsvm2rl3`'s 31 refused cuts. FALSIFIED as a priority item; demoted.**
 
-Mechanism: `gsvm2rl3` has **61 FREE columns**, all basic at the root. Every GMI
-cut carries pure cancellation noise on them — 4e-19 … 3e-16 absolute, ≤ 1.2e-17
-*relative*, with 994/994 entries ≤ 1e-12 relative. The cleanup tries to pin each
-such column at `u[k]`/`l[k]`, both infinite, and refuses the whole cut. HiGHS
-handles exactly this by **zeroing `|v| <= small_matrix_value` first**
-(`HighsTransformedLp.cpp:337-341`) and only refusing genuinely free columns that
-carry *real* coefficients (`:173-176`). SCIP does the same via `removeZeros`
-before the infinite-bound test. discopt pins before zeroing; the order is
-backwards.
+The audit proposed this as the second high-leverage fix: `gsvm2rl3` separates 31
+cuts and discards all 31 at the infinite-bound pin
+(`milp_driver.rs:3213-3222`) — confirmed here, `SubstDropUnbounded = 31`,
+`SubstDropDynamism = 0`, so the *site* is right and the earlier
+dynamism-backstop diagnosis was wrong. The instance has 61 FREE columns carrying
+≤ 1.2e-17-relative cancellation noise, and the prescription was "zero before
+pinning, as HiGHS does at `HighsTransformedLp.cpp:337-341`."
 
-*Honest expectation.* Recovering these particular cuts is already measured
-**node-neutral on `gsvm2rl3`** (3 better / 3 worse at a fixed 5000-node budget —
-see "Falsified: relaxing the cut-cleanup's numerical gates"). Zero-then-pin is a
-*different* fix from the one that was falsified — dropping a 1e-17-relative
-roundoff term is exact to tolerance, where keeping it was not — and it is the rule
-both reference solvers use. It ships because the rule is wrong, not because
-`gsvm2rl3` is expected to flip. The breadth argument is the reason to expect more:
-**18 of 100 MPS files carry FR columns; 6 are on this panel** — `gsvm2rl3`,
-`iskar`, `istra`, `jijia`, `kaihu`, `obra`. Only `gsvm2rl3` is *verified* affected;
-the other five are at risk and are the kill criterion. If the panel does not move
-on those six, the fix stays (it is a correctness repair) but claims no credit.
+**Four measurements killed it, in order (2026-09-05):**
+
+1. **The HiGHS mechanism is not what was reported, and is not portable.** The
+   `small_matrix_value` cleanup at `:340` runs *after* the free-column refusal at
+   `:173`, so it is not what saves HiGHS. What actually saves it is upstream, in
+   the separator: `HighsTableauSeparator.cpp:158-165` discards basis-inverse
+   weights with `maxAbsRowVal(row) * |weight| <= feastol` **before the row is
+   aggregated**, so noise never becomes a nonzero. discopt's GMI path cannot
+   adopt that: filtering `w` breaks the `ābar_B = e_i` identity that lets
+   `gomory.rs` skip basic columns, and skipping them would then be an
+   uncompensated — unsound — drop. HiGHS gets away with it because its filtered
+   weights feed a general aggregator (`transform` + cMIR), not a tableau row with
+   assumed unit structure.
+2. **Compensated summation cannot help.** The residues are 4e-19 … 3e-16, which
+   is per-*product* rounding in `f * base.val[k]`, not summation error. Kahan or
+   Neumaier accumulation removes the latter and not the former.
+3. **FBBT cannot bound the columns.** The SCIP review's explanation — "SCIP would
+   refuse these cuts too; the difference is that its presolve bounds the
+   variables first" — does not hold here. Ten interval-arithmetic FBBT passes over
+   `gsvm2rl3` move it from **61 free structural columns to 61**
+   (`scratchpad/miplib/fbbt_free.py`).
+4. **The breadth argument evaporates.** The claim was "18 of 100 MPS files have FR
+   columns; 6 on this panel." Six panel instances do have them
+   (`scratchpad/miplib/freecount.py`) — but five carry exactly **one** free column
+   (the objective variable) and **none of them loses a single cut**
+   (`scratchpad/miplib/breadth.py`): `SubstDropUnbounded = 0` on all five, with
+   24-176 cuts generated each. Only `gsvm2rl3`, with 61, is affected.
+
+So the item reduces to: one instance out of 38, whose cut recovery is **already
+measured node-neutral** (3 better / 3 worse at a fixed 5000-node budget — see
+"Falsified: relaxing the cut-cleanup's numerical gates"), with no sound fix
+identified. The refusal at the pin is **correct as written**: dropping a term
+whose maximising bound is infinite is not a relaxation, and no amount of
+smallness makes it one in exact arithmetic. It stays.
+
+*What would revive it:* a cut family whose coefficients are conditioned by
+construction (A2), or a genuine bound derivation for those 61 columns that FBBT
+cannot reach. Not a laxer numerical gate — that road has now been measured shut
+twice.
+
+*Lesson recorded (CLAUDE.md §4, §11):* three separate expert-supplied mechanisms
+for this one instance — dynamism backstop, zero-then-pin, presolve bounding — were
+each plausible, each cited to real source, and each wrong. The counters and a
+20-line numpy FBBT settled in minutes what the citations could not.
 
 ### Track A — the bound (needed by 17/17)
 
@@ -960,7 +986,7 @@ so a stage can be scored before parity is reached:
 | stage | target | basis for the target |
 |---|---|---|
 | A0 + A0.1 | 21/38 | measured, banked (`cut500_prune`) |
-| A0′.1 + A0′.2 | 21/38 | **no solved-count target.** Both are correctness repairs that unblock machinery; scored on *counters* (amur: `SepGomory` calls > 0 and `DualPrepRejectShape` → ~0; gsvm2rl3: `SubstDropUnbounded` → 0) and on the 6 FR-column instances, not on solves |
+| A0′.1 | 21/38 | **no solved-count target.** A correctness repair that unblocks three mechanisms; scored on *counters* (amur: `SepGomory` calls > 0, `DualPrepRejectShape` → ~0), not on solves. A0′.2 was falsified and demoted — see Track A0′ |
 | A1 | 24/38 | cut lifecycle makes a >500 budget affordable |
 | A2 | 30/38 | the family HiGHS actually closes its last few percent with |
 | A3 | — | branching quality; scored on nodes at fixed solved-count, not on solves |
@@ -968,7 +994,7 @@ so a stage can be scored before parity is reached:
 | B2 | 35/38 | the sub-MIP/pump ladder |
 
 These are targets, not predictions — a stage that misses its target is re-scoped
-against the measurement, per §4 of CLAUDE.md, not carried forward on hope. A0′
+against the measurement, per §4 of CLAUDE.md, not carried forward on hope. A0′.1
 deliberately claims no solved-count: it is first in the order because it unblocks
 three mechanisms at once, not because it is expected to move the panel by itself.
 
