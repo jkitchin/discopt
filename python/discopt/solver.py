@@ -6596,6 +6596,33 @@ def _role2_budget(seconds):
     return None if _tuning().deterministic else seconds
 
 
+def _finder_stage_deadline(outer_deadline: float) -> float:
+    """Bound a finder-role primal-heuristic STAGE to a share of what is left (#1153).
+
+    ``outer_deadline`` is the role-1 deadline the stage would otherwise inherit.
+    The result is never later than it, so this can only ever *reduce* a stage's
+    clock — it is a division of the caller's remaining budget between the finder
+    stage and the search, not a work allowance that grows with ``time_limit``.
+    That is why the #1153 ratchet records it as a ``split``.
+
+    Take this ONCE per stage and share it among every consumer. Recomputing it
+    per call is Zeno's bound — each call gets a share of whatever is left at that
+    moment, and the total is never bounded (measured: per-call grants fell
+    3.0 s -> 1.75 s while total stage wall did not move, 7.08 s -> 7.47 s).
+
+    Returns ``outer_deadline`` unchanged when the share is 1.0 (flag off), so the
+    legacy path is byte-identical.
+    """
+    share = _heuristic_entry_share()
+    if share >= 1.0:
+        return float(outer_deadline)
+    now = time.perf_counter()
+    return min(
+        float(outer_deadline),
+        now + max(_DEADLINE_NODE_FLOOR_S, share * (float(outer_deadline) - now)),
+    )
+
+
 def _role2_deadline(deadline):
     """The absolute-deadline form of :func:`_role2_budget` (``None`` = no clock)."""
     return None if _tuning().deterministic else deadline
@@ -11823,37 +11850,19 @@ def solve_model(
         return True
 
     def _heur_stage_deadline() -> float:
-        """The deadline a *finder*-role root primal heuristic STAGE runs under.
+        """This solve's finder-stage deadline — see :func:`_finder_stage_deadline`.
 
-        #1153, second attempt — and the first one failed for a reason worth
-        recording. A finder stage is TWO NLP consumers, not one: a multistart
-        relaxation solve that seeds the rounding, and the feasibility pump itself
-        (3.27 s + 3.11 s = the 6.4 s that eats a 10 s budget on heatexch_gen2).
-        The first attempt bounded only the pump and left the seed on the global
-        ``_deadline``, so it capped the cheaper half and measured inert — §6.4's
-        null was an artifact of an incomplete change, not evidence against the
-        approach. Every consumer of the stage now reads this.
+        A finder stage is TWO NLP consumers, not one: a multistart seed that
+        produces the rounding point (3.27 s measured) and the pump itself
+        (3.11 s). #1153's first attempt bounded only the pump and left the seed on
+        the global deadline, capped the cheaper half, and measured inert — §6.4's
+        null was that artifact, not evidence against the approach.
 
-        Capping is preferable to REFUSING (the entry-share form) for a reason the
-        panels showed: refusing costs ``nvs05`` its incumbent outright and
-        degrades ``tspn12``, because a productive pump never runs at all. A
-        productive pump usually succeeds early, so bounding its clock keeps the
-        win while still stopping it from consuming the search.
-
-        Returns ``_deadline`` unchanged — legacy, byte-identical — when the share
-        is 1.0 (flag off).
-
-        Sound: a truncated primal heuristic changes which incumbent is found and
-        when, never the dual bound or the certificate (§0.3 heuristic-policy).
+        Capping beats REFUSING: refusing costs nvs05 its incumbent outright and
+        degrades tspn12, because a productive pump never runs. A productive pump
+        usually succeeds early, so bounding its clock keeps the win.
         """
-        _share = _heuristic_entry_share()
-        if _share >= 1.0:
-            return _deadline
-        _now = time.perf_counter()
-        return min(
-            _deadline,
-            _now + max(_DEADLINE_NODE_FLOOR_S, _share * (_deadline - _now)),
-        )
+        return _finder_stage_deadline(_deadline)
 
     def _hess_compile_refuses(_ev) -> bool:
         """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
@@ -17115,23 +17124,9 @@ def _solve_nlp_bb(
                             evaluator=evaluator,
                             # #1153: same class as the ``solve_model`` finder
                             # stage — this pump was handed the whole SOLVE
-                            # deadline, so what it costs is set by the caller's
-                            # time_limit rather than by the stage. Share-bounded
-                            # once, here, for the same reason and with the same
-                            # legacy-identical behaviour when the flag is off.
-                            deadline=(
-                                t_start + time_limit
-                                if _heuristic_entry_share() >= 1.0
-                                else min(
-                                    t_start + time_limit,
-                                    time.perf_counter()
-                                    + max(
-                                        _DEADLINE_NODE_FLOOR_S,
-                                        _heuristic_entry_share()
-                                        * (t_start + time_limit - time.perf_counter()),
-                                    ),
-                                )
-                            ),
+                            # deadline, so what it costs was set by the caller's
+                            # time_limit rather than by the stage.
+                            deadline=_finder_stage_deadline(t_start + time_limit),
                         )
                         if fp_sol is not None:
                             fp_obj = float(evaluator.evaluate_objective(fp_sol))

@@ -164,6 +164,7 @@ _ROLE1_NAMES = frozenset(
         "_probe_remaining",
         "_ms_remaining",
         "_hg_remaining",
+        "outer_deadline",
     }
 )
 
@@ -398,6 +399,19 @@ KNOWN: tuple[tuple[str, str, int, str], ...] = (
         "iter_budget = remaining / horizon",
         1,
         "derived",  # capped at 60 s by the ``return min(...)`` on the next line
+    ),
+    (
+        "solver.py",
+        "return min(",
+        1,
+        # ``_finder_stage_deadline``: the #1153 stage cap itself. A share of the
+        # caller's remaining budget, and therefore a carve — but one that is
+        # min'd against the role-1 deadline, so it can only ever REDUCE a stage's
+        # clock, never grant work that grows with ``time_limit``. Recorded rather
+        # than hidden: an earlier revision passed this scan only because the
+        # variable was named ``outer_deadline`` instead of a whitelisted name,
+        # which is the ratchet going blind to its own author.
+        "split",
     ),
     (
         "solvers/oa.py",
