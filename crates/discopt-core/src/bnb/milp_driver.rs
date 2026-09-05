@@ -360,6 +360,55 @@ fn dive_batch_eligible(
         && batch_index % stride == 0
 }
 
+/// Node-selection order for the MILP search, read once from `DISCOPT_NODE_SELECT`.
+///
+/// Default `bestfirst` is the shipped behavior exactly, so this is default-off in
+/// the CLAUDE.md §5 sense: the OFF arm is the pre-change search, which is what a
+/// differential panel A/Bs against. It is env-gated rather than an `MilpOptions`
+/// field for the same reason `dive_stride` is — `MilpOptions` has no `Default`
+/// impl, so a new field would have to be threaded through every construction site
+/// in the crate, most of them test fixtures, which is churn that buys nothing for
+/// an entry experiment.
+///
+/// Why this exists. `TreeManager::new` hardcodes [`SelectionStrategy::BestFirst`],
+/// and the pool's `DepthFirst` and `BestEstimate` are implemented, tested, and
+/// unreachable — so no experiment on node ordering is currently *possible*. HiGHS
+/// pops one node from its queue and then dives, repeating until a pseudocost-scored
+/// plunge test fails or 100 plunge nodes elapse (`HighsMipSolver.cpp:218-360`,
+/// `HighsSearch.cpp:1609-1786`), so the large majority of its nodes are dive nodes
+/// and the queue only chooses plunge roots. discopt does no diving at all, which
+/// matters because pure best-first finds incumbents late and a search with no
+/// incumbent prunes nothing.
+///
+/// Note what `depthfirst` does and does not model here. The driver evaluates a
+/// *batch* of up to 64 nodes per iteration (`tm.export_batch(64)`), so this is a
+/// 64-wide frontier of the deepest part of the tree, not a single-node dive. It is
+/// the entry experiment for "does going deep find incumbents sooner and shrink the
+/// tree", not an implementation of plunging.
+fn node_select() -> SelectionStrategy {
+    static SEL: std::sync::OnceLock<SelectionStrategy> = std::sync::OnceLock::new();
+    *SEL.get_or_init(|| match std::env::var("DISCOPT_NODE_SELECT") {
+        Ok(raw) => parse_node_select(&raw).unwrap_or_else(|e| panic!("{e}")),
+        Err(_) => SelectionStrategy::BestFirst,
+    })
+}
+
+/// The parse table behind [`node_select`]. An unrecognized value is **REFUSED**,
+/// not silently defaulted: a typo that quietly fell back to `bestfirst` would make
+/// an experimental arm identical to its own control and report the difference as
+/// "no effect" (CLAUDE.md §3 and §6).
+fn parse_node_select(raw: &str) -> Result<SelectionStrategy, String> {
+    match raw.trim() {
+        "bestfirst" => Ok(SelectionStrategy::BestFirst),
+        "depthfirst" => Ok(SelectionStrategy::DepthFirst),
+        "bestestimate" => Ok(SelectionStrategy::BestEstimate),
+        other => Err(format!(
+            "DISCOPT_NODE_SELECT={other:?} is not a node-selection order \
+             (expected \"bestfirst\", \"depthfirst\", or \"bestestimate\")"
+        )),
+    }
+}
+
 /// Options for the MILP driver.
 pub struct MilpOptions {
     /// Number of structural (model) variables; columns `[n_struct, n)` are slacks.
@@ -714,7 +763,7 @@ pub fn solve_milp_node_hooked(
 
     let glb = base_l[..ns].to_vec();
     let gub = base_u[..ns].to_vec();
-    let mut tm = TreeManager::new(ns, glb, gub, int_info, SelectionStrategy::BestFirst);
+    let mut tm = TreeManager::new(ns, glb, gub, int_info, node_select());
     // Objective-lattice fathoming. Derived from the ORIGINAL cost vector and
     // integrality pattern, before any cut adds a slack column to `c_w`: the
     // lattice is a property of the model, and appended slacks carry zero cost so
@@ -7176,6 +7225,56 @@ mod root_cut_budget_tests {
             "dual bound {} above incumbent {} after cleanup -- false certificate",
             cut.bound,
             cut.obj
+        );
+    }
+}
+
+#[cfg(test)]
+mod node_select_tests {
+    use super::*;
+
+    /// The default must be the shipped search exactly. If this ever drifts, every
+    /// "OFF arm" in a node-ordering differential panel would silently be measuring
+    /// something other than the pre-change solver.
+    #[test]
+    fn unset_env_is_the_shipped_best_first_order() {
+        // `node_select` itself caches in a `OnceLock`, so the parse table is what
+        // this asserts on — the mapping is the part a typo can corrupt.
+        assert_eq!(
+            parse_node_select("bestfirst"),
+            Ok(SelectionStrategy::BestFirst)
+        );
+    }
+
+    #[test]
+    fn each_implemented_strategy_is_reachable_by_name() {
+        assert_eq!(
+            parse_node_select("depthfirst"),
+            Ok(SelectionStrategy::DepthFirst)
+        );
+        assert_eq!(
+            parse_node_select(" bestestimate "),
+            Ok(SelectionStrategy::BestEstimate)
+        );
+    }
+
+    /// A typo must be REFUSED, never silently defaulted.
+    ///
+    /// This is the whole reason the parse returns a `Result`. An arm launched as
+    /// `DISCOPT_NODE_SELECT=depth_first` that quietly fell back to `bestfirst`
+    /// would be byte-identical to its own control, and the panel would report the
+    /// resulting zero difference as "node ordering does not matter" — a false
+    /// negative indistinguishable from a real one (CLAUDE.md §6).
+    #[test]
+    fn an_unrecognized_order_is_refused_rather_than_defaulted() {
+        let err = parse_node_select("depth_first").unwrap_err();
+        assert!(
+            err.contains("depth_first"),
+            "error must name the offending value: {err}"
+        );
+        assert!(
+            err.contains("bestfirst"),
+            "error must list the valid values: {err}"
         );
     }
 }
