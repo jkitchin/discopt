@@ -27,8 +27,9 @@ class SolveStatus(Enum):
 
     ``LOCAL`` is the one member that is neither a success nor a failure: it means
     the solver returned a **local** result that makes no claim about the global
-    problem (discopt's ``"local_optimal"`` / ``"local_infeasible"``, added by
-    #1148 — an MPEC Scholtes continuation, for instance). It is deliberately NOT
+    problem (discopt's ``"local_optimal"`` / ``"local_limit"`` /
+    ``"local_infeasible"``, added by #1148 — an MPEC Scholtes continuation, for
+    instance). It is deliberately NOT
     ``OPTIMAL``: ``is_solved`` is ``status == OPTIMAL``, and
     ``proved_optimal_count`` counts ``gap is None and is_solved`` as a proved
     optimum, so a local stationary point reported as ``OPTIMAL`` would be scored
@@ -71,6 +72,11 @@ DISCOPT_STATUS_MAP = {
     # #1148: a local result is not a certificate and must never be scored as one.
     # Both counters of the release gate skip a LOCAL row.
     "local_optimal": SolveStatus.LOCAL,
+    # A local search that produced a point but never established stationarity.
+    # Weaker than ``local_optimal`` and mapped the same way: an unmapped status
+    # would already fail closed to UNKNOWN, but naming it keeps that intentional
+    # and testable rather than accidental, which is this table's whole point.
+    "local_limit": SolveStatus.LOCAL,
     "local_infeasible": SolveStatus.LOCAL,
 }
 

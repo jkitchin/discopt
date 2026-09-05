@@ -20,8 +20,9 @@ Conflating them (or reporting only the first, which any generic NLP result does)
 is the specific error the CCOpt discussion in #1123 warns about, and the reason
 this module exists. POUNCE Gate 0 (`jkitchin/pounce#794
 <https://github.com/jkitchin/pounce/issues/794>`_) documented that
-``sqrt(t)`` floor; :func:`complementarity_accuracy_floor` makes it visible in the
-report rather than letting the result imply exact orthogonality.
+``sqrt(t)`` scale for the ``min`` residual; :func:`admitted_residual_scale` makes
+it visible in the report — per residual definition, since the scale differs by
+formula — rather than letting the result imply exact orthogonality.
 
 Every residual carries its **definition** as a string, per #1148's acceptance
 criteria: a number whose formula is not recorded cannot be compared across
@@ -79,7 +80,8 @@ __all__ = [
     "Residual",
     "SourceResidualReport",
     "accept_local_incumbent",
-    "complementarity_accuracy_floor",
+    "admitted_residual_scale",
+    "admitted_residual_scale_definition",
     "evaluate_at_point",
     "is_certified_status",
     "is_local_status",
@@ -167,18 +169,35 @@ class Residual:
     1e3), so :attr:`scaled_value` is the number a tolerance should be compared
     against, and both are reported.
 
-    ``floor`` is the accuracy floor below which the number cannot be driven by
-    the algorithm that produced it (``sqrt(t)`` for a Scholtes homotopy stopped
-    at ``t``; see :func:`complementarity_accuracy_floor`). ``None`` means no
-    floor applies. It is reported so a residual of 1e-4 from a ``t = 1e-8``
-    continuation reads as *at the floor* rather than as a convergence failure.
+    ``admitted_scale`` is the **worst-case residual the relaxation admits** at the
+    parameter it was stopped at — the largest value of *this residual definition*
+    consistent with the relaxed rows (see :func:`admitted_residual_scale`).
+    ``None`` means no relaxation-derived scale applies.
+
+    It is **not** a limit on attainable accuracy, and an earlier draft of this
+    field said it was (#1158 review 3, nonblocking 1). ``f·g <= t`` admits
+    ``min(f, g)`` as large as ``sqrt(t)``, but it also admits ``(f, g) = (0, 1)``,
+    whose residual is exactly ``0`` at every positive ``t`` — a solver can and
+    routinely does land far below the scale. What the number buys is the other
+    direction: a residual of 1e-4 from a ``t = 1e-8`` continuation is *within what
+    the relaxation allows*, so it is not by itself evidence of a convergence
+    failure. Whether the subsolver could have done better is an empirical question
+    about the subsolver, which this number says nothing about; the continuation
+    trace's per-stage statuses are where that evidence lives.
+
+    ``admitted_scale_definition`` records the formula, because the scale depends on
+    which residual definition was selected — ``sqrt(t)`` for ``min``, ``t`` for the
+    product form, ``(2-sqrt(2))*sqrt(t)`` for Fischer-Burmeister — and a number
+    whose formula is not recorded cannot be compared across solvers. Copying one
+    definition's scale into another's report was the second half of that finding.
     """
 
     name: str
     value: float
     definition: str
     scale: float = 1.0
-    floor: Optional[float] = None
+    admitted_scale: Optional[float] = None
+    admitted_scale_definition: Optional[str] = None
     where: Optional[str] = None
 
     @property
@@ -188,9 +207,15 @@ class Residual:
         return float(self.value) / (s if s > 0.0 else 1.0)
 
     @property
-    def at_floor(self) -> bool:
-        """True when the residual is no larger than its algorithmic accuracy floor."""
-        return self.floor is not None and float(self.value) <= float(self.floor)
+    def within_admitted_scale(self) -> bool:
+        """True when the residual is no larger than what the relaxation admits.
+
+        A statement about the *relaxation*, not about the solver: being outside
+        the admitted scale means the point does not even satisfy the relaxed
+        condition, while being inside says nothing about how close to the true
+        condition the solver got.
+        """
+        return self.admitted_scale is not None and float(self.value) <= float(self.admitted_scale)
 
     def as_dict(self) -> dict:
         """JSON-ready mapping, definition included (never dropped)."""
@@ -200,8 +225,9 @@ class Residual:
             "definition": self.definition,
             "scale": float(self.scale),
             "scaled_value": self.scaled_value,
-            "floor": None if self.floor is None else float(self.floor),
-            "at_floor": self.at_floor,
+            "admitted_scale": (None if self.admitted_scale is None else float(self.admitted_scale)),
+            "admitted_scale_definition": self.admitted_scale_definition,
+            "within_admitted_scale": self.within_admitted_scale,
             "where": self.where,
         }
 
@@ -267,6 +293,12 @@ class ContinuationStage:
     reason: str
     objective: Optional[float] = None
     source_complementarity: Optional[float] = None
+    #: Whether the subsolver *converged* at this stage, as opposed to merely
+    #: returning a point. ``accepted`` says the point was taken forward; a
+    #: stalled stage is accepted and not certified, and collapsing the two is
+    #: what let a zero-iteration subsolver report ``local_optimal`` at its own
+    #: starting point (#1158 review 3, blocking 3).
+    certified: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -274,6 +306,7 @@ class ContinuationStage:
             "t": float(self.t),
             "status": self.status,
             "accepted": self.accepted,
+            "certified": self.certified,
             "reason": self.reason,
             "objective": None if self.objective is None else float(self.objective),
             "source_complementarity": (
@@ -290,21 +323,48 @@ class ContinuationTrace:
     stages: tuple[ContinuationStage, ...]
     final_t: Optional[float]
     termination_reason: str
-    accuracy_floor: Optional[float]
+    #: The worst-case ``min(f, g)`` residual the regularization at :attr:`final_t`
+    #: admits (see :func:`admitted_residual_scale`). Reported for the ``min``
+    #: definition because that is the trace's own summary number; the per-relation
+    #: residuals in the report each carry the scale of *their* definition, which is
+    #: not the same number.
+    admitted_residual_scale: Optional[float]
     #: Whether any stage's subsolver actually converged. Reaching the end of the
     #: schedule is not the same thing: the loop can walk t down to ``t_min`` with
     #: every stage failing, and reporting that as converged would call a run that
     #: produced no point a success (#1158 review, LOW 9).
     any_stage_accepted: bool = True
-    accuracy_floor_definition: str = (
-        "sqrt(t_final): the complementarity accuracy a Scholtes regularization "
-        "f*g <= t can attain, per POUNCE Gate 0 (jkitchin/pounce#794)"
+    #: Whether the stage that produced the **reported** point converged. This is
+    #: what :attr:`converged` turns on: accepting an iterate and converging are
+    #: different events, and a trace that reports the first as the second lets a
+    #: run that did no optimization at all read as a solved one (#1158 review 3,
+    #: blocking 3). Defaults to ``False`` — absent evidence of convergence is
+    #: read as not converged, the same closed-set rule as
+    #: :func:`~discopt.status.is_certified_status`.
+    reported_point_certified: bool = False
+    admitted_residual_scale_definition: str = (
+        "sqrt(t_final): the largest min(f, g) residual a Scholtes regularization "
+        "f*g <= t admits, per POUNCE Gate 0 (jkitchin/pounce#794). An upper bound "
+        "on the admitted residual, NOT a lower limit on attainable accuracy: "
+        "(f, g) = (0, 1) satisfies the relaxed row with residual 0 at every t."
     )
 
     @property
+    def any_stage_certified(self) -> bool:
+        """True when some stage's subsolver converged (not merely returned a point)."""
+        return any(stage.certified for stage in self.stages)
+
+    @property
     def converged(self) -> bool:
-        """True when the schedule reached its target **and** a stage converged."""
-        return self.termination_reason == "t_min_reached" and self.any_stage_accepted
+        """True when the schedule reached its target **and** the reported point converged.
+
+        Not ``any_stage_accepted``: a stage is accepted when the subsolver handed
+        back a point it stopped at, which a subsolver allowed zero iterations
+        also does — at the starting point. Convergence is a property of the
+        stage whose point is being reported, so that is what this reads
+        (#1158 review 3, blocking 3).
+        """
+        return self.termination_reason == "t_min_reached" and self.reported_point_certified
 
     def as_dict(self) -> dict:
         return {
@@ -314,8 +374,14 @@ class ContinuationTrace:
             "termination_reason": self.termination_reason,
             "converged": self.converged,
             "any_stage_accepted": self.any_stage_accepted,
-            "accuracy_floor": (None if self.accuracy_floor is None else float(self.accuracy_floor)),
-            "accuracy_floor_definition": self.accuracy_floor_definition,
+            "any_stage_certified": self.any_stage_certified,
+            "reported_point_certified": self.reported_point_certified,
+            "admitted_residual_scale": (
+                None
+                if self.admitted_residual_scale is None
+                else float(self.admitted_residual_scale)
+            ),
+            "admitted_residual_scale_definition": self.admitted_residual_scale_definition,
         }
 
 
@@ -517,24 +583,93 @@ def _scalar(model: "Model", expr: "Expression", point: dict[int, np.ndarray]) ->
 # ─────────────────────────── residual formulas ───────────────────────────
 
 
-def complementarity_accuracy_floor(t: Optional[float]) -> Optional[float]:
-    r"""The complementarity accuracy a Scholtes regularization at ``t`` can attain.
+#: ``2 - sqrt(2)``: the Fischer-Burmeister value at ``f = g``, which is where the
+#: function is largest on ``{f, g >= 0, f*g <= t}``.
+_FB_ADMITTED_COEFF = 2.0 - math.sqrt(2.0)
 
-    The regularized feasible set admits ``f·g <= t``; with ``f`` and ``g`` of
-    comparable magnitude the best attainable ``min(f, g)`` is ``sqrt(t)``. POUNCE
-    Gate 0 (`jkitchin/pounce#794 <https://github.com/jkitchin/pounce/issues/794>`_)
-    documented that floor. Reporting it beside the residual is what stops a
-    result from implying exact orthogonality: at ``t = 1e-8`` a source residual of
-    ``1e-4`` is *at the floor*, not a convergence failure.
+_ADMITTED_SCALE_DEFINITION = {
+    ComplementarityKind.MIN: (
+        "sqrt(t): the largest min(f, g) admitted by the Scholtes row f*g <= t "
+        "with f, g >= 0, attained at f = g = sqrt(t)"
+    ),
+    ComplementarityKind.NATURAL_MAP: (
+        "sqrt(t): on the nonnegative pair (l=0, u=+inf) the normal map reduces to "
+        "min(f, g), so the Scholtes row f*g <= t admits the same worst case"
+    ),
+    ComplementarityKind.PRODUCT: (
+        "t: the product residual IS the quantity the Scholtes row bounds, so the "
+        "row admits exactly f*g = t"
+    ),
+    ComplementarityKind.FISCHER_BURMEISTER: (
+        "(2 - sqrt(2))*sqrt(t): phi(f, g) = f + g - hypot(f, g) is largest at "
+        "f = g on {f, g >= 0, f*g <= t}, where f = g = sqrt(t)"
+    ),
+}
 
-    Returns ``None`` for ``t`` that is missing or non-positive (no floor applies).
+
+def admitted_residual_scale(
+    t: Optional[float], kind: str = ComplementarityKind.MIN
+) -> Optional[float]:
+    r"""The worst-case residual a Scholtes regularization at ``t`` **admits**.
+
+    The regularized feasible set replaces ``0 <= f ⊥ g >= 0`` with ``f, g >= 0``
+    and ``f·g <= t``. That relaxation admits points whose residual is nonzero, and
+    this is how large the residual of ``kind`` can get on it:
+
+    ============================ ====================
+    ``kind``                     admitted scale
+    ============================ ====================
+    ``min`` / ``natural_map``    ``sqrt(t)``
+    ``product``                  ``t``
+    ``fischer_burmeister``       ``(2-sqrt(2))*sqrt(t)``
+    ============================ ====================
+
+    Each is a **maximum over the relaxed set**, not a lower limit on what a
+    solver can reach: ``(f, g) = (0, 1)`` satisfies ``f·g <= t`` for every ``t``
+    with a residual of exactly ``0``. Calling ``sqrt(t)`` an accuracy *floor* —
+    as this function's earlier name and docstring did — asserts the opposite and
+    is wrong (#1158 review 3, nonblocking 1); POUNCE Gate 0
+    (`jkitchin/pounce#794 <https://github.com/jkitchin/pounce/issues/794>`_)
+    documents it as the scale the regularization admits.
+
+    The number is reported so a residual can be read against what the algorithm
+    that produced it was actually asking for: at ``t = 1e-8``, a ``min`` residual
+    of ``1e-4`` sits at the edge of the admitted set rather than outside it, which
+    is a different statement from "the subsolver failed to converge". It is
+    **per definition**, which is why ``kind`` is required rather than assumed:
+    copying the ``min`` number into a product report compares a residual against
+    the scale of a different formula (``1e-4`` against ``1e-8``) and reads as a
+    gross violation when it is the same point.
+
+    Returns ``None`` for ``t`` that is missing or non-positive, and for
+    ``kind = "auto"``, which names no formula to derive a scale from.
     """
     if t is None:
         return None
     tv = float(t)
     if not math.isfinite(tv) or tv <= 0.0:
         return None
-    return math.sqrt(tv)
+    if kind == ComplementarityKind.PRODUCT:
+        return tv
+    if kind == ComplementarityKind.FISCHER_BURMEISTER:
+        return _FB_ADMITTED_COEFF * math.sqrt(tv)
+    if kind in (ComplementarityKind.MIN, ComplementarityKind.NATURAL_MAP):
+        return math.sqrt(tv)
+    if kind == ComplementarityKind.AUTO:
+        # Mixed or unresolved definitions: there is no single formula, so there is
+        # no scale. Reporting one of them would be the copied-number bug again.
+        return None
+    raise ValueError(f"unknown complementarity residual kind {kind!r}")
+
+
+def admitted_residual_scale_definition(kind: str) -> Optional[str]:
+    """The recorded formula behind :func:`admitted_residual_scale` for ``kind``."""
+    if kind == ComplementarityKind.AUTO:
+        return None
+    try:
+        return _ADMITTED_SCALE_DEFINITION[kind]
+    except KeyError:
+        raise ValueError(f"unknown complementarity residual kind {kind!r}") from None
 
 
 def _bound_violation(value: float, bounds: tuple[float, float]) -> float:
@@ -588,7 +723,7 @@ def relation_residuals(
     point: dict[int, np.ndarray],
     *,
     kind: str = ComplementarityKind.AUTO,
-    floor: Optional[float] = None,
+    continuation_t: Optional[float] = None,
 ) -> tuple[RelationResidual, ...]:
     """Source residuals of every **scalar** relation ``pairs`` stands for.
 
@@ -626,7 +761,16 @@ def relation_residuals(
                         value=_complementarity_residual(elem_kind, fv, gv, elem),
                         definition=ComplementarityKind.formula(elem_kind),
                         scale=scale,
-                        floor=floor,
+                        # The admitted scale is derived from THIS row's resolved
+                        # definition, never copied from another's: sqrt(t) against a
+                        # product residual compares 1e-4 to 1e-8 and reads as a gross
+                        # violation of the same point (#1158 review 3, nonblocking 1).
+                        admitted_scale=admitted_residual_scale(continuation_t, elem_kind),
+                        admitted_scale_definition=(
+                            None
+                            if continuation_t is None
+                            else admitted_residual_scale_definition(elem_kind)
+                        ),
                         where=elem.describe(),
                     ),
                     f_bound=Residual(
@@ -743,8 +887,11 @@ def source_residual_report(
     relations = list(model._complementarities if pairs is None else pairs)
     note_list = list(notes)
 
-    floor = None if continuation is None else continuation.accuracy_floor
-    rows = relation_residuals(model, relations, point, kind=kind, floor=floor)
+    # Pass the continuation PARAMETER, not a scale derived from it: each row
+    # resolves its own residual definition and the admitted scale follows from
+    # that definition, so the derivation has to happen where the kind is known.
+    continuation_t = None if continuation is None else continuation.final_t
+    rows = relation_residuals(model, relations, point, kind=kind, continuation_t=continuation_t)
 
     # ── aggregates ──
     resolved_kind = kind
@@ -777,7 +924,13 @@ def source_residual_report(
             + "; computed on the SOURCE operands (#1147 provenance), not on the lowered rows"
         ),
         scale=1.0 if worst_c is None else float(worst_c.complementarity.scale),
-        floor=floor,
+        # The aggregate reports the worst row's value, so it reports that row's
+        # admitted scale too — the two must come from the same definition or the
+        # comparison between them is meaningless.
+        admitted_scale=(None if worst_c is None else worst_c.complementarity.admitted_scale),
+        admitted_scale_definition=(
+            None if worst_c is None else worst_c.complementarity.admitted_scale_definition
+        ),
         where=None if worst_c is None else worst_c.name,
     )
     bound_violation = Residual(
@@ -1039,7 +1192,6 @@ def accept_local_incumbent(
     result,
     *,
     x_flat=None,
-    report: Optional[SourceResidualReport] = None,
 ):
     """Independently verify a **local** result before it may become an incumbent.
 
@@ -1061,13 +1213,18 @@ def accept_local_incumbent(
     row is weaker than the condition it replaced, so a check against the lowered
     model can never stand in for a check against the source relation.
 
-    Parameters
-    ----------
-    report
-        The source-residual report to gate on. Defaults to
-        ``result.mpec_report``; when that is absent and ``model`` declares
-        relations, one is computed here rather than skipped — an unmeasured
-        relation is treated as unverified, never as satisfied.
+    **The report is recomputed here, never accepted from the caller.** An earlier
+    draft gated on ``result.mpec_report`` when one was carried, which authorized
+    a *different* point: a report is a measurement of one ``(model, x)`` pair,
+    and nothing tied it to the ``x_flat`` actually being vouched for. Passing an
+    explicit ``x_flat`` alongside a result whose report was computed at the
+    solver's own iterate made the gate vouch for an unmeasured point — verified
+    ``-2e-4`` against a true optimum of ``0`` on a two-variable NCP whose carried
+    report was clean at ``(0, 0)`` (#1158 review 3, blocking 1). The same hazard
+    applies to the *model*: relations may have been added, rebuilt or re-scaled
+    since the report was taken. Recomputing costs one evaluation of the source
+    relations and is the only form of the check that is a statement about the
+    point and the relations this call is actually asked to accept.
 
     Returns
     -------
@@ -1084,13 +1241,10 @@ def accept_local_incumbent(
         return None
     x_flat = np.asarray(x_flat, dtype=np.float64)
 
-    if report is None:
-        report = getattr(result, "mpec_report", None)
-    if report is None and getattr(model, "_complementarities", None):
-        # No report was carried, but the model declares relations: measure them
-        # now. Absent certification is interpreted as NOT certified (#1148 §C),
-        # so the one thing this must not do is proceed as if there were nothing
-        # to check.
+    # Recompute against the point and the relations in front of us. Absent
+    # certification is interpreted as NOT certified (#1148 §C), so a measurement
+    # that cannot be taken is a refusal, never a pass.
+    if getattr(model, "_complementarities", None):
         try:
             report = source_residual_report(model, x_flat=x_flat)
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
@@ -1101,16 +1255,16 @@ def accept_local_incumbent(
                 exc,
             )
             return None
-    if report is not None and not report.source_satisfied:
-        logger.info(
-            "accept_local_incumbent: refusing the point — source complementarity "
-            "%.3e (scaled %.3e), operand bounds %.3e, source primal %.3e",
-            report.complementarity.value,
-            report.complementarity.scaled_value,
-            report.bound_violation.value,
-            report.primal_feasibility.value,
-        )
-        return None
+        if not report.source_satisfied:
+            logger.info(
+                "accept_local_incumbent: refusing the point — source complementarity "
+                "%.3e (scaled %.3e), operand bounds %.3e, source primal %.3e",
+                report.complementarity.value,
+                report.complementarity.scaled_value,
+                report.bound_violation.value,
+                report.primal_feasibility.value,
+            )
+            return None
 
     verdict = verify_point(model, x_flat, with_objective=True)
     return verdict.objective if verdict.ok else None

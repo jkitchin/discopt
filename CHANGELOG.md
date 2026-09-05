@@ -24,12 +24,27 @@ The release procedure that produces these entries is documented in
   which read a violation of `0.0` on a row `sum(x) <= 10` at `x = (6, 6)` where
   the truth is `2.0`. The reduction now sums the endpoints (summation is monotone,
   so no interval subtlety) and rounds outward, as the sibling `_eval_matmul`
-  reduction already did. The outward step is the **accumulation** bound
-  `(log2(n) + 2)·eps·Σ|x_i|` (numpy sums pairwise), not a single ULP: measured
-  against an exact `fractions.Fraction` reference over 3000 random sums
-  (*n* ∈ [4, 600], heavy cancellation at ~1e8), a one-ULP widening still returned
-  an enclosure that did **not** contain the true sum on 2289 of them, worst
-  shortfall 1.5e-6; with the accumulation bound, 0 of 3000.
+  reduction already did. The outward step is the **accumulation** bound, not a
+  single ULP: measured against an exact `fractions.Fraction` reference over 3000
+  random sums (*n* ∈ [4, 600], heavy cancellation at ~1e8), a one-ULP widening
+  still returned an enclosure that did **not** contain the true sum on 2289 of
+  them, worst shortfall 1.5e-6; with the accumulation bound, 0 of 3000.
+
+  The bound is chosen from the reduction order numpy **actually** used:
+  `(log2(n) + 2)·eps·Σ|x_i|` when the reduction runs along the unit-stride axis
+  (where numpy sums pairwise) and `(n - 1)·eps·Σ|x_i|` when it runs across a
+  strided axis, where numpy accumulates sequentially — its `sum` documentation
+  makes pairwise precision conditional on the memory axis, and applying the
+  pairwise factor to a strided reduction understates the error by ~*n*/log2(*n*).
+  Counterexample: a C-contiguous `(10002, 2)` array of ones with `1e16` first and
+  `-1e16` last has exact column sums of `10000`, and the pairwise-factored
+  enclosure of `dm.sum(v, axis=0)` was `[-67.89, 67.89]` — missing the value by
+  three orders of magnitude, on the same certified-bound path. The magnitude sum
+  `Σ|x_i|` is itself rounded up before scaling, since it is a float64 sum too.
+  The strided factor is `max(n - 1, log2(n) + 2)` rather than a bare `n - 1`: the
+  two cross at `n = 5`, and taking the smaller would make a *soundness* fix narrow
+  strided enclosures for a handful of terms — bound-changing, for no benefit. As
+  written, the pairwise path is untouched and the strided path only ever widens.
 
   **Who was exposed:** models built through the Python modeling API that use
   `dm.sum(...)`. The `.nl` reader emits no `SumExpression` at all (measured: 0 of
@@ -37,11 +52,46 @@ The release procedure that produces these entries is documented in
   or gate could exercise this — which is why it survived. Regression coverage is
   `python/tests/test_interval_sum_reduction.py`, including a differential check
   that a dual bound never exceeds the true optimum on Python-API `dm.sum` models.
-  The sibling reduction in `_eval_matmul` has the same one-ULP gap over its
-  `k`-term dot products (measured: 190 of 400 random products miss the truth); it
-  predates this work and is tracked as #1161 rather than folded in, because
-  widening matmul enclosures is a bound-affecting change that needs its own
-  differential evidence.
+  The sibling reduction in `_eval_matmul` had the same one-ULP gap over its
+  `k`-term dot products (measured: 190 of 400 random products missed the truth).
+  It was tracked separately as #1161 because widening matmul enclosures is a
+  bound-affecting change needing its own differential evidence; that work landed
+  in #1171 and is merged into this head, so **both** reductions now go through
+  the shared `_widen_sum` and no one-ULP reduction remains in this module.
+
+- **`accept_local_incumbent` trusted a cached source-residual report** and so
+  vouched for a point nobody had measured. A `SourceResidualReport` records no
+  point and no model, but the gate accepted `result.mpec_report` when one was
+  carried and then verified whatever `x_flat` it was handed. On
+  `min -x-y  s.t.  x == y, 0 <= x ⊥ y >= 0` with Scholtes rows at `t = 1e-8`, a
+  report taken at the exactly complementary `(0, 0)` admitted `(1e-4, 1e-4)`,
+  whose source residual is `1e-4` and whose objective `-2e-4` is **below** the
+  true optimum of `0` — an invalid incumbent cutoff that, fed to a global solve,
+  fathoms the optimum away, and the exact hazard the function exists to block.
+  The report is now recomputed at the acceptance boundary against the actual
+  candidate and the model's current relations; the `report=` keyword is gone
+  rather than left as a way to supply one. The same recomputation closes the
+  model-side face of the hole (a report taken before a relation was declared no
+  longer vouches for a model that now carries it). Regressions:
+  `test_review3_1_*` in `python/tests/test_mpec_source_residuals.py`, both with
+  the accepted-at-`(0, 0)` control retained.
+- **An iteration-limited MPEC iterate was promoted to `"local_optimal"`**, which
+  the new status vocabulary defines as a local *stationary* point. With the
+  subsolver allowed zero iterations it performs no optimization and returns its
+  own starting point under `ITERATION_LIMIT`; the wrapper published that as a
+  stationary point — on the distance model from `x0 = (5, 5)`, a point at which
+  the generated product row is violated by `24`. The merge base preserved
+  `ITERATION_LIMIT`, so this was a regression introduced by the local-status work,
+  in the one direction the vocabulary exists to prevent. The iterate is still
+  reported (it is a warm start and it carries its residuals — that is the
+  stalled-stage handling added earlier in this entry), but under `"local_limit"`,
+  and `ContinuationTrace` now distinguishes *accepting* an iterate from
+  *converging*: `ContinuationStage.certified` records whether the subsolver
+  converged at that stage, `reported_point_certified` whether the stage behind the
+  reported point did, and `converged` reads the latter rather than
+  `any_stage_accepted`. Regression:
+  `test_review3_3_a_zero_iteration_subsolver_does_not_report_local_optimal`, with
+  a converged-run control that must still say `"local_optimal"`.
 
 ### Added
 
@@ -61,18 +111,27 @@ The release procedure that produces these entries is documented in
   *original* rows and bounds, `max_i y_i(1-y_i)` over binary selectors after
   checking `0 <= y_i <= 1`, and the lowered rows' own residual beside them so the
   two can be compared. Tolerances are scaled by the relation's declared scale, and
-  the `sqrt(t)` accuracy floor a Scholtes regularization imposes (POUNCE Gate 0,
-  jkitchin/pounce#794) is reported rather than left to imply exact orthogonality.
+  the worst-case residual a Scholtes regularization at `t` *admits* (POUNCE Gate 0,
+  jkitchin/pounce#794) is reported rather than left to imply exact orthogonality —
+  as `Residual.admitted_scale`, per residual definition (`sqrt(t)` for `min`, `t`
+  for the product form, `(2-sqrt(2))·sqrt(t)` for Fischer-Burmeister), and
+  documented as an upper bound on the admitted residual rather than a limit on
+  attainable accuracy: `f·g <= t` also admits `(f, g) = (0, 1)`, whose residual is
+  exactly `0` at every positive `t`.
   `SourceResidualReport.as_dict()` is the shared benchmark schema of
   jkitchin/pounce#780.
 - **A distinct terminal status for local results** (`discopt.status`):
-  `"local_optimal"` and `"local_infeasible"`. A status, not a flag beside
+  `"local_optimal"`, `"local_limit"` and `"local_infeasible"`. A status, not a flag beside
   `"optimal"` — the benchmark harness scores `status == OPTIMAL` with no gap as a
   *proved optimum*, so a local stationary point reported as optimal is read by the
   release gate as a certificate; and every consumer that pattern-matches on the
   status would inherit the bug from a flag. A stalled MPEC continuation reports
   `"local_infeasible"`, never `"infeasible"`, which is a certificate in the other
-  direction. `SolveResult.__post_init__` **raises** if a local status carries a
+  direction. `"local_optimal"` means a local *stationary* point and is reserved for
+  a point a subsolver converged to; a usable-but-stalled iterate is still reported,
+  with its residuals and as a warm start, under the weaker `"local_limit"`, which
+  is in `LOCAL_STATUSES` and so inherits the same no-dual-bound guard.
+  `SolveResult.__post_init__` **raises** if a local status carries a
   `bound` or `root_bound` and forces `gap_certified=False`: a local result may
   become an incumbent only after independent verification
   (`mpec_report.accept_local_incumbent`, which gates on the source residuals and

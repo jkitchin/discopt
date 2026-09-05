@@ -1584,7 +1584,7 @@ def _solve_scholtes(
     from discopt.mpec_report import (
         ContinuationStage,
         ContinuationTrace,
-        complementarity_accuracy_floor,
+        admitted_residual_scale,
         max_source_complementarity,
         point_from_flat,
     )
@@ -1623,6 +1623,9 @@ def _solve_scholtes(
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
     best_t: Optional[float] = None
+    # Whether the stage that produced ``best_x`` CONVERGED, as opposed to merely
+    # handing back the point it stopped at. The reported status turns on this.
+    best_certified = False
     termination = "max_iter"
     wall0 = time.perf_counter()
     tv = t0
@@ -1709,12 +1712,14 @@ def _solve_scholtes(
         # stopped", and only the first is what ``local_optimal`` claims.
         if usable and has_point:
             best_x, best_obj, best_t = x_cur.copy(), stage_obj, float(tv)
+            best_certified = certified_stage
         stages.append(
             ContinuationStage(
                 iteration=it,
                 t=float(tv),
                 status=str(getattr(stage_result.status, "value", stage_result.status)),
                 accepted=bool(usable and has_point),
+                certified=bool(certified_stage and has_point),
                 reason=_stage_reason(converged, has_point, stage_result.status)
                 + (
                     f"; source residual not measured ({residual_failures[-1]})"
@@ -1748,8 +1753,9 @@ def _solve_scholtes(
         stages=tuple(stages),
         final_t=final_t,
         termination_reason=termination,
-        accuracy_floor=complementarity_accuracy_floor(best_t),
+        admitted_residual_scale=admitted_residual_scale(best_t),
         any_stage_accepted=any(st.accepted for st in stages),
+        reported_point_certified=best_certified,
     )
     if residual_failures:
         import warnings
@@ -1793,8 +1799,17 @@ def _solve_scholtes(
     # as it is recorded, so the trace and the result cannot disagree.
     objective = best_obj
 
+    # ``local_optimal`` is defined as a local STATIONARY point, so it is reserved
+    # for a point a subsolver actually converged to. A stalled iterate is still
+    # reported -- it is a warm start, it carries its residuals, and throwing it
+    # away is what #1158 review 2 (MEDIUM 5) fixed -- but under the weaker
+    # ``local_limit``. Unconditional promotion meant a subsolver allowed zero
+    # iterations returned its own starting point as a stationary point, with the
+    # generated product row violated by 24 (#1158 review 3, blocking 3). Neither
+    # branch carries a bound or certification: a local solve proves nothing about
+    # the global problem either way (#1148 §C).
     return SolveResult(
-        status=_status.LOCAL_OPTIMAL,
+        status=_status.LOCAL_OPTIMAL if best_certified else _status.LOCAL_LIMIT,
         objective=objective,
         # bound stays None: a local solve may contribute an incumbent (after
         # independent feasibility verification) and never a dual bound (#1148 §C).

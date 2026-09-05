@@ -220,16 +220,40 @@ Which definition is used is chosen from the relation's **declared bounds**, neve
 from its `role` — the same rule §3 states for the lowerings, and for the same
 reason.
 
-### Scale, and the accuracy floor
+### Scale, and the residual the relaxation admits
 
 A uniform tolerance is meaningless when the two operands carry unrelated physical
 magnitudes (a multiplier in 1e-6 against a flow in 1e3), so a residual is reported
-both raw and divided by the relation's `effective_scale` (§3). A Scholtes
-regularization at `t` cannot attain a complementarity better than `sqrt(t)` —
-POUNCE Gate 0's documented floor
-([jkitchin/pounce#794](https://github.com/jkitchin/pounce/issues/794)) — so
-`Residual.floor` carries it and `at_floor` says whether the number is at it. A
-report that omitted the floor would imply exact orthogonality.
+both raw and divided by the relation's `effective_scale` (§3).
+
+Separately, a Scholtes regularization at `t` replaces the exact condition with
+`f, g >= 0` and `f·g <= t`, and that relaxed set **admits** points whose residual
+is nonzero. How large depends on which residual definition is being read:
+
+| definition | largest residual the row `f·g <= t` admits |
+| --- | --- |
+| `min`, `natural_map` | `sqrt(t)`, attained at `f = g = sqrt(t)` |
+| `product` | `t` — the row bounds this quantity directly |
+| `fischer_burmeister` | `(2 - sqrt(2))·sqrt(t)`, also attained at `f = g` |
+
+`Residual.admitted_scale` carries that number and `admitted_scale_definition`
+records the formula it came from, so the two can never be read against each
+other's units. `Residual.within_admitted_scale` says whether the point is inside
+what the relaxation allows.
+
+**This is an upper bound on the admitted residual, not a lower limit on
+attainable accuracy.** `(f, g) = (0, 1)` satisfies `f·g <= t` for every positive
+`t` with a residual of exactly `0`, and solvers routinely land far below the
+scale — so a residual much smaller than `sqrt(t)` is ordinary, not surprising.
+What the number buys is the other direction: a `min` residual of `1e-4` from a
+`t = 1e-8` continuation sits at the edge of the admitted set rather than outside
+it, which is a different statement from "the subsolver failed to converge".
+Whether the subsolver could have done better is an empirical question about the
+subsolver; the continuation trace's per-stage statuses are where that evidence
+lives, not here. POUNCE Gate 0
+([jkitchin/pounce#794](https://github.com/jkitchin/pounce/issues/794)) documents
+the `sqrt(t)` scale in exactly this sense. A report that omitted it would imply
+exact orthogonality.
 
 ### This field set is the shared benchmark schema
 
@@ -238,7 +262,8 @@ report that omitted the floor would imply exact orthogonality.
 That schema is this one: `SourceResidualReport.as_dict()` is its serialization,
 and it is defined here rather than as a separate artifact so the two repositories
 do not end up with two vocabularies for the same numbers. Every entry carries
-`value`, `definition`, `scale`, `scaled_value`, `floor` and `at_floor`; the
+`value`, `definition`, `scale`, `scaled_value`, `admitted_scale`,
+`admitted_scale_definition` and `within_admitted_scale`; the
 report adds `n_scalar_relations` (the executed-measurement count), the
 per-relation breakdown with `source_name`/`index` attribution, the continuation
 trace, and `stationarity` (always `null` — see §8).
@@ -264,12 +289,26 @@ Vocabulary in `discopt.status`; enforcement in `SolveResult.__post_init__`.
 
 ### A distinct terminal status, not a flag
 
-`discopt.status` defines two statuses that make **no global claim**:
+`discopt.status` defines three statuses that make **no global claim**:
 
 * `local_optimal` — a local stationary point of the problem actually solved;
+* `local_limit` — a *point*, from a local search that stopped on an iteration or
+  step-size limit without establishing stationarity. Strictly weaker than
+  `local_optimal`, and separate from it for the same reason `local_infeasible` is
+  separate from `infeasible`: the weaker claim needs its own name, or it gets
+  made under the stronger one. A Scholtes homotopy whose final accepted stage
+  stalled reports the iterate here — it is still a usable warm start and still
+  carries its residuals — rather than calling it stationary;
 * `local_infeasible` — a local solver found no point. This is **not** an
   infeasibility proof. A stalled MPEC continuation lands here and never on
   `infeasible`, which is a certificate in the other direction.
+
+The continuation trace keeps the same distinction, so the result and the trace
+cannot disagree: `ContinuationStage.certified` says whether the subsolver
+converged at that stage (as opposed to merely handing back the point it stopped
+at), `ContinuationTrace.reported_point_certified` says whether the stage behind
+the *reported* point did, and `converged` reads that rather than
+`any_stage_accepted`.
 
 It is a status and not a `certified=False` flag beside `"optimal"` because every
 consumer that pattern-matches on the *status* would inherit the bug. Measured on
@@ -279,12 +318,13 @@ local stationary point reported as `"optimal"` is scored by the release gate as 
 **certificate**, which is CLAUDE.md §1's hard gate with no slack. An unmapped
 status maps to `UNKNOWN` and both counters skip the row, so a consumer that has
 never heard of the local mode fails closed. `DISCOPT_STATUS_MAP` names
-`local_optimal`/`local_infeasible` explicitly so that skip is intentional and
-tested rather than accidental.
+`local_optimal`/`local_limit`/`local_infeasible` explicitly so that skip is
+intentional and tested rather than accidental.
 
 The states the vocabulary keeps apart: certified optimal; certified bound +
 incumbent with a gap; feasible with no bound; local stationary with no global
-claim; and certified-infeasible versus local-search-failed.
+claim; a local point with no stationarity claim at all; and
+certified-infeasible versus local-search-failed.
 
 ### The asymmetry that makes a local mode safe
 

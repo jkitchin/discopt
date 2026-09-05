@@ -28,6 +28,10 @@ The states this vocabulary keeps apart
 2. :data:`FEASIBLE` (with a finite ``bound``) — certified bound + incumbent, gap > 0.
 3. :data:`FEASIBLE` (no ``bound``) — feasible, no bound.
 4. :data:`LOCAL_OPTIMAL` — local stationary point, **no global claim**.
+4b. :data:`LOCAL_LIMIT` — a *point*, from a local search that stopped on a
+   limit without establishing stationarity. Separate from ``LOCAL_OPTIMAL``
+   for the same reason ``LOCAL_INFEASIBLE`` is separate from ``INFEASIBLE``:
+   the weaker claim needs its own name, or it is made under the stronger one.
 5. :data:`INFEASIBLE` vs :data:`LOCAL_INFEASIBLE` — a *certified* infeasibility
    proof versus a local solver that merely failed to find a point. A stalled
    MPEC continuation must never surface as ``"infeasible"``: that is a false
@@ -60,13 +64,22 @@ ERROR = "error"
 #: global claim: it may become an incumbent after independent feasibility
 #: verification, and may never become a dual bound.
 LOCAL_OPTIMAL = "local_optimal"
+#: A local solver produced a point but never established stationarity: it
+#: stopped on an iteration or step-size limit at an *iterate*. Strictly weaker
+#: than :data:`LOCAL_OPTIMAL`, and kept apart from it because ``local_optimal``
+#: is defined above as "a local stationary point" and a consumer is entitled to
+#: read it that way. A Scholtes homotopy whose subsolver did zero iterations
+#: returned its own starting point under ``local_optimal`` (#1158 review 3,
+#: blocking 3); the point is still worth reporting — as a warm start, and with
+#: its residuals — but not under a label that claims more than happened.
+LOCAL_LIMIT = "local_limit"
 #: A local solver failed to produce a point. This is *not* an infeasibility
 #: proof — a stalled MPEC continuation lands here, never on :data:`INFEASIBLE`.
 LOCAL_INFEASIBLE = "local_infeasible"
 
 #: Statuses that make no global claim. A result carrying one of these is never
 #: certified and never contributes a dual bound.
-LOCAL_STATUSES = frozenset({LOCAL_OPTIMAL, LOCAL_INFEASIBLE})
+LOCAL_STATUSES = frozenset({LOCAL_OPTIMAL, LOCAL_LIMIT, LOCAL_INFEASIBLE})
 
 #: Statuses that assert a proof about the *global* problem.
 CERTIFYING_STATUSES = frozenset({OPTIMAL, INFEASIBLE, UNBOUNDED})

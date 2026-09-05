@@ -111,6 +111,126 @@ def test_the_enclosure_contains_the_exact_sum_under_cancellation():
     )
 
 
+def test_slow_axis_reduction_is_widened_for_a_sequential_accumulation():
+    """The widening must be valid for the reduction order NumPy actually used.
+
+    NumPy's pairwise summation applies only along the *fast* (unit-stride) axis;
+    a reduction across a strided axis is a plain sequential accumulation, whose
+    forward error bound is ``(n-1)*u*sum|x_i|`` (Higham, *ASNA* 2nd ed. §4.2),
+    not the pairwise ``(log2(n)+1)*u*sum|x_i|``. Applying the pairwise factor to
+    a strided reduction understates the error by ~n/log2(n) and yields an
+    enclosure that does **not** contain the value.
+
+    Counterexample from the #1158 review, reproduced before the fix: summing a
+    ``(10002, 2)`` C-contiguous array down ``axis=0`` — the slow axis — with
+    ``1e16`` first, ``-1e16`` last and ones between gives an exact column sum of
+    ``10000``, and the pairwise-factored enclosure returned
+    ``[-67.89, 67.89]``, missing it by three orders of magnitude. The transposed
+    control reduces along the fast axis, stays pairwise, and was correct all
+    along; keeping it here is what shows the fix did not simply widen everything.
+    """
+    n = 10002
+    a = np.ones((n, 2), dtype=np.float64, order="C")
+    a[0, :] = 1e16
+    a[-1, :] = -1e16
+    exact = 10000.0
+
+    m = dm.Model("slowaxis")
+    v = m.continuous("v", shape=(n, 2), lb=-1e17, ub=1e17)
+    enc = evaluate_interval(dm.sum(v, axis=0), m, {v: Interval(a.copy(), a.copy())})
+    lo = np.asarray(enc.lo).ravel()
+    hi = np.asarray(enc.hi).ravel()
+    _checked(
+        bool(np.all(lo <= exact) and np.all(exact <= hi)),
+        f"slow-axis enclosure [{lo[0]!r}, {hi[0]!r}] does not contain the exact "
+        f"column sum {exact!r} — the widening assumed a pairwise reduction that "
+        "NumPy does not perform across a strided axis",
+    )
+
+    at = np.ascontiguousarray(a.T)
+    m2 = dm.Model("fastaxis")
+    v2 = m2.continuous("v2", shape=at.shape, lb=-1e17, ub=1e17)
+    enc2 = evaluate_interval(dm.sum(v2, axis=1), m2, {v2: Interval(at.copy(), at.copy())})
+    lo2 = np.asarray(enc2.lo).ravel()
+    hi2 = np.asarray(enc2.hi).ravel()
+    _checked(
+        bool(np.all(lo2 <= exact) and np.all(exact <= hi2)),
+        f"fast-axis control [{lo2[0]!r}, {hi2[0]!r}] does not contain {exact!r}",
+    )
+    # The control must stay TIGHT: a pairwise reduction keeps the log2(n) factor,
+    # so its half-width is smaller than the sequential one by orders of magnitude.
+    _checked(
+        (hi2[0] - lo2[0]) < (hi[0] - lo[0]) / 100.0,
+        f"the fast-axis control widened to {(hi2[0] - lo2[0])!r}, within 100x of the "
+        f"slow-axis {(hi[0] - lo[0])!r} — the fix widened the pairwise case too",
+    )
+
+
+def test_slow_axis_enclosure_holds_over_random_strided_reductions():
+    """The sequential bound must hold across sizes, not just on one counterexample.
+
+    Differential against an exact :class:`fractions.Fraction` reference, on the
+    **slow** axis of a C-contiguous 2-D array so numpy accumulates sequentially,
+    with heavy cancellation so the error actually shows. This is also what backs
+    the magnitude-sum argument in ``_accumulation_factor``: ``sum |x_i|`` is a
+    float64 reduction of the same length, and if the factor's headroom did not
+    absorb its own accumulation error these enclosures would start missing.
+    """
+    from fractions import Fraction  # noqa: PLC0415
+
+    rng = np.random.default_rng(20260906)
+    misses = 0
+    trials = 40
+    for trial in range(trials):
+        n = int(rng.integers(500, 8001))
+        col = rng.normal(0.0, 1e9, size=n)
+        half = n // 2
+        col[:half] = -col[half : 2 * half][:half]
+        a = np.ascontiguousarray(np.stack([col, col[::-1]], axis=1))  # (n, 2), C-order
+
+        m = dm.Model(f"strided{trial}")
+        v = m.continuous("v", shape=a.shape, lb=-1e10, ub=1e10)
+        m.minimize(v[0, 0])
+        enc = evaluate_interval(dm.sum(v, axis=0), m, {v: Interval(a.copy(), a.copy())})
+        lo = np.asarray(enc.lo).ravel()
+        hi = np.asarray(enc.hi).ravel()
+        for j in range(a.shape[1]):
+            exact = sum((Fraction(float(x)) for x in a[:, j]), Fraction(0))
+            if not (Fraction(float(lo[j])) <= exact <= Fraction(float(hi[j]))):
+                misses += 1
+    _checked(
+        misses == 0,
+        f"{misses}/{2 * trials} slow-axis enclosures did not contain the exact sum",
+    )
+
+
+def test_the_sequential_bound_never_narrows_an_enclosure():
+    """The fix must only ever widen: a soundness fix that tightens is bound-changing.
+
+    ``n - 1`` and ``log2(n) + 2`` cross at ``n = 5``, so a bare sequential factor
+    would make strided enclosures *narrower* than the code it replaces for a
+    handful of terms. Both are sound, but tightening a bound anywhere needs its
+    own differential evidence (CLAUDE.md §5) and buys nothing at ``n <= 5``, so
+    the sequential factor is the max of the two. Checked across the crossover and
+    well past it.
+    """
+    from discopt._relax.convexity.interval_eval import _accumulation_factor  # noqa: PLC0415
+
+    for n in (2, 3, 4, 5, 6, 7, 16, 100, 10002, 10**6):
+        seq = _accumulation_factor(n, pairwise=False)
+        pw = _accumulation_factor(n, pairwise=True)
+        _checked(
+            seq >= pw,
+            f"n={n}: the sequential factor {seq!r} is below the pairwise {pw!r} — "
+            "this fix would narrow a strided enclosure",
+        )
+    _checked(
+        _accumulation_factor(1, pairwise=False) == 0.0
+        and _accumulation_factor(0, pairwise=True) == 0.0,
+        "the identity reduction is exact and gets no widening at all",
+    )
+
+
 def test_widening_does_not_break_a_degenerate_point_evaluation():
     """The error bound must stay far below the residual probe's degeneracy guard.
 

@@ -46,7 +46,7 @@ from discopt.mpec_report import (  # noqa: E402
     ContinuationTrace,
     Residual,
     accept_local_incumbent,
-    complementarity_accuracy_floor,
+    admitted_residual_scale,
     evaluate_at_point,
     max_source_complementarity,
     point_from_flat,
@@ -325,7 +325,7 @@ def test_every_reported_residual_records_its_definition():
     )
 
 
-def test_continuation_trace_is_kept_and_carries_the_accuracy_floor():
+def test_continuation_trace_is_kept_and_carries_the_admitted_residual_scale():
     m, x, y = _distance_model()
     res = solve_mpec(m, [complementarity(x, y, name="c")], method="scholtes", t_min=1e-8)
     trace = res.mpec_report.continuation
@@ -344,8 +344,9 @@ def test_continuation_trace_is_kept_and_carries_the_accuracy_floor():
         f"final t must be t_min, got {trace.final_t!r}",
     )
     _checked(
-        abs(float(trace.accuracy_floor) - 1e-4) < 1e-12,
-        f"the sqrt(t) accuracy floor at t=1e-8 is 1e-4, got {trace.accuracy_floor!r}",
+        abs(float(trace.admitted_residual_scale) - 1e-4) < 1e-12,
+        f"the min-form admitted scale sqrt(t) at t=1e-8 is 1e-4, got "
+        f"{trace.admitted_residual_scale!r}",
     )
     _checked(
         any(s.source_complementarity is not None for s in trace.stages),
@@ -358,13 +359,94 @@ def test_continuation_trace_is_kept_and_carries_the_accuracy_floor():
     )
 
 
-def test_accuracy_floor_is_sqrt_t_and_absent_without_one():
-    _checked(
-        abs(complementarity_accuracy_floor(1e-8) - 1e-4) < 1e-15,
-        "sqrt(1e-8) must be 1e-4",
+def test_admitted_residual_scale_is_per_definition_and_absent_without_a_t():
+    """Nonblocking 1: the scale is an admitted MAXIMUM, and it differs by formula.
+
+    ``sqrt(t)`` was reported for every residual definition, including the product
+    and Fischer-Burmeister forms whose formulas admit different worst cases. At
+    ``t = 1e-8`` that compared a product residual against ``1e-4`` instead of
+    ``1e-8`` — four orders of magnitude of slack handed to the definition that
+    needs it least (#1158 review 3, nonblocking 1).
+    """
+    from discopt.mpec_report import (  # noqa: PLC0415
+        ComplementarityKind,
+        admitted_residual_scale_definition,
     )
-    _checked(complementarity_accuracy_floor(None) is None, "no t means no floor")
-    _checked(complementarity_accuracy_floor(0.0) is None, "t=0 imposes no floor")
+
+    _checked(
+        abs(admitted_residual_scale(1e-8, ComplementarityKind.MIN) - 1e-4) < 1e-15,
+        "min: sqrt(1e-8) = 1e-4",
+    )
+    _checked(
+        admitted_residual_scale(1e-8, ComplementarityKind.PRODUCT) == 1e-8,
+        "product: the row bounds the product itself, so the scale IS t",
+    )
+    _checked(
+        abs(
+            admitted_residual_scale(1e-8, ComplementarityKind.FISCHER_BURMEISTER)
+            - 5.857864376269049e-05
+        )
+        < 1e-18,
+        "fischer_burmeister: (2 - sqrt(2))*sqrt(t)",
+    )
+    _checked(
+        admitted_residual_scale(1e-8, ComplementarityKind.NATURAL_MAP) == pytest.approx(1e-4),
+        "natural_map reduces to min on the nonnegative pair",
+    )
+    _checked(
+        admitted_residual_scale(1e-8, ComplementarityKind.AUTO) is None,
+        "auto names no formula, so it derives no scale rather than borrowing one",
+    )
+    _checked(admitted_residual_scale(None) is None, "no t means no admitted scale")
+    _checked(admitted_residual_scale(0.0) is None, "t=0 admits nothing to scale against")
+    # The formula is recorded beside the number, per this module's own rule.
+    _checked(
+        "sqrt(t)" in admitted_residual_scale_definition(ComplementarityKind.MIN)
+        and admitted_residual_scale_definition(ComplementarityKind.AUTO) is None,
+        "each definition records its own formula",
+    )
+
+
+def test_admitted_scale_is_an_upper_bound_not_a_floor():
+    """Nonblocking 1: a point far BELOW the admitted scale is ordinary, not suspect.
+
+    ``(f, g) = (0, 1)`` satisfies ``f*g <= t`` with a residual of exactly ``0`` at
+    every positive ``t``, so wording that called ``sqrt(t)`` a limit on attainable
+    accuracy asserted something the relaxation does not say.
+    """
+    from discopt.mpec_report import ComplementarityKind, Residual  # noqa: PLC0415
+
+    scale = admitted_residual_scale(1e-8, ComplementarityKind.MIN)
+    exact = Residual(
+        name="source_complementarity",
+        value=0.0,
+        definition=ComplementarityKind.formula(ComplementarityKind.MIN),
+        admitted_scale=scale,
+    )
+    _checked(
+        exact.within_admitted_scale,
+        "an exactly complementary point is within what the relaxation admits",
+    )
+    _checked(
+        float(exact.value) < float(scale),
+        f"and it is strictly BELOW the admitted scale {scale!r} — the scale is a "
+        "maximum over the relaxed set, not a bound the solver cannot beat",
+    )
+    outside = Residual(
+        name="source_complementarity",
+        value=10.0 * scale,
+        definition=ComplementarityKind.formula(ComplementarityKind.MIN),
+        admitted_scale=scale,
+    )
+    _checked(
+        not outside.within_admitted_scale,
+        "a residual the relaxation does NOT admit is reported as outside it",
+    )
+    _checked(
+        outside.as_dict()["within_admitted_scale"] is False
+        and "admitted_scale" in outside.as_dict(),
+        "and both survive serialization under their own names",
+    )
 
 
 def test_selector_integrality_residual_is_reported_when_selectors_exist():
@@ -668,7 +750,7 @@ def test_report_serializes_with_every_definition_intact():
             f"the serialized {key} must carry its definition",
         )
     _checked(
-        payload["continuation"]["stages"] and payload["continuation"]["accuracy_floor"],
+        payload["continuation"]["stages"] and payload["continuation"]["admitted_residual_scale"],
         "the serialized continuation must carry its stages and floor",
     )
     import json  # noqa: PLC0415
@@ -695,14 +777,17 @@ def test_continuation_trace_serializes_a_stall_distinguishably():
         stages=(ContinuationStage(0, 1e-2, "iteration_limit", False, "did not converge"),),
         final_t=1e-2,
         termination_reason="subsolver_failure",
-        accuracy_floor=complementarity_accuracy_floor(1e-2),
+        admitted_residual_scale=admitted_residual_scale(1e-2),
     )
     converged = ContinuationTrace(
         parameter="t",
-        stages=(ContinuationStage(0, 1e-8, "optimal", True, "subsolver converged"),),
+        stages=(
+            ContinuationStage(0, 1e-8, "optimal", True, "subsolver converged", certified=True),
+        ),
         final_t=1e-8,
         termination_reason="t_min_reached",
-        accuracy_floor=complementarity_accuracy_floor(1e-8),
+        admitted_residual_scale=admitted_residual_scale(1e-8),
+        reported_point_certified=True,
     )
     _checked(
         not stalled.converged and converged.converged,
@@ -1004,7 +1089,7 @@ def test_review_9_converged_requires_an_accepted_stage():
         stages=(ContinuationStage(0, 1e-8, "error", False, "no stage converged"),),
         final_t=1e-8,
         termination_reason="t_min_reached",
-        accuracy_floor=complementarity_accuracy_floor(1e-8),
+        admitted_residual_scale=admitted_residual_scale(1e-8),
         any_stage_accepted=False,
     )
     _checked(
@@ -1219,10 +1304,182 @@ def test_review2_5_converged_is_false_when_the_point_came_from_a_larger_t():
         stages=(ContinuationStage(0, 1e-1, "optimal", True, "converged"),),
         final_t=1e-1,
         termination_reason="t_min_reached_but_best_point_is_from_a_larger_t",
-        accuracy_floor=complementarity_accuracy_floor(1e-1),
+        admitted_residual_scale=admitted_residual_scale(1e-1),
         any_stage_accepted=True,
     )
     _checked(
         not trace.converged,
         "the schedule reached t_min but the reported point did not — not converged",
     )
+
+
+def test_review3_1_a_carried_report_cannot_vouch_for_a_different_point():
+    """BLOCKING 1: gating on ``result.mpec_report`` authorized an unmeasured point.
+
+    A :class:`SourceResidualReport` is a measurement of one ``(model, x)`` pair
+    and carries no record of which point it was taken at. ``accept_local_incumbent``
+    used to accept the report carried on ``result`` and then verify a *different*
+    ``x_flat``, so a result whose report was clean at the true solution vouched
+    for a violating point nearby — here a report taken at ``(0, 0)`` (exactly
+    complementary) admitting ``(1e-4, 1e-4)``, whose source residual is ``1e-4``
+    and whose objective ``-2e-4`` beats the true optimum of ``0``. Fed to a global
+    solve as a cutoff, that fathoms the optimum away, which is the #1148 §C
+    hazard the function exists to block.
+
+    The fix recomputes at the boundary, so the gate is a statement about the
+    point and the relations actually in front of it. The control below is what
+    shows this is not a blanket refusal.
+    """
+    m = dm.Model("stale_report")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(-(x + y))
+    m.complementarity(x, y, name="c")
+
+    clean = source_residual_report(m, x_flat=np.array([0.0, 0.0]))
+    _checked(clean.source_satisfied, "the report is taken at a genuinely complementary point")
+
+    violating = np.array([1e-4, 1e-4])
+    fresh = source_residual_report(m, x_flat=violating)
+    _checked(
+        not fresh.source_satisfied,
+        f"and the candidate genuinely violates the relation "
+        f"({fresh.complementarity.value:.3e}) — otherwise this probe measures nothing",
+    )
+
+    class _Result:
+        x = {"x": 0.0, "y": 0.0}
+        mpec_report = clean
+        objective = 0.0
+
+    _checked(
+        accept_local_incumbent(m, _Result(), x_flat=violating) is None,
+        "a report taken elsewhere must not authorize this point",
+    )
+    _checked(
+        accept_local_incumbent(m, _Result()) is not None,
+        "control: the point the report WAS taken at is still accepted",
+    )
+
+
+def test_review3_1_a_stale_report_cannot_vouch_across_a_model_change():
+    """BLOCKING 1, second face: the report is not tied to the model either.
+
+    Relations are added, rebuilt and re-scaled between a solve and the moment an
+    incumbent is offered — #1147 exists precisely because models get rebuilt. A
+    report taken before a relation was declared says nothing about the model that
+    now carries it, so binding the report to the *point* alone would still leave
+    this hole open; recomputing closes both.
+    """
+    m = dm.Model("late_relation")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(-(x + y))
+
+    point = np.array([1.0, 1.0])
+    before = source_residual_report(m, pairs=(), x_flat=point)
+    _checked(
+        before.n_scalar_relations == 0,
+        "the report predates the relation, so it measured nothing about it",
+    )
+
+    m.complementarity(x, y, name="late")
+
+    class _Result:
+        x = {"x": 1.0, "y": 1.0}
+        mpec_report = before
+        objective = -2.0
+
+    _checked(
+        accept_local_incumbent(m, _Result(), x_flat=point) is None,
+        "a report from before the relation existed must not vouch for (1, 1)",
+    )
+
+
+def test_review3_3_a_zero_iteration_subsolver_does_not_report_local_optimal():
+    """BLOCKING 3: an iteration-limited iterate was promoted to a stationary point.
+
+    ``local_optimal`` is defined by :mod:`discopt.status` as a *local stationary
+    point*. With the subsolver allowed zero iterations it does no optimization at
+    all and hands back the starting point under ``ITERATION_LIMIT``; the wrapper
+    published that as ``local_optimal`` — here the starting point ``(5, 5)``, at
+    which the generated product row is violated by ``24``. The merge base kept
+    ``ITERATION_LIMIT``, so this was a regression introduced by the local-status
+    work, in the one direction the vocabulary exists to prevent.
+
+    The point is still reported: it is a usable warm start and carries its
+    residuals (that is #1158 review 2, MEDIUM 5, and the assertions below hold
+    it). What changes is the label — ``local_limit``, which is in
+    ``LOCAL_STATUSES``, so the no-dual-bound chokepoint still applies and no
+    consumer reads it as stationary.
+    """
+    from discopt.status import LOCAL_LIMIT, LOCAL_OPTIMAL, LOCAL_STATUSES  # noqa: PLC0415
+
+    m, x, y = _distance_model()
+    res = solve_mpec(
+        m,
+        [complementarity(x, y, name="c")],
+        method="scholtes",
+        max_iter=1,
+        x0=np.array([5.0, 5.0]),
+        nlp_options={"max_iter": 0},
+    )
+    _checked(
+        res.status != LOCAL_OPTIMAL,
+        f"a subsolver that did zero iterations did not find a stationary point, "
+        f"got status {res.status!r}",
+    )
+    _checked(res.status == LOCAL_LIMIT, f"it is a limit termination, got {res.status!r}")
+    _checked(
+        res.status in LOCAL_STATUSES,
+        "and it stays inside LOCAL_STATUSES, so the no-dual-bound guard still applies",
+    )
+    _checked(
+        res.bound is None and not res.gap_certified,
+        f"no bound, no certification: bound={res.bound!r} gap_certified={res.gap_certified!r}",
+    )
+    # The iterate is RETAINED — the fix is about the claim, not about the point.
+    _checked(res.x is not None, "the warm start is still reported")
+    trace = res.mpec_report.continuation
+    _checked(
+        not trace.converged and not trace.reported_point_certified,
+        "and the trace says plainly that the reported point did not converge",
+    )
+    _checked(
+        trace.any_stage_accepted and not trace.any_stage_certified,
+        "accepting an iterate and converging are now distinct in the trace",
+    )
+    _checked(
+        trace.as_dict()["reported_point_certified"] is False,
+        "and the distinction survives serialization",
+    )
+
+
+def test_review3_3_a_converged_stage_still_reports_local_optimal():
+    """Control for BLOCKING 3: the demotion is driven by evidence, not blanket.
+
+    A healthy homotopy whose reported point came from a converged stage must
+    still say ``local_optimal`` — otherwise the fix would have removed the
+    status the local mode exists to publish rather than reserved it.
+    """
+    from discopt.status import LOCAL_OPTIMAL  # noqa: PLC0415
+
+    m, x, y = _distance_model()
+    res = solve_mpec(m, [complementarity(x, y, name="c")], method="scholtes")
+    trace = res.mpec_report.continuation
+    _checked(
+        trace.any_stage_certified,
+        "the control run must actually have a converged stage, or it measures nothing",
+    )
+    if trace.reported_point_certified:
+        _checked(
+            res.status == LOCAL_OPTIMAL,
+            f"a converged reported point is local_optimal, got {res.status!r}",
+        )
+    else:
+        # A late-stage stall is the expected Scholtes outcome; then the honest
+        # label is the weaker one, and the point is still reported.
+        _checked(
+            res.status == "local_limit" and res.x is not None,
+            f"a stalled reported point is local_limit with the point kept, got {res.status!r}",
+        )

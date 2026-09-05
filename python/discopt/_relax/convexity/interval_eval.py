@@ -243,28 +243,72 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _accumulation_factor(n_terms: int) -> float:
+def _reduction_is_pairwise(terms: np.ndarray, axis: Union[int, tuple[int, ...], None]) -> bool:
+    """Whether numpy sums this reduction **pairwise** rather than sequentially.
+
+    numpy's pairwise summation is a property of the *inner loop*, not of
+    ``np.sum``: it applies when the reduction walks contiguous memory. Reducing
+    along a **slow** (strided) axis accumulates sequentially instead, and its
+    error grows like ``n`` rather than ``log2(n)``
+    (`numpy.sum notes <https://numpy.org/doc/stable/reference/generated/numpy.sum.html#notes>`_).
+
+    Applying the pairwise bound to a sequential reduction is unsound in the
+    narrow direction, and it was measured: a C-contiguous ``(10002, 2)`` array of
+    ones with the first row ``1e16`` and the last ``-1e16`` has exact column sums
+    of ``10000``, but ``sum(v, axis=0)`` returned ``[-67.89, 67.89]`` — an
+    enclosure that excludes the truth — while the transposed fast-axis control
+    enclosed it (#1158 review 4, blocking 2).
+
+    Answers **False unless pairwise is provable**: over-widening is loose and
+    sound, under-widening is not. A tuple axis reduces over several axes in an
+    order numpy does not specify, so it takes the sequential bound too.
+    """
+    if terms.ndim == 0:
+        return True
+    if axis is None:
+        # A full reduction walks one buffer, pairwise, when that buffer is
+        # contiguous; a strided one gives no such guarantee.
+        return bool(terms.flags.c_contiguous or terms.flags.f_contiguous)
+    if not isinstance(axis, (int, np.integer)):
+        return False
+    a = int(axis) % terms.ndim
+    return bool(terms.strides[a] == terms.itemsize)
+
+
+def _accumulation_factor(n_terms: int, *, pairwise: bool) -> float:
     """Relative widening that bounds the float error of an ``n``-term reduction.
 
     A single ``np.nextafter`` per endpoint is the right convention for a *binary*
     operation, but a reduction over ``n`` terms accumulates far more than one ULP,
-    so one step does not bound it. numpy sums pairwise, whose forward error is
-    bounded by ``(log2(n) + 1) * u * sum |x_i|`` with ``u = eps/2`` the unit
-    roundoff (Higham, *Accuracy and Stability of Numerical Algorithms*, §4.2);
+    so one step does not bound it. The forward error is bounded by
+    ``gamma_k * sum |x_i|`` with ``u = eps/2`` the unit roundoff (Higham,
+    *Accuracy and Stability of Numerical Algorithms*, §4.2), where ``k`` is
+    ``log2(n)`` for **pairwise** summation and ``n - 1`` for **sequential**
+    summation. Which one applies is :func:`_reduction_is_pairwise`'s business, and
+    it is not a free choice — see there for the measured counterexample.
     ``_relax/convexity/eigenvalue.py`` already takes the rigorous route for its
     own accumulation, so the pattern is the repo's, not an invention.
 
-    The factor returned is ``(log2(n) + 2) * eps = (2*log2(n) + 4) * u``, which is
-    more than twice the pairwise bound. The headroom is deliberate and covers, on
-    top of the summation itself:
+    The factor returned is ``(log2(n) + 2) * eps`` pairwise and ``(n - 1) * eps``
+    sequential — in ``u`` units, ``2*log2(n) + 4`` and ``2*(n - 1)``, each at
+    least twice its bound. The headroom is deliberate and covers, on top of the
+    summation itself:
 
     * the rounding of the summands, which for ``_eval_matmul`` are themselves
       *rounded products* of interval endpoints (``<= 0.5 * eps * sum |x_i|``);
-    * the rounding of ``sum |x_i|`` and of the multiplication by this factor;
+    * the rounding of the multiplication by this factor.
 
-    all of which fit inside the remaining ``(log2(n) + 2.5) * u``. The caller
-    still applies a final outward ``np.nextafter`` to absorb the rounding of the
-    subtraction/addition of the widening term itself.
+    ``sum |x_i|`` is itself an ``n``-term reduction computed in floating point,
+    so it can come back *below* the exact magnitude sum, and the widening term is
+    only as sound as it is. Two things cover that. Its summands are
+    **nonnegative**, so there is no cancellation and its relative error is at most
+    ``gamma_n = n*u/(1 - n*u)`` — for any ``n`` this evaluator will ever see,
+    ``n*u < 1e-9``, so ``fl(sum |x_i|) >= (1 - 1e-9) * sum |x_i|``, which the
+    factor-of-two headroom above absorbs many times over. On top of that,
+    :func:`_widen_sum` rounds the magnitude sum **up** by one ULP before scaling,
+    so the final rounding is not left to the headroom at all. The caller still
+    applies a final outward ``np.nextafter`` to absorb the rounding of the
+    subtraction/addition of the widening term.
 
     Widening is always the SAFE direction: an enclosure may be loose and remain
     sound, but must never be narrow. ``n_terms <= 1`` is the identity reduction
@@ -272,7 +316,19 @@ def _accumulation_factor(n_terms: int) -> float:
     """
     if n_terms <= 1:
         return 0.0
-    return (math.log2(n_terms) + 2.0) * float(np.finfo(np.float64).eps)
+    eps = float(np.finfo(np.float64).eps)
+    pairwise_k = math.log2(n_terms) + 2.0
+    if pairwise:
+        return pairwise_k * eps
+    # ``max`` and not plain ``n - 1``: the two cross at n = 5, so for a handful of
+    # terms the sequential bound is the SMALLER of the two, and taking it would
+    # make this fix *narrow* strided enclosures relative to the code it replaces.
+    # Both values are sound (each is at least twice its Higham bound), but a
+    # soundness fix that tightens a bound anywhere is a bound-changing change
+    # needing its own differential evidence (CLAUDE.md §5), and there is no reason
+    # to buy that for <= 5 terms. With the max, the pairwise path is untouched and
+    # the strided path only ever widens.
+    return max(float(n_terms - 1), pairwise_k) * eps
 
 
 def _widen_sum(
@@ -293,11 +349,21 @@ def _widen_sum(
     ``None``, while the ``SumExpression`` reduction passes its declared ``axis``
     (an int, a tuple of ints, or ``None`` for a full reduction). Both go through
     this one helper so the two reductions cannot drift apart (#1161).
+
+    The error bound is sized for the reduction numpy will *actually* perform —
+    pairwise along contiguous memory, sequential along a strided axis — because
+    the pairwise bound does not hold for a sequential accumulation
+    (:func:`_reduction_is_pairwise`). ``sum |x_i|`` is rounded **up** before being
+    scaled — a magnitude sum rounded down would shrink the very term that makes
+    the enclosure sound — and its own accumulation error is bounded by the
+    factor's headroom, since its summands are nonnegative and so cannot cancel
+    (see :func:`_accumulation_factor`).
     """
-    factor = _accumulation_factor(n_terms)
+    factor = _accumulation_factor(n_terms, pairwise=_reduction_is_pairwise(terms, axis))
     if factor == 0.0:
         return total
-    err = factor * np.sum(np.abs(terms), axis=axis)
+    mag = np.sum(np.abs(terms), axis=axis)
+    err = np.nextafter(factor * np.nextafter(mag, np.inf), np.inf)
     widened = total + sign * err
     return np.where(np.isfinite(err), widened, sign * np.inf)
 
