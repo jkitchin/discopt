@@ -957,6 +957,92 @@ Stage 1's remaining items (stall-based termination, in-tree aging, a violation
 re-checked pool) stand, but they are now optimizations on a working cut path
 rather than the fix for it.
 
+**A1 entry experiment (2026-09-05) — the stall rule has never fired.** Before
+implementing a replacement, the existing rule was instrumented on a 3-row,
+11-column knapsack fixture, with the three constants temporarily promoted to
+`MilpOptions` knobs (`cut_stall_rel`, `cut_stall_rounds`, `cut_max_parallel`)
+defaulting to exactly the values they replaced, so the measurement is
+bound-neutral by construction. **Those knobs, and the `RootCutStallRounds`
+counter used below, were measurement scaffolding on a throwaway branch and are
+deliberately NOT in the tree** — every arm measured neutral-to-harmful, and
+CLAUDE.md §3 forbids shipping a flag with no consumer. They are cheap to
+reconstruct from this section if a later change needs them:
+
+| arm | rounds run | stalls registered |
+|---|---|---|
+| shipped `1e-7`, 1 round | **40** (the cap) | **0** |
+| SCIP's `1e-4`, 1 round | **14** | 1 |
+| `1e-4`, 3 rounds | 40 | 10 |
+
+The historical test `root.obj <= prev_obj + 1e-7*(1+|prev_obj|)` registers **zero
+stalls in forty rounds**. It is not merely "far tighter than either reference" as
+drafted above — it is inert. `cut_rounds = 50`, which A0 graduated default-ON,
+therefore means fifty full separation rounds on *every* instance, whether or not
+the bound is still moving. That is the direct mechanism of the per-instance tax
+A0 recorded (slower on 11 of the 18 instances both A0 arms solve;
+`neos-3611447-jijia` 7.5 → 13.9 s, `enlight8` 5.4 → 10.5 s, `22433` 0.31 →
+2.51 s). SCIP's threshold stops the same fixture at 14 rounds.
+
+Orthogonality is loose by the same margin: `CUT_MAX_PARALLEL = 0.99` against
+HiGHS's `maxpar = 0.1` and SCIP's `MINORTHO 0.90`. Tightening it to 0.05 takes
+the kept set on the fixture from **31 cuts to 12**.
+
+**RETRACTION AND RESULT (2026-09-05).** The entry experiment above was run on a
+unit fixture and its conclusion was over-generalized in this document, per
+CLAUDE.md §11. Corrected on real corpus instances (the shipped
+`RootCutRounds` / `RootCutsGenerated` counters plus a scaffolding
+`RootCutStallRounds`, 12 panel instances, shipped A0 config):
+
+| binding exit | count |
+|---|---|
+| round cap — the only case where the stall threshold can act | **1** (`gr4x6`) |
+| 500-cut generation cap, reached at 11–14 rounds | 3 (the whole `mik` family) |
+| stall rule already fires at the shipped `1e-7` | 2 (`enlight8`, `neos-911970`) |
+| separation stops producing violated cuts | 6 |
+
+The rule is inert *on the fixture*; on real instances it fires occasionally, and
+more importantly the loop almost always exits for some other reason long before
+50 rounds. `cut_rounds = 50` is therefore not a description of what the solver
+does, and tightening its stopping threshold cannot buy much.
+
+**The A1 arms panel confirms that** (38 instances, TL 20 s, arms interleaved,
+190 comparisons, cert-clean with 0 bounds above the reference optimum):
+
+| arm | solved | node geomean | iter geomean (21 solved) |
+|---|---|---|---|
+| `prod` (shipped) | 21 | 1.000 | 1.000 |
+| `stall` (SCIP `1e-4`) | 21 | 1.025 | **0.983** |
+| `stall3` (`1e-4`, 3 rounds) | 21 | 1.088 | 1.157 |
+| `ortho` (maxpar 0.10) | 21 | 1.477 | 1.386 |
+| `both` | **20** (loses `gt2`) | 1.654 | 1.049 |
+
+`stall` is worth **1.7 % of simplex iterations** on the instances that solve —
+noise, not a lever. Tightening orthogonality is actively harmful (node geomean
+1.477), reproducing at the loop level the same result §2.5c already recorded for
+`cut_select`. **The kill criterion fires: no arm survives, and the cut-loop
+stopping rule is not the mechanism of A0's per-instance tax.**
+
+*A note on the instrument.* The panel's wall column showed `stall` at 0.834,
+which reads as a 17 % win and is the number a careless writeup would have
+published. Load peaked at 57 during the run (an out-of-session `cargo check
+--workspace --all-targets`), so under §9 wall could not carry the verdict;
+scoring the same arms on simplex iterations — load-independent — gave 0.983. The
+wall figure was mostly artifact. The panel now refuses to start above a load of
+6 rather than recording the excursion and hoping the reader discounts it.
+
+*Where A1 goes instead.* The measurement points at the two exits that actually
+bind. The `mik` family generates its full 500-cut budget and keeps 88–114 of
+them, and those cuts then ride in **every node LP** for the rest of the search;
+six other instances stop because separation dries up, which no stopping rule
+improves. That is the in-tree half of Stage 1 — cut aging with a ~10-LP basic
+limit, and a pool that re-checks violation — not the root loop's termination
+test. A1 re-scopes accordingly, which is the fallback this section named in
+advance.
+
+*Kill criterion for the A1 arms panel:* an arm must remove A0's per-instance tax
+**without giving back A0's +3 solved instances**. If none does, the stopping rule
+is not the tax's mechanism and A1 re-scopes onto in-tree aging and the pool.
+
 *Why this is now the lever, not a prerequisite.* §2.5c measured discopt's own
 existing separators closing **70–92 %** of the root gap at 200 × 8 on exactly the
 instances that fail — mik 17.46 → 4.47, `fiber` 61.55 → 6.01, `b-ball` 12.73 →
