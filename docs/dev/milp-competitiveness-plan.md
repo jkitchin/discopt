@@ -286,7 +286,145 @@ entry experiment this section was written to run — "does HiGHS also leave 7–
 at the mik root?" — is answered **no** (it leaves 1.5–1.8 %), so Stage 2 is not
 killed; it is deferred behind a bigger, cheaper win.
 
-## 3. Stages
+## 2.6 Why HiGHS needs so few nodes — the mechanism, measured
+
+HiGHS closes **16 of the 38 in a single node**: `app2-2`, `b-ball`, `beavma`,
+`dcmulti`, `f2gap40400`, `gen`, `gr4x6`, `gt2`, `khb05250`, `neos-1425699`,
+`neos-5192052-neckar`, `nexp-50-20-1-1`, `nexp-50-20-4-2`, `sp150x300d`,
+`supportcase14`, `supportcase16`. One node means the root — after presolve, cuts
+and heuristics — both *produces* the optimum and *proves* it. Total panel nodes:
+HiGHS 15,417, discopt 4,693,240 at its best arm. That is ~300×.
+
+The mechanism is not one missing component; it is two, multiplying.
+
+**First: the last few percent of root gap is worth orders of magnitude of tree.**
+Tree size grows roughly exponentially in the residual gap, so the interesting
+comparison is not "discopt closes 74 % of the mik root gap" but what is *left*.
+At 200 × 8, discopt leaves 4.5 % on `mik-250-20-75-*`; HiGHS leaves 1.7 %
+(§2.5). A 2.6× wider residual gap is not a 2.6× bigger tree. The same pattern
+holds on `sp150x300d` (15.71 % vs 0.00 %), `nexp-50-20-1-1` (30.00 % vs 0.00 %)
+and `beavma` (31.05 % vs 0.00 %) — on those three HiGHS's root bound is *exact*
+and discopt's is not close, which is precisely why HiGHS needs one node and
+discopt needs 10⁵.
+
+**Second: with no incumbent, nothing prunes.** A node is cut off only when its
+bound is worse than the incumbent. discopt reaches the end of its budget 22-45 %
+above the optimum on the four `mik`, and finds **no feasible point at all** on
+`enlight_hard` and `neos-2624317-amur`. A tree with a poor incumbent explores
+nodes that a good one deletes outright, regardless of how good the bound is.
+This is why `mik` burns 289 k-563 k nodes against HiGHS's 558-1055 despite a
+dual gap of only 2.1-2.7 %.
+
+Neither alone explains the ratio; together they do. And they are not independent
+— a good incumbent early prunes the tree that would otherwise be needed to lift
+the bound.
+
+## 3. The parity plan
+
+*Goal:* 38/38 on this panel inside HiGHS's wall-clock envelope. That is the
+definition of done; every stage below is scored against it.
+
+*Ordering principle, from §1's measured decomposition:* **the bound is short on
+17 of 17 failures; the incumbent is additionally short on 14 of 17.** Bound work
+is therefore necessary everywhere and primal work is necessary on 14 and
+sufficient on none — no instance closes until the bound arrives, however good the
+incumbent. That is a strict ordering, and it is why Track A precedes Track B. But
+Track B is not optional: on the `mik` family the bound is already within 2.6 % and
+the tree still does not close, so Track A alone does not reach 38/38 either.
+
+### Track A — the bound (needed by 17/17)
+
+**A0. Graduate the root cut budget. Ready now; no new code.**
+This was net-*negative* before the structural-space fix (`cut200_prune` 11/38
+against base 18/38) because every cut broke node warm starts. With that fixed it
+is net-positive: `cut500_prune` **21/38 against base 19/38 at 47 % fewer nodes**,
+190/190 runs, zero certification aborts, no false bound. That meets CLAUDE.md §5's
+double bar — cert-clean *and* net-positive — which it did not before. Needs one
+confirming panel on an unloaded machine for the wall-clock column, then the
+default flips.
+*Expected: +2 instances, already measured.*
+
+**A1. Finish the cut lifecycle (the remainder of the old Stage 1).**
+The warm-start half is done. Still missing: stall-based termination instead of the
+fixed round budget (discopt's `1e-7*(1+|prev_obj|)` test is far tighter than
+HiGHS's `stall < 3` against cumulative gain or SCIP's `objreldiff ≤ 1e-4`); cut
+*aging* (SCIP `LP_ROWAGELIMIT 10`, `set.c:263`; HiGHS ages basic cut rows at
+`mip_lp_age_limit`, `HighsLpRelaxation.cpp:595-642`); and a cut *pool* rather
+than the constraint matrix. Also: `CUT_MAX_PARALLEL = 0.99` is 10× laxer than
+both references (HiGHS `maxpar = 0.1`, `HighsCutPool.cpp:320`; SCIP `MINORTHO
+0.90`), so near-duplicate cuts are being kept.
+*Expected: the budget can then go higher than 500 without paying for it, which is
+what A2 needs.*
+
+**A2. A second cut family — cMIR/flow-cover and knapsack cover.**
+GMI is discopt's only family. §2.5 shows the existing separators already close
+70-92 % of the root gap, so this is not "discopt has no cuts" — it is the last
+few percent, which §2.6 argues is where the tree size lives. Deferred behind A1
+deliberately: cMIR is only worth having once a large cut set is affordable.
+The instances it should move are the mixed-knapsack and set-covering shapes that
+dominate the failures — `mik-*`, `nexp-*`, `sp150x300d`, `beavma`.
+*Entry experiment before building (CLAUDE.md §4, the #727 RLT lesson): separate
+cMIR at the root on those instances only, and measure the root gap against the
+4.5 %/15.7 %/30.0 % baselines. If it does not move them on the real instances, it
+does not get built.*
+
+**A3. The two instances that get no usable cuts at all.**
+`gsvm2rl3` — 31 cuts separated, all discarded as ill-conditioned, 42 % dual gap.
+`neos-2624317-amur` — zero cuts generated, 100 % dual gap, no feasible point.
+Relaxing the numerical gates is already **falsified** (see "Falsified: relaxing
+the cut-cleanup's numerical gates"): it rescues `gsvm2rl3`'s root gap but is
+node-neutral, so these need a family whose coefficients are conditioned by
+construction, i.e. A2. Tracked here so they are not silently dropped.
+
+### Track B — the incumbent (needed by 14/17)
+
+discopt's failures are not marginal on this axis: 22-45 % above optimum on the
+`mik` family, and no feasible point at all on two instances. This is the half
+that was invisible while only the bound was instrumented.
+
+**B1. Node selection and plunging.** discopt uses `SelectionStrategy::BestFirst`
+and carries a best-estimate field that is not wired to the driver. SCIP's default
+is `nodesel_estimate` (`STDPRIORITY 200000`, the highest of five,
+`nodesel_estimate.c:48`); HiGHS alternates best-estimate plunges with a forced
+best-bound pop every 10 leaves (`HighsMipSolver.cpp:504-516`). Cheapest item in
+Track B — the field exists — and it is the one that most directly attacks "no
+incumbent".
+
+**B2. Real primal heuristics.** In rough order of value-per-unit-work: diving
+variants, RENS, feasibility pump, RINS, local branching. Two instances find no
+feasible point at all, which is a feasibility-pump-shaped problem specifically.
+
+*Scoring note for Track B:* an incumbent improvement shows up as **nodes and
+solved-count**, not as root gap. Measure it at a fixed node budget, not a time
+limit, until the machine is reliably quiet.
+
+### Track C — measured NOT to be the difference. Do not spend here.
+
+Recorded so this ground is not re-covered:
+
+- **Presolve** — `h_nopre ≈ h_full` everywhere on the root-bound probe; worth
+  ~0-3 pp of root gap (§2.5a). §1c independently put it at ≤2 instances.
+- **Symmetry** — 0 instances on this panel (§1c).
+- **`node_propagation`** — graduated ON, but gains **zero** instances; the HiGHS
+  review's "3-6 instances" is falsified (Stage 0.1).
+- **Relaxing the cut numerical gates** — cert-clean but node-neutral; falsified
+  and reverted, with the measurement recorded at the refusal site.
+- **`cut_select`** — falsified earlier: `fiber` 2986.5 → 6457.4 it/node, `mik`
+  acceptance 100 % → 35.0 %.
+
+### Measurement discipline for every stage below
+
+1. Node-limited panels while machine load is high — a time limit measures the
+   machine (CLAUDE.md §9). Load was ~68 during the 2026-09-05 work; every
+   conclusion drawn that day rests on node counts and counters, never wall.
+2. Every bound-changing item behind a default-off flag with the §5 double bar
+   (cert-clean AND net-positive) over the 38 panel *and* the in-repo MINLP corpus.
+3. Entry experiment before implementation, on **real corpus instances**, with a
+   named kill criterion.
+
+## 3bis. Stage detail (the original numbering, retained)
+
+
 
 Reordered from the first draft per §2, and re-weighted per §2.5 — Stage 1 is now
 the lever and Stage 2 is deferred behind it. Every bound-changing piece goes behind a
@@ -570,11 +708,28 @@ Sequentially-lifted knapsack cover (upgrading `lp/cover.rs` from unlifted) is
 
 ## 4. Success metric
 
-The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. Base is **18/38 at
-444.93 s** (19/38 once the tolerance is matched); HiGHS **36/38 at 76.77 s**
-interleaved, 38/38 at 66.85 s alone. "Competitive" is solved-count within a few
-instances of HiGHS's with total wall within ~2×. Every stage reports against this
-same table.
+The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
+solved-count within a few instances of HiGHS's with total wall within ~2×. Every
+stage reports against this same table.
+
+Current standing, matched tolerance, 190/190 runs, zero certification aborts:
+
+| arm | solved | wall | med(solved) | nodes |
+|---|---|---|---|---|
+| base_16x1 | 19/38 | 430.41 s | 0.170 s | 8,853,388 |
+| cut200_prune | 20/38 | 400.50 s | 0.130 s | 6,459,226 |
+| **cut500_prune** (best) | **21**/38 | 399.97 s | 0.138 s | 4,693,240 |
+| **highs** | **38**/38 | **71.95 s** | 1.039 s | **15,417** |
+
+Distance to go: **17 instances, ~5.6× wall, ~300× nodes.** Intermediate targets,
+so a stage can be scored before parity is reached: A0 → 21/38 (measured, banked);
+A1 → 24/38; A2 → 30/38; B1+B2 → 35/38. These are targets, not predictions — a
+stage that misses its target is re-scoped against the measurement, per §4 of
+CLAUDE.md, not carried forward on hope.
+
+*Caveat on every wall column here:* machine load was 66-69 during the 2026-09-05
+panel. Node counts are load-independent and carry the conclusions; the wall
+figures need one quiet re-run before they are quoted outside this document.
 
 ## 5. Licensing note for the owner
 
