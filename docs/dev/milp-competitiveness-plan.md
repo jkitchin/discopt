@@ -1043,6 +1043,87 @@ advance.
 **without giving back A0's +3 solved instances**. If none does, the stopping rule
 is not the tax's mechanism and A1 re-scopes onto in-tree aging and the pool.
 
+### A2 — in-tree cut aging. Measured 2026-09-05, and it does NOT survive.
+
+A1 handed off to in-tree aging on the premise, never measured here, that the root
+cuts discopt keeps are largely **dead weight** in the tree: costing basis
+dimension in every node LP while contributing nothing to that node's bound. Per
+CLAUDE.md §4 that premise was tested before any aging code was written.
+
+*Instrument.* Every node LP that reaches optimal classifies each surviving cut row
+by its slack column — `x[j] > 1e-7` means the cut is not tight at that node and is
+exactly what aging would delete. 36 of 38 panel instances classified (two generate
+no cuts), shipped A0 config, 20 s limit.
+
+*Round 1 — the headline ratio, and why it could not decide anything.*
+
+| statistic | value |
+|---|---|
+| pooled slack share over all (node, cut) pairs | **44.7 %** |
+| median per-instance slack share | **51.4 %** |
+
+The pre-registered kill line was *median below 50 % → KILL*. The median is 51.4 %,
+so **the criterion as written did not fire**, even though the work-weighted pooled
+figure (44.7 %) sits the other side of the line. Recording that rather than
+switching to whichever statistic gives a clean answer: post-hoc statistic choice
+is the failure §4 exists to prevent, and the honest verdict was MARGINAL.
+
+*Why a slack share cannot settle it.* An aging rule does not delete a row that is
+slack *now*; it deletes one non-binding for ~10 **consecutive** node LPs. A 45 %
+pooled share is equally consistent with durable dead weight (aging works) and with
+rows alternating in and out of the basis (aging thrashes and removes nothing) —
+and those imply opposite decisions. The headline probe cannot distinguish them, so
+it was extended rather than believed.
+
+*Round 2 — age bucketing.* Each slack observation is bucketed by the row's
+consecutive-slack age at the moment of observation; the **aged** bucket is the
+fraction an aging rule with threshold 10 could actually have removed. Criterion
+pre-registered in the script before the run: ≥ 25 % → build it, < 10 % → kill,
+10–25 % → a second marginal answer means the effect is not there.
+
+| statistic | value |
+|---|---|
+| pooled slack share (reproduces round 1) | 44.5 % |
+| median per-instance slack share (reproduces round 1) | 51.4 % |
+| **pooled AGED share of all (node, cut) pairs** | **22.5 %** |
+| of the slack observations, durable (age ≥ 10) | 50.5 % |
+
+**VERDICT: A2 does not survive.** 22.5 % lands inside the marginal band, below the
+25 % line. And 22.5 % is an *upper* bound on what aging could buy, because it
+credits aging with deleting every aged row at zero cost — while a row aged out can
+be needed again lower in the tree, at which point its bound is simply lost.
+
+*The per-instance spread is the substance, not the pooled number.* The two
+populations are cleanly separated and neither is the one aging needs:
+
+| instance | nodes | slack % | aged % |
+|---|---|---|---|
+| `blend2` | 5.6 k | 87.7 | 79.3 |
+| `enlight_hard` | 97 k | 75.7 | 55.3 |
+| `p0201` | 438 | 51.1 | **1.1** |
+| `mik-250-20-75-5` | 183 k | 42.4 | **12.2** |
+| `neos17` | 44 k | 40.8 | **8.3** |
+| `beavma` | 79 k | 24.8 | **9.0** |
+
+Where slackness is durable the instance is already small and already solved
+(`blend2`, 5.6 k nodes). On the large-tree instances that actually time out — the
+`mik` family, `beavma`, `neos17` — slackness is **transient**: rows drift in and
+out of the basis, so aging would spend deletions and re-separations without ever
+shrinking the working LP much. `p0201` is the extreme: half its cut rows are slack
+at any moment and almost **none** of them durably.
+
+*Consequence.* Three measured rounds have now gone into the cut path — root
+attribution (§2.5), root-loop termination (A1), in-tree aging (A2) — and none
+found the lever. That is itself the finding: **discopt's cut machinery is not
+what separates it from HiGHS.** The next question is deliberately upstream of
+mechanism choice — which half of `time = nodes × cost_per_node` the gap lives in —
+because tree size and per-node cost imply disjoint work and three rounds of
+picking a mechanism first have not paid.
+
+*Scaffolding disposition.* The A2 counters are on a probe branch and ship only if
+something consumes them; a counter with no consumer is CLAUDE.md §3's dead flag,
+which is why A1's stall counter was dropped rather than merged.
+
 *Why this is now the lever, not a prerequisite.* §2.5c measured discopt's own
 existing separators closing **70–92 %** of the root gap at 200 × 8 on exactly the
 instances that fail — mik 17.46 → 4.47, `fiber` 61.55 → 6.01, `b-ball` 12.73 →
