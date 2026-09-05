@@ -119,6 +119,80 @@ def test_options_passthrough(opt, monkeypatch):
     assert captured.get("gap_tolerance") == 1e-3
 
 
+def test_tee_matches_no_tee(opt, capsys):
+    """`tee=True` solves identically to `tee=False` and streams the log (issue #1178).
+
+    Before the fix, `tee` was mapped onto `Model.solve(stream=True)` — a different
+    feature (an iterator of SolveUpdate) that raises NotImplementedError — so every
+    `tee=True` solve came back as termination `error` with no solution loaded.
+    """
+    quiet = _tiny_minlp()
+    res_quiet = opt.solve(quiet, tee=False)
+    capsys.readouterr()  # drop anything the quiet solve emitted
+
+    loud = _tiny_minlp()
+    res_loud = opt.solve(loud, tee=True)
+    out = capsys.readouterr().out
+
+    assert res_loud.solver.termination_condition == res_quiet.solver.termination_condition
+    assert res_loud.solver.termination_condition == pyo.TerminationCondition.optimal
+    assert pyo.value(loud.obj) == pytest.approx(pyo.value(quiet.obj), abs=1e-6)
+    assert loud.x.value == pytest.approx(quiet.x.value, abs=1e-6)
+    assert loud.y.value == pytest.approx(quiet.y.value, abs=1e-6)
+    assert out.strip(), "tee=True produced no solver log on stdout"
+
+
+def test_tee_attaches_a_stdout_handler_then_restores_it(opt, monkeypatch):
+    """`tee=True` attaches a stdout handler for the solve and removes it after."""
+    import logging
+    import sys
+
+    import discopt.modeling as dm
+
+    discopt_logger = logging.getLogger("discopt")
+    before_handlers = list(discopt_logger.handlers)
+    before_level = discopt_logger.level
+
+    during: dict[str, object] = {}
+    orig = dm.Model.solve
+
+    def spy(self, *a, **k):
+        added = [h for h in discopt_logger.handlers if h not in before_handlers]
+        during["added"] = added
+        during["effective_level"] = discopt_logger.getEffectiveLevel()
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(dm.Model, "solve", spy)
+    opt.solve(_tiny_minlp(), tee=True)
+
+    assert "added" in during, "Model.solve was never reached — the probe measured nothing"
+    added = during["added"]
+    assert len(added) == 1, f"expected exactly one tee handler, saw {added}"
+    assert isinstance(added[0], logging.StreamHandler)
+    assert added[0].stream is sys.stdout
+    assert during["effective_level"] <= logging.INFO
+
+    # ...and the logger is left exactly as it was found.
+    assert discopt_logger.handlers == before_handlers
+    assert discopt_logger.level == before_level
+
+
+def test_tee_does_not_request_streaming(opt, monkeypatch):
+    """`tee=True` must not reach `Model.solve` as `stream=True` (issue #1178)."""
+    import discopt.modeling as dm
+
+    captured = {}
+    orig = dm.Model.solve
+
+    def spy(self, *a, **k):
+        captured.update(k)
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(dm.Model, "solve", spy)
+    opt.solve(_tiny_minlp(), tee=True)
+    assert "stream" not in captured
+
+
 def test_duals_when_exposed(opt):
     """Convex NLP min (x-3)^2 s.t. x>=4 -> KKT multiplier ~2; sign matches the
     AMPL/Pyomo convention (cross-checked against ipopt's value 2.0)."""

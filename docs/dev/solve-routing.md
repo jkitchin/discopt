@@ -27,7 +27,8 @@ Model.solve(...)                                          [modeling/core.py:2680
   ▼
 solve_model(...)                                          [solver.py:2017]
   │
-  ├─ stream=True ───────────────────────────► _solve_streaming  (yields SolveUpdate)
+  ├─ stream=True ───────────────────────────► _solve_streaming  (NotImplementedError:
+  │                                             no backend yields SolveUpdate yet)
   │
   ├─ EXPLICIT SOLVER SELECTOR
   │     solver="amp"      ──► solve_amp      (Adaptive Multivariate Partitioning)

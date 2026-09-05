@@ -4504,7 +4504,10 @@ class Model:
             Compute sensitivities w.r.t. Parameters.
         stream : bool, default False
             If True, return an iterator of :class:`SolveUpdate` instead of
-            the final result.
+            the final result. **Not implemented** — no backend produces the update
+            feed, so this currently raises ``NotImplementedError``. It is not a
+            "print the solver log" switch: for that, attach a handler to the
+            ``discopt`` logger at INFO (what the Pyomo plugin's ``tee=True`` does).
         deterministic : bool, default False
             Make the search a function of the model rather than of machine speed,
             by rendering every **role-2** wall budget inert — the sub-budgets that
@@ -5309,8 +5312,19 @@ class Model:
         return result
 
     def _solve_streaming(self, **kwargs) -> Iterator["SolveUpdate"]:
-        """Streaming solve that yields updates during B&B."""
-        raise NotImplementedError("Streaming solve requires solver backend")
+        """Streaming solve that yields updates during B&B.
+
+        Not implemented: no backend produces the :class:`SolveUpdate` feed yet, so
+        ``solve(stream=True)`` raises rather than returning a partial answer. The
+        message names the parameter because a caller mistaking ``stream`` for
+        "print the solver log" is exactly how issue #1178 happened — for that, hook
+        the ``discopt`` logger at INFO (see ``discopt.pyomo``'s ``tee`` handling).
+        """
+        raise NotImplementedError(
+            "Model.solve(stream=True) is not implemented: no solver backend yields "
+            "SolveUpdate progress. Call solve() without stream= for a SolveResult; "
+            "to watch progress, attach a handler to the 'discopt' logger at INFO."
+        )
 
     # ── Infeasibility analysis ──
 

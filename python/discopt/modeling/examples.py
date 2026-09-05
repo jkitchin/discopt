@@ -663,6 +663,11 @@ def example_llm_formulation():
 
 def example_streaming():
     """
+    NOTE: streaming is not implemented yet — ``solve(stream=True)`` raises
+    ``NotImplementedError`` because no backend produces the ``SolveUpdate`` feed.
+    To watch a solve in progress today, attach a handler to the ``discopt``
+    logger at INFO (which is what the Pyomo plugin's ``tee=True`` does).
+
     import discopt
 
     m = dm.Model("large_problem")
