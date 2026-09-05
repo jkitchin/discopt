@@ -1502,6 +1502,73 @@ stands, but it stood by luck and not by correctness. Both defects are fixed: the
 finiteness test is in `has_inc`, and the guard is now written `not (… <= tol)`
 rather than `… > tol`, which is the form that *fails* on nan instead of passing.
 
+### A6 — the discarded infeasibility proofs are real but too rare. Falsified 2026-09-05.
+
+**The hypothesis.** `strong_branch` (`milp_driver.rs:2740-2795`) turns an
+infeasible probe into the score constant `INFEAS_DELTA = 1e7` and throws the
+*proof* away. An infeasible down probe proves `x_i ≥ ceil(x_i)` at that node; if
+both probes on a candidate come back infeasible the node itself is infeasible and
+could be pruned outright. HiGHS harvests exactly this (`branchUpwards`,
+`HighsSearch.cpp:558-561`, `:665-669`). The claim was that discopt is paying for a
+full warm dual re-solve per probe and discarding the domain reduction it buys.
+
+**Soundness was checked first, and it holds.** Two questions had to clear before
+this was even buildable, and both did:
+
+1. *Is the probe's `Infeasible` conditional on a cutoff?* No. The probe closure
+   (`milp_driver.rs:2705-2721`) installs no incumbent and no cutoff row, so
+   `LpStatus::Infeasible` is a pure feasibility statement. HiGHS's third arm —
+   optimal-but-bound-exceeding, needing `other_child_lb` and deferred-subtree
+   bookkeeping (`HighsSearch.cpp:613-637`) — does not arise on discopt's path.
+2. *Can a numerical false-infeasible become a bound that cuts off the optimum?*
+   No. **Every** `LpStatus::Infeasible` this engine can emit is Farkas-certified.
+   The primal has exactly two emission sites (`primal.rs:1330`, `:1359`), each
+   gated on `farkas_ray_certifies`, returning the honest `Numerical` when the ray
+   does not certify; the dual (`dual.rs:940-969`) gates its own the same way and
+   returns `None` for a cold primal fallback rather than emit uncertified. Notably
+   discopt would collapse on a *stronger* proof than HiGHS, which has the
+   equivalent check short-circuited off — `HighsLpRelaxation.cpp:1228` reads
+   `if (true || checkDualProof()) return Status::kInfeasible;`.
+
+So the mechanism was cleared on soundness. It is the **frequency** that kills it.
+
+**The measurement.** 38-instance panel, shipped `sb_node_budget = 48`, all 38
+instances **node-capped at 3000** rather than wall-capped — deliberately, because
+the machine was at load ~30 from unrelated work and a share gathered under a wall
+cap is partly a timing measurement (§9). Zero instances hit the wall valve, so
+every count below is a function of the model and not of machine speed. Zero
+certificate violations.
+
+| bucket | count | share of probes |
+|---|---:|---:|
+| `SbProbes` | 11582 | — |
+| `SbProbeOptimal` | 11240 | 97.05% |
+| **`SbProbeInfeasible`** | **342** | **2.95%** |
+| `SbProbeOther` | 0 | 0.00% |
+| `SbCandBothInfeasible` | **1** | — |
+
+**Against the pre-registered criterion** (written into `profile.rs` before the
+run): ≥5% builds, <1% does not, and 1–5% is WEAK — *"build only if the
+both-children-infeasible count is itself non-trivial."* The share is 2.95%, and
+the both-infeasible count is **1 across the entire panel**. The whole-node-prune
+arm, which was the valuable half, essentially never fires. **A6 is falsified and
+the collapse is not being built.**
+
+**Retraction (§11).** Earlier in this session the collapse was described as
+"cleared for a v1 build". That was a statement about *soundness*, and it remains
+true; it was not a statement about frequency, and it was made before the frequency
+was measured. The build decision it implied is withdrawn.
+
+**What the same run turned up that is NOT falsified.** Strong branching is gated
+by `sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget`
+(`milp_driver.rs:1434`), a **global node budget**, defaulting to 48 in the Python
+binding. That is why `SbCalls` pins near 31 on every instance regardless of size:
+strong branching in discopt is a root-region activity that switches off entirely
+after the first 48 nodes, and everything below runs on pseudocosts alone. A4
+already swept that budget to unlimited and got only 1.22×, so running SB deeper is
+not the answer — but it means the pseudocost model is what steers essentially the
+whole tree, which is where A7 goes.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
