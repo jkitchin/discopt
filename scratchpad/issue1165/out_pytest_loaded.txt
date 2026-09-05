@@ -2,3 +2,18 @@
 ### exercises the new assertions on a LOADED box -- the condition that
 ### produced the original flake)
  17:47:30 up 57 min,  0 user,  load average: 0.79, 0.86, 0.94
+...............................                                          [100%]
+=============================== warnings summary ===============================
+python/tests/test_issue_517_numerical_dual_bound.py::test_hda_gets_first_finite_dual_bound
+python/tests/test_issue_517_numerical_dual_bound.py::test_hda_flag_disabled_is_sound_but_no_longer_discriminating
+  /home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+python/tests/test_issue_517_numerical_dual_bound.py::test_inert_on_cleanly_certifying_instances[alan]
+  /home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf).  Nonlinear tightening can adjust 4 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+31 passed, 3 warnings in 134.23s (0:02:14)
+### load at end
+ 17:49:45 up  1:00,  0 user,  load average: 3.43, 1.64, 1.21

@@ -1,0 +1,4 @@
+### 4 cores; 6 spinners started to force contention (the hda ON-arm probe
+### is also running on one core)
+ 17:50:23 up  1:00,  0 user,  load average: 3.01, 1.70, 1.24
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
