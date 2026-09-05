@@ -1014,6 +1014,58 @@ class SolverTuning:
     Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
+    gdp_sumover: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
+    )
+    """Teach the GDP/relaxation expression walkers the indexed-summation node
+    ``SumOverExpression`` (``dm.sum(f(i) for i in S)``)
+    (``DISCOPT_GDP_SUMOVER``, default **ON** -- graduated by the §5 panel below;
+    opt out with ``DISCOPT_GDP_SUMOVER=0``, which restores the pre-#1154 walkers
+    byte for byte. #1154).
+
+    ``SumOverExpression`` holds its already-expanded term list in ``.terms``. Six
+    walkers in :mod:`discopt._relax.gdp_reformulate` had no case for it, so a
+    disjunct body built with ``dm.sum`` was under-reported as having no variables
+    (``_collect_variables``), non-linear (``_is_linear``), unbounded
+    (``_bound_expression``) and un-evaluable at the origin (``_body_at_zero``).
+    On ``main`` that costs three loud refusals: ``auto``/``big-m`` cannot bound
+    the body, ``hull`` cannot form ``g(0)``.
+
+    With the flag ON the six walkers treat ``Σ[t1, …, tn]`` **exactly** as the
+    left-folded chain ``t1 + … + tn`` — the desugaring the modeling layer could
+    equally have produced — so nothing about the reformulation's mathematics is
+    new; only the node type is newly recognised. The invariant is machine-checked
+    per walker in ``python/tests/test_1154_gdp_sumover_hull.py``.
+
+    **Graduated default-ON** (§5, 2026-09-04) on a panel that meets both bars;
+    full tables in ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
+
+    *Cert-clean.* The flag is **structurally inert** on the ``.nl`` corpus -- the
+    node is created only by the Python modeling API's ``dm.sum`` and the ``.nl``
+    reader never emits one, measured at 0 occurrences in 33 376 DAG nodes over all
+    66 vendored instances -- and the A/B differential is byte-identical on 63/66,
+    the other 3 reproducing their whole difference *within a single arm* (a
+    role-1 ``time_limit`` truncation artifact, #1116). Scored against the oracle:
+    52 instances, 0 bound violations, 0 primal violations. On the class where the
+    mechanism fires (108 generated GDP models x 3 routes x 2 arms = 648 solves,
+    every incumbent feasibility-verified in numpy against the original
+    disjunction): **0 invalid bounds**.
+
+    *Net-positive.* Three loud refusals on the issue's repro become three
+    certified optima at the true ``-30.0``. ``auto`` and ``big-m`` are
+    bit-identical between a ``Σ[...]`` body and the equivalent folded chain on all
+    108 cases; on ``hull`` with a nonlinear body the ``Σ`` form certifies
+    **46/54** against the chain's **29/54**, sd **0.00** over 3 interleaved reps
+    on a quiet machine. 731 GDP/OA/Benders/GBD/MPEC tests give identical results
+    in both arms.
+
+    Note the ordering that PR #1150 got wrong: widening ``_is_linear`` **alone**
+    made hull emit the disjunct body globally with its selector coefficient
+    collapsed to zero (``all_vars`` was empty, so no disaggregated variables were
+    created) and return a dual bound of −3.0 on a model whose true minimum is
+    −30.0. The walkers must move together; the independent-walker cross-check in
+    ``_reformulate_disjunction_hull`` now refuses loudly rather than emit that row."""
+
     disjunctive_config_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_DISJUNCTIVE_CONFIG_BOUND", default=False)
     )
