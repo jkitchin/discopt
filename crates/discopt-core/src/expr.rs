@@ -1243,7 +1243,24 @@ impl ExprArena {
                 // of the two flat vectors.
                 self.evaluate_matmul(*left, *right, x)
             }
-            ExprNode::Sum { operand, .. } => {
+            ExprNode::Sum { operand, axis } => {
+                if axis.is_some() {
+                    // An axis reduction is ARRAY-valued: `sum(A, axis=1)` on a
+                    // (2, 3) operand is two row sums, not one sum of six terms.
+                    // This evaluator is scalar-valued, so there is no honest
+                    // answer -- returning the full sum silently answers a
+                    // DIFFERENT model, and the Python LP/QP repr extractors then
+                    // emit one collapsed row and certify its optimum (#1160).
+                    // NaN is this arena's established "not scalar-representable"
+                    // signal (see the Index fall-through above); every extractor
+                    // that probes the repr checks for it and falls back to a
+                    // per-component path. The arena carries no shape inference,
+                    // so a 1-D `axis=0` operand -- which IS a full reduction --
+                    // is refused here too; `_relax.scalarize.sum_is_full_reduction`
+                    // is the precise predicate, on the Python side where shapes
+                    // are known.
+                    return f64::NAN;
+                }
                 // Sum all elements of the operand.
                 self.evaluate_sum_all(*operand, x)
             }
@@ -1642,7 +1659,15 @@ impl ModelRepr {
                 _ => f64::NAN,
             },
             ExprNode::MatMul { left, right } => self.evaluate_matmul(*left, *right, x),
-            ExprNode::Sum { operand, .. } => self.evaluate_sum_all(*operand, x),
+            ExprNode::Sum { operand, axis } => {
+                // Array-valued unless it is a full reduction -- see the matching
+                // guard in `ExprArena::evaluate` (#1160).
+                if axis.is_some() {
+                    f64::NAN
+                } else {
+                    self.evaluate_sum_all(*operand, x)
+                }
+            }
             ExprNode::SumOver { terms } => terms.iter().map(|t| self.evaluate_node(*t, x)).sum(),
         }
     }
@@ -2040,6 +2065,39 @@ mod tests {
             index_spec_to_flat(&IndexSpec::Tuple(vec![1, 2]), &[3, 4]),
             6
         );
+    }
+
+    #[test]
+    fn test_axis_reduced_sum_is_not_scalar_representable() {
+        // #1160: `sum(A, axis=k)` is ARRAY-valued -- one row per surviving
+        // element. This evaluator returns one f64, so the only honest answer is
+        // NaN (the arena's "not scalar-representable" signal, which every
+        // repr-based extractor checks for). Returning the full sum answered a
+        // DIFFERENT model: `sum(A, axis=1) <= b` was extracted as the single row
+        // `sum(A) <= b` and its optimum certified.
+        let mut arena = ExprArena::new();
+        let a = arena.add(ExprNode::Variable {
+            name: "A".into(),
+            index: 0,
+            size: 6,
+            shape: vec![2, 3],
+        });
+        let pt = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+        let full = arena.add(ExprNode::Sum {
+            operand: a,
+            axis: None,
+        });
+        assert!((arena.evaluate(full, &pt) - 21.0).abs() < 1e-12);
+
+        for axis in [0_usize, 1] {
+            let reduced = arena.add(ExprNode::Sum {
+                operand: a,
+                axis: Some(axis),
+            });
+            let v = arena.evaluate(reduced, &pt);
+            assert!(v.is_nan(), "axis={axis} evaluated to {v}, expected NaN");
+        }
     }
 
     #[test]
