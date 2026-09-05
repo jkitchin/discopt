@@ -246,6 +246,14 @@ incumbent where the pump is productive**. And at the 20 s rung the ON arm is
 identical to OFF on all three: the gate re-admits the pump, so the cliff has
 **moved, not gone**.
 
+Re-measured on the shipped form (entry rule + clock cap together), 48 runs, two
+repetitions, arms interleaved within each — `scratchpad/i1153/combined.log`. Both
+gains reproduce with zero spread (`heatexch_gen2` 3 -> 7, `tspn10` 3 -> 31) and so
+does the `tspn12` regression; 20 s and 40 s are ON == OFF throughout. One caveat
+for anyone re-deriving the panel: `tspn10` at 5 s is **bimodal** under the legacy
+arm (nodes `[3, 7]`, sd 2.0), so it is not a sound single-run probe at that rung —
+`heatexch_gen2` is the stable one (sd 0 at every rung in both arms).
+
 Two causes of the residual, both identified and neither yet fixed:
 
 * **The gate's cost estimate is wrong on first use.** `_heur_nlp_cost` seeds at a
