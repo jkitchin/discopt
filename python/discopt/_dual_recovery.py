@@ -161,15 +161,30 @@ def recover_multipliers(
         is_ge = sense_arr == ">="
         is_eq = sense_arr == "=="
         # Row activity is judged RELATIVE to the row's own scale, using the same
-        # row_scale the examiner uses for scaled primal feasibility:
-        # max(1, |rhs|, max|J_row| * max(1, |x|)). An absolute test measures the
-        # row in whatever units it happens to be written in, so multiplying a
-        # constraint through by 1000 -- which changes nothing about the problem
-        # -- makes a binding row read as inactive: the NLP's own convergence
-        # slack is scaled up with it. That empties the active set and the
-        # multiplier of a genuinely binding row is lost.
+        # row_scale the examiner and the incumbent verifier use:
+        # max(1, |rhs|, max_j |J_ij| * |x_j|) -- the row's first-order TERM
+        # magnitude. An absolute test measures the row in whatever units it
+        # happens to be written in, so multiplying a constraint through by 1000
+        # -- which changes nothing about the problem -- makes a binding row read
+        # as inactive: the NLP's own convergence slack is scaled up with it. That
+        # empties the active set and the multiplier of a genuinely binding row is
+        # lost.
+        #
+        # #1151: the ``max(1, |x_j|)`` floor this used to carry breaks that in the
+        # OTHER direction, and in the accepting direction. On a ``1/dmin``-scaled
+        # row (s = 1000) whose columns are all sub-unit it reads the scale as
+        # 1000 rather than ~1.4, so ``near`` admits rows with signed slack up to
+        # 1e-3 into the active set -- measured on the #1151 witness, where the
+        # floored form gives near=True and the term magnitude near=False. Extra
+        # inactive rows contribute free multipliers to the least-squares solve,
+        # which can shrink the stationarity residual and let a non-KKT point pass
+        # ``stationarity``. Shared with ``validation.feasibility`` rather than
+        # written out again: three hand-written copies is how #1151 came to be
+        # fixed in one place and left standing in the other two.
         if jac.size:
-            jac_scale = np.max(np.abs(jac) * np.maximum(1.0, np.abs(x_flat))[None, :], axis=1)
+            from discopt.validation.feasibility import jacobian_row_scales
+
+            jac_scale = jacobian_row_scales(jac, x_flat)
         else:
             jac_scale = np.zeros(body.size)
         row_scale = np.maximum(np.maximum(np.abs(rhs_arr), jac_scale), 1.0)

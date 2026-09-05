@@ -1,0 +1,24 @@
+instance      arm      status           objective                 bound   nodes
+hda             A  time_limit                 nan        -119284.660959       3   (22.1s)
+hda             B  time_limit                 nan        -119284.660959       3   (21.4s)
+nvs17           A  time_limit             -1100.4        -1486.92563441   18183   (20.0s)
+nvs17           B  time_limit             -1100.4               -1547.9   16391   (20.0s)
+nvs19           A  time_limit             -1098.2        -7236.32243243    4697   (20.0s)
+nvs19           B  time_limit             -1098.2        -7095.30253726    4899   (20.0s)
+nvs20           A  time_limit       230.922165223          193.49829642    1313   (20.0s)
+nvs20           B  time_limit       230.922165223          193.49829642    1383   (20.0s)
+nvs23           A  time_limit             -1124.8        -27001.8381356    1998   (20.1s)
+nvs23           B  time_limit             -1124.8             -26992.15    2000   (20.0s)
+nvs24           A  time_limit             -1031.8        -174529.927778    1243   (20.0s)
+nvs24           B  time_limit             -1031.8        -174333.924242    1261   (20.0s)
+st_e31          A  time_limit      -1.99999998999        -2.00374571605    2820   (20.1s)
+st_e31          B  time_limit      -1.99999998999        -2.00335733922    2869   (20.0s)
+syn05hfsg       A    feasible       837.732367688         840.489394102     179   (20.1s)
+syn05hfsg       B    feasible       837.732367688         840.489394102     163   (20.1s)
+tanksize        A  time_limit       1.26864375357         1.23892620927    1491   (20.0s)
+tanksize        B  time_limit       1.26864375357         1.23936472577    1501   (20.0s)
+tspn05          A     optimal       191.255207845         191.255106211      53   (20.1s)
+tspn05          B     optimal       191.255207845         191.255106211      53   (20.1s)
+
+instances re-run with NO code difference between arms: 10
+  of which the two identical-code runs still disagree: 8
