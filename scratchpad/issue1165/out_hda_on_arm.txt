@@ -35,3 +35,15 @@ Thread 0x00007f1e4971d080 (most recent call first):
   File "/home/user/discopt/python/discopt/solver.py", line 7012 in wrapper
   File "/home/user/discopt/python/discopt/modeling/core.py", line 5007 in solve
   File "/home/user/discopt/scratchpad/issue1165/probe_hda_on_arm.py", line 28 in <module>
+
+### KILLED at ~22 min, deliberately.
+The question this probe was asked -- slow, or hung? -- is answered by the two
+faulthandler dumps above: both land in root OBBT
+(_relax/obbt.py::run_obbt_on_relaxation via root_reduce.run_root_fixpoint),
+whose wall sub-budget deterministic=True neutralizes by design. It is slow, not
+deadlocked. Its own wall time is NOT quotable anyway: the before/after
+contention run overlapped it with 6 spinners, so this process was descheduled
+for ~5 of its minutes (CLAUDE.md §9 -- check for stray load you created
+yourself). The clean figure stands from the uncontaminated run: >2095 s at
+max_nodes=1, against 305 s for the OFF arm. Left running, it would itself be the
+stray load §9 warns about.
