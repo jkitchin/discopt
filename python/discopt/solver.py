@@ -21566,6 +21566,43 @@ def _milp_engine_default_on() -> bool:
     return os.environ.get("DISCOPT_MILP_ENGINE", "1").lower() not in ("0", "false", "no")
 
 
+def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
+    """Root cut options for the pure-MILP engine, or ``None`` to keep the
+    binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
+
+    Measured motivation (30-instance MILP panel, 20 s/instance): on the
+    lot-sizing / production-planning family the root dual bound the engine
+    proves is **18.9%** of the optimum, while HiGHS closes the same instances at
+    **100%** of theirs at its own root. That is not a missing cut *class* -- the
+    engine already separates cover and GMI cuts -- it is the budget: one round of
+    at most 16 cuts. Raising the same separator to 500 cuts over 50 rounds with
+    efficacy/orthogonality selection takes the prodplan root bound to **89.3%**
+    in 4.7 s.
+
+    Bound-CHANGING (CLAUDE.md §5), so it ships default-OFF behind
+    ``DISCOPT_MILP_ROOT_CUTS=1`` until a corpus-wide differential panel is
+    cert-clean AND net-positive. Nothing here can make a bound unsound -- a
+    Gomory/cover cut is valid for the integer hull either way -- but "sound" is
+    not the bar; "measurably helpful broadly" is (the ``DISCOPT_CUT_INHERIT``
+    lesson).
+
+    ``root_cut_time_s`` is what makes 50 rounds safe to ask for: without it a
+    long separation phase on a large root LP would spend the engine's whole slice
+    proving a bound with no time left to branch.
+    """
+    if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "0").lower() in ("0", "false", "no"):
+        return None
+    return {
+        "root_cuts": 500,
+        "cut_rounds": 50,
+        "cut_select": True,
+        # Half the engine's slice, floored so a very short budget still gets one
+        # useful pass. The loop stops early on tailing off, so on an instance
+        # whose root closes in two rounds this ceiling is never reached.
+        "root_cut_time_s": max(0.5, 0.5 * float(engine_budget)),
+    }
+
+
 def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> Optional[np.ndarray]:
     """A lifted-space seed built by improving *x_lifted* with an assignment-aware
     swap over the ORIGINAL variables, or ``None`` when unavailable.
@@ -21739,6 +21776,12 @@ def _solve_milp_simplex(
     if initial_point is not None and np.asarray(initial_point).size == n_orig:
         _seed = np.ascontiguousarray(np.asarray(initial_point, dtype=np.float64).ravel())
 
+    # Root cut budget (default-off; see ``_milp_root_cut_budget``). Passed as
+    # keywords so the binding's own defaults stand when the flag is off -- these
+    # same defaults also serve the MINLP per-node relaxer, which is why the
+    # budget is raised HERE and not by changing them.
+    _cut_opts = _milp_root_cut_budget(_milp_budget) or {}
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -21753,6 +21796,7 @@ def _solve_milp_simplex(
         initial_incumbent=_seed,
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
+        **_cut_opts,
     )
 
     # Feasibility gate (shared by the return path below and the #698 re-entry

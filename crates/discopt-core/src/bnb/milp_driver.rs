@@ -447,6 +447,47 @@ pub struct MilpOptions {
     /// the budget is spent the hook stops being called and the search runs on the
     /// relaxation it has.
     pub node_hook_cut_cap: usize,
+    /// Wall-clock ceiling for the ROOT CUT LOOP alone, in seconds.
+    ///
+    /// `None` (the value at every existing call site) leaves the loop bounded
+    /// only by `root_cuts` / `cut_rounds` / tailing-off, exactly as before.
+    ///
+    /// A value makes a many-round configuration safe to ask for. Raising
+    /// `cut_rounds` is how a weak root relaxation gets closed — on a lot-sizing
+    /// model the default single pass leaves the root bound at a fraction of the
+    /// optimum — but the separation phase is worth several seconds only if it
+    /// still leaves time to branch. This is the knob that says how much of the
+    /// budget the root may spend, so the round cap can be set by what the model
+    /// needs rather than by what a worst case can afford.
+    ///
+    /// Checked at the top of each round, so a round already in flight always
+    /// completes and the loop never abandons a partially augmented matrix. It
+    /// therefore bounds *entry* into rounds, not the duration of one round; a
+    /// single very slow round can still overrun it, bounded in turn by
+    /// `time_limit_s` through the LP's own deadline.
+    ///
+    /// This is not the ceiling on the whole solve -- that stays `time_limit_s`,
+    /// which the loop also honors (see the guard at the top of the round).
+    pub root_cut_time_s: Option<f64>,
+
+    /// Drop root cuts that are slack at the final root LP before the tree starts.
+    ///
+    /// Every root cut rides in every node LP for the rest of the solve. A cut that
+    /// is not tight at the root optimum has a zero dual multiplier there, so
+    /// removing it leaves the root bound and its certificate untouched while
+    /// taking a row out of every node — the measured cost of NOT doing this is
+    /// severe (30-instance MILP panel, `root_cuts=500, cut_rounds=50`: node counts
+    /// fell 2.4x but total wall rose from 103 s to 145 s, and `cflp_s101` went
+    /// from 0.04 s to 5.85 s at an unchanged node count).
+    ///
+    /// Deeper nodes may get a weaker bound than they would with the full set —
+    /// this is bound-CHANGING under CLAUDE.md §5, never bound-INVALIDATING, since
+    /// what remains is a subset of globally valid cuts. Kept as a switch so the
+    /// two can be measured against each other in one interleaved process.
+    ///
+    /// Inert unless `cut_rounds > 1`: with a single round every cut was separated
+    /// off the one root solve and is violated there, so nothing is ever slack.
+    pub root_cut_prune: bool,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -610,8 +651,7 @@ pub fn solve_milp_node_hooked(
     } else {
         node
     };
-    crate::profile::init_from_env();
-    crate::profile::reset();
+    crate::profile::begin_solve();
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -876,13 +916,54 @@ pub fn solve_milp_node_hooked(
     // (`n_w`) it was computed at. Reused to warm-start the root B&B node so it does
     // not re-derive the augmented LP from a cold slack basis. See `root_warm_basis`.
     let mut root_basis: Option<(Basis, usize)> = None;
+    // Snapshot of the matrix as it stood before any root cut, kept so the cut
+    // cleanup after the loop can rebuild from it with a subset of the cuts. Only
+    // taken when more than one round can run: with `cut_rounds == 1` every cut is
+    // separated off the single root solve and is violated there by construction,
+    // so the cleanup below provably keeps all of them and the clone would be pure
+    // cost. (`cut_rounds == 1` is the shipped default.)
+    let prune_base: Option<(SparseCols, usize, usize)> =
+        if opts.root_cut_prune && opts.root_cuts > 0 && opts.cut_rounds > 1 {
+            Some((csc_w.clone(), m_w, n_w))
+        } else {
+            None
+        };
+    let mut all_root_cuts: Vec<GomoryCut> = Vec::new();
+    let mut last_root_x: Option<Vec<f64>> = None;
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
+        // Wall bound for the separation phase: the earlier of the caller's own
+        // deadline and the (optional) root-cut sub-budget. Checked at the top of
+        // each round -- a round in flight always finishes, so the loop never
+        // leaves a half-augmented matrix behind.
+        //
+        // `root_cut_time_s` is the substantive half: it is the only thing that
+        // stops a high `cut_rounds` from spending the whole budget separating.
+        //
+        // The `deadline` half is a cheap early exit, NOT a fix for an overrun.
+        // The loop already stopped at the caller's deadline indirectly: each
+        // round's root LP carries `node_simplex.deadline`, and a deadline-aborted
+        // LP comes back non-`Optimal`, which breaks the loop below. Testing the
+        // clock here just skips mounting a round whose LP would abort anyway,
+        // along with the separation work that would follow it.
+        let root_cut_deadline: Option<std::time::Instant> = match (deadline, opts.root_cut_time_s) {
+            (Some(dl), Some(rc)) => {
+                Some(dl.min(t_start + std::time::Duration::from_secs_f64(rc.max(0.0))))
+            }
+            (Some(dl), None) => Some(dl),
+            (None, Some(rc)) => Some(t_start + std::time::Duration::from_secs_f64(rc.max(0.0))),
+            (None, None) => None,
+        };
         for _round in 0..opts.cut_rounds {
             if total_cuts >= opts.root_cuts {
                 break;
+            }
+            if let Some(dl) = root_cut_deadline {
+                if std::time::Instant::now() >= dl {
+                    break;
+                }
             }
             crate::profile::incr(crate::profile::Ctr::RootCutRounds);
             let root = {
@@ -962,6 +1043,9 @@ pub fn solve_milp_node_hooked(
             // if more cuts are appended below it is extended to the new size after
             // the loop. The clone is cheap next to the solve it came from.
             root_basis = Some((root.basis.clone(), n_w));
+            if prune_base.is_some() {
+                last_root_x = Some(root.x.clone());
+            }
             // Tailing off: stop once added cuts barely move the bound.
             if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
             {
@@ -1030,8 +1114,123 @@ pub fn solve_milp_node_hooked(
             csc_w = nw_csc;
             m_w = nm;
             n_w = nn;
+            if prune_base.is_some() {
+                all_root_cuts.extend(new_cuts);
+            }
         }
     }
+
+    // --- Root cut cleanup: keep only the cuts the root LP actually leans on ---
+    //
+    // Every cut generated above rides in *every* node LP for the rest of the
+    // solve. Across 50 rounds that is hundreds of extra rows, and the measured
+    // cost is severe: on the cflp family the 500-cut budget turned a 0.04 s solve
+    // into 31 s while the bound was no better. But a cut that is *slack* at the
+    // final root solution contributed nothing to the root bound, and dropping it
+    // is provably bound-neutral there: its dual multiplier is zero, so the root
+    // optimum and its KKT certificate survive the row's removal unchanged. Deeper
+    // in the tree a dropped cut could have become tight, so the node bounds may
+    // differ — weaker, never invalid, since the remaining rows are still globally
+    // valid cuts. This is a bound-CHANGING change under CLAUDE.md #5.
+    //
+    // A GMI cut's coefficients span the slack columns of the cuts before it, so a
+    // cut can only be dropped if nothing kept depends on it; the reverse sweep
+    // closes that dependency set before anything is removed.
+    if let (Some((csc_base, m_base, n_base)), Some(x)) = (prune_base.as_ref(), last_root_x.as_ref())
+    {
+        let (m_base, n_base) = (*m_base, *n_base);
+        let mut keep = vec![false; all_root_cuts.len()];
+        for ci in (0..all_root_cuts.len()).rev() {
+            let cut = &all_root_cuts[ci];
+            // `coeffs · x >= rhs`; the surplus is the amount by which the final
+            // root solution over-satisfies the cut. Cuts separated after the last
+            // solve have a negative surplus there (they were violated, which is
+            // why they were separated) and are always kept.
+            let act: f64 = cut
+                .coeffs
+                .iter()
+                .enumerate()
+                .take(x.len())
+                .map(|(j, &a)| a * x[j])
+                .sum();
+            let tight = act - cut.rhs <= 1e-6 * (1.0 + cut.rhs.abs());
+            if tight || keep[ci] {
+                keep[ci] = true;
+                for (j, &a) in cut.coeffs.iter().enumerate() {
+                    if a != 0.0 && j >= n_base {
+                        let dep = j - n_base;
+                        // A cut only ever sees the slacks of cuts before it, so
+                        // `dep < ci` and the reverse sweep still has it ahead.
+                        if dep < ci {
+                            keep[dep] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let n_keep = keep.iter().filter(|&&k| k).count();
+        crate::profile::incr_by(
+            crate::profile::Ctr::RootCutsGenerated,
+            all_root_cuts.len() as u64,
+        );
+        crate::profile::incr_by(crate::profile::Ctr::RootCutsKept, n_keep as u64);
+        if n_keep < all_root_cuts.len() {
+            let mut newidx = vec![usize::MAX; all_root_cuts.len()];
+            let mut next = 0usize;
+            for (c, &k) in keep.iter().enumerate() {
+                if k {
+                    newidx[c] = next;
+                    next += 1;
+                }
+            }
+            let kept: Vec<GomoryCut> = all_root_cuts
+                .iter()
+                .enumerate()
+                .filter(|(c, _)| keep[*c])
+                .map(|(_, cut)| {
+                    let mut coeffs = vec![0.0; n_base + n_keep];
+                    for (j, &a) in cut.coeffs.iter().enumerate() {
+                        if a == 0.0 {
+                            continue;
+                        }
+                        if j < n_base {
+                            coeffs[j] = a;
+                        } else {
+                            // Kept by the dependency closure above; indexing a
+                            // `usize::MAX` here would panic rather than corrupt.
+                            coeffs[n_base + newidx[j - n_base]] = a;
+                        }
+                    }
+                    GomoryCut {
+                        coeffs,
+                        rhs: cut.rhs,
+                    }
+                })
+                .collect();
+            b_w.truncate(m_base);
+            c_w.truncate(n_base);
+            l_w.truncate(n_base);
+            u_w.truncate(n_base);
+            is_int_full.truncate(n_base);
+            for cut in &kept {
+                b_w.push(cut.rhs);
+                c_w.push(0.0);
+                l_w.push(0.0);
+                u_w.push(INF);
+                is_int_full.push(false);
+            }
+            csc_w = rebuild_csc_with_cuts(csc_base, m_base, n_base, &kept);
+            m_w = m_base + kept.len();
+            n_w = n_base + kept.len();
+            // The stored basis indexes the pre-cleanup matrix (dropped rows'
+            // slacks are basic in it, by definition of being slack), so it cannot
+            // be extended onto the smaller one. The root node cold-solves the
+            // reduced LP instead -- cheaper than the solve that produced the
+            // basis, and far cheaper than carrying the dropped rows all tree.
+            root_basis = None;
+        }
+    }
+
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
 
@@ -2749,6 +2948,73 @@ fn augment_cols_with_cuts(sp: &SparseCols, m: usize, n: usize, cuts: &[GomoryCut
     SparseCols::from_csc(new_col_ptr, new_row_idx, new_vals)
 }
 
+/// Rebuild the pre-cut matrix with an explicit, ordered subset of root cuts.
+///
+/// [`augment_cols_with_cuts`] appends a *batch* of cuts to a matrix whose column
+/// count already covers every column those cuts reference; it scans `j in 0..n`
+/// and therefore cannot place a coefficient that lands on a slack column the same
+/// call is creating. That is sound for the root loop, where a round's cuts are
+/// separated off the matrix as it stood *before* the round. It is not sound for a
+/// rebuild: a GMI cut's coefficient vector spans all columns of the LP it was read
+/// off, cut slacks included, so replaying round 7's cuts onto the original matrix
+/// would silently drop their coefficients on rounds 1-6's slack columns and leave
+/// a *different, unjustified* row in the LP.
+///
+/// This builds the whole augmented matrix in one pass instead. `cuts[i].coeffs`
+/// may reference any column `< n_base + i` — the original columns plus the slacks
+/// of the cuts before it — and every such coefficient is placed. Cuts referencing
+/// a *dropped* cut's slack are the caller's problem: it must have closed the
+/// dependency set first (see the cleanup in `solve_milp`).
+fn rebuild_csc_with_cuts(
+    base: &SparseCols,
+    m_base: usize,
+    n_base: usize,
+    cuts: &[GomoryCut],
+) -> SparseCols {
+    let k = cuts.len();
+    if k == 0 {
+        return base.clone();
+    }
+    let (col_ptr, row_idx, vals) = base.raw();
+    let mut new_col_ptr: Vec<usize> = Vec::with_capacity(n_base + k + 1);
+    let mut new_row_idx: Vec<usize> = Vec::with_capacity(row_idx.len() + n_base * k + k);
+    let mut new_vals: Vec<f64> = Vec::with_capacity(vals.len() + n_base * k + k);
+    new_col_ptr.push(0);
+    // Original columns: their base entries (rows 0..m_base) then their coefficient
+    // in each cut row (rows m_base.., strictly greater, so rows stay sorted).
+    for j in 0..n_base {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            new_row_idx.push(row_idx[idx]);
+            new_vals.push(vals[idx]);
+        }
+        for (ci, cut) in cuts.iter().enumerate() {
+            if let Some(&v) = cut.coeffs.get(j) {
+                if v != 0.0 {
+                    new_row_idx.push(m_base + ci);
+                    new_vals.push(v);
+                }
+            }
+        }
+        new_col_ptr.push(new_row_idx.len());
+    }
+    // Cut slack columns: the surplus `-1` on the cut's own row, then any later
+    // cut's coefficient on this slack (again a strictly greater row index).
+    for c in 0..k {
+        new_row_idx.push(m_base + c);
+        new_vals.push(-1.0);
+        for (ci, cut) in cuts.iter().enumerate().skip(c + 1) {
+            if let Some(&v) = cut.coeffs.get(n_base + c) {
+                if v != 0.0 {
+                    new_row_idx.push(m_base + ci);
+                    new_vals.push(v);
+                }
+            }
+        }
+        new_col_ptr.push(new_row_idx.len());
+    }
+    SparseCols::from_csc(new_col_ptr, new_row_idx, new_vals)
+}
+
 /// Full CSC analogue of [`augment_with_cuts`] (T3b5): augment the matrix via
 /// [`augment_cols_with_cuts`] AND append the `k` surplus rows/cols to
 /// `b/c/l/u/is_int` exactly as the dense version does. Returns the grown CSC and new
@@ -3574,6 +3840,8 @@ mod tests {
             initial_incumbent: None,
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
     }
@@ -3934,6 +4202,8 @@ mod tests {
             initial_incumbent: None,
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
     }
@@ -4337,15 +4607,16 @@ mod tests {
         let r_ref = solve_milp(&lp, &b, 0.0, &o_ref);
         assert_eq!(r_ref.status, MilpStatus::Optimal);
 
-        // The driver calls `profile::init_from_env()` on entry, which overwrites a
-        // bare `set_enabled(true)` with "is DISCOPT_PROFILE set?" -- so arming the
-        // counters here means arming the env var, under TEST_LOCK.
-        std::env::set_var("DISCOPT_PROFILE", "1");
+        // `set_enabled(true)` raises the test override, which keeps both halves of
+        // the driver's `profile::begin_solve()` -- the env re-arm and the per-solve
+        // counter reset -- from touching this measurement, on this thread or a
+        // sibling's. Setting `DISCOPT_PROFILE` process-wide from a threaded test
+        // (the old way here) armed every concurrent solve as well.
+        crate::profile::set_enabled(true);
         crate::profile::reset();
         let r = solve_milp(&lp, &b, 0.0, &o);
         let rounds = crate::profile::counter(crate::profile::Ctr::RootCutRounds);
         let warm_reopt = crate::profile::counter(crate::profile::Ctr::RootCutWarmReopt);
-        std::env::remove_var("DISCOPT_PROFILE");
         crate::profile::set_enabled(false);
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!(
@@ -4554,6 +4825,8 @@ mod tests {
             initial_incumbent: None,
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
         let r = solve_milp(&lp, &b, 0.0, &o);
@@ -4684,6 +4957,8 @@ mod sparse_milp_diff {
                 initial_incumbent: None,
                 node_hook_rounds: 0,
                 node_hook_cut_cap: 0,
+                root_cut_time_s: None,
+                root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
         }
@@ -4979,6 +5254,8 @@ mod sparse_milp_diff {
             initial_incumbent: None,
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
         let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);
@@ -5269,6 +5546,8 @@ mod lazy_separation {
                 initial_incumbent: None,
                 node_hook_rounds: 0,
                 node_hook_cut_cap: 0,
+                root_cut_time_s: None,
+                root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
         }
@@ -5562,6 +5841,8 @@ mod node_separation {
                 initial_incumbent: None,
                 node_hook_rounds: rounds,
                 node_hook_cut_cap: cap,
+                root_cut_time_s: None,
+                root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
         }
@@ -5838,6 +6119,8 @@ mod lazy_infeasible_node {
             initial_incumbent: None,
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
     }
@@ -5906,5 +6189,282 @@ mod lazy_infeasible_node {
             "separator never ran on a FEASIBLE model; the guard above proves nothing"
         );
         let _ = r;
+    }
+}
+
+/// Tests for the root-cut wall bound (`MilpOptions::root_cut_time_s`) and for the
+/// root cut loop's newly-honored `time_limit_s` deadline.
+#[cfg(test)]
+mod root_cut_budget_tests {
+    use super::*;
+
+    /// A 0/1 knapsack big enough that cover/GMI cuts at the root measurably
+    /// shrink the tree — the differential the tests below read.
+    ///
+    /// `max Σ p_j x_j  s.t.  Σ w_j x_j ≤ cap`, written in the driver's minimize
+    /// form with one surplus column.
+    fn knapsack(
+        n: usize,
+    ) -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        // Deterministic pseudo-random weights/profits (no rng dependency): the
+        // pattern is arbitrary but fixed, so node counts are reproducible.
+        let w: Vec<f64> = (0..n).map(|j| (7 * j % 23 + 11) as f64).collect();
+        let p: Vec<f64> = (0..n).map(|j| (13 * j % 29 + 17) as f64).collect();
+        let cap: f64 = w.iter().sum::<f64>() / 2.0;
+        let mut dense = vec![0.0; n + 1];
+        dense[..n].copy_from_slice(&w);
+        dense[n] = 1.0; // slack:  Σ w x + s = cap,  s ≥ 0
+        let sp = SparseCols::from_dense(&dense, 1, n + 1);
+        let c: Vec<f64> = p.iter().map(|v| -v).chain(std::iter::once(0.0)).collect();
+        let l = vec![0.0; n + 1];
+        let mut u = vec![1.0; n + 1];
+        u[n] = INF;
+        (sp, 1, n, c, vec![cap], l, u)
+    }
+
+    fn budget_opts(ns: usize, root_cut_time_s: Option<f64>) -> MilpOptions {
+        MilpOptions {
+            n_struct: ns,
+            integer_cols: (0..ns).collect(),
+            max_nodes: 200_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 200,
+            cut_rounds: 30,
+            gmi_cuts: true,
+            cut_select: true,
+            node_cuts: false,
+            max_pool_cuts: 500,
+            heuristics: true,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: false,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1024,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            root_cut_time_s,
+            root_cut_prune: true,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    /// The budget really gates the separation phase, and gating it is visible.
+    ///
+    /// Same instance, same everything else: `root_cut_time_s: Some(0.0)` expires
+    /// before the first round is entered, so no root cuts are separated. The
+    /// cut-strengthened arm closes the 40-item knapsack at the root (1 node); the
+    /// budgeted-out arm has to branch (9 nodes). That strict inequality is the
+    /// anti-vacuity check (CLAUDE.md §6) -- if the budget were ignored both arms
+    /// would separate cuts and the node counts would be equal.
+    #[test]
+    fn a_zero_root_cut_budget_skips_the_separation_phase() {
+        let (sp, m, ns, c, b, l, u) = knapsack(40);
+        let n = l.len();
+        let full = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, None));
+        let zero = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, Some(0.0)));
+
+        assert_eq!(
+            full.status,
+            MilpStatus::Optimal,
+            "unbudgeted arm must certify"
+        );
+        assert_eq!(
+            zero.status,
+            MilpStatus::Optimal,
+            "budgeted arm must certify"
+        );
+        assert!(
+            zero.nodes > full.nodes,
+            "the root-cut budget did not gate the loop: {} nodes with cuts, {} without \
+             -- an equal count means both arms separated and the test proves nothing",
+            full.nodes,
+            zero.nodes
+        );
+    }
+
+    /// Gating the cuts must not change the ANSWER. The budget trades search
+    /// effort for wall time; a different optimum, or a dual bound above it, would
+    /// mean the loop is load-bearing for correctness rather than for speed
+    /// (CLAUDE.md §1).
+    #[test]
+    fn the_root_cut_budget_never_changes_the_certified_optimum() {
+        for n_items in [40usize, 300] {
+            let (sp, m, ns, c, b, l, u) = knapsack(n_items);
+            let n = l.len();
+            let full = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, None));
+            let zero = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, Some(0.0)));
+            assert_eq!(full.status, MilpStatus::Optimal, "n={n_items}");
+            assert_eq!(zero.status, MilpStatus::Optimal, "n={n_items}");
+            assert!(
+                (full.obj - zero.obj).abs() < 1e-6,
+                "n={n_items}: budgeted arm found {} but unbudgeted found {}",
+                zero.obj,
+                full.obj
+            );
+            for (name, r) in [("unbudgeted", &full), ("budgeted", &zero)] {
+                assert!(
+                    r.bound <= r.obj + 1e-6,
+                    "n={n_items} {name}: dual bound {} above incumbent {} -- false \
+                     certificate",
+                    r.bound,
+                    r.obj
+                );
+            }
+        }
+    }
+
+    /// A budget larger than the separation phase needs is a no-op: the loop runs
+    /// to its natural stop (cut cap / tailing off) and the tree is the same size
+    /// as with no budget at all. Without this the test above could pass with a
+    /// budget that always expires, which would make the option useless rather
+    /// than working.
+    #[test]
+    fn a_generous_root_cut_budget_is_indistinguishable_from_none() {
+        let (sp, m, ns, c, b, l, u) = knapsack(300);
+        let n = l.len();
+        let none = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, None));
+        let generous = solve_milp_csc(
+            &sp,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &budget_opts(ns, Some(600.0)),
+        );
+        assert_eq!(none.status, generous.status);
+        assert_eq!(
+            none.nodes, generous.nodes,
+            "a 600 s budget must not perturb a separation phase that takes \
+             milliseconds"
+        );
+        assert!((none.obj - generous.obj).abs() < 1e-12);
+    }
+
+    /// Densify a CSC for element-wise comparison in the tests below.
+    fn dense_of(sp: &SparseCols, m: usize, n: usize) -> Vec<f64> {
+        let mut d = vec![0.0; m * n];
+        for j in 0..n {
+            let (rows, vals) = sp.col(j);
+            for (&r, &v) in rows.iter().zip(vals) {
+                d[r * n + j] = v;
+            }
+        }
+        d
+    }
+
+    /// The whole reason `rebuild_csc_with_cuts` exists: a GMI cut's coefficient
+    /// vector spans the slack columns of the cuts before it, and the batch
+    /// appender cannot place those.
+    ///
+    /// Two cuts on a 1x2 base; the second has a coefficient on the FIRST cut's
+    /// surplus column (`n_base + 0`). The rebuild must carry it. The assertion
+    /// against `augment_cols_with_cuts` on the same input is the anti-vacuity
+    /// half (CLAUDE.md §6): it pins that the two functions genuinely differ here,
+    /// so a future "simplification" back to the batch appender fails loudly
+    /// instead of silently installing a different row.
+    #[test]
+    fn the_rebuild_places_a_cut_coefficient_on_an_earlier_cuts_slack() {
+        let base = SparseCols::from_dense(&[2.0, 3.0], 1, 2);
+        let (m_base, n_base) = (1usize, 2usize);
+        let cuts = vec![
+            GomoryCut {
+                coeffs: vec![1.0, 1.0],
+                rhs: 1.0,
+            },
+            GomoryCut {
+                // ... plus 0.5 * (cut 0's surplus), column n_base + 0 == 2.
+                coeffs: vec![1.0, 0.0, 0.5],
+                rhs: 0.25,
+            },
+        ];
+        let m_new = m_base + 2;
+        let n_new = n_base + 2;
+
+        let rebuilt = dense_of(
+            &rebuild_csc_with_cuts(&base, m_base, n_base, &cuts),
+            m_new,
+            n_new,
+        );
+        // row 0: the base row, no surplus columns
+        assert_eq!(&rebuilt[0..4], &[2.0, 3.0, 0.0, 0.0]);
+        // row 1: cut 0 with its own -1 surplus
+        assert_eq!(&rebuilt[4..8], &[1.0, 1.0, -1.0, 0.0]);
+        // row 2: cut 1, including the 0.5 on cut 0's surplus column
+        assert_eq!(&rebuilt[8..12], &[1.0, 0.0, 0.5, -1.0]);
+
+        let batched = dense_of(
+            &augment_cols_with_cuts(&base, m_base, n_base, &cuts),
+            m_new,
+            n_new,
+        );
+        assert_eq!(
+            batched[8 + 2],
+            0.0,
+            "augment_cols_with_cuts is expected to DROP the cross-slack coefficient \
+             (it only scans j < n_base); if it now keeps it, rebuild_csc_with_cuts \
+             is redundant and this test is no longer proving anything"
+        );
+    }
+
+    /// The cleanup must remove cuts, and removing them must not move the answer.
+    ///
+    /// A 300-item knapsack under a 200-cut / 30-round budget separates far more
+    /// cuts than the final root LP leans on. The counters make the drop visible
+    /// (CLAUDE.md §6 -- without the strict `kept < generated` this test would pass
+    /// on a cleanup that never fired), and the certified optimum is compared
+    /// against the same solve with the separation phase budgeted out entirely.
+    #[test]
+    fn the_root_cut_cleanup_drops_slack_cuts_without_moving_the_optimum() {
+        let _g = crate::profile::test_guard();
+        let (sp, m, ns, c, b, l, u) = knapsack(300);
+        let n = l.len();
+
+        let reference = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, Some(0.0)));
+
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let cut = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &budget_opts(ns, None));
+        let generated = crate::profile::counter(crate::profile::Ctr::RootCutsGenerated);
+        let kept = crate::profile::counter(crate::profile::Ctr::RootCutsKept);
+        crate::profile::set_enabled(false);
+
+        assert!(
+            generated > 0,
+            "no root cuts were separated -- the cleanup had nothing to act on and \
+             this test is vacuous"
+        );
+        assert!(
+            kept < generated,
+            "cleanup kept all {generated} root cuts; it never removed a row, so the \
+             per-node cost it exists to avoid is still being paid"
+        );
+        assert_eq!(cut.status, MilpStatus::Optimal);
+        assert_eq!(reference.status, MilpStatus::Optimal);
+        assert!(
+            (cut.obj - reference.obj).abs() < 1e-6,
+            "cleanup changed the optimum: {} vs {}",
+            cut.obj,
+            reference.obj
+        );
+        assert!(
+            cut.bound <= cut.obj + 1e-6,
+            "dual bound {} above incumbent {} after cleanup -- false certificate",
+            cut.bound,
+            cut.obj
+        );
     }
 }
