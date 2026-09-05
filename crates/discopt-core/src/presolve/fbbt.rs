@@ -1436,7 +1436,7 @@ pub fn fbbt_with_cutoff_until(
                 &model.arena,
                 constr.body,
                 output_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }
@@ -1456,7 +1456,7 @@ pub fn fbbt_with_cutoff_until(
                 &model.arena,
                 obj_expr,
                 *cutoff_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }
@@ -1548,7 +1548,7 @@ pub fn fbbt_until(
                 &model.arena,
                 constr.body,
                 output_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }

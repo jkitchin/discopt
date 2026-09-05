@@ -176,13 +176,7 @@ pub fn fbbt_fixed_point(
             .filter_map(|&v| bounds.get(v).map(|b| (v, *b)))
             .collect();
 
-        backward_propagate(
-            &model.arena,
-            constr.body,
-            output_bound,
-            &node_bounds,
-            bounds,
-        );
+        backward_propagate(&model.arena, constr.body, output_bound, node_bounds, bounds);
 
         // Detect changes; queue downstream constraints. Integer/binary vars
         // are snapped inward to integrality first, so an indicator fixing
