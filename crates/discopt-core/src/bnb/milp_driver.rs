@@ -39,6 +39,15 @@ const CUT_MIN_EFFICACY: f64 = 1e-4;
 /// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
 /// already-selected cut — keeps the kept set spanning diverse faces.
 const CUT_MAX_PARALLEL: f64 = 0.99;
+/// Nonzero ceiling for a cut once its slack coefficients have been expanded into
+/// structural ones, as `CUT_LEN_BASE + CUT_LEN_FRAC * n_struct`. Expanding a slack
+/// pulls in that row's whole support, so the rewrite can inflate a short tableau
+/// cut into a long row that then rides in every node LP. Same shape and constants
+/// as HiGHS's post-`untransform` limit (`HighsCutGeneration.cpp:982`): a generous
+/// fixed allowance so small models are not over-constrained, plus a fraction that
+/// scales with the model.
+const CUT_LEN_BASE: usize = 100;
+const CUT_LEN_FRAC: f64 = 0.15;
 
 /// Terminal status of a MILP solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -930,6 +939,15 @@ pub fn solve_milp_node_hooked(
         };
     let mut all_root_cuts: Vec<GomoryCut> = Vec::new();
     let mut last_root_x: Option<Vec<f64>> = None;
+    // Row-major view of the pre-cut matrix, and the running list of cuts already
+    // appended (each already rewritten into structural space). Together these let
+    // every newly separated cut be expressed over structural columns only, which
+    // is what keeps each slack column a singleton and so keeps node warm starts
+    // usable. See `substitute_slacks_to_structural`.
+    let (m_base0, n_base0) = (m_w, n_w);
+    let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
+    let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
+    let mut structural_cuts: Vec<GomoryCut> = Vec::new();
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
@@ -1086,6 +1104,37 @@ pub fn solve_milp_node_hooked(
                     1e7,
                 ));
             }
+            // Rewrite every separated cut over structural columns only, before
+            // anything downstream looks at it. Doing it here (rather than at
+            // append time) means selection scores, dedup signatures and the
+            // cleanup's tightness test all see one consistent space, and no cut
+            // row ever references another row's slack.
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                let before = cuts.len();
+                cuts = cuts
+                    .iter()
+                    .filter_map(|c| {
+                        substitute_slacks_to_structural(
+                            c,
+                            &base_rows,
+                            &structural_cuts,
+                            ns,
+                            n_base0,
+                            &root.x,
+                            &l_w,
+                            &u_w,
+                            cut_max_len,
+                            opts.simplex.tol,
+                            1e7,
+                        )
+                    })
+                    .collect();
+                crate::profile::incr_by(
+                    crate::profile::Ctr::RootCutsSubstDropped,
+                    (before - cuts.len()) as u64,
+                );
+            }
             // Keep the strongest, most diverse few (efficacy + orthogonality)
             // up to the remaining root-cut budget; otherwise add first-come.
             let remaining = opts.root_cuts - total_cuts;
@@ -1100,6 +1149,10 @@ pub fn solve_milp_node_hooked(
                 break;
             }
             total_cuts += new_cuts.len();
+            // Cut `i` occupies column `n_base0 + i`; later rounds expand a
+            // reference to that slack through this entry, so the order here must
+            // match the append order below exactly.
+            structural_cuts.extend(new_cuts.iter().cloned());
             let (nw_csc, nm, nn) = augment_csc_with_cuts(
                 &csc_w,
                 &mut b_w,
@@ -2947,24 +3000,343 @@ fn augment_cols_with_cuts(sp: &SparseCols, m: usize, n: usize, cuts: &[GomoryCut
     }
     SparseCols::from_csc(new_col_ptr, new_row_idx, new_vals)
 }
+/// Row-major structural block of the base matrix, plus each base row's rhs and
+/// the coefficient on that row's own slack column. Built once per solve and used
+/// to rewrite cut coefficients out of slack space (`substitute_slacks_to_structural`).
+struct BaseRows {
+    /// CSR over structural columns only (`0..ns`) for rows `0..m_base`.
+    ptr: Vec<usize>,
+    idx: Vec<usize>,
+    val: Vec<f64>,
+    /// `b_w[r]` for each base row.
+    rhs: Vec<f64>,
+    /// Coefficient of column `ns + r` in row `r` (the `-1` of the `[A | -I]`
+    /// convention), or `None` when that column is not a clean singleton for the
+    /// row — in which case rows are not substitutable and the cut is dropped.
+    slack_coef: Vec<Option<f64>>,
+}
 
-/// Rebuild the pre-cut matrix with an explicit, ordered subset of root cuts.
+impl BaseRows {
+    fn build(csc: &SparseCols, m_base: usize, n_base: usize, ns: usize, b: &[f64]) -> Self {
+        let mut counts = vec![0usize; m_base];
+        for j in 0..ns {
+            let (rows, _) = csc.col(j);
+            for &r in rows {
+                if r < m_base {
+                    counts[r] += 1;
+                }
+            }
+        }
+        let mut ptr = Vec::with_capacity(m_base + 1);
+        ptr.push(0);
+        for r in 0..m_base {
+            ptr.push(ptr[r] + counts[r]);
+        }
+        let nnz = ptr[m_base];
+        let mut idx = vec![0usize; nnz];
+        let mut val = vec![0.0f64; nnz];
+        let mut fill = ptr.clone();
+        for j in 0..ns {
+            let (rows, vals) = csc.col(j);
+            for (&r, &v) in rows.iter().zip(vals) {
+                if r < m_base {
+                    idx[fill[r]] = j;
+                    val[fill[r]] = v;
+                    fill[r] += 1;
+                }
+            }
+        }
+        // The identity `s_r = (b_r - A_r·x) / alpha` needs TWO things, and only one
+        // of them is a statement about column `ns+r`:
+        //
+        //   1. column `ns+r` sits alone in row `r`, so `alpha` is well defined; and
+        //   2. row `r` contains no OTHER base slack, because `ptr/idx/val` above
+        //      spans structural columns only -- a second slack in the row would be
+        //      silently dropped by the rewrite, producing a cut that is not implied
+        //      by the LP. That is a false-bound class of bug, so it is refused
+        //      rather than assumed.
+        //
+        // (1) does not imply (2): if some column `ns+q` is *not* a singleton and
+        // reaches into row `r`, then `slack_coef[q]` is correctly `None` while
+        // `slack_coef[r]` would still look fine. Hence the separate per-row tally.
+        // The `[A | -I]` build satisfies both; anything else declines the rewrite
+        // and the cut is dropped.
+        let mut slacks_in_row = vec![0usize; m_base];
+        for j in ns..n_base {
+            let (rows, _) = csc.col(j);
+            for &r in rows {
+                if r < m_base {
+                    slacks_in_row[r] += 1;
+                }
+            }
+        }
+        let mut slack_coef = vec![None; m_base];
+        for r in 0..m_base {
+            let j = ns + r;
+            if j >= n_base {
+                continue;
+            }
+            let (rows, vals) = csc.col(j);
+            if rows.len() == 1 && rows[0] == r && vals[0] != 0.0 && slacks_in_row[r] == 1 {
+                slack_coef[r] = Some(vals[0]);
+            }
+        }
+        BaseRows {
+            ptr,
+            idx,
+            val,
+            rhs: b[..m_base].to_vec(),
+            slack_coef,
+        }
+    }
+}
+
+/// Rewrite `cut` so it references only structural columns `0..ns`.
 ///
-/// [`augment_cols_with_cuts`] appends a *batch* of cuts to a matrix whose column
-/// count already covers every column those cuts reference; it scans `j in 0..n`
-/// and therefore cannot place a coefficient that lands on a slack column the same
-/// call is creating. That is sound for the root loop, where a round's cuts are
-/// separated off the matrix as it stood *before* the round. It is not sound for a
-/// rebuild: a GMI cut's coefficient vector spans all columns of the LP it was read
-/// off, cut slacks included, so replaying round 7's cuts onto the original matrix
-/// would silently drop their coefficients on rounds 1-6's slack columns and leave
-/// a *different, unjustified* row in the LP.
+/// A GMI cut separated off the tableau carries coefficients over *every* column,
+/// slacks included (`separate_gomory_cols` loops `j in 0..n`). Those slack
+/// references are what make cut rows structurally coupled: a coefficient on
+/// column `ns + r` puts a second nonzero into that column, so it is no longer a
+/// singleton, and `solve_lp_cols_warm`'s `slack_for_row` can no longer name a
+/// substitute when row `r`'s logical ends up basic. The basis it returns is then
+/// *short*, `PreparedDual::prepare` refuses it on shape, every node LP cold-solves,
+/// and `separate_gomory_cols` (which requires `basic_vars.len() == m`) silently
+/// stops separating. Measured on `sp150x300d` at 200x8: 1.1% of node LPs accepted
+/// their warm basis and 2079.6 simplex iterations were spent per node, against
+/// 100% and 9.1 for the same root bound (60) once cuts are structural.
 ///
-/// This builds the whole augmented matrix in one pass instead. `cuts[i].coeffs`
-/// may reference any column `< n_base + i` — the original columns plus the slacks
-/// of the cuts before it — and every such coefficient is placed. Cuts referencing
-/// a *dropped* cut's slack are the caller's problem: it must have closed the
-/// dependency set first (see the cleanup in `solve_milp`).
+/// Every substitution is an *equality* identity drawn from a row of the LP:
+///   base row `r`   : `s_r = (b_r - A_r·x) / alpha_r`
+///   cut  row `i`   : `s_i = c_i·x - rhs_i`      (cut rows are `c·x - s = rhs`, `s >= 0`)
+/// so the rewritten inequality is the same half-space over the feasible set, not a
+/// relaxation. Because it derives only from globally valid rows it also stays valid
+/// after any of those rows are removed, which is what makes dropping cuts safe.
+///
+/// Expanding a slack pulls in that row's whole support, so the rewrite can turn a
+/// short tableau cut into a long one, and a long cut costs every node LP that
+/// carries it. Past `max_len` nonzeros the cut is *shortened* rather than dropped,
+/// the same way HiGHS does after `untransform` (`HighsCutGeneration.cpp:982-1012`):
+/// a term whose variable sits at the bound that makes it contribute its minimum at
+/// `x_star` is relaxed into the rhs, smallest coefficient first. That step IS a
+/// relaxation — the cut gets weaker — but it is still valid (the rhs absorbs the
+/// term's minimum over the variable's box, which requires that bound to be finite)
+/// and, because only terms slack at `x_star` are chosen, it is violated there by
+/// the same margin, so it still cuts off the point it was separated for.
+///
+/// Returns `None` when the cut cannot be expressed structurally (an unsubstitutable
+/// row), cannot be shortened enough, or is numerically wild. Dropping a cut is
+/// always sound.
+#[allow(clippy::too_many_arguments)]
+fn substitute_slacks_to_structural(
+    cut: &GomoryCut,
+    base: &BaseRows,
+    prior: &[GomoryCut],
+    ns: usize,
+    n_base: usize,
+    x_star: &[f64],
+    l: &[f64],
+    u: &[f64],
+    max_len: usize,
+    tol: f64,
+    max_dynamism: f64,
+) -> Option<GomoryCut> {
+    let mut coeffs = vec![0.0f64; ns];
+    let head = ns.min(cut.coeffs.len());
+    coeffs[..head].copy_from_slice(&cut.coeffs[..head]);
+    let mut rhs = cut.rhs;
+    for j in ns..cut.coeffs.len() {
+        let a = cut.coeffs[j];
+        if a == 0.0 {
+            continue;
+        }
+        if j < n_base {
+            let r = j - ns;
+            let Some(alpha) = base.slack_coef.get(r).copied().flatten() else {
+                crate::profile::incr(crate::profile::Ctr::SubstDropNoSlack);
+                return None;
+            };
+            let f = a / alpha;
+            for k in base.ptr[r]..base.ptr[r + 1] {
+                coeffs[base.idx[k]] -= f * base.val[k];
+            }
+            rhs -= f * base.rhs[r];
+        } else {
+            // A prior cut, already structural by induction: this pass runs on every
+            // cut before it is appended, so `prior` never carries slack references.
+            let Some(c_i) = prior.get(j - n_base) else {
+                crate::profile::incr(crate::profile::Ctr::SubstDropNoPrior);
+                return None;
+            };
+            let w = ns.min(c_i.coeffs.len());
+            for (dst, src) in coeffs.iter_mut().zip(c_i.coeffs.iter()).take(w) {
+                *dst += a * src;
+            }
+            rhs += a * c_i.rhs;
+        }
+    }
+    if !rhs.is_finite() {
+        crate::profile::incr(crate::profile::Ctr::SubstDropDegenerate);
+        return None;
+    }
+
+    // Substitution builds each coefficient as a sum of scaled row entries, so
+    // cancellation routinely leaves a scatter of near-zero terms. Rejecting the cut
+    // for the resulting coefficient range would throw away nearly everything: with
+    // a plain dynamism gate, 217 of 217 cuts on `fiber` and 75 of 75 on
+    // `mik-250-20-75-1` were refused for that reason alone and the root bounds
+    // regressed (fiber 388985 -> 267429).
+    //
+    // The box `l`/`u` used to weaken is the ROOT box. That is what makes both
+    // weakening steps valid for the whole tree: every node's box is a subset, so a
+    // relaxation sound on the root box is sound on all of them. It holds because
+    // the bounds here come from presolve/FBBT, which are feasibility-based and so
+    // globally valid -- objective-based tightening (reduced-cost fixing, line
+    // ~2256) runs inside the node loop, strictly after this. Moving any
+    // objective-based fixing ahead of the root cut loop would make these bounds
+    // valid only relative to an incumbent and would need re-arguing here.
+    //
+    // HiGHS does not gate on dynamism -- its only `dynamism` line
+    // (`HighsCutGeneration.cpp:1061`) sits inside an `#if 0` debug block. It
+    // *removes* the negligible terms instead (`:783`,
+    // `minCoefficientValue = 100 * feastol * max(maxAbsValue, 1e-3)`) and moves each
+    // to the right-hand side. Same rule here, in `>=` form: dropping term `k`
+    // subtracts its MAXIMUM over the box, which is a relaxation of the original --
+    // never something the original does not imply. A term whose maximising bound is
+    // infinite cannot move, and only then is the cut refused (HiGHS returns `false`
+    // at the same point).
+    {
+        let mut maxabs = 0.0f64;
+        for &v in coeffs.iter() {
+            maxabs = maxabs.max(v.abs());
+        }
+        let min_coef = 100.0 * tol * maxabs.max(1e-3);
+        for k in 0..ns {
+            let a = coeffs[k];
+            if a == 0.0 || a.abs() > min_coef {
+                continue;
+            }
+            let pin = if a > 0.0 { u[k] } else { l[k] };
+            if pin.abs() >= INF {
+                // The term cannot be moved to the rhs: weakening across an
+                // unbounded direction is not a bound. HiGHS refuses the cut at
+                // the same point (`HighsCutGeneration.cpp:783`, returns `false`).
+                //
+                // KEEPING the coefficient instead is exact and was tried: it
+                // costs nothing in soundness and, combined with a dynamism cap
+                // raised past 1e12, recovers 99 cuts on `gsvm2rl3` (root gap
+                // 85.16 % -> 76.11 %) and improves the root gap on 7 of 38
+                // instances against 2 worsened. It is NOT shipped: at a fixed
+                // 5000-node budget the panel came out 3 better / 3 worse, 14
+                // solved either way, 132,724 vs 133,680 nodes -- cert-clean but
+                // neutral, so it stays out under CLAUDE.md §5 (the
+                // `DISCOPT_CUT_INHERIT` rule: sound is not the same as helpful).
+                // Rescuing `gsvm2rl3` needs a cut family whose coefficients are
+                // conditioned, not a laxer numerical gate.
+                crate::profile::incr(crate::profile::Ctr::SubstDropUnbounded);
+                return None;
+            }
+            rhs -= a * pin;
+            coeffs[k] = 0.0;
+        }
+        if !rhs.is_finite() {
+            crate::profile::incr(crate::profile::Ctr::SubstDropDegenerate);
+            return None;
+        }
+    }
+
+    let mut nnz = coeffs.iter().filter(|v| **v != 0.0).count();
+    if nnz == 0 {
+        crate::profile::incr(crate::profile::Ctr::SubstDropDegenerate);
+        return None;
+    }
+    // The ceiling bounds the *inflation* substitution causes, not a cut's intrinsic
+    // length. A cut that was already long costs what it always cost -- capping it
+    // here would discard cuts the engine has always accepted (a 300-item knapsack
+    // separates ~300-nonzero GMI cuts by nature) for a problem the rewrite did not
+    // create. So the effective limit never falls below the row's original nonzero
+    // count; only genuine growth is shortened.
+    let nnz_before = cut.coeffs.iter().filter(|v| **v != 0.0).count();
+    let max_len = max_len.max(nnz_before);
+    if nnz > max_len {
+        // Terms that are already at their minimum at `x_star` cost no violation to
+        // relax away; take the smallest such coefficients until the cut is short
+        // enough. A term can only move to the rhs if the bound it is pinned at is
+        // finite -- INF in this layer is the 1e20 sentinel, not f64::INFINITY.
+        let mut cancellable: Vec<usize> = (0..ns)
+            .filter(|&k| {
+                let a = coeffs[k];
+                if a == 0.0 {
+                    return false;
+                }
+                // Free exactly when the term is already at its MAXIMUM at
+                // `x_star`: the violation after removal is
+                // `old_violation - a*(max_k - x_star[k])`, so pinning at the max
+                // preserves it.
+                if a > 0.0 {
+                    u[k] < INF && (u[k] - x_star[k]).abs() <= tol
+                } else {
+                    l[k] > -INF && (x_star[k] - l[k]).abs() <= tol
+                }
+            })
+            .collect();
+        if nnz - cancellable.len() > max_len {
+            crate::profile::incr(crate::profile::Ctr::SubstDropTooLong);
+            return None;
+        }
+        cancellable.sort_by(|&a, &b| {
+            coeffs[a]
+                .abs()
+                .partial_cmp(&coeffs[b].abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        for &k in &cancellable {
+            if nnz <= max_len {
+                break;
+            }
+            let a = coeffs[k];
+            // The cut is `coeffs·x >= rhs`, so dropping term `k` requires
+            // subtracting that term's MAXIMUM over the box:
+            //   sum_{j!=k} a_j x_j = sum_j a_j x_j - a_k x_k >= rhs - max(a_k x_k)
+            // Subtracting the minimum instead would give an inequality the
+            // original does not imply -- it could cut off a feasible point and
+            // produce a false bound. (HiGHS's rule at `HighsCutGeneration.cpp:998`
+            // is the mirror of this because its cuts are in `<=` form.)
+            rhs -= a * if a > 0.0 { u[k] } else { l[k] };
+            coeffs[k] = 0.0;
+            nnz -= 1;
+        }
+        if nnz > max_len || !rhs.is_finite() {
+            crate::profile::incr(crate::profile::Ctr::SubstDropTooLong);
+            return None;
+        }
+    }
+
+    let (mut amin, mut amax) = (f64::INFINITY, 0.0f64);
+    for &v in &coeffs {
+        if v != 0.0 {
+            amin = amin.min(v.abs());
+            amax = amax.max(v.abs());
+        }
+    }
+    // After the small-coefficient cleanup the range is bounded by construction
+    // (`maxabs / min_coef = 1 / (100 * tol)` whenever `maxabs >= 1e-3`), so this is
+    // a backstop for the tiny-`maxabs` corner the cleanup's `1e-3` floor leaves
+    // open, not the primary filter it used to be.
+    // Split deliberately: a non-finite coefficient and a merely ill-conditioned
+    // one are different failures with different fixes, and folding them into one
+    // counter made this branch mis-diagnosed three times running.
+    if !amax.is_finite() {
+        crate::profile::incr(crate::profile::Ctr::SubstDropNonFinite);
+        return None;
+    }
+    if amax / amin > max_dynamism {
+        crate::profile::incr(crate::profile::Ctr::SubstDropDynamism);
+        return None;
+    }
+    Some(GomoryCut { coeffs, rhs })
+}
+
 fn rebuild_csc_with_cuts(
     base: &SparseCols,
     m_base: usize,
@@ -6376,6 +6748,345 @@ mod root_cut_budget_tests {
     /// half (CLAUDE.md §6): it pins that the two functions genuinely differ here,
     /// so a future "simplification" back to the batch appender fails loudly
     /// instead of silently installing a different row.
+    /// Shared fixtures for the substitution tests: a point and a box wide enough
+    /// that no term is at a bound, so the shortening path never fires and these
+    /// tests measure the identity alone.
+    const X_STAR: [f64; 2] = [0.5, 0.5];
+    const LO: [f64; 2] = [-1e3, -1e3];
+    const UP: [f64; 2] = [1e3, 1e3];
+
+    /// Substitution leaves a scatter of near-zero coefficients behind (cancellation
+    /// between scaled row entries), and rejecting a cut for the resulting
+    /// coefficient range threw away 217 of 217 cuts on `fiber`. The negligible terms
+    /// are removed instead, HiGHS-style. That is a weakening, so it carries the same
+    /// obligation as shortening: the rewritten cut must be *implied by* the original
+    /// over the whole box, never removing a point the original kept.
+    ///
+    /// `x0 - 1e-12*x1 + 0.5*x2 >= 0.3` over `x1 in [2, 3]`: the middle term is far
+    /// below `100 * tol * maxabs = 1e-7` and must be gone, with the right-hand side
+    /// moved by exactly that term's maximum (`a * l1`).
+    #[test]
+    fn the_small_coefficient_cleanup_only_relaxes_the_cut() {
+        let base = BaseRows {
+            ptr: vec![0],
+            idx: vec![],
+            val: vec![],
+            rhs: vec![],
+            slack_coef: vec![],
+        };
+        let cut = GomoryCut {
+            coeffs: vec![1.0, -1e-12, 0.5],
+            rhs: 0.3,
+        };
+        let x_star = [0.1, 2.0, 0.1];
+        let lo = [0.0, 2.0, 0.0];
+        let up = [1.0, 3.0, 1.0];
+        let out = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            3,
+            3,
+            &x_star,
+            &lo,
+            &up,
+            64,
+            1e-9,
+            1e7,
+        )
+        .expect("the cleanup must rewrite this cut, not refuse it");
+        assert_eq!(
+            out.coeffs[1], 0.0,
+            "tiny coefficient survived: {:?}",
+            out.coeffs
+        );
+        assert_eq!(out.coeffs[0], 1.0);
+        assert_eq!(out.coeffs[2], 0.5);
+
+        // Every box point the original keeps, the rewrite must keep too.
+        let mut checked = 0usize;
+        for a in 0..=10 {
+            for b in 0..=10 {
+                for c in 0..=10 {
+                    let x = [a as f64 / 10.0, 2.0 + b as f64 / 10.0, c as f64 / 10.0];
+                    let orig: f64 = (0..3).map(|k| cut.coeffs[k] * x[k]).sum();
+                    let new: f64 = (0..3).map(|k| out.coeffs[k] * x[k]).sum();
+                    if orig >= cut.rhs - 1e-9 {
+                        assert!(
+                            new >= out.rhs - 1e-9,
+                            "cleanup removed a point the original kept: {x:?}"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 1331, "the implication probe never ran");
+    }
+
+    /// Shortening is the one step that genuinely weakens a cut, so it carries the
+    /// two properties that make that safe: the shortened cut must be *implied by*
+    /// the original over the whole box (never cutting off a point the original
+    /// kept -- a false bound), and it must still be violated at the point it was
+    /// separated for (or it is useless).
+    ///
+    /// A 4-column cut `x0 + x1 + x2 + x3 >= 1` with a length cap of 2. Columns 2
+    /// and 3 sit at their lower bound 0 at `x_star`, so relaxing them costs
+    /// nothing at that point (`rhs -= a * 0`) and the cut stays `>= 1`.
+    #[test]
+    fn the_cut_shortening_only_weakens_and_keeps_the_violation() {
+        let csc = SparseCols::from_dense(&[1.0, 1.0, 1.0, 1.0, -1.0], 1, 5);
+        let base = BaseRows::build(&csc, 1, 5, 4, &[0.0]);
+        // The cut is written against the row's SLACK -- `-s >= -0.5` -- so it has
+        // one nonzero before the rewrite and four after (`s = x0+x1+x2+x3` from the
+        // row `x0+x1+x2+x3 - s = 0`). That growth is what the ceiling exists to
+        // bound, and it is the only thing that makes the shortening path reachable:
+        // the effective limit never falls below the cut's original nonzero count.
+        //
+        // Rewritten the cut is `-x0 -x1 -x2 -x3 >= -0.5` (the sum is at most 0.5),
+        // violated at `x_star` where the sum is 0.8. Columns 2 and 3 carry a
+        // negative coefficient and sit at their lower bound, which is where such a
+        // term is maximal, so relaxing them is free at `x_star`.
+        let cut = GomoryCut {
+            coeffs: vec![0.0, 0.0, 0.0, 0.0, -1.0],
+            rhs: -0.5,
+        };
+        let x_star = [0.4, 0.4, 0.0, 0.0];
+        let lo = [0.0, 0.0, 0.0, 0.0];
+        let up = [1.0, 1.0, 1.0, 1.0];
+        // What the rewrite produces before any shortening, for the implication check.
+        let expanded = GomoryCut {
+            coeffs: vec![-1.0, -1.0, -1.0, -1.0],
+            rhs: -0.5,
+        };
+        let out = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            4,
+            5,
+            &x_star,
+            &lo,
+            &up,
+            2,
+            1e-9,
+            1e7,
+        )
+        .expect("two terms are at their maximising bound and can be relaxed");
+        let nnz = out.coeffs.iter().filter(|v| **v != 0.0).count();
+        assert!(nnz <= 2, "cut not shortened: {:?}", out.coeffs);
+
+        // Still violated at the point it was separated for.
+        let act: f64 = (0..4).map(|k| out.coeffs[k] * x_star[k]).sum();
+        assert!(act < out.rhs - 1e-9, "shortened cut no longer cuts x_star");
+
+        // And implied by the original everywhere in the box: any point the
+        // shortened cut rejects, the original rejects too.
+        let mut checked = 0usize;
+        for a in 0..6 {
+            for b in 0..6 {
+                for c in 0..6 {
+                    for d in 0..6 {
+                        let x = [
+                            a as f64 / 5.0,
+                            b as f64 / 5.0,
+                            c as f64 / 5.0,
+                            d as f64 / 5.0,
+                        ];
+                        let orig: f64 = (0..4).map(|k| expanded.coeffs[k] * x[k]).sum();
+                        let shortened: f64 = (0..4).map(|k| out.coeffs[k] * x[k]).sum();
+                        if orig >= expanded.rhs - 1e-9 {
+                            assert!(
+                                shortened >= out.rhs - 1e-9,
+                                "shortened cut removed a point the original kept: {x:?}"
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 1296, "implication probe must actually have run");
+    }
+
+    /// The rewrite reads a base row over its STRUCTURAL columns only, so the
+    /// identity `s_r = (b_r - A_r·x) / alpha` is valid only when row `r` holds no
+    /// other base slack -- a second one would be silently dropped and the resulting
+    /// cut would not be implied by the LP, which is a false bound.
+    ///
+    /// Column-singleton-ness of `ns+r` does not establish that. Here row 0 carries
+    /// both its own slack (column 2, a singleton) and a stray entry from column 3,
+    /// so `slack_coef[0]` looks fine by that test alone. The per-row tally must
+    /// still refuse it, and any cut referencing that slack must be dropped rather
+    /// than rewritten.
+    #[test]
+    fn a_base_row_with_two_slacks_refuses_the_rewrite() {
+        // Row 0: `2x0 + 3x1 - s0 + 5*s1 = 6`. Column 2 (`s0`) is a singleton at
+        // row 0; column 3 (`s1`) also reaches into row 0.
+        let csc = SparseCols::from_dense(&[2.0, 3.0, -1.0, 5.0], 1, 4);
+        let (m_base, n_base, ns) = (1usize, 4usize, 2usize);
+        let b = vec![6.0];
+        let base = BaseRows::build(&csc, m_base, n_base, ns, &b);
+        assert_eq!(
+            base.slack_coef[0], None,
+            "row 0 holds a second slack; the rewrite is not valid for it"
+        );
+
+        let cut = GomoryCut {
+            coeffs: vec![1.0, 0.0, 1.0],
+            rhs: 4.0,
+        };
+        assert!(
+            substitute_slacks_to_structural(
+                &cut,
+                &base,
+                &[],
+                ns,
+                n_base,
+                &X_STAR,
+                &LO,
+                &UP,
+                64,
+                1e-9,
+                1e7,
+            )
+            .is_none(),
+            "a cut on an unexpressible slack must be dropped, not rewritten"
+        );
+    }
+
+    /// The slack substitution must be an *identity*, not a relaxation: a cut
+    /// rewritten over structural columns has to cut off exactly the same points
+    /// as the original did in the slack-extended space. If it were even slightly
+    /// stronger it could remove a feasible integer point and produce a false
+    /// bound, which is the one failure this whole change must not introduce.
+    ///
+    /// Base: one row `2x0 + 3x1 - s0 = 6` (so `s0 = 2x0 + 3x1 - 6`), structural
+    /// width 2, slack column 2. A cut `1*x0 + 1*s0 >= 4` therefore means
+    /// `x0 + 2x0 + 3x1 - 6 >= 4`, i.e. `3x0 + 3x1 >= 10`. The rewrite must
+    /// produce exactly that. Random feasible points check the identity rather
+    /// than only the coefficients, so an algebra slip in either direction fails.
+    #[test]
+    fn the_slack_substitution_preserves_the_cut_exactly() {
+        // [A | -I] over 2 structural columns and 1 row.
+        let csc = SparseCols::from_dense(&[2.0, 3.0, -1.0], 1, 3);
+        let (m_base, n_base, ns) = (1usize, 3usize, 2usize);
+        let b = vec![6.0];
+        let base = BaseRows::build(&csc, m_base, n_base, ns, &b);
+        assert_eq!(base.slack_coef[0], Some(-1.0), "row 0 slack must be found");
+
+        let cut = GomoryCut {
+            coeffs: vec![1.0, 0.0, 1.0],
+            rhs: 4.0,
+        };
+        let out = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            ns,
+            n_base,
+            &X_STAR,
+            &LO,
+            &UP,
+            64,
+            1e-9,
+            1e7,
+        )
+        .expect("cut is expressible over structural columns");
+        assert_eq!(
+            out.coeffs.len(),
+            ns,
+            "rewritten cut must be structural-only"
+        );
+
+        let mut checked = 0usize;
+        for i in 0..40 {
+            let x0 = (i as f64) * 0.37 - 5.0;
+            for k in 0..40 {
+                let x1 = (k as f64) * 0.29 - 4.0;
+                // s0 is pinned by the row, exactly as in the LP.
+                let s0 = 2.0 * x0 + 3.0 * x1 - 6.0;
+                let orig = cut.coeffs[0] * x0 + cut.coeffs[1] * x1 + cut.coeffs[2] * s0;
+                let new = out.coeffs[0] * x0 + out.coeffs[1] * x1;
+                assert_eq!(
+                    orig >= cut.rhs - 1e-9,
+                    new >= out.rhs - 1e-9,
+                    "substitution changed the half-space at ({x0}, {x1})"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 1600, "identity probe must actually have run");
+    }
+
+    /// The anti-vacuity half: the cut above genuinely *did* reference a slack, so
+    /// the rewrite is not a no-op copy. Without this a future change that made
+    /// `substitute_slacks_to_structural` return its input unchanged would still
+    /// pass the identity test.
+    #[test]
+    fn the_slack_substitution_actually_rewrites_the_coefficients() {
+        let csc = SparseCols::from_dense(&[2.0, 3.0, -1.0], 1, 3);
+        let base = BaseRows::build(&csc, 1, 3, 2, &[6.0]);
+        let cut = GomoryCut {
+            coeffs: vec![1.0, 0.0, 1.0],
+            rhs: 4.0,
+        };
+        let out = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            2,
+            3,
+            &X_STAR,
+            &LO,
+            &UP,
+            64,
+            1e-9,
+            1e7,
+        )
+        .unwrap();
+        // x0: 1 + 1*2 = 3; x1: 0 + 1*3 = 3; rhs: 4 + 1*6 = 10.
+        assert!((out.coeffs[0] - 3.0).abs() < 1e-12, "got {:?}", out.coeffs);
+        assert!((out.coeffs[1] - 3.0).abs() < 1e-12, "got {:?}", out.coeffs);
+        assert!((out.rhs - 10.0).abs() < 1e-12, "got {}", out.rhs);
+        assert_ne!(out.coeffs[0], cut.coeffs[0], "rewrite must not be a copy");
+    }
+
+    /// A cut referencing an *earlier cut's* slack expands through that cut, which
+    /// is the case that makes rounds 2+ couple. Cut A: `x0 >= 1` (slack column
+    /// `n_base + 0`, with `s_A = x0 - 1`). Cut B references it: `x1 + 2*s_A >= 3`
+    /// means `x1 + 2x0 - 2 >= 3`, i.e. `2x0 + x1 >= 5`.
+    #[test]
+    fn the_slack_substitution_expands_an_earlier_cuts_slack() {
+        let csc = SparseCols::from_dense(&[2.0, 3.0, -1.0], 1, 3);
+        let base = BaseRows::build(&csc, 1, 3, 2, &[6.0]);
+        let cut_a = GomoryCut {
+            coeffs: vec![1.0, 0.0],
+            rhs: 1.0,
+        };
+        let cut_b = GomoryCut {
+            coeffs: vec![0.0, 1.0, 0.0, 2.0],
+            rhs: 3.0,
+        };
+        let out = substitute_slacks_to_structural(
+            &cut_b,
+            &base,
+            &[cut_a],
+            2,
+            3,
+            &X_STAR,
+            &LO,
+            &UP,
+            64,
+            1e-9,
+            1e7,
+        )
+        .unwrap();
+        assert!((out.coeffs[0] - 2.0).abs() < 1e-12, "got {:?}", out.coeffs);
+        assert!((out.coeffs[1] - 1.0).abs() < 1e-12, "got {:?}", out.coeffs);
+        assert!((out.rhs - 5.0).abs() < 1e-12, "got {}", out.rhs);
+    }
+
     #[test]
     fn the_rebuild_places_a_cut_coefficient_on_an_earlier_cuts_slack() {
         let base = SparseCols::from_dense(&[2.0, 3.0], 1, 2);

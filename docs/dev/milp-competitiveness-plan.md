@@ -50,10 +50,43 @@ HiGHS closes `b-ball`, `sp150x300d`, `beavma`, `nexp-50-20-1-1`,
 after presolve, root cuts and root heuristics — both *produces* the optimum and
 *proves* it. discopt spends 350 k–870 k nodes on several of those same instances.
 
-This is a **root-strength** problem, not a tree-search problem. It is why Stage
-0's search-side flips move zero instances, and it is the reason the stage order
-below puts root cut control and cMIR ahead of everything on the search side.
-Almost everything that matters happens before the first branch.
+This was originally written up as "a **root-strength** problem, not a tree-search
+problem." I retracted that on 2026-09-05 in favour of a primal/dual/proof split
+claiming *"8 of 17 failures already hold a dual bound within ~5 % and still cannot
+close."* **That retraction was itself wrong and is withdrawn the same day**
+(CLAUDE.md §11). It classified failures by an arbitrary 5 % threshold bearing no
+relation to the solver's stopping rule, and was published without checking it
+against that rule. Recorded here rather than deleted, because the error mode — a
+threshold chosen for readability and then reasoned from as if it were the
+convergence test — is worth not repeating.
+
+Re-derived against the actual tolerance (`gap_tol = 1e-4`), over the 17 instances
+unsolved at the strongest arm of the post-structural-space panel:
+
+| class | count | meaning |
+|---|---|---|
+| dual gap already within `gap_tol` | **0** | no pruning / node-selection / cutoff defect exists on this panel |
+| PURE-BOUND — incumbent optimal, only bound missing | 3 | `b-ball` 4.5e-4, `neos-3610051-istra` 9.0e-3, `neos-3610040-iskar` 1.0e-2 |
+| BOTH SHORT — bound *and* incumbent | 14 | dual 4.6e-3 … 1.0; primal 22 % … no feasible point at all |
+
+**The bound is short on 17 of 17. The incumbent is additionally short on 14 of 17.**
+
+The instance I had held up as the sharpest evidence of a mechanics failure does not
+survive contact with the tolerance. `b-ball`'s bound is `-1.500672636` against an
+optimum of `-1.5` — a relative dual gap of `4.484e-4` against a `1e-4` stopping
+rule. It has not converged. It is short by a factor of ~4.5 in bound and is
+behaving exactly as specified. Its 200,839 nodes against HiGHS's 1 measure how
+much bound HiGHS gets at the root that discopt never gets anywhere, not a failure
+to use a bound it already had.
+
+**Consequence for the stage order.** The original framing was closer to right than
+its first correction, but the precise statement is narrower than either: this is a
+**bound-strength** problem — root or in-tree — on *every* failing instance, with a
+**primal-heuristic** problem layered on 14 of them. Bound work is necessary
+everywhere. Primal work is necessary on 14 and sufficient on none, because no
+instance closes until the bound arrives regardless of how good the incumbent is.
+That is a strict ordering, and the stages below follow it: bound first, primal as
+the accelerant that makes the bound's tree cheaper.
 
 ## 1. Where the gap is
 
@@ -189,9 +222,74 @@ first (`sepa_aggregation.c` Step 1 at `naggrs=0`) — and that the real defect i
 rows in both orientations would read as "MIR does nothing".** The tight-row
 filter is cheap and is adopted; the disagreement does not change Stage 2.
 
+## 2.5 The root-bound attribution — measured 2026-09-05, and it reorders §3
+
+Run before building anything (CLAUDE.md §4). Both arms read the *same* converted
+arrays. discopt at the root (`max_nodes` ≤ 3, first finite bound); HiGHS at
+`mip_max_nodes=1`. Dual gap as `(opt − bound)/(1+|opt|)`. 14/14 executed, 0
+vacuous.
+
+| instance | d_lp | d_root 16×1 | **d_big 200×8** | h_nopre | h_full | own cuts close |
+|---|---|---|---|---|---|---|
+| mik-250-20-75-1 | 18.99 | 17.29 | **4.63** | 1.94 | 1.84 | 75.6 % |
+| mik-250-20-75-2 | 18.16 | 16.03 | **4.81** | 1.64 | 1.52 | 73.5 % |
+| mik-250-20-75-3 | 16.13 | 14.03 | **4.53** | 1.68 | 1.76 | 71.9 % |
+| mik-250-20-75-5 | 17.46 | 15.86 | **4.47** | 2.12 | 1.72 | 74.4 % |
+| fiber | 61.55 | 37.94 | **6.01** | 2.31 | 1.95 | 90.2 % |
+| b-ball | 12.73 | 8.24 | **0.99** | 0.01 | −0.00 | 92.2 % |
+| sp150x300d | 50.00 | 35.71 | **15.71** | 2.86 | 0.00 | 68.6 % |
+| beavma | 58.66 | 52.58 | **31.05** | 1.04 | 0.00 | 47.1 % |
+| nexp-50-20-1-1 | 53.33 | 53.33 | **30.00** | −0.00 | −0.00 | 43.8 % |
+| neos-3611689-kaihu | 15.10 | 13.78 | **9.31** | 3.75 | 2.50 | 38.3 % |
+| neos-3610040-iskar | 8.30 | 7.41 | **6.57** | 4.51 | 5.26 | 20.9 % |
+| neos-3610051-istra | 8.89 | 8.73 | **6.55** | 4.11 | 2.00 | 26.3 % |
+| neos17 | 12.98 | 12.93 | **10.91** | 4.96 | 1.76 | 16.0 % |
+| neos-3118745-obra | 0.46 | 0.46 | **0.29** | 0.46 | 0.39 | 35.7 % |
+
+Three things fall out, and the third overturns the §3 ordering as first drafted.
+
+**(a) HiGHS's root strength is not presolve.** `h_nopre` ≈ `h_full` everywhere —
+mik 1.9–2.1 % with presolve off against 1.5–1.8 % with it on, `nexp` 0.00 either
+way. Presolve is worth ~0–3 pp of root gap. §1c said ≤2 instances; this says the
+root bound specifically owes it almost nothing. **Stage 7 stays last, confirmed.**
+(HiGHS exposes no cuts-off switch — the only `mip_*` option records in
+`HighsOptions.h` are `allow_restart`, the six `heuristic_run_*` booleans,
+`improving_solution_save`, `max_nodes`, `report_level` — so its *cut* share cannot
+be ablated this way. An earlier version of this probe labelled
+`mip_root_presolve_only` as "cuts off"; it is not a cut switch, and that arm was
+deleted rather than reinterpreted.)
+
+**(b) discopt's shipped root budget is drastically undersized.** 16 cuts × 1
+round moves mik 18.99 → 17.29 (9 % of the gap) and `nexp-50-20-1-1` 53.33 → 53.33
+(nothing at all).
+
+**(c) discopt's EXISTING separators already close 70–92 % of the root gap on the
+instances that matter — and this is the finding that reorders the plan.** At
+200 × 8, with no new cut family: mik 17.46 → **4.47** (74 %), `fiber` 61.55 →
+**6.01** (90 %), `b-ball` 12.73 → **0.99** (92 %), `sp150x300d` 50.00 → **15.71**
+(69 %). Cover + Gomory, today, gets mik from 17 % to 4.5 % against HiGHS's 1.7 %.
+
+Set (c) against §0: **the 200-cut arm produced those bounds and still solved 7
+fewer instances than base.** discopt is already generating cuts strong enough to
+be competitive at the root and then losing the solve by carrying every one of
+them in every node LP forever. That is not a cut-quality deficit. It is a cut
+*lifecycle* deficit, and §2.1's reviews called it correctly.
+
+**Consequence for §3.** As first drafted, Stage 1 (lifecycle) was framed as a
+prerequisite for Stage 2 (cMIR), with cMIR as the large lever — the HiGHS review
+put it at 10–15 instances. That is now the wrong weighting and I am recording the
+correction here rather than carrying it (CLAUDE.md §4, §11). **Stage 1 is the
+lever**; the bound it needs to pay off already exists. Stage 2 is demoted: it is
+what takes mik from 4.5 % to HiGHS's 1.7 % *after* Stage 1 makes a large root cut
+set affordable, and it is not worth starting until Stage 1 is measured. The
+entry experiment this section was written to run — "does HiGHS also leave 7–10 %
+at the mik root?" — is answered **no** (it leaves 1.5–1.8 %), so Stage 2 is not
+killed; it is deferred behind a bigger, cheaper win.
+
 ## 3. Stages
 
-Reordered from the first draft per §2. Every bound-changing piece goes behind a
+Reordered from the first draft per §2, and re-weighted per §2.5 — Stage 1 is now
+the lever and Stage 2 is deferred behind it. Every bound-changing piece goes behind a
 default-off flag with the §5 double bar (cert-clean AND net-positive) over the 38
 panel *and* the in-repo MINLP corpus. Propagation, aging, restarts and node
 selection are contractions or reorderings and need only the bound-neutral or
@@ -250,7 +348,7 @@ Ranked first because the code exists and shipping it off is the whole defect.
 *Kill criterion:* each flip measured alone on the 38 panel at matched tolerance;
 anything that does not improve solved-count or nodes stays off.
 
-### Stage 1 — root cut-loop control (the §0 prerequisite)
+### Stage 1 — root cut-loop control — **THE LEVER** (§2.5c)
 
 Replace fixed round/cut budgets with stall-based termination, cut aging, and
 efficacy+orthogonality selection; move root cuts into a pool rather than the
@@ -270,14 +368,106 @@ matrix.
 drop, (c) both. *Kill:* if (b) alone does not recover a substantial share of the
 7 instances the cut budget lost, aging is not the mechanism and Stage 1 re-scopes.
 
-### Stage 2 — cMIR done properly
+**RESOLVED — the kill criterion fired, and the mechanism turned out to be
+neither aging nor selection.** Both arms are dead:
 
-*Attribution first, before any code:* compare discopt's post-cut root bound
-against HiGHS's root bound on the four `mik` plus the six ≤3 %-dual instances.
-**This is the test of §2.2's precondition.** If HiGHS's root gap on `mik` is also
-7–10 %, cuts are not the lever there and this stage is re-scoped to search.
+- **(a) `cut_select` is falsified.** It does not help and on two instances it
+  *creates* the pathology. `fiber` at 200×8 goes from 2986.5 to 6457.4
+  iterations/node with selection on; `mik-250-20-75-1`, which is perfectly
+  healthy at 100 % warm-start acceptance and 6.1 iterations/node, drops to
+  **35.0 % acceptance and 515.3 iterations/node**. The textbook
+  efficacy+orthogonality fix makes things worse here.
+- **(b) slack-cut drop** fired its kill criterion earlier.
 
-If confirmed, build in fidelity order, measuring after each: (1) integral row
+The real mechanism is a **column-space defect**, not a lifecycle one.
+`separate_gomory_cols` loops `for j in 0..n` over the full working width
+(`lp/gomory.rs:215`), so every cut carries coefficients on base slack and
+earlier-cut surplus columns. A coefficient on column `ns + r` puts a *second*
+nonzero into that column, so it stops being a singleton;
+`solve_lp_cols_warm`'s basis reconstruction requires a singleton substitute
+(`lp/simplex/primal.rs:2599-2640`) and otherwise returns a **short** basis;
+`PreparedDual::prepare` refuses a short basis on shape
+(`lp/simplex/dual.rs:521,532`, `DualPrepRejectShape`) and the node cold-solves;
+the cold solve returns another short basis, so the state is self-sustaining. A
+short basis *also* silently disables GMI separation outright
+(`lp/gomory.rs:236`).
+
+Measured directly: `fiber` at 50×2 took **729 shape rejections against 2
+acceptances** (0.3 % warm-start acceptance), while the same instance's base
+16×1 arm ran at 100 %. That is the 492× per-node cost, and it explains why the
+cut arms produce a strong bound and then lose solves: they are paying two to
+three orders of magnitude more simplex iterations per node for it.
+
+`root_cut_prune` is a trigger rather than a cause — its dependency-closure sweep
+keeps a cut precisely *because* something references its surplus column, so it
+preferentially retains the cross-referencing cuts and discards the clean
+singleton ones. On `sp150x300d` removing the prune reaches the **identical**
+bound (60) at 22.3 instead of 2079.6 iterations/node.
+
+**Fix (implemented):** rewrite every cut into structural space before it is
+appended, HiGHS-style. HiGHS never has this problem because
+`HighsTransformedLp::transform` expands slack coefficients back into structural
+ones *before* generating the cut (`HighsTransformedLp.cpp:447,469-482`). The
+same rewrite here uses the exact equality identities the LP rows already supply
+(`s_r = (b_r - A_r·x)/alpha` for a base row, `s_i = c_i·x - rhs_i` for a cut
+row), so it is an identity, not a relaxation. Two follow-on steps are genuine
+weakenings and are bounded accordingly: negligible coefficients left by
+cancellation are moved to the right-hand side at their maximum over the box
+(HiGHS `HighsCutGeneration.cpp:783`), and a cut whose nonzero count *grows* past
+`100 + 0.15·n` is shortened the same way rather than dropped (`:982-1012`).
+
+*Measured result* (6 instances × 4 arms, 400 nodes, `RootCutsSubstDropped` and
+the five per-reason counters armed):
+
+| | before | after |
+|---|---|---|
+| warm-start acceptance | 0.3–1.1 % on the cut arms | **100 % on 22 of 24 arms**, 94.8 % worst |
+| `DualPrepRejectShape` | 588–822 per arm | **0** on 23 of 24 arms |
+| `fiber` 200×8 iterations/node | 2986.5 | **99.5** |
+| `sp150x300d` 200×8 iterations/node | 2079.6 | **10.7** |
+| `mik` 200×8 `sel` iterations/node | 515.3 | **5.6** |
+| `fiber` 200×8 root bound | 388985 | 381984 |
+| `mik` 200×8 root bound | −51927.6 | −51972.4 |
+| `blend2` 200×8 root bound | 7.14624 | **7.16601** |
+
+Cut quality is preserved (within 0.02–0.1 % on every instance, better on
+`blend2`) while the per-node cost falls 30–240×. A first attempt used a
+substitution-density guard instead, which restored warm start but dropped so
+many cuts that root bounds collapsed (`mik` to −58655.4, zero cuts kept); that
+is recorded here as falsified, and the shortening-not-dropping design replaced
+it. A plain dynamism gate failed the same way — 217 of 217 cuts on `fiber` and
+75 of 75 on `mik` refused for coefficient range alone — which is why the
+negligible terms are removed rather than the cut rejected. HiGHS does not gate
+on dynamism at all: its only `dynamism` line sits inside an `#if 0` debug block
+(`HighsCutGeneration.cpp:1061`).
+
+Stage 1's remaining items (stall-based termination, in-tree aging, a violation
+re-checked pool) stand, but they are now optimizations on a working cut path
+rather than the fix for it.
+
+*Why this is now the lever, not a prerequisite.* §2.5c measured discopt's own
+existing separators closing **70–92 %** of the root gap at 200 × 8 on exactly the
+instances that fail — mik 17.46 → 4.47, `fiber` 61.55 → 6.01, `b-ball` 12.73 →
+0.99 — while §0 measured that same 200-cut arm solving **7 fewer** instances. The
+bound Stage 2 was going to be built to produce is already being produced and then
+thrown away by carrying it in every node LP. Stage 1 is the difference between
+having that bound and being able to use it.
+
+*Target:* recover base's 19 and convert the cut arm's root strength into solves.
+The mik family is the cleanest probe — a 4.5 % root gap should not need 600 k
+nodes.
+
+### Stage 2 — cMIR done properly (DEFERRED behind Stage 1 per §2.5)
+
+*The attribution this stage was gated on has been run* (§2.5). HiGHS's mik root
+gap is **1.5–1.8 %**, not 7–10 %, so §2.2's precondition holds and cMIR is not
+killed. But §2.5c also showed discopt's existing separators reach 4.5 % on mik
+unaided, so cMIR is worth roughly the 4.5 % → 1.7 % remainder — real, but second
+to Stage 1, and **not to be started until Stage 1 is measured**. Starting it
+first would build a stronger cut into the same lifecycle that is currently
+converting strong cuts into lost solves.
+
+When it is started, build in fidelity order, measuring after each: (1) integral row
 slacks treated as integer in the δ/complementation set; (2) separate on the
 current LP *including* previously added cuts, scored by efficacy `viol/‖α‖` not
 raw violation; (3) VUB/VLB substitution; (4) the full δ set incl. best/2,/4,/8
@@ -317,6 +507,54 @@ and are unwired on the MILP path.
 
 Last, per §1c (≤2 instances, large build — the matrix path has no postsolve
 chain). Note restarts (Stage 4) want re-presolve, so there is a coupling.
+
+### Falsified: relaxing the cut-cleanup's numerical gates (2026-09-05)
+
+*Hypothesis.* The substitution's two numerical gates are throwing away usable
+cuts. Evidence prompting it: on `gsvm2rl3` the root separator emitted 31 cuts and
+kept **zero**, leaving an 85 % root gap, and HiGHS has no dynamism gate at all —
+its only `dynamism` line (`HighsCutGeneration.cpp:1061`) sits inside an `#if 0`.
+
+*Entry experiment.* Two gates, tested separately and then together, over all 38
+panel instances with a false-bound assertion on every run.
+
+1. **Relaxing the dynamism cap alone** (1e7 → 1e300): 7 instances better, 2
+   worse on root gap. `gsvm2rl3` **unchanged** — its cuts never reach the cap.
+2. **Keeping an unremovable small coefficient** instead of refusing the cut
+   (exact, no weakening): **0 of 38 changed.** Its cuts are then killed by the
+   dynamism cap instead.
+3. **Both together**: `gsvm2rl3` goes 0 → 99 cuts and 85.16 % → 76.11 % root gap;
+   7 better / 2 worse overall. At an intermediate cap of 1e12 the result is 6
+   better / 2 worse and `gsvm2rl3` stays at zero cuts — its coefficient range
+   exceeds 1e12, i.e. those cuts are genuinely ill-conditioned.
+
+*Kill criterion and result.* The bar is CLAUDE.md §5's second half: net-positive,
+not merely sound. Measured at a **fixed 5000-node budget** (deterministic, so the
+loaded machine could not contaminate it — load average was ~68 throughout, which
+invalidates any wall-clock or time-limited solved-count):
+
+| arm | solved | total nodes | dual gap better | worse |
+|---|---|---|---|---|
+| base (1e7, refuse) | 14/38 | 133,680 | — | — |
+| 1e12 + keep | 14/38 | 132,724 | 3 | 3 |
+
+**Cert-clean but neutral, so it does not ship** — the `DISCOPT_CUT_INHERIT` rule.
+The root-bound gain does not survive into tree progress. Not flagged, not
+default-off-with-a-knob: reverted, with the measurement recorded in a comment at
+the refusal site so the next person does not re-run it.
+
+*What it did leave behind.* One counter covered three distinct failures
+(unbounded-bound refusal, non-finite coefficient, ill-conditioned ratio), and I
+mis-diagnosed `gsvm2rl3` three times in a row off it — first as "dynamism", then
+as "the unbounded branch", before measurement showed it is the ratio test acting
+on cuts the unbounded branch let through. The counter is now split into
+`SubstDropUnbounded`, `SubstDropNonFinite` and `SubstDropDynamism`. That split is
+the shippable part of this experiment.
+
+*Carried forward.* `gsvm2rl3` (42 % dual gap) and `neos-2624317-amur` (zero cuts
+generated at all, 100 % dual gap, no feasible point) are not cut-*gating*
+failures. They need a cut family whose coefficients are conditioned by
+construction, which is Stage 2's business, not a threshold change.
 
 ### Explicitly dropped
 

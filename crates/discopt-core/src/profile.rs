@@ -391,6 +391,14 @@ counters!(
     // full separation output.
     RootCutsGenerated,
     RootCutsKept,
+    RootCutsSubstDropped,
+    SubstDropNoSlack,
+    SubstDropNoPrior,
+    SubstDropDegenerate,
+    SubstDropTooLong,
+    SubstDropDynamism,
+    SubstDropUnbounded,
+    SubstDropNonFinite,
     // Why a warm DUAL re-optimize was refused, forcing the primal fallback. On the
     // `rsyn0840m` OA master with a real root cut pool, 588 of 589 node LPs took the
     // primal path at 556 pivots each -- these separate "the shape is wrong" from
