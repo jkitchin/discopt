@@ -1588,25 +1588,33 @@ def _is_linear(expr: Expression) -> bool:
             return False
         # ** is always nonlinear
         return False
-    # #1039: ``SumOverExpression`` is deliberately NOT admitted here, even
-    # though the indexed summation Σ[t0, t1, ...] *is* linear when every term
-    # is. ``_is_linear`` is a shared gate with ~10 consumers, and several of
-    # them read a True as "and I can therefore take this apart": the hull
-    # substitution family (``_hull_linear_substitute`` → ``_substitute_vars``
-    # → ``_collect_variables``) and ``_bound_expression`` have no case for this
-    # node, so admitting it made hull emit ``Σ[3 terms] - (0 * y0) <= 0`` — the
-    # disjunct body imposed GLOBALLY, with the selector coefficient collapsed
-    # to zero and the disaggregated variables never created. That cut off the
-    # other mode and returned a false ``optimal`` certificate (-3.0 against a
-    # true -30.0) where this predicate's conservative False had previously
-    # produced a loud refusal. Callers that only need "can this body become one
-    # LP row" must ask ``_extract_body_coeffs`` directly — it returns the row as
-    # the witness, so it cannot promise more than it delivers. Widening
-    # ``_is_linear`` itself is tracked by #1154: it is a bound-changing change
-    # (it moves the FBBT structural mask at ``solver.py:3068`` and the aux-lift
-    # gate at ``factorable_reform.py:684``) and needs the §5 differential panel.
     if isinstance(expr, FunctionCall):
         return False
+    # #1154: the indexed summation Σ[t0, t1, ...] IS linear when every term is,
+    # and is admitted as such (``DISCOPT_GDP_SUMOVER``, default ON) — but only
+    # because the whole walker family moved with it. The ORDER is the lesson.
+    #
+    # ``_is_linear`` is a shared gate with ~10 consumers, and several read a True
+    # as "and I can therefore take this apart". #1039's first attempt widened
+    # this predicate ALONE, while the hull substitution family
+    # (``_hull_linear_substitute`` → ``_substitute_vars`` → ``_collect_variables``)
+    # and ``_bound_expression`` still had no case for the node. ``all_vars`` came
+    # back empty, so hull emitted ``Σ[3 terms] - (0 * y0) <= 0`` — the disjunct
+    # body imposed GLOBALLY, its selector coefficient collapsed to zero and the
+    # disaggregated variables never created. That cut off the other mode and
+    # certified ``optimal`` at -3.0 against a true -30.0: a dual bound ABOVE the
+    # minimum, where the conservative False had produced a loud refusal. #1150
+    # reverted it; #1154 shipped it with the family complete, plus
+    # ``_assert_hull_saw_every_variable``, which now refuses loudly rather than
+    # emitting that row for ANY node the collector cannot see.
+    #
+    # Two things stay true regardless. A caller that only needs "can this body
+    # become one LP row" should ask ``_extract_body_coeffs`` directly — it returns
+    # the row as the witness, so it cannot promise more than it delivers. And
+    # widening this predicate is bound-changing (it moves the FBBT structural mask
+    # at ``solver.py:3068`` and the aux-lift gate at ``factorable_reform.py:684``),
+    # which is why it ships behind a flag; the §5 panel that graduated it
+    # default-ON is ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
     terms = _sumover_terms(expr)
     if terms is not None:
         # A sum is linear iff every term is; an empty sum is the constant 0.
