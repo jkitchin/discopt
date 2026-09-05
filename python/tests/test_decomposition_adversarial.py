@@ -469,18 +469,53 @@ def _rand_gap(seed):
     return m
 
 
+# Both backends run to a fixed ITERATION budget, with a wall limit far above the
+# measured cost, so the dual ascent stops at the same iterate on both and the
+# bit-equality assertion below has a well-defined subject (#1165).
+#
+# A wall-clock-truncated bound is NOT a comparable quantity. Until #1165 each arm
+# got a bare ``time_limit=15``; the dual loop then stops wherever the stopwatch
+# caught it, so ``seq.bound == thr.bound`` was asserting that two *different
+# amounts of dual ascent* agree to the last bit -- a measurement of machine load,
+# not of the backend. Measured (``scratchpad/issue1165/``, one process, load ~1):
+#
+#   time_limit=15 (shipped)       18/18 identical on a QUIET box, every case
+#                                 ending on ``iteration_limit`` -- the assertion
+#                                 only breaks once the 15 s cap starts binding,
+#                                 and seed 4/5 kelley sat at 13.9 s per arm, i.e.
+#                                 right on the cliff. The reported failure
+#                                 (14.000000000718945 vs 14.000000000667704) is
+#                                 the work-terminated value against a truncated
+#                                 one: 14.000000000718945 is exactly what both
+#                                 arms return when neither is cut off.
+#   max_iterations=50, tl=300     36/36 identical, and identical across two
+#                                 independent reps, at ~3.5 s per arm (vs ~14 s
+#                                 at the default 200) -- ~85x headroom before the
+#                                 wall limit could bind again.
+#
+# Do not put the wall cap back: the soundness assertions are the valuable part
+# and they hold under either budget, but the differential one is only meaningful
+# when both arms terminate on work.
+_DUAL_DETERMINISTIC_KW = {"max_iterations": 50, "time_limit": 300}
+
+
 @pytest.mark.parametrize("seed", range(6))
 @pytest.mark.parametrize("method", ["subgradient", "bundle", "kelley"])
 def test_rand_lagrangian_dual_is_valid_lower_bound(seed, method):
     """The Lagrangian dual bound never exceeds the optimum (equality coupling
     exercises the free-multiplier path), across all three dual methods, and the
-    two backends agree bit-for-bit."""
+    two backends agree bit-for-bit at a fixed iteration budget (see
+    ``_DUAL_DETERMINISTIC_KW`` for why the budget is work and not wall clock)."""
     mono = _rand_gap(seed).solve(time_limit=30)
     if mono.status != "optimal":
         pytest.skip("degenerate instance")
     opt = float(mono.objective)
-    seq = solve_lagrangian(_rand_gap(seed), method=method, backend="sequential", time_limit=15)
-    thr = solve_lagrangian(_rand_gap(seed), method=method, backend="threads", time_limit=15)
+    seq = solve_lagrangian(
+        _rand_gap(seed), method=method, backend="sequential", **_DUAL_DETERMINISTIC_KW
+    )
+    thr = solve_lagrangian(
+        _rand_gap(seed), method=method, backend="threads", **_DUAL_DETERMINISTIC_KW
+    )
     for r in (seq, thr):
         if r.bound is not None:
             assert r.bound <= opt + 1e-2, f"{method}: unsound dual bound {r.bound} > opt {opt}"
@@ -488,6 +523,16 @@ def test_rand_lagrangian_dual_is_valid_lower_bound(seed, method):
             assert r.objective == pytest.approx(opt, abs=ABS)
         if r.objective is not None:
             assert r.objective >= opt - ABS, "recovered incumbent below optimum (infeasible?)"
+    # CLAUDE.md §6: assert the precondition rather than assume it. If the wall
+    # limit ever binds again the arms stop at machine-speed-dependent iterates
+    # and the comparison below is meaningless -- say so loudly instead of
+    # silently degrading back into the flake this test used to be.
+    for label, r in (("sequential", seq), ("threads", thr)):
+        assert r.status != "time_limit", (
+            f"{method}/seed{seed}: the {label} arm terminated on time_limit, so "
+            "this backend comparison is not valid -- raise time_limit or lower "
+            "max_iterations in _DUAL_DETERMINISTIC_KW rather than deleting this"
+        )
     assert seq.bound == thr.bound and seq.objective == thr.objective  # determinism
 
 

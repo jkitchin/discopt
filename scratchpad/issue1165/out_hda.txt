@@ -1,0 +1,8 @@
+### uptime before:
+ 17:01:53 up 12 min,  0 user,  load average: 1.39, 1.48, 0.86
+### ARM time (shipped: time_limit=25) x3 reps
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0    26.4s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=1    26.2s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
