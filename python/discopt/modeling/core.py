@@ -2172,6 +2172,12 @@ class Parameter(Expression):
 #: ``bound=-inf``, so it is decertified by the dual-side check regardless.
 _NON_GAP_CERTIFICATE_STATUSES = frozenset({"infeasible"})
 
+#: Statuses that make no claim about the GLOBAL problem (#1148). Imported from
+#: ``discopt.status`` -- a leaf module with no imports of its own -- rather than
+#: re-spelled here, so the vocabulary has exactly one definition and the benchmark
+#: harness, the solver and this dataclass cannot drift apart on what "local" means.
+from discopt.status import is_local_status as _is_local_status  # noqa: E402
+
 
 @dataclass
 class SolveResult:
@@ -2181,9 +2187,21 @@ class SolveResult:
     Attributes
     ----------
     status : str
-        Termination status. Typical values are ``"optimal"``, ``"feasible"``,
-        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``,
-        ``"iteration_limit"``, and ``"error"``.
+        Termination status. The vocabulary is defined in :mod:`discopt.status`:
+        ``"optimal"``, ``"feasible"``, ``"infeasible"``, ``"unbounded"``,
+        ``"time_limit"``, ``"node_limit"``, ``"iteration_limit"``, ``"error"``,
+        and the two **local** statuses added by #1148 —
+        ``"local_optimal"`` (a local stationary point, no global claim) and
+        ``"local_infeasible"`` (a local solver found no point, which is *not* an
+        infeasibility proof; a stalled MPEC continuation lands here).
+
+        The local statuses are a distinct status rather than a flag beside
+        ``"optimal"`` on purpose: a consumer that has never heard of the local
+        mode maps an unknown status to "unknown" and skips the row, so it fails
+        closed. Reusing ``"optimal"`` would have the benchmark harness score a
+        local stationary point as a *proved optimum*. A result carrying a local
+        status always has ``gap_certified=False`` and may never carry a
+        ``bound``; :meth:`__post_init__` enforces both.
     objective : float or None
         Best objective value found (None if infeasible).
     bound : float or None
@@ -2339,6 +2357,28 @@ class SolveResult:
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
+    # Source-level complementarity/MPEC residual report (#1148), populated by
+    # ``discopt.mpec.solve_mpec`` on every method. A
+    # ``discopt.mpec_report.SourceResidualReport``: residuals computed on the
+    # relations' SOURCE operands (which survive every rebuilding pass, #1147),
+    # each carrying the definition that produced it, plus the lowered rows'
+    # own residual so the two can be compared.
+    #
+    # ``None`` means NOT MEASURED -- never "measured clean". It arises three ways:
+    # the solve produced no incumbent, so there was no point to measure; the
+    # residual measurement refused (an operand the interval evaluator cannot walk;
+    # ``solve_mpec`` warns and returns the solve result unharmed); or the solve
+    # never went through ``solve_mpec`` at all. Use
+    # ``discopt.mpec.source_residuals(model, result)`` to measure a result the
+    # plain ``Model.solve`` path produced. A model with no complementarity
+    # relations reports ``n_scalar_relations=0``, which is a measurement of
+    # nothing rather than a clean bill of health -- read that field before the
+    # residual values.
+    #
+    # Typed ``object`` to keep the import lazy -- the report module reaches the
+    # interval evaluator, and ``SolveResult`` is constructed on every solve path.
+    mpec_report: Optional[object] = None
+
     # Set True when the final incumbent-verification guard (Model.solve, default
     # on) found the returned incumbent INFEASIBLE in the ORIGINAL problem — a
     # false primal, which can only arise from an unsound presolve mutation or a
@@ -2422,6 +2462,32 @@ class SolveResult:
             and self.objective is None
             and self.status not in _NON_GAP_CERTIFICATE_STATUSES
         ):
+            self.gap_certified = False
+            self.gap = None
+
+        # #1148 §C: a LOCAL result may never become a dual bound. A feasible point
+        # is a valid upper bound on a minimum, so a local solve may contribute an
+        # *incumbent* (after independent feasibility verification -- see
+        # ``discopt.mpec_report.accept_local_incumbent``); a dual bound is the
+        # certificate, and a local solve proves nothing about it. That asymmetry is
+        # what lets a local mode feed the global solver without contaminating it,
+        # and it is enforced here rather than left to each producer: every
+        # ``SolveResult`` passes through this one chokepoint, so a local status
+        # cannot carry a bound by any route. Refusing loudly rather than silently
+        # dropping the value: a caller that set one on a local result has a bug in
+        # what it believes it proved, and a quiet ``None`` would hide it
+        # (CLAUDE.md §3).
+        if _is_local_status(self.status):
+            if self.bound is not None or self.root_bound is not None:
+                raise ValueError(
+                    f"SolveResult(status={self.status!r}) carries a dual bound "
+                    f"(bound={self.bound!r}, root_bound={self.root_bound!r}). A local "
+                    "solve makes no global claim, so it may never contribute a dual "
+                    "bound -- only an incumbent, and only after independent "
+                    "feasibility verification (#1148 §C)."
+                )
+            # Certification is a claim about the global problem; a local status
+            # makes none. Absent certification is interpreted as NOT certified.
             self.gap_certified = False
             self.gap = None
 

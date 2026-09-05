@@ -20,6 +20,7 @@ Neumaier (1990), *Interval Methods for Systems of Equations*.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -102,6 +103,25 @@ def _indexed_interval(expr: IndexExpression, box: dict) -> Optional[Interval]:
     return Interval(np.asarray(lo), np.asarray(hi))
 
 
+def _reduced_count(arr: np.ndarray, axis: Optional[int]) -> int:
+    """How many terms a ``SumExpression`` reduction adds together.
+
+    ``axis=None`` sums every element; an integer axis sums along that axis only.
+    A 0-d operand is the identity, so it counts as one term and no widening is
+    applied. Used to size the accumulation-error bound, so an over-count would
+    only widen (safe) and an under-count would narrow (not safe) -- hence the
+    conservative fallback of ``arr.size`` for anything unexpected.
+    """
+    if arr.ndim == 0:
+        return 1
+    if axis is None:
+        return int(arr.size)
+    try:
+        return int(arr.shape[axis])
+    except (IndexError, TypeError):
+        return int(arr.size)
+
+
 def _eval(expr: Expression, model: Model, box: dict, cache: dict) -> Interval:
     eid = id(expr)
     if eid in cache:
@@ -160,7 +180,55 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
 
     # --- Aggregations ----------------------------------------------
     if isinstance(expr, SumExpression):
-        return _eval(expr.operand, model, box, cache)
+        # ``SumExpression`` IS a reduction: ``dag_compiler`` lowers it to
+        # ``jnp.sum(operand, axis=expr.axis)``. This used to return the operand's
+        # enclosure UNREDUCED, so ``sum(x)`` over ``x in [0, 10]^2`` came back as
+        # ``[0, 10]`` instead of ``[0, 20]`` -- an enclosure that does not contain
+        # the value, i.e. unsound in the narrow direction, and silently the wrong
+        # shape. Measured via the #1148 residual probe: a point ``x = (6, 6)``
+        # against the row ``sum(x) <= 10`` reported a violation of 0.0 where the
+        # true violation is 2.0, because the reduction never happened and the
+        # elementwise ``6`` cleared the row (#1158 review, HIGH 1).
+        #
+        # Summation is monotone increasing in every argument, so the enclosure of
+        # the sum is the sum of the endpoints -- no interval-arithmetic subtlety.
+        # Outward rounding by the ACCUMULATION error, not by one ULP.
+        #
+        # A single ``nextafter`` per endpoint is the right convention for a binary
+        # operation, and it is what ``_eval_matmul`` uses -- but a reduction over
+        # n terms accumulates far more than one ULP, so one step does not bound
+        # it. Measured on this branch against an exact ``fractions.Fraction``
+        # reference (3000 random sums, n in [4, 600], heavy cancellation at ~1e8):
+        # the one-ULP form returned an enclosure that did NOT contain the true sum
+        # on 2289 of 3000 trials, worst shortfall 1.5e-6. That is the same
+        # too-narrow enclosure the reduction fix was written to close, and this
+        # evaluator is on the solve path (nonlinear bound tightening, uniform/OA
+        # relaxation, the g-convex injection), where it becomes an FBBT tightening
+        # that cuts the optimum out of the box (#1158 review 3, MEDIUM 1).
+        #
+        # numpy sums pairwise, whose forward error is bounded by
+        # ``(log2(n) + 1) * eps * sum |x_i|``. That is the widening applied here,
+        # with a slack term and a final ``nextafter`` to cover the rounding of the
+        # bound's own computation. ``_relax/convexity/eigenvalue.py`` already takes
+        # the rigorous route for its own accumulation, so the pattern is the
+        # repo's, not an invention.
+        #
+        # Widening is always the SAFE direction: an enclosure may be loose and
+        # remain sound, but must never be narrow.
+        inner = _eval(expr.operand, model, box, cache)
+        lo_arr = np.asarray(inner.lo, dtype=np.float64)
+        hi_arr = np.asarray(inner.hi, dtype=np.float64)
+        lo = np.sum(lo_arr, axis=expr.axis)
+        hi = np.sum(hi_arr, axis=expr.axis)
+        n_terms = _reduced_count(lo_arr, expr.axis)
+        if n_terms > 1:
+            # +2 rather than +1: one for the bound's own rounding, one of slack.
+            factor = (math.log2(n_terms) + 2.0) * float(np.finfo(np.float64).eps)
+            lo_err = factor * np.sum(np.abs(lo_arr), axis=expr.axis)
+            hi_err = factor * np.sum(np.abs(hi_arr), axis=expr.axis)
+            lo = lo - lo_err
+            hi = hi + hi_err
+        return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
 
     if isinstance(expr, SumOverExpression):
         if not expr.terms:

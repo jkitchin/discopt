@@ -172,3 +172,159 @@ every lowering funnels through (`_scalarize_pairs`) — not at a call site. The
 fallback previously counted *within the list handed to the lowering*, and
 `Model.complementarity` hands over exactly one relation, so every unnamed
 declaration on a model became `compl0` and emitted `compl0_f_nonneg` twice.
+
+
+## 7. Source residuals — what a number means
+
+**Status:** normative for every consumer that reports a complementarity residual.
+**Issue:** [#1148](https://github.com/jkitchin/discopt/issues/1148) (slice 2),
+implemented in `discopt.mpec_report`.
+
+### The two residuals are different numbers
+
+POUNCE's internal barrier/KKT complementarity is a property of the **generated
+NLP**. The MPCC complementarity `0 <= f ⊥ g >= 0` is a property of the **user's
+model**. They are not the same measurement and must never be reported as if they
+were.
+
+Measured on `max x + y  s.t.  x == y, 0 <= x ⊥ y >= 0`, after a Scholtes homotopy
+stopped at `t = 1e-8`:
+
+| quantity | value |
+|---|---|
+| max violation of the generated rows (`x >= 0`, `y >= 0`, `x·y <= t`) | `1.0e-8` |
+| source complementarity `min(x, y)` on the declared operands | `1.4e-4` |
+
+Four orders of magnitude, at the same point, because the *regularized* problem
+admits `x = y ≈ sqrt(t)` and every row it holds is satisfied there. A result that
+reports only the first number says the point is complementary. It is not: the
+true MPCC forces `x = y = 0`, and the returned objective (`-2.8e-4`) is *below*
+the true optimum (`0`). `SourceResidualReport` carries both, side by side.
+
+### What is reported, and its definition
+
+Every residual is a `Residual` carrying `value`, the `definition` string that
+produced it, the `scale` it was measured against, and the algorithmic `floor`
+below which it cannot be driven. A number without its formula cannot be compared
+across solvers, which is why the definition is a field and not a docstring.
+
+| residual | definition |
+|---|---|
+| `source_complementarity` | `max_i min(f_i(x), g_i(x))` for a nonnegative pair; the normal map `\|z - mid(l, u, z - F(x))\|` for a box MCP. `product` and Fischer–Burmeister are selectable. |
+| `source_operand_bounds` | violation of the bounds the **relation** declares on each operand (nonnegativity for an NCP pair, the box for an MCP) |
+| `source_primal_feasibility` | max violation of the **source** constraint rows and the **original** declared variable bounds, on the source expression tree |
+| `selector_integrality` | `max_i y_i(1 - y_i)` over binary selectors, **after** checking `0 <= y_i <= 1` |
+| `lowered_row_residual` | max violation of the rows the lowering generated — the comparison quantity, never the source claim |
+
+Which definition is used is chosen from the relation's **declared bounds**, never
+from its `role` — the same rule §3 states for the lowerings, and for the same
+reason.
+
+### Scale, and the accuracy floor
+
+A uniform tolerance is meaningless when the two operands carry unrelated physical
+magnitudes (a multiplier in 1e-6 against a flow in 1e3), so a residual is reported
+both raw and divided by the relation's `effective_scale` (§3). A Scholtes
+regularization at `t` cannot attain a complementarity better than `sqrt(t)` —
+POUNCE Gate 0's documented floor
+([jkitchin/pounce#794](https://github.com/jkitchin/pounce/issues/794)) — so
+`Residual.floor` carries it and `at_floor` says whether the number is at it. A
+report that omitted the floor would imply exact orthogonality.
+
+### This field set is the shared benchmark schema
+
+[jkitchin/pounce#780](https://github.com/jkitchin/pounce/issues/780) lists
+"define the common benchmark metadata/result schema" as an immediate action.
+That schema is this one: `SourceResidualReport.as_dict()` is its serialization,
+and it is defined here rather than as a separate artifact so the two repositories
+do not end up with two vocabularies for the same numbers. Every entry carries
+`value`, `definition`, `scale`, `scaled_value`, `floor` and `at_floor`; the
+report adds `n_scalar_relations` (the executed-measurement count), the
+per-relation breakdown with `source_name`/`index` attribution, the continuation
+trace, and `stationarity` (always `null` — see §8).
+
+### The instrument checks itself
+
+Operands are evaluated with the interval evaluator over a **degenerate** box
+(`[x, x]` per variable, keyed by object identity). A correct evaluation stays
+degenerate; the evaluator widens to `[-inf, +inf]` for an atom it cannot walk, so
+a widened result proves the graph was *not* evaluated and `evaluate_at_point`
+raises rather than reporting a midpoint. Likewise `relation_residuals` refuses
+when it is handed relations and measures none, and every constraint-list entry
+kind (`Constraint`, `_DisjunctiveConstraint`, `_SOSConstraint`) has an explicit
+residual or raises — a row silently skipped would make the maximum read as
+complete. This is CLAUDE.md §6 applied to the instrument itself.
+
+
+## 8. Local results versus certificates — the contract
+
+**Status:** normative for every solver path that can return a local result.
+**Issue:** [#1148](https://github.com/jkitchin/discopt/issues/1148) §B/§C.
+Vocabulary in `discopt.status`; enforcement in `SolveResult.__post_init__`.
+
+### A distinct terminal status, not a flag
+
+`discopt.status` defines two statuses that make **no global claim**:
+
+* `local_optimal` — a local stationary point of the problem actually solved;
+* `local_infeasible` — a local solver found no point. This is **not** an
+  infeasibility proof. A stalled MPEC continuation lands here and never on
+  `infeasible`, which is a certificate in the other direction.
+
+It is a status and not a `certified=False` flag beside `"optimal"` because every
+consumer that pattern-matches on the *status* would inherit the bug. Measured on
+the benchmark harness: `is_solved` is `status == OPTIMAL`, and
+`proved_optimal_count` counts `gap is None and is_solved` as a proved optimum — a
+local stationary point reported as `"optimal"` is scored by the release gate as a
+**certificate**, which is CLAUDE.md §1's hard gate with no slack. An unmapped
+status maps to `UNKNOWN` and both counters skip the row, so a consumer that has
+never heard of the local mode fails closed. `DISCOPT_STATUS_MAP` names
+`local_optimal`/`local_infeasible` explicitly so that skip is intentional and
+tested rather than accidental.
+
+The states the vocabulary keeps apart: certified optimal; certified bound +
+incumbent with a gap; feasible with no bound; local stationary with no global
+claim; and certified-infeasible versus local-search-failed.
+
+### The asymmetry that makes a local mode safe
+
+> A local result **may become an incumbent only after independent feasibility
+> verification**, and **may never become a bound.**
+
+A feasible point is a valid upper bound on a minimum; a dual bound is the
+certificate and never comes from a local solve. That asymmetry is what lets a
+local mode feed the global solver without contaminating it. It is enforced
+structurally, not by convention: `SolveResult.__post_init__` **raises** if a
+local status carries a `bound` or a `root_bound`, and forces `gap_certified` to
+`False`. Refusing rather than silently clearing the field is deliberate — a
+caller that set one has a bug in what it believes it proved.
+`mpec_report.accept_local_incumbent` is the verification side: it runs the shared
+`validation.feasibility.verify_point` and returns `None` rather than vouching for
+a point it cannot verify.
+
+Two further rules:
+
+* **Validation is performed on the source model**, not only on the generated NLP.
+  A smoothing tolerance can be small while a truth value near a strict predicate
+  boundary has already flipped — §7's table is that case.
+* **Absent certification is interpreted as not certified.**
+  `status.is_certified_status` is a membership test against a closed set, never
+  `not is_local_status(...)`.
+
+### Stationarity is not claimed
+
+C-/M-/S-stationarity classifications are reported **only** if discopt has actually
+checked the required conditions. It has not, so `SourceResidualReport.stationarity`
+is `None` and no code path sets it. Reporting a classification the solver did not
+verify would be exactly the §1 error this document exists to prevent.
+
+### One return type
+
+`mpec.solve_mpec` returns a `modeling.core.SolveResult` for `scholtes`, `sos1`
+**and** `gdp`. Before #1148 switching one keyword changed the returned type, the
+type of `status` (enum versus str) and whether a certification field existed at
+all, so no caller could write one branch that read a result. The Scholtes arm
+carries its continuation trace — per-stage `t`, subsolver status, accept/reject
+reason and the achieved source residual — rather than discarding it, so
+"converged at 1e-8" and "stalled at 1e-2" are distinguishable from the result
+alone.
