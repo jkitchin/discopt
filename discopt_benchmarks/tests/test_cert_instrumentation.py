@@ -171,7 +171,8 @@ def test_reduction_separation_timers_present_and_bounded():
     non-negative floats; the timers sum to no more than the wall time; at least one
     timer is strictly positive (cert:T0.3).
 
-    Plus per-decision cut-pool telemetry (``pool/gate_*``, cut-inheritance gating).
+    Plus per-decision cut-pool telemetry (``pool/gate_*``, cut-inheritance gating)
+    and the ``row_filter/`` counters (#1039/#1150).
 
     NOTE (schema, not a weakening): the ``sum(values) <= wall_time`` invariant is
     only meaningful for the *timer* families — ``cuts/`` values are counts and
@@ -192,7 +193,13 @@ def test_reduction_separation_timers_present_and_bounded():
     stats = result.solver_stats
     assert stats is not None and len(stats) > 0
     _TIMER_FAMILIES = ("reduce/", "separate/")
-    _NON_TIMER_FAMILIES = ("cuts/", "pool/")
+    # ``row_filter/`` (#1039/#1150) is COUNTS -- invocations and rows dropped by the
+    # candidate-A row filter -- so it belongs here and not above: it is not seconds,
+    # and admitting it to the timer families would corrupt the ``sum <= wall_time``
+    # invariant below. It is emitted unconditionally, zeros included, precisely so a
+    # dormant filter is distinguishable from an unwired counter, which is why it now
+    # reaches this schema check on every spatial solve.
+    _NON_TIMER_FAMILIES = ("cuts/", "pool/", "row_filter/")
     _KNOWN = _TIMER_FAMILIES + _NON_TIMER_FAMILIES
     # Every entry is a non-negative float in a known instrumentation family.
     assert all(isinstance(v, float) and v >= 0.0 for v in stats.values())

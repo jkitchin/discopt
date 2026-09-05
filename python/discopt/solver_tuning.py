@@ -1014,6 +1014,58 @@ class SolverTuning:
     Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
+    gdp_sumover: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
+    )
+    """Teach the GDP/relaxation expression walkers the indexed-summation node
+    ``SumOverExpression`` (``dm.sum(f(i) for i in S)``)
+    (``DISCOPT_GDP_SUMOVER``, default **ON** -- graduated by the §5 panel below;
+    opt out with ``DISCOPT_GDP_SUMOVER=0``, which restores the pre-#1154 walkers
+    byte for byte. #1154).
+
+    ``SumOverExpression`` holds its already-expanded term list in ``.terms``. Six
+    walkers in :mod:`discopt._relax.gdp_reformulate` had no case for it, so a
+    disjunct body built with ``dm.sum`` was under-reported as having no variables
+    (``_collect_variables``), non-linear (``_is_linear``), unbounded
+    (``_bound_expression``) and un-evaluable at the origin (``_body_at_zero``).
+    On ``main`` that costs three loud refusals: ``auto``/``big-m`` cannot bound
+    the body, ``hull`` cannot form ``g(0)``.
+
+    With the flag ON the six walkers treat ``Σ[t1, …, tn]`` **exactly** as the
+    left-folded chain ``t1 + … + tn`` — the desugaring the modeling layer could
+    equally have produced — so nothing about the reformulation's mathematics is
+    new; only the node type is newly recognised. The invariant is machine-checked
+    per walker in ``python/tests/test_1154_gdp_sumover_hull.py``.
+
+    **Graduated default-ON** (§5, 2026-09-04) on a panel that meets both bars;
+    full tables in ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
+
+    *Cert-clean.* The flag is **structurally inert** on the ``.nl`` corpus -- the
+    node is created only by the Python modeling API's ``dm.sum`` and the ``.nl``
+    reader never emits one, measured at 0 occurrences in 33 376 DAG nodes over all
+    66 vendored instances -- and the A/B differential is byte-identical on 63/66,
+    the other 3 reproducing their whole difference *within a single arm* (a
+    role-1 ``time_limit`` truncation artifact, #1116). Scored against the oracle:
+    52 instances, 0 bound violations, 0 primal violations. On the class where the
+    mechanism fires (108 generated GDP models x 3 routes x 2 arms = 648 solves,
+    every incumbent feasibility-verified in numpy against the original
+    disjunction): **0 invalid bounds**.
+
+    *Net-positive.* Three loud refusals on the issue's repro become three
+    certified optima at the true ``-30.0``. ``auto`` and ``big-m`` are
+    bit-identical between a ``Σ[...]`` body and the equivalent folded chain on all
+    108 cases; on ``hull`` with a nonlinear body the ``Σ`` form certifies
+    **46/54** against the chain's **29/54**, sd **0.00** over 3 interleaved reps
+    on a quiet machine. 731 GDP/OA/Benders/GBD/MPEC tests give identical results
+    in both arms.
+
+    Note the ordering that PR #1150 got wrong: widening ``_is_linear`` **alone**
+    made hull emit the disjunct body globally with its selector coefficient
+    collapsed to zero (``all_vars`` was empty, so no disaggregated variables were
+    created) and return a dual bound of −3.0 on a model whose true minimum is
+    −30.0. The walkers must move together; the independent-walker cross-check in
+    ``_reformulate_disjunction_hull`` now refuses loudly rather than emit that row."""
+
     disjunctive_config_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_DISJUNCTIVE_CONFIG_BOUND", default=False)
     )
@@ -1259,6 +1311,91 @@ class SolverTuning:
     whole-base-build path. Like #694, with the deadline active the fallback bound
     becomes timing-dependent (an anytime algorithm), so it is not bit-reproducible
     run-to-run; the ``=0`` opt-out path stays deterministic."""
+
+    root_setup_build_deadline: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_SETUP_BUILD_DEADLINE", default=True)
+    )
+    """Bound the **pre-B&B root-setup** relaxation builds by the solve's own
+    deadline, minus the root-fallback reserve
+    (``DISCOPT_ROOT_SETUP_BUILD_DEADLINE``, default **ON** — GRADUATED per §5, set
+    ``=0`` to opt out; §5 bound-changing; issue #1152).
+
+    #832 gave the root-relaxation *fallback*'s builds a deadline; the root-setup
+    phases that run BEFORE it — root OBBT's per-round envelope rebuild, the root LP
+    probe, the root cut pool — still build unbudgeted. Each of those phases polls a
+    deadline between its LP solves but not inside the build, so a build that starts
+    just before the deadline runs to completion past it. Measured on ``casctanks`` at
+    ``time_limit=5`` (in-repo corpus): root OBBT starts its round build at t=4.39 s
+    with 0.61 s left and spends 1.85 s in it, so the solve returns at 6.4 s (1.29x)
+    and — the second half of the defect — the #654 short-circuit then finds
+    ``_remaining_budget() == 0`` and skips the root-relaxation fallback entirely, so
+    the solve reports ``bound=None`` where a slice of a second would have proved one.
+
+    That is issue #1152's contradiction in miniature: "honour the deadline" and "keep
+    the dual bound" read as opposing contracts only because the long root operations
+    are all-or-nothing. When on, ``solve_model`` threads one absolute root-setup
+    deadline (``time_limit`` minus the ``_ROOT_FALLBACK_RESERVE_S`` slice the
+    fallback needs) into those builds as the ``build_deadline`` the #694/#832 anytime
+    mechanism already implements: the constraint-row loop stops at the deadline and
+    the partial relaxation is still a valid outer approximation. It also declines to
+    *start* the native-kernel spec build (two whole relaxation builds whose row sets
+    must correspond, so it is not truncatable) once that deadline is spent.
+
+    Sound by construction, in each direction the truncation reaches:
+
+    * **OBBT** tightens ``x_i`` to the optimum of ``min x_i`` over the relaxation
+      polytope. Dropping constraint rows only ENLARGES that polytope, so the LP
+      optimum moves outward and the tightening is weaker — never invalid. The #208
+      cascade's carried aux-column bounds are keyed by column index and a truncated
+      build has a different lifted layout, so they are neither applied to nor
+      captured from a truncated build.
+    * **The root LP probe** decides whether to keep the relaxer and banks a bound
+      that ``_root_relaxation_lower_bound`` re-gates on exact box equality; a
+      truncated build can only make that bound weaker (fewer rows), and #928's
+      cut-short objective floor keeps it finite.
+    * **The root cut pool** only adds cuts; a truncated build separates fewer of
+      them, which loosens per-node bounds and never invalidates one.
+
+    Bound-**changing** (a truncated setup build can weaken the root box, the probe
+    bound or the pool), hence flag-gated. Off is byte-identical: no build deadline is
+    computed, no entry gate is consulted, and ``_setup_remaining_budget`` returns the
+    plain remainder.
+
+    GRADUATED default-ON per §5 (one passing graduation-gate run suffices) on the
+    in-repo corpus differential — 66 instances x ``time_limit`` {5 s, 20 s}, both arms
+    interleaved per instance, 132 pairs / 559 comparisons
+    (``scratchpad/i1152/panel.py`` + ``panel_report.py``):
+
+    * *cert-clean*: **0** soundness violations — no dual bound above its reference
+      optimum, none crossing its own incumbent — **0** certification regressions and
+      **0** certified objectives changed.
+    * *net-positive*: 2 bounds RECOVERED from ``None`` (``casctanks`` -> 1.2584,
+      ``bchoco08`` -> 1.0) and 3 tightened (``4stufen`` 18770 -> 19055, ``beuster``
+      5942 -> 6352, ``nvs09`` -50.59 -> -48.99, all still below the -43.13 oracle),
+      against **1** marginally looser (``tanksize`` at 20 s, 1.253535 -> 1.253040, a
+      4e-4 relative move, both below the 1.26864 certified optimum) and **0** lost.
+      Punctuality is neutral-to-better: mean ``wall/time_limit`` 0.447 -> 0.440 with
+      the two large wins on the class the issue names (``casctanks`` 1.23x -> 1.02x,
+      ``beuster`` 1.13x -> 0.98x) and no pair newly over 1.25x.
+
+    One measured counter-example, recorded rather than averaged away: ``hda`` at an
+    8 s budget (not one of the panel's two) goes the other way — 9.68 s (sd 0.25) ->
+    10.26 s (sd 0.10) over 3 interleaved reps per arm, 1.21x -> 1.28x, with a
+    bit-identical bound. Root setup finishing 2.4 s earlier lets the search start two
+    more nodes and the last one straddles the deadline: the pre-existing per-node
+    overrun (#966), given more chances to fire, not a setup overrun.
+
+    Scope of that panel, stated rather than glossed: it is the in-repo corpus, which
+    does contain ``casctanks`` (one of the four overrun instances the issue lists,
+    reproducing both symptoms) but not the two the issue names. Those were run
+    separately on the owner's machine during the PR review and are the arm that
+    closes it — ``sonet23v4`` at ``tl=2`` and ``watercontamination0202`` at
+    ``tl=30``/``tl=60``, the instances behind #1152's own two tests: **3 pass** with
+    the flag on its default and **3 xfail** under
+    ``DISCOPT_ROOT_SETUP_BUILD_DEADLINE=0``, back to back at load 5.4. The OFF arm is
+    what attributes the pass to this flag rather than to the machine, and doubles as
+    an end-to-end check that the §5 opt-out is live. See
+    ``docs/dev/1152-time-limit-root-setup-contract-2026-09-04.md``."""
 
     node_round_budget: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_NODE_ROUND_BUDGET", default=False)

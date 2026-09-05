@@ -98,20 +98,28 @@ def solve_gdpopt_loa(
     linear_senses = []
     nonlinear_indices = []
 
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _is_linear
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
 
+    # #1039: ask ONE question, and ask the component that answers it with a
+    # witness. This loop used to gate on ``_is_linear(c.body)`` first and only
+    # then call the extractor — two predicates for one decision, and the
+    # conservative one wins. ``_is_linear`` rejects ``SumOverExpression``, so
+    # the ``exactly-one`` row that ``make_disjunct``/``add_disjunction`` emits
+    # never reached the master MILP: the master could pick "no disjunct
+    # active", whose fixed-integer NLP is infeasible, and LOA reported
+    # ``status="unknown"`` on a trivially feasible model. ``_extract_body_coeffs``
+    # returning ``(c_vec, offset)`` *is* the proof the body is one linear row —
+    # it cannot claim more than it produces — so it is the correct and only
+    # gate. Anything it cannot read goes to the NLP subproblem, as before.
     for k, c in enumerate(reformulated._constraints):
         if not isinstance(c, Constraint):
             continue
-        if _is_linear(c.body):
-            coeffs = _extract_body_coeffs(c.body, reformulated, n_vars)
-            if coeffs is not None:
-                c_vec, off = coeffs
-                linear_A_rows.append(c_vec)
-                linear_b_rows.append(-off)  # body - off sense 0 → c_vec @ x sense -off
-                linear_senses.append(c.sense)
-            else:
-                nonlinear_indices.append(k)
+        coeffs = _extract_body_coeffs(c.body, reformulated, n_vars)
+        if coeffs is not None:
+            c_vec, off = coeffs
+            linear_A_rows.append(c_vec)
+            linear_b_rows.append(-off)  # body - off sense 0 → c_vec @ x sense -off
+            linear_senses.append(c.sense)
         else:
             nonlinear_indices.append(k)
 

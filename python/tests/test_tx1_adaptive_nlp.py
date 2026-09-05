@@ -20,7 +20,8 @@ Soundness contract asserted here:
     yields a valid dual bound (``bound <= optimum`` for min), never a false
     certificate.
   * The back-off mechanism actually fires (effective stride grows when the
-    node-NLP stops improving the incumbent).
+    node-NLP stops improving the incumbent). Asserted on tspn05: nvs09's tree
+    is now too short to accumulate the patience counter (#1039).
 
 Marked ``slow``: real vendored solves.
 """
@@ -41,6 +42,8 @@ _DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl")
 # nvs09 BARON-confirmed optimum (minlplib.solu; matches this repo's measured
 # certified objective to 1e-6).
 _NVS09_OPT = -43.13433691803531
+# tspn05 reference optimum (minlplib.solu ``=best= 191.2552078000``).
+_TSPN05_OPT = 191.2552078
 _ABS = 1e-6
 _REL = 1e-4
 
@@ -87,24 +90,59 @@ def test_adaptive_nlp_convex_inert(monkeypatch):
 
 
 @pytest.mark.slow
-def test_adaptive_nlp_nonconvex_sound_and_backoff_fires(monkeypatch, caplog):
-    """On nvs09 the flag preserves the optimum + a valid bound, and backs off."""
-    with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
-        res = _solve("nvs09", adaptive=True, tl=30, monkeypatch=monkeypatch)
+def test_adaptive_nlp_nonconvex_sound(monkeypatch):
+    """On nvs09 the flag preserves the optimum and a valid dual bound."""
+    res = _solve("nvs09", adaptive=True, tl=30, monkeypatch=monkeypatch)
 
     # Not an error / not false-infeasible.
     assert res.status in ("optimal", "feasible")
     assert res.objective is not None
     tol = _ABS + _REL * abs(_NVS09_OPT)
-    # Incumbent is the true optimum (never beats it — no false-feasible).
+    # Incumbent is the true optimum (never beats it -- no false-feasible).
     assert res.objective >= _NVS09_OPT - tol
     assert abs(res.objective - _NVS09_OPT) <= tol
     # Dual bound is a valid lower bound (min sense): never crosses the optimum.
-    if res.bound is not None:
-        assert res.bound <= _NVS09_OPT + tol
+    # #1039: asserted unconditionally. The old ``if res.bound is not None`` guard
+    # made this arm vacuous the moment the bound went missing -- which is exactly
+    # the failure it exists to catch.
+    assert res.bound is not None, "nvs09 returned no dual bound"
+    assert res.bound <= _NVS09_OPT + tol
+
+
+@pytest.mark.slow
+def test_adaptive_nlp_backoff_fires(monkeypatch, caplog):
+    """The back-off mechanism engages, and the instance it engages on stays sound.
+
+    #1039: this assertion used to ride on nvs09, and it stopped firing there --
+    not because the back-off broke, but because nvs09 got easy. It now certifies
+    in 31 nodes, and ``_ADAPTIVE_NLP_PATIENCE = 2`` consecutive non-improving
+    *fired* batches at ``node_nlp_stride = 4`` never accumulate in a tree that
+    short. Measured at ``time_limit=30`` with ``DISCOPT_ADAPTIVE_NLP=1``:
+
+        nvs09       optimal    31 nodes   TX1 total=0  back-off=0
+        casctanks   feasible   31 nodes   TX1 total=0  back-off=0
+        bchoco07    time_limit  3 nodes   TX1 total=0  back-off=0
+        tspn05      optimal    43 nodes   TX1 total=2  back-off=2
+
+    So the mechanism is live and is re-pointed at tspn05 rather than retired --
+    dropping it would leave the back-off with no test at all. nvs09 keeps the
+    soundness half above; this test carries both the firing assertion and its own
+    soundness assertions, so the re-pointing does not trade coverage away.
+    """
+    with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
+        res = _solve("tspn05", adaptive=True, tl=30, monkeypatch=monkeypatch)
+
+    # Soundness on the re-pointed instance, same contract as nvs09 above.
+    assert res.status in ("optimal", "feasible")
+    assert res.objective is not None
+    tol = _ABS + _REL * abs(_TSPN05_OPT)
+    assert res.objective >= _TSPN05_OPT - tol
+    assert abs(res.objective - _TSPN05_OPT) <= tol
+    assert res.bound is not None, "tspn05 returned no dual bound"
+    assert res.bound <= _TSPN05_OPT + tol
 
     # The adaptive back-off actually engaged (effective stride grew at least once).
     assert any(
         "TX1 adaptive node-NLP" in rec.getMessage() and "back off" in rec.getMessage()
         for rec in caplog.records
-    ), "expected the adaptive node-NLP back-off to fire on nvs09"
+    ), "expected the adaptive node-NLP back-off to fire on tspn05"

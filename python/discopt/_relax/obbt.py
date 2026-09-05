@@ -1816,6 +1816,7 @@ def obbt_tighten_root(
     *,
     rounds: int = 3,
     deadline: Optional[float] = None,
+    build_deadline: Optional[float] = None,
     time_limit_per_lp: float = 0.2,
     min_width: float = 1e-6,
     eps: float = 1e-7,
@@ -1856,6 +1857,17 @@ def obbt_tighten_root(
         box.  Stops early when a sweep tightens nothing.
     deadline : float, optional
         Absolute ``time.perf_counter()`` budget; the loop aborts when reached.
+    build_deadline : float, optional
+        Absolute ``time.perf_counter()`` budget for the per-round ENVELOPE BUILD
+        (issue #1152). ``deadline`` is polled between rounds and between LPs, but a
+        round's ``build_milp_relaxation`` is uninterruptible once started, so a build
+        entered just inside ``deadline`` runs past it (measured: casctanks spends
+        1.85 s in a build entered with 0.61 s left). Passing this stops the build's
+        constraint-row loop when spent (the #694/#832 anytime mechanism). Sound: a
+        relaxation with fewer rows is a LARGER polytope, so every OBBT bound read off
+        it is weaker, never invalid. The #208 aux cascade is skipped on a truncated
+        build — its carried bounds are keyed by column index and a truncated build
+        has a different lifted layout.
     incumbent_cutoff : float, optional
         If a feasible objective is known, add ``obj <= cutoff`` to the polytope
         (optimality-based tightening) — often a much larger reduction.
@@ -1983,6 +1995,14 @@ def obbt_tighten_root(
         def _apply_carried_aux(milp) -> None:
             if not (cascade_aux and carried_aux):
                 return
+            # #1152: the index correspondence above holds only across WHOLE builds.
+            # A ``build_deadline``-truncated build stopped part-way through the
+            # constraint loop, so its lifted columns are a prefix of the full layout
+            # and column ``c`` need not be the same quantity it was last round.
+            # Applying a carried bound by index there could tighten the wrong
+            # column — an unsound cut, not merely a weaker one — so skip it.
+            if bool(getattr(milp, "_build_truncated", False)):
+                return
             n_total = len(milp._bounds)
             for col, (alb, aub) in carried_aux.items():
                 if n_orig <= col < n_total:
@@ -1991,6 +2011,10 @@ def obbt_tighten_root(
 
         def _capture_aux(milp, res) -> None:
             if not cascade_aux:
+                return
+            # #1152, the mirror of ``_apply_carried_aux``: never record an aux bound
+            # against a column index that a truncated build assigned.
+            if bool(getattr(milp, "_build_truncated", False)):
                 return
             n_total = len(milp._bounds)
             tl, tu = res.tightened_lb, res.tightened_ub
@@ -2022,6 +2046,7 @@ def obbt_tighten_root(
                     relaxer._terms,
                     relaxer._disc,
                     bound_override=(lb, ub),
+                    build_deadline=build_deadline,
                 )
             except Exception as exc:  # noqa: BLE001 - keeps the tightening found so far
                 # Capability-disabling: without an envelope there is no OBBT round
@@ -2071,6 +2096,7 @@ def obbt_tighten_root(
                                 relaxer._terms,
                                 relaxer._disc,
                                 bound_override=(lb, ub),
+                                build_deadline=build_deadline,
                             )
                             _apply_carried_aux(milp)
                         except Exception as exc:  # noqa: BLE001 - keeps the bounds already found

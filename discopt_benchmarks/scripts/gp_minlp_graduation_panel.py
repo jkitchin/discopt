@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -151,6 +152,26 @@ def _feasible(nl_path: Path, x: dict) -> tuple[bool, list[str]]:
     return (not msgs), msgs
 
 
+def _closed_its_tree(result) -> bool:
+    """Did *result* actually finish the model, rather than merely report a valid gap?
+
+    #1039. Mirrors :func:`discopt.solver._route_result_is_certified`, which #1059
+    introduced for the same confusion on the auto-route fallback path. A terminal
+    ``infeasible``/``unbounded`` verdict is a certificate; otherwise the gap must
+    be certified *and* closed to the panel's own relative tolerance.
+    """
+    if result is None:
+        return False
+    if getattr(result, "status", None) in ("infeasible", "unbounded"):
+        return True
+    if not bool(getattr(result, "gap_certified", False)):
+        return False
+    gap = getattr(result, "gap", None)
+    if gap is None or not math.isfinite(gap):
+        return False
+    return float(gap) <= _REL
+
+
 def evaluate_affected(name: str, nl_path: Path, time_limit: float) -> InstanceResult:
     m = from_nl(str(nl_path))
     info = classify_gp_minlp(m)
@@ -183,9 +204,22 @@ def evaluate_affected(name: str, nl_path: Path, time_limit: float) -> InstanceRe
             res.cert_clean = False
             res.violations.append(f"ON bound {on.bound} crosses oracle {oracle}")
     # (c) ON must certify (a recognised GP-MINLP closes its tree).
-    if not on.gap_certified:
+    #
+    # #1039: ``gap_certified`` alone is NOT that test, and reading it as one was
+    # already established as a measured defect by #1059 — see
+    # ``discopt.solver._route_result_is_certified``. The flag means "the reported
+    # gap is mathematically valid", not "the gap is closed": a time-limited run
+    # can legitimately carry ``gap_certified=True`` beside a wide-open gap.
+    # Measured on ``nvs17`` at ``time_limit=6``: ``status="time_limit"``,
+    # ``bound=-1514.706902950524``, ``objective=-1100.4``, gap **37.65%**,
+    # ``gap_certified=True``. This bar counted that as a certified instance.
+    # "Closes its tree" is a terminal verdict, or a gap closed to tolerance.
+    if not _closed_its_tree(on):
         res.cert_clean = False
-        res.violations.append("ON did not certify (gap_certified=False)")
+        res.violations.append(
+            f"ON did not close its tree (status={on.status}, "
+            f"gap_certified={on.gap_certified}, gap={on.gap})"
+        )
     # (d) cross-check against the independent classic B&B optimum, when it has one.
     if off.objective is not None and not _within(on.objective, off.objective):
         res.cert_clean = False

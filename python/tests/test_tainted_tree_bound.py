@@ -73,14 +73,36 @@ def test_uncertified_feasible_exit_reports_valid_finite_dual_bound():
 @pytest.mark.slow
 @pytest.mark.skipif(not _has(_NVS17), reason="nvs17.nl not vendored")
 def test_reported_bound_is_a_valid_lower_bound_not_a_false_certificate():
-    """Whatever the exit status, a reported bound never exceeds the optimum and a
-    *certified* gap is only claimed when the bound genuinely meets the incumbent."""
+    """Whatever the exit status, a reported bound never exceeds the optimum and
+    never crosses the incumbent it is paired with.
+
+    #1039: this test used to require that ``gap_certified`` implied a *closed*
+    gap. That is not what the flag means, and #1059 had already established the
+    opposite reading as the correct one (see
+    ``discopt.solver._route_result_is_certified``): ``gap_certified`` asserts the
+    reported gap is mathematically valid, not that it is closed. ``nvs17`` at
+    ``time_limit=6`` legitimately returns ``status="time_limit"``,
+    ``bound=-1514.7``, ``objective=-1100.4``, gap 37.65%, ``gap_certified=True``
+    — a sound, honestly-reported, wide gap. Requiring closure here was asserting
+    a contract the field does not have. What the flag *does* promise is checked
+    below; gap closure is asserted where it genuinely holds, on ``optimal``.
+    """
     r = from_nl(_NVS17).solve(time_limit=6, gap_tolerance=1e-4)
-    if r.bound is not None and np.isfinite(r.bound):
-        assert r.bound <= _NVS17_OPT + 1e-4 * max(1.0, abs(_NVS17_OPT))
+    # nvs17 always reaches a finite dual bound in 6 s. Assert that rather than
+    # guarding on it — a guard here would let the whole test pass vacuously if
+    # the bound ever went missing, which is the regression most worth catching.
+    assert r.bound is not None and np.isfinite(r.bound), f"no finite bound: {r.bound}"
+    # Soundness: a lower bound on a minimize never exceeds the true optimum.
+    assert r.bound <= _NVS17_OPT + 1e-4 * max(1.0, abs(_NVS17_OPT))
     if r.gap_certified:
-        # A certificate requires a finite bound that meets the incumbent.
-        assert r.bound is not None and np.isfinite(r.bound)
+        # What the flag promises: the reported gap is a valid one, i.e. the bound
+        # is finite and does not cross the incumbent it is quoted against.
+        assert r.objective is not None
+        assert r.bound <= r.objective + 1e-6, (
+            f"certified gap with bound {r.bound} above incumbent {r.objective}"
+        )
+    if r.status == "optimal":
+        # Closure is a property of the terminal status, not of gap_certified.
         assert r.objective is not None
         assert abs(r.objective - r.bound) <= 1e-4 * max(1.0, abs(r.objective)) + 1e-6
 
