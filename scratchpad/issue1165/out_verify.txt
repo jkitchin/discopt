@@ -2,3 +2,21 @@
 All checks passed!
 964 files already formatted
 ### mypy
+python/discopt/gams/link.py:275: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+python/discopt/dae/mol.py:310: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+Success: no issues found in 335 source files
+### smoke
+python/tests/test_unbounded_relaxation_soundness.py::test_ex14_1_9_reported_bound_never_exceeds_incumbent
+  /home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x1 (lb=-inf, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1129 passed, 20 skipped, 9376 deselected, 2 xpassed, 26 warnings in 430.59s (0:07:10)
+### adversarial slow suite
+python/tests/test_adversarial_recent_fixes.py::test_triggering_instance_is_sound[nvs22]
+  /home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x4 (lb=-inf, ub=inf), x5 (lb=-inf, ub=inf), x6 (lb=-inf, ub=inf), x7 (lb=-inf, ub=inf).  Nonlinear tightening can adjust 8 bounds via defined_variable_forward. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+19 passed, 7 warnings in 163.74s (0:02:43)
+### done
