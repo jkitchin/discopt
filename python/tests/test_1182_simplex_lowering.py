@@ -571,3 +571,22 @@ def test_a_weight_name_cannot_collide_with_a_user_variable():
     m, _x = _overlap_model()
     with pytest.raises(ValueError, match="reserved"):
         m.continuous(f"{SIMPLEX_WEIGHT_PREFIX}0", lb=0.0, ub=1.0)
+
+
+@pytest.mark.unit
+def test_a_row_whose_shape_is_not_statically_known_is_refused_not_assumed_scalar():
+    """ "Shape unknown" takes the refusing branch, not the scalar branch.
+
+    ``Expression.shape`` raises for a scalar reduction and for an array-valued
+    one alike, and #1160 is the case where an axis-reduced sum was several rows
+    rather than one. Weighting a vector of predicates with a single lambda would
+    emit a different feasible set, so the unknown case refuses.
+    """
+    m = dm.Model("unknown_shape")
+    a = m.continuous("a", (2, 3), lb=-1.0, ub=1.0)
+    m.minimize(a[0, 0])
+    row = dm.sum(a, axis=1) <= 0.0
+    dc = _DisjunctiveConstraint(disjuncts=[[row], [a[0, 0] >= 1.0]], name="u")
+    with pytest.raises(SimplexLoweringRefused) as exc:
+        lower_disjunction_simplex(dc, lambda size: _fake_weight(m, size, []))
+    assert "not statically known" in str(exc.value) or "shape" in str(exc.value)

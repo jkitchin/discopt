@@ -277,12 +277,30 @@ class DisjunctionResidualReport:
 
 
 def _require_scalar(body: Expression, where: str) -> None:
+    """Refuse a disjunct row that is not statically one scalar predicate.
+
+    Theorem 1 weights **one literal**, so an array-valued row would need
+    per-element weights and a per-element CNF distribution. Rows whose shape is
+    not statically known (reductions, matmul, custom calls) are refused too, and
+    that is deliberate rather than conservative-by-accident: ``Expression.shape``
+    raises for both a scalar reduction and an array-valued one, and #1160 is
+    exactly the case where an axis-reduced sum turned out to be several rows
+    rather than one. Treating "shape unknown" as "scalar" would weight a vector
+    of predicates with a single lambda and silently emit a different feasible
+    set, so the unknown case takes the refusing branch (CLAUDE.md §3). big-M and
+    hull remain available for such a row.
+    """
     try:
         shape = body.shape
-    except AttributeError:
-        # Shape not statically known (reductions, matmul, ...). A reduction is a
-        # scalar; anything else would need per-element weights.
-        return
+    except AttributeError as exc:
+        raise SimplexLoweringRefused(
+            f"{where}: the disjunct row's shape is not statically known "
+            f"({exc}), so it cannot be established to be a single scalar "
+            "predicate. Theorem 1 weights one literal per disjunct; an "
+            "array-valued row (an axis-reduced sum, a matmul) would need "
+            "per-element weights. Expand the row into scalar rows, or use "
+            "gdp_method='big-m'/'hull'."
+        ) from exc
     if shape not in ((), (1,)):
         raise SimplexLoweringRefused(
             f"{where}: disjunct row has shape {shape}; Theorem 1 needs one weight "
