@@ -1848,13 +1848,22 @@ because its separators found no further violated cut, not because it ran out of
 budget. discopt's root is *exhausted* at 169.4. Reaching HiGHS's 198.4 requires cut
 families discopt does not have, not more rounds of the ones it does.
 
-**What is left, from HiGHS's own log.** Its root is two passes, not one: cuts to
-163.6, then `2.2% inactive integer columns, restarting`, a re-presolve to 79×65,
-and a second pass to 198.4 — and it carries 41–105 cuts *in the LP* down the tree
-while accumulating 280 **conflicts**. discopt has no restart, no conflict analysis,
-and no cuts retained in node LPs. Those are the surviving candidates on this
-instance; which one carries the 71 → 163.6 jump is being attributed against the
-HiGHS source before anything is built.
+**What is left, from HiGHS's own log.** Its root is two passes, not one: cuts,
+then `2.2% inactive integer columns, restarting`, a re-presolve to 79×65, then a
+second pass to 198.4 — and it carries 41–105 cuts *in the LP* down the tree while
+accumulating 280 **conflicts**. discopt has no restart, no conflict analysis, and
+no cuts retained in node LPs. A9 measures which of these is actually worth
+anything.
+
+> **Retraction (§11), 2026-09-05.** An earlier version of this section attributed
+> a `71 → 163.6` jump to HiGHS's *first cut pass*. That reading is wrong. Log
+> lines with `Src == kSolutionSourceNone` are throttled by
+> `mip_min_logging_interval`, default **5 seconds**
+> (`mip/HighsMipSolverData.cpp:1657-1661`), so `71 → 163.6` spans every separation
+> round that fit in one 5 s window, not one pass. No single pass is measured.
+> The same paragraph named the **restart** as a leading surviving candidate; A9d
+> measures it at **166 nodes vs 157**, i.e. worth 1.06×. Both claims are
+> withdrawn.
 
 **Instrumentation note (§6).** A first attempt to attribute HiGHS's root by
 ablating its per-cut-family options produced a clean-looking nine-row table in
@@ -1865,6 +1874,111 @@ which **six rows were silent no-ops**: `mip_gomory`, `mip_flow_cover`,
 reporting the default bound. The table was discarded before it was used. Only
 `presolve` and `mip_heuristic_effort` are real options in that build; the
 attribution above comes from HiGHS's log and source instead.
+
+### A9 — #1183 continued: the gap is the SEARCH, not the relaxation. 2026-09-05.
+
+B1 falsified four levers. A9 ran four more, then turned the question around and
+ablated **HiGHS's** mechanisms instead. Same MPS, same reader, optimum 224.
+
+**A9a — implied bounds from a single row's residual activity.** The HiGHS
+mechanism (`presolve/HPresolve.cpp:7957-8055`, `mip/HighsImplications.cpp:673-698`)
+reads a row with exactly one binary and emits `x + (ub_x − v)·y ≤ ub_x` — a big-M
+row with the modeller's `M` replaced by a derived one. On this model 112 of 291
+rows qualify, and the derived `M` is tighter on **100% of 180 triples, by a median
+of 108.0** — Pyomo's `gdp.bigm` over-estimates by exactly that much. Arm 1 is
+therefore strongly supported. But the 180 cuts (all valid, each checked against
+the proven optimum) move the root LP **71.0 → 71.5**. **FALSIFIED** against a
++10-point bar.
+
+**A9b — full probing.** A9a is a weak proxy: HiGHS *fixes* the binary and
+propagates over **every** row. Doing that (FBBT to a fixpoint on each of the two
+branches of each binary) is a different animal — 89 binaries probed, **13 branches
+propagate infeasible so 13 binaries are fixed outright**, 5 global tightenings,
+470 implied-bound cuts, 672 soundness checks all passing:
+
+| root LP | bound |
+|---|---|
+| raw | 71.00 |
+| + FBBT alone — *what discopt's presolve already does* | 71.00 (**+0.00**) |
+| + probing | 90.00 (**+19.00** incremental) |
+| + implied-bound cuts on top, 87 separated | 93.33 (+22.33) |
+
+Note the middle row: discopt's entire root presolve tightens 86 bounds and buys
+**nothing** on the root LP of this model. Probing is the whole gain.
+
+**A9c — but it does not move the tree.** Handing discopt the probing-tightened
+model (13 binaries fixed): **2371 → 2217 nodes, 1.07×**, against a 1.5× bar.
+**FALSIFIED.** discopt's own cut loop already reaches 169.4, far past 90, so the
+probing gain is subsumed — and even *fixing 13 of 112 binaries* is worth 7%.
+
+That is now **six** levers that improve the bound or shrink the model and do not
+move discopt's tree: a perfect incumbent (1.43×), the HiGHS-presolved model
+(1.43×), MIR/c-MIR (+0.00), single-row implied bounds (+0.50), full probing
+(1.07×), and every existing switch (1.63×). At that point the hypothesis class
+itself is wrong.
+
+**A9d — so ablate HiGHS instead.** Which of *its* mechanisms is worth its 157
+nodes? Every option name status-checked, and one that exists in `ref/HiGHS` but
+not in the installed 1.12.0 build is reported as skipped rather than silently run
+at its default:
+
+| HiGHS configuration | nodes |
+|---|---|
+| defaults | **157** |
+| no restart | 166 |
+| cuts age out of the LP immediately | 167 |
+| no presolve | 206 |
+| no strong branching | **367** |
+| cut pool ~disabled | **516** |
+| no heuristics / no symmetry / no probing lifting | 157 (no effect at all) |
+
+Cuts are worth 3.3× to HiGHS and branching 2.3×; the restart, node-LP cut
+retention, heuristics and symmetry are worth essentially nothing here. **The
+decisive row is `cut pool ~disabled`: HiGHS solves from a root bound of 71 in 516
+nodes, while discopt solves from a root bound of 169.4 in 2371.** A solver with a
+*much stronger root* taking 4.6× more nodes is not losing on its relaxation.
+
+**A9e — confirming it on discopt's side.** Making strong branching effectively
+exhaustive, then adding node propagation:
+
+| discopt configuration | nodes |
+|---|---|
+| default SB (6 candidates, 48-node budget) | 2371 |
+| SB 16 / 500 | 1789 |
+| SB 64 / 5000 | 1641 |
+| SB exhaustive (256 / 10⁶) | 1641 — *saturates at 64* |
+| SB exhaustive + `node_propagation` | **1109** |
+| SB exhaustive + seeded optimum (not a legitimate configuration) | 683 |
+
+**1109 nodes is 2.14× the default, from two existing, tested code paths left at
+unhelpful defaults** — `sb_max_cands=6, sb_node_budget=48`, and
+`node_propagation=false`. SB saturating at 64 candidates says discopt's scoring
+rule is already extracting everything it can; past 1641 the gain comes from
+propagation, not from better ranking.
+
+**Conclusion for this class.** The relaxation is not the problem — six bound- and
+model-side levers moved the tree by at most 1.63×. The search is: at a root bound
+185% better than HiGHS's cut-disabled configuration, discopt explores 4.6× more
+nodes. The levers that measurably work are per-node propagation and branching
+budget, both of which already exist.
+
+**Corpus check (not an instance fix, per §2).** The 38-instance MIPLIB panel had
+already been run for `node_propagation` and left unscored. Scored on **node
+count** (load-independent; that run's wall column is unusable, load peaked at
+26.8):
+
+* total nodes **5,544,184 → 4,375,238 = 1.267×**
+* **cert-clean**: 152 checks, **0** bounds above the reference optimum, **0**
+  certifications lost
+* one certification **gained** (`neos-3611689-kaihu` feasible → optimal) and
+  `enlight_hard` node_limit → feasible
+* large wins: `flugpl` 13.4×, `enlight8` 3.2×, `neos-3611689-kaihu` 3.2×,
+  `neos-3611447-jijia` 3.1×, `gt2` 2.3×, `bppc8-02` 2.0×
+* losses: `sp150x300d` 0.46×, `neos-3118745-obra` 0.74×, `supportcase14` 0.79×,
+  `fiber` 0.82×
+
+That meets §5's cert-clean bar and is net-positive on nodes. A wall-clock arm
+under a proper load gate is the remaining requirement before the default flips.
 
 ## 4. Success metric
 
