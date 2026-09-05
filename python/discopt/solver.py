@@ -9869,6 +9869,7 @@ def solve_model(
                         t_start,
                         initial_point=initial_point,
                         deferred=_deferred,
+                        prefer_pounce=nlp_solver == "pounce",
                     )
                     if _simplex_res is not None:
                         return _simplex_res
@@ -21530,6 +21531,7 @@ def _solve_milp_simplex(
     t_start: float,
     initial_point: Optional[np.ndarray] = None,
     deferred: Optional[dict] = None,
+    prefer_pounce: bool = False,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -21863,6 +21865,37 @@ def _solve_milp_simplex(
         except Exception as _e:  # pragma: no cover - defensive
             logger.debug("root LP relaxation bound failed: %s", _e)
 
+        # Relaxation duals at the incumbent. ``SolveResult`` promises named
+        # constraint duals / reduced costs for a MILP (test_solver_duals.py,
+        # test_p1_milp_bb_soundness.py), and the Python ``_solve_milp_bb`` path
+        # has always supplied them. Routing a pure MILP here by default must not
+        # silently drop that half of the contract, so recover them the same way:
+        # re-solve the relaxation with the integers fixed at the incumbent. The
+        # row decomposition (_A_ub_m/_b_ub_m/_A_eq_m/_b_eq_m) and ``n_orig`` are
+        # already built above for the feasibility gate.
+        #
+        # Reporting only: the recovered duals never feed back into the bound or
+        # the certificate, so a failed recovery degrades to ``None`` rather than
+        # failing the solve.
+        constraint_duals = None
+        bound_duals_lower = None
+        bound_duals_upper = None
+        try:
+            constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
+                model,
+                lp_data=lp_data,
+                x_flat=np.asarray(xo, dtype=float),
+                n_orig=n_orig,
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
+                time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                prefer_pounce=prefer_pounce,
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug("simplex MILP dual recovery failed: %s", _exc)
+
         return SolveResult(
             status=status,
             objective=obj_val,
@@ -21875,6 +21908,9 @@ def _solve_milp_simplex(
             root_gap=root_gap_val,
             root_time=root_time_val,
             gap_certified=status == "optimal",
+            constraint_duals=constraint_duals,
+            bound_duals_lower=bound_duals_lower,
+            bound_duals_upper=bound_duals_upper,
         )
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
