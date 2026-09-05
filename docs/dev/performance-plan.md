@@ -5443,6 +5443,40 @@ an economy-of-scale sizing idiom, not a one-off. That is the concrete fixture #1
 entry condition asks for, and it is a *capability* fixture: on those rows the exact
 continuous lowering is not faster than the alternatives, it is the only one there is.
 
+### E4 — the SOS1 reference, which only exists on MPEC models
+
+Requirement 4 of #1182 asks for a benchmark against "exact GDP/SOS1 references".
+E1/E2 cover the exact GDP references. SOS1 in this tree is not a general
+disjunction lowering — it is one of `discopt.mpec`'s complementarity encodings — so
+the SOS1 comparison exists only where a complementarity does. A relation
+`0 <= f ⊥ g >= 0` is reachable through four exact encodings, all through the same
+certified `Model.solve`; `method="scholtes"` is deliberately absent, being a
+homotopy of *local* solves whose result is not a certificate.
+
+| model | arm | status | objective | nodes | wall | source `min(f, g)` | certified |
+|---|---|---|---|---|---|---|---|
+| distance | sos1 | optimal | 1 | 3 | 0.36 s | 9.3e−11 | yes |
+| distance | gdp/big-m | optimal | 1 | 3 | 0.04 s | 6.1e−11 | yes |
+| distance | gdp/hull | optimal | 1 | 3 | 0.05 s | 7.5e−12 | yes |
+| distance | **gdp/simplex** | optimal | 1 | 11 | **15.70 s** | **1.4e−17** | yes |
+| chain4 | sos1 | optimal | 1 | 29 | 0.06 s | 2.2e−11 | yes |
+| chain4 | gdp/big-m | optimal | 1 | 9 | 0.06 s | 4.9e−12 | yes |
+| chain4 | gdp/hull | optimal | 1 | 9 | 0.18 s | 6.6e−12 | yes |
+| chain4 | **gdp/simplex** | optimal | 1 | **5** | **14.65 s** | 5.5e−08 | yes |
+
+All four certify the same optimum, so the encoding is sound here too. The
+node-count signal is **mixed** — the simplex arm wins on `chain4` (5 vs 9) and
+loses on `distance` (11 vs 3) — while the wall-time signal is uniformly bad:
+100–250× slower, and near-constant at ~15 s across two models of different size,
+which suggests a per-node cost in the spatial path rather than search. Stated
+plainly so it is not read as a partial win: a node-count win that costs 244× wall
+does not meet §5's *net-positive* bar, and one of the two models is a synthetic
+chain I wrote for this probe rather than a corpus instance (`distance` is the
+repo's own `test_mpec.py` fixture). The one column where the lowering is
+consistently better is the **source complementarity residual** on `distance`
+(1.4e−17 against 6.1e−11), which is a property of the encoding being exact rather
+than regularized — worth recording, not worth a default change.
+
 **Retraction of the framing in #1182's own text.** The issue asks for "a model where
 the deferred lowering is expected to beat the exact GDP/SOS1 path" and reads that as a
 performance question. E1/E2 answer it negatively and that answer is binding: no

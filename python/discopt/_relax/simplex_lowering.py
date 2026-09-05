@@ -94,6 +94,7 @@ from discopt.modeling.core import (
     Expression,
     Model,
     SelectorActivation,
+    Variable,
     _DisjunctiveConstraint,
 )
 
@@ -108,6 +109,7 @@ __all__ = [
     "disjunction_residuals",
     "lower_disjunction_simplex",
     "selected_disjuncts",
+    "structural_jacobian_nonzeros",
 ]
 
 #: Name prefix of the Theorem-1 weight variables. They are *witnesses*, not
@@ -150,6 +152,63 @@ class LoweringSizes:
         self.literal_occurrences += other.literal_occurrences
         self.weight_variables += other.weight_variables
         self.rows += other.rows
+
+
+def structural_jacobian_nonzeros(model: Model) -> int:
+    """Structural nonzeros of the constraint Jacobian: sum over rows of |vars(row)|.
+
+    The fourth quantity of #1182 requirement 4, and the one that is **not** a
+    per-disjunction property, so it lives here rather than on
+    :class:`LoweringSizes`: it is a whole-model number and only means anything
+    when compared between two lowerings of the same model. Structural, not
+    numeric — a coefficient that happens to be zero at some point still occupies
+    a Jacobian entry, and the point is to compare sparsity patterns.
+
+    Rows a lowering did not produce (indicator, SOS and logical constraints, and
+    any disjunction left unlowered) are **not** silently skipped: they are not
+    ``Constraint`` rows, and counting them as zero would understate the pattern,
+    so this refuses when it meets one.
+    """
+    from discopt.modeling.core import _DisjunctiveConstraint as _DC
+
+    nnz = 0
+    for index, row in enumerate(model._constraints):
+        if isinstance(row, Constraint):
+            nnz += len(_variables_in(row.body))
+            continue
+        kind = "an unlowered disjunction" if isinstance(row, _DC) else type(row).__name__
+        raise ValueError(
+            f"constraint {index} is {kind}, which has no Jacobian row of its own; "
+            "count nonzeros on the LOWERED model, where every row is algebraic, "
+            "or the comparison silently omits it"
+        )
+    return nnz
+
+
+def _variables_in(expr) -> set[str]:
+    """Names of the variables an expression touches (structural, not numeric)."""
+    seen: set[str] = set()
+    visited: set[int] = set()
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, Variable):
+            seen.add(node.name)
+            continue
+        for attr in ("operands", "args", "children"):
+            kids = getattr(node, attr, None)
+            if kids:
+                stack.extend(kids)
+                break
+        else:
+            for attr in ("left", "right", "operand", "base", "expr", "body"):
+                kid = getattr(node, attr, None)
+                if kid is not None and not isinstance(kid, (int, float, str)):
+                    stack.append(kid)
+    return seen
 
 
 @dataclass

@@ -192,9 +192,12 @@ $$\sum_j \lambda_{ij}\,p_{ij}(z) \le 0,\qquad \lambda_i \ge 0,\qquad \sum_j \lam
 A discopt disjunction is $\bigvee_j \bigwedge_k c_{jk}$, so CNF conversion
 distributes over the conjunctions and produces $\prod_j |P_j|$ clauses, where an
 equality row counts as **two** predicates. That blowup is real and is refused above
-`MAX_CNF_CLAUSES` rather than expanded silently; the four size quantities — clauses,
+`MAX_CNF_CLAUSES` rather than expanded silently; the size quantities — clauses,
 literal occurrences, weight variables, rows — are recorded **separately** on
 `Model._simplex_lowerings`, because reducing one says nothing about the others.
+The fourth quantity, structural Jacobian nonzeros, is a whole-model number and is
+read with `structural_jacobian_nonzeros(lowered_model)`; it refuses a model still
+carrying a disjunction rather than counting that row as zero.
 
 ### What it guarantees, and what it does not
 
@@ -236,8 +239,11 @@ point:
 
 ### Why it is not the default
 
-On every corpus benchmarked in #1182 it is slower than big-M and certifies strictly
-less. It exists for the disjunct rows the other two lowerings **refuse**: big-M
+On every corpus benchmarked in #1182 it is slower than big-M and never certifies
+more. On general disjunctions it certifies strictly less; on the MPEC models, where
+the exact SOS1 and GDP encodings are also available, all four certify the same
+optimum and the lowering is 100–250× slower in wall time with a mixed node-count
+signal. It exists for the disjunct rows the other two lowerings **refuse**: big-M
 raises when a row's interval enclosure is unbounded, and hull raises
 `HullPerspectiveOriginError` when the row is not finite at the origin. Theorem 1
 needs neither — its weights are bounded by construction and it forms no perspective.

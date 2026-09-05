@@ -523,3 +523,33 @@ def test_the_lifted_row_is_exact_in_projection_over_a_sampled_box():
             checked += 1
 
     assert checked == 202, f"the sampler covered {checked} points, expected 202"
+
+
+@pytest.mark.unit
+def test_jacobian_nonzeros_is_the_fourth_size_quantity_and_refuses_a_gdp_row():
+    """Requirement 4's fourth quantity, measured on the lowered model.
+
+    It is a whole-model number, so it lives beside ``LoweringSizes`` rather than
+    on it, and it refuses a model still carrying a disjunction — counting that
+    row as zero would understate the pattern it exists to compare.
+    """
+    from discopt._relax.simplex_lowering import structural_jacobian_nonzeros
+
+    def build():
+        m = dm.Model("nnz")
+        x = m.continuous("x", lb=-5.0, ub=5.0)
+        m.minimize(x * x)
+        m.either_or([[x <= -1.0], [x >= 1.0]], name="g")
+        return m
+
+    counts = {
+        method: structural_jacobian_nonzeros(reformulate_gdp(build(), method=method))
+        for method in ("big-m", "hull", "simplex")
+    }
+    # Three different sparsity patterns for the same disjunction — which is the
+    # whole point of measuring this separately from clause and row counts.
+    assert len(set(counts.values())) == 3
+    assert counts["simplex"] < counts["big-m"] < counts["hull"]
+
+    with pytest.raises(ValueError, match="unlowered disjunction"):
+        structural_jacobian_nonzeros(build())
