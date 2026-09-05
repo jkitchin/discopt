@@ -957,6 +957,173 @@ Stage 1's remaining items (stall-based termination, in-tree aging, a violation
 re-checked pool) stand, but they are now optimizations on a working cut path
 rather than the fix for it.
 
+**A1 entry experiment (2026-09-05) — the stall rule has never fired.** Before
+implementing a replacement, the existing rule was instrumented on a 3-row,
+11-column knapsack fixture, with the three constants temporarily promoted to
+`MilpOptions` knobs (`cut_stall_rel`, `cut_stall_rounds`, `cut_max_parallel`)
+defaulting to exactly the values they replaced, so the measurement is
+bound-neutral by construction. **Those knobs, and the `RootCutStallRounds`
+counter used below, were measurement scaffolding on a throwaway branch and are
+deliberately NOT in the tree** — every arm measured neutral-to-harmful, and
+CLAUDE.md §3 forbids shipping a flag with no consumer. They are cheap to
+reconstruct from this section if a later change needs them:
+
+| arm | rounds run | stalls registered |
+|---|---|---|
+| shipped `1e-7`, 1 round | **40** (the cap) | **0** |
+| SCIP's `1e-4`, 1 round | **14** | 1 |
+| `1e-4`, 3 rounds | 40 | 10 |
+
+The historical test `root.obj <= prev_obj + 1e-7*(1+|prev_obj|)` registers **zero
+stalls in forty rounds**. It is not merely "far tighter than either reference" as
+drafted above — it is inert. `cut_rounds = 50`, which A0 graduated default-ON,
+therefore means fifty full separation rounds on *every* instance, whether or not
+the bound is still moving. That is the direct mechanism of the per-instance tax
+A0 recorded (slower on 11 of the 18 instances both A0 arms solve;
+`neos-3611447-jijia` 7.5 → 13.9 s, `enlight8` 5.4 → 10.5 s, `22433` 0.31 →
+2.51 s). SCIP's threshold stops the same fixture at 14 rounds.
+
+Orthogonality is loose by the same margin: `CUT_MAX_PARALLEL = 0.99` against
+HiGHS's `maxpar = 0.1` and SCIP's `MINORTHO 0.90`. Tightening it to 0.05 takes
+the kept set on the fixture from **31 cuts to 12**.
+
+**RETRACTION AND RESULT (2026-09-05).** The entry experiment above was run on a
+unit fixture and its conclusion was over-generalized in this document, per
+CLAUDE.md §11. Corrected on real corpus instances (the shipped
+`RootCutRounds` / `RootCutsGenerated` counters plus a scaffolding
+`RootCutStallRounds`, 12 panel instances, shipped A0 config):
+
+| binding exit | count |
+|---|---|
+| round cap — the only case where the stall threshold can act | **1** (`gr4x6`) |
+| 500-cut generation cap, reached at 11–14 rounds | 3 (the whole `mik` family) |
+| stall rule already fires at the shipped `1e-7` | 2 (`enlight8`, `neos-911970`) |
+| separation stops producing violated cuts | 6 |
+
+The rule is inert *on the fixture*; on real instances it fires occasionally, and
+more importantly the loop almost always exits for some other reason long before
+50 rounds. `cut_rounds = 50` is therefore not a description of what the solver
+does, and tightening its stopping threshold cannot buy much.
+
+**The A1 arms panel confirms that** (38 instances, TL 20 s, arms interleaved,
+190 comparisons, cert-clean with 0 bounds above the reference optimum):
+
+| arm | solved | node geomean | iter geomean (21 solved) |
+|---|---|---|---|
+| `prod` (shipped) | 21 | 1.000 | 1.000 |
+| `stall` (SCIP `1e-4`) | 21 | 1.025 | **0.983** |
+| `stall3` (`1e-4`, 3 rounds) | 21 | 1.088 | 1.157 |
+| `ortho` (maxpar 0.10) | 21 | 1.477 | 1.386 |
+| `both` | **20** (loses `gt2`) | 1.654 | 1.049 |
+
+`stall` is worth **1.7 % of simplex iterations** on the instances that solve —
+noise, not a lever. Tightening orthogonality is actively harmful (node geomean
+1.477), reproducing at the loop level the same result §2.5c already recorded for
+`cut_select`. **The kill criterion fires: no arm survives, and the cut-loop
+stopping rule is not the mechanism of A0's per-instance tax.**
+
+*A note on the instrument.* The panel's wall column showed `stall` at 0.834,
+which reads as a 17 % win and is the number a careless writeup would have
+published. Load peaked at 57 during the run (an out-of-session `cargo check
+--workspace --all-targets`), so under §9 wall could not carry the verdict;
+scoring the same arms on simplex iterations — load-independent — gave 0.983. The
+wall figure was mostly artifact. The panel now refuses to start above a load of
+6 rather than recording the excursion and hoping the reader discounts it.
+
+*Where A1 goes instead.* The measurement points at the two exits that actually
+bind. The `mik` family generates its full 500-cut budget and keeps 88–114 of
+them, and those cuts then ride in **every node LP** for the rest of the search;
+six other instances stop because separation dries up, which no stopping rule
+improves. That is the in-tree half of Stage 1 — cut aging with a ~10-LP basic
+limit, and a pool that re-checks violation — not the root loop's termination
+test. A1 re-scopes accordingly, which is the fallback this section named in
+advance.
+
+*Kill criterion for the A1 arms panel:* an arm must remove A0's per-instance tax
+**without giving back A0's +3 solved instances**. If none does, the stopping rule
+is not the tax's mechanism and A1 re-scopes onto in-tree aging and the pool.
+
+### A2 — in-tree cut aging. Measured 2026-09-05, and it does NOT survive.
+
+A1 handed off to in-tree aging on the premise, never measured here, that the root
+cuts discopt keeps are largely **dead weight** in the tree: costing basis
+dimension in every node LP while contributing nothing to that node's bound. Per
+CLAUDE.md §4 that premise was tested before any aging code was written.
+
+*Instrument.* Every node LP that reaches optimal classifies each surviving cut row
+by its slack column — `x[j] > 1e-7` means the cut is not tight at that node and is
+exactly what aging would delete. 36 of 38 panel instances classified (two generate
+no cuts), shipped A0 config, 20 s limit.
+
+*Round 1 — the headline ratio, and why it could not decide anything.*
+
+| statistic | value |
+|---|---|
+| pooled slack share over all (node, cut) pairs | **44.7 %** |
+| median per-instance slack share | **51.4 %** |
+
+The pre-registered kill line was *median below 50 % → KILL*. The median is 51.4 %,
+so **the criterion as written did not fire**, even though the work-weighted pooled
+figure (44.7 %) sits the other side of the line. Recording that rather than
+switching to whichever statistic gives a clean answer: post-hoc statistic choice
+is the failure §4 exists to prevent, and the honest verdict was MARGINAL.
+
+*Why a slack share cannot settle it.* An aging rule does not delete a row that is
+slack *now*; it deletes one non-binding for ~10 **consecutive** node LPs. A 45 %
+pooled share is equally consistent with durable dead weight (aging works) and with
+rows alternating in and out of the basis (aging thrashes and removes nothing) —
+and those imply opposite decisions. The headline probe cannot distinguish them, so
+it was extended rather than believed.
+
+*Round 2 — age bucketing.* Each slack observation is bucketed by the row's
+consecutive-slack age at the moment of observation; the **aged** bucket is the
+fraction an aging rule with threshold 10 could actually have removed. Criterion
+pre-registered in the script before the run: ≥ 25 % → build it, < 10 % → kill,
+10–25 % → a second marginal answer means the effect is not there.
+
+| statistic | value |
+|---|---|
+| pooled slack share (reproduces round 1) | 44.5 % |
+| median per-instance slack share (reproduces round 1) | 51.4 % |
+| **pooled AGED share of all (node, cut) pairs** | **22.5 %** |
+| of the slack observations, durable (age ≥ 10) | 50.5 % |
+
+**VERDICT: A2 does not survive.** 22.5 % lands inside the marginal band, below the
+25 % line. And 22.5 % is an *upper* bound on what aging could buy, because it
+credits aging with deleting every aged row at zero cost — while a row aged out can
+be needed again lower in the tree, at which point its bound is simply lost.
+
+*The per-instance spread is the substance, not the pooled number.* The two
+populations are cleanly separated and neither is the one aging needs:
+
+| instance | nodes | slack % | aged % |
+|---|---|---|---|
+| `blend2` | 5.6 k | 87.7 | 79.3 |
+| `enlight_hard` | 97 k | 75.7 | 55.3 |
+| `p0201` | 438 | 51.1 | **1.1** |
+| `mik-250-20-75-5` | 183 k | 42.4 | **12.2** |
+| `neos17` | 44 k | 40.8 | **8.3** |
+| `beavma` | 79 k | 24.8 | **9.0** |
+
+Where slackness is durable the instance is already small and already solved
+(`blend2`, 5.6 k nodes). On the large-tree instances that actually time out — the
+`mik` family, `beavma`, `neos17` — slackness is **transient**: rows drift in and
+out of the basis, so aging would spend deletions and re-separations without ever
+shrinking the working LP much. `p0201` is the extreme: half its cut rows are slack
+at any moment and almost **none** of them durably.
+
+*Consequence.* Three measured rounds have now gone into the cut path — root
+attribution (§2.5), root-loop termination (A1), in-tree aging (A2) — and none
+found the lever. That is itself the finding: **discopt's cut machinery is not
+what separates it from HiGHS.** The next question is deliberately upstream of
+mechanism choice — which half of `time = nodes × cost_per_node` the gap lives in —
+because tree size and per-node cost imply disjoint work and three rounds of
+picking a mechanism first have not paid.
+
+*Scaffolding disposition.* The A2 counters are on a probe branch and ship only if
+something consumes them; a counter with no consumer is CLAUDE.md §3's dead flag,
+which is why A1's stall counter was dropped rather than merged.
+
 *Why this is now the lever, not a prerequisite.* §2.5c measured discopt's own
 existing separators closing **70–92 %** of the root gap at 200 × 8 on exactly the
 instances that fail — mik 17.46 → 4.47, `fiber` 61.55 → 6.01, `b-ball` 12.73 →
@@ -1079,6 +1246,437 @@ branching/DINS as first-incumbent tools.
 Sequentially-lifted knapsack cover (upgrading `lp/cover.rs` from unlifted) is
 *not* dropped but is low priority: ~0.5–1 instance, low risk, and irrelevant to
 `mik` (cover fires only on binary rows).
+
+### A3 — where the gap actually is. Measured 2026-09-05, and it ends the cut search.
+
+Three measured rounds have now gone into the cut path — root attribution
+(§2.5), root-loop termination (A1), in-tree aging (A2) — and none produced a
+lever. That is itself a result: the next question is not *which cut mechanism*
+but whether the cut path is the right place at all. So the probe stopped
+choosing mechanisms and measured the shape of the gap directly.
+
+`scratchpad/miplib/nodegap.py`, full §0 panel, 38 instances, `gap_tol=1e-4`,
+TL = 20 s, HiGHS and discopt run back-to-back on each instance so both meet the
+same machine load. Ratios are taken **only over the 21 instances both solvers
+drive to optimality** — a node count is a complete, load-independent quantity
+only for a run that *finishes*; under a wall-clock cap a loaded machine explores
+fewer nodes, so a timed-out instance's node count is a timing measurement in
+disguise. Zero certificate violations (the probe exits non-zero on any bound
+above the reference optimum).
+
+| | geomean, discopt ÷ HiGHS, over the 21 both-solved |
+|---|---|
+| nodes explored | **105×** more |
+| nodes per second | **80×** more |
+
+Solved counts on the run were discopt 21/38, HiGHS 37/38; those are wall-clock
+gated and therefore load-sensitive, so they are context, not the finding.
+
+**discopt is not slow.** It is roughly two orders of magnitude *faster* per node
+than HiGHS and pays for it with a tree two orders of magnitude larger. The
+per-instance spread says the same thing without the geomean: `gt2` 2643 nodes at
+39052 n/s against HiGHS's 1 node at 39 n/s; `dcmulti` 3593 at 2197 against 5 at
+5; `enlight8` 129509 at 43582 against 444 at 339. Two instances run the other
+way — `neos-911970` (discopt 31 nodes at 2 n/s vs HiGHS 1907 at 269) and
+`neos-3118745-obra` — and they are the exception that shows the measurement is
+not an artifact of the harness.
+
+The consequence for planning is direct, and it is why no further cut-mechanism
+round should be started before it is used: **discopt has an enormous per-node
+budget available to trade for better decisions.** Any mechanism that cuts the
+tree by 2× is worth up to ~40× the per-node cost it adds and still comes out
+ahead. That is a very different economy from the one the cut rounds were
+implicitly optimizing, where the aim was to add bound cheaply.
+
+Two candidates spend that budget, and they want opposite work: a weak
+**incumbent** prunes nothing however good the bound is (lever: primal
+heuristics — discopt has rounding plus the #1060 continuous-repair dive, and no
+RINS/RENS/feasibility-pump/local-branching), while a weak **dual bound**
+certifies nothing away however good the incumbent is (lever: branching and
+bounding). Both produce the identical symptom measured above, so the node ratio
+cannot separate them; `scratchpad/miplib/gapsplit.py` separates them by
+splitting the gap still open at the time limit against the reference optimum.
+
+One specific suspect is already visible in the tree and costs nothing to test.
+Strong branching is gated by
+
+```rust
+let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
+// crates/discopt-core/src/bnb/milp_driver.rs:1434
+```
+
+and the **Python binding default is `sb_node_budget = 48`**
+(`crates/discopt-python/src/lp_bindings.rs:1102`, `:1230`) — which every panel
+measurement in this document has silently used. Strong branching therefore runs
+for the first 48 nodes, and the pseudocosts seeded from those 48 steer the
+remaining 100k–480k. HiGHS instead budgets strong branching in LP *iterations*,
+recomputed at every branching decision so that it never fully expires
+(`HighsSearch.cpp:1272-1290`). Note that `milp_driver.rs:4573`'s `1024` is a
+**test helper**, not a default, and the Rust `Default` impl at `:4211` is `1000`;
+neither reaches a Python solve. `scratchpad/miplib/sbbudget.py` sweeps the
+budget — it is already a parameter, so the falsifying experiment needs no code.
+
+### A4 — the strong-branching budget is NOT the lever. Falsified 2026-09-05.
+
+A3 established that discopt's gap is tree size (105x more nodes at 80x higher
+throughput), so it has a large per-node budget to trade for better decisions.
+The cheapest place that budget could go was already a parameter, so it was
+tested first.
+
+Strong branching is gated by
+
+```rust
+let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
+// crates/discopt-core/src/bnb/milp_driver.rs:1483
+```
+
+and the **binding default is `sb_node_budget = 48`**, set in the Python binding
+(`crates/discopt-python/src/lp_bindings.rs:1102`, and again at `:1230`, `:1389`).
+Every panel measurement in this plan has silently used it. (Two other constants
+in the tree are *not* the default and must not be cited as such: the Rust
+`Default` of `1000` at `milp_driver.rs:4211`, and `1024` in the test helper
+`fn opts(..)` at `:4573`. Neither reaches a Python solve.) So strong branching
+runs for the first 48 nodes, and the pseudocosts it seeds then steer the
+remaining 100k-480k. HiGHS instead budgets SB in **LP iterations** — about a
+third of all non-heuristic LP iterations, recomputed at every branching decision,
+so it never fully expires (`HighsSearch.cpp:1272-1290`).
+
+**Hypothesis:** the SB budget *shape* — a small fixed node prefix — is a binding
+constraint on discopt's tree size.
+
+**Experiment** (`sbbudget.py`, 38-instance MIPLIB easy panel, `gap_tol=1e-4`,
+TL 20 s, four arms run back-to-back per instance so they meet the same load):
+`sb_node_budget` in {48 (shipped), 1000, 50000, 10^7}. Kill criterion registered
+before the run: geomean node reduction over instances **every** arm drives to
+optimality, `>= 1.5x` survives, `< 1.25x` falsifies.
+
+**Result — FALSIFIED.** 21 of 38 instances solved by all four arms (the same
+21/38 for every arm):
+
+| shipped48 / arm | geomean node reduction |
+|---|---|
+| n1000 | 1.151x |
+| n50k | **1.221x** |
+| unlimited | 1.221x |
+
+The best arm lands below even the 1.25x "weak" floor. **Do not spend on the SB
+budget shape.**
+
+**The distribution is the finding, and it is bimodal, not flat.** Ten of the 21
+instances are *exactly* 1.00x — the budget changes nothing — while a minority
+move hard:
+
+| instance | shipped48 | n1000 | n50k | unlimited | 48/best |
+|---|---|---|---|---|---|
+| `fiber` | 23537 | 3187 | 2081 | 2081 | **11.31x** |
+| `dcmulti` | 3593 | 1105 | 1105 | 1105 | **3.25x** |
+| `neos-3611447-jijia` | 100541 | 54261 | 55601 | 55601 | 1.85x |
+| `23588` | 4449 | 2529 | 2587 | 2587 | 1.76x |
+| `p0201` | 441 | 685 | 685 | 685 | **worse** |
+
+So more strong branching is a *large* lever on a few instances, inert on half,
+and actively harmful on at least one. That is the shape a per-node cost model
+predicts: SB pays where the LP discriminates between candidates and wastes LPs
+where it does not. HiGHS acts on exactly that distinction and discopt does not —
+`setMinReliable(0)` shuts strong branching off entirely at a degenerate node
+(`HighsSearch.cpp:1114-1116`), where `computeLPDegneracy >= 10` is reached by
+`varConsRatio >= 2` alone (`HighsLpRelaxation.cpp:438-493`). discopt's
+`Pseudocosts` (`crates/discopt-core/src/bnb/branching.rs:51-62`) carries cost
+sums and counts only — no inference count, no cutoff count, no degeneracy factor
+— so at a degenerate node it has nothing to fall back on and keeps buying SB LPs
+that cannot discriminate. **A degeneracy shut-off is a live, general candidate**
+("stop paying where the probe cannot separate"), and it is falsifiable on this
+very panel: if degeneracy separates `p0201` from `fiber`, it is a mechanism; if
+it does not, the explanation is dropped rather than kept as a story.
+
+**Two corrections to this probe's own instrument, recorded per CLAUDE.md §6/§11.**
+
+1. *The run first exited on a gate that was mis-specified, not on a solver
+   defect.* The gate required two solved arms to agree on the objective to 1e-6.
+   That asserts an exactness the solve never promised: the panel runs
+   `gap_tol=1e-4`, so "optimal" means "gap <= 1e-4" and two arms may legitimately
+   stop at different incumbents inside that band. `gen` did exactly that —
+   `shipped48` returned the reference optimum to 1.3e-16, the larger-budget arms
+   returned an incumbent 5.76e-5 **above** it (worse, correct side for a
+   minimize, inside the certified gap). The gate is now anchored to the **oracle**
+   instead: every solved arm's incumbent must lie in
+   `[optimum, optimum + gap_tol*(1+|optimum|)]`. That is not a loosening — it is
+   *stricter* in the direction that matters, because an incumbent below the true
+   optimum is caught outright, whereas an arm-vs-arm test passes two arms that
+   are wrong the same way. The dual-bound gate ran ahead of it and passed on all
+   38 x 4 arms, which is why the node table above is readable at all.
+
+2. *A registered caveat, resolved empirically rather than waived.* Before the
+   run it was stated that a FALSIFIED verdict would not be acceptable without an
+   `SbCalls` counter, because a flat arm cannot be distinguished from "strong
+   branching never ran". The table settles it without the counter: node counts
+   **change** between `shipped48` and `n1000` on 16 of the 21 instances, so SB
+   demonstrably fires more at the larger budgets and moves the search. This is
+   not the instrument-measured-nothing failure mode. The counter still ships (it
+   sharpens the per-instance picture); it is simply not load-bearing here.
+
+**What A4 leaves standing.** A3's finding is untouched: the gap is tree size.
+What A4 removes is the cheapest explanation for it. The remaining candidates,
+both upstream of any scoring parameter, are (i) discopt discards a proof it has
+already paid for — an infeasible SB probe proves `x >= ceil(x_i)` at that node,
+and `strong_branch` turns it into a score constant (`INFEAS_DELTA = 1e7`,
+`milp_driver.rs:2720`) and throws the domain reduction away; HiGHS instead
+collapses the branch (`branchUpwards`, `HighsSearch.cpp:558-561, 665-669`),
+pushing one child and setting the parent's `opensubtrees = 0`, and it needs no
+conflict analysis to do it — and (ii) discopt has no plunging at all.
+
+### A5 — the gap is PRIMAL, and specifically the *improving* kind. Measured 2026-09-05.
+
+A3 said the gap is tree size. A4 removed the cheapest explanation for it. This
+probe asks the question that decides what to build: on the instances discopt
+fails to close, is the open gap the incumbent's fault or the bound's?
+
+**Method** (`gapsplit.py`, same 38-instance MIPLIB easy panel, `gap_tol=1e-4`,
+TL 20 s, single arm). For each unsolved instance with a known optimum `z*`,
+split the open span `[bound, incumbent]` at `z*`:
+
+```
+pshare = (incumbent - z*) / (incumbent - bound)      dshare = (z* - bound) / (incumbent - bound)
+```
+
+Registered before the run: median `pshare >= 0.60` -> PRIMAL lever (build
+heuristics); `<= 0.20` -> DUAL lever (branching/bounding); between -> both live.
+
+**Result: 17 of 38 unsolved, median primal share 89.6%, median dual share 10.4%
+-> PRIMAL.** Zero certificate violations (no bound above an optimum, no incumbent
+below one).
+
+**The three-way breakdown is the actionable part, not the median.** The 17 split
+cleanly and the groups want different things:
+
+| group | count | instances | what it needs |
+|---|---|---|---|
+| incumbent found but POOR | **12** | `mik-250-20-75-{1,2,3,5}`, `neos-911970`, `nexp-50-20-{1-1,4-2}`, `sp150x300d`, `neos17`, `beavma`, `neos-3118745-obra`, `gsvm2rl3` | **improving** heuristics + diving |
+| no incumbent at all | 2 | `enlight_hard`, `neos-2624317-amur` | find-any-point (RENS / pump class) |
+| incumbent IS the optimum | 3 | `neos-3610051-istra`, `neos-3610040-iskar`, `b-ball` | bounding only |
+
+And the poor incumbents are *very* poor — this is not a matter of a few percent:
+
+| instance | incumbent | optimum | off by |
+|---|---|---|---|
+| `neos-911970` | 215.69 | 54.76 | 294% |
+| `beavma` | 593880 | 383285 | 55% |
+| `mik-250-20-75-5` | -28299 | -51532 | 45% |
+| `gsvm2rl3` | 0.586 | 0.337 | 74% |
+| `mik-250-20-75-1` | -34400 | -49716 | 31% |
+
+**This corrects a framing error recorded earlier in this plan.** The working
+assumption had been that discopt's primal weakness is a *feasibility* problem,
+and RENS was discussed as the answer on the grounds that HiGHS invokes it
+precisely under `if (mipdata_->incumbent.empty())`
+(`HighsMipSolver.cpp:275-299`). That is true of HiGHS and irrelevant here:
+discopt finds a feasible point on 15 of 17 unsolved instances and 12 of those
+are simply *bad*. The lever is the **improvement** class — RINS-style
+neighborhood search, local branching, and diving — not the find-any-point class.
+Only 2 of 17 want a RENS/pump, which independently confirms A4's note that the
+feasibility pump is not worth building early.
+
+**It also strengthens the case for plunging** rather than replacing it. Diving
+is the structural mechanism that produces *better* incumbents earlier: HiGHS's
+dive nodes are the large majority of its nodes, and its rounding heuristics run
+*inside* the dive loop. The 12-instance group is exactly the population that
+would benefit, and it is the largest group on the panel.
+
+**Instrument defect found and fixed, recorded per CLAUDE.md §6.** The scored set
+was computed with `has_inc = st in HAS_INCUMBENT and obj is not None`, with no
+finiteness test. `enlight_hard` and `neos-2624317-amur` returned `node_limit`
+with `obj = inf`, which passes a None-check; `span` became `inf`, `pshare`
+became `nan`, and the summary line then reported "NO INCUMBENT AT ALL: 0" while
+two rows printed `nan`. Worse, the wiring guard written to catch exactly this,
+
+```python
+if abs(r["pshare"] + r["dshare"] - 1.0) > 1e-6:   # abs(nan) > 1e-6  ->  False
+```
+
+was **defeated by the nan**: every comparison against nan is False, so the guard
+passed silently and `statistics.median` then sorted a list containing nan, where
+order is undefined. Recomputed with the two rows set to what they actually mean
+(no incumbent -> `pshare = 1.0`), the median is **unchanged at 89.6%** — the two
+values sort to the top and do not move the 9th of 17. The verdict therefore
+stands, but it stood by luck and not by correctness. Both defects are fixed: the
+finiteness test is in `has_inc`, and the guard is now written `not (… <= tol)`
+rather than `… > tol`, which is the form that *fails* on nan instead of passing.
+
+### A6 — the discarded infeasibility proofs are real but too rare. Falsified 2026-09-05.
+
+**The hypothesis.** `strong_branch` (`milp_driver.rs:2740-2795`) turns an
+infeasible probe into the score constant `INFEAS_DELTA = 1e7` and throws the
+*proof* away. An infeasible down probe proves `x_i ≥ ceil(x_i)` at that node; if
+both probes on a candidate come back infeasible the node itself is infeasible and
+could be pruned outright. HiGHS harvests exactly this (`branchUpwards`,
+`HighsSearch.cpp:558-561`, `:665-669`). The claim was that discopt is paying for a
+full warm dual re-solve per probe and discarding the domain reduction it buys.
+
+**Soundness was checked first, and it holds.** Two questions had to clear before
+this was even buildable, and both did:
+
+1. *Is the probe's `Infeasible` conditional on a cutoff?* No. The probe closure
+   (`milp_driver.rs:2705-2721`) installs no incumbent and no cutoff row, so
+   `LpStatus::Infeasible` is a pure feasibility statement. HiGHS's third arm —
+   optimal-but-bound-exceeding, needing `other_child_lb` and deferred-subtree
+   bookkeeping (`HighsSearch.cpp:613-637`) — does not arise on discopt's path.
+2. *Can a numerical false-infeasible become a bound that cuts off the optimum?*
+   No. **Every** `LpStatus::Infeasible` this engine can emit is Farkas-certified.
+   The primal has exactly two emission sites (`primal.rs:1330`, `:1359`), each
+   gated on `farkas_ray_certifies`, returning the honest `Numerical` when the ray
+   does not certify; the dual (`dual.rs:940-969`) gates its own the same way and
+   returns `None` for a cold primal fallback rather than emit uncertified. Notably
+   discopt would collapse on a *stronger* proof than HiGHS, which has the
+   equivalent check short-circuited off — `HighsLpRelaxation.cpp:1228` reads
+   `if (true || checkDualProof()) return Status::kInfeasible;`.
+
+So the mechanism was cleared on soundness. It is the **frequency** that kills it.
+
+**The measurement.** 38-instance panel, shipped `sb_node_budget = 48`, all 38
+instances **node-capped at 3000** rather than wall-capped — deliberately, because
+the machine was at load ~30 from unrelated work and a share gathered under a wall
+cap is partly a timing measurement (§9). Zero instances hit the wall valve, so
+every count below is a function of the model and not of machine speed. Zero
+certificate violations.
+
+| bucket | count | share of probes |
+|---|---:|---:|
+| `SbProbes` | 11582 | — |
+| `SbProbeOptimal` | 11240 | 97.05% |
+| **`SbProbeInfeasible`** | **342** | **2.95%** |
+| `SbProbeOther` | 0 | 0.00% |
+| `SbCandBothInfeasible` | **1** | — |
+
+**Against the pre-registered criterion** (written into `profile.rs` before the
+run): ≥5% builds, <1% does not, and 1–5% is WEAK — *"build only if the
+both-children-infeasible count is itself non-trivial."* The share is 2.95%, and
+the both-infeasible count is **1 across the entire panel**. The whole-node-prune
+arm, which was the valuable half, essentially never fires. **A6 is falsified and
+the collapse is not being built.**
+
+**Retraction (§11).** Earlier in this session the collapse was described as
+"cleared for a v1 build". That was a statement about *soundness*, and it remains
+true; it was not a statement about frequency, and it was made before the frequency
+was measured. The build decision it implied is withdrawn.
+
+**What the same run turned up that is NOT falsified.** Strong branching is gated
+by `sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget`
+(`milp_driver.rs:1434`), a **global node budget**, defaulting to 48 in the Python
+binding. That is why `SbCalls` pins near 31 on every instance regardless of size:
+strong branching in discopt is a root-region activity that switches off entirely
+after the first 48 nodes, and everything below runs on pseudocosts alone. A4
+already swept that budget to unlimited and got only 1.22×, so running SB deeper is
+not the answer — but it means the pseudocost model is what steers essentially the
+whole tree, which is where A7 goes.
+
+### A7 — the pseudocost default *is* mis-scaled, and fixing it is not enough. 2026-09-05.
+
+**The defect, and it is a real one.** `Pseudocosts::default_cost`
+(`branching.rs:108`) is a hardcoded `1.0` in **objective units**, and
+`score()` (`branching.rs:179-184`) multiplies it against observed per-unit
+pseudocosts — also in objective units — inside the same product:
+
+```rust
+let d = self.down_cost(var_index) * frac_part;      // observed, or the 1.0 default
+let u = self.up_cost(var_index) * (1.0 - frac_part);
+(1e-6 + d) * (1e-6 + u)
+```
+
+So on a model whose true pseudocosts sit near `1e-3`, every never-observed
+variable scores ~1000× too high and wins every comparison; near `1e3` it loses
+every one. **Branching order is a function of the objective's arbitrary scale.**
+`tree_manager.rs:723-726` reads the same accessors for `best_estimate`, so
+BestEstimate node ordering skews with it. Nothing here touches a bound —
+pseudocosts select a *variable* — so this is soundness-free but search-changing.
+
+**Entry experiment first (CLAUDE.md §4).** The defect only matters if unobserved
+candidates actually compete at selection time, so that was measured before any
+implementation, with the kill criterion committed to `profile.rs` *before* the
+run. 38-instance panel, fixed 3000-node cap:
+
+| pre-registered kill threshold | measured | |
+|---|---|---|
+| unobserved < 10 % of scored candidates | **39.90 %** (675,255 / 1,692,319) | 4× over |
+| unobserved winners < 5 % of decisions | **17.40 %** (7,206 / 41,406) | 3.5× over |
+| — (A4 secondary) observed costs within one decade of 1.0 | **26.6 %**, spread > 4 decades | |
+
+The constant is not a rarely-touched fallback: it decides roughly **one
+branching in six**. This is compounded by the A4 finding that `sb_active`
+(`milp_driver.rs:1434`) gates strong branching off after `sb_node_budget` nodes
+(48 in the Python binding), so pseudocosts steer essentially the whole tree with
+no mechanism ever initializing them below the root region.
+
+**The fix.** Score an unobserved variable at the running arithmetic mean of every
+per-unit pseudocost observed so far, across all variables — so it ranks as *an
+average variable of this model* rather than *a variable worth 1.0 objective
+units*. Zero-gain observations are included in that mean (a branch that gained
+nothing is evidence about the scale, not a missing sample). Before any
+observation, and when every observation so far is exactly zero, it falls back to
+the legacy constant: no scale is knowable there, and all unobserved candidates
+tie under either value anyway. Behind `DISCOPT_PCOST_DEFAULT` (`one` = legacy,
+`mean` = new), default-off, unrecognized values a hard refusal — which doubles as
+the differential panel's wiring gate.
+
+**The differential panel says do not graduate.** 38 instances × 2 arms, 3000-node
+cap, order alternated per instance, 120,825 feasibility conditions checked on
+incumbents:
+
+| | `one` (legacy) | `mean` (scale-free) |
+|---|---|---|
+| solved to optimality | 11/38 | **12**/38 |
+| geomean dual gap | 0.00158169 | **0.00141174** |
+| geomean primal gap | 0.00410782 | **0.00259286** |
+| total nodes | 84,900 | 83,966 |
+| dual bound better on | — | 8 instances (worse on 7) |
+| primal gap better on | — | 2 instances (worse on 1) |
+
+**Cert-clean: yes**, with no slack — no bound above its reference optimum in
+either arm, every incumbent independently feasibility-verified against the
+*source* MPS rows (not the engine's standard form), and no instance optimal under
+`one` that is non-optimal under `mean`. The arms genuinely diverged on 27/38, so
+this is not a null instrument.
+
+**Net-positive: no.** The pre-registered bar was ≥ 3 net-better instances on the
+dual *or* primal side with neither geomean worsening. Both geomeans improved and
+one more instance solved, but the per-instance margin is **1 on each side** —
+8-better/7-worse is a coin flip. Worse, the dual-side gains are concentrated in
+one family: all four `mik-250-20-75-*` instances improve, which is exactly the
+benefit-confined-to-a-class pattern CLAUDE.md §2 rejects. This is the
+`DISCOPT_CUT_INHERIT` case again: **sound is not the bar; broadly helpful is.**
+The flag ships default-off with this measurement recorded and does not graduate.
+
+**Retraction, CLAUDE.md §11 — this section's first version named the wrong next
+step, and it was wrong within the hour.** It claimed that "HiGHS and SCIP do not
+guess: they strong-branch the unreliable candidates, and discopt cannot"; that
+A4's unlimited-budget sweep "swept SB on *all* candidates at every node"; and
+that reliability branching was therefore "a different experiment from A4's".
+**All three are false.** `strong_branch` already filters to unreliable
+candidates —
+
+```rust
+.filter(|c| c.2 < ctx.reliability)   // milp_driver.rs:2678; c.2 is the obs count
+```
+
+— and `MilpOptions::strong_branch` is documented at `milp_driver.rs:408` as
+"Limited strong branching on unreliable candidates (**reliability branching**)",
+feedback loop included. discopt *is* a reliability brancher. A4's `unlimited` arm
+therefore already ran reliability branching at full depth and measured **1.221×**,
+below even that probe's 1.25× falsification floor. There is no A8 of the kind
+described; the claim is withdrawn rather than carried forward.
+
+**What A7 actually leaves standing.** A6's 39.9 % unobserved figure was measured
+at the *shipped* `sb_node_budget = 48`, so it is a description of the tree once
+reliability branching has expired — not evidence that the mechanism is missing.
+And A4 already established, on this same panel, that turning it back on
+everywhere is worth only 1.22× in geomean while being **bimodal**: 11.31× on
+`fiber`, 3.25× on `dcmulti`, *exactly* 1.00× on ten instances, and actively
+**worse** on `p0201`. The lever is not more SB or a better guess between probes —
+it is spending SB where the probe can discriminate and not where it cannot. That
+is the degeneracy shut-off A4 already registered as its live candidate
+(`setMinReliable(0)` at a degenerate node, `HighsSearch.cpp:1114-1116`), with a
+falsification test on this very panel: if a degeneracy signal separates `p0201`
+from `fiber`, it is a mechanism; if it does not, it is dropped. That, not a
+default-value refinement, is the next experiment.
 
 ## 4. Success metric
 
