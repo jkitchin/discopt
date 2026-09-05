@@ -232,40 +232,39 @@ The repository already applies the right doctrine to the *improver* role
 
 ### 6.3 What the entry-share flag does and does not fix
 
-`DISCOPT_HEUR_ENTRY_SHARE` requires a finder to fit 25 % of the remainder.
-Two repetitions, arms interleaved within each repetition, zero spread:
+**Read the earlier numbers in this section's history with care.** The container
+this work ran on restarted mid-investigation and the BASELINE moved with it:
+`tspn10` at 5 s was 7/7 nodes under the legacy arm before the restart and 3/3
+after; `tspn12` at 40 s went 15 -> 63. Any comparison spanning that boundary
+attributes an environment change to the code. Everything below is a single
+three-arm run in ONE process on ONE container, arms interleaved within each
+repetition, 54 runs — `scratchpad/i1153/three_arm.log`.
 
-| @10 s | nodes OFF -> ON | bound OFF -> ON | incumbent OFF -> ON |
+Node counts, two repetitions, at the rung where the pump is admitted:
+
+| @10 s | legacy | flat share | success-weighted |
 |---|---|---|---|
-| `tspn10` | 3 -> **31** | 161.160 -> **165.223** (tighter) | unchanged |
-| `heatexch_gen2` | 3 -> **7** | unchanged | unchanged (none) |
-| `tspn12` | 3 -> 5 | unchanged | 262.647 -> **282.244 (worse)** |
+| `heatexch_gen2` | 3, 3 | **7, 7** | 3, 3 |
+| `tspn10` | 3, 3 | **31, 31** | 3, 3 |
+| `tspn12` | 3, 3 | 5, 5 | 3, 3 |
 
-It fixes the collapse where the pump is wasted and **loses a genuinely better
-incumbent where the pump is productive**. And at the 20 s rung the ON arm is
-identical to OFF on all three: the gate re-admits the pump, so the cliff has
-**moved, not gone**.
+And at 5 s the flat arm also removes a bimodality: `heatexch_gen2` legacy is
+`[7, 3]` (sd 2.0) and flat is `[7, 7]` (sd 0); `tspn10` legacy `[3, 3]`, flat
+`[7, 7]`.
 
-Re-measured on the shipped form (entry rule + clock cap together), 48 runs, two
-repetitions, arms interleaved within each — `scratchpad/i1153/combined.log`. Both
-gains reproduce with zero spread (`heatexch_gen2` 3 -> 7, `tspn10` 3 -> 31) and so
-does the `tspn12` regression; 20 s and 40 s are ON == OFF throughout. One caveat
-for anyone re-deriving the panel: `tspn10` at 5 s is **bimodal** under the legacy
-arm (nodes `[3, 7]`, sd 2.0), so it is not a sound single-run probe at that rung —
-`heatexch_gen2` is the stable one (sd 0 at every rung in both arms).
+**The cost, and it is real.** `tspn12` at 10 s: legacy reaches `262.647` in both
+repetitions, flat reaches `282.244` in both. Reproducible, not noise. The pump
+there is productive and the flat share refuses it.
 
-Two causes of the residual, both identified and neither yet fixed:
+**One apparent second regression is noise, and per-rep data is what shows it.**
+`heatexch_gen2` at 20 s reads `legacy 808843.77 / flat None` in the summary — but
+the legacy arm returned `None` in rep 0 and `808843.77` in rep 1. Bimodal. A
+summary that prints only the last repetition would have recorded a regression
+that is not there; this is why the probe prints every repetition.
 
-* **The gate's cost estimate is wrong on first use.** `_heur_nlp_cost` seeds at a
-  2.0 s default while the pump actually costs 6.4 s, so the first admission is
-  made on a 3x underestimate. Self-calibration only starts after that solve.
-* **Any entry threshold is a cliff.** Refusing on cost alone cannot distinguish
-  the productive pump (`tspn12`) from the wasted one (`tspn10`,
-  `heatexch_gen2`). The improver role already solves exactly this with success
-  weighting (`3 * (found + 1) / (calls + 1)`); extending that weighting to the
-  finder role — allow the first attempt, then charge it against a
-  success-weighted contingent — is the next step, and would let a productive
-  pump keep running while starving an unproductive one.
+So the flat share buys node throughput at 5-10 s and costs one reproducible
+incumbent. Whether that trade is net-positive is a corpus question, not a
+three-instance one — §6.6.
 
 ### 6.4 The stage-deadline form, measured and falsified on its own
 
@@ -289,7 +288,27 @@ deadline is not a bound on a stage whose unit of work already exceeds it.
 The entry rule is therefore retained as the mechanism, with the clock cap kept
 alongside it.
 
-### 6.5 Status
+### 6.5 Success weighting on the finder role, measured and falsified
+
+The obvious repair for `tspn12` is to discriminate on OUTCOME rather than cost:
+allow the first attempt, then shrink the admitted share once for every fruitless
+one — `base ** (calls - found)`, the *improver* role's success weighting
+(`_improver_allowed`'s `3 * (found + 1) / (calls + 1)`) carried across to the
+finder role. It was implemented, made unit-testable as a pure function, and
+measured in the same three-arm run above.
+
+**It is inert on all nine cells** — identical to legacy everywhere, including the
+two the flat share fixes. The reason is visible once stated: the harm is done by
+the *first* pump, and a rule whose whole point is to admit the first attempt
+cannot prevent it. Refusing only the *second* attempt saves wall but not enough
+to change a node count.
+
+The code was therefore removed rather than shipped. An inert flag is a dead flag
+(CLAUDE.md §3), and keeping it would have implied a fix that measurement says is
+not there. What remains of the attempt is this record and the module-level
+refactor it forced, which is what made the three-arm probe possible at all.
+
+### 6.6 Status
 
 Neither flag is proposed for default-ON on this evidence, and #1153 is **not
 closed**. What is settled: the harm class reproduces here; its cause is

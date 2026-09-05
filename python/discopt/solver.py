@@ -46,7 +46,6 @@ from discopt.modeling.core import (
 )
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
-from discopt.solver_tuning import finder_entry_share as _finder_entry_share_for
 from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_share
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import saturate_role2 as _role2_saturate
@@ -11743,23 +11742,6 @@ def solve_model(
     # launch another unless that much budget remains. A dict so the nested
     # closures can mutate it without a ``nonlocal`` dance.
     _heur_nlp_cost = {"max": 0.0, "default": 2.0}
-    # #1153: outcomes of the FINDER-role root heuristics so far this solve. The
-    # entry rule below shrinks a finder's admitted share once for every attempt
-    # that produced nothing, so a productive heuristic keeps its full legacy
-    # allowance and a fruitless one stops eating the search. See
-    # ``_finder_entry_share``.
-    _finder_state = {"calls": 0, "found": 0}
-
-    def _record_finder(found: bool) -> None:
-        """Record whether a finder-role root heuristic yielded an incumbent."""
-        _finder_state["calls"] += 1
-        if found:
-            _finder_state["found"] += 1
-
-    def _finder_entry_share() -> float:
-        """This solve's finder share — :func:`solver_tuning.finder_entry_share`
-        applied to the outcomes recorded so far."""
-        return _finder_entry_share_for(_finder_state["calls"], _finder_state["found"])
 
     def _observe_heur_nlp(wall: float) -> None:
         """Record an observed heuristic/root NLP wall for the entry gate."""
@@ -11803,7 +11785,9 @@ def solve_model(
         # 20 s that the legacy arm missed — but the entry rule is what works.
         #
         # The share is 1.0 (this exact rule, byte-identical) with the flag off.
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _finder_entry_share()):
+        if _remaining <= max(
+            _DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _heuristic_entry_share()
+        ):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
@@ -13620,7 +13604,6 @@ def solve_model(
                         deadline=_heur_stage_deadline(),
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_fp)
-                    _fp_found = False
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
                         fp_feas = not cl_list or _check_constraint_feasibility(
@@ -13628,11 +13611,7 @@ def solve_model(
                         )
                         if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
                             _inject_incumbent(fp_sol, fp_obj)
-                            _fp_found = True
                             logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
-                    # #1153: the outcome, not just the cost, decides what the NEXT
-                    # finder is allowed to spend.
-                    _record_finder(_fp_found)
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
 
@@ -13693,7 +13672,6 @@ def solve_model(
                                 evaluator=evaluator,
                                 deadline=_heur_stage_deadline(),
                             )
-                            _fp2_found = False
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
                                 fp_feas2 = not cl_list or _check_constraint_feasibility(
@@ -13705,12 +13683,10 @@ def solve_model(
                                     and fp_feas2
                                 ):
                                     _inject_incumbent(fp_sol2, fp_obj2)
-                                    _fp2_found = True
                                     logger.info(
                                         "NLP-relaxation feasibility pump found incumbent: obj=%.6g",
                                         fp_obj2,
                                     )
-                            _record_finder(_fp2_found)
                     except Exception as e:
                         logger.debug("NLP-relaxation feasibility pump failed: %s", e)
                     finally:
