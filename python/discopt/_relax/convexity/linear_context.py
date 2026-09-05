@@ -29,6 +29,7 @@ from typing import Optional
 import numpy as np
 
 from discopt._relax.convexity.lattice import Sign, is_strict, sign_from_bounds
+from discopt._relax.scalarize import sum_is_full_reduction
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -149,6 +150,12 @@ def extract_affine(
             return None
 
         if isinstance(node, SumExpression):
+            # A full reduction contributes one row whose terms are the operand's
+            # elements at a uniform scale. An axis reduction is array-valued --
+            # several rows -- so this single coefficient row would be their sum
+            # (#1160). Abstain rather than describe a row the model does not have.
+            if not sum_is_full_reduction(node):
+                return None
             return walk(node.operand, scale)
 
         if isinstance(node, SumOverExpression):

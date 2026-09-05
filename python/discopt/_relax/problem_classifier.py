@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 # route the problem class — does not pull in JAX. That keeps LP/MILP/MIQP solves
 # free of JAX/XLA cold-start.
 from discopt._flat_index import resolve_scalar_slot
+from discopt._relax.scalarize import sum_is_full_reduction
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -483,8 +484,23 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
                 continue
 
             if isinstance(node, SumExpression):
-                # sum(expr) reduces expr to a scalar: element-collapse is legitimate
-                # here (uniform scale), so allow array nodes beneath this point.
+                # A FULL reduction sums its operand to a scalar: element-collapse
+                # is legitimate here (uniform scale), so allow array nodes beneath
+                # this point. An AXIS reduction is array-valued — ``sum(A, axis=1)``
+                # is one row per row of ``A`` — so descending would fold rows the
+                # model keeps apart and emit ``sum(A) <= b`` for ``sum(A, axis=1)
+                # <= b``, a strictly larger feasible set certified as the answer
+                # (#1160). Refuse so ``extract_lp_data()`` routes the body to the
+                # tape/autodiff extractor, which fans it out into one row per
+                # element. Under ``allow_array`` an enclosing reduction already
+                # sums every element with this same uniform scale, and summing a
+                # partial sum's elements is summing the operand's, so the collapse
+                # is exact there and stays allowed.
+                if not allow_array and not sum_is_full_reduction(node):
+                    raise _NotLinearError(
+                        "axis-reduced sum in scalar position (vector-valued body); "
+                        "routing to the per-component extractor"
+                    )
                 stack.append((node.operand, scale, True))
                 continue
 
@@ -764,7 +780,15 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
                 continue
 
             if isinstance(node, SumExpression):
-                # sum(expr) reduces to a scalar: array collapse legitimate below here.
+                # Full reduction: array collapse legitimate below here. Axis
+                # reduction: array-valued, one row per surviving element, so
+                # descending would fold separate rows into one (#1160) — see the
+                # matching guard in ``_extract_linear_coefficients_sparse``.
+                if not allow_array and not sum_is_full_reduction(node):
+                    raise _NotQuadraticError(
+                        "axis-reduced sum in scalar position (vector-valued body); "
+                        "routing to the per-component extractor"
+                    )
                 stack.append((node.operand, scale, True))
                 continue
 

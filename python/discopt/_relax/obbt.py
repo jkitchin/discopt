@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 
 from discopt._flat_index import resolve_scalar_slot
+from discopt._relax.scalarize import sum_is_full_reduction
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
 from discopt.solvers.lp_backend import (
@@ -499,6 +500,12 @@ def _extract_linear_constraints(
             return None
 
         if isinstance(expr, SumExpression):
+            # Only a full reduction is the single row this returns. An axis
+            # reduction stands for one row per surviving element, and merging
+            # their coefficients would hand OBBT a constraint the model does not
+            # contain -- an invalid tightening, not just a weak one (#1160).
+            if not sum_is_full_reduction(expr):
+                return None
             return _extract_coeffs(expr.operand)
 
         if isinstance(expr, SumOverExpression):
@@ -639,6 +646,10 @@ def _extract_linear_objective(
                 return {slot: 1.0}, 0.0
             return None
         if isinstance(expr, SumExpression):
+            # See the sibling extractor above: an axis reduction is several rows,
+            # not one (#1160).
+            if not sum_is_full_reduction(expr):
+                return None
             return _extract(expr.operand)
         if isinstance(expr, SumOverExpression):
             merged: dict[int, float] = {}

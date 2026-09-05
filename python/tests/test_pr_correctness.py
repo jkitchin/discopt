@@ -13,6 +13,7 @@ Each instance is chosen to cover a distinct solver code path:
 * ``binary_knapsack``          — pure 0-1 MILP
 * ``binary_cubic_minlp``       — tiny mixed continuous/binary nonconvex MINLP
 * ``exp_binary_minlp``         — OA-friendly convex MINLP with ``exp``
+* ``row_capped_axis_sum``      — array-valued ``dm.sum(A, axis=1)`` rows (#1160)
 
 The full ``circle_minlp`` case stays in the nightly correctness suite. It
 exercises a nonconvex circle superlevel shape, but it is too expensive for this
@@ -36,6 +37,7 @@ from test_correctness import (
     _build_binary_knapsack,
     _build_constrained_quadratic,
     _build_exp_binary_minlp,
+    _build_row_capped_axis_sum,
     _build_simple_minlp,
     assert_optimal_value,
 )
@@ -93,6 +95,18 @@ PR_INSTANCES: list[ProblemInstance] = [
         integer_vars=["y"],
         bounds={"x": (0, 3), "y": (0, 1)},
         description="OA-friendly convex MINLP",
+    ),
+    # The `.nl` corpus contains no ``SumExpression`` at all, so an axis-reduced
+    # sum has no coverage in any `.nl` panel or gate — which is how #1160's false
+    # certificate survived. This is the PR-tier probe for that class; it solves in
+    # well under a second.
+    ProblemInstance(
+        name="row_capped_axis_sum",
+        build_fn=_build_row_capped_axis_sum,
+        expected_obj=-4.0,
+        integer_vars=[],
+        bounds={"A": (0, 1)},
+        description="Array-valued sum(A, axis=1) <= 2: per-row caps",
     ),
 ]
 

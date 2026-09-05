@@ -73,7 +73,13 @@ logger = logging.getLogger(__name__)
 #: Sentinel for "no memoized shape on this node" (``None`` is a real answer).
 _MISS = object()
 
-__all__ = ["scalar_elements", "static_shape", "MAX_SCALAR_ELEMENTS"]
+__all__ = [
+    "scalar_elements",
+    "static_shape",
+    "sum_result_shape",
+    "sum_is_full_reduction",
+    "MAX_SCALAR_ELEMENTS",
+]
 
 #: Refuse to expand a single expression into more scalar elements than this.
 #: A relaxation row per element is the point of the exercise, but an accidental
@@ -119,6 +125,56 @@ def static_shape(expr: Expression) -> Optional[tuple[int, ...]]:
     return shape
 
 
+def sum_result_shape(expr: SumExpression) -> Optional[tuple[int, ...]]:
+    """Static shape of what a ``SumExpression`` node *evaluates to*, or ``None``.
+
+    ``axis=None`` is a full reduction: the node is a scalar whatever the operand
+    is, so nothing about the operand needs to be known. An ``axis=k`` reduction
+    leaves the operand's other axes standing, so the node is **array-valued** and
+    stands for one row per surviving element — ``dm.sum(A, axis=1)`` on a
+    ``(2, 3)`` variable is two independent row sums, not one sum of six terms
+    (issue #1160).
+
+    ``None`` means "not known", never "scalar": callers must treat it the way
+    :func:`scalar_elements` treats it, as "keep your conservative path".
+    """
+    if expr.axis is None:
+        return ()
+    operand_shape = static_shape(expr.operand)
+    if operand_shape is None:
+        return None
+    nd = len(operand_shape)
+    axes = expr.axis if isinstance(expr.axis, tuple) else (expr.axis,)
+    reduced: set[int] = set()
+    for a in axes:
+        if not isinstance(a, (int, np.integer)):
+            return None
+        a = int(a)
+        if not -nd <= a < nd:
+            # numpy would raise here; this module does not guess what the
+            # evaluator would have done with an out-of-range axis.
+            return None
+        reduced.add(a % nd)
+    return tuple(d for i, d in enumerate(operand_shape) if i not in reduced)
+
+
+def sum_is_full_reduction(expr: SumExpression) -> bool:
+    """True only when this ``SumExpression`` node provably evaluates to a scalar.
+
+    The predicate every structural walker needs before it descends into
+    ``.operand`` and folds the operand's elements together with one uniform
+    scale. That fold is exactly right for a full reduction and *wrong* for an
+    axis reduction, where the elements belong to different rows: collapsing
+    ``dm.sum(A, axis=1) <= 2`` into ``dm.sum(A) <= 2`` deletes the per-row caps
+    and certifies an optimum the real model does not have (issue #1160).
+
+    False on an unknown shape, deliberately — the caller then abstains and the
+    body routes to an extractor that fans an array-valued body out into one row
+    per element (the tape/autodiff rungs), which is slower and correct.
+    """
+    return sum_result_shape(expr) == ()
+
+
 def _static_shape_uncached(expr: Expression) -> Optional[tuple[int, ...]]:
     if isinstance(expr, Constant):
         return tuple(int(d) for d in expr.value.shape)
@@ -154,10 +210,11 @@ def _static_shape_uncached(expr: Expression) -> Optional[tuple[int, ...]]:
         return _matmul_shape(static_shape(expr.left), static_shape(expr.right))
 
     if isinstance(expr, SumExpression):
-        # A full reduction is scalar. An axis-reduction's shape depends on the
-        # evaluator's axis semantics for a partially-known operand — report
-        # unknown rather than re-derive them here.
-        return () if expr.axis is None else None
+        # A full reduction is scalar; an axis reduction keeps the operand's other
+        # axes. One definition of that, shared with the ``sum_is_full_reduction``
+        # guard the relaxation-side walkers use (#1160), so the two can never
+        # disagree about what a ``SumExpression`` node stands for.
+        return sum_result_shape(expr)
 
     if isinstance(expr, SumOverExpression):
         shapes = [static_shape(t) for t in expr.terms]
