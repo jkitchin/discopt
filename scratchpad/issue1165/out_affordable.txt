@@ -1,0 +1,75 @@
+ 17:45:33 up 55 min,  0 user,  load average: 0.37, 0.82, 0.94
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+
+=== A. #517 flag inertness on cleanly-certifying instances ===
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf).  Nonlinear tightening can adjust 4 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+OA: nonlinear objective is not convex in the optimization sense; disabling master lower-bound updates and skipping objective OA cuts
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1e-7 [3munscaled_kkt_error[0m[2m=[0m9.226713556964754e-5 [3mscaled_nlp_error[0m[2m=[0m9.226713556964754e-12 [3mthreshold[0m[2m=[0m0.0001
+OA: nonlinear objective is not convex in the optimization sense; disabling master lower-bound updates and skipping objective OA cuts
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1e-7 [3munscaled_kkt_error[0m[2m=[0m9.226713556964754e-5 [3mscaled_nlp_error[0m[2m=[0m9.226713556964754e-12 [3mthreshold[0m[2m=[0m0.0001
+  alan     shipped tl=20    rep0    2.4s off[optimal,n=13,2.9249999999509586] on[optimal,n=13,2.9249999999509586] SAME
+OA: nonlinear objective is not convex in the optimization sense; disabling master lower-bound updates and skipping objective OA cuts
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1e-7 [3munscaled_kkt_error[0m[2m=[0m9.226713556964754e-5 [3mscaled_nlp_error[0m[2m=[0m9.226713556964754e-12 [3mthreshold[0m[2m=[0m0.0001
+OA: nonlinear objective is not convex in the optimization sense; disabling master lower-bound updates and skipping objective OA cuts
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1e-7 [3munscaled_kkt_error[0m[2m=[0m9.226713556964754e-5 [3mscaled_nlp_error[0m[2m=[0m9.226713556964754e-12 [3mthreshold[0m[2m=[0m0.0001
+  alan     shipped tl=20    rep1    2.2s off[optimal,n=13,2.9249999999509586] on[optimal,n=13,2.9249999999509586] SAME
+  alan     work-terminated  rep0    0.1s off[optimal,n=13,2.9249999999509586] on[optimal,n=13,2.9249999999509586] SAME
+  alan     work-terminated  rep1    0.1s off[optimal,n=13,2.9249999999509586] on[optimal,n=13,2.9249999999509586] SAME
+  ex1221   shipped tl=20    rep0    4.2s off[optimal,n=5,7.6671800686755205] on[optimal,n=5,7.6671800686755205] SAME
+  ex1221   shipped tl=20    rep1    4.1s off[optimal,n=5,7.6671800686755205] on[optimal,n=5,7.6671800686755205] SAME
+  ex1221   work-terminated  rep0    4.0s off[optimal,n=5,7.6671800686755205] on[optimal,n=5,7.6671800686755205] SAME
+  ex1221   work-terminated  rep1    4.1s off[optimal,n=5,7.6671800686755205] on[optimal,n=5,7.6671800686755205] SAME
+
+=== B. Benders multicut backend determinism ===
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=0 rep0    0.0s seq[optimal,3.623957266463968,3.6239572664639437] thr[optimal,3.623957266463968,3.6239572664639437] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=0 rep1    0.0s seq[optimal,3.623957266463968,3.6239572664639437] thr[optimal,3.623957266463968,3.6239572664639437] SAME
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+  seed=1 rep0    0.0s seq[optimal,12.558228372059215,12.558228372059205] thr[optimal,12.558228372059215,12.558228372059205] SAME
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+  seed=1 rep1    0.0s seq[optimal,12.558228372059215,12.558228372059205] thr[optimal,12.558228372059215,12.558228372059205] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=2 rep0    0.0s seq[optimal,4.189332841663353,4.189332841663352] thr[optimal,4.189332841663353,4.189332841663352] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=2 rep1    0.0s seq[optimal,4.189332841663353,4.189332841663352] thr[optimal,4.189332841663353,4.189332841663352] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=3 rep0    0.0s seq[optimal,3.503186163015992,3.503186163015988] thr[optimal,3.503186163015992,3.503186163015988] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=3 rep1    0.0s seq[optimal,3.503186163015992,3.503186163015988] thr[optimal,3.503186163015992,3.503186163015988] SAME
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+  seed=4 rep0    0.0s seq[optimal,13.090010804421263,13.090010804421258] thr[optimal,13.090010804421263,13.090010804421258] SAME
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+  seed=4 rep1    0.0s seq[optimal,13.090010804421263,13.090010804421258] thr[optimal,13.090010804421263,13.090010804421258] SAME
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+  seed=5 rep0    0.0s seq[optimal,2.4584222019637956,2.458422201963793] thr[optimal,2.4584222019637956,2.458422201963793] SAME
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 1 added no separating cut (degenerate or missing duals); stall=1.
+  seed=5 rep1    0.0s seq[optimal,2.4584222019637956,2.458422201963793] thr[optimal,2.4584222019637956,2.458422201963793] SAME
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+  seed=6 rep0    0.0s seq[optimal,18.677457706054664,18.67745770605464] thr[optimal,18.677457706054664,18.67745770605464] SAME
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 0 added no separating cut (degenerate or missing duals); stall=1.
+  seed=6 rep1    0.0s seq[optimal,18.677457706054664,18.67745770605464] thr[optimal,18.677457706054664,18.67745770605464] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=7 rep0    0.0s seq[optimal,8.252071899905918,8.252071899905916] thr[optimal,8.252071899905918,8.252071899905916] SAME
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+Benders iteration 2 added no separating cut (degenerate or missing duals); stall=1.
+  seed=7 rep1    0.0s seq[optimal,8.252071899905918,8.252071899905916] thr[optimal,8.252071899905918,8.252071899905916] SAME
+
+executed comparisons = 24
+ 17:45:56 up 56 min,  0 user,  load average: 0.99, 0.93, 0.97

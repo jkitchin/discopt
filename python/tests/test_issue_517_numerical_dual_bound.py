@@ -86,6 +86,36 @@ def test_hda_flag_disabled_is_sound_but_no_longer_discriminating(monkeypatch):
     for the #517 path (the #1039 ``row_filter/invocations`` counter is what made
     the equivalent search tractable for the row filter). That is the one piece of
     #1039 left open rather than closed.
+
+    #1165 -- the differential assertion is GONE, not weakened. This test used to
+    close with ``abs(on.bound - off.bound) <= 1e-6 * max(1, abs(off.bound))``
+    between two 25 s solves. **A wall-clock-truncated bound is not a comparable
+    quantity**: each arm reports wherever the search happened to be when the
+    clock ran out, so that assertion measured machine load, not the flag. Three
+    measurements, all in ``scratchpad/issue1165/``:
+
+      * The number the arms agree on is a property of the BOX. On a quiet
+        machine both arms are bit-stable at ``-100217.95933512867`` (6 solves,
+        3 reps interleaved, sd 0) -- not the ``-141697.43348991615`` recorded
+        above from a different machine, in the same arm at the same budget.
+      * The failure that opened #1165 had both arms at ``status='time_limit'``,
+        ``nodes=3``, ``objective=None`` and reported OFF ``-141697.43348991615``
+        vs ON ``-13992288065.862448`` -- five orders of magnitude, from load.
+      * Making the comparison VALID is not affordable on hda. The #1116 recipe
+        (``deterministic=True`` + a node budget, so both arms terminate on WORK)
+        gives the OFF arm ``-141697.43348991615`` in 305 s at ``max_nodes=1``
+        -- exactly the value recorded above, i.e. the work-terminated bound is
+        the reproducible one -- while the ON arm did not return in 2095 s at the
+        same budget. hda is in the #1039 ``_NOT_AFFORDABLY_COMPARABLE`` class.
+
+    So the ON/OFF differential moved to where it can be made valid:
+    ``test_inert_on_cleanly_certifying_instances`` below now runs both arms to a
+    deterministic node budget and compares them bit-for-bit, which is the same
+    claim tested on instances where the comparison has a well-defined subject.
+    What is left here is exactly what survives truncation and is asserted
+    unconditionally: a sound bound is sound wherever the search was cut off, and
+    the OFF arm's bound being finite is the whole content of "the legacy
+    no-bound baseline is unreachable".
     """
     # Pin the later-graduated row filter OFF so this flag is the only variable.
     monkeypatch.setenv("DISCOPT_RELAX_ROW_FILTER", "0")
@@ -103,13 +133,20 @@ def test_hda_flag_disabled_is_sound_but_no_longer_discriminating(monkeypatch):
         assert r.bound <= _HDA_OPT + 1e-2, f"UNSOUND ({label}): {r.bound:.6g} > {_HDA_OPT}"
         assert r.status != "optimal", f"{label}: a loose dual floor must not claim optimality"
 
-    # Record the measured state: hda does not separate the arms any more. If this
-    # ever fails, the flag has become load-bearing on hda again and the stronger
-    # differential assertion (see the #671 refinement test) should be restored.
-    assert abs(on.bound - off.bound) <= 1e-6 * max(1.0, abs(off.bound)), (
-        f"hda now DOES discriminate the flag (OFF {off.bound!r} vs ON {on.bound!r}); "
-        "restore the differential assertion this test gave up"
-    )
+    # NO differential assertion here, deliberately -- see the #1165 section of
+    # this test's docstring. Everything above is truncation-proof; a comparison
+    # between two ``time_limit`` runs is not, and must not be added back.
+
+
+#: Both arms terminate on WORK, not on the wall clock -- the #1116 recipe already
+#: used by ``test_relax_row_filter.py``. A solve cut off by ``time_limit`` stops at
+#: a machine-speed-dependent point, so two such solves are two different amounts
+#: of search and comparing them bit-for-bit measures load (#1165). Measured on the
+#: two instances below, 2 reps x 2 arms each
+#: (``scratchpad/issue1165/probe_affordable_comparisons.py``): identical bounds in
+#: every run under BOTH budgets, and the work budget is the cheaper one
+#: (alan 2.4 s -> 0.1 s per arm pair; ex1221 unchanged at ~4 s).
+_WORK_TERMINATED_KW = {"deterministic": True, "max_nodes": 25, "time_limit": 120}
 
 
 @pytest.mark.slow
@@ -117,19 +154,35 @@ def test_hda_flag_disabled_is_sound_but_no_longer_discriminating(monkeypatch):
 def test_inert_on_cleanly_certifying_instances(name, monkeypatch):
     """Instances whose node LPs solve cleanly (no numerical breakdown) are
     byte-identical with the flag ON: the floor fires only on a failed node LP, so
-    a well-conditioned certifying instance never triggers it."""
+    a well-conditioned certifying instance never triggers it.
+
+    This carries the ON/OFF differential that ``hda`` can no longer host (#1165):
+    hda cannot terminate on work affordably, these two can, so the comparison is
+    made here where it has a well-defined subject. Both arms run under
+    ``_WORK_TERMINATED_KW`` and the precondition is ASSERTED rather than assumed
+    (CLAUDE.md §6) -- an arm that ends on ``time_limit`` fails loudly instead of
+    silently degrading into a comparison of two differently-truncated searches.
+    """
     path = os.path.join(_NL_DATA, f"{name}.nl")
     if not os.path.exists(path):
         pytest.skip(f"{name}.nl not vendored")
 
     monkeypatch.setenv(_FLAG, "0")
-    off = dm.from_nl(path).solve(time_limit=20)
+    off = dm.from_nl(path).solve(**_WORK_TERMINATED_KW)
     monkeypatch.setenv(_FLAG, "1")
-    on = dm.from_nl(path).solve(time_limit=20)
+    on = dm.from_nl(path).solve(**_WORK_TERMINATED_KW)
+
+    for arm, r in (("OFF", off), ("ON", on)):
+        assert r.status != "time_limit", (
+            f"{name}: the {arm} arm terminated on time_limit, so this ON/OFF "
+            "comparison is not valid -- raise time_limit or lower max_nodes in "
+            "_WORK_TERMINATED_KW rather than comparing two truncated searches"
+        )
 
     assert off.status == on.status, f"{name}: status changed {off.status} -> {on.status}"
     assert off.objective == on.objective, f"{name}: objective drifted with the flag"
     assert off.bound == on.bound, f"{name}: bound drifted with the flag ({off.bound} -> {on.bound})"
+    assert off.node_count == on.node_count, f"{name}: node count drifted with the flag"
 
 
 def test_flag_defaults_on(monkeypatch):

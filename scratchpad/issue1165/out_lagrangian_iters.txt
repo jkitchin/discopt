@@ -1,0 +1,66 @@
+### uptime before:
+ 16:56:56 up 7 min,  0 user,  load average: 1.08, 1.06, 0.51
+### ARM iters MAX_ITERS=200
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+  rep0 seed=0 subgradient     2.7s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=0 bundle          1.2s seq[optimal,3.999999999999999] thr[optimal,3.999999999999999] SAME
+  rep0 seed=0 kelley          0.9s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=1 subgradient     1.4s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 bundle          0.4s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 kelley          0.3s seq[optimal,9.999999999998181] thr[optimal,9.999999999998181] SAME
+  rep0 seed=2 subgradient     0.1s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 bundle          0.4s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 kelley          0.3s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=3 subgradient    22.4s seq[iteration_limit,3.999999653212795] thr[iteration_limit,3.999999653212795] SAME
+  rep0 seed=3 bundle          1.7s seq[iteration_limit,3.999794206750356] thr[iteration_limit,3.999794206750356] SAME
+  rep0 seed=3 kelley         25.5s seq[iteration_limit,3.999999999982383] thr[iteration_limit,3.999999999982383] SAME
+  rep0 seed=4 subgradient    24.4s seq[iteration_limit,13.999980567845292] thr[iteration_limit,13.999980567845292] SAME
+  rep0 seed=4 bundle          2.3s seq[iteration_limit,13.999034658281056] thr[iteration_limit,13.999034658281056] SAME
+  rep0 seed=4 kelley         27.9s seq[iteration_limit,14.000000000718945] thr[iteration_limit,14.000000000718945] SAME
+  rep0 seed=5 subgradient    24.0s seq[iteration_limit,4.999999564776517] thr[iteration_limit,4.999999564776517] SAME
+  rep0 seed=5 bundle          2.4s seq[iteration_limit,4.999525171813057] thr[iteration_limit,4.999525171813057] SAME
+  rep0 seed=5 kelley         27.1s seq[iteration_limit,5.000000000995983] thr[iteration_limit,5.000000000995983] SAME
+
+[iters] comparisons=18 disagreements=0 time_limit_truncated=0 wall=165.9s
+### ARM iters MAX_ITERS=50 x2 reps
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+  rep0 seed=0 subgradient     3.0s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=0 bundle          1.1s seq[optimal,3.999999999999999] thr[optimal,3.999999999999999] SAME
+  rep0 seed=0 kelley          0.9s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=1 subgradient     1.5s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 bundle          0.5s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 kelley          0.3s seq[optimal,9.999999999998181] thr[optimal,9.999999999998181] SAME
+  rep0 seed=2 subgradient     0.2s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 bundle          0.4s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 kelley          0.3s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=3 subgradient     5.4s seq[iteration_limit,3.9999987040646374] thr[iteration_limit,3.9999987040646374] SAME
+  rep0 seed=3 bundle          1.7s seq[iteration_limit,3.999794206750356] thr[iteration_limit,3.999794206750356] SAME
+  rep0 seed=3 kelley          6.3s seq[iteration_limit,3.999999999982383] thr[iteration_limit,3.999999999982383] SAME
+  rep0 seed=4 subgradient     5.9s seq[iteration_limit,13.82762213733098] thr[iteration_limit,13.82762213733098] SAME
+  rep0 seed=4 bundle          2.6s seq[iteration_limit,13.999034658281056] thr[iteration_limit,13.999034658281056] SAME
+  rep0 seed=4 kelley          6.9s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep0 seed=5 subgradient     6.0s seq[iteration_limit,4.999995413398128] thr[iteration_limit,4.999995413398128] SAME
+  rep0 seed=5 bundle          2.5s seq[iteration_limit,4.999525171813057] thr[iteration_limit,4.999525171813057] SAME
+  rep0 seed=5 kelley          6.6s seq[iteration_limit,5.000000000317332] thr[iteration_limit,5.000000000317332] SAME
+  rep1 seed=0 subgradient     2.9s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep1 seed=0 bundle          1.2s seq[optimal,3.999999999999999] thr[optimal,3.999999999999999] SAME
+  rep1 seed=0 kelley          0.9s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep1 seed=1 subgradient     1.5s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep1 seed=1 bundle          0.5s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep1 seed=1 kelley          0.3s seq[optimal,9.999999999998181] thr[optimal,9.999999999998181] SAME
+  rep1 seed=2 subgradient     0.2s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep1 seed=2 bundle          0.5s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep1 seed=2 kelley          0.3s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep1 seed=3 subgradient     5.2s seq[iteration_limit,3.9999987040646374] thr[iteration_limit,3.9999987040646374] SAME
+  rep1 seed=3 bundle          1.6s seq[iteration_limit,3.999794206750356] thr[iteration_limit,3.999794206750356] SAME
+  rep1 seed=3 kelley          5.8s seq[iteration_limit,3.999999999982383] thr[iteration_limit,3.999999999982383] SAME
+  rep1 seed=4 subgradient     5.7s seq[iteration_limit,13.82762213733098] thr[iteration_limit,13.82762213733098] SAME
+  rep1 seed=4 bundle          2.4s seq[iteration_limit,13.999034658281056] thr[iteration_limit,13.999034658281056] SAME
+  rep1 seed=4 kelley          6.6s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep1 seed=5 subgradient     5.6s seq[iteration_limit,4.999995413398128] thr[iteration_limit,4.999995413398128] SAME
+  rep1 seed=5 bundle          2.6s seq[iteration_limit,4.999525171813057] thr[iteration_limit,4.999525171813057] SAME
+  rep1 seed=5 kelley          6.8s seq[iteration_limit,5.000000000317332] thr[iteration_limit,5.000000000317332] SAME
+
+[iters] comparisons=36 disagreements=0 time_limit_truncated=0 wall=103.0s
+### uptime after:
+ 17:01:26 up 11 min,  0 user,  load average: 2.29, 1.64, 0.89
