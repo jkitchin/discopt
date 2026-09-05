@@ -1425,6 +1425,83 @@ collapses the branch (`branchUpwards`, `HighsSearch.cpp:558-561, 665-669`),
 pushing one child and setting the parent's `opensubtrees = 0`, and it needs no
 conflict analysis to do it — and (ii) discopt has no plunging at all.
 
+### A5 — the gap is PRIMAL, and specifically the *improving* kind. Measured 2026-09-05.
+
+A3 said the gap is tree size. A4 removed the cheapest explanation for it. This
+probe asks the question that decides what to build: on the instances discopt
+fails to close, is the open gap the incumbent's fault or the bound's?
+
+**Method** (`gapsplit.py`, same 38-instance MIPLIB easy panel, `gap_tol=1e-4`,
+TL 20 s, single arm). For each unsolved instance with a known optimum `z*`,
+split the open span `[bound, incumbent]` at `z*`:
+
+```
+pshare = (incumbent - z*) / (incumbent - bound)      dshare = (z* - bound) / (incumbent - bound)
+```
+
+Registered before the run: median `pshare >= 0.60` -> PRIMAL lever (build
+heuristics); `<= 0.20` -> DUAL lever (branching/bounding); between -> both live.
+
+**Result: 17 of 38 unsolved, median primal share 89.6%, median dual share 10.4%
+-> PRIMAL.** Zero certificate violations (no bound above an optimum, no incumbent
+below one).
+
+**The three-way breakdown is the actionable part, not the median.** The 17 split
+cleanly and the groups want different things:
+
+| group | count | instances | what it needs |
+|---|---|---|---|
+| incumbent found but POOR | **12** | `mik-250-20-75-{1,2,3,5}`, `neos-911970`, `nexp-50-20-{1-1,4-2}`, `sp150x300d`, `neos17`, `beavma`, `neos-3118745-obra`, `gsvm2rl3` | **improving** heuristics + diving |
+| no incumbent at all | 2 | `enlight_hard`, `neos-2624317-amur` | find-any-point (RENS / pump class) |
+| incumbent IS the optimum | 3 | `neos-3610051-istra`, `neos-3610040-iskar`, `b-ball` | bounding only |
+
+And the poor incumbents are *very* poor — this is not a matter of a few percent:
+
+| instance | incumbent | optimum | off by |
+|---|---|---|---|
+| `neos-911970` | 215.69 | 54.76 | 294% |
+| `beavma` | 593880 | 383285 | 55% |
+| `mik-250-20-75-5` | -28299 | -51532 | 45% |
+| `gsvm2rl3` | 0.586 | 0.337 | 74% |
+| `mik-250-20-75-1` | -34400 | -49716 | 31% |
+
+**This corrects a framing error recorded earlier in this plan.** The working
+assumption had been that discopt's primal weakness is a *feasibility* problem,
+and RENS was discussed as the answer on the grounds that HiGHS invokes it
+precisely under `if (mipdata_->incumbent.empty())`
+(`HighsMipSolver.cpp:275-299`). That is true of HiGHS and irrelevant here:
+discopt finds a feasible point on 15 of 17 unsolved instances and 12 of those
+are simply *bad*. The lever is the **improvement** class — RINS-style
+neighborhood search, local branching, and diving — not the find-any-point class.
+Only 2 of 17 want a RENS/pump, which independently confirms A4's note that the
+feasibility pump is not worth building early.
+
+**It also strengthens the case for plunging** rather than replacing it. Diving
+is the structural mechanism that produces *better* incumbents earlier: HiGHS's
+dive nodes are the large majority of its nodes, and its rounding heuristics run
+*inside* the dive loop. The 12-instance group is exactly the population that
+would benefit, and it is the largest group on the panel.
+
+**Instrument defect found and fixed, recorded per CLAUDE.md §6.** The scored set
+was computed with `has_inc = st in HAS_INCUMBENT and obj is not None`, with no
+finiteness test. `enlight_hard` and `neos-2624317-amur` returned `node_limit`
+with `obj = inf`, which passes a None-check; `span` became `inf`, `pshare`
+became `nan`, and the summary line then reported "NO INCUMBENT AT ALL: 0" while
+two rows printed `nan`. Worse, the wiring guard written to catch exactly this,
+
+```python
+if abs(r["pshare"] + r["dshare"] - 1.0) > 1e-6:   # abs(nan) > 1e-6  ->  False
+```
+
+was **defeated by the nan**: every comparison against nan is False, so the guard
+passed silently and `statistics.median` then sorted a list containing nan, where
+order is undefined. Recomputed with the two rows set to what they actually mean
+(no incumbent -> `pshare = 1.0`), the median is **unchanged at 89.6%** — the two
+values sort to the top and do not move the 9th of 17. The verdict therefore
+stands, but it stood by luck and not by correctness. Both defects are fixed: the
+finiteness test is in `has_inc`, and the guard is now written `not (… <= tol)`
+rather than `… > tol`, which is the form that *fails* on nan instead of passing.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
