@@ -1569,6 +1569,93 @@ already swept that budget to unlimited and got only 1.22×, so running SB deeper
 not the answer — but it means the pseudocost model is what steers essentially the
 whole tree, which is where A7 goes.
 
+### A7 — the pseudocost default *is* mis-scaled, and fixing it is not enough. 2026-09-05.
+
+**The defect, and it is a real one.** `Pseudocosts::default_cost`
+(`branching.rs:108`) is a hardcoded `1.0` in **objective units**, and
+`score()` (`branching.rs:179-184`) multiplies it against observed per-unit
+pseudocosts — also in objective units — inside the same product:
+
+```rust
+let d = self.down_cost(var_index) * frac_part;      // observed, or the 1.0 default
+let u = self.up_cost(var_index) * (1.0 - frac_part);
+(1e-6 + d) * (1e-6 + u)
+```
+
+So on a model whose true pseudocosts sit near `1e-3`, every never-observed
+variable scores ~1000× too high and wins every comparison; near `1e3` it loses
+every one. **Branching order is a function of the objective's arbitrary scale.**
+`tree_manager.rs:723-726` reads the same accessors for `best_estimate`, so
+BestEstimate node ordering skews with it. Nothing here touches a bound —
+pseudocosts select a *variable* — so this is soundness-free but search-changing.
+
+**Entry experiment first (CLAUDE.md §4).** The defect only matters if unobserved
+candidates actually compete at selection time, so that was measured before any
+implementation, with the kill criterion committed to `profile.rs` *before* the
+run. 38-instance panel, fixed 3000-node cap:
+
+| pre-registered kill threshold | measured | |
+|---|---|---|
+| unobserved < 10 % of scored candidates | **39.90 %** (675,255 / 1,692,319) | 4× over |
+| unobserved winners < 5 % of decisions | **17.40 %** (7,206 / 41,406) | 3.5× over |
+| — (A4 secondary) observed costs within one decade of 1.0 | **26.6 %**, spread > 4 decades | |
+
+The constant is not a rarely-touched fallback: it decides roughly **one
+branching in six**. This is compounded by the A4 finding that `sb_active`
+(`milp_driver.rs:1434`) gates strong branching off after `sb_node_budget` nodes
+(48 in the Python binding), so pseudocosts steer essentially the whole tree with
+no mechanism ever initializing them below the root region.
+
+**The fix.** Score an unobserved variable at the running arithmetic mean of every
+per-unit pseudocost observed so far, across all variables — so it ranks as *an
+average variable of this model* rather than *a variable worth 1.0 objective
+units*. Zero-gain observations are included in that mean (a branch that gained
+nothing is evidence about the scale, not a missing sample). Before any
+observation, and when every observation so far is exactly zero, it falls back to
+the legacy constant: no scale is knowable there, and all unobserved candidates
+tie under either value anyway. Behind `DISCOPT_PCOST_DEFAULT` (`one` = legacy,
+`mean` = new), default-off, unrecognized values a hard refusal — which doubles as
+the differential panel's wiring gate.
+
+**The differential panel says do not graduate.** 38 instances × 2 arms, 3000-node
+cap, order alternated per instance, 120,825 feasibility conditions checked on
+incumbents:
+
+| | `one` (legacy) | `mean` (scale-free) |
+|---|---|---|
+| solved to optimality | 11/38 | **12**/38 |
+| geomean dual gap | 0.00158169 | **0.00141174** |
+| geomean primal gap | 0.00410782 | **0.00259286** |
+| total nodes | 84,900 | 83,966 |
+| dual bound better on | — | 8 instances (worse on 7) |
+| primal gap better on | — | 2 instances (worse on 1) |
+
+**Cert-clean: yes**, with no slack — no bound above its reference optimum in
+either arm, every incumbent independently feasibility-verified against the
+*source* MPS rows (not the engine's standard form), and no instance optimal under
+`one` that is non-optimal under `mean`. The arms genuinely diverged on 27/38, so
+this is not a null instrument.
+
+**Net-positive: no.** The pre-registered bar was ≥ 3 net-better instances on the
+dual *or* primal side with neither geomean worsening. Both geomeans improved and
+one more instance solved, but the per-instance margin is **1 on each side** —
+8-better/7-worse is a coin flip. Worse, the dual-side gains are concentrated in
+one family: all four `mik-250-20-75-*` instances improve, which is exactly the
+benefit-confined-to-a-class pattern CLAUDE.md §2 rejects. This is the
+`DISCOPT_CUT_INHERIT` case again: **sound is not the bar; broadly helpful is.**
+The flag ships default-off with this measurement recorded and does not graduate.
+
+**What this actually points at.** The interesting reading is not that the mean is
+a bad default — it is that *any* default is a guess, and A6 measured 39.9 % of
+candidates being guessed at. HiGHS and SCIP do not guess: they run strong
+branching on a candidate whose pseudocost is **unreliable** (fewer than η
+observations), wherever it appears in the tree. discopt cannot, because
+`sb_active` switches SB off globally after 48 nodes. A4's sweep of that budget to
+unlimited returned only 1.22×, but that swept SB on *all* candidates at every
+node — the expensive thing. Reliability branching is SB targeted *only* at
+unreliable candidates, which is a different experiment from A4's and is the
+next one to run (A8).
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
