@@ -709,10 +709,297 @@ def test_continuation_trace_serializes_a_stall_distinguishably():
     )
 
 
-def test_zz_probe_actually_fired():
-    """CLAUDE.md §6: fail when this module's residual comparisons never executed."""
+def teardown_module(module):  # noqa: ARG001 - pytest hook signature
+    """CLAUDE.md §6: fail when this module's residual comparisons never executed.
+
+    A module-teardown hook rather than a test, deliberately. As a test it was
+    position-dependent — it passed only if some counted test happened to run
+    before it, and this suite runs under ``pytest-randomly``, so a shuffle that
+    put it first would have made the guard-against-measuring-nothing itself
+    measure nothing. ``teardown_module`` runs after every test in the file, in
+    any order, and an assertion here fails the run.
+    """
+    print(f"\n#1148 residual probe: {ASSERTIONS_EXECUTED} comparisons executed")
     assert ASSERTIONS_EXECUTED > 0, (
         "the #1148 residual probes executed ZERO comparisons. A probe that traverses "
         "nothing prints a clean pass; this counter exists so that cannot happen."
     )
-    print(f"\n#1148 residual probe: {ASSERTIONS_EXECUTED} comparisons executed")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Regressions for the #1158 code review. Each fails on the pre-review commit.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_review_1_sum_row_residual_is_reduced():
+    """HIGH 1: ``evaluate_interval`` did not reduce ``SumExpression``.
+
+    ``sum(x)`` came back as the operand's ELEMENTWISE enclosure, so the degenerate
+    -width and finiteness guards never fired and a row violated by 2.0 reported a
+    residual of 0.0 — the instrument reading clean on an infeasible point, for one
+    of the most common expression shapes there is.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval  # noqa: PLC0415
+
+    m = dm.Model("sum_row")
+    x = m.continuous("x", shape=2, lb=0, ub=10)
+    m.minimize(x[0])
+    m.subject_to(dm.sum(x) <= 10, name="budget")
+
+    # The enclosure over the whole box must CONTAIN the value; [0, 10] did not.
+    box = evaluate_interval(dm.sum(x), m)
+    _checked(
+        float(np.asarray(box.hi)) == 20.0,
+        f"sum(x) over x in [0,10]^2 encloses up to 20, got hi={box.hi!r}",
+    )
+
+    point = point_from_flat(m, np.array([6.0, 6.0]))
+    _checked(
+        abs(float(evaluate_at_point(m, dm.sum(x), point)[0]) - 12.0) < 1e-12,
+        "sum(x) at (6, 6) is 12",
+    )
+    from discopt.mpec_report import _model_rows, _primal_feasibility  # noqa: PLC0415
+
+    viol = _primal_feasibility(m, _model_rows(m), None, point).value
+    _checked(
+        abs(viol - 2.0) < 1e-12,
+        f"sum(x) <= 10 at (6,6) is violated by 2.0; the residual reported {viol!r}",
+    )
+
+    # And an axis reduction keeps its axis.
+    a = m.continuous("a", shape=(2, 3), lb=0, ub=1)
+    rowwise = evaluate_interval(dm.sum(a, axis=1), m)
+    _checked(
+        np.asarray(rowwise.hi).shape == (2,) and float(np.max(rowwise.hi)) == 3.0,
+        f"sum(a, axis=1) reduces to shape (2,) with hi=3, got {rowwise.hi!r}",
+    )
+
+
+def test_review_1_scalar_sum_relation_is_measurable():
+    """HIGH 1, second half: ``sum(x) ⊥ y`` is a scalar relation and must measure."""
+    m = dm.Model("sum_relation")
+    x = m.continuous("x", shape=2, lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(y)
+    pair = complementarity(dm.sum(x), y, name="sy")
+    row = relation_residuals(m, [pair], point_from_flat(m, np.array([1.0, 2.0, 4.0])))[0]
+    _checked(abs(row.f_value - 3.0) < 1e-12, f"f = sum(x) at (1,2) is 3, got {row.f_value!r}")
+    _checked(
+        abs(row.complementarity.value - 3.0) < 1e-12,
+        f"min(3, 4) is 3, got {row.complementarity.value!r}",
+    )
+
+
+def test_review_2_local_incumbent_is_gated_on_the_source_residual():
+    """HIGH 2: verification ran against the LOWERED model, which is a relaxation.
+
+    On the Scholtes arm the model holds ``f·g <= t``, not ``f·g == 0``, so
+    ``verify_point`` alone vouched for a point whose source complementarity was
+    1.4e-4 — and returned an objective strictly better than the true global
+    optimum, which as a cutoff fathoms the optimum away.
+    """
+    m, x, y = _balanced_model()
+    res = solve_mpec(m, [complementarity(x, y, name="c")], method="scholtes")
+    report = res.mpec_report
+    _checked(
+        not report.source_satisfied,
+        f"the balanced point violates the source relation ({report.complementarity.value:.3e})",
+    )
+    _checked(
+        float(res.objective) < 0.0,
+        f"and its objective {res.objective!r} beats the true optimum 0 — the danger",
+    )
+    _checked(
+        accept_local_incumbent(m, res) is None,
+        "so it must NOT be vouched for as an incumbent",
+    )
+    # Control: a genuinely complementary local point is still accepted, so the
+    # refusal above is a property of the residual and not a blanket rejection.
+    m2, a, b = _distance_model()
+    ok = solve_mpec(m2, [complementarity(a, b, name="c")], method="scholtes")
+    _checked(ok.mpec_report.source_satisfied, "control: the distance point IS complementary")
+    verified = accept_local_incumbent(m2, ok)
+    _checked(
+        verified is not None and abs(verified - 1.0) < 1e-3,
+        f"control: it must still be accepted, got {verified!r}",
+    )
+
+
+def test_review_3_a_failed_report_does_not_destroy_the_solve():
+    """HIGH 3: an operand the interval evaluator cannot walk killed a done solve.
+
+    The refusal is right for the *residual* — but the row need not have anything
+    to do with the relations (source primal feasibility walks every source row),
+    and ``Model.solve`` had already returned a certified result.
+    """
+    import warnings  # noqa: PLC0415
+
+    m = dm.Model("unwalkable")
+    u = m.continuous("u", lb=1, ub=3)
+    v = m.continuous("v", lb=1, ub=3)
+    x = m.continuous("x", lb=0, ub=5)
+    y = m.continuous("y", lb=0, ub=5)
+    m.subject_to(u**v <= 8, name="pow")  # variable exponent: not interval-walkable
+    m.minimize((x - 1) ** 2 + (y - 1) ** 2 + u + v)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = solve_mpec(m, [complementarity(x, y, name="c")], method="gdp", time_limit=20)
+
+    _checked(res.status == "optimal", f"the solve must survive, got status {res.status!r}")
+    _checked(res.objective is not None, "and keep its objective")
+    _checked(res.mpec_report is None, "the report is None — NOT MEASURED, not 'clean'")
+    _checked(
+        any(
+            issubclass(w.category, RuntimeWarning) and "could not be measured" in str(w.message)
+            for w in caught
+        ),
+        "and the refusal is loud: a warning naming the failure (CLAUDE.md §7)",
+    )
+
+
+def test_review_4_a_scholtes_relaxation_is_refused_by_the_solve_guard():
+    """MEDIUM 4: a relaxation marked 'lowered' let the guard vouch for it.
+
+    ``require_all_relations_lowered`` exists to catch "a declared relation solved
+    as if absent". Scholtes leaves ``f·g <= t`` on the model, which is weaker than
+    the relation, so a following ``Model.solve`` certified the RELAXATION —
+    measured as ``optimal``/``gap_certified=True`` at an objective better than the
+    true optimum.
+    """
+    from discopt.mpec import RELAXING_METHODS, relaxed_relations  # noqa: PLC0415
+
+    m, x, y = _balanced_model()
+    pair = complementarity(x, y, name="c")
+    solve_mpec(m, [pair], method="scholtes")
+
+    _checked("scholtes" in RELAXING_METHODS, "scholtes is a relaxation, not an encoding")
+    _checked(relaxed_relations(m) == [pair], "the model carries it as relaxed")
+    with pytest.raises(NotImplementedError, match="RELAXATION"):
+        m.solve(time_limit=20)
+    _checked(True, "and a global solve over it is refused rather than certified")
+
+    # Control: an EXACT lowering is not refused.
+    m2, a, b = _distance_model()
+    solve_mpec(m2, [complementarity(a, b, name="c")], method="gdp")
+    _checked(relaxed_relations(m2) == [], "gdp is exact, so nothing is flagged")
+    again = m2.solve(time_limit=20)
+    _checked(
+        again.status == "optimal",
+        f"control: an exactly-lowered model still solves, got {again.status!r}",
+    )
+
+
+def test_review_5_binary_roundoff_is_not_reported_as_out_of_box():
+    """MEDIUM 5: ``> 0.0`` on solver output made -1e-15 an infinite residual."""
+    m = dm.Model("roundoff")
+    w = m.continuous("w", lb=0, ub=1)
+    s = m.binary("s")
+    m.minimize(w)
+    pair = complementarity(w, s, name="ws")
+    m._complementarities.append(pair)
+
+    report = source_residual_report(m, [pair], x_flat=np.array([0.5, -1e-15]))
+    _checked(
+        np.isfinite(report.integrality.value),
+        f"routine roundoff must not read as out-of-box, got {report.integrality.value!r}",
+    )
+    _checked(
+        report.integrality.value < 1e-12,
+        f"y = -1e-15 is integral to tolerance, got {report.integrality.value!r}",
+    )
+    # Control: a genuinely out-of-box selector is still caught.
+    bad = source_residual_report(m, [pair], x_flat=np.array([0.5, 2.0]))
+    _checked(bad.integrality.value == float("inf"), "control: y = 2 is still refused")
+
+
+def test_review_6_rows_are_recorded_per_relation_not_per_call():
+    """MEDIUM 6: every pair got the aggregate row list, so rows_in lied and
+    generated_rows went quadratic (3N² rows for N scalar relations)."""
+    from discopt.mpec import reformulate_gdp  # noqa: PLC0415
+
+    m = dm.Model("per_pair")
+    x = m.continuous("x", shape=2, lb=0, ub=10)
+    y = m.continuous("y", shape=2, lb=0, ub=10)
+    m.minimize(x[0] + y[1])
+    p1 = complementarity(x, y, name="a")
+    p2 = complementarity(x[0], y[1], name="b")
+    reformulate_gdp(m, [p1, p2])
+
+    r1 = [c.name for c in p1.rows_in(m)]
+    r2 = [c.name for c in p2.rows_in(m)]
+    _checked(
+        all(n.startswith("a") for n in r1),
+        f"relation 'a' must own only its own rows, got {r1}",
+    )
+    _checked(
+        all(n.startswith("b") for n in r2),
+        f"relation 'b' must own only its own rows, got {r2}",
+    )
+    _checked(
+        set(r1).isdisjoint(r2),
+        "and the two relations' row sets must not overlap",
+    )
+    total = generated_rows(m, [p1, p2])
+    _checked(
+        len(total) == len(m._constraints),
+        f"generated_rows must not double-count: {len(total)} vs {len(m._constraints)} rows",
+    )
+
+
+def test_review_8_stage_objectives_are_in_model_units_on_a_maximize():
+    """LOW 8: stage objectives were raw subsolver values, sign-flipped vs the result."""
+    m = dm.Model("maximize_mpec")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.maximize(-((x - 1) ** 2) - (y - 1) ** 2)
+    res = solve_mpec(m, [complementarity(x, y, name="c")], method="scholtes")
+    stages = [s for s in res.mpec_report.continuation.stages if s.accepted]
+    _checked(bool(stages), "at least one stage converged")
+    _checked(
+        abs(float(stages[-1].objective) - float(res.objective)) < 1e-6,
+        f"the last accepted stage ({stages[-1].objective!r}) must agree with the "
+        f"result ({res.objective!r}) — same units, same sign",
+    )
+    _checked(
+        float(res.objective) < 0.0,
+        f"and the maximize objective is reported in model units, got {res.objective!r}",
+    )
+
+
+def test_review_9_final_t_is_a_t_that_was_actually_solved():
+    """LOW 9: final_t was one schedule step past the last solve on a max_iter exit."""
+    m, x, y = _distance_model()
+    res = solve_mpec(
+        m, [complementarity(x, y, name="c")], method="scholtes", t0=1.0, sigma=0.1, max_iter=3
+    )
+    trace = res.mpec_report.continuation
+    solved_ts = [s.t for s in trace.stages]
+    _checked(
+        float(trace.final_t) in [float(t) for t in solved_ts],
+        f"final_t={trace.final_t!r} must be one of the t values solved {solved_ts}",
+    )
+    _checked(
+        trace.termination_reason == "max_iter" and not trace.converged,
+        f"a truncated schedule is not converged, got {trace.termination_reason!r}",
+    )
+
+
+def test_review_9_converged_requires_an_accepted_stage():
+    """LOW 9b: reaching t_min with every stage failing is not convergence."""
+    stalled = ContinuationTrace(
+        parameter="t",
+        stages=(ContinuationStage(0, 1e-8, "error", False, "no stage converged"),),
+        final_t=1e-8,
+        termination_reason="t_min_reached",
+        accuracy_floor=complementarity_accuracy_floor(1e-8),
+        any_stage_accepted=False,
+    )
+    _checked(
+        not stalled.converged,
+        "reaching the end of the schedule with nothing accepted is not converged",
+    )
+    _checked(
+        stalled.as_dict()["any_stage_accepted"] is False,
+        "and the distinction is serialized",
+    )

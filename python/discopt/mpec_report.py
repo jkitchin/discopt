@@ -51,6 +51,7 @@ module scope, and a residual report is not a reason to load it.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Sequence
@@ -96,6 +97,8 @@ __all__ = [
 _POINT_EVAL_REL_WIDTH = 1e-6
 
 _INF = float("inf")
+
+logger = logging.getLogger(__name__)
 
 
 class ComplementarityKind:
@@ -288,6 +291,11 @@ class ContinuationTrace:
     final_t: Optional[float]
     termination_reason: str
     accuracy_floor: Optional[float]
+    #: Whether any stage's subsolver actually converged. Reaching the end of the
+    #: schedule is not the same thing: the loop can walk t down to ``t_min`` with
+    #: every stage failing, and reporting that as converged would call a run that
+    #: produced no point a success (#1158 review, LOW 9).
+    any_stage_accepted: bool = True
     accuracy_floor_definition: str = (
         "sqrt(t_final): the complementarity accuracy a Scholtes regularization "
         "f*g <= t can attain, per POUNCE Gate 0 (jkitchin/pounce#794)"
@@ -295,8 +303,8 @@ class ContinuationTrace:
 
     @property
     def converged(self) -> bool:
-        """True when the schedule reached its target, not when it stalled."""
-        return self.termination_reason == "t_min_reached"
+        """True when the schedule reached its target **and** a stage converged."""
+        return self.termination_reason == "t_min_reached" and self.any_stage_accepted
 
     def as_dict(self) -> dict:
         return {
@@ -305,6 +313,7 @@ class ContinuationTrace:
             "final_t": None if self.final_t is None else float(self.final_t),
             "termination_reason": self.termination_reason,
             "converged": self.converged,
+            "any_stage_accepted": self.any_stage_accepted,
             "accuracy_floor": (None if self.accuracy_floor is None else float(self.accuracy_floor)),
             "accuracy_floor_definition": self.accuracy_floor_definition,
         }
@@ -978,7 +987,12 @@ def _integrality_residual(
         ys.extend(float(a) for a in arr)
     if not ys:
         return None
-    if out_of_box > 0.0:
+    # ``> _INTEGRALITY_TOL``, NOT ``> 0.0``. A binary comes back from an LP/MILP
+    # as -1e-15 as a matter of routine roundoff; an exact-zero threshold called
+    # that "outside the box" and reported the residual as +inf, so
+    # ``source_satisfied`` went False on a perfectly good solution (#1158 review,
+    # MEDIUM 5). The module's own integrality tolerance is the right scale.
+    if out_of_box > _INTEGRALITY_TOL:
         return Residual(
             name="selector_integrality",
             value=float("inf"),
@@ -1000,7 +1014,13 @@ def _integrality_residual(
 # ───────────────────── the local/certified result contract ─────────────────────
 
 
-def accept_local_incumbent(model: "Model", result, *, x_flat=None):
+def accept_local_incumbent(
+    model: "Model",
+    result,
+    *,
+    x_flat=None,
+    report: Optional[SourceResidualReport] = None,
+):
     """Independently verify a **local** result before it may become an incumbent.
 
     A feasible point is a valid upper bound on a minimum, so a local solve may
@@ -1009,6 +1029,25 @@ def accept_local_incumbent(model: "Model", result, *, x_flat=None):
     dual bound: the dual bound is the certificate, and a local solve proves
     nothing about it. That asymmetry is what lets a local mode feed the global
     solver without contaminating it (#1148 §C).
+
+    **The source relations are checked, and they are checked first.** Running
+    ``verify_point`` alone against ``model`` is not verification of an MPEC point
+    and was the bug this signature exists to prevent: on the Scholtes arm the
+    model no longer holds the complementarity condition — the lowering replaced
+    it with ``f >= 0``, ``g >= 0`` and the **relaxed** ``f·g <= t`` — so a point
+    with a source residual of 1.4e-4 passed, and the function vouched for an
+    objective strictly better than the true global optimum. Fed to a global solve
+    as a cutoff, that fathoms the optimum away (#1158 review, HIGH 2). A relaxed
+    row is weaker than the condition it replaced, so a check against the lowered
+    model can never stand in for a check against the source relation.
+
+    Parameters
+    ----------
+    report
+        The source-residual report to gate on. Defaults to
+        ``result.mpec_report``; when that is absent and ``model`` declares
+        relations, one is computed here rather than skipped — an unmeasured
+        relation is treated as unverified, never as satisfied.
 
     Returns
     -------
@@ -1023,7 +1062,37 @@ def accept_local_incumbent(model: "Model", result, *, x_flat=None):
         x_flat = _flat_from_result(model, result)
     if x_flat is None:
         return None
-    verdict = verify_point(model, np.asarray(x_flat, dtype=np.float64), with_objective=True)
+    x_flat = np.asarray(x_flat, dtype=np.float64)
+
+    if report is None:
+        report = getattr(result, "mpec_report", None)
+    if report is None and getattr(model, "_complementarities", None):
+        # No report was carried, but the model declares relations: measure them
+        # now. Absent certification is interpreted as NOT certified (#1148 §C),
+        # so the one thing this must not do is proceed as if there were nothing
+        # to check.
+        try:
+            report = source_residual_report(model, x_flat=x_flat)
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            logger.warning(
+                "accept_local_incumbent: refusing to vouch for the point because its "
+                "source residuals could not be measured (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+    if report is not None and not report.source_satisfied:
+        logger.info(
+            "accept_local_incumbent: refusing the point — source complementarity "
+            "%.3e (scaled %.3e), operand bounds %.3e, source primal %.3e",
+            report.complementarity.value,
+            report.complementarity.scaled_value,
+            report.bound_violation.value,
+            report.primal_feasibility.value,
+        )
+        return None
+
+    verdict = verify_point(model, x_flat, with_objective=True)
     return verdict.objective if verdict.ok else None
 
 

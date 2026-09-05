@@ -63,7 +63,9 @@ __all__ = [
     "reformulate_scholtes",
     "reformulate_sos1",
     "require_all_relations_lowered",
+    "RELAXING_METHODS",
     "register_relations",
+    "relaxed_relations",
     "resolve_source_variables",
     "source_residuals",
     "source_variables",
@@ -363,6 +365,24 @@ class Complementarity:
         return _scalarize_pairs(model, [self])
 
 
+#: Lowering methods whose rows are a **relaxation** of the relation, not an
+#: encoding of it. Scholtes replaces ``f·g = 0`` with ``f·g <= t``, so its rows
+#: admit points the relation forbids and a solve over them certifies the
+#: *relaxation*. Everything else here (``gdp``, ``sos1``) encodes the relation
+#: exactly.
+#:
+#: This distinction is load-bearing for the solve guard, not bookkeeping. #1148
+#: made ``solve_mpec`` record its relations on the model, and a Scholtes run then
+#: left the relation marked lowered — so ``require_all_relations_lowered``, whose
+#: entire purpose is to catch "a declared relation solved as if absent", *vouched*
+#: for a relaxation. Measured on the balanced probe (``max x+y s.t. x==y,
+#: 0 <= x ⊥ y >= 0``, true optimum 0): ``solve_mpec(method="scholtes")`` followed
+#: by ``model.solve()`` returned ``status='optimal' objective=2.83e-04
+#: gap_certified=True`` — a certified optimum strictly better than the true one,
+#: straight past the guard (#1158 review, MEDIUM 4).
+RELAXING_METHODS = frozenset({"scholtes"})
+
+
 @dataclass
 class LoweringRecord:
     """What one model did with one relation: the method, and the rows it emitted.
@@ -378,6 +398,16 @@ class LoweringRecord:
 
     method: str
     rows: Optional[list] = None
+
+    @property
+    def is_exact(self) -> bool:
+        """True when the rows ENCODE the relation rather than relax it.
+
+        See :data:`RELAXING_METHODS`. Keyed on the method that emitted the rows,
+        which is the only thing that knows whether the generated feasible set is
+        the relation's own or a superset of it.
+        """
+        return self.method not in RELAXING_METHODS
 
 
 def _lowered_map(model: Model) -> dict:
@@ -821,6 +851,23 @@ def unlowered_relations(model: Model) -> list[Complementarity]:
     return [p for p in model._complementarities if not p.is_lowered_into(model)]
 
 
+def relaxed_relations(model: Model) -> list[Complementarity]:
+    """Relations whose rows in ``model`` are a **relaxation**, not an encoding.
+
+    Distinct from :func:`unlowered_relations`: the rows are present, they are
+    just weaker than the relation. A global solve over them certifies the
+    relaxation, which is not the model the user declared — see
+    :data:`RELAXING_METHODS` for the measured false certificate this exists to
+    stop.
+    """
+    out = []
+    for p in model._complementarities:
+        record = getattr(model, "_lowered_complementarities", {}).get(p)
+        if record is not None and not record.is_exact:
+            out.append(p)
+    return out
+
+
 def require_all_relations_lowered(model: Model, *, context: str) -> None:
     """Refuse to solve a model that declares a relation no lowering emitted.
 
@@ -837,16 +884,32 @@ def require_all_relations_lowered(model: Model, *, context: str) -> None:
     if not getattr(model, "_complementarities", None):
         return
     pending = unlowered_relations(model)
-    if not pending:
-        return
-    raise NotImplementedError(
-        f"{context}: model declares complementarity relation(s) with no lowering: "
-        + "; ".join(p.describe() for p in pending)
-        + ". The box-bounded MCP form is represented but not lowered (#1147), so "
-        "solving would silently drop the condition and certify a point it forbids. "
-        "Restrict the complementary variable to [0, +inf) and use "
-        "Model.complementarity, or reformulate the relation explicitly."
-    )
+    if pending:
+        raise NotImplementedError(
+            f"{context}: model declares complementarity relation(s) with no lowering: "
+            + "; ".join(p.describe() for p in pending)
+            + ". The box-bounded MCP form is represented but not lowered (#1147), so "
+            "solving would silently drop the condition and certify a point it forbids. "
+            "Restrict the complementary variable to [0, +inf) and use "
+            "Model.complementarity, or reformulate the relation explicitly."
+        )
+    relaxed = relaxed_relations(model)
+    if relaxed:
+        # Rows present but WEAKER than the relation. A global solve over them
+        # reports a certified optimum of the relaxation, which on the balanced
+        # probe is strictly better than the true optimum -- see RELAXING_METHODS.
+        # "Has a lowering" was never the right test; "has an EXACT lowering" is.
+        methods = sorted({p.lowering_in(model) or "?" for p in relaxed})
+        raise NotImplementedError(
+            f"{context}: model carries a RELAXATION of complementarity relation(s), not "
+            "an encoding of them: "
+            + "; ".join(p.describe() for p in relaxed)
+            + f" (lowered by {', '.join(methods)}). Those rows admit points the relation "
+            "forbids, so a global solve over this model would certify the relaxation "
+            "rather than the MPEC. Use discopt.mpec.solve_mpec(..., method='scholtes'), "
+            "which returns a LOCAL result that claims no certificate, or lower the "
+            "relation exactly with method='gdp' / 'sos1' on a fresh model."
+        )
 
 
 # ─────────────────────────── scalarization ────────────────────────────
@@ -1004,30 +1067,41 @@ def _require_lowerable(pairs: list[Complementarity], method: str) -> None:
 # ─────────────────────────── reformulations ───────────────────────────
 
 
-class _RowRecorder:
-    """Capture the rows a lowering appends to ``model``, and mark the relations.
+def _lower_each(model: Model, todo: list[Complementarity], method: str, emit) -> None:
+    """Lower each relation in turn, recording **that relation's own** rows.
 
-    Rows are identified by *position* in ``model._constraints`` — everything
-    appended between construction and :meth:`mark` — not by matching generated
-    names. Name matching is what #1147 removed from provenance resolution and for
-    the same reason: a later pass renames, and a prefix match on ``compl0_``
-    silently picks up ``compl0_extra`` from somewhere else.
+    ``emit`` is called once per scalar element of one relation; the rows it
+    appends to ``model._constraints`` between the relation's start and end
+    positions are the rows attributed to it.
 
-    A lowering that emits no rows into ``_constraints`` (nothing does today, but
-    a future one might record only builder-resident rows) records an empty list,
+    Per relation, not per call. The first version took one slice around the whole
+    list and assigned that aggregate to *every* pair, so
+    :meth:`Complementarity.rows_in` — documented as "the rows **this relation**
+    generated" — returned other relations' rows, and :func:`generated_rows` then
+    concatenated the aggregate once per pair: ``3N²`` rows for ``N`` scalar
+    relations, so a vector relation with 1000 elements walked ~3M rows instead of
+    3000 in the lowered-row residual (#1158 review, MEDIUM 6).
+
+    Rows are identified by *position*, never by matching generated names. Name
+    matching is what #1147 removed from provenance resolution and for the same
+    reason: a later pass renames, and a prefix match on ``compl0_`` silently picks
+    up ``compl0_extra`` from somewhere else.
+
+    Scalarizing one relation at a time also closes a naming hole: two *unnamed*
+    relations lowered in a single call were both named before either emitted a
+    row, so ``_ensure_relation_name`` saw neither the other's name nor its rows
+    and handed out ``compl0`` twice. Emitting between namings makes the second
+    lookup see the first's rows.
+
+    A relation whose lowering emits no ``_constraints`` row records an empty list,
     which is a *measured* answer and distinct from the untracked ``None`` a
     rebuilding pass leaves behind.
     """
-
-    def __init__(self, model: Model, pairs: list[Complementarity]) -> None:
-        self._model = model
-        self._pairs = pairs
-        self._start = len(model._constraints)
-
-    def mark(self, method: str) -> None:
-        rows = list(self._model._constraints[self._start :])
-        for pair in self._pairs:
-            pair.mark_lowered(self._model, method, rows)
+    for parent in todo:
+        start = len(model._constraints)
+        for elem in _scalarize_pairs(model, [parent]):
+            emit(elem)
+        parent.mark_lowered(model, method, list(model._constraints[start:]))
 
 
 def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
@@ -1042,13 +1116,14 @@ def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "scholtes")
-    emitted = _RowRecorder(model, todo)
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         tag = p.name
         model.subject_to(p.f >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(p.g >= 0, name=f"{tag}_g_nonneg")
         model.subject_to(p.f * p.g <= t, name=f"{tag}_reg")
-    emitted.mark("scholtes")
+
+    _lower_each(model, todo, "scholtes", emit)
 
 
 def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
@@ -1064,8 +1139,8 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "sos1")
-    emitted = _RowRecorder(model, todo)
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         tag = p.name
         members: list[Variable] = []
         for side, expr in (("f", p.f), ("g", p.g)):
@@ -1082,7 +1157,8 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
                 model.subject_to(aux == expr, name=f"{tag}_{side}_link")
                 members.append(aux)
         model.sos1(members, name=f"{tag}_sos1")
-    emitted.mark("sos1")
+
+    _lower_each(model, todo, "sos1", emit)
 
 
 def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
@@ -1111,8 +1187,8 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "gdp")
-    emitted = _RowRecorder(model, todo)
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
         tag = p.name or "compl"
         fv = _gdp_operand(model, p.f, tag, "f")
@@ -1120,7 +1196,8 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
         model.either_or([[fv == 0], [gv == 0]], name=tag)
-    emitted.mark("gdp")
+
+    _lower_each(model, todo, "gdp", emit)
 
 
 def _gdp_operand(model: Model, expr: Expression, tag: str, side: str) -> Expression:
@@ -1240,23 +1317,51 @@ def _report_for(
     continuation=None,
     notes: tuple[str, ...] = (),
 ):
-    """Build the #1148 source-residual report for a point, or ``None`` without one."""
+    """Build the #1148 source-residual report for a point, or ``None`` without one.
+
+    A residual that cannot be measured **refuses** — ``evaluate_at_point`` raises
+    rather than reporting the midpoint of a widened enclosure, which is the whole
+    point of the instrument. But that refusal must not take the *solve* with it:
+    ``_report_for`` runs after ``Model.solve`` has already returned a certified
+    result, and the report is a reporting layer on top of it. Before this, a model
+    with one row the interval evaluator cannot walk (a variable exponent ``u**v``,
+    say) turned a completed ``solve_mpec`` call into a ``ValueError`` — and the
+    offending row need not have anything to do with the relations, since source
+    primal feasibility walks every source row (#1158 review, HIGH 3).
+
+    So the failure is downgraded to ``mpec_report = None`` — but never silently
+    (CLAUDE.md §7): it warns, naming the exception. ``None`` means "not measured",
+    never "measured clean"; :attr:`SolveResult.mpec_report` says so.
+    """
+    import warnings
+
     from discopt.mpec_report import source_residual_report
 
     if point is None:
         return None
     rows, bounds = snapshot
-    return source_residual_report(
-        model,
-        pairs,
-        point=point,
-        kind=kind,
-        source_constraints=rows,
-        source_bounds=bounds,
-        continuation=continuation,
-        lowered_rows=generated_rows(model, pairs),
-        notes=notes,
-    )
+    try:
+        return source_residual_report(
+            model,
+            pairs,
+            point=point,
+            kind=kind,
+            source_constraints=rows,
+            source_bounds=bounds,
+            continuation=continuation,
+            lowered_rows=generated_rows(model, pairs),
+            notes=notes,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported loudly, never swallowed
+        warnings.warn(
+            f"solve_mpec: the source-residual report could not be measured "
+            f"({type(exc).__name__}: {exc}). The solve result is unaffected and is "
+            "returned as-is; result.mpec_report is None, which means NOT MEASURED — "
+            "it does not mean the source residuals are clean.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
 
 
 def _result_point(model: Model, result):
@@ -1467,7 +1572,7 @@ def _solve_scholtes(
       ``t``, beside the ``sqrt(t)`` accuracy floor the regularization imposes.
     """
     from discopt._tape_nlp_evaluator import make_evaluator
-    from discopt.modeling.core import ObjectiveSense, SolveResult
+    from discopt.modeling.core import SolveResult
     from discopt.mpec_report import (
         ContinuationStage,
         ContinuationTrace,
@@ -1538,7 +1643,14 @@ def _solve_scholtes(
 
         converged = stage_result.status is SolveStatus.OPTIMAL
         has_point = stage_result.x is not None
-        stage_obj = None if stage_result.objective is None else float(stage_result.objective)
+        # In MODEL units, like the returned ``SolveResult.objective``. The NLP
+        # backend minimises the negation for a MAXIMIZE model, and recording the
+        # raw value left ``stages[-1].objective`` and ``result.objective``
+        # differing by a sign on every maximize MPEC -- in the very trace schema
+        # this slice proposes to share across repositories (#1158 review, LOW 8).
+        stage_obj = (
+            None if stage_result.objective is None else _model_units(model, stage_result.objective)
+        )
         stage_res = None
         if has_point:
             x_cur = np.asarray(stage_result.x, dtype=np.float64)
@@ -1572,12 +1684,18 @@ def _solve_scholtes(
             break
         tv = max(tv * sigma, t_min)
 
+    # ``final_t`` is the last t a stage was actually SOLVED at, read off the
+    # trace -- not the loop's ``tv``, which the schedule has already advanced one
+    # step past the last solve by the time a ``max_iter`` exit is taken
+    # (#1158 review, LOW 9).
+    last_solved_t = float(stages[-1].t) if stages else None
     trace = ContinuationTrace(
         parameter="t",
         stages=tuple(stages),
-        final_t=best_t if best_t is not None else (float(tv) if stages else None),
+        final_t=best_t if best_t is not None else last_solved_t,
         termination_reason=termination,
         accuracy_floor=complementarity_accuracy_floor(best_t),
+        any_stage_accepted=any(st.accepted for st in stages),
     )
 
     wall = time.perf_counter() - wall0
@@ -1606,13 +1724,9 @@ def _solve_scholtes(
 
     from discopt.solver import _unpack_solution
 
+    # ``best_obj`` is already in model units: every stage objective is converted
+    # as it is recorded, so the trace and the result cannot disagree.
     objective = best_obj
-    if objective is not None and model._objective is not None:
-        # The NLP backend minimises the negation for a MAXIMIZE model; report the
-        # objective in model units, as ``Model.solve`` does, so the unified return
-        # type means the same thing on both arms.
-        if model._objective.sense == ObjectiveSense.MAXIMIZE:
-            objective = -objective
 
     return SolveResult(
         status=_status.LOCAL_OPTIMAL,
@@ -1631,6 +1745,21 @@ def _solve_scholtes(
             continuation=trace,
         ),
     )
+
+
+def _model_units(model: Model, objective: float) -> float:
+    """An NLP-backend objective converted to the model's own sense.
+
+    The backend always minimises, negating the objective for a MAXIMIZE model, so
+    a raw subsolver value is in *internal* units. One helper, used for both the
+    per-stage trace entries and the returned result, so the two cannot drift.
+    """
+    from discopt.modeling.core import ObjectiveSense
+
+    obj = float(objective)
+    if model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        return -obj
+    return obj
 
 
 def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:

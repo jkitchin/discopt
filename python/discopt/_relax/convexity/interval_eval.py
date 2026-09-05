@@ -160,7 +160,23 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
 
     # --- Aggregations ----------------------------------------------
     if isinstance(expr, SumExpression):
-        return _eval(expr.operand, model, box, cache)
+        # ``SumExpression`` IS a reduction: ``dag_compiler`` lowers it to
+        # ``jnp.sum(operand, axis=expr.axis)``. This used to return the operand's
+        # enclosure UNREDUCED, so ``sum(x)`` over ``x in [0, 10]^2`` came back as
+        # ``[0, 10]`` instead of ``[0, 20]`` -- an enclosure that does not contain
+        # the value, i.e. unsound in the narrow direction, and silently the wrong
+        # shape. Measured via the #1148 residual probe: a point ``x = (6, 6)``
+        # against the row ``sum(x) <= 10`` reported a violation of 0.0 where the
+        # true violation is 2.0, because the reduction never happened and the
+        # elementwise ``6`` cleared the row (#1158 review, HIGH 1).
+        #
+        # Summation is monotone increasing in every argument, so the enclosure of
+        # the sum is the sum of the endpoints -- no interval-arithmetic subtlety.
+        inner = _eval(expr.operand, model, box, cache)
+        return Interval(
+            np.sum(np.asarray(inner.lo, dtype=np.float64), axis=expr.axis),
+            np.sum(np.asarray(inner.hi, dtype=np.float64), axis=expr.axis),
+        )
 
     if isinstance(expr, SumOverExpression):
         if not expr.terms:

@@ -2362,10 +2362,21 @@ class SolveResult:
     # ``discopt.mpec_report.SourceResidualReport``: residuals computed on the
     # relations' SOURCE operands (which survive every rebuilding pass, #1147),
     # each carrying the definition that produced it, plus the lowered rows'
-    # own residual so the two can be compared. ``None`` for a solve with no
-    # complementarity relations. Typed ``object`` to keep the import lazy -- the
-    # report module reaches the interval evaluator, and ``SolveResult`` is
-    # constructed on every solve path.
+    # own residual so the two can be compared.
+    #
+    # ``None`` means NOT MEASURED -- never "measured clean". It arises three ways:
+    # the solve produced no incumbent, so there was no point to measure; the
+    # residual measurement refused (an operand the interval evaluator cannot walk;
+    # ``solve_mpec`` warns and returns the solve result unharmed); or the solve
+    # never went through ``solve_mpec`` at all. Use
+    # ``discopt.mpec.source_residuals(model, result)`` to measure a result the
+    # plain ``Model.solve`` path produced. A model with no complementarity
+    # relations reports ``n_scalar_relations=0``, which is a measurement of
+    # nothing rather than a clean bill of health -- read that field before the
+    # residual values.
+    #
+    # Typed ``object`` to keep the import lazy -- the report module reaches the
+    # interval evaluator, and ``SolveResult`` is constructed on every solve path.
     mpec_report: Optional[object] = None
 
     # Set True when the final incumbent-verification guard (Model.solve, default
