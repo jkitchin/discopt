@@ -317,38 +317,58 @@ The code was therefore removed rather than shipped. An inert flag is a dead flag
 not there. What remains of the attempt is this record and the module-level
 refactor it forced, which is what made the three-arm probe possible at all.
 
-### 6.6 Decision panel: the flat share does not graduate
+### 6.6 Decision panels: shared gate vs finder-scoped
 
 17 instances (the subset still OPEN at the largest phase-A rung, selected by that
 measured property rather than by name), ladder 5/10/20/40 s, both arms
-interleaved in ONE process — `scratchpad/i1153/panel4.log`, 136 solves.
+interleaved in ONE process, 136 solves each.
 
-**The issue's gate, item 1.** Incumbent monotonicity: **13 comparisons, 0
-violations in BOTH arms.** There was nothing on this subset for the flag to
-repair, and it repairs nothing.
+**Panel A** (`panel4.log`) applied the share inside `_root_heur_nlp_entry_ok`
+unconditionally — which, as review found, is the shared gate for *thirteen* root
+heuristic entries, several of them improver-role and already bounded by
+`_improver_allowed`'s success-weighted contingent. **Panel B** (`panel5.log`)
+applies it only where the caller passes `finder=True`: the two feasibility-pump
+entries.
 
-**Differential, legacy -> flat:**
+| | A: shared gate | B: finder-scoped |
+|---|---|---|
+| monotonicity violations | 0 / 0 (both arms) | 0 / 0 (both arms) |
+| incumbent better / worse / same | 1 / **3** / 64 | **2 / 2** / 64 |
+| node count flat higher / lower | 17 / **4** | **20 / 0** |
+| certification regressions | none | none |
 
-| | result |
-|---|---|
-| incumbent better / worse / same | 1 / **3** / 64 |
-| node count flat higher / lower | **17** / 4 |
-| certification regressions | none |
+Scoping is a clear improvement and confirms the review's diagnosis: it removes
+one regression (`nvs05` at 20 s, `1107.89 -> 1269.7`, gone), adds a gain
+(`heatexch_gen2` at 40 s, none -> `808844`), and **eliminates every node-count
+decrease** — throughput now improves strictly wherever it moves at all, 20 up and
+0 down, across the whole `bchoco*` / `heatexch_gen*` / `beuster` / `4stufen`
+family that sits at 3 nodes under the legacy rule at every budget.
 
-The throughput half of #1153 is genuinely improved and broadly so — the flat
-share raises the node count on 17 of 21 instance-rungs where it moves at all,
-including the whole `bchoco*` / `heatexch_gen*` / `beuster` / `4stufen` family
-that explores exactly 3 nodes at every budget under the legacy rule. But the
-primal side regresses: `nvs05` at 10 s loses its incumbent outright
-(`1269.7` -> none), `nvs05` at 20 s degrades (`1107.89` -> `1269.7`), and
-`tspn12` at 10 s degrades (`262.647` -> `282.244`), against a single gain
-(`tspn08` at 5 s, none -> `290.567`).
+Two incumbent regressions survive, both from the finder pump itself:
+`nvs05` at 10 s (`1269.7` -> none, lost outright) and `tspn12` at 10 s
+(`262.647` -> `282.244`).
 
-**Verdict: cert-clean, NOT net-positive.** No certification regression and no
-false or looser bound anywhere, so the flag is sound — but three incumbents lost
-against one gained is a regression on exactly the axis #1153 is about. Per
-CLAUDE.md §5 and the `DISCOPT_CUT_INHERIT` precedent, it **stays default OFF**
-with this measurement recorded. Both #1153 flags are now in that position.
+**Verdict on B: still not graduating, but the reason narrowed.** Throughput is
+now strictly better and the incumbent column is a wash (2/2) rather than a net
+loss — yet losing an incumbent outright on `nvs05` is a user-visible harm, and
+the estimator §6.7 names is the standing suspect for it.
+
+### 6.6b The estimator, and panel C
+
+Review identified the mechanism: `_mean_heur_nlp_cost()` returns a running **max**
+that never decays — its own comment says "the *max* (not mean) is deliberate",
+recording ~15 s overruns — so dividing it by the share makes the admission test
+*"remaining > 4x the worst case ever seen"*, not "4x typical". One expensive early
+NLP then refuses every later root heuristic for the rest of the solve at any
+`time_limit` under 60 s, which is exactly the shape of `nvs05` losing its
+incumbent at 10 s while gaining nodes.
+
+The share now divides a running **mean** (`_typical_heur_nlp_cost`), while the
+legacy overrun guard keeps the max — it answers a different question ("could
+another solve of the worst size still fit?") where the max is right. Flag off is
+unchanged: share 1.0 selects the max, i.e. the legacy rule byte-identically.
+
+<!-- RESULTS-PANEL-C -->
 
 ### 6.7 Status
 
