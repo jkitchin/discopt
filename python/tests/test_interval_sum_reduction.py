@@ -221,23 +221,22 @@ def test_dual_bound_never_exceeds_the_optimum(name, build, shape, box, optimum):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "jkitchin/discopt#1160: a constraint on dm.sum(X, axis=k) is solved as the "
-        "axis-COLLAPSED model and certified there — pre-existing, measured identically "
-        "on 1e75919 and on this branch, and unrelated to the interval_eval fix here. "
-        "strict=True so this flips to a failure the moment #1160 is fixed."
-    ),
-)
 def test_axis_reduced_constraint_bound_is_sound():
+    """An axis-reduced constraint is several rows, not one (jkitchin/discopt#1160).
+
+    ``dm.sum(a, axis=1) <= 2`` caps each of the two rows, so the total is at most
+    4 and the optimum of ``min -sum(a)`` is -4.  Extracting it as the single
+    collapsed row ``sum(a) <= 2`` certifies -2 and fathoms the optimum away.
+    This was an xfail(strict=True) here until #1160 landed.
+    """
     m = dm.Model("axis_bound")
     a = m.continuous("a", shape=(2, 3), lb=0, ub=1)
     m.subject_to(dm.sum(a, axis=1) <= 2)  # per-row cap => total <= 4
     m.minimize(-dm.sum(a))
     res = m.solve(time_limit=60, gap_tolerance=1e-6)
-    assert res.bound is not None and res.bound <= -4.0 + 1e-4, (
-        f"dual bound {res.bound!r} is above the true optimum -4.0"
+    _checked(
+        res.bound is not None and res.bound <= -4.0 + 1e-4,
+        f"dual bound {res.bound!r} is above the true optimum -4.0",
     )
 
 
