@@ -1,10 +1,19 @@
 # #1153 — incumbent quality must be non-decreasing in `time_limit`
 
-Status: **in progress.** Two mechanisms were investigated. The first
-(`DISCOPT_BUDGET_SATURATION`) was measured and **falsified** as the cause on this
-corpus and stays default OFF. The second (`DISCOPT_HEUR_ENTRY_SHARE`) is the
-measured cause, is fixed at the budget where it was measured, and is **not yet
-general** — see §6.
+Status: **diagnosed; no fix graduates. #1153 stays open.**
+
+Four candidate mechanisms were built and measured. Two were falsified outright
+(`DISCOPT_BUDGET_SATURATION` §6.1, the stage-deadline form §6.4), one was inert
+and was deleted rather than shipped (finder success weighting §6.5), and the one
+that works (`DISCOPT_HEUR_ENTRY_SHARE`, the flat finder share) is **cert-clean
+but not net-positive** — it raises node throughput on 17 of 21 moving
+instance-rungs and costs three incumbents against one gained, so it ships default
+OFF (§6.6).
+
+Read §6.7 first if you are picking this up: the issue's stated gate already
+passes on this corpus, the reported `nvs19` reproduction does not reproduce here,
+and what actually reproduces is the *throughput* half — which is diagnosed to a
+single heuristic call.
 
 ## 1. The defect
 
@@ -308,13 +317,65 @@ The code was therefore removed rather than shipped. An inert flag is a dead flag
 not there. What remains of the attempt is this record and the module-level
 refactor it forced, which is what made the three-arm probe possible at all.
 
-### 6.6 Status
+### 6.6 Decision panel: the flat share does not graduate
 
-Neither flag is proposed for default-ON on this evidence, and #1153 is **not
-closed**. What is settled: the harm class reproduces here; its cause is
-identified and measured to the individual heuristic call; one intervention moves
-it and one does not; and the inventory, ratchet and monotonicity panel are in
-place so the next attempt starts from measurement rather than from scratch. What
-remains is a rule that separates the productive pump from the wasted one — the
-improver role's success weighting, `3 * (found + 1) / (calls + 1)`, extended to
-the finder role — and a corpus-wide panel of it.
+17 instances (the subset still OPEN at the largest phase-A rung, selected by that
+measured property rather than by name), ladder 5/10/20/40 s, both arms
+interleaved in ONE process — `scratchpad/i1153/panel4.log`, 136 solves.
+
+**The issue's gate, item 1.** Incumbent monotonicity: **13 comparisons, 0
+violations in BOTH arms.** There was nothing on this subset for the flag to
+repair, and it repairs nothing.
+
+**Differential, legacy -> flat:**
+
+| | result |
+|---|---|
+| incumbent better / worse / same | 1 / **3** / 64 |
+| node count flat higher / lower | **17** / 4 |
+| certification regressions | none |
+
+The throughput half of #1153 is genuinely improved and broadly so — the flat
+share raises the node count on 17 of 21 instance-rungs where it moves at all,
+including the whole `bchoco*` / `heatexch_gen*` / `beuster` / `4stufen` family
+that explores exactly 3 nodes at every budget under the legacy rule. But the
+primal side regresses: `nvs05` at 10 s loses its incumbent outright
+(`1269.7` -> none), `nvs05` at 20 s degrades (`1107.89` -> `1269.7`), and
+`tspn12` at 10 s degrades (`262.647` -> `282.244`), against a single gain
+(`tspn08` at 5 s, none -> `290.567`).
+
+**Verdict: cert-clean, NOT net-positive.** No certification regression and no
+false or looser bound anywhere, so the flag is sound — but three incumbents lost
+against one gained is a regression on exactly the axis #1153 is about. Per
+CLAUDE.md §5 and the `DISCOPT_CUT_INHERIT` precedent, it **stays default OFF**
+with this measurement recorded. Both #1153 flags are now in that position.
+
+### 6.7 Status
+
+Neither flag graduates, and **#1153 is not closed.**
+
+What is settled, and is the substance of this work:
+
+* **Incumbent monotonicity — the issue's stated gate — very nearly holds already
+  on the in-repo corpus.** 198 comparisons over 66 instances at 5/10/20/40 s
+  produced **one** violation (`clay0303hfsg`), and the 17-instance decision panel
+  produced none in either arm. The `nvs19` failure the issue reports does not
+  reproduce on this machine at all: it returns `-1098.2` stably at 15/30/60/120 s
+  (`scratchpad/i1153/nvs19_base.json`). So the gate as written cannot be "made to
+  pass" here — it already passes, and passing it is not evidence of a fix.
+* **The throughput half DOES reproduce, and is diagnosed to the individual
+  call.** A whole family (`bchoco*`, `heatexch_gen*`, `beuster`, `4stufen`,
+  `contvar`, `hda`) explores exactly 3 nodes at every budget from 5 s to 240 s.
+  The cause is the finder-heuristic entry rule admitting a feasibility pump that
+  consumes up to 100 % of the remaining budget and frequently returns nothing.
+* **The obvious fix is sound but costs more primal quality than it buys** (§6.6),
+  and two other candidate mechanisms were falsified outright (§6.1, §6.4, §6.5).
+
+What remains is a way to spend less on a fruitless finder *without* refusing a
+productive one, given that outcome is unknown before the call and success
+weighting (§6.5) is too late to help. Two directions the evidence points at, both
+unexplored: give the pump a *deterministic* work budget rather than a wall one
+(the #912 `WorkBudget` machinery already exists and would make the cost knowable
+in advance instead of estimated at a 3x-wrong default), or make the pump itself
+interruptible so a share-sized deadline can actually bind on round one — §6.4
+showed it currently cannot, because a single sub-NLP overruns its own grant.
