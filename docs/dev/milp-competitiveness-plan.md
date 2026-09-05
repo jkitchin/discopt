@@ -1645,16 +1645,38 @@ benefit-confined-to-a-class pattern CLAUDE.md §2 rejects. This is the
 `DISCOPT_CUT_INHERIT` case again: **sound is not the bar; broadly helpful is.**
 The flag ships default-off with this measurement recorded and does not graduate.
 
-**What this actually points at.** The interesting reading is not that the mean is
-a bad default — it is that *any* default is a guess, and A6 measured 39.9 % of
-candidates being guessed at. HiGHS and SCIP do not guess: they run strong
-branching on a candidate whose pseudocost is **unreliable** (fewer than η
-observations), wherever it appears in the tree. discopt cannot, because
-`sb_active` switches SB off globally after 48 nodes. A4's sweep of that budget to
-unlimited returned only 1.22×, but that swept SB on *all* candidates at every
-node — the expensive thing. Reliability branching is SB targeted *only* at
-unreliable candidates, which is a different experiment from A4's and is the
-next one to run (A8).
+**Retraction, CLAUDE.md §11 — this section's first version named the wrong next
+step, and it was wrong within the hour.** It claimed that "HiGHS and SCIP do not
+guess: they strong-branch the unreliable candidates, and discopt cannot"; that
+A4's unlimited-budget sweep "swept SB on *all* candidates at every node"; and
+that reliability branching was therefore "a different experiment from A4's".
+**All three are false.** `strong_branch` already filters to unreliable
+candidates —
+
+```rust
+.filter(|c| c.2 < ctx.reliability)   // milp_driver.rs:2678; c.2 is the obs count
+```
+
+— and `MilpOptions::strong_branch` is documented at `milp_driver.rs:408` as
+"Limited strong branching on unreliable candidates (**reliability branching**)",
+feedback loop included. discopt *is* a reliability brancher. A4's `unlimited` arm
+therefore already ran reliability branching at full depth and measured **1.221×**,
+below even that probe's 1.25× falsification floor. There is no A8 of the kind
+described; the claim is withdrawn rather than carried forward.
+
+**What A7 actually leaves standing.** A6's 39.9 % unobserved figure was measured
+at the *shipped* `sb_node_budget = 48`, so it is a description of the tree once
+reliability branching has expired — not evidence that the mechanism is missing.
+And A4 already established, on this same panel, that turning it back on
+everywhere is worth only 1.22× in geomean while being **bimodal**: 11.31× on
+`fiber`, 3.25× on `dcmulti`, *exactly* 1.00× on ten instances, and actively
+**worse** on `p0201`. The lever is not more SB or a better guess between probes —
+it is spending SB where the probe can discriminate and not where it cannot. That
+is the degeneracy shut-off A4 already registered as its live candidate
+(`setMinReliable(0)` at a degenerate node, `HighsSearch.cpp:1114-1116`), with a
+falsification test on this very panel: if a degeneracy signal separates `p0201`
+from `fiber`, it is a mechanism; if it does not, it is dropped. That, not a
+default-value refinement, is the next experiment.
 
 ## 4. Success metric
 
