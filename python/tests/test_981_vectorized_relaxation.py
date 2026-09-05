@@ -114,10 +114,17 @@ def test_unscalarizable_expression_reports_unknown_not_empty():
     m = Model("u")
     X = m.continuous("X", lb=0, ub=1, shape=(2, 3))
 
-    # An axis-reduction: array-valued, but its shape depends on evaluator axis
-    # semantics the rewrite deliberately does not re-derive.
+    # An axis-reduction is array-valued. Its shape used to be reported as
+    # *unknown* here so the walk would not re-derive numpy's axis semantics; #1160
+    # made those semantics load-bearing (a walker that treats the node as scalar
+    # collapses rows and certifies the wrong model), so they are derived in one
+    # place now -- `scalarize.sum_result_shape` -- and this is that answer.
     axis_reduction = dm.sum(X, axis=0)
-    assert static_shape(axis_reduction) is None
+    assert static_shape(axis_reduction) == (3,)
+
+    # The contract this test exists for is unchanged: the rewrite still cannot
+    # EXPAND an axis reduction (``_elem`` has no ``SumExpression`` case), so
+    # callers keep their previous behaviour rather than losing rows.
     assert scalar_elements(axis_reduction) is None
 
 

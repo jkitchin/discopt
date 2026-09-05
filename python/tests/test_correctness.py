@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import discopt.modeling as dm
+import numpy as np
 import pytest
 from discopt.modeling.core import Model, SolveResult
 from discopt.modeling.examples import example_simple_minlp
@@ -66,6 +67,19 @@ def assert_optimal_value(
     )
 
 
+def _elements(value) -> list[tuple[str, float]]:
+    """``(label, scalar)`` for every element of a solution entry.
+
+    A scalar variable yields one unlabelled element; a shaped variable yields one
+    per flat element, labelled ``[i]`` so a failure names the offending slot.
+    """
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim == 0:
+        return [("", float(arr))]
+    flat = arr.reshape(-1)
+    return [(f"[{i}]", float(flat[i])) for i in range(flat.size)]
+
+
 def assert_integer_feasible(
     result: SolveResult,
     integer_var_names: list[str],
@@ -75,12 +89,15 @@ def assert_integer_feasible(
     """Assert all integer/binary variables are integral within tolerance."""
     assert result.x is not None, f"[{name}] No solution"
     for var_name in integer_var_names:
-        val = float(result.x[var_name])
-        rounded = round(val)
-        assert abs(val - rounded) <= tol, (
-            f"[{name}] Variable {var_name}={val:.8f} is not integral "
-            f"(nearest integer={rounded}, gap={abs(val - rounded):.2e})"
-        )
+        # ``result.x[name]`` is an array for a shaped variable; every element of
+        # it is a decision variable and must be checked (a bare ``float()`` on a
+        # size>1 array raises, so this is coverage the panel could not carry).
+        for pos, val in _elements(result.x[var_name]):
+            rounded = round(val)
+            assert abs(val - rounded) <= tol, (
+                f"[{name}] Variable {var_name}{pos}={val:.8f} is not integral "
+                f"(nearest integer={rounded}, gap={abs(val - rounded):.2e})"
+            )
 
 
 def assert_bounds_satisfied(
@@ -92,9 +109,9 @@ def assert_bounds_satisfied(
     """Assert all variable values are within their declared bounds."""
     assert result.x is not None, f"[{name}] No solution"
     for var_name, (lb, ub) in bounds.items():
-        val = float(result.x[var_name])
-        assert val >= lb - tol, f"[{name}] {var_name}={val:.8f} violates lower bound {lb}"
-        assert val <= ub + tol, f"[{name}] {var_name}={val:.8f} violates upper bound {ub}"
+        for pos, val in _elements(result.x[var_name]):
+            assert val >= lb - tol, f"[{name}] {var_name}{pos}={val:.8f} violates lower bound {lb}"
+            assert val <= ub + tol, f"[{name}] {var_name}{pos}={val:.8f} violates upper bound {ub}"
 
 
 # ──────────────────────────────────────────────────────────
@@ -488,6 +505,58 @@ def _build_power_nlp() -> Model:
 
 
 # ──────────────────────────────────────────────────────────
+# Axis-reduced sums (issue #1160)
+#
+# ``dm.sum(X, axis=k)`` is array-valued: one constraint row per surviving
+# element. The relaxation side used to fold it into a single row, so these were
+# solved as the axis-COLLAPSED model and its optimum certified. The `.nl` reader
+# emits no ``SumExpression``, so no `.nl` panel can cover this class — it lives
+# or dies with these Python-API instances.
+# ──────────────────────────────────────────────────────────
+
+
+def _build_row_capped_axis_sum() -> Model:
+    """min -sum(A) s.t. sum(A, axis=1) <= 2, A in [0,1]^(2x3).
+
+    Two independent row caps of 2, so the optimum is -4 (e.g. two ones per row).
+    Collapsed to the single cap ``sum(A) <= 2`` it reads -2.
+    """
+    m = dm.Model("row_capped_axis_sum")
+    A = m.continuous("A", shape=(2, 3), lb=0, ub=1)
+    m.subject_to(dm.sum(A, axis=1) <= 2)
+    m.minimize(-dm.sum(A))
+    return m
+
+
+def _build_column_capped_axis_sum() -> Model:
+    """min -sum(B) s.t. sum(B, axis=0) <= 1 on binary B of shape (2,3).
+
+    Reduces the OTHER axis: each of the 3 columns may carry at most one of its
+    2 entries, so the optimum is -3. Collapsed it reads -1.
+    """
+    m = dm.Model("column_capped_axis_sum")
+    B = m.binary("B", shape=(2, 3))
+    m.subject_to(dm.sum(B, axis=0) <= 1)
+    m.minimize(-dm.sum(B))
+    return m
+
+
+def _build_quadratic_axis_sum() -> Model:
+    """min -sum(A) s.t. sum(A*A, axis=1) <= 1/2, A in [0,1]^(2x3).
+
+    Nonlinear body, same reduction. Per row Cauchy-Schwarz gives
+    ``sum(a) <= sqrt(3 * 1/2)``, attained with all three equal at
+    ``sqrt(1/6) <= 1``; two rows give ``6*sqrt(1/6) = sqrt(6)``, so the optimum
+    is ``-sqrt(6) ~= -2.449490``.
+    """
+    m = dm.Model("quadratic_axis_sum")
+    A = m.continuous("A", shape=(2, 3), lb=0, ub=1)
+    m.subject_to(dm.sum(A * A, axis=1) <= 0.5)
+    m.minimize(-dm.sum(A))
+    return m
+
+
+# ──────────────────────────────────────────────────────────
 # Build the test instance registry
 # ──────────────────────────────────────────────────────────
 
@@ -689,6 +758,31 @@ INSTANCES: list[ProblemInstance] = [
         integer_vars=["x", "y"],
         bounds={"x": (0, 5), "y": (0, 5), "z": (0, 3)},
         description="Quadratic with 2 integers + 1 continuous",
+    ),
+    # --- Axis-reduced sums (issue #1160) ---
+    ProblemInstance(
+        name="row_capped_axis_sum",
+        build_fn=_build_row_capped_axis_sum,
+        expected_obj=-4.0,
+        integer_vars=[],
+        bounds={"A": (0, 1)},
+        description="sum(A, axis=1) <= 2: per-row caps, not one total cap",
+    ),
+    ProblemInstance(
+        name="column_capped_axis_sum",
+        build_fn=_build_column_capped_axis_sum,
+        expected_obj=-3.0,
+        integer_vars=["B"],
+        bounds={"B": (0, 1)},
+        description="Binary sum(B, axis=0) <= 1: per-column caps",
+    ),
+    ProblemInstance(
+        name="quadratic_axis_sum",
+        build_fn=_build_quadratic_axis_sum,
+        expected_obj=-math.sqrt(6.0),
+        integer_vars=[],
+        bounds={"A": (0, 1)},
+        description="Nonlinear sum(A*A, axis=1) <= 1/2: per-row caps",
     ),
 ]
 

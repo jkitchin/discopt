@@ -60,6 +60,7 @@ import numpy as np
 # isolating extractor below short-circuits on "target absent -> coefficient 0",
 # which is what the dependent-output pattern requires.
 from discopt._relax.objective_epigraph import VarNameIndex, WorkCounter, _const_value
+from discopt._relax.scalarize import sum_is_full_reduction
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -220,6 +221,13 @@ def _isolated_affine_coeffs(expr, index=None, work=None):
             bad |= names
             continue
         if isinstance(node, SumExpression):
+            # A full reduction passes the multiplier straight through to the
+            # operand's elements. An axis reduction is array-valued -- the node
+            # stands for several rows -- so the coefficient this walk reports
+            # would be for none of them (#1160). Mark the names unprovable.
+            if not sum_is_full_reduction(node):
+                bad |= names
+                continue
             stack.append((node.operand, mult))
             continue
         # SumOverExpression (a reduction carrying the name -> not a scalar

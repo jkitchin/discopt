@@ -45,7 +45,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from discopt._relax.scalarize import scalar_elements
+from discopt._relax.scalarize import scalar_elements, sum_is_full_reduction
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -448,6 +448,11 @@ class _Canonicalizer:
 
         if isinstance(expr, SumExpression):
             # sum(array_variable) over its elements is affine; anything else is opaque.
+            # Only a FULL reduction collapses to one affine form: `sum(A, axis=1)`
+            # is one row per row of `A`, and folding its elements into a single
+            # canonical sum is the axis-collapse of #1160.
+            if not sum_is_full_reduction(expr):
+                raise UnsupportedCanonicalization("axis-reduced sum (array-valued)")
             op = expr.operand
             if isinstance(op, Variable):
                 from discopt._relax.term_classifier import _compute_var_offset

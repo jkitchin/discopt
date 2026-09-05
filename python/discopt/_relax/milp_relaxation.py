@@ -33,6 +33,7 @@ import scipy.sparse as sp
 from discopt._relax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt._relax.discretization import DiscretizationState
 from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.scalarize import sum_is_full_reduction
 from discopt._relax.term_classifier import (
     NonlinearTerms,
     _compute_var_offset,
@@ -1387,6 +1388,13 @@ def _expr_to_polynomial(expr: Expression, model: Model) -> _AffineSquare | None:
                 return visit(e.operand, -scale)
             return False
         if isinstance(e, SumExpression):
+            # A full reduction distributes ``scale`` over the operand's elements
+            # and yields the one polynomial this walk returns. An axis reduction
+            # is array-valued -- one polynomial per surviving element -- so
+            # descending would merge rows the model keeps apart and hand the
+            # caller a single quadratic form for several constraints (#1160).
+            if not sum_is_full_reduction(e):
+                return False
             return visit(e.operand, scale)
         if isinstance(e, SumOverExpression):
             # ``dm.sum(f, over=...)`` / ``dm.sum(term for ...)`` builds an n-ary
@@ -1897,6 +1905,13 @@ def _linearize_affine_expr_sparse(
                 raise ValueError(f"Non-affine power in univariate argument: {e}")
 
         if isinstance(e, SumExpression):
+            # Only a full reduction is the single affine row this builds; an axis
+            # reduction stands for one row per surviving element, and folding its
+            # elements together with one uniform scale is the #1160 collapse.
+            # ``ValueError`` is this walk's "not affine" signal -- every caller
+            # catches it and abstains.
+            if not sum_is_full_reduction(e):
+                raise ValueError(f"Axis-reduced sum is array-valued, not one affine row: {e}")
             op = e.operand
             if isinstance(op, Variable):
                 offset = _compute_var_offset(op, model)
