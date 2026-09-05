@@ -429,6 +429,19 @@ counters!(
     DualRefactorizations,
     DualRefacCap,
     DualRefacFtFail,
+    // Why GMI separation produced nothing. `separate_gomory_cols` had FIVE
+    // uncounted early returns, so a panel that never once looked at a tableau row
+    // reported "0 cuts" — indistinguishable from "looked and found none". That is
+    // exactly the CLAUDE.md §6 failure mode, and it hid the short-basis export
+    // defect (A0'.1) for weeks: on `neos-2624317-amur` every call bailed at
+    // `basic_vars.len() != m` and the instrument said nothing. `SepGomoryCalls` is
+    // the denominator; a healthy run has calls > 0 and the four refusal counters
+    // small against it.
+    SepGomoryCalls,
+    SepGomoryShortBasis,
+    SepGomorySingular,
+    SepGomoryFtranFail,
+    SepGomoryBtranFail,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,

@@ -225,6 +225,7 @@ pub fn separate_gomory_cols(
     max_dynamism: f64,
 ) -> Vec<GomoryCut> {
     let mut cuts = Vec::new();
+    crate::profile::incr(crate::profile::Ctr::SepGomoryCalls);
     if m == 0 {
         return cuts;
     }
@@ -232,6 +233,7 @@ pub fn separate_gomory_cols(
     // (degenerate phase-2 artifact the caller could not complete) is unusable —
     // decline rather than index past it. Matches the old dense path's `None`.
     if basis.basic_vars.len() != m {
+        crate::profile::incr(crate::profile::Ctr::SepGomoryShortBasis);
         return cuts;
     }
 
@@ -245,6 +247,7 @@ pub fn separate_gomory_cols(
         })
         .collect();
     if lu.factorize_sparse(m, &bcols).is_err() {
+        crate::profile::incr(crate::profile::Ctr::SepGomorySingular);
         return cuts; // singular basis → no cuts (as the dense solve's None did)
     }
 
@@ -268,7 +271,10 @@ pub fn separate_gomory_cols(
     }
     let xb = match ftran_refined(&mut lu, sp, &basis.basic_vars, &rhs_b, tol) {
         Some(xb) => xb,
-        None => return cuts,
+        None => {
+            crate::profile::incr(crate::profile::Ctr::SepGomoryFtranFail);
+            return cuts;
+        }
     };
 
     for (i, &bi) in basis.basic_vars.iter().enumerate() {
@@ -285,7 +291,10 @@ pub fn separate_gomory_cols(
         e_i[i] = 1.0;
         let w = match btran_refined(&mut lu, sp, &basis.basic_vars, &e_i, tol) {
             Some(w) => w,
-            None => continue,
+            None => {
+                crate::profile::incr(crate::profile::Ctr::SepGomoryBtranFail);
+                continue;
+            }
         };
 
         // GMI cut Σ ψ_j x̃_j ≥ 1, accumulated into original-variable space.
@@ -364,7 +373,73 @@ pub fn separate_gomory_cols(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lp::basis::recover_basis;
+    use crate::lp::basis::{recover_basis, AT_LOWER};
+
+    /// Every refusal inside `separate_gomory_cols` must leave a counter behind.
+    ///
+    /// This function had five uncounted early returns, so "no cuts separated" and
+    /// "never looked at a single tableau row" were the same observation. That is
+    /// the CLAUDE.md §6 failure mode, and it is what hid the short-basis export
+    /// defect (A0'.1): on `neos-2624317-amur` the cold root LP exported 338 basic
+    /// variables for m = 342, every separation call bailed at the length guard,
+    /// and the panel reported `0/0` cuts — read as "nothing to cut".
+    ///
+    /// Asserted as *deltas* around each call, and with the call counter as the
+    /// denominator, so the test itself cannot pass vacuously.
+    #[test]
+    fn a_short_basis_refusal_is_counted_not_silent() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+
+        // x0 + x1 + s = 1.5, x0,x1 ∈ {0,1} relaxed, s ≥ 0 — the LP of the first
+        // test, whose complete basis is known to separate exactly one GMI cut.
+        let a = [1.0, 1.0, 1.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [1.0, 1.0, f64::INFINITY];
+        let b = [1.5];
+        let integrality = [true, true, false];
+        let sp = crate::lp::simplex::sparse::SparseCols::from_dense(&a, 1, 3);
+
+        let calls = |()| crate::profile::counter(crate::profile::Ctr::SepGomoryCalls);
+        let short = |()| crate::profile::counter(crate::profile::Ctr::SepGomoryShortBasis);
+
+        // Arm 1: a basis one column short of `m`. It must refuse AND say so.
+        let c0 = calls(());
+        let s0 = short(());
+        let stub = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, AT_LOWER],
+            basic_vars: vec![], // 0 != m = 1
+        };
+        let cuts = separate_gomory_cols(&sp, 1, 3, &l, &u, &b, &stub, &integrality, 1e-7, 1e9);
+        assert!(cuts.is_empty(), "a short basis cannot yield cuts");
+        assert_eq!(calls(()) - c0, 1, "the call counter is the denominator");
+        assert_eq!(short(()) - s0, 1, "the short-basis refusal must be counted");
+
+        // Arm 2: the complete basis. The refusal counter must NOT move — without
+        // this arm the test would pass on a counter that fires unconditionally.
+        let x = [1.0, 0.5, 0.0];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 3,
+            c: &[0.0, 0.0, 0.0],
+            l: &l,
+            u: &u,
+        };
+        let good = recover_basis(&x, &lp, 1e-7).expect("basis");
+        let c1 = calls(());
+        let s1 = short(());
+        let cuts = separate_gomory_cols(&sp, 1, 3, &l, &u, &b, &good, &integrality, 1e-7, 1e9);
+        assert_eq!(cuts.len(), 1, "the complete basis still separates its cut");
+        assert_eq!(calls(()) - c1, 1);
+        assert_eq!(
+            short(()) - s1,
+            0,
+            "a complete basis must not count a refusal"
+        );
+
+        crate::profile::set_enabled(false);
+    }
 
     fn dot(a: &[f64], b: &[f64]) -> f64 {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
