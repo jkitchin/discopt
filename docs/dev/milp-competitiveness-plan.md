@@ -1247,6 +1247,75 @@ Sequentially-lifted knapsack cover (upgrading `lp/cover.rs` from unlifted) is
 *not* dropped but is low priority: ~0.5–1 instance, low risk, and irrelevant to
 `mik` (cover fires only on binary rows).
 
+### A3 — where the gap actually is. Measured 2026-09-05, and it ends the cut search.
+
+Three measured rounds have now gone into the cut path — root attribution
+(§2.5), root-loop termination (A1), in-tree aging (A2) — and none produced a
+lever. That is itself a result: the next question is not *which cut mechanism*
+but whether the cut path is the right place at all. So the probe stopped
+choosing mechanisms and measured the shape of the gap directly.
+
+`scratchpad/miplib/nodegap.py`, full §0 panel, 38 instances, `gap_tol=1e-4`,
+TL = 20 s, HiGHS and discopt run back-to-back on each instance so both meet the
+same machine load. Ratios are taken **only over the 21 instances both solvers
+drive to optimality** — a node count is a complete, load-independent quantity
+only for a run that *finishes*; under a wall-clock cap a loaded machine explores
+fewer nodes, so a timed-out instance's node count is a timing measurement in
+disguise. Zero certificate violations (the probe exits non-zero on any bound
+above the reference optimum).
+
+| | geomean, discopt ÷ HiGHS, over the 21 both-solved |
+|---|---|
+| nodes explored | **105×** more |
+| nodes per second | **80×** more |
+
+Solved counts on the run were discopt 21/38, HiGHS 37/38; those are wall-clock
+gated and therefore load-sensitive, so they are context, not the finding.
+
+**discopt is not slow.** It is roughly two orders of magnitude *faster* per node
+than HiGHS and pays for it with a tree two orders of magnitude larger. The
+per-instance spread says the same thing without the geomean: `gt2` 2643 nodes at
+39052 n/s against HiGHS's 1 node at 39 n/s; `dcmulti` 3593 at 2197 against 5 at
+5; `enlight8` 129509 at 43582 against 444 at 339. Two instances run the other
+way — `neos-911970` (discopt 31 nodes at 2 n/s vs HiGHS 1907 at 269) and
+`neos-3118745-obra` — and they are the exception that shows the measurement is
+not an artifact of the harness.
+
+The consequence for planning is direct, and it is why no further cut-mechanism
+round should be started before it is used: **discopt has an enormous per-node
+budget available to trade for better decisions.** Any mechanism that cuts the
+tree by 2× is worth up to ~40× the per-node cost it adds and still comes out
+ahead. That is a very different economy from the one the cut rounds were
+implicitly optimizing, where the aim was to add bound cheaply.
+
+Two candidates spend that budget, and they want opposite work: a weak
+**incumbent** prunes nothing however good the bound is (lever: primal
+heuristics — discopt has rounding plus the #1060 continuous-repair dive, and no
+RINS/RENS/feasibility-pump/local-branching), while a weak **dual bound**
+certifies nothing away however good the incumbent is (lever: branching and
+bounding). Both produce the identical symptom measured above, so the node ratio
+cannot separate them; `scratchpad/miplib/gapsplit.py` separates them by
+splitting the gap still open at the time limit against the reference optimum.
+
+One specific suspect is already visible in the tree and costs nothing to test.
+Strong branching is gated by
+
+```rust
+let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
+// crates/discopt-core/src/bnb/milp_driver.rs:1434
+```
+
+and the **Python binding default is `sb_node_budget = 48`**
+(`crates/discopt-python/src/lp_bindings.rs:1102`, `:1230`) — which every panel
+measurement in this document has silently used. Strong branching therefore runs
+for the first 48 nodes, and the pseudocosts seeded from those 48 steer the
+remaining 100k–480k. HiGHS instead budgets strong branching in LP *iterations*,
+recomputed at every branching decision so that it never fully expires
+(`HighsSearch.cpp:1272-1290`). Note that `milp_driver.rs:4573`'s `1024` is a
+**test helper**, not a default, and the Rust `Default` impl at `:4211` is `1000`;
+neither reaches a Python solve. `scratchpad/miplib/sbbudget.py` sweeps the
+budget — it is already a parameter, so the falsifying experiment needs no code.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
