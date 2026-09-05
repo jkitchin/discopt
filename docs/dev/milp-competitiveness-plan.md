@@ -1316,6 +1316,115 @@ recomputed at every branching decision so that it never fully expires
 neither reaches a Python solve. `scratchpad/miplib/sbbudget.py` sweeps the
 budget — it is already a parameter, so the falsifying experiment needs no code.
 
+### A4 — the strong-branching budget is NOT the lever. Falsified 2026-09-05.
+
+A3 established that discopt's gap is tree size (105x more nodes at 80x higher
+throughput), so it has a large per-node budget to trade for better decisions.
+The cheapest place that budget could go was already a parameter, so it was
+tested first.
+
+Strong branching is gated by
+
+```rust
+let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
+// crates/discopt-core/src/bnb/milp_driver.rs:1483
+```
+
+and the **binding default is `sb_node_budget = 48`**, set in the Python binding
+(`crates/discopt-python/src/lp_bindings.rs:1102`, and again at `:1230`, `:1389`).
+Every panel measurement in this plan has silently used it. (Two other constants
+in the tree are *not* the default and must not be cited as such: the Rust
+`Default` of `1000` at `milp_driver.rs:4211`, and `1024` in the test helper
+`fn opts(..)` at `:4573`. Neither reaches a Python solve.) So strong branching
+runs for the first 48 nodes, and the pseudocosts it seeds then steer the
+remaining 100k-480k. HiGHS instead budgets SB in **LP iterations** — about a
+third of all non-heuristic LP iterations, recomputed at every branching decision,
+so it never fully expires (`HighsSearch.cpp:1272-1290`).
+
+**Hypothesis:** the SB budget *shape* — a small fixed node prefix — is a binding
+constraint on discopt's tree size.
+
+**Experiment** (`sbbudget.py`, 38-instance MIPLIB easy panel, `gap_tol=1e-4`,
+TL 20 s, four arms run back-to-back per instance so they meet the same load):
+`sb_node_budget` in {48 (shipped), 1000, 50000, 10^7}. Kill criterion registered
+before the run: geomean node reduction over instances **every** arm drives to
+optimality, `>= 1.5x` survives, `< 1.25x` falsifies.
+
+**Result — FALSIFIED.** 21 of 38 instances solved by all four arms (the same
+21/38 for every arm):
+
+| shipped48 / arm | geomean node reduction |
+|---|---|
+| n1000 | 1.151x |
+| n50k | **1.221x** |
+| unlimited | 1.221x |
+
+The best arm lands below even the 1.25x "weak" floor. **Do not spend on the SB
+budget shape.**
+
+**The distribution is the finding, and it is bimodal, not flat.** Ten of the 21
+instances are *exactly* 1.00x — the budget changes nothing — while a minority
+move hard:
+
+| instance | shipped48 | n1000 | n50k | unlimited | 48/best |
+|---|---|---|---|---|---|
+| `fiber` | 23537 | 3187 | 2081 | 2081 | **11.31x** |
+| `dcmulti` | 3593 | 1105 | 1105 | 1105 | **3.25x** |
+| `neos-3611447-jijia` | 100541 | 54261 | 55601 | 55601 | 1.85x |
+| `23588` | 4449 | 2529 | 2587 | 2587 | 1.76x |
+| `p0201` | 441 | 685 | 685 | 685 | **worse** |
+
+So more strong branching is a *large* lever on a few instances, inert on half,
+and actively harmful on at least one. That is the shape a per-node cost model
+predicts: SB pays where the LP discriminates between candidates and wastes LPs
+where it does not. HiGHS acts on exactly that distinction and discopt does not —
+`setMinReliable(0)` shuts strong branching off entirely at a degenerate node
+(`HighsSearch.cpp:1114-1116`), where `computeLPDegneracy >= 10` is reached by
+`varConsRatio >= 2` alone (`HighsLpRelaxation.cpp:438-493`). discopt's
+`Pseudocosts` (`crates/discopt-core/src/bnb/branching.rs:51-62`) carries cost
+sums and counts only — no inference count, no cutoff count, no degeneracy factor
+— so at a degenerate node it has nothing to fall back on and keeps buying SB LPs
+that cannot discriminate. **A degeneracy shut-off is a live, general candidate**
+("stop paying where the probe cannot separate"), and it is falsifiable on this
+very panel: if degeneracy separates `p0201` from `fiber`, it is a mechanism; if
+it does not, the explanation is dropped rather than kept as a story.
+
+**Two corrections to this probe's own instrument, recorded per CLAUDE.md §6/§11.**
+
+1. *The run first exited on a gate that was mis-specified, not on a solver
+   defect.* The gate required two solved arms to agree on the objective to 1e-6.
+   That asserts an exactness the solve never promised: the panel runs
+   `gap_tol=1e-4`, so "optimal" means "gap <= 1e-4" and two arms may legitimately
+   stop at different incumbents inside that band. `gen` did exactly that —
+   `shipped48` returned the reference optimum to 1.3e-16, the larger-budget arms
+   returned an incumbent 5.76e-5 **above** it (worse, correct side for a
+   minimize, inside the certified gap). The gate is now anchored to the **oracle**
+   instead: every solved arm's incumbent must lie in
+   `[optimum, optimum + gap_tol*(1+|optimum|)]`. That is not a loosening — it is
+   *stricter* in the direction that matters, because an incumbent below the true
+   optimum is caught outright, whereas an arm-vs-arm test passes two arms that
+   are wrong the same way. The dual-bound gate ran ahead of it and passed on all
+   38 x 4 arms, which is why the node table above is readable at all.
+
+2. *A registered caveat, resolved empirically rather than waived.* Before the
+   run it was stated that a FALSIFIED verdict would not be acceptable without an
+   `SbCalls` counter, because a flat arm cannot be distinguished from "strong
+   branching never ran". The table settles it without the counter: node counts
+   **change** between `shipped48` and `n1000` on 16 of the 21 instances, so SB
+   demonstrably fires more at the larger budgets and moves the search. This is
+   not the instrument-measured-nothing failure mode. The counter still ships (it
+   sharpens the per-instance picture); it is simply not load-bearing here.
+
+**What A4 leaves standing.** A3's finding is untouched: the gap is tree size.
+What A4 removes is the cheapest explanation for it. The remaining candidates,
+both upstream of any scoring parameter, are (i) discopt discards a proof it has
+already paid for — an infeasible SB probe proves `x >= ceil(x_i)` at that node,
+and `strong_branch` turns it into a score constant (`INFEAS_DELTA = 1e7`,
+`milp_driver.rs:2720`) and throws the domain reduction away; HiGHS instead
+collapses the branch (`branchUpwards`, `HighsSearch.cpp:558-561, 665-669`),
+pushing one child and setting the parent's `opensubtrees = 0`, and it needs no
+conflict analysis to do it — and (ii) discopt has no plunging at all.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
