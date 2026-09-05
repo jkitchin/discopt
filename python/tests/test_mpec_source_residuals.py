@@ -27,6 +27,8 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import pathlib  # noqa: E402
+
 import discopt.modeling.core as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
@@ -59,6 +61,9 @@ pytestmark = pytest.mark.smoke
 #: Every residual comparison this module actually executed. Incremented at the
 #: point of comparison, never at the top of a loop that might not run.
 ASSERTIONS_EXECUTED = 0
+
+#: Path to the module under test, for the source-level contract checks below.
+discopt_mpec_file = __import__("discopt.mpec", fromlist=["x"]).__file__
 
 
 def _checked(condition: bool, message: str) -> None:
@@ -748,9 +753,16 @@ def test_review_1_sum_row_residual_is_reduced():
 
     # The enclosure over the whole box must CONTAIN the value; [0, 10] did not.
     box = evaluate_interval(dm.sum(x), m)
+    # CONTAINMENT, not equality: the reduction rounds outward (see the review-2
+    # regression below), so the endpoint is 20 or a hair beyond it. What must never
+    # happen again is an endpoint BELOW 20 — an enclosure that excludes the value.
     _checked(
-        float(np.asarray(box.hi)) == 20.0,
-        f"sum(x) over x in [0,10]^2 encloses up to 20, got hi={box.hi!r}",
+        float(np.asarray(box.hi)) >= 20.0,
+        f"sum(x) over x in [0,10]^2 must enclose 20, got hi={box.hi!r}",
+    )
+    _checked(
+        float(np.asarray(box.lo)) <= 0.0,
+        f"and must enclose 0, got lo={box.lo!r}",
     )
 
     point = point_from_flat(m, np.array([6.0, 6.0]))
@@ -770,8 +782,8 @@ def test_review_1_sum_row_residual_is_reduced():
     a = m.continuous("a", shape=(2, 3), lb=0, ub=1)
     rowwise = evaluate_interval(dm.sum(a, axis=1), m)
     _checked(
-        np.asarray(rowwise.hi).shape == (2,) and float(np.max(rowwise.hi)) == 3.0,
-        f"sum(a, axis=1) reduces to shape (2,) with hi=3, got {rowwise.hi!r}",
+        np.asarray(rowwise.hi).shape == (2,) and float(np.max(rowwise.hi)) >= 3.0,
+        f"sum(a, axis=1) reduces to shape (2,) enclosing 3, got {rowwise.hi!r}",
     )
 
 
@@ -1002,4 +1014,215 @@ def test_review_9_converged_requires_an_accepted_stage():
     _checked(
         stalled.as_dict()["any_stage_accepted"] is False,
         "and the distinction is serialized",
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Regressions for the SECOND #1158 review pass. Three are inside the fixes above.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_review2_1_a_violated_relation_is_not_hidden_by_another_relations_scale():
+    """HIGH 1: the aggregate mixed one relation's value with its own scale.
+
+    ``effective_scale`` is per-relation, so ranking by RAW residual and then
+    reporting that relation's scale said nothing about the others. A box MCP on
+    ``z in [0, 1e3]`` violated by 1e-3 (scaled 1e-6, inside tolerance) outranked
+    an NCP pair violated by 1e-4 (scaled 1e-4, a hundred times over) — and the
+    report read ``source_satisfied=True`` with the second relation badly violated.
+    Since ``accept_local_incumbent`` gates on exactly this, it was a hole in the
+    HIGH-2 fix with the same shape as the original bug.
+    """
+    m = dm.Model("mixed_scales")
+    zf = m.continuous("zf", lb=0, ub=1e3)
+    zg = m.continuous("zg", lb=0, ub=1e3)
+    nf = m.continuous("nf", lb=0, ub=10)
+    ng = m.continuous("ng", lb=0, ub=10)
+    m.minimize(zf + nf)
+
+    big = complementarity(zf, zg, name="big", scale=1e3)
+    small = complementarity(nf, ng, name="small")  # effective_scale 1.0
+    for rel in (big, small):
+        m._complementarities.append(rel)
+
+    # big: min(1e-3, 5) = 1e-3 -> scaled 1e-6 (at tolerance)
+    # small: min(1e-4, 5) = 1e-4 -> scaled 1e-4 (100x over tolerance)
+    report = source_residual_report(m, [big, small], x_flat=np.array([1e-3, 5.0, 1e-4, 5.0]))
+
+    by_name = {r.name: r for r in report.relations}
+    _checked(
+        abs(by_name["big"].complementarity.scaled_value - 1e-6) < 1e-12,
+        f"big scales to 1e-6, got {by_name['big'].complementarity.scaled_value!r}",
+    )
+    _checked(
+        abs(by_name["small"].complementarity.scaled_value - 1e-4) < 1e-12,
+        f"small scales to 1e-4, got {by_name['small'].complementarity.scaled_value!r}",
+    )
+    _checked(
+        report.complementarity.value == pytest.approx(1e-4),
+        f"the aggregate must rank by SCALED value, so it reports 'small' "
+        f"({1e-4}), got {report.complementarity.value!r} from {report.complementarity.where!r}",
+    )
+    _checked(
+        not report.source_satisfied,
+        "and source_satisfied must be False — one relation is 100x over tolerance",
+    )
+    # Control: with both relations inside tolerance it still reads satisfied, so
+    # the False above is a property of the violation and not a broken predicate.
+    ok = source_residual_report(m, [big, small], x_flat=np.array([1e-3, 5.0, 1e-9, 5.0]))
+    _checked(ok.source_satisfied, "control: both within tolerance still reads satisfied")
+
+
+def test_review2_2_the_sum_reduction_rounds_outward():
+    """MEDIUM 2: the new reduction dropped the module's outward-rounding invariant.
+
+    ``evaluate_interval`` is on the solve path (nonlinear bound tightening,
+    uniform/OA relaxation, the g-convex injection), where an enclosure narrower
+    than the true image is the FBBT failure that cuts the optimum out of the box.
+    Summing n terms accumulates ~n ULP, so the endpoints must be pushed outward —
+    as the sibling reduction ``_eval_matmul`` already did.
+    """
+    from discopt._relax.convexity.interval import Interval  # noqa: PLC0415
+    from discopt._relax.convexity.interval_eval import evaluate_interval  # noqa: PLC0415
+
+    m = dm.Model("rounding")
+    x = m.continuous("x", shape=3, lb=0.1, ub=0.1)
+    m.minimize(x[0])
+    enc = evaluate_interval(dm.sum(x), m)
+    exact = 0.1 + 0.1 + 0.1
+    _checked(
+        float(enc.lo) < exact < float(enc.hi),
+        f"the enclosure must strictly straddle the float sum {exact!r}, got "
+        f"[{float(enc.lo)!r}, {float(enc.hi)!r}]",
+    )
+    # And on a degenerate point box it stays tight enough for the residual probe
+    # to accept it (the two requirements pull in opposite directions; both hold).
+    point = point_from_flat(m, np.array([0.1, 0.1, 0.1]))
+    _checked(
+        abs(float(evaluate_at_point(m, dm.sum(x), point)[0]) - exact) < 1e-12,
+        "and a point evaluation still resolves, so outward rounding did not "
+        "widen it past the degeneracy guard",
+    )
+    _checked(isinstance(enc, Interval), "the reduction returns an Interval")
+
+
+def test_review2_3_a_stage_residual_refusal_does_not_abort_the_homotopy():
+    """MEDIUM 3: the per-stage residual call was bare, so it aborted the solve.
+
+    ``_report_for`` guards the final report, but the in-loop
+    ``max_source_complementarity`` did not — so a relation containing an operand
+    the interval evaluator cannot walk raised on the first iteration, which is
+    strictly worse than the pre-#1148 behaviour.
+    """
+    import warnings  # noqa: PLC0415
+
+    m = dm.Model("stage_refusal")
+    u = m.continuous("u", lb=1.0, ub=2.0)
+    v = m.continuous("v", lb=1.0, ub=2.0)
+    y = m.continuous("y", lb=0, ub=5)
+    m.minimize((y - 1) ** 2 + u + v)
+    # The RELATION itself carries the unwalkable atom, so the per-stage call --
+    # not just the final report -- must survive it.
+    pair = complementarity(u**v - 1.0, y, name="nl")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = solve_mpec(m, [pair], method="scholtes", max_iter=3)
+
+    _checked(
+        dstatus.is_local_status(res.status),
+        f"the homotopy must still return a local result, got {res.status!r}",
+    )
+    _checked(
+        any(issubclass(w.category, RuntimeWarning) for w in caught),
+        "and the unmeasured residual is reported, not swallowed",
+    )
+    trace = res.mpec_report.continuation if res.mpec_report else None
+    if trace is not None:
+        _checked(
+            all(st.source_complementarity is None for st in trace.stages),
+            "stages record source_complementarity=None — NOT MEASURED, not 0.0",
+        )
+    else:
+        _checked(True, "the final report also refused, which is equally acceptable")
+
+
+def test_review2_4_a_partial_result_x_does_not_abort_a_finished_solve():
+    """MEDIUM 4: ``_result_point`` ran as an argument expression, outside the guard.
+
+    Its refusal (a result missing one of the model's variables) therefore bypassed
+    ``_report_for``'s ``except`` and turned a certified ``Model.solve`` into an
+    exception out of ``solve_mpec`` — the exact HIGH-3 class the guard closed.
+    """
+    from discopt.mpec import _report_for  # noqa: PLC0415
+
+    m, x, y = _distance_model()
+    pair = complementarity(x, y, name="c")
+    m._complementarities.append(pair)
+
+    def raising_point():
+        raise ValueError("solve result does not carry variable 'y'")
+
+    import warnings  # noqa: PLC0415
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = _report_for(m, [pair], (None, None), raising_point, kind="auto")
+    _checked(got is None, "a point that cannot be resolved yields no report, not an exception")
+    _checked(
+        any(issubclass(w.category, RuntimeWarning) for w in caught),
+        "and it is reported loudly",
+    )
+
+
+def test_review2_5_a_stalled_but_usable_stage_is_taken_forward():
+    """MEDIUM 5: only OPTIMAL stages were accepted, discarding good late iterates.
+
+    Scholtes subproblems become degenerate as ``t -> 0`` (MFCQ fails in the limit),
+    so Ipopt code 3 -> ``ITERATION_LIMIT`` at small ``t`` is the expected case. The
+    old behaviour reported the last *certified* stage, which on such a run is a
+    large-``t`` point with a residual orders of magnitude worse.
+    """
+    from discopt.solvers import SolveStatus  # noqa: PLC0415
+
+    m, x, y = _distance_model()
+    res = solve_mpec(m, [complementarity(x, y, name="c")], method="scholtes")
+    trace = res.mpec_report.continuation
+    accepted = [st for st in trace.stages if st.accepted]
+    _checked(bool(accepted), "at least one stage is accepted on a healthy run")
+    _checked(
+        float(trace.final_t) == pytest.approx(min(st.t for st in accepted)),
+        f"the reported point comes from the smallest accepted t, got {trace.final_t!r}",
+    )
+
+    # The status set is the contract: a stalled-with-a-point stage counts, an
+    # INFEASIBLE or ERROR one does not — its "point" is wherever restoration
+    # stopped and stands for nothing.
+    from discopt.mpec import _solve_scholtes  # noqa: F401, PLC0415
+
+    src = pathlib.Path(discopt_mpec_file).read_text()
+    _checked(
+        "SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT" in src,
+        "usable stages are OPTIMAL and ITERATION_LIMIT",
+    )
+    _checked(
+        "SolveStatus.INFEASIBLE" not in src.split("_USABLE_STAGE_STATUSES")[1][:200],
+        "and INFEASIBLE is deliberately excluded",
+    )
+    _checked(SolveStatus.ITERATION_LIMIT is not SolveStatus.OPTIMAL, "the two stay distinct")
+
+
+def test_review2_5_converged_is_false_when_the_point_came_from_a_larger_t():
+    """MEDIUM 5b: reaching t_min while reporting an earlier point is not convergence."""
+    trace = ContinuationTrace(
+        parameter="t",
+        stages=(ContinuationStage(0, 1e-1, "optimal", True, "converged"),),
+        final_t=1e-1,
+        termination_reason="t_min_reached_but_best_point_is_from_a_larger_t",
+        accuracy_floor=complementarity_accuracy_floor(1e-1),
+        any_stage_accepted=True,
+    )
+    _checked(
+        not trace.converged,
+        "the schedule reached t_min but the reported point did not — not converged",
     )

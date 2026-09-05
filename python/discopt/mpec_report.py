@@ -367,9 +367,19 @@ class SourceResidualReport:
     def source_satisfied(self) -> bool:
         """Whether **every** source residual is within the scaled tolerance.
 
+        Quantified over **every relation**, not over the aggregate alone. The
+        aggregate is one relation's value against that relation's own scale, and
+        even ranked by scaled value it is a single row; testing each row directly
+        is what makes this a statement about the whole model rather than about
+        whichever relation happened to rank worst (#1158 review 2, HIGH 1).
+
         Deliberately not a certificate and never used as one: it is the
         source-side reading a caller compares against its own tolerance.
         """
+        if any(r.complementarity.scaled_value > _SOURCE_TOL for r in self.relations):
+            return False
+        if any(r.max_bound_violation > _SOURCE_TOL for r in self.relations):
+            return False
         return (
             self.complementarity.scaled_value <= _SOURCE_TOL
             and self.bound_violation.value <= _SOURCE_TOL
@@ -742,7 +752,17 @@ def source_residual_report(
         kinds = {_resolve_kind(kind, r.relation) for r in rows}
         resolved_kind = kinds.pop() if len(kinds) == 1 else ComplementarityKind.AUTO
 
-    worst_c = max(rows, key=lambda r: r.complementarity.value, default=None)
+    # Worst by SCALED value, not raw. ``effective_scale`` is genuinely per-relation
+    # (a declared ``scale=``, else the largest finite declared-bound magnitude), so
+    # picking the worst raw residual and then reporting *that relation's* scale
+    # mixes one relation's numerator with its own denominator and says nothing
+    # about the others. Measured: a box MCP on ``z in [0, 1e3]`` with residual 1e-3
+    # (scaled 1e-6, fine) outranks an NCP pair with residual 1e-4 (scaled 1e-4,
+    # 100x over tolerance), and the aggregate reported 1e-6 -> ``source_satisfied``
+    # True with a badly violated relation in the report (#1158 review 2, HIGH 1).
+    # The scaled value is the number a tolerance is compared against -- this
+    # module's own docstring says so -- so it is the number the max ranks by.
+    worst_c = max(rows, key=lambda r: r.complementarity.scaled_value, default=None)
     worst_b = max(rows, key=lambda r: r.max_bound_violation, default=None)
     complementarity = Residual(
         name="source_complementarity",

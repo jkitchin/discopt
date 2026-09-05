@@ -172,11 +172,17 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
         #
         # Summation is monotone increasing in every argument, so the enclosure of
         # the sum is the sum of the endpoints -- no interval-arithmetic subtlety.
+        # Outward rounding, like every other arithmetic result in this module and
+        # like the sibling reduction ``_eval_matmul``. Summing n terms accumulates
+        # up to ~n ULP in each endpoint, so an un-rounded sum can return an
+        # enclosure strictly NARROWER than the true image -- and this evaluator is
+        # on the solve path (nonlinear bound tightening, uniform/OA relaxation,
+        # the g-convex injection), where a too-narrow enclosure is the FBBT
+        # failure that cuts the optimum out of the box (#1158 review 2, MEDIUM 2).
         inner = _eval(expr.operand, model, box, cache)
-        return Interval(
-            np.sum(np.asarray(inner.lo, dtype=np.float64), axis=expr.axis),
-            np.sum(np.asarray(inner.hi, dtype=np.float64), axis=expr.axis),
-        )
+        lo = np.sum(np.asarray(inner.lo, dtype=np.float64), axis=expr.axis)
+        hi = np.sum(np.asarray(inner.hi, dtype=np.float64), axis=expr.axis)
+        return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
 
     if isinstance(expr, SumOverExpression):
         if not expr.terms:

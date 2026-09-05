@@ -1311,7 +1311,7 @@ def _report_for(
     model: Model,
     pairs: list[Complementarity],
     snapshot: tuple[Optional[list], Optional[dict[int, tuple]]],
-    point,
+    point_fn,
     *,
     kind: str,
     continuation=None,
@@ -1337,10 +1337,18 @@ def _report_for(
 
     from discopt.mpec_report import source_residual_report
 
-    if point is None:
-        return None
     rows, bounds = snapshot
     try:
+        # ``point_fn`` is a CALLABLE, not a point, so resolving the point happens
+        # INSIDE this guard. It used to be an argument expression -- evaluated
+        # before the function was entered, so ``_result_point``'s own
+        # "result does not carry variable ..." refusal sailed straight past the
+        # ``except`` and turned a finished, certified ``Model.solve`` into an
+        # exception out of ``solve_mpec``: the very HIGH-3 class this guard exists
+        # to close (#1158 review 2, MEDIUM 4).
+        point = point_fn() if callable(point_fn) else point_fn
+        if point is None:
+            return None
         return source_residual_report(
             model,
             pairs,
@@ -1424,7 +1432,7 @@ def source_residuals(
         (source_constraints, source_bounds)
         if source_constraints is not None
         else (None, source_bounds),
-        _result_point(model, result),
+        lambda: _result_point(model, result),
         kind=kind,
     )
 
@@ -1514,7 +1522,7 @@ def solve_mpec(
             model,
             report_pairs,
             snapshot,
-            _result_point(model, result),
+            lambda: _result_point(model, result),
             kind=residual_kind,
             notes=(
                 f"global method {method!r}: the status and bound are the solver's own "
@@ -1583,6 +1591,13 @@ def _solve_scholtes(
     from discopt.solvers import SolveStatus
     from discopt.solvers.nlp_backend import get_nlp_solver
 
+    # Terminal codes whose returned point is worth taking forward. OPTIMAL is a
+    # certified local solution; ITERATION_LIMIT covers Ipopt's code 3 stall, which
+    # is the expected late-stage outcome of a Scholtes homotopy. INFEASIBLE and
+    # ERROR are NOT here: their "point" is wherever restoration stopped and stands
+    # for nothing. See the comment at the acceptance test below.
+    _USABLE_STAGE_STATUSES = (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
+
     if solve_kwargs:
         raise TypeError(
             "solve_mpec(method='scholtes') takes no Model.solve keyword arguments "
@@ -1604,6 +1619,7 @@ def _solve_scholtes(
     )
 
     stages: list[ContinuationStage] = []
+    residual_failures: list[str] = []
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
     best_t: Optional[float] = None
@@ -1641,8 +1657,27 @@ def _solve_scholtes(
             termination = "subsolver_failure"
             break
 
-        converged = stage_result.status is SolveStatus.OPTIMAL
+        # A stage is USABLE when the subsolver returned a point it stopped at, not
+        # only when it reported OPTIMAL. Scholtes subproblems get progressively
+        # more degenerate as t -> 0 (MFCQ fails in the limit), so Ipopt code 3
+        # (``Search_Direction_Becomes_Too_Small`` -> ITERATION_LIMIT here) at the
+        # late, small-t stages is the EXPECTED case, not a failure: this repo's own
+        # note on that code says it means the IPM stalled at or near a local
+        # solution it cannot certify to tolerance. Accepting only OPTIMAL threw
+        # those away, so a run whose t=1e-1 stage converged and whose t=1e-2..1e-8
+        # stages stalled reported the t=1e-1 point (source residual ~1e-1) instead
+        # of the ~1e-4 one the pre-#1148 code returned -- and a run where every
+        # stage stalled returned ``local_infeasible`` with no point at all, having
+        # had one in hand (#1158 review 2, MEDIUM 5).
+        #
+        # ``local_optimal`` still means "a local stationary point"; a stalled-but-
+        # usable stage is recorded as such in the trace's ``reason`` and in
+        # ``stage_certified``, so the distinction survives rather than being
+        # flattened either way.
+        certified_stage = stage_result.status is SolveStatus.OPTIMAL
+        usable = stage_result.status in _USABLE_STAGE_STATUSES
         has_point = stage_result.x is not None
+        converged = certified_stage
         # In MODEL units, like the returned ``SolveResult.objective``. The NLP
         # backend minimises the negation for a MAXIMIZE model, and recording the
         # raw value left ``stages[-1].objective`` and ``result.objective``
@@ -1654,26 +1689,37 @@ def _solve_scholtes(
         stage_res = None
         if has_point:
             x_cur = np.asarray(stage_result.x, dtype=np.float64)
-            stage_res = max_source_complementarity(
-                model, report_pairs, point_from_flat(model, x_cur), kind=residual_kind
-            )
+            try:
+                stage_res = max_source_complementarity(
+                    model, report_pairs, point_from_flat(model, x_cur), kind=residual_kind
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded in the trace, never silent
+                # Same rule as ``_report_for``: the residual may refuse, and the
+                # refusal must not take the SOLVE with it. This call was bare, so
+                # one operand the interval evaluator cannot walk aborted the whole
+                # homotopy on its first iteration -- strictly worse than the
+                # pre-#1148 behaviour (#1158 review 2, MEDIUM 3). The stage records
+                # ``source_complementarity=None`` (not measured) and says why.
+                stage_res = None
+                residual_failures.append(f"{type(exc).__name__}: {exc}")
         # A stage is ACCEPTED only when the subsolver converged. A non-converged
         # iterate is still carried forward as the next warm start (it is the best
         # guess available), but it must not become the reported point: that is the
         # difference between "a local stationary point" and "wherever the solver
         # stopped", and only the first is what ``local_optimal`` claims.
-        if converged and has_point:
+        if usable and has_point:
             best_x, best_obj, best_t = x_cur.copy(), stage_obj, float(tv)
         stages.append(
             ContinuationStage(
                 iteration=it,
                 t=float(tv),
                 status=str(getattr(stage_result.status, "value", stage_result.status)),
-                accepted=bool(converged and has_point),
-                reason=(
-                    "subsolver converged"
-                    if converged and has_point
-                    else "subsolver did not converge; iterate carried as a warm start only"
+                accepted=bool(usable and has_point),
+                reason=_stage_reason(converged, has_point, stage_result.status)
+                + (
+                    f"; source residual not measured ({residual_failures[-1]})"
+                    if residual_failures and stage_res is None and has_point
+                    else ""
                 ),
                 objective=stage_obj,
                 source_complementarity=stage_res,
@@ -1689,14 +1735,33 @@ def _solve_scholtes(
     # step past the last solve by the time a ``max_iter`` exit is taken
     # (#1158 review, LOW 9).
     last_solved_t = float(stages[-1].t) if stages else None
+    final_t = best_t if best_t is not None else last_solved_t
+    if termination == "t_min_reached" and best_t is not None and best_t > t_min * (1.0 + 1e-9):
+        # The schedule reached t_min, but the point being REPORTED came from an
+        # earlier, larger t -- so the run did not converge at the accuracy the
+        # final t implies, and ``converged`` must not say it did (#1158 review 2,
+        # MEDIUM 5). ``final_t`` already names the t the reported point came from;
+        # this keeps the two consistent.
+        termination = "t_min_reached_but_best_point_is_from_a_larger_t"
     trace = ContinuationTrace(
         parameter="t",
         stages=tuple(stages),
-        final_t=best_t if best_t is not None else last_solved_t,
+        final_t=final_t,
         termination_reason=termination,
         accuracy_floor=complementarity_accuracy_floor(best_t),
         any_stage_accepted=any(st.accepted for st in stages),
     )
+    if residual_failures:
+        import warnings
+
+        warnings.warn(
+            "solve_mpec: the per-stage source residual could not be measured on "
+            f"{len(residual_failures)} homotopy stage(s) ({residual_failures[-1]}). The "
+            "continuation was unaffected; those stages report "
+            "source_complementarity=None, which means NOT MEASURED.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     wall = time.perf_counter() - wall0
     if best_x is None:
@@ -1712,7 +1777,7 @@ def _solve_scholtes(
                 model,
                 report_pairs,
                 snapshot,
-                point_from_flat(model, x_cur) if stages else None,
+                (lambda: point_from_flat(model, x_cur)) if stages else (lambda: None),
                 kind=residual_kind,
                 continuation=trace,
                 notes=(
@@ -1740,10 +1805,23 @@ def _solve_scholtes(
             model,
             report_pairs,
             snapshot,
-            point_from_flat(model, best_x),
+            lambda: point_from_flat(model, best_x),
             kind=residual_kind,
             continuation=trace,
         ),
+    )
+
+
+def _stage_reason(certified: bool, has_point: bool, status) -> str:
+    """One sentence saying what a homotopy stage produced, and how strong it is."""
+    if not has_point:
+        return "subsolver returned no point"
+    if certified:
+        return "subsolver converged"
+    code = getattr(status, "value", status)
+    return (
+        f"subsolver stalled ({code}) at a point it could not certify to tolerance; "
+        "taken as a local iterate, which is what 'local_optimal' claims"
     )
 
 
