@@ -80,6 +80,12 @@ def instrument():
     from discopt.solvers import nlp_ipopt
 
     state: dict = {
+        # The post-solve A/B re-solves the captured problems through the SAME
+        # patched entry points. Without this flag they land in ``solves`` and
+        # inflate both the solve count and the total NLP wall past the solve's
+        # own wall -- which is exactly how a probe reports 89.7 s of NLP inside a
+        # 26.4 s solve and reads as a finding.
+        "recording": True,
         "cb_counts": dict.fromkeys(CB_NAMES, 0),
         "solves": [],
         "last_callbacks": None,
@@ -142,6 +148,8 @@ def instrument():
         )
 
     def problem_solve_wrapper(self, *a, **k):
+        if not state["recording"]:
+            return orig_problem_solve(self, *a, **k)
         before = dict(state["cb_counts"])
         t0 = time.perf_counter()
         out = orig_problem_solve(self, *a, **k)
@@ -160,6 +168,8 @@ def instrument():
         return out
 
     def batch_wrapper(problems, *a, **k):
+        if not state["recording"]:
+            return orig_batch(problems, *a, **k)
         state["batch_calls"] += 1
         before = dict(state["cb_counts"])
         t0 = time.perf_counter()
@@ -258,6 +268,7 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
     pool = [c for c in captures if c["mid"] is not None and c["x0"] is not None]
     prev = None
     n_ws_ok = 0
+    n_dim_mismatch = 0
     for c in pool[:max_cases]:
         problem, info, x0, mid = c["problem"], c["info"], c["x0"], c["mid"]
         x_star = c["x"]
@@ -276,7 +287,7 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
             "status": int(i_cold.get("status", -100)),
             "wall_s": time.perf_counter() - t0,
         }
-        if prev is not None:
+        if prev is not None and prev[2] == (problem.n, problem.m):
             # Unsigned state (no ``problem=``): dimensions are still checked
             # against the arrays, the rest is deliberately unverified because the
             # child box differs from the parent's by construction.
@@ -289,7 +300,13 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
                 "wall_s": time.perf_counter() - t0,
             }
             n_ws_ok += 1
-        prev = (x_star, info) if x_star is not None else None
+        elif prev is not None:
+            # A consecutive pair whose (n, m) differ cannot replay a dual state at
+            # all: the cut pool changes the row count between node NLPs, so this
+            # is a *structural* limit on warm-starting across nodes, not a probe
+            # shortcoming. Counted, not hidden.
+            n_dim_mismatch += 1
+        prev = (x_star, info, (problem.n, problem.m)) if x_star is not None else None
         cases.append(row)
 
     def med(key, field="iters"):
@@ -299,6 +316,7 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
     return {
         "n_cases": len(cases),
         "n_with_prev_warm_start": n_ws_ok,
+        "n_prev_dim_mismatch": n_dim_mismatch,
         "median_iters_warm_x0": med("warm_x0"),
         "median_iters_cold_midpoint": med("cold_midpoint"),
         "median_iters_prev_warm_start": med("prev_warm_start"),
@@ -357,6 +375,7 @@ def run_instance(nl: str, time_limit: float, reps: int, rounds: int, max_cases: 
             f"{nl}: no POUNCE NLP solve was observed on either entry point "
             "-- probe measured nothing",
         )
+        state["recording"] = False
         cb_costs = None
         if state["last_callbacks"] is not None and state["last_x"] is not None:
             cb_costs = callback_layer_costs(
