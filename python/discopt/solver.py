@@ -11765,7 +11765,7 @@ def solve_model(
             return _heur_nlp_cost["default"]
         return _heur_nlp_cost["max"]
 
-    def _root_heur_nlp_entry_ok(_ev=None, *, finder: bool = False) -> bool:
+    def _root_heur_nlp_entry_ok(_ev=None) -> bool:
         """Whether a compile-/solve-triggering root heuristic NLP may start now.
 
         Returns False when either the deadline has effectively passed (no room to
@@ -11804,25 +11804,11 @@ def solve_model(
         # contingent). Dividing here unconditionally double-gated those — their
         # own contingent AND a 4x-stricter entry test — which is the shape of the
         # three lost incumbents in the §6.6 panel.
-        _share = _heuristic_entry_share() if finder else 1.0
-        # #1153: dividing a running MEAN here instead of the max was implemented
-        # and then FALSIFIED. Review argued the max never decays, so the test
-        # reads "remaining > 4x worst-case-ever" and one expensive early NLP
-        # refuses every later heuristic — a plausible mechanism for nvs05@10s
-        # losing its incumbent. The ordering probe killed it: on BOTH regressing
-        # instances the first finder decision fires at event index 0, before any
-        # heuristic NLP has been observed, so max == mean == the 2.0 s default and
-        # the two estimators are numerically IDENTICAL at the only decision that
-        # matters. Its panel agreed (incumbent 1/2/65 and 18 up vs the max arm's
-        # 2/2/64 and 20 up — no better, within noise), so the change went out
-        # again rather than ship on a falsified hypothesis.
-        #
-        # The real lever at these budgets is the 2.0 s DEFAULT SEED, not the
-        # statistic: with nothing observed, this gate is "is more than
-        # ``2.0 / share`` seconds left?" on any model, independent of the pump's
-        # measured 6.4 s cost. That is the open item, and it is a work-budget
-        # question (#912) rather than an estimator one.
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _worst_heur_nlp_cost() / _share):
+        # #1153: this flag CAPS a finder stage's clock (``_heur_stage_deadline``)
+        # rather than refusing its entry. Refusing was measured and rejected: it
+        # costs nvs05 its incumbent outright (1269.7 -> none) and degrades tspn12,
+        # because a productive pump never runs. So the entry rule stays legacy.
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _worst_heur_nlp_cost()):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
@@ -11835,6 +11821,39 @@ def solve_model(
             if _compile_est > 0.0 and _remaining < _compile_est:
                 return False
         return True
+
+    def _heur_stage_deadline() -> float:
+        """The deadline a *finder*-role root primal heuristic STAGE runs under.
+
+        #1153, second attempt — and the first one failed for a reason worth
+        recording. A finder stage is TWO NLP consumers, not one: a multistart
+        relaxation solve that seeds the rounding, and the feasibility pump itself
+        (3.27 s + 3.11 s = the 6.4 s that eats a 10 s budget on heatexch_gen2).
+        The first attempt bounded only the pump and left the seed on the global
+        ``_deadline``, so it capped the cheaper half and measured inert — §6.4's
+        null was an artifact of an incomplete change, not evidence against the
+        approach. Every consumer of the stage now reads this.
+
+        Capping is preferable to REFUSING (the entry-share form) for a reason the
+        panels showed: refusing costs ``nvs05`` its incumbent outright and
+        degrades ``tspn12``, because a productive pump never runs at all. A
+        productive pump usually succeeds early, so bounding its clock keeps the
+        win while still stopping it from consuming the search.
+
+        Returns ``_deadline`` unchanged — legacy, byte-identical — when the share
+        is 1.0 (flag off).
+
+        Sound: a truncated primal heuristic changes which incumbent is found and
+        when, never the dual bound or the certificate (§0.3 heuristic-policy).
+        """
+        _share = _heuristic_entry_share()
+        if _share >= 1.0:
+            return _deadline
+        _now = time.perf_counter()
+        return min(
+            _deadline,
+            _now + max(_DEADLINE_NODE_FLOOR_S, _share * (_deadline - _now)),
+        )
 
     def _hess_compile_refuses(_ev) -> bool:
         """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
@@ -13584,6 +13603,14 @@ def solve_model(
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
+            # #1153: ONE deadline for the whole stage, taken here and shared by
+            # every consumer below. Recomputing ``now + share * (deadline - now)``
+            # per call is Zeno's bound: each call gets a share of whatever is left
+            # AT THAT MOMENT, so the total is never bounded. Measured on
+            # heatexch_gen2 at 10 s — per-call grants did fall (3.0 -> 1.75) while
+            # total NLP wall did not (7.08 s -> 7.36 s), because the stage simply
+            # ran more, cheaper rounds. A stage budget has to be a stage budget.
+            _fp_stage_deadline = _heur_stage_deadline()
             # Find the best relaxation solution from this batch
             best_root_idx = None
             best_root_obj = np.inf
@@ -13591,7 +13618,7 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator, finder=True):
+            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
 
@@ -13602,7 +13629,7 @@ def solve_model(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=_deadline,
+                        deadline=_fp_stage_deadline,
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_fp)
                     if fp_sol is not None:
@@ -13637,7 +13664,7 @@ def solve_model(
                 if (
                     _mc_lp_relaxer is not None
                     and not _model_is_convex
-                    and _root_heur_nlp_entry_ok(_active_evaluator, finder=True)
+                    and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
                     try:
                         from discopt._relax.primal_heuristics import feasibility_pump
@@ -13646,7 +13673,7 @@ def solve_model(
                         _relax_opts = dict(opts)
                         _relax_opts["max_wall_time"] = max(
                             _DEADLINE_NODE_FLOOR_S,
-                            min(3.0, _deadline - time.perf_counter()),
+                            min(3.0, _fp_stage_deadline - time.perf_counter()),
                         )
                         _root_relax = _solve_root_node_multistart(
                             _active_evaluator,
@@ -13656,7 +13683,10 @@ def solve_model(
                             _relax_opts,
                             nlp_solver,
                             n_random=0,
-                            deadline=_deadline,
+                            # #1153: the SEED is the expensive half of this stage
+                            # (3.27 s of the measured 6.4 s). Leaving it on the
+                            # global deadline is what made the first attempt inert.
+                            deadline=_fp_stage_deadline,
                             observe_cost=_observe_heur_nlp,
                         )
                         if (
@@ -13671,7 +13701,7 @@ def solve_model(
                                 max_rounds=5,
                                 backend=_resolve_heuristic_backend(nlp_solver),
                                 evaluator=evaluator,
-                                deadline=_deadline,
+                                deadline=_fp_stage_deadline,
                             )
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
@@ -17083,7 +17113,25 @@ def _solve_nlp_bb(
                             max_rounds=5,
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
-                            deadline=t_start + time_limit,
+                            # #1153: same class as the ``solve_model`` finder
+                            # stage — this pump was handed the whole SOLVE
+                            # deadline, so what it costs is set by the caller's
+                            # time_limit rather than by the stage. Share-bounded
+                            # once, here, for the same reason and with the same
+                            # legacy-identical behaviour when the flag is off.
+                            deadline=(
+                                t_start + time_limit
+                                if _heuristic_entry_share() >= 1.0
+                                else min(
+                                    t_start + time_limit,
+                                    time.perf_counter()
+                                    + max(
+                                        _DEADLINE_NODE_FLOOR_S,
+                                        _heuristic_entry_share()
+                                        * (t_start + time_limit - time.perf_counter()),
+                                    ),
+                                )
+                            ),
                         )
                         if fp_sol is not None:
                             fp_obj = float(evaluator.evaluate_objective(fp_sol))
