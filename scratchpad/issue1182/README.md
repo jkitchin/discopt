@@ -2,8 +2,9 @@
 
 The probes CLAUDE.md §4 requires before implementing the Theorem-1 lowering of
 [arXiv:2601.03906v1](https://arxiv.org/abs/2601.03906v1). Results are written up in
-`docs/dev/performance-plan.md` §26; the `*_run.log` files here are the raw output of
-the runs quoted there.
+`docs/dev/performance-plan.md` §26, which holds the tables verbatim and is the
+durable record — `scratchpad/**/*.log` is gitignored, so re-run a probe rather than
+looking for its output here.
 
 Every probe prints an executed-comparison / executed-assertion count and exits
 non-zero if it is zero (CLAUDE.md §6).
