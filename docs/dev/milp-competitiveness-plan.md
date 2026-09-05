@@ -1766,6 +1766,106 @@ surviving lever on this panel. The target class is *improvement* heuristics
 (RINS-style neighborhood search, local branching, diving), not feasibility
 heuristics (RENS, feasibility pump).
 
+### B1 — #1183, an external reproducer, and four more falsified levers. 2026-09-05.
+
+A1–A8 all ran on the 38-instance MIPLIB panel. #1183 (filed by an outside
+reporter) is an independent instance of the same symptom on a completely
+different model class — a plant-layout **generalized disjunctive program**
+reformulated to MILP by Pyomo's `gdp.bigm`, 291 rows × 202 cols, 112 binaries,
+optimum 224 — and it is small enough to falsify hypotheses in seconds rather than
+hours. Every number below is on the **identical MPS**, with HiGHS as the reader for
+both solvers, so there is no conversion-fidelity risk in the comparison itself.
+
+| measurement | value | share of the 68.3% formulation gap closed |
+|---|---|---|
+| pure LP relaxation (the formulation, handed to both solvers) | 71.0 | 0% |
+| discopt root bound | 169.4 | **64.3%** |
+| HiGHS root bound (after its restart and second cut pass) | 198.4 | **83.3%** |
+| optimum | 224.0 | 100% |
+| discopt nodes (engine, defaults) | **2199** | |
+| discopt nodes (via the Pyomo plugin) | 4389 | |
+| HiGHS nodes | **157** | |
+
+**The formulation is not the story.** The big-M relaxation is genuinely weak — a
+68.3% root gap — but *both* solvers start from the identical 71.0. discopt closes
+64.3% of it at the root, which is not far off HiGHS's own first pass (163.6 in its
+log). The gap is what happens after.
+
+**Four levers, each with a pre-registered bar, each falsified:**
+
+1. **The incumbent (primal).** discopt holds an incumbent of **492** against an
+   optimum of 224 from node 3 through node 625 — a 120% primal gap during which no
+   bound can prune. That looked like A5's finding reproduced. It is not: handing
+   discopt the **proven optimum** as `initial_incumbent` gives **2199 → 1537 nodes,
+   1.43×**, against a 3× bar. On this instance the gap is *dual*, not primal.
+   (The seed was verified injected, not assumed — `validate_seed_incumbent`
+   rejects silently by design (`milp_driver.rs:3729`), so the probe asserts the
+   3-node seeded run reports 224 before believing either arm.)
+2. **Presolve.** HiGHS's presolve reduces 291×202 with 112 binaries to **80×66
+   with 45 binaries** — 72% of rows and 60% of the binaries gone. discopt's
+   `presolve` option is documented at `milp_driver.rs:406` as "Root
+   feasibility-based bound tightening (sound, dimension-preserving)" and is a
+   single `tighten_bounds_csc` (FBBT) call at `:690`: it narrows bounds and never
+   removes a row, removes a column, or fixes a binary out of the model. There is no
+   presolve/postsolve pair on the MILP path. Handing discopt the **HiGHS-presolved
+   model** gives **2199 → 1539 nodes, 1.43×**, against the same 3× bar. A model
+   3.6× smaller with 60% fewer binaries buys almost nothing.
+3. **MIR and c-MIR.** `lp/mir.rs` (single-row MIR) and `lp/aggregation.rs`
+   (Marchand–Wolsey aggregation c-MIR) exist, are tested, and are exposed to Python
+   — but the MILP driver imports only `separate_cover_csc` and
+   `separate_gomory_cols` (`milp_driver.rs:21,24`; the only `Sep*` timers in the
+   driver are `SepCover` and `SepGomory`). MIR is reachable from `convex_kernel.rs`
+   and the bindings and from nowhere on the MILP path, which looked like an obvious
+   omission on a big-M model. Run against the root LP they separate **145 cuts,
+   every one valid** (each checked against the proven optimum; none cuts it off)
+   and move the bound by **+0.00**. Wiring them would not fix this.
+4. **Every switch discopt already has.** A 2×5 sweep over {original,
+   HiGHS-presolved} × {defaults, `node_propagation`, `node_cuts`, both, both + SB
+   unrestricted}, all ten proving 224.0:
+
+   | model | switches | nodes |
+   |---|---|---|
+   | original | defaults | 2199 |
+   | original | node_propagation | 2667 |
+   | original | node_cuts | 2199 |
+   | original | both | 2667 |
+   | original | both + SB unrestricted | 1573 |
+   | presolved | defaults | 1539 |
+   | presolved | node_propagation | **1349** |
+   | presolved | node_cuts | 1539 |
+   | presolved | both | 1349 |
+   | presolved | both + SB unrestricted | 1473 |
+
+   Best configuration reachable today: **1349 nodes, 1.63× off the baseline and
+   still 8.6× behind HiGHS**. `node_propagation` *hurts* on the unpresolved model
+   (2199 → 2667). `node_cuts` is a **complete no-op** on this model (2199 → 2199,
+   1539 → 1539): cover cuts need knapsack rows, and big-M no-overlap rows are not
+   knapsacks.
+
+**Why more of the same cuts cannot help.** The root cut loop ran with
+`root_cuts=500, cut_rounds=50` and made only **24 Gomory calls**. It stopped
+because its separators found no further violated cut, not because it ran out of
+budget. discopt's root is *exhausted* at 169.4. Reaching HiGHS's 198.4 requires cut
+families discopt does not have, not more rounds of the ones it does.
+
+**What is left, from HiGHS's own log.** Its root is two passes, not one: cuts to
+163.6, then `2.2% inactive integer columns, restarting`, a re-presolve to 79×65,
+and a second pass to 198.4 — and it carries 41–105 cuts *in the LP* down the tree
+while accumulating 280 **conflicts**. discopt has no restart, no conflict analysis,
+and no cuts retained in node LPs. Those are the surviving candidates on this
+instance; which one carries the 71 → 163.6 jump is being attributed against the
+HiGHS source before anything is built.
+
+**Instrumentation note (§6).** A first attempt to attribute HiGHS's root by
+ablating its per-cut-family options produced a clean-looking nine-row table in
+which **six rows were silent no-ops**: `mip_gomory`, `mip_flow_cover`,
+`mip_clique`, `mip_mixed_integer_rounding`, `mip_implied_bound` and
+`mip_lifted_knapsack_cover` are not HiGHS options, and `setOptionValue` returns
+`kError` **without raising**. Every "OFF" row was the default configuration
+reporting the default bound. The table was discarded before it was used. Only
+`presolve` and `mip_heuristic_effort` are real options in that build; the
+attribution above comes from HiGHS's log and source instead.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
