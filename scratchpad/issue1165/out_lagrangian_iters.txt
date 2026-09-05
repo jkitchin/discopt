@@ -1,0 +1,13 @@
+### uptime before:
+ 16:56:56 up 7 min,  0 user,  load average: 1.08, 1.06, 0.51
+### ARM iters MAX_ITERS=200
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+  rep0 seed=0 subgradient     2.7s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=0 bundle          1.2s seq[optimal,3.999999999999999] thr[optimal,3.999999999999999] SAME
+  rep0 seed=0 kelley          0.9s seq[optimal,4.0] thr[optimal,4.0] SAME
+  rep0 seed=1 subgradient     1.4s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 bundle          0.4s seq[optimal,10.0] thr[optimal,10.0] SAME
+  rep0 seed=1 kelley          0.3s seq[optimal,9.999999999998181] thr[optimal,9.999999999998181] SAME
+  rep0 seed=2 subgradient     0.1s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 bundle          0.4s seq[optimal,2.0] thr[optimal,2.0] SAME
+  rep0 seed=2 kelley          0.3s seq[optimal,2.0] thr[optimal,2.0] SAME
