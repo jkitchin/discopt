@@ -11741,15 +11741,12 @@ def solve_model(
     # expensive-Hessian class, so once one long solve is observed we must not
     # launch another unless that much budget remains. A dict so the nested
     # closures can mutate it without a ``nonlocal`` dance.
-    _heur_nlp_cost = {"max": 0.0, "sum": 0.0, "n": 0.0, "default": 2.0}
+    _heur_nlp_cost = {"max": 0.0, "default": 2.0}
 
     def _observe_heur_nlp(wall: float) -> None:
         """Record an observed heuristic/root NLP wall for the entry gate."""
-        if wall >= 0.0:
-            if wall > _heur_nlp_cost["max"]:
-                _heur_nlp_cost["max"] = float(wall)
-            _heur_nlp_cost["sum"] += float(wall)
-            _heur_nlp_cost["n"] += 1.0
+        if wall >= 0.0 and wall > _heur_nlp_cost["max"]:
+            _heur_nlp_cost["max"] = float(wall)
 
     def _worst_heur_nlp_cost() -> float:
         """The running MAX observed heuristic/root NLP wall — the legacy guard.
@@ -11767,24 +11764,6 @@ def solve_model(
         if _heur_nlp_cost["max"] <= 0.0:
             return _heur_nlp_cost["default"]
         return _heur_nlp_cost["max"]
-
-    def _typical_heur_nlp_cost() -> float:
-        """The running MEAN — the estimator the #1153 share test divides.
-
-        Dividing the *max* by a share compounds two conservatisms into a cliff:
-        the rule becomes "remaining > 4x the worst case ever seen", and the max
-        never decays, so ONE expensive early NLP (the heatexch_gen3 class, ~15 s)
-        refuses every later root heuristic for the rest of the solve at any
-        ``time_limit`` under 60 s. That is a plausible mechanism for the two
-        incumbent losses the finder-scoped panel still shows (``nvs05`` at 10 s
-        loses its incumbent outright), so the share divides a mean instead. The
-        legacy overrun guard keeps the max — it is answering a different question,
-        "could another solve of the worst size still fit?", where the max is
-        right.
-        """
-        if _heur_nlp_cost["n"] <= 0.0:
-            return _heur_nlp_cost["default"]
-        return _heur_nlp_cost["sum"] / _heur_nlp_cost["n"]
 
     def _root_heur_nlp_entry_ok(_ev=None, *, finder: bool = False) -> bool:
         """Whether a compile-/solve-triggering root heuristic NLP may start now.
@@ -11826,11 +11805,24 @@ def solve_model(
         # own contingent AND a 4x-stricter entry test — which is the shape of the
         # three lost incumbents in the §6.6 panel.
         _share = _heuristic_entry_share() if finder else 1.0
-        # The share divides a MEAN; the legacy guard keeps the MAX. See
-        # ``_typical_heur_nlp_cost``. With the flag off ``_share`` is 1.0 and the
-        # cost is the max, i.e. the legacy rule byte-identically.
-        _cost = _typical_heur_nlp_cost() if _share < 1.0 else _worst_heur_nlp_cost()
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _cost / _share):
+        # #1153: dividing a running MEAN here instead of the max was implemented
+        # and then FALSIFIED. Review argued the max never decays, so the test
+        # reads "remaining > 4x worst-case-ever" and one expensive early NLP
+        # refuses every later heuristic — a plausible mechanism for nvs05@10s
+        # losing its incumbent. The ordering probe killed it: on BOTH regressing
+        # instances the first finder decision fires at event index 0, before any
+        # heuristic NLP has been observed, so max == mean == the 2.0 s default and
+        # the two estimators are numerically IDENTICAL at the only decision that
+        # matters. Its panel agreed (incumbent 1/2/65 and 18 up vs the max arm's
+        # 2/2/64 and 20 up — no better, within noise), so the change went out
+        # again rather than ship on a falsified hypothesis.
+        #
+        # The real lever at these budgets is the 2.0 s DEFAULT SEED, not the
+        # statistic: with nothing observed, this gate is "is more than
+        # ``2.0 / share`` seconds left?" on any model, independent of the pump's
+        # measured 6.4 s cost. That is the open item, and it is a work-budget
+        # question (#912) rather than an estimator one.
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _worst_heur_nlp_cost() / _share):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the

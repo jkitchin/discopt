@@ -368,7 +368,50 @@ legacy overrun guard keeps the max — it answers a different question ("could
 another solve of the worst size still fit?") where the max is right. Flag off is
 unchanged: share 1.0 selects the max, i.e. the legacy rule byte-identically.
 
-<!-- RESULTS-PANEL-C -->
+**Panel C measured it, and the ordering probe falsified it.**
+
+| | B: finder-scoped, max | C: finder-scoped, mean |
+|---|---|---|
+| monotonicity violations | 0 / 0 | 0 / 0 |
+| incumbent better / worse / same | **2 / 2** / 64 | 1 / 2 / 65 |
+| node count flat higher / lower | **20 / 0** | 18 / 0 |
+| certification regressions | none | none |
+
+C is no better than B — `nvs05` at 10 s and `tspn12` at 10 s still regress, and C
+loses B's `heatexch_gen2`@40 s gain. Within noise, but certainly not the recovery
+the hypothesis predicted.
+
+The *mechanism* probe (`scratchpad/i1153/ordering_probe.py`) explains why, and is
+the decisive measurement rather than the panel. Review's own caution was that a
+panel improving `nvs05` would not by itself clear the estimator, because the
+max-never-decays cliff bites only when an expensive NLP is observed **before** the
+finder entry decision. So the probe records the interleaved sequence of
+(NLP observed) and (finder decision) events directly:
+
+```
+nvs05  @10 s  first finder decision at index 0, NLPs observed before it: 0
+tspn12 @10 s  first finder decision at index 0, NLPs observed before it: 0
+```
+
+On **both** regressing instances, in **both** arms, the finder decision fires
+before any heuristic NLP has been observed. At that moment
+`max == mean == the 2.0 s default`, so the two estimators are numerically
+**identical** at the only decision that matters, and the estimator cannot be the
+mechanism here whatever the panel shows.
+
+The change was therefore reverted rather than kept: it shipped on a hypothesis
+this probe falsifies, and its own panel does not support it (CLAUDE.md §4). What
+survives is the **rename** — `_mean_heur_nlp_cost` -> `_worst_heur_nlp_cost` —
+which was always the causally interesting half: a function returning a max, named
+"mean", and consumed as one at a division site is how the share came to divide a
+worst-case-ever by a fraction and read as "4x typical".
+
+**The real lever at these budgets is the 2.0 s DEFAULT SEED, not the statistic.**
+With nothing observed, the gate reduces to "is more than ``2.0 / share`` seconds
+left?" on any model, independent of the pump's measured 6.4 s cost. That is a
+work-budget question (#912's `WorkBudget` would make the cost knowable in advance
+rather than guessed), not an estimator one — and it is the single most promising
+open item, now backed by a direct measurement rather than by argument.
 
 ### 6.7 Status
 
