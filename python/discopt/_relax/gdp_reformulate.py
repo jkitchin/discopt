@@ -1124,12 +1124,16 @@ def _reformulate_disjunction_hull(
         )
     )
 
+    # Refuse before doing any work if any body hides a variable from the
+    # collector everything below is keyed on (checked per body -- see the
+    # function's docstring for why the disjunction-wide union is not enough).
+    _assert_hull_saw_every_variable(dc)
+
     # --- Collect all variables across all disjuncts ---
     all_vars: dict[str, Variable] = {}
     for disjunct in dc.disjuncts:
         for con in disjunct:
             all_vars.update(_collect_variables(con.body))
-    _assert_hull_saw_every_variable(dc, all_vars)
 
     # --- Per-disjunct bounds and disaggregated variables ---
     # disjunct_bounds[k][var_name] = (dlb, dub)
@@ -1306,14 +1310,11 @@ class HullVariableCoverageError(ValueError):
     """
 
 
-def _assert_hull_saw_every_variable(
-    dc: _DisjunctiveConstraint,
-    all_vars: dict[str, Variable],
-) -> None:
+def _assert_hull_saw_every_variable(dc: _DisjunctiveConstraint) -> None:
     """Cross-check ``_collect_variables`` against an *independent* DAG walker.
 
-    Everything downstream of ``all_vars`` in :func:`_reformulate_disjunction_hull` -- the
-    disaggregated variables, the aggregation rows ``x = Σ_k v_k``, the bound
+    Everything downstream of the collector in :func:`_reformulate_disjunction_hull`
+    -- the disaggregated variables, the aggregation rows ``x = Σ_k v_k``, the bound
     linking rows ``dlb·y_k ≤ v_k ≤ dub·y_k``, the substitution map handed to
     :func:`_hull_linear_substitute` / :func:`_substitute_vars` -- is keyed on it.
     A variable the collector misses is therefore not merely under-disaggregated:
@@ -1321,13 +1322,33 @@ def _assert_hull_saw_every_variable(
     body is imposed *globally* rather than under its selector.
 
     That is not hypothetical. PR #1150 widened :func:`_is_linear` to admit
-    ``SumOverExpression`` while this collector still had no case for the node.
+    ``SumOverExpression`` while the collector still had no case for the node.
     ``all_vars`` came back empty, no disaggregated variable was created, and hull
     emitted ``Σ[3 terms] - (0 * y0) <= 0`` — the arm's own constraint, always on,
     with its selector coefficient collapsed to zero. On a model whose true
     minimum is −30.0 both ``auto`` and ``hull`` then returned
     ``status=optimal, objective=−3.0, bound=−3.0``: a dual bound **above** the
     optimum, i.e. a false certificate (CLAUDE.md §1).
+
+    **The check is PER CONSTRAINT BODY, and that is load-bearing.** The first
+    version of this guard compared the walkers' *disjunction-wide unions*, which
+    made a per-body miss invisible whenever the missed variable was collected
+    from any other constraint in the same disjunction — the common case, since
+    the arms of a disjunction usually constrain the same variables. Found in
+    review of PR #1159 with a 6-line repro that the union form passed silently::
+
+        X = m.continuous("X", shape=(3,), lb=0.0, ub=10.0)
+        A = np.array([[1.0, 1.0, 1.0]])
+        m.either_or([[(A @ X)[0] - 3.0 <= 0.0], [X[0] >= 8.0]])
+        m.minimize(-(X[0] + X[1] + X[2]))     # true minimum -30.0
+
+    ``(A @ X)[0]`` is an ``IndexExpression`` over a ``MatMulExpression``.
+    :func:`_is_linear` answers ``True`` for any ``IndexExpression`` without
+    inspecting its base, so the body takes the *linear* route, while
+    :func:`_collect_variables` returns ``{}`` for it. ``X`` reached ``all_vars``
+    from the other arm, the union check passed, and hull certified ``-3.0``.
+    Measured on ``main`` too: this false certificate predates #1154. Per body,
+    the guard fires on it.
 
     The check is deliberately built on a walker this module does not own:
     :func:`discopt.modeling.core._iter_model_leaves`, which enumerates the
@@ -1338,31 +1359,34 @@ def _assert_hull_saw_every_variable(
 
     Refuses loudly rather than falling back, per CLAUDE.md §3: there is no sound
     cheaper answer here — the alternative is exactly the silent wrong row above.
-    Every construct that can trip this refusal is one that ``main`` already
-    refuses on the nonlinear route (``_body_at_zero`` raises
-    :class:`HullPerspectiveOriginError` for the same node types), so no model
-    that reformulates today starts failing.
+    It costs no model that reformulates today. On the nonlinear route
+    :func:`_body_at_zero` already raises :class:`HullPerspectiveOriginError` for
+    every node type that can trip this; on the linear route the only way in is an
+    ``IndexExpression`` over one of them, which is the defect class itself.
     """
     from discopt.modeling.core import Parameter, _iter_model_leaves
 
-    seen: dict[str, Variable] = {}
-    for disjunct in dc.disjuncts:
-        for con in disjunct:
-            for leaf in _iter_model_leaves(con.body):
-                if isinstance(leaf, Parameter):
-                    continue
-                seen[leaf.name] = leaf
-    missed = sorted(name for name in seen if name not in all_vars)
-    if missed:
-        raise HullVariableCoverageError(
-            "GDP hull reformulation cannot see every variable in the disjunct "
-            f"bodies: {missed} are reachable from the expression DAG but were not "
-            "collected, so they would be emitted un-disaggregated and the "
-            "disjunct's constraints would be imposed globally (a false "
-            "certificate -- see issue #1154). Reformulate this disjunction with "
-            "method='big-m', or express the body with +/-/* so the hull walkers "
-            "can take it apart."
-        )
+    for k, disjunct in enumerate(dc.disjuncts):
+        for j, con in enumerate(disjunct):
+            collected = _collect_variables(con.body)
+            missed = sorted(
+                {
+                    leaf.name
+                    for leaf in _iter_model_leaves(con.body)
+                    if not isinstance(leaf, Parameter) and leaf.name not in collected
+                }
+            )
+            if missed:
+                cname = getattr(con, "name", None) or f"disjunct {k}, constraint {j}"
+                raise HullVariableCoverageError(
+                    f"GDP hull reformulation cannot see every variable in the body of "
+                    f"{cname}: {missed} are reachable from that body's expression DAG "
+                    "but were not collected from it, so they would be emitted "
+                    "un-disaggregated and the disjunct's constraints would be imposed "
+                    "globally (a false certificate -- see issue #1154). Reformulate "
+                    "this disjunction with method='big-m', or express the body with "
+                    "+/-/* so the hull walkers can take it apart."
+                )
 
 
 class HullPerspectiveOriginError(ValueError):

@@ -163,18 +163,90 @@ def test_bound_expression_matches_the_folded_chain():
     assert checked == 6
 
 
-def test_bound_expression_does_not_produce_nan_on_mixed_infinities():
-    """An unbounded-below and an unbounded-above term in one sum.
+def _unguarded_fold(terms, model):
+    """What a plain ``lo += t_lo`` / ``hi += t_hi`` fold would return.
 
-    Plain float addition would give ``-inf + inf = nan``, which compares False
-    against every finite threshold and so reads as "bounded" at the big-M gate.
+    The control for the NaN test below: without it the test cannot tell whether
+    the explicit-infinity branch did anything (CLAUDE.md §6).
+    """
+    lo = hi = 0.0
+    for t in terms:
+        t_lo, t_hi = _bound_expression(t, model)
+        lo = lo + t_lo
+        hi = hi + t_hi
+    return lo, hi
+
+
+def test_bound_expression_does_not_produce_nan_on_mixed_infinities():
+    """A term whose whole interval is ``-inf`` next to one unbounded above.
+
+    Plain float addition gives ``-inf + inf = nan`` on the *upper* accumulator,
+    and NaN compares False against every finite threshold — so it reads as
+    "bounded" at the big-M gate and a bogus ``M`` goes into the row.
+
+    The first version of this test paired ``[-inf, 0]`` with ``[0, +inf]``, which
+    folds to ``-inf + 0`` and ``0 + inf`` — no NaN either way. It passed
+    identically against the unguarded fold and so exercised nothing (found in
+    review of PR #1159). ``log(x)`` on ``x ⊆ (-inf, 0]`` gives the interval
+    ``(-inf, -inf)``, which is what actually collides with ``exp(y)``'s ``+inf``.
+    The control below asserts the divergence rather than assuming it.
     """
     m = dm.Model("infinities")
-    lo_free = m.continuous("lo_free", lb=-np.inf, ub=0.0)
-    hi_free = m.continuous("hi_free", lb=0.0, ub=np.inf)
-    lo, hi = _bound_expression(SumOverExpression([lo_free, hi_free]), m)
-    assert not np.isnan(lo) and not np.isnan(hi)
+    x = m.continuous("x", lb=-5.0, ub=0.0)
+    y = m.continuous("y", lb=0.0, ub=np.inf)
+    terms = [dm.log(x), dm.exp(y)]
+
+    # The premise, measured: this input really does break a plain fold.
+    plain_lo, plain_hi = _unguarded_fold(terms, m)
+    assert np.isnan(plain_hi), (
+        f"the unguarded fold returned {(plain_lo, plain_hi)}; this input no longer "
+        "exercises the explicit-infinity branch, so the test below proves nothing"
+    )
+
+    lo, hi = _bound_expression(SumOverExpression(list(terms)), m)
+    assert not np.isnan(lo) and not np.isnan(hi), (lo, hi)
     assert lo == -np.inf and hi == np.inf
+
+
+def test_the_coverage_guard_checks_each_body_not_the_union():
+    """The guard must fire on a body whose miss another arm's body would mask.
+
+    ``(A @ X)[0]`` is an ``IndexExpression`` over a ``MatMulExpression``:
+    ``_is_linear`` answers True for any ``IndexExpression`` without inspecting
+    its base, so the body takes the *linear* route, while ``_collect_variables``
+    returns ``{}`` for it. The other arm's ``X[0] >= 8.0`` puts ``X`` into the
+    disjunction-wide union, so a union-based guard passes and hull certifies
+    ``-3.0`` against a true minimum of ``-30.0`` (measured on ``main`` too — this
+    false certificate predates #1154; found in review of PR #1159).
+    """
+    m = dm.Model("index_over_matmul")
+    X = m.continuous("X", shape=(3,), lb=0.0, ub=10.0)
+    A = np.array([[1.0, 1.0, 1.0]])
+    body = (A @ X)[0] - 3.0
+
+    # Guard the probe (§6): if either premise stops holding, the model below is
+    # no longer an instance of the defect and the test would pass vacuously.
+    assert _is_linear(body) is True, "premise: this body takes the linear route"
+    assert not _collect_variables(body), "premise: the collector misses X here"
+
+    m.either_or([[body <= 0.0], [X[0] >= 8.0]])
+    m.minimize(-(X[0] + X[1] + X[2]))
+
+    with pytest.raises(HullVariableCoverageError) as excinfo:
+        m.solve(gdp_method="hull", time_limit=60)
+    assert "'X'" in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_guard_names_the_offending_constraint():
+    """The message must point at the body, not just at the disjunction."""
+    m = dm.Model("named_body")
+    X = m.continuous("X", shape=(2,), lb=0.0, ub=10.0)
+    A = np.array([[1.0, 1.0]])
+    m.either_or([[(A @ X)[0] - 3.0 <= 0.0], [X[0] >= 8.0]])
+    m.minimize(-(X[0] + X[1]))
+    with pytest.raises(HullVariableCoverageError) as excinfo:
+        m.solve(gdp_method="hull", time_limit=60)
+    assert "disjunct 0, constraint 0" in str(excinfo.value), str(excinfo.value)
 
 
 def test_body_at_zero_matches_the_folded_chain():
