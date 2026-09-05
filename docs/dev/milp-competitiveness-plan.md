@@ -419,6 +419,46 @@ start while cuts, warm starts and strong branching are all disabled at once.
 *Also add counters at `gomory.rs:233-235, 246-248, 271`: three silent early
 returns, none instrumented. CLAUDE.md §6.*
 
+**Result (2026-09-05) — shipped, cert-clean, net-positive on LP work.** The
+eligibility test was wrong in its *quantity*, not merely its strictness. Swapping
+a nonbasic row singleton `s` into a basic artificial's slot replaces `B`'s column
+`±e_r` with `a·e_r` — a scalar multiple, still nonsingular — and leaves `x`
+bit-identical whatever `s`'s value, because a basic variable may hold any value.
+The primal argument never needed value zero. What the swap *can* break is the
+exported `dual`, since a basic column requires `c_j − yᵀA_j = 0`. So the
+admissible criterion is the **reduced cost**, and the value test missed every
+dual-degenerate case. Fixed by a second pass (`select_row_substitutes`,
+`primal.rs`) that fills only the rows pass 1 left empty — strictly monotone, so no
+basis that completed before can be shortened.
+
+Counter deltas on amur at the settings above: `DualPrepRejectShape` 300 → **0**,
+`DualPrepAccept` 80 → **191**, `RootCutsGenerated` 0 → **102**, `RootCutsKept`
+0 → **25**. Three blocked mechanisms unblocked by one criterion change.
+
+38-instance node-limited differential panel (`nodepanel.py`, budget 5000,
+`gap_tol=1e-4`, `root_cuts=500`, `cut_rounds=8`, `root_cut_prune=True`):
+
+- *Cert-clean.* 76 bound-vs-optimum comparisons executed, zero violations;
+  solved count unchanged at 14/38, no certified instance regressed.
+- *Bound-neutral in the tree.* 133,680 → 133,662 nodes (−0.01 %); 36 of 38
+  instances bit-identical in nodes **and** iterations. Expected: a warm start does
+  not move an LP optimum, so it cannot move the tree.
+- *Net-positive in LP work.* Total simplex iterations **6,492,081 → 4,057,317
+  (−37.5 %)**, entirely in the four short-basis instances — `neos-3610040-iskar`
+  1,898,737 → 29,372 (**−98.5 %**), `neos-2624317-amur` −20.8 %, `neos-911970`
+  −6.2 %, `neos-3118745-obra` −1.5 %. The 34 untouched instances moving by exactly
+  zero iterations also rules out nondeterminism as the source of the four deltas.
+
+No wall-clock claim: load was 30–70 all day (CLAUDE.md §9). Iterations and nodes
+are load-independent, which is why the gate is stated on them.
+
+This is the shape to expect from every A0′ item: it does not move the solved
+count by itself, because a node-limited panel spends its budget either way. It
+removes a *blockage*, and the items downstream of it (A1's cut budget, A3's
+strong branching) are the ones that convert freed LP work into bound. Note also
+`convex_kernel.rs:652,1948` carries the same defect on the MINLP path — out of
+scope for the MILP panel, and it needs the MINLP corpus to gate.
+
 **A0′.2 — `gsvm2rl3`'s 31 refused cuts. FALSIFIED as a priority item; demoted.**
 
 The audit proposed this as the second high-leverage fix: `gsvm2rl3` separates 31
@@ -485,6 +525,46 @@ double bar — cert-clean *and* net-positive — which it did not before. Needs 
 confirming panel on an unloaded machine for the wall-clock column, then the
 default flips.
 *Expected: +2 instances, already measured.*
+
+**A0 configuration check (2026-09-05) — the shipped setting is not the banked
+one, and it had never been measured.** The banked arm is `cut500_prune` =
+`root_cuts=500, cut_rounds=8, cut_select=False, root_cut_prune=True`. What
+`_milp_root_cut_budget` (`solver.py:21476-21510`) actually hands `solve_milp_py`
+is **different**: `root_cuts=500, cut_rounds=50, cut_select=True,
+root_cut_time_s=max(0.5, 0.5·engine_budget)`. Flipping the default as written
+would therefore have shipped a configuration no panel had ever run — the A0.1
+wiring step above silently changes the thing A0 measured.
+
+Measured with a **node**-budget panel (`scratchpad/miplib/armpanel.py`, 38
+instances, `max_nodes=2000`, `gap_tol=1e-4`, three arms rotated per instance).
+Node budgets rather than time budgets deliberately: the machine was at load ~21
+all day, and node counts, iteration counts and dual bounds are load-independent
+where wall-clock is not (CLAUDE.md §9). `time_limit_s=300` was present only as a
+hang guard and bound on no row.
+
+| arm | config | solved | nodes | simplex iters |
+|---|---|---|---|---|
+| `off` | 16 / 1 / no-select (today's default) | 11/38 | 59,070 | 1,498,688 |
+| `prod` | 500 / 50 / select (what `_milp_root_cut_budget` ships) | 11/38 | 57,524 | 1,618,863 |
+| `p500` | 500 / 8 / no-select (the banked `cut500_prune`) | 11/38 | 58,646 | 1,941,550 |
+
+Cert-clean: 114 bound-vs-reference-optimum comparisons, **zero violations**, and
+no instance changed solved status in either direction.
+
+The payoff is in the **bound**, on the 27 instances no arm finished within 2000
+nodes — mean dual gap `off` 0.2496 → `prod` **0.1883** (−25 %), median 0.1435 →
+**0.0404**; `prod` is strictly better than `off` on 16, worse on 4, tied on 7.
+The four `mik-250-20-75-*` move 0.143/0.127/0.145/0.162 → 0.038/0.036/0.037/0.038
+— the §1b pure-dual family is exactly where the cuts land.
+
+**The banked claim transfers, and the shipped configuration is the better of the
+two**: `prod` beats `p500` on mean gap (0.1883 vs 0.1919), on best-arm wins
+(19 vs 12) and on simplex iterations (1.62 M vs 1.94 M). So A0.1's wiring does
+not need to be re-pointed at `cut500_prune`; `_milp_root_cut_budget` stays as it
+is. Caveat on scope: at a 2000-node budget no arm converts a better bound into a
+*solve*, so this panel confirms cert-cleanliness and bound quality but says
+nothing about the banked "+2 instances", which was a 20 s wall-clock result. That
+column still needs the unloaded-machine panel named above before the flip.
 
 **A0.1 — wire the graduated budget to the product path.** The
 `_STRONG_CUT_PROFILE` 200 × 10 escalation
@@ -986,7 +1066,7 @@ so a stage can be scored before parity is reached:
 | stage | target | basis for the target |
 |---|---|---|
 | A0 + A0.1 | 21/38 | measured, banked (`cut500_prune`) |
-| A0′.1 | 21/38 | **no solved-count target.** A correctness repair that unblocks three mechanisms; scored on *counters* (amur: `SepGomory` calls > 0, `DualPrepRejectShape` → ~0), not on solves. A0′.2 was falsified and demoted — see Track A0′ |
+| A0′.1 | 21/38 | **MET, 2026-09-05.** No solved-count target — a correctness repair scored on counters and LP work. Delivered: `DualPrepRejectShape` 300 → 0 on amur, `RootCutsGenerated` 0 → 102, and **−37.5 % simplex iterations** panel-wide at unchanged nodes and a cert-clean panel. A0′.2 was falsified and demoted — see Track A0′ |
 | A1 | 24/38 | cut lifecycle makes a >500 budget affordable |
 | A2 | 30/38 | the family HiGHS actually closes its last few percent with |
 | A3 | — | branching quality; scored on nodes at fixed solved-count, not on solves |
