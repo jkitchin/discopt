@@ -141,3 +141,5 @@ scratchpad/**/*.pstats
 
 # #1180 probe-chain completion sentinels
 scratchpad/**/PROBES*_DONE
+scratchpad/**/SMOKE_DONE
+scratchpad/**/AB_DONE
