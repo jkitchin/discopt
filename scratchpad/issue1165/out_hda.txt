@@ -1,0 +1,26 @@
+### uptime before:
+ 17:01:53 up 12 min,  0 user,  load average: 1.39, 1.48, 0.86
+### ARM time (shipped: time_limit=25) x3 reps
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0    26.4s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=1    26.2s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep1 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0    26.2s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep1 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=1    26.2s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep2 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0    26.1s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+  rep2 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=1    26.2s status=time_limit nodes=3 bound=-100217.95933512867 obj=None
+
+[time] executed solves = 6
+  flag=0: [-100217.95933512867, -100217.95933512867, -100217.95933512867]  sd=0
+  flag=1: [-100217.95933512867, -100217.95933512867, -100217.95933512867]  sd=0
+  within-arm bit-reproducible: True
+### ARM nodes max_nodes=1 deterministic x2 reps
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+[38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)
+  rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0   305.0s status=node_limit nodes=3 bound=-141697.43348991615 obj=None
+[38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)
+### uptime after:
+ 17:44:31 up 54 min,  0 user,  load average: 1.00, 1.00, 1.00

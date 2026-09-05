@@ -1,0 +1,49 @@
+ 17:46:29 up 56 min,  0 user,  load average: 0.60, 0.84, 0.94
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+[38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)
+Timeout (0:10:00)!
+Thread 0x00007f1e4971d080 (most recent call first):
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 320 in solve
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 1174 in _solve_probe
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 1207 in run_obbt_on_relaxation
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 2129 in obbt_tighten_root
+  File "/home/user/discopt/python/discopt/_relax/root_reduce.py", line 392 in _stage_obbt
+  File "/home/user/discopt/python/discopt/_relax/root_reduce.py", line 306 in run_root_fixpoint
+  File "/home/user/discopt/python/discopt/solver.py", line 14941 in solve_model
+  File "/home/user/discopt/python/discopt/debug/__init__.py", line 98 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6630 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6660 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6700 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 7012 in wrapper
+  File "/home/user/discopt/python/discopt/modeling/core.py", line 5007 in solve
+  File "/home/user/discopt/scratchpad/issue1165/probe_hda_on_arm.py", line 28 in <module>
+Timeout (0:10:00)!
+Thread 0x00007f1e4971d080 (most recent call first):
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 320 in solve
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 1174 in _solve_probe
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 1231 in run_obbt_on_relaxation
+  File "/home/user/discopt/python/discopt/_relax/obbt.py", line 2129 in obbt_tighten_root
+  File "/home/user/discopt/python/discopt/_relax/root_reduce.py", line 392 in _stage_obbt
+  File "/home/user/discopt/python/discopt/_relax/root_reduce.py", line 306 in run_root_fixpoint
+  File "/home/user/discopt/python/discopt/solver.py", line 14941 in solve_model
+  File "/home/user/discopt/python/discopt/debug/__init__.py", line 98 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6630 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6660 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 6700 in wrapper
+  File "/home/user/discopt/python/discopt/solver.py", line 7012 in wrapper
+  File "/home/user/discopt/python/discopt/modeling/core.py", line 5007 in solve
+  File "/home/user/discopt/scratchpad/issue1165/probe_hda_on_arm.py", line 28 in <module>
+
+### KILLED at ~22 min, deliberately.
+The question this probe was asked -- slow, or hung? -- is answered by the two
+faulthandler dumps above: both land in root OBBT
+(_relax/obbt.py::run_obbt_on_relaxation via root_reduce.run_root_fixpoint),
+whose wall sub-budget deterministic=True neutralizes by design. It is slow, not
+deadlocked. Its own wall time is NOT quotable anyway: the before/after
+contention run overlapped it with 6 spinners, so this process was descheduled
+for ~5 of its minutes (CLAUDE.md §9 -- check for stray load you created
+yourself). The clean figure stands from the uncontaminated run: >2095 s at
+max_nodes=1, against 305 s for the OFF arm. Left running, it would itself be the
+stray load §9 warns about.
