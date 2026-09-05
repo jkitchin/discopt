@@ -131,6 +131,21 @@ struct BranchRecord {
     parent_lb: f64,
 }
 
+/// Relative slack applied at both objective-lattice comparisons, so neither one
+/// turns floating-point noise in an LP dual bound into a wrong answer. It is
+/// deliberately much larger than the LP's own tolerance and much smaller than any
+/// admissible lattice spacing (>= 1e-3, see `obj_integral::MAX_DENOM`), which is
+/// the gap that makes a single constant workable for both directions.
+const LATTICE_EPS: f64 = 1e-9;
+
+/// A proven objective lattice: every attainable objective value equals
+/// `k * spacing + offset` for some integer `k`.
+#[derive(Debug, Clone, Copy)]
+struct ObjLattice {
+    spacing: f64,
+    offset: f64,
+}
+
 /// Orchestrates the Branch-and-Bound search.
 pub struct TreeManager {
     pool: NodePool,
@@ -171,6 +186,12 @@ pub struct TreeManager {
     /// all-false unless registered via [`Self::set_branch_deprioritized`].
     /// Fallback in [`select_spatial_branch_variable`] preserves completeness.
     branch_deprioritized: Vec<bool>,
+    /// The objective lattice `{ k*spacing + offset : k integer }`, when every
+    /// attainable objective value lies on one. `None` = not proven, and both the
+    /// cutoff and the bound rounding below degrade to their plain forms. Set by
+    /// the driver from [`crate::bnb::obj_integral::objective_granularity`];
+    /// never inferred here.
+    obj_lattice: Option<ObjLattice>,
     /// Set true (and never cleared within a solve) when a node is fathomed with
     /// no branching direction AND no validly-established finite dual bound (its
     /// `local_lower_bound` is still `-inf`/sentinel — e.g. an unbounded-below,
@@ -257,6 +278,7 @@ impl TreeManager {
             nonconvex: false,
             spatial_integer_cols,
             branch_deprioritized,
+            obj_lattice: None,
             bound_unresolved: false,
             unresolved_floor: f64::INFINITY,
             branch_var_counts: vec![0; n_vars],
@@ -532,8 +554,8 @@ impl TreeManager {
                 continue;
             }
 
-            // 1. Prune if lower bound >= incumbent (node can't improve).
-            if node_lb >= self.incumbent_value {
+            // 1. Prune if lower bound >= cutoff (node can't improve).
+            if node_lb >= self.cutoff_value() {
                 self.pool.prune(result.node_id);
                 stats.pruned += 1;
                 continue;
@@ -942,7 +964,11 @@ impl TreeManager {
             // #933: the root seed is a valid lower bound for every subtree, so
             // flooring the frontier minimum at it is always sound (`-inf` when
             // never seeded, leaving this identical to the pre-#933 value).
-            self.global_lower_bound = min_lb.max(self.root_seed).min(self.incumbent_value);
+            // Lift onto the objective lattice (no-op without one). The lift is
+            // applied to the frontier BEFORE the incumbent cap, so it can close a
+            // gap but never push the reported bound past a feasible solution.
+            let frontier = self.round_bound_up(min_lb.max(self.root_seed));
+            self.global_lower_bound = frontier.min(self.incumbent_value);
         }
     }
 
@@ -1036,6 +1062,87 @@ impl TreeManager {
     /// inherit it as their dual-simplex warm-start state.
     pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {
         self.pool.get_mut(id).basis = basis;
+    }
+
+    /// Declare that every attainable objective value lies on the lattice
+    /// `k*spacing + offset`, which lets node fathoming use `U - spacing` instead
+    /// of the incumbent `U` itself and lets the global dual bound be lifted to
+    /// the next lattice point at or above it.
+    ///
+    /// The caller owns the proof. A `spacing` LARGER than the true one fathoms
+    /// nodes that may hold the optimum, and a wrong `offset` lifts the dual bound
+    /// past the optimum — both false certificates, the one outcome forbidden
+    /// outright (CLAUDE.md §1). So the only supported `spacing` is
+    /// [`crate::bnb::obj_integral::objective_granularity`], which refuses rather
+    /// than guesses, and the only supported `offset` is the model's objective
+    /// constant, because `TreeManager` objective values include it (the driver
+    /// injects `sobj + obj_const` and imports `sol.obj + obj_const`). A
+    /// non-finite or non-positive `spacing`, or a non-finite `offset`, is ignored.
+    pub fn set_objective_lattice(&mut self, spacing: Option<f64>, offset: f64) {
+        self.obj_lattice = match spacing {
+            Some(g) if g.is_finite() && g > 0.0 && offset.is_finite() => {
+                Some(ObjLattice { spacing: g, offset })
+            }
+            _ => None,
+        };
+    }
+
+    /// The value a node's lower bound must reach before the node can be
+    /// fathomed: the incumbent normally, and `incumbent - spacing` once an
+    /// objective lattice is known.
+    ///
+    /// With spacing `g`, the best objective strictly better than an attained
+    /// incumbent `U` is `U - g`; a node whose bound exceeds that cannot improve
+    /// on `U`. The `+eps` keeps the comparison strict at the lattice point
+    /// itself — a node bounded at exactly `U - g` may *contain* the value `U - g`,
+    /// which is an improvement, so it must be branched, not fathomed.
+    ///
+    /// This is the single fathoming cutoff, deliberately: SCIP folds the same
+    /// rounding into `primalbound` once (`scip/src/scip/primal.c:428`) so node
+    /// fathoming, the leaf queue and the LP objective limit cannot disagree.
+    /// Reduced-cost fixing reads the raw incumbent separately in the driver and
+    /// is intentionally left alone here.
+    pub fn cutoff_value(&self) -> f64 {
+        match self.obj_lattice {
+            Some(ObjLattice { spacing, .. }) if self.incumbent_value.is_finite() => {
+                let c = self.incumbent_value - spacing;
+                c + LATTICE_EPS * c.abs().max(1.0)
+            }
+            _ => self.incumbent_value,
+        }
+    }
+
+    /// Lift a valid dual bound to the smallest lattice value at or above it.
+    ///
+    /// If every attainable objective is a lattice point and `v` is a valid lower
+    /// bound on the optimum, then the optimum — being a lattice point ≥ `v` — is
+    /// at least `ceil((v - offset)/g)*g + offset`. This is the half of objective
+    /// integrality that *certifies*: it is what turns a frontier stuck at 7.72
+    /// under an optimum of 8 into a closed gap. HiGHS applies the same lift to
+    /// its dual bound (`highs/src/mip/HighsMipSolver.cpp`, the `ceil` guarded by
+    /// `objectiveFunction.isIntegral()`).
+    ///
+    /// The `-eps` before the ceiling is load-bearing in the other direction: an
+    /// LP dual bound that lands a hair above a lattice point (7.72 is exact, but
+    /// `8.0000000001` happens) must not be lifted a whole unit past the optimum.
+    /// The result is floored at `v` so the lift can only ever tighten.
+    pub fn round_bound_up(&self, v: f64) -> f64 {
+        let Some(ObjLattice { spacing, offset }) = self.obj_lattice else {
+            return v;
+        };
+        if !v.is_finite() {
+            return v;
+        }
+        let k = (v - offset) / spacing;
+        if !k.is_finite() {
+            return v;
+        }
+        let lifted = (k - LATTICE_EPS * k.abs().max(1.0)).ceil() * spacing + offset;
+        if lifted.is_finite() && lifted > v {
+            lifted
+        } else {
+            v
+        }
     }
 
     /// Get the current incumbent solution, if any.
@@ -1444,6 +1551,210 @@ mod tests {
         ]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.pruned, 2);
+    }
+
+    /// Build a one-variable manager with a single root node, ready to receive a
+    /// node result. Used by the objective-lattice tests below.
+    fn lattice_tm(granularity: Option<f64>, incumbent: f64) -> TreeManager {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.set_objective_lattice(granularity, 0.0);
+        tm.initialize();
+        tm.incumbent_value = incumbent;
+        tm.incumbent_solution = Some(vec![3.0]);
+        tm
+    }
+
+    /// Feed one node a fractional bound `lb` and report whether it was fathomed.
+    fn fathomed_at(tm: &mut TreeManager, lb: f64) -> bool {
+        let batch = tm.export_batch(1);
+        assert_eq!(
+            batch.node_ids.len(),
+            1,
+            "fixture must hand out exactly one node"
+        );
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: lb,
+            solution: vec![3.5],
+            is_feasible: false,
+            certified_infeasible: false,
+        }]);
+        tm.process_evaluated().pruned == 1
+    }
+
+    /// The whole point of the rule, at the line that implements it. A node bounded
+    /// at 7.72 under an incumbent of 8 cannot hold anything better than 8 when the
+    /// objective only takes integer values — the next attainable value down is 7 —
+    /// yet the plain `lb >= incumbent` test keeps branching it. (Measured on
+    /// `mk_binpack`: 551,849 nodes with the bound frozen at 7.72.)
+    ///
+    /// Both arms are asserted, so this fails whichever way the rule breaks:
+    /// reverting it leaves the node unfathomed, and applying it where no lattice
+    /// was proven fathoms a node that may hold the optimum.
+    #[test]
+    fn objective_lattice_fathoms_a_node_the_plain_cutoff_cannot() {
+        let mut with = lattice_tm(Some(1.0), 8.0);
+        assert!(
+            fathomed_at(&mut with, 7.72),
+            "with an integral objective, lb=7.72 under incumbent 8 must fathom"
+        );
+        let mut without = lattice_tm(None, 8.0);
+        assert!(
+            !fathomed_at(&mut without, 7.72),
+            "with no proven lattice the node must still be branched"
+        );
+    }
+
+    /// The soundness boundary. A node bounded at exactly `U - g` may *contain* a
+    /// solution worth `U - g`, which is a strict improvement, so it must survive.
+    /// Fathoming here would be a false certificate (CLAUDE.md §1).
+    #[test]
+    fn objective_lattice_never_fathoms_the_next_attainable_value() {
+        let mut tm = lattice_tm(Some(1.0), 8.0);
+        assert!(
+            !fathomed_at(&mut tm, 7.0),
+            "lb == U - g still admits an improving solution and must be branched"
+        );
+    }
+
+    /// Granularity below one unit: `U - g` is much closer to `U`, so the rule is
+    /// correspondingly weaker — it must not behave as though the spacing were 1.
+    #[test]
+    fn objective_lattice_respects_a_sub_unit_spacing() {
+        let mut coarse = lattice_tm(Some(1.0), 8.0);
+        assert!(fathomed_at(&mut coarse, 7.4), "spacing 1 fathoms lb=7.4");
+        let mut fine = lattice_tm(Some(0.5), 8.0);
+        assert!(
+            !fathomed_at(&mut fine, 7.4),
+            "spacing 0.5 must NOT fathom lb=7.4 -- a solution worth 7.5 is admissible"
+        );
+    }
+
+    /// A granularity the caller could not prove, or one that is nonsense, must
+    /// degrade to the plain incumbent cutoff rather than silently doing something.
+    #[test]
+    fn a_nonsense_granularity_is_refused_not_applied() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut tm = lattice_tm(Some(bad), 8.0);
+            assert_eq!(
+                tm.cutoff_value(),
+                8.0,
+                "granularity {bad} must be ignored, leaving the plain cutoff"
+            );
+            assert!(
+                !fathomed_at(&mut tm, 7.72),
+                "granularity {bad} must not fathom anything"
+            );
+        }
+    }
+
+    /// Without an incumbent there is nothing to subtract from; the cutoff stays at
+    /// `+inf` so the lattice cannot make an empty tree prune itself.
+    #[test]
+    fn objective_lattice_is_inert_before_the_first_incumbent() {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.set_objective_lattice(Some(1.0), 0.0);
+        assert_eq!(tm.cutoff_value(), f64::INFINITY);
+    }
+
+    /// The certifying half of the rule. A frontier stuck at 7.72 under an integral
+    /// objective proves the optimum is at least 8 — which is exactly how an
+    /// odd-hole / bin-packing gap closes without a single extra node.
+    #[test]
+    fn objective_lattice_lifts_a_fractional_dual_bound_onto_the_lattice() {
+        let mut tm = lattice_tm(Some(1.0), 8.0);
+        assert!((tm.round_bound_up(7.72) - 8.0).abs() < 1e-12);
+        assert!(
+            (tm.round_bound_up(7.0) - 7.0).abs() < 1e-12,
+            "already on the lattice"
+        );
+        assert!(
+            (tm.round_bound_up(-0.4) - 0.0).abs() < 1e-12,
+            "negatives lift too"
+        );
+        tm.set_objective_lattice(None, 0.0);
+        assert!(
+            (tm.round_bound_up(7.72) - 7.72).abs() < 1e-12,
+            "no proven lattice must leave the bound untouched"
+        );
+    }
+
+    /// The lift must respect the lattice OFFSET, not assume it passes through
+    /// zero. With `obj_const = 0.5` the attainable values are 7.5, 8.5, ... so a
+    /// bound of 7.72 proves only 8.5 — lifting it to 8.0 would be a bound that no
+    /// solution can attain, and lifting to 9.0 would exceed the optimum.
+    #[test]
+    fn objective_lattice_lift_respects_the_objective_constant() {
+        let mut tm = lattice_tm(Some(1.0), 100.0);
+        tm.set_objective_lattice(Some(1.0), 0.5);
+        assert!(
+            (tm.round_bound_up(7.72) - 8.5).abs() < 1e-12,
+            "got {}",
+            tm.round_bound_up(7.72)
+        );
+        assert!(
+            (tm.round_bound_up(8.5) - 8.5).abs() < 1e-12,
+            "already on the lattice"
+        );
+    }
+
+    /// Floating-point noise must not buy a whole unit. A dual bound a hair above
+    /// an integer is that integer, not the next one — lifting it would report a
+    /// bound above the true optimum, i.e. a false certificate (CLAUDE.md §1).
+    #[test]
+    fn objective_lattice_lift_does_not_round_up_lp_noise() {
+        let tm = lattice_tm(Some(1.0), 100.0);
+        let lifted = tm.round_bound_up(8.0 + 1e-11);
+        assert!(
+            lifted <= 8.0 + 1e-9,
+            "noise at 8+1e-11 was lifted to {lifted}, past the optimum"
+        );
+    }
+
+    /// The lift can only tighten. Whatever the arithmetic does, the returned
+    /// value is a valid dual bound iff it is >= the one handed in, so the floor at
+    /// `v` is the invariant worth asserting directly.
+    #[test]
+    fn objective_lattice_lift_never_loosens_a_bound() {
+        let tm = lattice_tm(Some(0.25), 100.0);
+        let mut checked = 0;
+        let mut lifted_any = 0;
+        for i in -400i32..400 {
+            let v = i as f64 * 0.0137;
+            let r = tm.round_bound_up(v);
+            assert!(r >= v - 1e-12, "lift loosened {v} to {r}");
+            assert!(
+                r <= v + 0.25 + 1e-12,
+                "lift overshot a full spacing: {v} -> {r}"
+            );
+            if r > v + 1e-12 {
+                lifted_any += 1;
+            }
+            checked += 1;
+        }
+        // CLAUDE.md §6 -- 800 no-ops would prove nothing.
+        assert_eq!(checked, 800);
+        assert!(lifted_any > 100, "the lift barely fired ({lifted_any})");
     }
 
     #[test]
