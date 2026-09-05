@@ -2,3 +2,18 @@
 ### is also running on one core)
  17:50:23 up  1:00,  0 user,  load average: 3.01, 1.70, 1.24
 [§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+  rep0 old (time_limit=15)                          30.1s seq[time_limit,13.999999999231209] thr[time_limit,13.999999999231209] SAME
+  rep0 new (max_iterations=50, time_limit=300)      26.7s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep1 old (time_limit=15)                          30.1s seq[time_limit,13.999999990621077] thr[time_limit,13.999999988118365] DIFFER
+  rep1 new (max_iterations=50, time_limit=300)      27.0s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep2 old (time_limit=15)                          30.4s seq[time_limit,13.999999983138142] thr[time_limit,13.999999990621077] DIFFER
+  rep2 new (max_iterations=50, time_limit=300)      27.2s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep3 old (time_limit=15)                          30.3s seq[time_limit,13.999999988118365] thr[time_limit,13.999999988118365] SAME
+  rep3 new (max_iterations=50, time_limit=300)      27.0s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+  rep4 old (time_limit=15)                          30.1s seq[time_limit,13.9999999931316] thr[time_limit,13.999999988118365] DIFFER
+  rep4 new (max_iterations=50, time_limit=300)      27.1s seq[iteration_limit,13.999999983138142] thr[iteration_limit,13.999999983138142] SAME
+
+executed comparisons = 10
+  old (time_limit=15)                        agreed 2/5, wall-truncated 5/5
+  new (max_iterations=50, time_limit=300)    agreed 5/5, wall-truncated 0/5
+ 17:55:11 up  1:05,  0 user,  load average: 13.61, 9.32, 4.68

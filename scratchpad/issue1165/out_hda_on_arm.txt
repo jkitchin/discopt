@@ -2,3 +2,4 @@
 [§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
 /home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
   return fn(*args, **kwargs)
+[38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)

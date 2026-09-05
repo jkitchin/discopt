@@ -1,0 +1,4 @@
+### ruff
+All checks passed!
+964 files already formatted
+### mypy
