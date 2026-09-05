@@ -46,9 +46,15 @@ node LP forever. See §2.1.
 
 HiGHS closes `b-ball`, `sp150x300d`, `beavma`, `nexp-50-20-1-1`,
 `nexp-50-20-4-2`, `khb05250`, `gen`, `dcmulti`, `app2-2`, `f2gap40400`, `gr4x6`,
-`supportcase14` and `supportcase16` in **one node**. One node means the root LP —
-after presolve, root cuts and root heuristics — both *produces* the optimum and
-*proves* it. discopt spends 350 k–870 k nodes on several of those same instances.
+`supportcase14` and `supportcase16` in **one node**. discopt spends 350 k–870 k
+nodes on several of those same instances.
+
+*Read §2.6 before drawing conclusions from that count.* "One node" is HiGHS
+incrementing `num_nodes` on root *close*, not a statement that the root LP was
+integral — and per-instance ablation shows the closer is a **restart** on
+`beavma`/`dcmulti`, **integral-objective rounding** on `sp150x300d`, and a
+**sub-MIP incumbent** on `nexp-50-20-4-2`. `b-ball`'s 1 node is an artifact of the
+engine-form conversion: HiGHS takes 126 nodes on the original MPS.
 
 This was originally written up as "a **root-strength** problem, not a tree-search
 problem." I retracted that on 2026-09-05 in favour of a primal/dual/proof split
@@ -288,14 +294,35 @@ killed; it is deferred behind a bigger, cheaper win.
 
 ## 2.6 Why HiGHS needs so few nodes — the mechanism, measured
 
-HiGHS closes **16 of the 38 in a single node**: `app2-2`, `b-ball`, `beavma`,
-`dcmulti`, `f2gap40400`, `gen`, `gr4x6`, `gt2`, `khb05250`, `neos-1425699`,
-`neos-5192052-neckar`, `nexp-50-20-1-1`, `nexp-50-20-4-2`, `sp150x300d`,
-`supportcase14`, `supportcase16`. One node means the root — after presolve, cuts
-and heuristics — both *produces* the optimum and *proves* it. Total panel nodes:
-HiGHS 15,417, discopt 4,693,240 at its best arm. That is ~300×.
+Total panel nodes: HiGHS 15,417, discopt 4,693,240 at its best arm. ~300×.
+HiGHS closes **16 of the 38 in a single node**. Before drawing conclusions from
+that number, three corrections to how it must be read (all measured 2026-09-05,
+`scratchpad/parity/attrib/panelform.py`, highspy 1.12.0, 30 s, the same engine-form
+arrays discopt receives):
 
-The mechanism is not one missing component; it is two, multiplying.
+- **"1 node" does not mean "the root LP was integral."** HiGHS increments
+  `num_nodes` on root *close* (`HighsMipSolverData.cpp:1802-1808, 1840-1850,
+  1879-1884, 2370-2376`). It means the root loop — LP, cuts, heuristics,
+  restarts — reached `mip_rel_gap` before any branching.
+- **The closer is often not the cuts.** Per-instance ablation: on `beavma` root
+  cuts do 99.4 % and a **restart** finishes it (`norestart`: 7 nodes); on
+  `sp150x300d` cuts reach 68.18 of 69 and the bound then jumps to 69 with *no new
+  cuts* — that is `computeNewUpperLimit` integral-objective rounding, not
+  separation; on `nexp-50-20-4-2` the sub-MIP incumbent is load-bearing
+  (`noheur` **times out**). Only `nexp-50-20-1-1` closes on root cuts alone.
+- **`b-ball`'s "1 node" is a formulation artifact.** On the original MPS, HiGHS
+  takes **126 nodes** and its bound stalls at −1.5996 with 303 conflicts. The
+  1-node result is a property of the engine-form conversion, not of HiGHS.
+
+And two of the panel's hardest instances are **not** root-closable by HiGHS
+either: `gsvm2rl3` takes **634 nodes** (root 0.012 → 0.2306, 67 % of the gap, then
+1394 conflicts and 15,179 strong-branching iterations), and
+`neos-2624317-amur`'s HiGHS root bound stays at **0** — no HiGHS cut family fires
+at its root, and it needs 3,838 nodes, 9,775 conflicts and 56,531 SB iterations
+(38 % of all its LP iterations). **Treating amur as a root-cut problem would be
+wrong**; it is a branching-and-conflicts problem for HiGHS too.
+
+With those corrections, the mechanism is two effects multiplying.
 
 **First: the last few percent of root gap is worth orders of magnitude of tree.**
 Tree size grows roughly exponentially in the residual gap, so the interesting
@@ -303,21 +330,54 @@ comparison is not "discopt closes 74 % of the mik root gap" but what is *left*.
 At 200 × 8, discopt leaves 4.5 % on `mik-250-20-75-*`; HiGHS leaves 1.7 %
 (§2.5). A 2.6× wider residual gap is not a 2.6× bigger tree. The same pattern
 holds on `sp150x300d` (15.71 % vs 0.00 %), `nexp-50-20-1-1` (30.00 % vs 0.00 %)
-and `beavma` (31.05 % vs 0.00 %) — on those three HiGHS's root bound is *exact*
-and discopt's is not close, which is precisely why HiGHS needs one node and
-discopt needs 10⁵.
+and `beavma` (31.05 % vs 0.00 %).
 
 **Second: with no incumbent, nothing prunes.** A node is cut off only when its
 bound is worse than the incumbent. discopt reaches the end of its budget 22-45 %
 above the optimum on the four `mik`, and finds **no feasible point at all** on
-`enlight_hard` and `neos-2624317-amur`. A tree with a poor incumbent explores
-nodes that a good one deletes outright, regardless of how good the bound is.
-This is why `mik` burns 289 k-563 k nodes against HiGHS's 558-1055 despite a
-dual gap of only 2.1-2.7 %.
+`enlight_hard` and `neos-2624317-amur`. This is why `mik` burns 289 k-563 k nodes
+against HiGHS's 558-1055 despite a dual gap of only 2.1-2.7 %.
 
 Neither alone explains the ratio; together they do. And they are not independent
 — a good incumbent early prunes the tree that would otherwise be needed to lift
 the bound.
+
+### 2.6a The separator-level answer: HiGHS has no GMI at all
+
+Worth stating plainly because it inverts the natural assumption. HiGHS's tableau
+separator does **not** generate Gomory mixed-integer cuts. It uses tableau rows
+only as *base inequalities* fed to cMIR and lifted-cover generation with bound
+substitution (`HighsTableauSeparator.cpp:40-244`, `HighsCutGeneration.cpp:505-738,
+1391-1491`, `HighsTransformedLp.cpp:20-140, 150-460`), alongside three basis-free
+families: Path (`HighsPathSeparator.cpp:170-549`), Mod-k
+(`HighsModkSeparator.cpp:30-267`), implied-bound
+(`HighsImplications.cpp:583-660`) and clique (`HighsCliqueTable.cpp:1604-1712`).
+
+So the 70-92 % of root gap discopt's GMI already closes is being compared against
+a solver that closes its last few percent with a *different and stronger* family.
+This is the strongest single argument for A2, and it is why A2 is cMIR/flow-cover
+rather than "more GMI".
+
+**HiGHS also never rejects a cut for coefficient range.** Its only dynamism check
+is inside `#if 0` (`HighsCutGeneration.cpp:1045-1063`). It gates *source rows*
+instead — Tableau drops basis-inverse rows with weight ratio > 1e4, Path follows
+only arcs with weight in `[feastol, 1/feastol]` (`checkWeight`, `:222-229`).
+SCIP likewise **repairs rather than rejects**: `postprocessCut` (`cuts.c:3748-3810`)
+runs `removeZeros(feastol)` → `cutTightenCoefs` → `removeZeros` again, and declares
+a cut unusable only when a small coefficient's cancelling bound is infinite
+(`:935-1000`). discopt is the outlier in refusing whole cuts on a numerical gate.
+
+## 2.7 Instrument correction: PR #1164's `kept/gen` column is an artifact
+
+`RootCutsGenerated`/`RootCutsKept` increment only inside the cut-cleanup block
+(`milp_driver.rs:1226-1229`), which is gated by `prune_base` (`:934-939`) —
+`Some(..)` only when `root_cut_prune && root_cuts > 0 && cut_rounds > 1`. **At
+`cut_rounds = 1` they never fire.** The `0/0` cells reported for `base_16x1` and
+`cut200_noprune` therefore mean *not counted*, not *no cuts generated*. The base
+arm does cut: `b-ball`'s root bound is −1.705882 at `root_cuts=16` against
+−1.818182 at `root_cuts=0`, and `enlight_hard` goes 21 → 23. This is a CLAUDE.md
+§6 failure (a probe that measured nothing and was believed) and PR #1164's body
+carries the correction.
 
 ## 3. The parity plan
 
@@ -332,6 +392,62 @@ incumbent. That is a strict ordering, and it is why Track A precedes Track B. Bu
 Track B is not optional: on the `mik` family the bound is already within 2.6 % and
 the tree still does not close, so Track A alone does not reach 38/38 either.
 
+### Track A0′ — two measured defects that block whole mechanisms. Do these first.
+
+Both were found by the 2026-09-05 engine audit and both are **confirmed by
+discopt's own split counters** (`scratchpad/miplib/verify_claims.py`, run with
+`DISCOPT_PROFILE=1` set before `import discopt`, deltas taken pre/post). Each is
+days of work, not weeks, and each unblocks machinery that is already built.
+
+**A0′.1 — the short basis export (`neos-2624317-amur`).**
+The cold root LP returns **338 basic variables for m = 342**. Everything
+downstream declines silently: `separate_gomory_cols` returns empty at its
+`basis.basic_vars.len() != m` guard (`lp/gomory.rs:233-235`) — with **no
+counter**, so the panel reads "zero cuts" when the truth is "never looked" — and
+`PreparedDual::prepare` refuses the warm start on shape, so nodes cold-solve.
+Confirmed here: on amur, zero `RootCuts*` and zero `SubstDrop*` counters fire at
+all, and `DualPrepRejectShape = 300` against `DualPrepAccept = 80`.
+
+Origin: `lp/simplex/primal.rs:2585-2627`; the eligibility test at `:2601` is
+`stat[j] != BASIC && nb_value(j) == 0.0` with `rows.len() == 1`. 50 of 342 rows
+have their slack nonbasic at a *nonzero* value with no zero-valued structural
+substitute, so the basis cannot be completed. At a complete basis a numpy replica
+finds 201 fractional integer basics and **70 admissible GMI cuts** on the same
+instance. Note this is *necessary but not sufficient* for amur: §2.6 shows HiGHS's
+root bound on amur is 0 too, so cuts alone will not close it — but nothing else can
+start while cuts, warm starts and strong branching are all disabled at once.
+*Also add counters at `gomory.rs:233-235, 246-248, 271`: three silent early
+returns, none instrumented. CLAUDE.md §6.*
+
+**A0′.2 — zero-then-pin in the cut cleanup (`gsvm2rl3`, plus 6 at-risk).**
+`gsvm2rl3` separates 31 cuts and discards **all 31**. Confirmed here:
+`SubstDropUnbounded = 31`, `SubstDropDynamism = 0` — so the refusal is the
+infinite-bound pin at `milp_driver.rs:3213-3222`, **not** the dynamism backstop.
+(The earlier diagnosis blamed dynamism; the counter split shipped in
+`6375b1fb` is what disproved it.)
+
+Mechanism: `gsvm2rl3` has **61 FREE columns**, all basic at the root. Every GMI
+cut carries pure cancellation noise on them — 4e-19 … 3e-16 absolute, ≤ 1.2e-17
+*relative*, with 994/994 entries ≤ 1e-12 relative. The cleanup tries to pin each
+such column at `u[k]`/`l[k]`, both infinite, and refuses the whole cut. HiGHS
+handles exactly this by **zeroing `|v| <= small_matrix_value` first**
+(`HighsTransformedLp.cpp:337-341`) and only refusing genuinely free columns that
+carry *real* coefficients (`:173-176`). SCIP does the same via `removeZeros`
+before the infinite-bound test. discopt pins before zeroing; the order is
+backwards.
+
+*Honest expectation.* Recovering these particular cuts is already measured
+**node-neutral on `gsvm2rl3`** (3 better / 3 worse at a fixed 5000-node budget —
+see "Falsified: relaxing the cut-cleanup's numerical gates"). Zero-then-pin is a
+*different* fix from the one that was falsified — dropping a 1e-17-relative
+roundoff term is exact to tolerance, where keeping it was not — and it is the rule
+both reference solvers use. It ships because the rule is wrong, not because
+`gsvm2rl3` is expected to flip. The breadth argument is the reason to expect more:
+**18 of 100 MPS files carry FR columns; 6 are on this panel** — `gsvm2rl3`,
+`iskar`, `istra`, `jijia`, `kaihu`, `obra`. Only `gsvm2rl3` is *verified* affected;
+the other five are at risk and are the kill criterion. If the panel does not move
+on those six, the fix stays (it is a correctness repair) but claims no credit.
+
 ### Track A — the bound (needed by 17/17)
 
 **A0. Graduate the root cut budget. Ready now; no new code.**
@@ -344,59 +460,139 @@ confirming panel on an unloaded machine for the wall-clock column, then the
 default flips.
 *Expected: +2 instances, already measured.*
 
+**A0.1 — wire the graduated budget to the product path.** The
+`_STRONG_CUT_PROFILE` 200 × 10 escalation
+(`python/discopt/solvers/milp_simplex.py:66-96, 985-1022`) sits on the OA/relaxer
+entry. `Model.solve()` on a pure MILP goes `_milp_engine_default_on`
+(`solver.py:21457-21474`) → `_solve_milp_simplex` (`:21563`) → `solve_milp_py`
+(`:21692-21706`) with `_cut_opts = {}` unless `DISCOPT_MILP_ROOT_CUTS=1`
+(`:21476-21510`). **A graduated cut default that never reaches a plain MILP solve
+buys nothing for users.** Near-zero code; do it in the same PR as A0.
+
 **A1. Finish the cut lifecycle (the remainder of the old Stage 1).**
 The warm-start half is done. Still missing: stall-based termination instead of the
-fixed round budget (discopt's `1e-7*(1+|prev_obj|)` test is far tighter than
-HiGHS's `stall < 3` against cumulative gain or SCIP's `objreldiff ≤ 1e-4`); cut
-*aging* (SCIP `LP_ROWAGELIMIT 10`, `set.c:263`; HiGHS ages basic cut rows at
-`mip_lp_age_limit`, `HighsLpRelaxation.cpp:595-642`); and a cut *pool* rather
-than the constraint matrix. Also: `CUT_MAX_PARALLEL = 0.99` is 10× laxer than
-both references (HiGHS `maxpar = 0.1`, `HighsCutPool.cpp:320`; SCIP `MINORTHO
-0.90`), so near-duplicate cuts are being kept.
-*Expected: the budget can then go higher than 500 without paying for it, which is
-what A2 needs.*
+fixed round budget; cut *aging*; and a cut *pool* rather than the constraint
+matrix. Both references agree on the shape and neither uses a fixed budget:
+HiGHS runs `while (scaledOptimal && !fractional.empty() && stall < 3)` with
+`maxSepaRounds = min(2·sqrt(maxTreeSizeLog2), ∞)` and an LP-iteration cap of
+`max(10000, 10·avg)` (`HighsMipSolverData.cpp:1912-1915`); SCIP has
+`maxroundsroot = -1` (`set.c:471`) and stops on `objreldiff ≤ 1e-4 AND nfracs ≥
+(0.9 − 0.1·nstall)·prev` (`solve.c:2963-2996`), exiting at 10 stalls at the root
+and 1 in the tree (`set.c:475, 477`). discopt's `1e-7*(1+|prev_obj|)` test is far
+tighter than either. Aging: SCIP `LP_ROWAGELIMIT 10` (`set.c:263`), `cutagelimit
+80` (`:483`); HiGHS ages basic cut rows at `mip_lp_age_limit`
+(`HighsLpRelaxation.cpp:595-642`) and drops basic cut rows after the root
+(`:522-539`). Also: `CUT_MAX_PARALLEL = 0.99` is 10× laxer than both references
+(HiGHS `maxpar = 0.1`, `HighsCutPool.cpp:320`; SCIP `MINORTHO 0.90`), so
+near-duplicate cuts are being kept.
+*Both source reviews independently confirmed A1-before-A2: the lifecycle is the
+prerequisite, since a stronger family is only affordable once a large cut set is.*
+*Expected: the budget can then go higher than 500 without paying for it.*
 
-**A2. A second cut family — cMIR/flow-cover and knapsack cover.**
-GMI is discopt's only family. §2.5 shows the existing separators already close
-70-92 % of the root gap, so this is not "discopt has no cuts" — it is the last
-few percent, which §2.6 argues is where the tree size lives. Deferred behind A1
-deliberately: cMIR is only worth having once a large cut set is affordable.
-The instances it should move are the mixed-knapsack and set-covering shapes that
-dominate the failures — `mik-*`, `nexp-*`, `sp150x300d`, `beavma`.
+**A2. The second cut family — cMIR/flow-cover with bound substitution, and
+lifted knapsack covers.**
+Correcting an earlier phrasing: GMI is *not* discopt's only separator —
+`lp/mir.rs:206`, `lp/aggregation.rs:86` and `lp/cover.rs` all exist. But `mir` and
+`aggregation` are reachable only from `bnb/convex_kernel.rs:680, 1972` and
+`lp_bindings.rs:285`; **`milp_driver.rs` imports neither.** What is genuinely
+absent is flow cover, variable-upper-bound substitution and lifted covers — a
+`grep` of `crates/discopt-core/src/lp/*.rs` for flow-cover / VUB / bound
+substitution returns nothing.
+
+The structure census says this is exactly the right family for the failures
+(executed, `scratchpad/parity/struct_probe.py`): `nexp-50-20-1-1` is 1030 columns,
+245 binaries, objective on binaries only, with **245 two-variable VUB rows
+`x_a ≤ u_a y_a`** and 50 all-continuous flow rows. `sp150x300d` is 1050 columns,
+300 binaries, **150 big-M VUB rows** (binary coefficient ≥ 100× the continuous
+one), and **all 750 continuous variables have finite upper bounds**, so
+coefficient tightening fires on all 150.
+
+SCIP's named answer for that class, in order: varbound upgrade
+(`cons_varbound.c:108`, priority +50000), coefficient tightening
+(`cons_linear.c:9003` — `x − M y ≤ 0` with `x ≤ ub_x` reduces M to `ub_x`), then
+lifted flow cover and cMIR with VUB substitution (`sepa_aggregation.c:860-965`;
+`SCIPcalcFlowCover` `cuts.c:11645`, citing Gu/Nemhauser/Savelsbergh 1999;
+`SCIPcalcKnapsackCover` `:924`; `SCIPcutGenerationHeuristicCMIR` `:940`;
+`VARTYPEUSEVBDS 2`). For `mik-*`/`beavma`, SCIP's lifted covers come from
+`cons_knapsack` at `SEPAPRIORITY +600000` — *before any separator plugin* —
+with sequential lifted minimal covers (`:5564, :2581, :5316, :4801, :5035`), and
+for non-upgraded mixed rows via `SCIPseparateRelaxedKnapsack`
+(`cons_knapsack.c:5781`, called from `cons_linear.c:7538-7620`), which relaxes
+continuous and general-integer variables to their bounds or variable bounds.
+
+**Coefficient tightening is the cheapest item in A2 and should be measured
+first** — it is presolve-level, needs no separator, and the census says it fires
+on all 150 `sp150x300d` VUB rows.
+
 *Entry experiment before building (CLAUDE.md §4, the #727 RLT lesson): separate
-cMIR at the root on those instances only, and measure the root gap against the
-4.5 %/15.7 %/30.0 % baselines. If it does not move them on the real instances, it
-does not get built.*
+cMIR at the root on `mik-*`, `nexp-*`, `sp150x300d`, `beavma` only, and measure
+the root gap against the 4.5 %/15.7 %/30.0 %/31.1 % baselines. If it does not move
+them on the real instances, it does not get built.*
 
-**A3. The two instances that get no usable cuts at all.**
-`gsvm2rl3` — 31 cuts separated, all discarded as ill-conditioned, 42 % dual gap.
-`neos-2624317-amur` — zero cuts generated, 100 % dual gap, no feasible point.
-Relaxing the numerical gates is already **falsified** (see "Falsified: relaxing
-the cut-cleanup's numerical gates"): it rescues `gsvm2rl3`'s root gap but is
-node-neutral, so these need a family whose coefficients are conditioned by
-construction, i.e. A2. Tracked here so they are not silently dropped.
+**A3. Branching quality — the node-48 cliff.**
+`sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget`
+(`milp_driver.rs:1434`) with a budget of **48 nodes** and ≤ 6 candidates. After
+node 48, any variable with fewer than 8 observations falls back to
+`default_cost = 1.0` in both directions, so the product score degenerates to
+most-fractional for **> 99.99 % of every tree on this panel**.
+`reliability_threshold = 8` is hardcoded at `tree_manager.rs:276`. The engine audit
+rates this the single biggest quality gap in the driver. For scale, HiGHS spends
+15,179 SB iterations on `gsvm2rl3` and 56,531 on `amur` — 38 % of that instance's
+total LP work — where discopt spends its entire SB allowance in the first 48
+nodes. Reliability branching (SB until a variable has *k* reliable observations,
+not until node *k*) is the standard form and is what both references implement.
+*Caveat from the b-ball probe: this will do nothing on dual-degenerate instances
+— see Track C.*
 
 ### Track B — the incumbent (needed by 14/17)
 
 discopt's failures are not marginal on this axis: 22-45 % above optimum on the
-`mik` family, and no feasible point at all on two instances. This is the half
-that was invisible while only the bound was instrumented.
+`mik` family, and no feasible point at all on two instances.
 
-**B1. Node selection and plunging.** discopt uses `SelectionStrategy::BestFirst`
-and carries a best-estimate field that is not wired to the driver. SCIP's default
-is `nodesel_estimate` (`STDPRIORITY 200000`, the highest of five,
-`nodesel_estimate.c:48`); HiGHS alternates best-estimate plunges with a forced
-best-bound pop every 10 leaves (`HighsMipSolver.cpp:504-516`). Cheapest item in
-Track B — the field exists — and it is the one that most directly attacks "no
-incumbent".
+The inventory is now definitive (2026-09-05 audit). **ON:** per-node rounding
+(`try_rounding_csc`, `milp_driver.rs:2299-2311` — nearest then floor, original
+rows only) and a single root repair dive (`try_dive_repair`, `:2334-2344`, body
+`:3742+`). **INERT:** off-root dives — `DIVE_STRIDE_DEFAULT = 0` (`:317`), and
+`dive_batch_eligible` (`:351-360`) requires `!has_incumbent`, so it **can never
+improve an existing incumbent**. **ABSENT:** feasibility pump, RINS, RENS, local
+branching, any sub-MIP/LNS, shifting, ZI-round, feasibility jump,
+propagation-based diving, plunging, restarts — and *any* improvement heuristic
+whatsoever once an incumbent exists. That last one is the finding: discopt's first
+incumbent is very nearly its last.
 
-**B2. Real primal heuristics.** In rough order of value-per-unit-work: diving
-variants, RENS, feasibility pump, RINS, local branching. Two instances find no
-feasible point at all, which is a feasibility-pump-shaped problem specifically.
+**B1. Node selection and plunging.** `SelectionStrategy::BestFirst` is
+**hardcoded** at `milp_driver.rs:717` with `export_batch(64)` at `:1370`;
+`DepthFirst` and `BestEstimate` exist in `bnb/pool.rs:10-18` (`:66-81`, `:82-96`)
+and the driver never uses them. SCIP's default is `nodesel_estimate`
+(`STDPRIORITY 200000`, the highest of five, `nodesel_estimate.c:48`) with plunge
+parameters at `:56-62` (MINPLUNGEDEPTH `maxdepth/10`, MAXPLUNGEDEPTH
+`maxdepth/2`, MAXPLUNGEQUOT 0.25, BESTNODEFREQ 10). Cheapest item in Track B —
+the strategy exists and is unreachable — and the one that most directly attacks
+"no incumbent".
 
-*Scoring note for Track B:* an incumbent improvement shows up as **nodes and
-solved-count**, not as root gap. Measure it at a fixed node budget, not a time
-limit, until the machine is reliably quiet.
+**B2. Real primal heuristics.** Two shared pieces have to be built before any of
+them: a **probing fix-propagate-undo stack** and a **reduced-copy sub-MILP call**.
+With those, in order of value-per-unit-work:
+1. **Randomized rounding after every root separation round while no incumbent** —
+   HiGHS's `randomizedRounding` has no option and always runs
+   (`HighsMipSolverData.cpp:1783-1790`); it is the source of `b-ball`'s incumbent.
+2. **Shift-and-propagate** — SCIP's answer for the no-feasible-point case
+   (`heur_shiftandpropagate.c:66-71`): runs *before* the root LP, relaxes
+   continuous variables out of the rows, repeatedly fixes the discrete variable
+   that most reduces weighted row violation, propagates in probing mode,
+   `onlywithoutsol TRUE`. This is the shape of `enlight_hard` and `amur`.
+3. **Feasibility pump**, then **RENS**, then **RINS**/local branching (sub-MIP).
+   Measured relevance: on `nexp-50-20-4-2` HiGHS's sub-MIP incumbent is
+   load-bearing — `noheur` times out where the default takes 1 node.
+
+*Do not port* `ziRound` or `shifting`: both are **default OFF** in HiGHS
+(`HighsOptions.h:1234-1241`).
+
+**B3. Restarts.** Measured as the actual closer on `beavma` (`norestart`: 1 → 7
+nodes) and `dcmulti` (two restarts), and `noheur` `beavma` closes via **five**
+restarts. SCIP triggers at ≥ 2.5 % root integer fixings (`set.c:363-371`,
+`solve.c:4953-4958`). discopt has none. Cheap relative to B2 and independently
+measured to matter.
 
 ### Track C — measured NOT to be the difference. Do not spend here.
 
@@ -404,13 +600,47 @@ Recorded so this ground is not re-covered:
 
 - **Presolve** — `h_nopre ≈ h_full` everywhere on the root-bound probe; worth
   ~0-3 pp of root gap (§2.5a). §1c independently put it at ≤2 instances.
-- **Symmetry** — 0 instances on this panel (§1c).
+  (Caveat: SCIP's *coefficient tightening* is presolve-shaped and is **not**
+  covered by this negative — it is an A2 item with its own census evidence.)
+- **Symmetry** — 0 instances on this panel (§1c); HiGHS `nosym` is identical to
+  default on every instance ablated.
 - **`node_propagation`** — graduated ON, but gains **zero** instances; the HiGHS
   review's "3-6 instances" is falsified (Stage 0.1).
 - **Relaxing the cut numerical gates** — cert-clean but node-neutral; falsified
-  and reverted, with the measurement recorded at the refusal site.
+  and reverted, with the measurement recorded at the refusal site. (A0′.2 is a
+  *different* change: zero-then-pin, not keep-and-widen.)
 - **`cut_select`** — falsified earlier: `fiber` 2986.5 → 6457.4 it/node, `mik`
   acceptance 100 % → 35.0 %.
+- **Integral-objective cutoff tightening** — **already built and wired.**
+  `bnb/obj_integral.rs` computes the lattice and `set_objective_lattice`
+  feeds `cutoff_value` (`tree_manager.rs:1105-1113`), default ON via
+  `DISCOPT_OBJ_INTEGRALITY`. Both source reviews flagged HiGHS's
+  `computeNewUpperLimit` as a possible gap; it is not one. It simply does not
+  apply to `b-ball`, whose objective variable is continuous
+  (`obj_integral.rs:121` correctly declines a lattice).
+- **Pruning mechanics** — verified exact. `tree_manager.rs:557-562` prunes on
+  `node_lb >= cutoff_value()`; `cutoff_value` is the incumbent exactly;
+  `gap_tol` is applied only at `milp_driver.rs:1357, 1872`; the global bound is
+  recomputed from the open frontier every batch (`:917, 923-973`); ties are
+  explored, not pruned; and **no objective cutoff reaches the node LP** —
+  `SimplexOptions` has no such field and a grep of `lp/simplex/*.rs` for
+  `cutoff|obj_limit|objective_limit` is empty. SCIP's cutoff test
+  (`SCIPsetIsGE(lowerbound, cutoffbound)`, `solve.c:3164`, eps 1e-9, with
+  `cutoffbound = upperbound` exactly, `primal.c:428-441`) would not prune those
+  nodes either. An earlier "pruning mechanics" framing was retracted and both
+  reviews independently confirmed the retraction.
+- **`b-ball` by branching or by strong branching** — it is a **dual-degenerate
+  plateau, measured**. The bound is flat at −1.705882 from node 127 through
+  32,099 nodes under *every* switch tried: whole-tree strong branching with
+  16,044 calls, `sb_max_cands=30`, `node_propagation`, heuristics off,
+  reduced-cost fixing off, `node_cuts`, `root_cut_prune` off. A degeneracy probe
+  found **350/350 child LPs equal to their parent** (176 at depth 1, 174 at
+  depth 2). Every pseudocost is 0, so branching is a coin flip. Structure: 8
+  assignment rows each picking 5 of 11 over 88 binaries, 11 linking equalities
+  `2·x_i = Σ_k x_{i,k}`, 11 rows `x12 ≤ x_i`, objective `min −x12`; the LP gives
+  40/11 = 1.818 and the integer answer is `floor(40/11) = 3` → −1.5. **Only cuts
+  or presolve can move this instance.** A HiGHS-style gap-aware node prune would
+  not help either: its threshold is −1.50015 against a frontier at −1.500673.
 
 ### Measurement discipline for every stage below
 
@@ -421,7 +651,10 @@ Recorded so this ground is not re-covered:
    (cert-clean AND net-positive) over the 38 panel *and* the in-repo MINLP corpus.
 3. Entry experiment before implementation, on **real corpus instances**, with a
    named kill criterion.
-
+4. Every new silent early return gets a counter. Two of this plan's root causes
+   (A0′.1, A0′.2) were invisible for weeks because the code declined without
+   counting, and one of them was misdiagnosed three times before the counter was
+   split. CLAUDE.md §6.
 ## 3bis. Stage detail (the original numbering, retained)
 
 
@@ -722,10 +955,22 @@ Current standing, matched tolerance, 190/190 runs, zero certification aborts:
 | **highs** | **38**/38 | **71.95 s** | 1.039 s | **15,417** |
 
 Distance to go: **17 instances, ~5.6× wall, ~300× nodes.** Intermediate targets,
-so a stage can be scored before parity is reached: A0 → 21/38 (measured, banked);
-A1 → 24/38; A2 → 30/38; B1+B2 → 35/38. These are targets, not predictions — a
-stage that misses its target is re-scoped against the measurement, per §4 of
-CLAUDE.md, not carried forward on hope.
+so a stage can be scored before parity is reached:
+
+| stage | target | basis for the target |
+|---|---|---|
+| A0 + A0.1 | 21/38 | measured, banked (`cut500_prune`) |
+| A0′.1 + A0′.2 | 21/38 | **no solved-count target.** Both are correctness repairs that unblock machinery; scored on *counters* (amur: `SepGomory` calls > 0 and `DualPrepRejectShape` → ~0; gsvm2rl3: `SubstDropUnbounded` → 0) and on the 6 FR-column instances, not on solves |
+| A1 | 24/38 | cut lifecycle makes a >500 budget affordable |
+| A2 | 30/38 | the family HiGHS actually closes its last few percent with |
+| A3 | — | branching quality; scored on nodes at fixed solved-count, not on solves |
+| B1 + B3 | 33/38 | node selection + restarts, both cheap and both measured to matter |
+| B2 | 35/38 | the sub-MIP/pump ladder |
+
+These are targets, not predictions — a stage that misses its target is re-scoped
+against the measurement, per §4 of CLAUDE.md, not carried forward on hope. A0′
+deliberately claims no solved-count: it is first in the order because it unblocks
+three mechanisms at once, not because it is expected to move the panel by itself.
 
 *Caveat on every wall column here:* machine load was 66-69 during the 2026-09-05
 panel. Node counts are load-independent and carry the conclusions; the wall
