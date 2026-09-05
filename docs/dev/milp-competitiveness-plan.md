@@ -1678,6 +1678,94 @@ falsification test on this very panel: if a degeneracy signal separates `p0201`
 from `fiber`, it is a mechanism; if it does not, it is dropped. That, not a
 default-value refinement, is the next experiment.
 
+### A8 — degeneracy does **not** explain A4's bimodality. The explanation is dropped. 2026-09-05.
+
+**What A4 left owing.** A4 measured the strong-branching node budget and found it
+is not the lever (1.221× at unlimited, below that probe's own 1.25× floor), but its
+per-instance table was *bimodal*, not flat: `fiber` 11.31× and `dcmulti` 3.25×
+against `p0201` 0.644× — SB actively **harmful** — and `22433` 0.726×. A4
+registered exactly one explanation for that split, and one test of it. HiGHS shuts
+strong branching off entirely on a degenerate LP:
+
+```cpp
+if (degeneracyFac >= 10.0) pseudocost.setMinReliable(0);   // HighsSearch.cpp:1114-1116
+```
+
+The registered test: *if degeneracy separates the instances where SB pays from the
+ones where it hurts, the shut-off is a mechanism to port; if it does not, the
+explanation is dropped rather than kept as a story.*
+
+**What was measured, and why not `computeLPDegneracy` directly.** HiGHS's
+degeneracy factor (`HighsLpRelaxation.cpp:478-493`) is a proxy computed from
+fixed-row/column shares; the thing it is a proxy *for* is that probing a degenerate
+node cannot move the LP value, so the probe returns no ranking. discopt can measure
+that end directly at the branching site — cheaper, and not dependent on reproducing
+another solver's heuristic constants. Four counters were added to `strong_branch`
+(`milp_driver.rs`), inert unless `DISCOPT_PROFILE=1`, both tests relative to the
+objective scale rather than absolute (the same defect A7 found in the pseudocost
+default, this time in the instrument):
+
+| counter | meaning |
+|---|---|
+| `SbProbeZeroGain` | an `Optimal` probe whose child objective did not move |
+| `SbCallFlat` | ≥2 candidates, all scored alike — no ranking bought |
+| `SbCallDiscriminating` | ≥2 candidates and a real spread |
+| `SbCallSingleton` | exactly 1 candidate — cannot discriminate by construction |
+
+`SbCalls == Flat + Discriminating + Singleton` is asserted per instance in the
+panel and in a unit test (§6), as is `SbProbeZeroGain ≤ SbProbeOptimal`.
+
+**Pre-registered kill criterion, committed to `profile.rs` before the run.** Split
+the both-solved instances by A4's own node table into SB-PAYS (shipped48 / best
+larger-budget arm ≥ 1.15) and SB-WASTES (≤ 0.95), leaving the 0.95–1.15 band out as
+noise — a numeric threshold on A4's table, not a hand-picked set (§2). *If the
+median zero-gain probe share in SB-WASTES does not exceed SB-PAYS's median by at
+least 1.5×, flatness does not explain A4's bimodality and the degeneracy
+explanation is dropped.*
+
+**Result — 20 instances, 2,781 SB calls, 17,566 SB probes, `sb_node_budget` at the
+3000-node cap (the regime the shut-off would act in):**
+
+| instance | group | probes | optimal | zero-gain % | flat-call % | nodes |
+|---|---|---|---|---|---|---|
+| 23588 | PAYS | 1660 | 1630 | 0.0% | 0.0% | 2523 |
+| bppc8-02 | PAYS | 1496 | 1496 | **82.2%** | 43.1% | 3059 |
+| dcmulti | PAYS | 1142 | 1052 | 0.1% | 0.0% | 1507 |
+| enlight8 | PAYS | 1088 | 991 | **48.3%** | 38.9% | 3023 |
+| fiber | PAYS | 2660 | 2466 | 10.0% | 19.6% | 2547 |
+| gt2 | PAYS | 1222 | 1222 | **68.3%** | 32.3% | 3043 |
+| neos-3611447-jijia | PAYS | 766 | 746 | 9.7% | 4.3% | 3051 |
+| 22433 | WASTES | 1264 | 845 | 0.6% | 0.9% | 213 |
+| khb05250 | WASTES | 148 | 148 | 0.0% | 0.0% | 99 |
+| p0201 | WASTES | 1504 | 1504 | 17.2% | 1.9% | 665 |
+| supportcase16 | WASTES | 348 | 300 | 41.0% | 0.0% | 59 |
+
+Median zero-gain share: **SB-PAYS 0.0998, SB-WASTES 0.0887**. Criterion asked for
+`0.0887 / 0.0998 ≥ 1.5`; observed **0.889**.
+
+**Verdict: FALSIFIED, and not marginally — the sign is wrong.** The instances where
+SB pays are, if anything, the *more* degenerate ones: the three largest zero-gain
+shares on the panel (bppc8-02 82.2%, gt2 68.3%, enlight8 48.3%) are all in SB-PAYS,
+and the flat-call share separates the groups in the same wrong direction (PAYS
+median 19.7% vs WASTES 0.5%). A HiGHS-style shut-off keyed on degeneracy would have
+disabled strong branching precisely on the instances where A4 measured it earning
+3–11× node reductions.
+
+Per A4's own commitment the degeneracy explanation is **dropped**, not carried
+forward as a story, and the shut-off is **not built**. The counters stay (they are
+inert without `DISCOPT_PROFILE`, and they are what makes the claim falsifiable), but
+no behavior is keyed on them.
+
+**What this closes.** A1 (cut aging), A2 (in-tree aging), A4 (SB budget), A6→A7
+(pseudocost default, cert-clean but not net-positive), and now A8 (SB
+discrimination) have all been measured and none is the lever. Every one of them was
+a *dual*-side search-order hypothesis. A5 measured directly that the gap is
+**primal** — 17/38 unsolved with an 89.6% median primal share, and 12 of those hold
+a merely-poor incumbent rather than none — and that finding is now the only
+surviving lever on this panel. The target class is *improvement* heuristics
+(RINS-style neighborhood search, local branching, diving), not feasibility
+heuristics (RENS, feasibility pump).
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
