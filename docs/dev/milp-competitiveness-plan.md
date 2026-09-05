@@ -1877,6 +1877,30 @@ attribution above comes from HiGHS's log and source instead.
 
 ### A9 — #1183 continued: the gap is the SEARCH, not the relaxation. 2026-09-05.
 
+> **§8 CORRECTION, same day.** A9a–A9e and all of B1 were first measured in the
+> `wt-probe` worktree, which sits **behind main**: it predates #1173, which had
+> already graduated `node_propagation` to default-ON
+> (`crates/discopt-python/src/lp_bindings.rs:1101`). Every `discopt.__file__`
+> assertion passed — the file *was* the code under test — but the build's defaults
+> were not the shipped ones, so the baselines were inflated. §8 says to assert a
+> **marker unique to the version under test**; a path is not that marker when the
+> question is "what does shipped discopt do". Re-measured on main below. The
+> ratios inside each experiment remain valid (both arms always shared one build);
+> the absolute baselines do not.
+>
+> | | on `wt-probe` (reported first) | on main (correct) |
+> |---|---|---|
+> | #1183 default nodes | 2371 | **1543** |
+> | probing-tightened bounds | 2217 (1.07×) | **2737 (0.56× — actively worse)** |
+> | best legitimate configuration | 1109 | **1109** |
+>
+> Two further claims are withdrawn: that `node_propagation` was awaiting
+> graduation (it shipped in **#1173**), and that the panel showed
+> `neos-3611689-kaihu` gaining a certification — under a clean load that instance
+> proves optimality in *both* arms, so the "gain" was an artifact of the
+> contaminated run it was scored from.
+
+
 B1 falsified four levers. A9 ran four more, then turned the question around and
 ablated **HiGHS's** mechanisms instead. Same MPS, same reader, optimum 224.
 
@@ -1907,9 +1931,11 @@ Note the middle row: discopt's entire root presolve tightens 86 bounds and buys
 **nothing** on the root LP of this model. Probing is the whole gain.
 
 **A9c — but it does not move the tree.** Handing discopt the probing-tightened
-model (13 binaries fixed): **2371 → 2217 nodes, 1.07×**, against a 1.5× bar.
-**FALSIFIED.** discopt's own cut loop already reaches 169.4, far past 90, so the
-probing gain is subsumed — and even *fixing 13 of 112 binaries* is worth 7%.
+model (13 binaries fixed): on main, **1543 → 2737 nodes = 0.56×**. Not merely
+short of the 1.5× bar — **actively worse**. **FALSIFIED.** discopt's own cut loop
+already reaches 169.4, far past 90, so the probing bound is subsumed, and the
+tightened box then perturbs branching and propagation onto a worse trajectory.
+Even *fixing 13 of 112 binaries outright* does not pay for that.
 
 That is now **six** levers that improve the bound or shrink the model and do not
 move discopt's tree: a perfect incumbent (1.43×), the HiGHS-presolved model
@@ -1938,47 +1964,64 @@ decisive row is `cut pool ~disabled`: HiGHS solves from a root bound of 71 in 51
 nodes, while discopt solves from a root bound of 169.4 in 2371.** A solver with a
 *much stronger root* taking 4.6× more nodes is not losing on its relaxation.
 
-**A9e — confirming it on discopt's side.** Making strong branching effectively
-exhaustive, then adding node propagation:
+**A9e — confirming it on discopt's side.** On main, varying the strong-branching
+budget (`node_propagation` is already on by default here):
 
 | discopt configuration | nodes |
 |---|---|
-| default SB (6 candidates, 48-node budget) | 2371 |
-| SB 16 / 500 | 1789 |
-| SB 64 / 5000 | 1641 |
-| SB exhaustive (256 / 10⁶) | 1641 — *saturates at 64* |
-| SB exhaustive + `node_propagation` | **1109** |
-| SB exhaustive + seeded optimum (not a legitimate configuration) | 683 |
+| defaults (`sb_max_cands=6`, `sb_node_budget=48`) | 1543 |
+| SB 16 / 500 | 2323 — **worse than the default** |
+| SB 64 / 5000 | **1109** |
+| SB exhaustive (256 / 10⁶) | 1109 — *saturates at 64* |
+| SB exhaustive + explicit `node_propagation` | 1109 — *confirms it is already on* |
+| SB exhaustive + seeded optimum (not a legitimate configuration) | 463 |
 
-**1109 nodes is 2.14× the default, from two existing, tested code paths left at
-unhelpful defaults** — `sb_max_cands=6, sb_node_budget=48`, and
-`node_propagation=false`. SB saturating at 64 candidates says discopt's scoring
-rule is already extracting everything it can; past 1641 the gain comes from
-propagation, not from better ranking.
+Two things here. The reachable gain is **1543 → 1109 = 1.39×** from the SB budget
+alone, and it **saturates at 64 candidates** — discopt's scoring rule is already
+extracting everything it can, so ranking quality is not the lever. And the budget
+is **non-monotonic**: 16/500 is *worse* than 6/48. A wider probe changes which
+variable is chosen, and on this instance the intermediate choice is unlucky. That
+rules out simply raising the default without a corpus panel, and it is the same
+shape of result as A6→A7.
 
 **Conclusion for this class.** The relaxation is not the problem — six bound- and
-model-side levers moved the tree by at most 1.63×. The search is: at a root bound
-185% better than HiGHS's cut-disabled configuration, discopt explores 4.6× more
-nodes. The levers that measurably work are per-node propagation and branching
-budget, both of which already exist.
+model-side levers moved the tree by at most 1.63×, and one (probing) moved it
+backwards. The search is: HiGHS with its cut pool disabled proves optimality from
+a root bound of **71** in **516** nodes; discopt, from a root bound of **169.4**,
+takes **1543**. Three times the nodes from more than twice the root bound. The
+open levers are per-node work and the cut families discopt lacks, not better
+bounds from the ones it has.
 
-**Corpus check (not an instance fix, per §2).** The 38-instance MIPLIB panel had
-already been run for `node_propagation` and left unscored. Scored on **node
-count** (load-independent; that run's wall column is unusable, load peaked at
-26.8):
+**Corpus re-validation of #1173.** `node_propagation` shipped default-ON in #1173;
+the 38-instance MIPLIB panel was re-run here on a clean main build. The first
+scoring of it was wrong in an instructive way: it pooled all 38 instances and
+reported 1.267× on nodes. **Node counts are only deterministic on instances that
+actually finish** — for a clock-terminated instance the node count measures how
+much machine it got, and that run's load ran 6.5–20.4. Split correctly:
 
-* total nodes **5,544,184 → 4,375,238 = 1.267×**
-* **cert-clean**: 152 checks, **0** bounds above the reference optimum, **0**
-  certifications lost
-* one certification **gained** (`neos-3611689-kaihu` feasible → optimal) and
-  `enlight_hard` node_limit → feasible
-* large wins: `flugpl` 13.4×, `enlight8` 3.2×, `neos-3611689-kaihu` 3.2×,
-  `neos-3611447-jijia` 3.1×, `gt2` 2.3×, `bppc8-02` 2.0×
-* losses: `sp150x300d` 0.46×, `neos-3118745-obra` 0.74×, `supportcase14` 0.79×,
-  `fiber` 0.82×
+*21 instances where **both** arms proved optimality (node counts verified
+deterministic: 42 rep-pairs, zero mismatches):*
 
-That meets §5's cert-clean bar and is net-positive on nodes. A wall-clock arm
-under a proper load gate is the remaining requirement before the default flips.
+| | OFF | ON | |
+|---|---|---|---|
+| total nodes | 1,115,897 | 386,543 | **2.89×** |
+| total wall | 56.32 s | 31.04 s | **1.81×** |
+
+`flugpl` 13.4×, `enlight8` 3.2×, `neos-3611689-kaihu` 3.2×,
+`neos-3611447-jijia` 3.1×, `gt2` 2.3×, `bppc8-02` 2.0×. Three regressions:
+`fiber` 0.82×, `supportcase14` 0.79×, `khb05250` 0.94× — only `fiber` loses
+wall (7.90 s → 9.39 s).
+
+*17 clock-terminated instances,* compared on dual bound rather than nodes: ON
+tighter on 5, looser on 6, equal on 6 — **a wash**, with the four
+`mik-250-20-75-*` all in the "looser" column.
+
+*Certification:* 152 checks, **0** bounds above a reference optimum, **0**
+certifications lost, 0 gained. Cert-clean.
+
+No selection bias in the split: zero instances changed certification status
+between arms, so the 21-instance subset is identical for both. #1173 was the right
+call, and this is the measurement that should have accompanied it.
 
 ## 4. Success metric
 
