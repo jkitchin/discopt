@@ -79,8 +79,30 @@ pub fn begin_solve() {
 }
 
 /// Whether profiling is currently active.
+///
+/// Under a [`set_enabled(true)`] test override this is **thread-scoped**: only the
+/// thread that raised the override sees profiling as on. `TEST_OVERRIDE` alone was
+/// not enough. It stops a sibling test from *disarming* the owner's measurement,
+/// but the owner leaves `ENABLED` globally true, so every concurrent solve on the
+/// pool kept incrementing the same global counters — the owner then read its own
+/// events plus theirs. That is not a hypothetical: CI's
+/// `root_cut_rounds_reoptimize_warm_instead_of_cold_solving` asked for
+/// `cut_rounds = 12` and read `RootCutRounds = 20`, i.e. 8 rounds belonging to
+/// other tests, and failed on the derived `warm_reopt == rounds - 1` identity.
+/// An instrument that over-counts is as broken as one that counts nothing.
+///
+/// The scope this buys is the *owning thread*, so a counter incremented on a rayon
+/// worker inside the measured solve is not visible to the owner. No counter test
+/// reads one: every reader measures either a direct simplex/separator call or the
+/// driver's root loop, all of which run on the caller's thread. A test that ever
+/// does want a worker-thread counter will read 0, which its
+/// `assert!(n >= …)` floor must catch loudly rather than pass vacuously.
 #[inline(always)]
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if TEST_OVERRIDE.load(Ordering::Relaxed) {
+        return TEST_OWNS_MEASUREMENT.with(|owns| owns.get());
+    }
     ENABLED.load(Ordering::Relaxed)
 }
 
@@ -585,6 +607,15 @@ pub fn counter_snapshot() -> Vec<(&'static str, u64)> {
 #[cfg(test)]
 static TEST_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+thread_local! {
+    /// Raised on the one thread that called `set_enabled(true)`. While
+    /// `TEST_OVERRIDE` is up, [`enabled`] consults this instead of `ENABLED`, so
+    /// the override arms the owner's thread and nobody else's. See [`enabled`] for
+    /// why the global flag alone let sibling tests inflate a measurement.
+    static TEST_OWNS_MEASUREMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Force the profiling flag on/off. Test-only: production toggles it exactly once
 /// via [`init_from_env`]. Exposed so a Rust test can deterministically observe a
 /// [`counter`] without setting the `DISCOPT_PROFILE` env var process-wide.
@@ -594,6 +625,7 @@ static TEST_OVERRIDE: AtomicBool = AtomicBool::new(false);
 /// the ordinary env-driven behaviour.
 #[cfg(test)]
 pub fn set_enabled(on: bool) {
+    TEST_OWNS_MEASUREMENT.with(|owns| owns.set(on));
     TEST_OVERRIDE.store(on, Ordering::Relaxed);
     ENABLED.store(on, Ordering::Relaxed);
 }
@@ -661,6 +693,43 @@ mod tests {
     /// deleted. Holds [`TEST_LOCK`] because it mutates process-global state that
     /// every sibling solve's `init_from_env` reads, and restores the prior value
     /// on the way out so it cannot leak into the rest of the suite.
+    /// A sibling thread's work must not land in the measuring thread's counters.
+    ///
+    /// Before the thread-scoped override, `set_enabled(true)` left `ENABLED` true
+    /// process-wide, so every concurrent solve on `cargo test`'s pool incremented
+    /// the same globals and the owner read its own events *plus* theirs. This is
+    /// the exact shape that made CI's root-cut-round test see 20 rounds when it
+    /// asked for 12. Fails before the fix, passes after.
+    #[test]
+    fn a_sibling_threads_counters_do_not_land_in_this_threads_measurement() {
+        let _guard = test_guard();
+        set_enabled(true);
+        reset();
+
+        let sibling = std::thread::spawn(|| {
+            // No `set_enabled` here: this thread is a bystander, exactly like a
+            // test that merely runs a solve while another test is measuring.
+            let mut n = 0;
+            for _ in 0..1000 {
+                incr(Ctr::RootCutRounds);
+                n += 1;
+            }
+            n
+        });
+        let emitted: u32 = sibling.join().expect("sibling panicked");
+
+        let mine = counter(Ctr::RootCutRounds);
+        set_enabled(false);
+
+        // §6: prove the sibling actually ran, or "0 stray counts" is vacuous.
+        assert_eq!(emitted, 1000, "the sibling never emitted anything");
+        assert_eq!(
+            mine, 0,
+            "{mine} of the sibling's 1000 increments leaked into this thread's \
+             measurement; a counter test would read its own events plus theirs"
+        );
+    }
+
     #[test]
     fn discopt_profile_zero_means_off_not_on() {
         let _guard = test_guard();
