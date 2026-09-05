@@ -20,7 +20,7 @@ from discopt import Model
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solver import _native_kernel_verify_point
 from discopt.solvers._convex_kernel import _incumbent_is_feasible
-from discopt.validation.feasibility import ABS_TOL, verify_point
+from discopt.validation.feasibility import ABS_TOL, jacobian_row_scales, verify_point
 
 pytestmark = pytest.mark.smoke
 
@@ -257,8 +257,12 @@ def test_unit_scale_row_is_still_held_to_the_absolute_tolerance():
 
 
 # Each entry is a NAIVE WIDENING of
-#     violation <= abs_tol * max(1, |rhs|, max_j |J_ij| * max(1,|x_j|))
+#     violation <= abs_tol * max(1, |rhs|, max_j |J_ij| * |x_j|)
 # together with a (violation, scale) pair it accepts and the chosen form rejects.
+# (#1151 replaced the `max(1,|x_j|)` factor this header used to name with the
+# plain `|x_j|` term magnitude; the parametrized cases below take `scale` as a
+# given and were unaffected, but the header was documenting a form the module no
+# longer implements -- and, worse, one of the shapes it exists to reject.)
 # The direction matters: every one of these is LOOSER, and three of them are
 # looser in a way that grows with the violation itself.
 NAIVE_WIDENINGS = [
@@ -424,3 +428,149 @@ def test_term_magnitude_scale_is_never_looser_than_the_floored_form():
         assert new <= old + 1e-12
         compared += 1
     assert compared == 200, "the direction guard compared nothing"
+
+
+# --------------------------------------------------------------------------
+# #1151 review finding 1+2: the row scale has ONE definition, and the two other
+# consumers use it. Before the review this expression was written out by hand in
+# three places; fixing one left the other two vouching for the point it rejects.
+# --------------------------------------------------------------------------
+def test_examiner_scaled_feasibility_rejects_what_the_incumbent_gate_rejects():
+    """The user-facing feasibility tool must not certify a point the incumbent
+    verifier refuses — on the very class #1151 is about.
+
+    Measured before the fix, on this exact model and point::
+
+        verify_point -> False: row 0 violated by 9.276e-04 (allowed 1.405e-06)
+        examiner     -> [PASS] primal_con_feas (scaled) (tol=1.0e-06)
+    """
+    from types import SimpleNamespace
+
+    from discopt.validation.examiner import examine
+
+    m = _quotient_aux_row_model()
+    pt = np.array([0.0014052502011193727, 0.0014073586395206353, 0.9978427215251631])
+
+    assert verify_point(m, pt).ok is False, "precondition: the incumbent gate rejects this point"
+
+    report = examine(
+        SimpleNamespace(
+            x={v.name: float(pt[i]) for i, v in enumerate(m._variables)},
+            objective=None,
+            bound=None,
+            status="optimal",
+        ),
+        m,
+        recover_duals=False,
+    )
+    scaled = [c for c in report.checks if c.name == "primal_con_feas (scaled)"]
+    assert len(scaled) == 1, f"the scaled primal-feasibility check did not run: {report.checks}"
+    assert scaled[0].passed is False, (
+        "the examiner certified a point the incumbent verifier rejects — the "
+        "#1151 row scale is back in examiner.py"
+    )
+
+
+def test_dual_recovery_active_set_uses_the_term_magnitude_scale():
+    """``_dual_recovery``'s ``near`` test must not admit a row with 9.3e-4 of
+    signed slack into the KKT active set.
+
+    Surplus inactive rows contribute free multipliers to the least-squares solve,
+    which can shrink the stationarity residual and let a non-KKT point pass — a
+    validation weakened in the ACCEPTING direction.
+
+    **Scope, measured rather than assumed.** The review that found this described
+    it on a quotient aux's defining row. That row is an ``==``, and
+    ``row_select`` takes ``is_eq`` unconditionally — ``near`` is never consulted
+    for an equality — so the scale cannot change the active set there. The defect
+    is real but bites on scaled **inequalities**, which ``_clear_divisions``
+    also produces (it multiplies a ``<=`` through by a sign-definite denominator
+    and flips the sense when that denominator is negative). This case is
+    therefore built on the ``<=`` form, where the two scales genuinely disagree
+    about membership; on the ``==`` form both select the row and there is nothing
+    to test.
+    """
+    from discopt._dual_recovery import recover_multipliers, row_metadata
+
+    # The `<=` form of the same scaled row, which is what `_clear_divisions`
+    # emits for an inequality with a sign-definite denominator.
+    m = Model("quotient_aux_le")
+    m.continuous("x", lb=1e-3, ub=1e3)
+    m.continuous("y", lb=1e-3, ub=1e3)
+    m.continuous("w", lb=1e-6, ub=1e6)
+    x, y, w = m._variables
+    m.subject_to(1000.0 * (w * y) - 1000.0 * x <= 0.0)
+    m.minimize(w)
+
+    pt = np.array([0.0014052502011193727, 0.0014073586395206353, 0.9978427215251631])
+    ev = NLPEvaluator(m)
+    J = np.asarray(ev.evaluate_jacobian(pt), dtype=np.float64)
+    body = np.asarray(ev.evaluate_constraints(pt), dtype=np.float64)
+    sense_arr, rhs_arr, _labels = row_metadata(ev)
+    assert sense_arr[0] == "<=", "precondition: this case needs an inequality row"
+    signed = abs(float(body[0]))
+
+    # Preconditions: this row IS the regime -- the floored form admits it, the
+    # term magnitude does not. Asserted, so the case cannot quietly stop
+    # exercising the boundary it was built for (§6).
+    active_tol = 1e-6
+    floored = float((np.abs(J[0]) * np.maximum(1.0, np.abs(pt))).max())
+    term = float(jacobian_row_scales(J, pt)[0])
+    assert signed <= active_tol * max(1.0, floored), (
+        "precondition: the floored form admitted this row into the active set"
+    )
+    assert signed > active_tol * max(1.0, term), (
+        "precondition: the term-magnitude scale must exclude this row"
+    )
+
+    # And the real code path agrees: the row is NOT in the recovered active set.
+    grad = np.zeros(pt.size)
+    grad[2] = 1.0  # objective is `w`
+    lo = np.array([v.lb for v in m._variables], dtype=float).ravel()
+    hi = np.array([v.ub for v in m._variables], dtype=float).ravel()
+    dr = recover_multipliers(
+        grad=grad,
+        jac=J,
+        body=body,
+        sense_arr=sense_arr,
+        rhs_arr=rhs_arr,
+        x_flat=pt,
+        lb=lo,
+        ub=hi,
+        is_continuous=np.ones(pt.size, dtype=bool),
+        active_tol=active_tol,
+    )
+    assert 0 not in set(np.asarray(dr.row_select).tolist()), (
+        "_dual_recovery admitted a row with 9.3e-4 of signed slack into the KKT "
+        "active set — the #1151 row scale is back in _dual_recovery.py"
+    )
+
+
+def test_row_scale_has_a_single_definition_shared_by_all_three_consumers():
+    """§2, structurally: the three call sites import one helper rather than each
+    writing ``max_j |J_ij| * |x_j|`` out again. A hand-written copy is how #1151
+    came to be fixed in one place and left standing in two others."""
+    import inspect
+
+    from discopt import _dual_recovery
+    from discopt.validation import examiner, feasibility
+
+    for mod in (examiner, _dual_recovery, feasibility):
+        src = inspect.getsource(mod)
+        assert "jacobian_row_scales" in src, (
+            f"{mod.__name__} does not use the shared row-scale helper"
+        )
+        assert "np.maximum(1.0, np.abs(x_flat))" not in src, (
+            f"{mod.__name__} still carries the pre-#1151 floored row scale by hand"
+        )
+
+
+def test_jacobian_row_scales_rejects_shape_mismatches():
+    """The shared helper refuses inputs it cannot interpret rather than
+    broadcasting them into a silently wrong scale (CLAUDE.md §7)."""
+    with pytest.raises(ValueError, match="2-D Jacobian"):
+        jacobian_row_scales(np.zeros(3), np.zeros(3))
+    with pytest.raises(ValueError, match="columns"):
+        jacobian_row_scales(np.zeros((2, 3)), np.zeros(4))
+    assert jacobian_row_scales(np.zeros((0, 3)), np.zeros(3)).shape == (0,)
+    assert jacobian_row_scales(np.array([[2.0, -3.0]]), np.array([5.0, 1.0]))[0] == 10.0

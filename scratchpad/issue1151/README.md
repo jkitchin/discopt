@@ -17,6 +17,38 @@ assert which sources they loaded (§8).
 | `null_control.py`, `null.txt` | **Null control** for Panel A's 10 result differences: the same instances re-run with NO code difference between arms. 8 of 10 still disagree, which is what `divergent_rows = 0` implies. |
 | `panel_api.py`, `panel_api.json`, `panel_api.txt` | **Panel B** — the class where the path *does* fire (quotient objectives, 10 models x 2 arms). Positive control plus the ON/OFF differential. |
 | `cert_cost.py`, `cert.txt` | What an honest certificate costs on the two models where the defect fired, 3 interleaved reps with a standard deviation. |
+| `probe_examiner.py` | Review finding 1+2: the same floored row scale in `validation/examiner.py` and `_dual_recovery.py`, and whether each still vouches for the #1151 witness point. |
+
+## The fix was not applied everywhere the formula lived
+
+The review on the PR found the defective expression written out by hand in two
+more places. Reproduced by `probe_examiner.py` on the #1151 witness point, before
+those sites were fixed:
+
+```
+verify_point           -> ok=False  row 0 violated by 9.276e-04 (allowed 1.405e-06)
+examiner primal_con_feas (unscaled)       -> passed=False
+examiner primal_con_feas (scaled)         -> passed=True     <- certifies what the gate rejects
+_dual_recovery near-test  -> |signed|=9.276e-04  floored scale=1.000e+03 (admits <= 1.000e-03)
+                             -> near=True; term scale=1.405e+00 -> near=False
+```
+
+and after:
+
+```
+examiner primal_con_feas (scaled)         -> passed=False
+```
+
+All three now call one helper, `validation.feasibility.jacobian_row_scales`, so
+they cannot drift again.
+
+**One correction to the review's finding 2.** It describes the harm on a quotient
+aux's *defining* row. That row is an `==`, and `_dual_recovery`'s `row_select`
+takes `is_eq` unconditionally — `near` is never consulted for an equality — so
+the scale cannot change the active set there. The defect is real but bites on
+scaled **inequalities**, which `_clear_divisions` also produces. The regression
+test is built on the `<=` form for that reason, with the sense asserted as a
+precondition.
 
 ## Headline numbers
 

@@ -38,6 +38,7 @@ import pytest
 from discopt._relax.convexity import classify_model
 from discopt.gp import classify_gp, is_log_convex, solve_gp
 from discopt.modeling.core import Model
+from discopt.validation import feasibility
 
 # Strictly-positive box shared by the continuous GP variables.
 POS = dict(lb=1e-3, ub=1e3)
@@ -278,10 +279,30 @@ def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
     oracle = xv / yv + yv / xv
 
     assert oracle >= 2.0 - 1e-9, f"the returned point itself is infeasible: f={oracle}"
-    assert result.objective == pytest.approx(oracle, abs=1e-9), (
+
+    # Tolerance = the bound the fix actually GUARANTEES, not the deviation it
+    # happens to achieve. #1151's verifier holds each quotient aux to
+    # ``|dw| <= abs_tol * max(1, |w|)``, so two auxes give ~2e-6 here. The
+    # original ``abs=1e-9`` passes today (measured delta ~4e-16 at this floor,
+    # worst 4.4e-13 across the sweep below) but only because the accepted
+    # incumbent's defining-row residual sits at float noise rather than at the
+    # tolerance boundary; on a 5 s time-limited solve, which incumbent is
+    # accepted is timing-dependent, so a boundary-residual incumbent would
+    # report a delta up to ~2e-6 and fail a property that was never claimed.
+    # Asserting the contract instead of the observation loses no signal: the
+    # defect this pins reported a delta of -1.318e-03, 660x outside this band.
+    tol = 1e-6 * max(1.0, abs(oracle))
+    assert result.objective == pytest.approx(oracle, abs=tol), (
         f"reported objective {result.objective!r} is not attained by its own "
         f"incumbent ({xv!r}, {yv!r}), whose true objective is {oracle!r} "
-        f"(delta {result.objective - oracle:+.6e})"
+        f"(delta {result.objective - oracle:+.6e}, allowed {tol:.3e})"
+    )
+    # The sharp assertion, and the one the issue is actually about: no reported
+    # objective may sit below the true global minimum. This one is exact --
+    # AM-GM gives exactly 2 -- so it carries only numerical slack.
+    assert result.objective >= 2.0 - tol, (
+        f"reported objective {result.objective!r} is BELOW the global minimum "
+        f"2.0 -- a false certificate"
     )
 
 
@@ -342,7 +363,9 @@ def _division_gp(floor: float) -> Model:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("floor", [1e-3, 1e-2, 1e-1, 1.0], ids=lambda f: f"floor{f:g}")
-def test_bb_reported_objective_is_attained_across_denominator_floors(floor: float) -> None:
+def test_bb_reported_objective_is_attained_across_denominator_floors(
+    floor: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#1151: ``objective`` and ``x`` must agree, at every denominator floor.
 
     The sibling above pins the single box the issue reports. This sweeps the
@@ -388,7 +411,33 @@ def test_bb_reported_objective_is_attained_across_denominator_floors(floor: floa
         # reported VALUE, which is right from the first incumbent, not about
         # reaching ``optimal``; the defect certified in 0.6 s, so a short budget
         # discriminates just as sharply and keeps this off the slow critical path.
+        # §6: prove the changed code actually ran. `_row_scales` is entered only
+        # for rows already over the flat absolute tolerance ("pass 2"), which on
+        # the whole vendored `.nl` corpus never happens — measured, 0 invocations
+        # across 119 instances (`scratchpad/issue1151/panelA.txt`). So a solve
+        # that value-checks green tells us nothing about #1151 unless it also
+        # shows this path was exercised: a different reformulation, a fast path
+        # that avoids the quotient aux, or a pass-2 that is never reached would
+        # all keep the assertions below passing while measuring nothing.
+        calls = {"n": 0}
+        _real_row_scales = feasibility._row_scales
+
+        def _counting(*a, **k):
+            calls["n"] += 1
+            return _real_row_scales(*a, **k)
+
+        monkeypatch.setattr(feasibility, "_row_scales", _counting)
         result = model.solve(solver="bb", time_limit=20.0)
+
+    # The floors at and above 1e-1 have denominators large enough that no row
+    # ever becomes suspect, so the path legitimately does not fire there; the
+    # tight floors are the ones that must exercise it. Asserting per-floor rather
+    # than unconditionally keeps this a real precondition instead of a wish.
+    if floor <= 1e-2:
+        assert calls["n"] > 0, (
+            f"the #1151 code path never ran at floor {floor:g} — this solve "
+            f"measured nothing about the defect, whatever its objective says"
+        )
 
     assert result.objective is not None, "no incumbent to check"
     assert result.x is not None, "an incumbent value with no point is not checkable"

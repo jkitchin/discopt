@@ -191,6 +191,35 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
     return VerifyResult(True)
 
 
+def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
+    """``max_j |J_ij| * |x_j|`` per row — the row's first-order term magnitude.
+
+    **The one definition of this quantity.** It is not private, because three
+    call sites need it and #1151 was in part a consequence of there having been
+    three *copies*: this module's incumbent gate, ``validation/examiner.py``'s
+    scaled primal-feasibility check, and ``_dual_recovery``'s active-set test all
+    carried the same expression written out by hand. Fixing one left the other
+    two vouching for exactly the point the fixed one rejects — measured, on the
+    #1151 witness: ``verify_point`` rejected the row at 9.276e-04 while the
+    examiner reported ``[PASS] primal_con_feas (scaled)`` and ``_dual_recovery``
+    admitted the row into its active set. Import this rather than re-deriving it.
+
+    Not floored: callers apply their own floor (``max(1, |rhs_i|, …)``), and
+    flooring ``|x_j|`` *inside* the max is precisely the #1151 defect — see the
+    module docstring. Returns zeros where every term of a row vanishes; the
+    caller's floor is what keeps such a row on the plain absolute tolerance.
+    """
+    J = np.asarray(J, dtype=np.float64)
+    xw = np.abs(np.asarray(x_flat, dtype=np.float64))
+    if J.ndim != 2:
+        raise ValueError(f"expected a 2-D Jacobian, got shape {J.shape}")
+    if J.shape[1] != xw.shape[0]:
+        raise ValueError(f"Jacobian has {J.shape[1]} columns, point has {xw.shape[0]}")
+    if J.shape[0] == 0:
+        return np.zeros(0, dtype=np.float64)
+    return np.asarray((np.abs(J) * xw[None, :]).max(axis=1), dtype=np.float64)
+
+
 def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.ndarray]:
     """``max_j |J_ij| * |x_j|`` for the given row indices, or ``None``.
 
@@ -216,12 +245,11 @@ def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.
     if J.ndim != 2 or J.shape[0] <= int(rows.max()):
         logger.debug("feasibility: Jacobian shape %s cannot cover rows; stricter bound", J.shape)
         return None
-    xw = np.abs(np.asarray(x_flat, dtype=np.float64))
-    sub = np.abs(J[rows, :]) * xw[None, :]
+    sub = jacobian_row_scales(J[rows, :], x_flat)
     if not np.all(np.isfinite(sub)):
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")
         return None
-    return np.asarray(sub.max(axis=1), dtype=np.float64)
+    return sub
 
 
 def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult:
