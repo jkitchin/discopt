@@ -27,8 +27,11 @@ The real gate is ``_extract_body_coeffs``: it answers with the row itself, so it
 cannot promise more capability than it delivers.
 
 Completing the hull family so these routes *solve* the model instead of declining
-it is tracked by #1154; the parametrized test below is written to strengthen
-rather than break when that lands.
+it was #1154, which has since landed: the parametrized test below was written to
+strengthen rather than break when it did, and it now takes its answer branch —
+all three routes return the true -30.0 instead of refusing. Defect 2's lesson
+stands unchanged and is the reason #1154 needed its own PR and its own §5 panel:
+what was wrong was widening ``_is_linear`` *alone*, not widening it at all.
 """
 
 import discopt.modeling as dm
