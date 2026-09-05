@@ -20,7 +20,11 @@ not upgrade the status, and it must not cross the incumbent.
 
 import pytest
 from discopt.modeling.core import Model, SolveResult
-from discopt.solver import _merge_engine_bound, _milp_engine_default_on
+from discopt.solver import (
+    _merge_engine_bound,
+    _milp_engine_default_on,
+    _milp_root_cut_budget,
+)
 
 
 def _milp(maximize: bool = False) -> Model:
@@ -58,6 +62,39 @@ def test_opt_out_is_honored(monkeypatch, off):
     """CLAUDE.md §5 keeps the legacy path reachable; that is what the panel A/Bs."""
     monkeypatch.setenv("DISCOPT_MILP_ENGINE", off)
     assert _milp_engine_default_on() is False
+
+
+def test_root_cut_budget_is_on_by_default(monkeypatch):
+    """Track A0 graduated the root cut budget default-ON on 2026-09-05.
+
+    38 MIPLIB instances at 20 s, both arms interleaved, two replicates, run
+    twice: 18-19/38 -> 21/38 solved, 9.41 M -> 5.35 M nodes, and the dual gap on
+    the 17 instances neither arm closes 0.2028 -> 0.1494 -- cert-clean over 304
+    bound-vs-optimum comparisons with zero violations. Fails against the
+    default-off gate this replaces.
+    """
+    monkeypatch.delenv("DISCOPT_MILP_ROOT_CUTS", raising=False)
+    opts = _milp_root_cut_budget(20.0)
+    assert opts is not None, "the graduated budget must reach a plain Model.solve()"
+    # Pin the panel's configuration, not merely "some cuts": A0.1's whole failure
+    # mode was wiring a *different* budget than the one that was measured.
+    assert opts["root_cuts"] == 500
+    assert opts["cut_rounds"] == 50
+    assert opts["cut_select"] is True
+    assert opts["root_cut_time_s"] == 10.0  # half the engine slice
+
+
+@pytest.mark.parametrize("off", ["0", "false", "no", "FALSE", "No"])
+def test_root_cut_budget_opt_out_restores_the_legacy_single_pass(monkeypatch, off):
+    """§5 requires the legacy path stay intact and reachable after a graduation."""
+    monkeypatch.setenv("DISCOPT_MILP_ROOT_CUTS", off)
+    assert _milp_root_cut_budget(20.0) is None
+
+
+def test_root_cut_budget_floor_survives_a_tiny_slice(monkeypatch):
+    """A short budget still gets one useful separation pass rather than none."""
+    monkeypatch.delenv("DISCOPT_MILP_ROOT_CUTS", raising=False)
+    assert _milp_root_cut_budget(0.2)["root_cut_time_s"] == 0.5
 
 
 def test_gate_is_not_cached(monkeypatch):

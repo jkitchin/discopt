@@ -521,10 +521,45 @@ This was net-*negative* before the structural-space fix (`cut200_prune` 11/38
 against base 18/38) because every cut broke node warm starts. With that fixed it
 is net-positive: `cut500_prune` **21/38 against base 19/38 at 47 % fewer nodes**,
 190/190 runs, zero certification aborts, no false bound. That meets CLAUDE.md §5's
-double bar — cert-clean *and* net-positive — which it did not before. Needs one
-confirming panel on an unloaded machine for the wall-clock column, then the
-default flips.
+double bar — cert-clean *and* net-positive — which it did not before.
 *Expected: +2 instances, already measured.*
+
+**GRADUATED default-ON, 2026-09-05.** `_milp_root_cut_budget` now returns the
+budget unless `DISCOPT_MILP_ROOT_CUTS=0`; the legacy `root_cuts=16, cut_rounds=1`
+single pass stays intact and reachable, which is what the panel A/Bs.
+
+Confirming panel: 38 instances, `gap_tol=1e-4`, 20 s each, both arms interleaved
+*within* every replicate, 2 replicates, and the whole panel run **twice** under
+different machine load.
+
+| arm | solved | total wall | med(solved) | nodes | gap on the 17 open |
+|---|---|---|---|---|---|
+| off (16 / 1) | 18-19/38 | 424.9 s ±4.2 | 0.158 s | 9,409,627 | mean 0.2028, med 0.1052 |
+| on (500 / 50 / select) | **21**/38 | 399.8 s ±1.0 | 0.135 s | **5,353,150** | mean **0.1494**, med **0.0265** |
+
+*Cert-clean*: 304 bound-vs-reference comparisons across the two runs, zero
+violations; `fiber`, `gt2` and `neos-3611689-kaihu` go feasible → optimal and
+nothing regresses. *Net-positive*: +3 instances, −43 % nodes, and a materially
+better dual bound exactly on §1b's pure-dual family.
+
+**On the wall column, and why it is not the basis of this verdict.** The machine
+never idled below load ~5 — two `myst start` dev servers hold ~100 % CPU each,
+and a foreign `pytest` arrived mid-run on the first attempt (load peaked at 58).
+Per CLAUDE.md §9 the wall numbers are corroboration only. The verdict rests on
+solved count, node count and dual bound, which are load-independent, and which
+**both runs reproduced to four significant figures** (0.2028 → 0.1494 in each) —
+two runs under different load agreeing exactly is stronger evidence than one
+quiet run would have been. `gradpanel.py` now samples load per solve so a
+contaminated row is recorded rather than inferred, and `gradscore.py` refuses to
+issue a timing verdict when it sees contention.
+
+**The cost, stated rather than buried.** Cuts buy the hard instances by taxing
+the easy ones: ON is *slower* on 11 of the 18 both arms solve —
+`neos-3611447-jijia` 7.5 → 13.9 s, `enlight8` 5.4 → 10.5 s, `22433`
+0.31 → 2.51 s — against 7 faster (`bppc8-02` 3.79 → 1.44 s). Net-positive at 38
+instances, but the per-instance tax is precisely the argument for A1's
+stall-based termination and cut aging. A1 should be scored on removing this tax
+without giving back the +3.
 
 **A0 configuration check (2026-09-05) — the shipped setting is not the banked
 one, and it had never been measured.** The banked arm is `cut500_prune` =
@@ -1065,7 +1100,7 @@ so a stage can be scored before parity is reached:
 
 | stage | target | basis for the target |
 |---|---|---|
-| A0 + A0.1 | 21/38 | measured, banked (`cut500_prune`) |
+| A0 + A0.1 | 21/38 | **MET, 2026-09-05 — graduated default-ON.** 18-19/38 → **21/38** at −43 % nodes, dual gap on the 17 open instances 0.2028 → 0.1494; cert-clean over 304 bound-vs-optimum comparisons across two independent runs, zero violations, three instances feasible → optimal and none the reverse. Shipped at `_milp_root_cut_budget`'s configuration, not `cut500_prune`'s — see Track A0 |
 | A0′.1 | 21/38 | **MET, 2026-09-05.** No solved-count target — a correctness repair scored on counters and LP work. Delivered: `DualPrepRejectShape` 300 → 0 on amur, `RootCutsGenerated` 0 → 102, and **−37.5 % simplex iterations** panel-wide at unchanged nodes and a cert-clean panel. A0′.2 was falsified and demoted — see Track A0′ |
 | A1 | 24/38 | cut lifecycle makes a >500 budget affordable |
 | A2 | 30/38 | the family HiGHS actually closes its last few percent with |

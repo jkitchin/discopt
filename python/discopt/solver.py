@@ -21579,18 +21579,50 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     efficacy/orthogonality selection takes the prodplan root bound to **89.3%**
     in 4.7 s.
 
-    Bound-CHANGING (CLAUDE.md §5), so it ships default-OFF behind
-    ``DISCOPT_MILP_ROOT_CUTS=1`` until a corpus-wide differential panel is
-    cert-clean AND net-positive. Nothing here can make a bound unsound -- a
-    Gomory/cover cut is valid for the integer hull either way -- but "sound" is
-    not the bar; "measurably helpful broadly" is (the ``DISCOPT_CUT_INHERIT``
-    lesson).
+    Bound-CHANGING (CLAUDE.md §5), so this shipped default-OFF until a
+    corpus-wide differential panel came back cert-clean AND net-positive.
+    Nothing here can make a bound unsound -- a Gomory/cover cut is valid for the
+    integer hull either way -- but "sound" is not the bar; "measurably helpful
+    broadly" is (the ``DISCOPT_CUT_INHERIT`` lesson).
+
+    **Graduated default-ON 2026-09-05.** 38 MIPLIB instances, ``gap_tol=1e-4``,
+    20 s each, both arms interleaved within every replicate, 2 replicates, run
+    twice under different machine load:
+
+    ==========================  ==========  ==========  ==================
+    arm                         solved      nodes       gap on the 17 open
+    ==========================  ==========  ==========  ==================
+    off (``root_cuts=16``, 1)   18-19/38    9.41 M      mean 0.2028
+    on (this budget)            **21/38**   **5.35 M**  **mean 0.1494**
+    ==========================  ==========  ==========  ==================
+
+    *Cert-clean*: 304 bound-vs-reference-optimum comparisons across the two runs,
+    zero violations, and no certification regression -- ``fiber``, ``gt2`` and
+    ``neos-3611689-kaihu`` go feasible -> optimal, none go the other way.
+    *Net-positive*: +3 instances, -43 % nodes, and the dual gap on the instances
+    nobody closes drops from 0.2028 to 0.1494 (median 0.1052 -> 0.0265). The
+    four ``mik-250-20-75-*`` -- a pure *dual* failure family -- go from ~0.14 to
+    ~0.037 at a matched node budget.
+
+    The honest cost: cuts buy the hard instances by taxing the easy ones. ON is
+    *slower* on 11 of the 18 both arms solve (``neos-3611447-jijia`` 7.5 -> 13.9 s,
+    ``enlight8`` 5.4 -> 10.5 s, ``22433`` 0.31 -> 2.51 s) and faster on 7
+    (``bppc8-02`` 3.79 -> 1.44 s). Total wall still fell in both runs
+    (426 -> 398 s, 425 -> 400 s), but this machine never idles below load ~5, so
+    per CLAUDE.md §9 the *wall* column is corroboration only -- the verdict rests
+    on solved count, node count and dual bound, which are load-independent and
+    which both runs reproduced to four digits. The per-instance tax is the
+    argument for the plan's A1 (stall-based termination and cut aging), not a
+    reason to withhold the budget.
+
+    Set ``DISCOPT_MILP_ROOT_CUTS=0`` to restore the binding's historical
+    ``root_cuts=16, cut_rounds=1`` single pass.
 
     ``root_cut_time_s`` is what makes 50 rounds safe to ask for: without it a
     long separation phase on a large root LP would spend the engine's whole slice
     proving a bound with no time left to branch.
     """
-    if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "0").lower() in ("0", "false", "no"):
+    if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
         return None
     return {
         "root_cuts": 500,
@@ -21776,7 +21808,8 @@ def _solve_milp_simplex(
     if initial_point is not None and np.asarray(initial_point).size == n_orig:
         _seed = np.ascontiguousarray(np.asarray(initial_point, dtype=np.float64).ravel())
 
-    # Root cut budget (default-off; see ``_milp_root_cut_budget``). Passed as
+    # Root cut budget (default-ON since 2026-09-05; see ``_milp_root_cut_budget``,
+    # whose docstring carries the graduation panel). Passed as
     # keywords so the binding's own defaults stand when the flag is off -- these
     # same defaults also serve the MINLP per-node relaxer, which is why the
     # budget is raised HERE and not by changing them.
