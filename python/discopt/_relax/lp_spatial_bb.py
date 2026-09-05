@@ -506,6 +506,16 @@ def solve_lp_spatial_bb(
             # rather than more tree — the coupling #1153 measured. The pass has
             # its own deterministic cap (``rounds=5``); this only stops the wall
             # grant from tracking the caller's budget upward without end.
+            #
+            # NOTE on the ``frac`` argument, which the helper documents as "the
+            # fraction of ``time_limit`` this carve was taken from": the value
+            # here is a third of what REMAINS, not of the engine's full
+            # ``time_limit``, so the ceiling it derives (50 s) is an upper bound
+            # on the carve rather than the exact 1/3-of-limit the contract
+            # implies. The effective grant, ``min(remaining / 3, 50)``, is sound
+            # and never looser than the un-saturated original — but anyone
+            # re-tuning ``ROLE2_SATURATION_S`` should read this site as "capped at
+            # 50 s", not as "capped at a third of the limit".
             _obbt_budget = saturate_role2(
                 max(0.0, time_limit - (time.perf_counter() - t0)) / 3.0, 1.0 / 3.0
             )

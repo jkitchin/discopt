@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import ast
 import os
+import statistics
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -63,7 +64,7 @@ from pathlib import Path
 
 import pytest
 from discopt import solver_tuning
-from discopt.modeling.core import from_nl
+from discopt.modeling.core import ObjectiveSense, from_nl
 from discopt.solver_tuning import (
     HEURISTIC_ENTRY_SHARE,
     ROLE2_SATURATION_S,
@@ -166,12 +167,72 @@ _ROLE1_NAMES = frozenset(
     }
 )
 
+#: Calls that RETURN a role-1 remaining budget. A carve off one of these is a
+#: role-1 carve even though no whitelisted Name appears — ``0.5 *
+#: _remaining_budget()`` is a ``Call``, not a ``Name``, and the allowlist alone
+#: never sees it.
+_ROLE1_CALLS = frozenset({"_remaining_budget", "_fb_left", "_remaining", "_remaining_budget_s"})
+
+#: Clock reads. ``deadline - time.perf_counter()`` is a role-1 remaining budget
+#: spelled as a subtraction, which is how the helper this PR itself deleted
+#: (``_heur_stage_deadline``) carved ``share * (_deadline - _now)`` straight past
+#: the first version of this scan.
+_CLOCK_FUNCS = frozenset({"perf_counter", "monotonic", "_now"})
+
 #: Calls that saturate their argument (#1153).
 _SATURATING = frozenset({"saturate_role2", "_role2_saturate"})
 
 #: Calls that return their argument unchanged (or a no-clock value); a carve
 #: wrapped in one of these is bounded exactly when the carve inside it is.
 _PASSTHROUGH = frozenset({"_role2_budget", "_role2_deadline", "_role2_horizon"})
+
+
+def _is_clock_read(node: ast.AST) -> bool:
+    """``time.perf_counter()`` / ``time.monotonic()`` / the ``_now()`` seam."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Attribute):
+        return f.attr in _CLOCK_FUNCS
+    return isinstance(f, ast.Name) and f.id in _CLOCK_FUNCS
+
+
+def _carries_role1(node: ast.AST) -> bool:
+    """Does this expression carry a role-1 (caller-owned) remaining budget?
+
+    Three spellings, all of which occur in this package and only the first of
+    which a name allowlist can see:
+
+    * a whitelisted **name** — ``time_limit``, ``remaining``, …;
+    * a **call** that returns one — ``_remaining_budget()``;
+    * a **subtraction** of a clock read from a deadline — ``_deadline - _now``,
+      ``deadline - time.perf_counter()``.
+
+    The third is not hypothetical: the helper this PR deleted
+    (``_heur_stage_deadline``) carved ``share * (_deadline - _now)``, an
+    unsaturated role-2 carve, and the first version of this scan reported it
+    clean. The ratchet must see the defect its own PR introduced.
+    """
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in _ROLE1_NAMES:
+            return True
+        if isinstance(n, ast.Call):
+            f = n.func
+            name = (
+                f.id
+                if isinstance(f, ast.Name)
+                else (f.attr if isinstance(f, ast.Attribute) else "")
+            )
+            if name in _ROLE1_CALLS:
+                return True
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Sub):
+            if _is_clock_read(n.right) or (
+                isinstance(n.right, ast.Name) and "deadline" in n.right.id.lower()
+            ):
+                return True
+            if isinstance(n.left, ast.Name) and "deadline" in n.left.id.lower():
+                return True
+    return False
 
 
 def _bounded(node: ast.AST) -> bool:
@@ -247,8 +308,7 @@ def _scan() -> dict[tuple[str, str], int]:
             for node in ast.walk(tree):
                 if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.Mult, ast.Div)):
                     continue
-                names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-                if not names & _ROLE1_NAMES:
+                if not _carries_role1(node):
                     continue
                 # Widen to the whole value expression: ``0.25 * time_limit`` is
                 # bounded when it sits inside ``min(..., 30.0)``, and judging the
@@ -392,19 +452,29 @@ def test_the_saturated_sites_stay_saturated():
     """
     sites = []
     for path in sorted(_PKG.rglob("*.py")):
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith(("def ", "#", "*", "from ", "import ")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            # AST, not a line grep: prose mentioning ``saturate_role2(`` inside a
+            # docstring is not a call site, and this file's own doctrine is that
+            # an instrument must measure what it claims to.
+            if not isinstance(node, ast.Call):
                 continue
-            if "saturate_role2(" in stripped or "_role2_saturate(" in stripped:
-                sites.append(f"{path.relative_to(_PKG)}:{lineno}")
-    # The six carves #1153 saturated: the root LP probe, the two root cut-pool
-    # separations, the cumulative per-node OBBT grant, the root fixpoint, and the
-    # LP-spatial engine's root OBBT.
-    assert len(sites) == 6, (
-        f"the #1153 saturation count changed ({len(sites)} call sites, expected 6). "
-        "Lowering it means a carve went back to tracking the caller's budget.\n"
-        + "\n".join(f"  {s}" for s in sites)
+            f = node.func
+            name = (
+                f.id
+                if isinstance(f, ast.Name)
+                else (f.attr if isinstance(f, ast.Attribute) else "")
+            )
+            if name in _SATURATING:
+                sites.append(f"{path.relative_to(_PKG)}:{node.lineno}")
+    # A FLOOR, not an equality. Equality fails in both directions — including the
+    # one this file's own ratchet tells an author to take, "wrap the new carve in
+    # saturate_role2" — and the message would then explain only the other case.
+    # Removing a wrapper is the regression; adding one is the fix.
+    assert len(sites) >= 6, (
+        f"the #1153 saturation count DROPPED to {len(sites)} call sites (floor 6). "
+        "A carve went back to tracking the caller's budget; adding sites is fine "
+        "and does not fail here.\n" + "\n".join(f"  {s}" for s in sites)
     )
 
 
@@ -433,55 +503,84 @@ def _nodes(path: Path, tl: float) -> int:
     return int(from_nl(str(path)).solve(time_limit=tl, gap_tolerance=1e-4).node_count or 0)
 
 
+def _solve(path: Path, tl: float):
+    """``(objective, better_is_lower)`` — the sense read from the model, never assumed."""
+    model = from_nl(str(path))
+    result = model.solve(time_limit=tl, gap_tolerance=1e-4)
+    sense = getattr(getattr(model, "_objective", None), "sense", None)
+    return result.objective, sense is None or sense is ObjectiveSense.MINIMIZE
+
+
+def _worse(a: float | None, b: float | None, minimize: bool) -> bool:
+    """Did quality fall going from ``a`` to ``b``, in this model's own sense?
+
+    Hardcoding ``b > a`` reads a MAXIMIZE instance exactly backwards — real
+    regressions pass and improvements fail — and nothing else in the panel would
+    catch it, because every instance in the seed list happens to minimize today.
+    """
+    if a is None:
+        return False
+    if b is None:
+        return True
+    tol = 1e-6 * max(1.0, abs(a))
+    return (b > a + tol) if minimize else (b < a - tol)
+
+
 @pytest.mark.slow
 @pytest.mark.correctness
 @pytest.mark.skipif(not _DATA.is_dir(), reason="MINLPLib corpus not vendored")
 def test_finder_entry_share_stops_the_throughput_collapse():
     """Doubling the budget must not HALVE the tree (#1153's throughput half).
 
-    The legacy arm is run as a **control**, not for symmetry: without it, an arm
-    that collapsed for some unrelated reason — or a panel where the pump stopped
-    being admitted at all — would read as a pass (CLAUDE.md §6). The control must
-    reproduce the collapse for the treatment arm's result to mean anything, and
-    when it does not this **skips** rather than fails — see the comment below.
+    The legacy arm is run as a **control**: without it, an arm that collapsed for
+    some unrelated reason — or a panel where the pump stopped being admitted at
+    all — would read as a pass (CLAUDE.md §6). When the control does not
+    reproduce the collapse this **skips** rather than fails, because the absence
+    of the defect on a machine is not a regression in the code.
+
+    Arms are interleaved within each repetition and the comparison is over the
+    per-cell **median**, because a single OFF/ON draw is not a measurement here:
+    `heatexch_gen2` is bimodal at these budgets on some machines (measured
+    ``[7, 3]``, sd 2.0), and a sequential one-shot pair would redden the build on
+    an unlucky draw with no defect present (CLAUDE.md §9).
     """
+    reps = 2
+    samples: dict[tuple[str, str, float], list[int]] = {}
+    for _rep in range(reps):
+        for name in _COLLAPSE_PANEL:
+            path = _DATA / f"{name}.nl"
+            if not path.exists():
+                continue
+            for tl in (_SMALL, _LARGE):
+                for arm, on in (("legacy", False), ("share", True)):
+                    token = _with_entry_share(on)
+                    try:
+                        samples.setdefault((name, arm, tl), []).append(_nodes(path, tl))
+                    finally:
+                        solver_tuning.reset_current(token)
+
+    def med(name: str, arm: str, tl: float) -> float:
+        return statistics.median(samples[(name, arm, tl)])
+
+    compared = 0
     control_collapsed = 0
     failures: list[str] = []
-    compared = 0
     for name in _COLLAPSE_PANEL:
-        path = _DATA / f"{name}.nl"
-        if not path.exists():
+        if (name, "legacy", _SMALL) not in samples:
             continue
-        token = _with_entry_share(False)
-        try:
-            off_small, off_large = _nodes(path, _SMALL), _nodes(path, _LARGE)
-        finally:
-            solver_tuning.reset_current(token)
-        token = _with_entry_share(True)
-        try:
-            on_small, on_large = _nodes(path, _SMALL), _nodes(path, _LARGE)
-        finally:
-            solver_tuning.reset_current(token)
         compared += 1
-        if off_large < off_small:
+        if med(name, "legacy", _LARGE) < med(name, "legacy", _SMALL):
             control_collapsed += 1
-        if on_large < on_small:
+        if med(name, "share", _LARGE) < med(name, "share", _SMALL):
             failures.append(
-                f"{name}: share ON still collapses {on_small} -> {on_large} nodes "
-                f"({_SMALL}s -> {_LARGE}s); control {off_small} -> {off_large}"
+                f"{name}: share ON still collapses {med(name, 'share', _SMALL)} -> "
+                f"{med(name, 'share', _LARGE)} nodes ({_SMALL}s -> {_LARGE}s); "
+                f"control {med(name, 'legacy', _SMALL)} -> {med(name, 'legacy', _LARGE)}; "
+                f"raw {samples[(name, 'share', _SMALL)]} / {samples[(name, 'share', _LARGE)]}"
             )
 
     assert compared > 0, "no panel instance was vendored — this test measured nothing"
     if control_collapsed == 0:
-        # NOT a failure, and the distinction matters. The collapse is
-        # machine-dependent: it needs the 5 s run to land on the branch where the
-        # feasibility pump is refused, and on some containers the legacy arm is
-        # bimodal there (heatexch_gen2 measured [7, 3], sd 2.0, over two
-        # repetitions on one such box) or simply never takes it. Where the defect
-        # is absent the treatment cannot be judged at all, so the honest verdict
-        # is "not measurable here", not "the fix regressed" — asserting would turn
-        # a quiet machine into a red build. The treatment assertion below still
-        # runs whenever the control DOES reproduce it.
         pytest.skip(
             "the legacy arm did not reproduce the throughput collapse on this "
             "machine, so the treatment arm is unfalsifiable here (CLAUDE.md §6); "
@@ -493,9 +592,15 @@ def test_finder_entry_share_stops_the_throughput_collapse():
 @pytest.mark.slow
 @pytest.mark.correctness
 @pytest.mark.skipif(not _DATA.is_dir(), reason="MINLPLib corpus not vendored")
-def test_incumbent_quality_is_monotone_in_time_limit():
-    """More budget must never yield a worse incumbent (#1153's gate)."""
-    token = _with_entry_share(True)
+@pytest.mark.parametrize("share_on", [False, True], ids=["legacy", "share"])
+def test_incumbent_quality_is_monotone_in_time_limit(share_on):
+    """More budget must never yield a worse incumbent (#1153's gate).
+
+    Parametrised over BOTH arms on purpose. Gating only the flag-on arm would
+    leave the **shipped default path** — the flag is default-off — with no
+    monotonicity gate at all, which is the one configuration every user gets.
+    """
+    token = _with_entry_share(share_on)
     comparisons = 0
     violations: list[str] = []
     try:
@@ -503,17 +608,12 @@ def test_incumbent_quality_is_monotone_in_time_limit():
             path = _DATA / f"{name}.nl"
             if not path.exists():
                 continue
-            rung = [
-                (tl, from_nl(str(path)).solve(time_limit=tl, gap_tolerance=1e-4).objective)
-                for tl in _LADDER
-            ]
-            for (tl_a, obj_a), (tl_b, obj_b) in zip(rung, rung[1:]):
+            rung = [(tl, *_solve(path, tl)) for tl in _LADDER]
+            for (tl_a, obj_a, minimize), (tl_b, obj_b, _) in zip(rung, rung[1:]):
                 if obj_a is None:
                     continue  # nothing to be monotone about yet
                 comparisons += 1
-                if obj_b is None:
-                    violations.append(f"{name}: {tl_a}s -> {obj_a}, {tl_b}s -> no incumbent")
-                elif obj_b > obj_a + 1e-6 * max(1.0, abs(obj_a)):
+                if _worse(obj_a, obj_b, minimize):
                     violations.append(f"{name}: {tl_a}s -> {obj_a}, {tl_b}s -> {obj_b}")
     finally:
         solver_tuning.reset_current(token)

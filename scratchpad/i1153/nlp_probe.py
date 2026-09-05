@@ -9,7 +9,6 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt
 from discopt.modeling.core import from_nl
 import discopt.solvers.nlp_pounce as NP
-import discopt.solver as S
 
 print(f"# discopt.__file__ = {discopt.__file__}", flush=True)
 calls = []
@@ -27,8 +26,10 @@ def wrapped(evaluator, x0, **kw):
         calls.append((grant, time.perf_counter() - t, "<-".join(reversed(stack[-3:]))))
 
 
+# Only this seam is real. ``solver.solve_nlp_pounce`` does NOT exist as a module
+# attribute — it is a function-local import alias — so assigning it would be a
+# silent no-op that reads as a second, wider interception than the probe has.
 NP.solve_nlp = wrapped
-S.solve_nlp_pounce = wrapped
 
 inst = sys.argv[1]
 seen = 0
