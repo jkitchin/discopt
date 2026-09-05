@@ -174,3 +174,72 @@ Two rules follow, and both are load-bearing:
    bound on a minimum; a dual bound is the certificate and never comes from a local
    solve. This asymmetry is what lets a local mode warm-start the global solver
    without contaminating it.
+
+## 7. The exact continuous (simplex/CNF) lowering — `gdp_method="simplex"`
+
+Issue #1182 (deferred from RFC #1123) adds a third exact lowering beside big-M and
+hull, implemented in `discopt._relax.simplex_lowering`. It is **opt-in**, and the
+reasons it is opt-in are measurements, recorded in `docs/dev/performance-plan.md`
+§26 with the probes in `scratchpad/issue1182/`.
+
+### What it emits
+
+Theorem 1 of Wehbeh & Kerrigan ([arXiv:2601.03906v1](https://arxiv.org/abs/2601.03906v1))
+replaces a CNF clause $\bigvee_j [p_{ij}(z) \le 0]$ with
+
+$$\sum_j \lambda_{ij}\,p_{ij}(z) \le 0,\qquad \lambda_i \ge 0,\qquad \sum_j \lambda_{ij} = 1 .$$
+
+A discopt disjunction is $\bigvee_j \bigwedge_k c_{jk}$, so CNF conversion
+distributes over the conjunctions and produces $\prod_j |P_j|$ clauses, where an
+equality row counts as **two** predicates. That blowup is real and is refused above
+`MAX_CNF_CLAUSES` rather than expanded silently; the four size quantities — clauses,
+literal occurrences, weight variables, rows — are recorded **separately** on
+`Model._simplex_lowerings`, because reducing one says nothing about the others.
+
+### What it guarantees, and what it does not
+
+- **Exact in projection onto the model variables.** The lifted problem stays
+  nonconvex; exactness is a statement about the projected feasible set. Because the
+  objective is a function of the source variables, a certified global solve of the
+  lowered model is a certificate for the source model — this path introduces no
+  local-only result and needs no local/certified distinction of its own (§6).
+- **`ONE_WAY` activation only.** `EXACTLY_ONE_TRUE` is refused, not approximated:
+  §3.1 of the paper represents strict negation with an existential exponential lift,
+  and substituting a closed inequality or a fixed margin would change the declared
+  feasible set (§5's rule).
+
+### The weights are witnesses, not selectors
+
+$\lambda_{ij}$ is an **existential witness** for "some literal of clause $i$ holds".
+By §4's taxonomy it is an existential compiler auxiliary — but unlike a selector
+binary it is *continuous* in $[0, 1]$, so:
+
+- a fractional $\lambda$ at a feasible point is **not** failed Boolean integrality,
+  and must never be reported as one;
+- it must not be turned into a recovered named Boolean assignment. Reading truth off
+  the weighted row is wrong in a way the source rows expose: at $\lambda = (0.4, 0.6)$
+  with $p_1 = 2$ and $p_2 = -4$ the weighted row reads $-1.6 \le 0$ while the first
+  literal is violated by $2$.
+
+The supported questions are answered on the **declared** predicates at the returned
+point:
+
+- `disjunction_residuals(model, point)` — per disjunction, $\min_j \max_k p_{jk}(z)$,
+  each residual carrying the definition string that produced it. The point is an
+  argument, never cached state, so a report taken elsewhere cannot stand in for
+  source validation. A model declaring no disjunction raises rather than returning an
+  empty report that would read as a pass.
+- `selected_disjuncts(model, point)` — which disjuncts actually hold. The answer is a
+  **set**: under `SELECT_ONE` a point may lie in several disjuncts (§2), and it is
+  empty when the disjunction is violated, which callers must treat as a failed
+  validation rather than as "the first disjunct".
+
+### Why it is not the default
+
+On every corpus benchmarked in #1182 it is slower than big-M and certifies strictly
+less. It exists for the disjunct rows the other two lowerings **refuse**: big-M
+raises when a row's interval enclosure is unbounded, and hull raises
+`HullPerspectiveOriginError` when the row is not finite at the origin. Theorem 1
+needs neither — its weights are bounded by construction and it forms no perspective.
+Scanning 11,058 GDPlib disjunct rows found 18 (in `stranded_gas`, `log` of a capacity
+sum whose box includes 0) that hit **both** refusals.

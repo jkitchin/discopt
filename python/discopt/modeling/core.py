@@ -2774,6 +2774,13 @@ class Model:
         # each; the mark lived on the relation as weakrefs first and the method
         # as a plain field, and both were wrong for the same reason.
         self._lowered_complementarities: dict = {}
+        # Size accounting for the #1182 exact continuous (simplex/CNF) lowering,
+        # one ``SimplexLoweringRecord`` per disjunction that pass handled. Empty
+        # on every other GDP method and on any model that was never lowered, so
+        # a reader never has to ask whether the attribute exists. Declared here
+        # rather than attached by the pass so the four size quantities of #1182
+        # requirement 4 survive pickling and copying with the model.
+        self._simplex_lowerings: list = []
         # Decomposition annotations (Benders / Lagrangian). Populated by
         # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
         # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by

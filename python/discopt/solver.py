@@ -7282,6 +7282,14 @@ def solve_model(
         - ``"big-m"`` (default), ``"hull"`` (convex hull), ``"mbigm"``,
           ``"auto"`` — reformulate disjunctions into a standard algebraic
           MIP/MINLP, then dispatch normally.
+        - ``"simplex"`` — the exact *continuous* CNF lowering of #1182
+          (:mod:`discopt._relax.simplex_lowering`): each disjunction becomes
+          continuous weights in ``[0, 1]`` on a simplex and no selector binary
+          at all. Exact in projection onto the model variables, so a certified
+          solve of the lowered model certifies the original. Measurably slower
+          than big-M/hull on every corpus benchmarked in #1182 and never chosen
+          by ``"auto"``; it exists for disjunct rows big-M and hull both refuse
+          (unbounded interval enclosure *and* non-finite at the origin).
         - ``"loa"`` — *native* logic-based Outer Approximation on the
           disjunctive form (dispatches to :func:`solve_gdpopt_loa`), not a
           reformulation.
@@ -7998,6 +8006,15 @@ def solve_model(
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
         native_gdp_methods = {"loa"}
+        if gdp_method == "simplex":
+            raise ValueError(
+                "gdp_method='simplex' lowers every disjunction to continuous "
+                "weights (#1182), leaving no selector binary for the MIP-NLP "
+                "family to branch or decompose on, so the combination is "
+                "contradictory rather than merely slow. Use the default solver "
+                "with gdp_method='simplex', or solver='mip-nlp' with "
+                f"gdp_method in {{{', '.join(sorted(repr(m) for m in gdp_methods))}}}."
+            )
         if gdp_method == "oa":
             warnings.warn(
                 "gdp_method='oa' is deprecated for selecting MINLP OA. Use "

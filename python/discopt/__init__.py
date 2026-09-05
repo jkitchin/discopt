@@ -108,6 +108,12 @@ if (
         _os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0")
         _os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "0")
 
+from discopt._relax.simplex_lowering import (
+    disjunction_residuals as disjunction_residuals,
+)
+from discopt._relax.simplex_lowering import (
+    selected_disjuncts as selected_disjuncts,
+)
 from discopt.callbacks import (
     CallbackContext as CallbackContext,
 )

@@ -3,6 +3,12 @@
 Converts indicator constraints, disjunctive constraints, and SOS constraints
 into standard MINLP constraints via big-M reformulation.
 
+Disjunctions additionally support ``"hull"``, ``"mbigm"``, ``"auto"`` and the
+exact *continuous* ``"simplex"`` lowering of #1182 (Theorem 1 of
+arXiv:2601.03906v1, implemented in :mod:`discopt._relax.simplex_lowering`).
+``"simplex"`` emits no selector binary at all; see that module for why it is
+opt-in and which disjunct rows only it can lower.
+
 The reformulation is applied as a preprocessing step before the model is
 passed to the NLP evaluator and solver. If no GDP constraints exist, the
 original model is returned unchanged (zero overhead).
@@ -111,10 +117,17 @@ def reformulate_gdp(
     method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default), ``"hull"`` (convex hull),
-        ``"mbigm"`` (multiple big-M with LP-based tightening), or
+        ``"mbigm"`` (multiple big-M with LP-based tightening),
         ``"auto"`` to dispatch per-disjunction via the F1 advisor in
         :mod:`discopt._relax.gdp_advisor` (each disjunction independently
-        gets the structurally-best of the three).
+        gets the structurally-best of the three), or ``"simplex"`` for the exact
+        continuous CNF lowering of #1182
+        (:mod:`discopt._relax.simplex_lowering`), which introduces continuous
+        weights in ``[0, 1]`` instead of selector binaries. ``"simplex"`` is
+        measurably slower than big-M/hull on the corpora benchmarked in #1182
+        and exists for the disjunct rows neither of them can lower at all
+        (unbounded interval enclosure *and* non-finite at the origin); it is
+        never selected by ``"auto"``.
         Indicator and SOS constraints always use big-M regardless.
     respect_disjunction_methods : bool, default True
         Whether a disjunction-local ``method`` override should take precedence
@@ -175,6 +188,27 @@ def reformulate_gdp(
         new_model._variables.append(var)
         return var
 
+    _weight_counter = [0]
+
+    def _add_simplex_weight(size: int) -> Variable:
+        """Allocate one Theorem-1 weight vector: continuous, in ``[0, 1]``.
+
+        Continuous **on purpose**: these are existential witnesses, not
+        selectors, so a fractional value at a feasible point is not a failed
+        Boolean integrality (#1182 requirement 1).
+        """
+        from discopt._relax.simplex_lowering import SIMPLEX_WEIGHT_PREFIX
+
+        name = f"{SIMPLEX_WEIGHT_PREFIX}{_weight_counter[0]}"
+        _weight_counter[0] += 1
+        while name in _taken:
+            name = f"{SIMPLEX_WEIGHT_PREFIX}{_weight_counter[0]}"
+            _weight_counter[0] += 1
+        _taken.add(name)
+        var = Variable(name, VarType.CONTINUOUS, (size,), 0.0, 1.0, new_model)
+        new_model._variables.append(var)
+        return var
+
     # In auto mode, ask the F1 advisor for a per-disjunction
     # recommendation up front; if any disjunction (or indicator) is
     # routed to mbigm we still need the LP relaxation precomputed.
@@ -202,7 +236,11 @@ def reformulate_gdp(
                 chosen = override
             else:
                 chosen = auto_advice.get(ci, method) if method == "auto" else method
-            if chosen == "hull":
+            if chosen == "simplex":
+                new_vars, new_cons = _reformulate_disjunction_simplex(
+                    c, new_model, _add_simplex_weight, ci
+                )
+            elif chosen == "hull":
                 new_vars, new_cons = _reformulate_disjunction_hull(c, new_model, _add_aux_binary)
             else:
                 # big-m and mbigm both go through _reformulate_disjunction;
@@ -941,6 +979,32 @@ def _reformulate_disjunction(
                 )
 
     return new_vars, new_cons
+
+
+def _reformulate_disjunction_simplex(
+    dc: _DisjunctiveConstraint,
+    model: Model,
+    add_weight,
+    index: int,
+) -> tuple[list[Variable], list[Constraint]]:
+    """Reformulate a disjunction with the exact continuous lowering of #1182.
+
+    Thin adapter over :func:`discopt._relax.simplex_lowering.
+    lower_disjunction_simplex`: the mathematics, the refusals and the size
+    accounting live there. The record is appended to ``model._simplex_lowerings``
+    so the four size quantities of #1182 requirement 4 stay inspectable after
+    the pass, and so a caller can see which disjunctions became witnesses rather
+    than selectors.
+
+    ``new_vars`` is returned empty on purpose: the weight variables are already
+    registered on ``model`` by ``add_weight`` (as ``_add_aux_binary`` does for
+    selectors), and the caller uses the returned list only for logging.
+    """
+    from discopt._relax.simplex_lowering import lower_disjunction_simplex
+
+    record, rows = lower_disjunction_simplex(dc, add_weight, index=index)
+    model._simplex_lowerings.append(record)
+    return [], rows
 
 
 def _reformulate_disjunction_nested(
