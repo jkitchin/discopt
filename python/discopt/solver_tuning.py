@@ -1881,6 +1881,36 @@ def saturate_role2(seconds: float, frac: float) -> float:
 HEURISTIC_ENTRY_SHARE = 0.25
 
 
+def finder_entry_share(calls: int, found: int) -> float:
+    """The budget share the NEXT finder-role root heuristic must fit in (#1153).
+
+    ``base ** (calls - found)`` — the base share raised to the number of
+    FRUITLESS finder attempts so far this solve:
+
+    * nothing tried yet -> ``1.0``, the legacy rule exactly. The first attempt is
+      never refused, because refusing it flatly is what cost ``tspn12`` its
+      incumbent (262.647 -> 282.244): the pump there is productive and cannot be
+      told apart from a wasted one in advance.
+    * one attempt, nothing found -> ``base``. This is the case #1153 measured: on
+      ``heatexch_gen2`` the first pump returns no incumbent and the second still
+      runs, and between them they spend 6.4 s of a 10 s budget while the tree
+      drops from 7 nodes to 3.
+    * one attempt, one incumbent -> ``1.0``. A finder that is paying its way
+      keeps its full allowance.
+
+    This is the *improver* role's success weighting (``_improver_allowed``'s
+    ``3 * (found + 1) / (calls + 1)``) carried across to the finder role, at the
+    granularity the measurement says matters: not whether a finder may run at
+    all, but whether it gets a SECOND unbounded attempt after a fruitless first.
+
+    Returns ``1.0`` throughout when the flag is off, which is the legacy rule.
+    """
+    base = heuristic_entry_share()
+    if base >= 1.0:
+        return 1.0
+    return float(base) ** max(0, int(calls) - int(found))
+
+
 def heuristic_entry_share() -> float:
     """The budget share a finder-role heuristic must fit in (#1153).
 

@@ -61,6 +61,7 @@ from discopt.solver_tuning import (
     HEURISTIC_ENTRY_SHARE,
     ROLE2_SATURATION_S,
     SolverTuning,
+    finder_entry_share,
     heuristic_entry_share,
     saturate_role2,
 )
@@ -133,6 +134,44 @@ def test_finder_entry_share_is_the_legacy_rule_when_off():
     token = _with_entry_share(False)
     try:
         assert heuristic_entry_share() == 1.0
+    finally:
+        solver_tuning.reset_current(token)
+
+
+@pytest.mark.unit
+def test_finder_share_shrinks_only_after_a_FRUITLESS_attempt():
+    """The first attempt keeps the legacy allowance; a fruitless one loses it.
+
+    This is the whole discrimination #1153 needs. A flat share refuses the first
+    pump too, and on ``tspn12`` that pump is PRODUCTIVE — refusing it cost the
+    incumbent 262.647 -> 282.244. Outcome, not cost, is what separates the pump
+    worth running from the one eating the search.
+    """
+    token = _with_entry_share(True)
+    try:
+        base = HEURISTIC_ENTRY_SHARE
+        # Nothing tried yet: the legacy rule, so the first finder always runs.
+        assert finder_entry_share(0, 0) == 1.0
+        # One attempt, nothing found: the share bites.
+        assert finder_entry_share(1, 0) == pytest.approx(base)
+        # One attempt that PAID: full allowance retained.
+        assert finder_entry_share(1, 1) == 1.0
+        # Repeated failure compounds; a later success still counts.
+        assert finder_entry_share(2, 0) == pytest.approx(base**2)
+        assert finder_entry_share(2, 1) == pytest.approx(base)
+        # Never negative exponent even if a caller passes found > calls.
+        assert finder_entry_share(0, 3) == 1.0
+    finally:
+        solver_tuning.reset_current(token)
+
+
+@pytest.mark.unit
+def test_finder_share_is_the_legacy_rule_throughout_when_off():
+    """Flag off must be 1.0 at every outcome, i.e. byte-identical legacy."""
+    token = _with_entry_share(False)
+    try:
+        for calls, found in ((0, 0), (1, 0), (1, 1), (5, 0)):
+            assert finder_entry_share(calls, found) == 1.0
     finally:
         solver_tuning.reset_current(token)
 
