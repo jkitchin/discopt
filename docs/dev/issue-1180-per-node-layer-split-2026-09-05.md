@@ -154,3 +154,72 @@ Two readings follow directly:
 NLP solves are the *root* multistart; the tree runs 4. Per-node cost in the tree
 is ~33 OBBT probe LPs per node, and it is the LP that is paid for.
 
+### §2.4 The corpus panel — 66 in-repo instances, 20 s each
+
+`nvs05` alone is a gate probe, not a class (CLAUDE.md §2), so the same two arms
+were run over the whole in-repo corpus (`python/tests/data/minlplib_nl`, 66
+instances, 20 s budget, 5185 nodes, 504.9 s of clean-arm wall, 333 executed
+assertions). Layer shares are **wall-weighted over the corpus** (self time
+summed across instances, then divided), with the per-instance median beside it
+so one long instance cannot carry the table:
+
+| layer | wall-weighted share | per-instance median (min–max) |
+|---|---:|---|
+| POUNCE native (IPM + tape) | **47.7 %** | 43.9 % (0.0–79.0) |
+| `discopt` Python | 15.4 % | 19.2 % (2.5–55.0) |
+| `discopt._rust` (LP/MILP) | 15.0 % | 4.8 % (0.2–54.5) |
+| other Python (stdlib, contextlib, builtins) | 9.4 % | 10.6 % (2.2–32.9) |
+| evaluator callback glue | 9.2 % | 7.5 % (0.0–21.5) |
+| numpy / scipy Python | 3.4 % | 4.9 % (0.5–23.2) |
+| **jax / XLA** | **0.00 %** | **0.0 % (0.0–0.0)** |
+
+Corpus component totals (same rules: `cum` per seam is an upper bound, `self` is
+additive):
+
+| seam | calls | self | cum | share of self total |
+|---|---:|---:|---:|---:|
+| `nlp_pounce.solve_nlp` (the node/root NLP) | 3080 | — | 298.7 s | **57.4 % (cum)** |
+| POUNCE native IPM | 3107 | 233.8 s | 302.3 s | **44.9 % (self)** |
+| `discopt._rust.solve_lp_warm_csc_py` | 8542 | 48.2 s | — | 9.3 % |
+| evaluator callback glue (Python frames) | 1 952 138 | 47.7 s | — | 9.2 % |
+| `mccormick_lp._solve_at_node_impl` | 386 | — | 71.4 s | 13.7 % (cum) |
+| `build_milp_relaxation` | 677 | — | 55.1 s | 10.6 % (cum) |
+| `obbt.py:_solve_probe` | 5817 | — | 22.5 s | 4.3 % (cum) |
+| `discopt._rust.solve_milp_csc_py` | 341 | 18.5 s | — | 3.6 % |
+| **tape evaluation (all 5 native entries)** | **1 952 138** | **11.5 s** | — | **2.2 %** |
+
+**The headline, corpus-wide: the per-node cost is the NLP solve, and the NLP
+solve is native.** `solve_nlp` accounts for 57 % of profiled wall, and 45 % of
+*all* self time is POUNCE's own IPM — code with no Python in it. The Rust LP is
+the second consumer at 9.3 %, and `nvs05`'s OBBT-probe dominance (§2.2) is a
+two-instance phenomenon (`nvs05` 41.6 %, `nvs09` 30.0 %, every other instance
+≤ 10.6 %), not the class.
+
+**The evaluator-callback picture repeats at corpus scale.** 1.95 million
+callbacks cost **11.5 s of tape arithmetic (2.2 %)** wrapped in **47.7 s of
+Python glue (9.2 %)** — 5.9 µs of math per callback under 24.5 µs of frames, the
+same ~4× ratio as `nvs05`. Deleting *every* Python frame between POUNCE and the
+tape is worth at most **1.10×** corpus-wide.
+
+**Two honesty notes on this table.**
+
+1. *cProfile distortion is not negligible here.* Profiled wall / clean wall is
+   median **1.23×** (0.63×–2.18×), and 8 of 66 instances land on a different
+   node count under the profiler. Python-frame-heavy instances inflate most, so
+   every Python share above is an **upper bound** and every native share a lower
+   bound. The direction of the headline is therefore safe: native dominance is
+   understated, not overstated.
+2. *The clean arm's FFI split is a cross-check on the headline only*, not a
+   second estimate of the same partition — `discopt._timing` charges the tape
+   callbacks (glue included) to `rust`, and anything native that is not inside a
+   `charge` region falls into its `python` residual. Over the corpus it reports
+   **rust 292.2 s / python 209.9 s / jax 0.00 s**, with `jax` absent from
+   `sys.modules` on all 66. That agrees with cProfile on both things it can
+   see: native-dominated, and no JAX.
+
+A defect found while reading it: `_ElasticFeasibilityEvaluator` (solver.py)
+declares no `timing_bucket`, so it trips the `[timing-bucket-unknown]` warning
+and its derivative-callback time is left with the enclosing region. It is an
+attribution gap in the FFI instrument, not a solver bug, and it is why the
+cProfile arm is the primary instrument here.
+

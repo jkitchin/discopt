@@ -138,3 +138,6 @@ scratchpad/_*_worker.py
 
 # #1180 raw profiler dumps (regenerate with issue1180_layer_split.py --pstats-dir)
 scratchpad/**/*.pstats
+
+# #1180 probe-chain completion sentinels
+scratchpad/**/PROBES*_DONE

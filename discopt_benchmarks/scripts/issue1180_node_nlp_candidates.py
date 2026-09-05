@@ -8,9 +8,10 @@ replaced the JAX one. The three that survive, and how each is measured here:
 
 1. **POUNCE iteration count per node-NLP.** Every ``solve_nlp`` on the POUNCE
    path is recorded: iterations, wall, status, size, and the callback counts it
-   drove. Root-phase solves (the multistart, which runs before the first node
-   callback) are separated from tree-phase node solves, because they are
-   different work and averaging them hides both.
+   drove. The root multistart and the tree's node solves are separated by a
+   companion ``max_nodes=1`` run rather than by a ``node_callback`` phase flag:
+   attaching a callback is NOT observation-neutral, it is a documented routing
+   signal, and it measures a different engine (see ``run_instance``).
 
 2. **Python frame overhead in ``_IpoptCallbacks`` / ``_BoundOverrideEvaluator``.**
    The callback path is five Python frames deep before any arithmetic happens:
@@ -40,6 +41,7 @@ before any number is believed; per-item progress printed.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import statistics
@@ -61,94 +63,137 @@ CB_NAMES = ("objective", "gradient", "constraints", "jacobian", "hessian")
 
 
 def instrument():
-    """Wrap the callback class and the POUNCE solve entry point.
+    """Wrap the callback class and BOTH POUNCE entry points.
+
+    Two entry points, not one: the serial ``pounce.Problem.solve`` and the batch
+    ``pounce.solve_nlp_batch`` (``solver._solve_batch_pounce``). An earlier
+    version of this probe wrapped ``nlp_pounce.solve_nlp`` only and asserted it
+    fired -- which it did not on ``alan``, whose node NLPs all go through the
+    batch path. The assertion caught it instead of reporting a vacuous zero,
+    which is the point of having one.
 
     Returns ``(state, restore)``. The wrappers only count and record; they never
     catch an exception (CLAUDE.md §7).
     """
     import pounce
 
-    from discopt.solvers import nlp_ipopt, nlp_pounce
+    from discopt.solvers import nlp_ipopt
 
     state: dict = {
-        "phase": "root",
         "cb_counts": dict.fromkeys(CB_NAMES, 0),
         "solves": [],
         "last_callbacks": None,
         "last_x": None,
-        "captures": [],  # (problem, info, x0, phase)
+        "captures": [],
+        "batch_calls": 0,
+        "non_problem_batches": 0,
     }
 
     originals = {n: getattr(nlp_ipopt._IpoptCallbacks, n) for n in CB_NAMES}
     orig_init = nlp_ipopt._IpoptCallbacks.__init__
-    orig_solve_nlp = nlp_pounce.solve_nlp
     orig_problem_solve = pounce.Problem.solve
+    orig_batch = pounce.solve_nlp_batch
 
     def make_cb(name, fn):
+        @functools.wraps(fn)
         def wrapper(self, *a, **k):
             state["cb_counts"][name] += 1
             if name == "objective" and a:
                 state["last_x"] = np.array(a[0], dtype=np.float64)
             return fn(self, *a, **k)
 
-        wrapper.__name__ = fn.__name__
         return wrapper
 
+    @functools.wraps(orig_init)
     def init_wrapper(self, evaluator):
         orig_init(self, evaluator)
         state["last_callbacks"] = self
 
-    def problem_solve_wrapper(self, *a, **k):
-        out = orig_problem_solve(self, *a, **k)
-        state["_pending"] = (self, out[1], np.array(a[0]) if a else None)
-        return out
+    def _record(problem, x_star, info, x0, cb_delta, wall, source):
+        lb, ub = problem.get_bounds()[:2] if hasattr(problem, "get_bounds") else (None, None)
+        mid = None
+        if lb is not None and ub is not None:
+            mid = 0.5 * (
+                np.clip(np.asarray(lb, dtype=float), -1e6, 1e6)
+                + np.clip(np.asarray(ub, dtype=float), -1e6, 1e6)
+            )
+        rec = {
+            "source": source,
+            "iterations": int(info.get("iter_count", -1)),
+            "status": int(info.get("status", -100)),
+            "wall_s": wall,
+            "n": int(problem.n),
+            "m": int(problem.m),
+            "callbacks": cb_delta,
+            "callbacks_total": sum(cb_delta.values()),
+        }
+        if mid is not None and x0 is not None:
+            rec["x0_is_midpoint"] = bool(np.allclose(np.asarray(x0), mid, rtol=0, atol=1e-9))
+            rec["x0_dist_to_midpoint"] = float(np.linalg.norm(np.asarray(x0) - mid))
+        state["solves"].append(rec)
+        state["captures"].append(
+            {
+                "problem": problem,
+                "x": None if x_star is None else np.asarray(x_star, dtype=np.float64),
+                "info": info,
+                "x0": x0,
+                "mid": mid,
+                }
+        )
 
-    def solve_nlp_wrapper(evaluator, x0, *a, **k):
+    def problem_solve_wrapper(self, *a, **k):
         before = dict(state["cb_counts"])
-        state.pop("_pending", None)
         t0 = time.perf_counter()
-        res = orig_solve_nlp(evaluator, x0, *a, **k)
+        out = orig_problem_solve(self, *a, **k)
         wall = time.perf_counter() - t0
         delta = {n: state["cb_counts"][n] - before[n] for n in CB_NAMES}
-        lb, ub = evaluator.variable_bounds
-        rec = {
-            "phase": state["phase"],
-            "iterations": int(res.iterations or 0),
-            "status": str(res.status),
-            "wall_s": wall,
-            "n": int(evaluator.n_variables),
-            "m": int(evaluator.n_constraints),
-            "callbacks": delta,
-            "callbacks_total": sum(delta.values()),
-        }
-        pending = state.get("_pending")
-        if pending is not None:
-            problem, info, px0 = pending
-            mid = 0.5 * (np.clip(lb, -1e6, 1e6) + np.clip(ub, -1e6, 1e6))
-            rec["x0_is_midpoint"] = bool(
-                px0 is not None and np.allclose(px0, mid, rtol=0, atol=1e-9)
-            )
-            rec["x0_dist_to_midpoint"] = (
-                float(np.linalg.norm(px0 - mid)) if px0 is not None else None
-            )
-            state["captures"].append(
-                {"problem": problem, "info": info, "x0": px0, "mid": mid, "phase": state["phase"]}
-            )
-        state["solves"].append(rec)
-        return res
+        x0 = k.get("x0", a[0] if a else None)
+        _record(
+            self,
+            out[0],
+            out[1],
+            np.asarray(x0) if x0 is not None else None,
+            delta,
+            wall,
+            "serial",
+        )
+        return out
+
+    def batch_wrapper(problems, *a, **k):
+        state["batch_calls"] += 1
+        before = dict(state["cb_counts"])
+        t0 = time.perf_counter()
+        out = orig_batch(problems, *a, **k)
+        wall = time.perf_counter() - t0
+        delta = {n: state["cb_counts"][n] - before[n] for n in CB_NAMES}
+        probs = list(problems)
+        x0s = k.get("x0s") or (a[0] if a else None)
+        n_inst = max(len(probs), 1)
+        share = {n: v // n_inst for n, v in delta.items()}
+        for i, p in enumerate(probs):
+            if not isinstance(p, pounce.Problem):
+                # The POUNCE-native .nl path hands NlProblem instances; it is
+                # default-OFF, so this is recorded rather than handled.
+                state["non_problem_batches"] += 1
+                continue
+            x0 = None
+            if x0s is not None and i < len(x0s) and x0s[i] is not None:
+                x0 = np.asarray(x0s[i], dtype=np.float64)
+            _record(p, out[i][0], out[i][1], x0, share, wall / n_inst, "batch")
+        return out
 
     for n, fn in originals.items():
         setattr(nlp_ipopt._IpoptCallbacks, n, make_cb(n, fn))
     nlp_ipopt._IpoptCallbacks.__init__ = init_wrapper
-    nlp_pounce.solve_nlp = solve_nlp_wrapper
     pounce.Problem.solve = problem_solve_wrapper
+    pounce.solve_nlp_batch = batch_wrapper
 
     def restore():
         for n, fn in originals.items():
             setattr(nlp_ipopt._IpoptCallbacks, n, fn)
         nlp_ipopt._IpoptCallbacks.__init__ = orig_init
-        nlp_pounce.solve_nlp = orig_solve_nlp
         pounce.Problem.solve = orig_problem_solve
+        pounce.solve_nlp_batch = orig_batch
 
     return state, restore
 
@@ -210,13 +255,13 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
     import pounce
 
     cases = []
-    tree = [c for c in captures if c["phase"] == "tree"]
-    pool = tree if tree else captures
-    prev_info = None
+    pool = [c for c in captures if c["mid"] is not None and c["x0"] is not None]
+    prev = None
     n_ws_ok = 0
     for c in pool[:max_cases]:
         problem, info, x0, mid = c["problem"], c["info"], c["x0"], c["mid"]
-        row: dict = {"phase": c["phase"], "n": problem.n, "m": problem.m}
+        x_star = c["x"]
+        row: dict = {"n": problem.n, "m": problem.m}
         t0 = time.perf_counter()
         _, i_warm = problem.solve(x0=np.asarray(x0, dtype=np.float64))
         row["warm_x0"] = {
@@ -231,11 +276,11 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
             "status": int(i_cold.get("status", -100)),
             "wall_s": time.perf_counter() - t0,
         }
-        if prev_info is not None:
+        if prev is not None:
             # Unsigned state (no ``problem=``): dimensions are still checked
             # against the arrays, the rest is deliberately unverified because the
             # child box differs from the parent's by construction.
-            ws = pounce.WarmStart.from_info(prev_info)
+            ws = pounce.WarmStart.from_info(prev[0], prev[1])
             t0 = time.perf_counter()
             _, i_ws = problem.solve(x0=np.asarray(x0, dtype=np.float64), warm_start=ws)
             row["prev_warm_start"] = {
@@ -244,7 +289,7 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
                 "wall_s": time.perf_counter() - t0,
             }
             n_ws_ok += 1
-        prev_info = info
+        prev = (x_star, info) if x_star is not None else None
         cases.append(row)
 
     def med(key, field="iters"):
@@ -264,25 +309,54 @@ def warm_start_ab(captures: list, max_cases: int) -> dict:
     }
 
 
+def count_root_only(nl: str, time_limit: float) -> dict:
+    """How many NLP solves a ``max_nodes=1`` (root-only) solve runs.
+
+    The full run minus this is the tree's share -- the same construction the
+    layer-split probe's ``--root-arm`` uses, and the reason neither needs a
+    ``node_callback``.
+    """
+    from discopt.modeling.core import from_nl
+
+    state, restore = instrument()
+    try:
+        model = from_nl(nl)
+        t0 = time.perf_counter()
+        result = model.solve(time_limit=time_limit, gap_tolerance=1e-4, max_nodes=1)
+        wall = time.perf_counter() - t0
+    finally:
+        restore()
+    return {
+        "wall_s": wall,
+        "nodes": int(result.node_count),
+        "n_solves": len(state["solves"]),
+        "total_iterations": sum(r["iterations"] for r in state["solves"] if r["iterations"] > 0),
+    }
+
+
 def run_instance(nl: str, time_limit: float, reps: int, rounds: int, max_cases: int) -> dict:
     from discopt.modeling.core import from_nl
 
     state, restore = instrument()
     try:
         model = from_nl(nl)
-
-        def node_cb(_ctx, _model):
-            state["phase"] = "tree"
-
+        # NO ``node_callback``: attaching one is not observation-neutral. It is a
+        # documented routing signal (``_MIP_NLP_IGNORED_OPTIONS``, the GP probe,
+        # the substitution-presolve gate all refuse to auto-route when a caller
+        # asked to watch nodes), and it therefore measures a DIFFERENT ENGINE.
+        # Measured on ``alan`` in fresh subprocesses, both orders, same 13 nodes
+        # and same objective 2.925: without a callback the solve runs 54 POUNCE
+        # NLP solves and 11 130 tape evaluations; with one it runs 1 and 0.
         t0 = time.perf_counter()
-        result = model.solve(time_limit=time_limit, gap_tolerance=1e-4, node_callback=node_cb)
+        result = model.solve(time_limit=time_limit, gap_tolerance=1e-4)
         wall = time.perf_counter() - t0
 
         solves = state["solves"]
-        check(len(solves) > 0, f"{nl}: no POUNCE NLP solve was observed -- probe measured nothing")
-        root = [s for s in solves if s["phase"] == "root"]
-        tree = [s for s in solves if s["phase"] == "tree"]
-
+        check(
+            len(solves) > 0,
+            f"{nl}: no POUNCE NLP solve was observed on either entry point "
+            "-- probe measured nothing",
+        )
         cb_costs = None
         if state["last_callbacks"] is not None and state["last_x"] is not None:
             cb_costs = callback_layer_costs(
@@ -305,20 +379,24 @@ def run_instance(nl: str, time_limit: float, reps: int, rounds: int, max_cases: 
             "median_callbacks_per_solve": statistics.median(r["callbacks_total"] for r in rows),
             "total_callbacks": sum(r["callbacks_total"] for r in rows),
             "statuses": sorted({r["status"] for r in rows}),
+            "sources": sorted({r["source"] for r in rows}),
             "n": rows[0]["n"],
             "m": rows[0]["m"],
         }
 
+    root_only = count_root_only(nl, time_limit)
+
     return {
         "instance": os.path.basename(nl),
         "wall_s": wall,
+        "root_only": root_only,
         "nodes": int(result.node_count),
         "status": str(result.status),
         "objective": None if result.objective is None else float(result.objective),
         "bound": None if result.bound is None else float(result.bound),
-        "nlp_root_multistart": summarize(root),
-        "nlp_tree_nodes": summarize(tree),
         "nlp_all": summarize(solves),
+        "batch_calls": state["batch_calls"],
+        "non_problem_batch_instances": state["non_problem_batches"],
         "callback_layer_costs_us": cb_costs,
         "warm_start_ab": ab,
     }
@@ -352,15 +430,16 @@ def main() -> int:
         print(f"[{name}] solving with instrumentation ...", flush=True)
         rec = run_instance(nl, args.time_limit, args.reps, args.rounds, args.max_ab_cases)
         records.append(rec)
-        for key in ("nlp_root_multistart", "nlp_tree_nodes"):
-            s = rec[key]
-            if s:
-                print(
-                    f"[{name}] {key}: {s['n_solves']} solves, median {s['median_iterations']:.0f} "
-                    f"iters, {s['median_callbacks_per_solve']:.0f} callbacks/solve, "
-                    f"{s['median_wall_ms']:.0f} ms/solve",
-                    flush=True,
-                )
+        s = rec["nlp_all"]
+        if s:
+            print(
+                f"[{name}] {s['n_solves']} NLP solves ({rec['nodes']} nodes, "
+                f"n={s['n']} m={s['m']}): median {s['median_iterations']:.0f} iters, "
+                f"{s['median_callbacks_per_solve']:.0f} callbacks/solve, "
+                f"{s['median_wall_ms']:.1f} ms/solve, {s['total_wall_s']:.1f}s total "
+                f"of {rec['wall_s']:.1f}s wall",
+                flush=True,
+            )
         ab = rec["warm_start_ab"]
         print(
             f"[{name}] warm-start A/B on {ab['n_cases']} subproblems: "
