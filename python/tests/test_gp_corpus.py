@@ -38,6 +38,7 @@ import pytest
 from discopt._relax.convexity import classify_model
 from discopt.gp import classify_gp, is_log_convex, solve_gp
 from discopt.modeling.core import Model
+from discopt.validation import feasibility
 
 # Strictly-positive box shared by the continuous GP variables.
 POS = dict(lb=1e-3, ub=1e3)
@@ -200,21 +201,20 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
     # what the test is actually about, and it holds today.
     assert result.convex_fast_path is False
     # #1039: the objective assertion that used to live here now has its own test
-    # below -- it fails, and it fails for a soundness reason, so it is pinned as a
-    # strict xfail rather than having its tolerance widened past the defect.
+    # below. It was split out because it failed for a SOUNDNESS reason and was
+    # pinned as a strict xfail rather than having its tolerance widened past the
+    # defect; #1151 has since fixed the defect, so that test now passes on its
+    # original threshold and the xfail is gone.
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1151: reported objective is BELOW the true global minimum. The error is "
-        "the absolute constraint tolerance amplified by 1/denominator, so it is "
-        "unbounded as the denominator shrinks. Fix is in the Rust incumbent path."
-    ),
-)
 def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
     """A reported objective must be the objective AT the returned point.
+
+    **#1151 FIXED — the strict xfail this carried is retired, not its
+    assertions.** Every assertion and threshold below is #1150's, unchanged,
+    including the ``abs=1e-9`` equality; only the ``xfail`` marker is gone,
+    which is exactly the signal ``strict=True`` was set to give.
 
     #1039 bucket E listed this as an accuracy miss --
     ``assert 1.998683979470214 == 2.0 +- 1.0e-04`` -- and the obvious repair
@@ -246,17 +246,26 @@ def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
 
     (the last two land at large denominators, so the amplification vanishes).
 
-    A trace over the whole solve found ZERO Python frames returning the bad
-    value, so it is produced in the Rust B&B incumbent path and passed through --
-    which is why this is pinned here rather than fixed in this PR: the fix is a
-    bound-changing solver change and needs the §5 differential regime, not a
-    test-repair PR.
+    Two claims in the paragraphs above are corrected by the fix (CLAUDE.md §11),
+    and are left standing only because the measurements around them are right:
 
-    ``strict=True`` on purpose: when the incumbent objective is recomputed from
-    the original expression at the incumbent point (the general fix -- one
-    evaluation, and it can only make the number correct, since the point is
-    feasible and its true objective is a valid upper bound), this test XPASSes
-    and fails the suite, which is the signal to remove the xfail.
+    * "A trace found ZERO Python frames returning the bad value, so it is
+      produced in the Rust B&B incumbent path." A frame trace over the solve
+      does find one -- ``_tape_nlp_evaluator.evaluate_objective``. It looks like
+      a Rust value because the model being evaluated is the *reformulated* one,
+      whose objective is literally ``_fr_aux_0 + _fr_aux_1``, so re-evaluating
+      "the objective at the point" reproduces the relaxation reading exactly.
+    * "The fix is a bound-changing solver change." It is not. No bound, cut or
+      relaxation moved. The defect was in the incumbent *verifier*'s row-scale
+      term, ``max_j |J_ij| * max(1, |x_j|)``: the ``max(1, ...)`` floor
+      over-read a row's scale by ``1/|x_j|``, which is precisely the
+      amplification ``_clear_divisions``'s ``1/dmin`` scaling exists to remove.
+      Dropping the floor makes the scale a real term magnitude and bounds the
+      aux error *relatively*. See ``discopt.validation.feasibility``.
+
+    What the diagnosis above got exactly right is the mechanism -- absolute
+    tolerance over the denominator -- and the 1/y table, which is what made the
+    fix findable.
     """
     model = _monomial_balance()
     with warnings.catch_warnings():
@@ -270,10 +279,30 @@ def test_bb_reported_objective_is_attained_by_its_own_incumbent() -> None:
     oracle = xv / yv + yv / xv
 
     assert oracle >= 2.0 - 1e-9, f"the returned point itself is infeasible: f={oracle}"
-    assert result.objective == pytest.approx(oracle, abs=1e-9), (
+
+    # Tolerance = the bound the fix actually GUARANTEES, not the deviation it
+    # happens to achieve. #1151's verifier holds each quotient aux to
+    # ``|dw| <= abs_tol * max(1, |w|)``, so two auxes give ~2e-6 here. The
+    # original ``abs=1e-9`` passes today (measured delta ~4e-16 at this floor,
+    # worst 4.4e-13 across the sweep below) but only because the accepted
+    # incumbent's defining-row residual sits at float noise rather than at the
+    # tolerance boundary; on a 5 s time-limited solve, which incumbent is
+    # accepted is timing-dependent, so a boundary-residual incumbent would
+    # report a delta up to ~2e-6 and fail a property that was never claimed.
+    # Asserting the contract instead of the observation loses no signal: the
+    # defect this pins reported a delta of -1.318e-03, 660x outside this band.
+    tol = 1e-6 * max(1.0, abs(oracle))
+    assert result.objective == pytest.approx(oracle, abs=tol), (
         f"reported objective {result.objective!r} is not attained by its own "
         f"incumbent ({xv!r}, {yv!r}), whose true objective is {oracle!r} "
-        f"(delta {result.objective - oracle:+.6e})"
+        f"(delta {result.objective - oracle:+.6e}, allowed {tol:.3e})"
+    )
+    # The sharp assertion, and the one the issue is actually about: no reported
+    # objective may sit below the true global minimum. This one is exact --
+    # AM-GM gives exactly 2 -- so it carries only numerical slack.
+    assert result.objective >= 2.0 - tol, (
+        f"reported objective {result.objective!r} is BELOW the global minimum "
+        f"2.0 -- a false certificate"
     )
 
 
@@ -315,3 +344,119 @@ def test_nonpositive_variable_is_not_log_convex() -> None:
     x = m.continuous("x", lb=-1.0, ub=1.0)
     m.minimize(x * x)
     assert is_log_convex(m) is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #1151 — the reported objective must be attained by the reported point
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _division_gp(floor: float) -> Model:
+    """``minimize x/y + y/x`` over ``[floor, 1e3]^2``. Global minimum exactly 2
+    by AM-GM (``t + 1/t >= 2`` for ``t > 0``), attained on the diagonal."""
+    m = Model("balance")
+    x = m.continuous("x", lb=floor, ub=1e3)
+    y = m.continuous("y", lb=floor, ub=1e3)
+    m.minimize(x / y + y / x)
+    return m
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("floor", [1e-3, 1e-2, 1e-1, 1.0], ids=lambda f: f"floor{f:g}")
+def test_bb_reported_objective_is_attained_across_denominator_floors(
+    floor: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1151: ``objective`` and ``x`` must agree, at every denominator floor.
+
+    The sibling above pins the single box the issue reports. This sweeps the
+    denominator, which is the axis the defect was unbounded along, and adds the
+    two certificate-shaped checks that box alone cannot make: the reported value
+    is never below the true global minimum, and the dual bound never exceeds it.
+
+    The defect this pins was a **false certificate**, not an accuracy miss. The
+    solver reported ``objective = 1.998683979470214`` at ``status = optimal`` on
+    a problem whose global minimum is exactly 2 — a value no feasible point
+    attains, its own incumbent included (true objective there: 2.000002247829649).
+
+    The mechanism: a quotient in the objective is lifted to an aux ``w == x/y``
+    whose defining equality is cleared to ``w*y - x == 0``. A residual ``eps`` on
+    that row is an error of ``eps/y`` in ``w`` — and ``w`` is what the objective
+    reads. The incumbent verifier's row-scale term over-read the (deliberately
+    ``1/dmin``-scaled) row's magnitude by ``1/|x_j|``, restoring exactly the
+    amplification the scaling removes, so the error grew without bound as the
+    denominator shrank:
+
+    ==========  ==========  =============  ==============
+    box floor   denominator  reported−true  |delta|×denom
+    ==========  ==========  =============  ==============
+    1e-3        0.00140525   -1.318268e-03   1.852e-06
+    1e-2        0.0106986    -1.850776e-04   1.980e-06
+    1e-1        8.13524      -4.360956e-13   3.548e-12
+    1e+0        479.758      -4.440892e-16   2.131e-13
+    ==========  ==========  =============  ==============
+
+    ``|delta| x denominator`` flat at ~1.9e-6 (twice the 1e-6 absolute tolerance,
+    for the two quotient terms) is the signature: no fixed tolerance widening
+    bounds it, because the amplification is unbounded as ``y -> 0``.
+
+    The assertion is therefore a *relative* one, keyed on the objective's own
+    magnitude and on nothing about an intermediate denominator.
+    """
+    model = _division_gp(floor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Bounded budget, and deliberately shorter than an honest certificate
+        # needs on the tight floors (measured: 37.6 s at 1e-3, 227.8 s at 1e-2 —
+        # ``scratchpad/issue1151/cert_cost.py``). The assertions are about the
+        # reported VALUE, which is right from the first incumbent, not about
+        # reaching ``optimal``; the defect certified in 0.6 s, so a short budget
+        # discriminates just as sharply and keeps this off the slow critical path.
+        # §6: prove the changed code actually ran. `_row_scales` is entered only
+        # for rows already over the flat absolute tolerance ("pass 2"), which on
+        # the whole vendored `.nl` corpus never happens — measured, 0 invocations
+        # across 119 instances (`scratchpad/issue1151/panelA.txt`). So a solve
+        # that value-checks green tells us nothing about #1151 unless it also
+        # shows this path was exercised: a different reformulation, a fast path
+        # that avoids the quotient aux, or a pass-2 that is never reached would
+        # all keep the assertions below passing while measuring nothing.
+        calls = {"n": 0}
+        _real_row_scales = feasibility._row_scales
+
+        def _counting(*a, **k):
+            calls["n"] += 1
+            return _real_row_scales(*a, **k)
+
+        monkeypatch.setattr(feasibility, "_row_scales", _counting)
+        result = model.solve(solver="bb", time_limit=20.0)
+
+    # The floors at and above 1e-1 have denominators large enough that no row
+    # ever becomes suspect, so the path legitimately does not fire there; the
+    # tight floors are the ones that must exercise it. Asserting per-floor rather
+    # than unconditionally keeps this a real precondition instead of a wish.
+    if floor <= 1e-2:
+        assert calls["n"] > 0, (
+            f"the #1151 code path never ran at floor {floor:g} — this solve "
+            f"measured nothing about the defect, whatever its objective says"
+        )
+
+    assert result.objective is not None, "no incumbent to check"
+    assert result.x is not None, "an incumbent value with no point is not checkable"
+    xv = float(result.x["x"])
+    yv = float(result.x["y"])
+    # Plain-Python oracle: the ORIGINAL objective, no solver machinery involved.
+    oracle = xv / yv + yv / xv
+    tol = 1e-6 * (1.0 + abs(oracle))
+
+    assert result.objective == pytest.approx(oracle, abs=tol), (
+        f"reported objective {result.objective!r} is not the objective at the "
+        f"reported point ({oracle!r}); delta {result.objective - oracle:.6e}"
+    )
+    # And the reported value must not be below the true global minimum at all.
+    assert result.objective >= 2.0 - tol, (
+        f"reported objective {result.objective!r} is BELOW the global minimum 2.0 "
+        f"— a false certificate"
+    )
+    if result.bound is not None:
+        assert result.bound <= 2.0 + 1e-6, (
+            f"dual bound {result.bound!r} exceeds the true global minimum 2.0"
+        )

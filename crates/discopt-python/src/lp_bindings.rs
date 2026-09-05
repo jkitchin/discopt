@@ -1098,9 +1098,11 @@ impl MilpNodeHook for PyMilpNodeHook {
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
                     cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
-                    node_propagation=false, reduced_cost_fixing=true,
+                    node_propagation=true, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    initial_incumbent=None, time_limit_s=None, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
+                    root_cut_prune=true,
+                    debug_hook=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -1129,6 +1131,8 @@ pub fn solve_milp_py<'py>(
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: Option<f64>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
@@ -1197,6 +1201,8 @@ pub fn solve_milp_py<'py>(
         sb_node_budget,
         initial_incumbent,
         time_limit_s,
+        root_cut_time_s,
+        root_cut_prune,
         debug_hook,
         // No lazy separator on this entry point: it keeps the historical
         // 6-tuple return and the driver's untouched path. `solve_milp_lazy_csc_py`
@@ -1220,9 +1226,11 @@ pub fn solve_milp_py<'py>(
                     obj_const=0.0, max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
                     cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
-                    node_propagation=false, reduced_cost_fixing=true,
+                    node_propagation=true, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    initial_incumbent=None, time_limit_s=None, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
+                    root_cut_prune=true,
+                    debug_hook=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1256,6 +1264,8 @@ pub fn solve_milp_csc_py<'py>(
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: Option<f64>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1313,6 +1323,8 @@ pub fn solve_milp_csc_py<'py>(
         sb_node_budget,
         initial_incumbent,
         time_limit_s,
+        root_cut_time_s,
+        root_cut_prune,
         debug_hook,
         // No lazy separator on this entry point: it keeps the historical
         // 6-tuple return and the driver's untouched path. `solve_milp_lazy_csc_py`
@@ -1373,9 +1385,11 @@ pub fn solve_milp_csc_py<'py>(
                     obj_const=0.0, max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
                     cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
-                    node_propagation=false, reduced_cost_fixing=true,
+                    node_propagation=true, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    initial_incumbent=None, time_limit_s=None, debug_hook=None,
+                    initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
+                    root_cut_prune=true,
+                    debug_hook=None,
                     node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
@@ -1411,6 +1425,8 @@ pub fn solve_milp_lazy_csc_py<'py>(
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: Option<f64>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
     node_callback: Option<Py<PyAny>>,
     node_hook_rounds: usize,
@@ -1493,6 +1509,8 @@ pub fn solve_milp_lazy_csc_py<'py>(
         sb_node_budget,
         initial_incumbent,
         time_limit_s,
+        root_cut_time_s,
+        root_cut_prune,
         debug_hook,
         Some(lazy_callback),
         node_callback,
@@ -1536,6 +1554,8 @@ fn run_milp_hooked<'py>(
     sb_node_budget: usize,
     initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: Option<f64>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
     lazy_callback: Option<Py<PyAny>>,
     node_callback: Option<Py<PyAny>>,
@@ -1577,6 +1597,8 @@ fn run_milp_hooked<'py>(
         initial_incumbent: initial_incumbent
             .map(|arr| arr.as_slice().map(|s| s.to_vec()))
             .transpose()?,
+        root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
+        root_cut_prune,
         simplex: SimplexOptions {
             tol,
             max_iter: 100_000,

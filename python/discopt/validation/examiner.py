@@ -26,6 +26,7 @@ import numpy as np
 
 from discopt._dual_recovery import recover_multipliers, row_metadata
 from discopt.modeling.core import Model, ObjectiveSense, VarType
+from discopt.validation.feasibility import jacobian_row_scales
 
 PRIMAL_FEAS_TOL = 1e-6
 DUAL_FEAS_TOL = 1e-6
@@ -201,9 +202,21 @@ def examine(
                 rhs=rhs_arr,
             )
         )
-        # Examiner's scaled mode: row_scale = max(|RHS|, max|J_row|·max(1,|x|)).
+        # Examiner's scaled mode: row_scale = max(1, |RHS|, max_j |J_ij| * |x_j|),
+        # the row's first-order TERM magnitude.
+        #
+        # #1151: this used to floor ``|x_j|`` at 1, which is not a term magnitude
+        # — it over-reads a row's scale by ``1/|x_j|`` on every sub-unit column,
+        # so a row deliberately scaled by ``1/dmin`` (as `_clear_divisions` scales
+        # a cleared quotient) has that scaling divided straight back out. Measured
+        # on the #1151 witness point, this check reported ``[PASS]`` for a row
+        # violated by 9.276e-04 that `validation.feasibility.verify_point` rejects
+        # — the user-facing "is my solution feasible" tool vouching for a point
+        # the incumbent gate refuses. Shared with that module rather than written
+        # out again here: three hand-written copies of this expression is how the
+        # fix came to be applied in one place and not the other two.
         if jac.size:
-            jac_scale = np.max(np.abs(jac) * np.maximum(1.0, np.abs(x_flat))[None, :], axis=1)
+            jac_scale = jacobian_row_scales(jac, x_flat)
             row_scale = np.maximum(np.abs(rhs_arr), jac_scale)
             row_scale = np.maximum(row_scale, 1.0)
             viol_scaled = viol_unscaled / row_scale

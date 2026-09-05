@@ -9884,16 +9884,32 @@ def solve_model(
             # speed for correctness (CLAUDE.md §1). This mirrors the #740 fix on
             # the spatial path.
             if lazy_constraints is None and incumbent_callback is None:
-                # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
-                # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
-                # falls through to the default path if unavailable.
-                if nlp_solver == "simplex":
+                # Warm-started-simplex engine: the whole MILP B&B runs in Rust
+                # with dual-warm-started simplex node solves. Reached explicitly
+                # via ``nlp_solver="simplex"``, and — since the routing panel
+                # below — by DEFAULT for a pure MILP; falls through to the
+                # Python ``_solve_milp_bb`` whenever the engine defers.
+                #
+                # ``lagrangian_bound`` is the one request that must NOT be
+                # silently rerouted: the monolithic engine has no per-node hook,
+                # so honoring the user's explicit ask means staying on the Python
+                # path. An explicit ``nlp_solver="simplex"`` still warns and
+                # proceeds (unchanged behavior); the *default* route simply
+                # declines to take over.
+                _engine_bound: Optional[float] = None
+                _want_engine = nlp_solver == "simplex" or (
+                    _milp_engine_default_on() and not lagrangian_bound
+                )
+                if _want_engine:
                     if lagrangian_bound:
                         logger.warning(
                             "lagrangian_bound is ignored with nlp_solver='simplex' (the "
                             "monolithic Rust MILP engine has no per-node hook); use the "
                             "default nlp_solver='pounce' MILP path to enable it."
                         )
+                    # Carries the engine's valid dual bound back out when it
+                    # DEFERS, so the work is not thrown away (see below).
+                    _deferred: dict = {}
                     _simplex_res = _solve_milp_simplex(
                         model,
                         time_limit,
@@ -9901,9 +9917,12 @@ def solve_model(
                         max_nodes,
                         t_start,
                         initial_point=initial_point,
+                        deferred=_deferred,
+                        prefer_pounce=nlp_solver == "pounce",
                     )
                     if _simplex_res is not None:
                         return _simplex_res
+                    _engine_bound = _deferred.get("bound")
                 # POUNCE-only mode (nlp_solver="pounce", the universal default)
                 # routes to the self-hosted B&B and bypasses HiGHS entirely. An
                 # interior-point method is the wrong tool for the *linear* node LPs
@@ -9914,7 +9933,7 @@ def solve_model(
                 # The B&B itself is sound, runs the continuous-repair root dive for
                 # an early incumbent, recovers stalled nodes, and reduced-cost-fixes.
                 _pounce_only = nlp_solver == "pounce"
-                return _solve_milp_bb(
+                _bb_res = _solve_milp_bb(
                     model,
                     time_limit,
                     gap_tolerance,
@@ -9933,6 +9952,7 @@ def solve_model(
                     initial_point=initial_point,
                     incumbent_time_extension=incumbent_time_extension,
                 )
+                return _merge_engine_bound(_bb_res, _engine_bound, model)
             logger.info(
                 "MILP with a lazy_constraints/incumbent_callback — routing to spatial "
                 "Branch-and-Bound (the specialized MILP engine cannot honor these "
@@ -21477,6 +21497,144 @@ def _root_dive(
 _SIMPLEX_MILP_BUDGET_CAP_S = 10.0
 
 
+def _merge_engine_bound(
+    res: SolveResult, engine_bound: Optional[float], model: Model
+) -> SolveResult:
+    """Fold a DEFERRED engine's dual bound into the fallback's result.
+
+    When ``_solve_milp_simplex`` defers (``solver.py`` node-limit branch) it
+    returns ``None`` so the robust Python path takes over — but it has already
+    proven a dual bound on the same problem, and that bound used to be thrown
+    away with the rest of the result. Both bounds are valid bounds on the *same*
+    feasible set, so keeping the tighter one is sound: for a minimization the
+    valid lower bound is ``max(fallback, engine)``; for a maximization the valid
+    upper bound is ``min(...)``.
+
+    Deliberately does NOT upgrade ``status``. A tightened bound can close the
+    gap numerically, but ``optimal`` is a *certificate* claim and this function
+    has not re-run the search that would justify it (CLAUDE.md §1) — it only
+    reports a bound the solver genuinely proved. ``gap`` is recomputed so the
+    reported triple stays self-consistent.
+    """
+    if engine_bound is None or not math.isfinite(engine_bound):
+        return res
+    from discopt.modeling.core import ObjectiveSense as _MergeObjSense
+
+    maximize = model._objective is not None and model._objective.sense == _MergeObjSense.MAXIMIZE
+    if res.bound is None or not math.isfinite(res.bound):
+        merged = float(engine_bound)
+    else:
+        merged = (
+            min(float(res.bound), float(engine_bound))
+            if maximize
+            else max(float(res.bound), float(engine_bound))
+        )
+    # Never let the merged bound cross the incumbent. Both bounds are valid, but
+    # they come from two searches with independent floating-point error, so the
+    # engine's can land a hair past an objective the fallback proved optimal —
+    # and a reported ``bound > objective`` reads as a broken certificate even
+    # when nothing is actually wrong. This is the same clamp the Rust tree
+    # applies to its own global bound (`tree_manager.rs`, the incumbent cap).
+    if res.objective is not None and math.isfinite(res.objective):
+        merged = (
+            max(merged, float(res.objective)) if maximize else min(merged, float(res.objective))
+        )
+    if res.bound is not None and math.isfinite(res.bound) and merged == float(res.bound):
+        return res
+    gap = res.gap
+    if res.objective is not None and math.isfinite(res.objective):
+        gap = abs(res.objective - merged) / max(1.0, abs(res.objective))
+    return dataclasses.replace(res, bound=merged, gap=gap)
+
+
+def _milp_engine_default_on() -> bool:
+    """Whether a pure MILP routes to the Rust B&B engine *by default*.
+
+    Historically the monolithic Rust MILP engine was opt-in behind
+    ``nlp_solver="simplex"`` while the universal default (``"pounce"``) drove the
+    per-node Python B&B (`_solve_milp_bb`). Measured on a 10-instance MILP panel
+    (60 s, ``max_nodes`` un-starved, 2 reps with rotated arm order, every
+    ``optimal`` claim oracle-checked): the engine solves 7/10 vs 6/10 and cuts
+    total wall 275 s -> 174 s, with mk_cflp 39x, mk_knapsack50 28x, mk_uflp 20x
+    and mk_pmedian flipping ``time_limit`` -> ``optimal`` in 9.89 s. Nothing
+    regressed and no ``optimal`` claim was wrong.
+
+    Re-read each call (never cached) so tests and panels can flip it in-process.
+    ``DISCOPT_MILP_ENGINE=0`` is the opt-out; the ``_solve_milp_bb`` path stays
+    intact and is still reached whenever the engine defers.
+    """
+    return os.environ.get("DISCOPT_MILP_ENGINE", "1").lower() not in ("0", "false", "no")
+
+
+def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
+    """Root cut options for the pure-MILP engine, or ``None`` to keep the
+    binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
+
+    Measured motivation (30-instance MILP panel, 20 s/instance): on the
+    lot-sizing / production-planning family the root dual bound the engine
+    proves is **18.9%** of the optimum, while HiGHS closes the same instances at
+    **100%** of theirs at its own root. That is not a missing cut *class* -- the
+    engine already separates cover and GMI cuts -- it is the budget: one round of
+    at most 16 cuts. Raising the same separator to 500 cuts over 50 rounds with
+    efficacy/orthogonality selection takes the prodplan root bound to **89.3%**
+    in 4.7 s.
+
+    Bound-CHANGING (CLAUDE.md §5), so this shipped default-OFF until a
+    corpus-wide differential panel came back cert-clean AND net-positive.
+    Nothing here can make a bound unsound -- a Gomory/cover cut is valid for the
+    integer hull either way -- but "sound" is not the bar; "measurably helpful
+    broadly" is (the ``DISCOPT_CUT_INHERIT`` lesson).
+
+    **Graduated default-ON 2026-09-05.** 38 MIPLIB instances, ``gap_tol=1e-4``,
+    20 s each, both arms interleaved within every replicate, 2 replicates, run
+    twice under different machine load:
+
+    ==========================  ==========  ==========  ==================
+    arm                         solved      nodes       gap on the 17 open
+    ==========================  ==========  ==========  ==================
+    off (``root_cuts=16``, 1)   18-19/38    9.41 M      mean 0.2028
+    on (this budget)            **21/38**   **5.35 M**  **mean 0.1494**
+    ==========================  ==========  ==========  ==================
+
+    *Cert-clean*: 304 bound-vs-reference-optimum comparisons across the two runs,
+    zero violations, and no certification regression -- ``fiber``, ``gt2`` and
+    ``neos-3611689-kaihu`` go feasible -> optimal, none go the other way.
+    *Net-positive*: +3 instances, -43 % nodes, and the dual gap on the instances
+    nobody closes drops from 0.2028 to 0.1494 (median 0.1052 -> 0.0265). The
+    four ``mik-250-20-75-*`` -- a pure *dual* failure family -- go from ~0.14 to
+    ~0.037 at a matched node budget.
+
+    The honest cost: cuts buy the hard instances by taxing the easy ones. ON is
+    *slower* on 11 of the 18 both arms solve (``neos-3611447-jijia`` 7.5 -> 13.9 s,
+    ``enlight8`` 5.4 -> 10.5 s, ``22433`` 0.31 -> 2.51 s) and faster on 7
+    (``bppc8-02`` 3.79 -> 1.44 s). Total wall still fell in both runs
+    (426 -> 398 s, 425 -> 400 s), but this machine never idles below load ~5, so
+    per CLAUDE.md §9 the *wall* column is corroboration only -- the verdict rests
+    on solved count, node count and dual bound, which are load-independent and
+    which both runs reproduced to four digits. The per-instance tax is the
+    argument for the plan's A1 (stall-based termination and cut aging), not a
+    reason to withhold the budget.
+
+    Set ``DISCOPT_MILP_ROOT_CUTS=0`` to restore the binding's historical
+    ``root_cuts=16, cut_rounds=1`` single pass.
+
+    ``root_cut_time_s`` is what makes 50 rounds safe to ask for: without it a
+    long separation phase on a large root LP would spend the engine's whole slice
+    proving a bound with no time left to branch.
+    """
+    if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
+        return None
+    return {
+        "root_cuts": 500,
+        "cut_rounds": 50,
+        "cut_select": True,
+        # Half the engine's slice, floored so a very short budget still gets one
+        # useful pass. The loop stops early on tailing off, so on an instance
+        # whose root closes in two rounds this ceiling is never reached.
+        "root_cut_time_s": max(0.5, 0.5 * float(engine_budget)),
+    }
+
+
 def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> Optional[np.ndarray]:
     """A lifted-space seed built by improving *x_lifted* with an assignment-aware
     swap over the ORIGINAL variables, or ``None`` when unavailable.
@@ -21534,6 +21692,8 @@ def _solve_milp_simplex(
     max_nodes: int,
     t_start: float,
     initial_point: Optional[np.ndarray] = None,
+    deferred: Optional[dict] = None,
+    prefer_pounce: bool = False,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -21543,7 +21703,12 @@ def _solve_milp_simplex(
     inherited basis), with a continuous-repair root dive for an early incumbent.
     Returns ``None`` to defer to the default path when the binding is unavailable,
     the model has no constraints, or the returned point fails the feasibility
-    gate. Pure-MILP only; MINLP/MIQP keep the POUNCE/IPM path."""
+    gate. Pure-MILP only; MINLP/MIQP keep the POUNCE/IPM path.
+
+    When *deferred* is a dict and this function returns ``None`` after the engine
+    actually ran, its valid dual bound is stored under ``"bound"`` so the caller
+    can fold it into the fallback's result instead of discarding proven work.
+    """
     from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
 
@@ -21643,6 +21808,13 @@ def _solve_milp_simplex(
     if initial_point is not None and np.asarray(initial_point).size == n_orig:
         _seed = np.ascontiguousarray(np.asarray(initial_point, dtype=np.float64).ravel())
 
+    # Root cut budget (default-ON since 2026-09-05; see ``_milp_root_cut_budget``,
+    # whose docstring carries the graduation panel). Passed as
+    # keywords so the binding's own defaults stand when the flag is off -- these
+    # same defaults also serve the MINLP per-node relaxer, which is why the
+    # budget is raised HERE and not by changing them.
+    _cut_opts = _milp_root_cut_budget(_milp_budget) or {}
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -21657,6 +21829,7 @@ def _solve_milp_simplex(
         initial_incumbent=_seed,
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
+        **_cut_opts,
     )
 
     # Feasibility gate (shared by the return path below and the #698 re-entry
@@ -21862,6 +22035,37 @@ def _solve_milp_simplex(
         except Exception as _e:  # pragma: no cover - defensive
             logger.debug("root LP relaxation bound failed: %s", _e)
 
+        # Relaxation duals at the incumbent. ``SolveResult`` promises named
+        # constraint duals / reduced costs for a MILP (test_solver_duals.py,
+        # test_p1_milp_bb_soundness.py), and the Python ``_solve_milp_bb`` path
+        # has always supplied them. Routing a pure MILP here by default must not
+        # silently drop that half of the contract, so recover them the same way:
+        # re-solve the relaxation with the integers fixed at the incumbent. The
+        # row decomposition (_A_ub_m/_b_ub_m/_A_eq_m/_b_eq_m) and ``n_orig`` are
+        # already built above for the feasibility gate.
+        #
+        # Reporting only: the recovered duals never feed back into the bound or
+        # the certificate, so a failed recovery degrades to ``None`` rather than
+        # failing the solve.
+        constraint_duals = None
+        bound_duals_lower = None
+        bound_duals_upper = None
+        try:
+            constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
+                model,
+                lp_data=lp_data,
+                x_flat=np.asarray(xo, dtype=float),
+                n_orig=n_orig,
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
+                time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                prefer_pounce=prefer_pounce,
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug("simplex MILP dual recovery failed: %s", _exc)
+
         return SolveResult(
             status=status,
             objective=obj_val,
@@ -21874,6 +22078,9 @@ def _solve_milp_simplex(
             root_gap=root_gap_val,
             root_time=root_time_val,
             gap_certified=status == "optimal",
+            constraint_duals=constraint_duals,
+            bound_duals_lower=bound_duals_lower,
+            bound_duals_upper=bound_duals_upper,
         )
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
@@ -21887,6 +22094,16 @@ def _solve_milp_simplex(
         # branch above, so deferral only discards a no-solution result. On a
         # debugger `quit` this instead surfaces the uncertified partial state
         # (no fallback engine resumes a solve the user stopped).
+        #
+        # The *bound* is not discarded with it. The engine proved a valid dual
+        # bound on this very problem before running out of budget; handing it
+        # back lets the caller keep the tighter of the two (both are valid), so
+        # a deferral costs search time but never proven information.
+        if deferred is not None and bound is not None and np.isfinite(bound):
+            # ``bound`` is the engine's internal (always-minimize) bound; flip it
+            # back into the model's own sense, exactly as the optimal/feasible
+            # branch does at the ``bound_val`` assignment above.
+            deferred["bound"] = float(-bound if maximize else bound)
         return _debug_stopped_result()
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 

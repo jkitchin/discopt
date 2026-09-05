@@ -1,0 +1,19 @@
+   floor  arm rep     status             objective     wall
+   1e-03   on   0    optimal                     2    37.58
+   1e-03  off   0    optimal      1.99868397947021     0.57
+   1e-03   on   1    optimal                     2    38.23
+   1e-03  off   1    optimal      1.99868397947021     0.61
+   1e-03   on   2    optimal                     2    38.04
+   1e-03  off   2    optimal      1.99868397947021     0.61
+   1e-02   on   0    optimal                     2   228.61
+   1e-02  off   0    optimal      1.99985334212268     0.77
+   1e-02   on   1    optimal                     2   227.78
+   1e-02  off   1    optimal      1.99985334212268     0.73
+   1e-02   on   2    optimal                     2   228.08
+   1e-02  off   2    optimal      1.99985334212268     0.75
+
+floor 1e-03 off: status={'optimal'} obj={1.99868397947} wall mean 0.60s sd 0.02
+floor 1e-03  on: status={'optimal'} obj={2.0} wall mean 37.95s sd 0.27
+floor 1e-02 off: status={'optimal'} obj={1.999853342123} wall mean 0.75s sd 0.02
+floor 1e-02  on: status={'optimal'} obj={2.0} wall mean 228.16s sd 0.34
+executed solves: 12

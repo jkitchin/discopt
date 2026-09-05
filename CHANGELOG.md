@@ -245,6 +245,42 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Reported objective could sit BELOW the true global minimum on quotient
+  expressions, at `status = optimal`** (#1151). `minimize x/y + y/x` over
+  `[1e-3, 1e3]^2` returned `1.998683979470214`; the global minimum is exactly 2
+  by AM-GM, so the reported number was attained by no point — its own incumbent
+  included, whose true objective is `2.000002247829649`. A false certificate, not
+  an accuracy miss. The mechanism is the absolute feasibility tolerance amplified
+  by `1/denominator`, so no fixed tolerance widening bounds it: `|delta| x
+  denominator` measured flat at ~1.9e-6 across box floors.
+  The defect was in the incumbent verifier's **row-scale** term, not in any bound,
+  cut or relaxation. `factorable_reform` lifts `x/y` to an aux `w == x/y` whose
+  defining equality is cleared to `w*y - x == 0` and then multiplied by
+  `1/dmin`, precisely so a fixed *absolute* residual test bounds the error in
+  `w`. The verifier's `max_j |J_ij| * max(1, |x_j|)` divided that scaling back
+  out: the `max(1, ...)` floor is not a term magnitude, and over-reads a row's
+  scale by `1/|x_j|` on every sub-unit column — reading 1000 (the coefficient on
+  `x`) where the row's terms reach only 1.4, and so licensing a tolerance of 1e-3
+  for a row violated by 9.28e-4. The scale is now the row's first-order term
+  magnitude, `max_j |J_ij| * |x_j|`, which bounds each aux *relatively*
+  (`|dw| <= abs_tol * max(1, |w|)`) with no dependence on the denominator.
+  Strictly tightening — `|x_j| <= max(1, |x_j|)` columnwise — so no point now
+  accepted was rejected before.
+  The same expression had been written out by hand in **three** places, and
+  fixing one left the other two vouching for exactly the point the fixed one
+  rejects: measured on the witness, `verify_point` rejected the row at 9.276e-04
+  while `validation/examiner.py` reported `[PASS] primal_con_feas (scaled)` — the
+  user-facing "is my solution feasible" tool — and `_dual_recovery` admitted the
+  row into its KKT active set, where surplus free multipliers can shrink the
+  stationarity residual and pass a non-KKT point. All three now share one
+  definition, `validation.feasibility.jacobian_row_scales`.
+  **User-visible cost**: models in this class now take substantially longer to
+  *certify*, because the previous certificate was manufactured by the too-low
+  incumbent (the tree stops at `bound >= incumbent - gap_tol`). Measured, 3
+  interleaved reps: `x/y + y/x` at box floor 1e-3 goes 0.60 s → 37.95 s, at 1e-2
+  0.75 s → 228.16 s. Both still reach `optimal`; the answer changes from
+  1.99868 to 2.0.
+
 - **`solve(time_limit=T)` overran its deadline AND lost its dual bound, from one
   defect** (#1152). Two slow-tier tests encoded what read as opposing contracts —
   "return within 1.25x of `T`" (#875) and "the deadline work must not cost the dual

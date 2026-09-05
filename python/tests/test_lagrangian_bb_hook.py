@@ -271,9 +271,25 @@ def _branching_brute(c, n, cap=5, target=35):
 
 
 @pytest.mark.correctness
-def test_hook_sound_and_helpful_on_a_branching_tree():
+def test_hook_sound_and_helpful_on_a_branching_tree(monkeypatch):
     """In-tree coverage: the instance branches deeply; the hook must stay sound
-    (same optimum as hook-off and brute force) and must not *increase* nodes."""
+    (same optimum as hook-off and brute force) and must not *increase* nodes.
+
+    Both arms are pinned to the Python ``_solve_milp_bb`` path
+    (``DISCOPT_MILP_ENGINE=0``) because that is the *only* engine the hook runs
+    on: `solver.py`'s router deliberately declines to reroute a
+    ``lagrangian_bound=True`` solve to the monolithic Rust MILP engine (which has
+    no per-node hook). Without the pin the two arms are different solvers, so
+    ``on.node_count <= off.node_count`` compares the hook against an unrelated
+    engine rather than against itself-minus-the-hook. That latent flaw surfaced
+    when the A0 root cut budget graduated default-ON: the Rust engine began
+    closing this instance at the root, ``off.node_count`` collapsed to 1, and the
+    "does it branch" precondition failed. Measured with the pin (both cut
+    settings, five instance sizes): off 13/11/25/101/89 nodes vs on 1/1/1/31/15 —
+    the hook's real, large benefit, which the cross-engine comparison had been
+    hiding behind luck.
+    """
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     m_off, c, n = _branching_instance()
     opt = _branching_brute(c, n)
     off = m_off.solve(time_limit=60)

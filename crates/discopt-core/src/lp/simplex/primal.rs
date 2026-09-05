@@ -1658,6 +1658,64 @@ impl<'a> Simplex<'a> {
     /// redundant; its artificial is left basic (the caller's warm path declines
     /// a short basis, unchanged). `Err` only on a factorization breakdown, which
     /// the caller ignores (basis emitted as-is, exactly as before this pass).
+    /// For each constraint row, pick a nonbasic real column that may replace a
+    /// basic artificial in that row's basis slot, or `-1` if none qualifies.
+    ///
+    /// A candidate must be a **row singleton** (its only nonzero is in that row),
+    /// so swapping it in turns B's slot column `±e_r` into `a·e_r` — a scalar
+    /// multiple, hence still nonsingular — and leaves `x` bit-identical, because a
+    /// basic variable may hold any value and the candidate simply keeps the one it
+    /// already has.
+    ///
+    /// Two admissible tests, applied in that order:
+    ///
+    /// 1. **Value zero** (original). The candidate sits nonbasic at 0, so it was
+    ///    contributing 0 to the RHS and its new basic value is 0.
+    /// 2. **Reduced cost zero** (#A0'.1). The primal argument above never needed
+    ///    the candidate's *value* — what the swap can break is the exported
+    ///    `dual`, since a basic column requires `c_j − yᵀA_j = 0`. Testing that
+    ///    directly admits the dual-degenerate case the value test misses: a slack
+    ///    nonbasic at a NONZERO bound whose reduced cost still vanishes.
+    ///
+    ///    This matters. On `neos-2624317-amur` the cold root LP exported 338 basic
+    ///    variables for m = 342 — 50 rows had their slack nonbasic at a nonzero
+    ///    value with no zero-valued alternative. A short basis makes
+    ///    `separate_gomory_cols` decline outright (`lp/gomory.rs:233`) and
+    ///    `PreparedDual::prepare` refuse every warm start, so the instance got no
+    ///    cuts *and* cold-solved every node, with no counter recording either.
+    ///
+    /// Pass 2 only fills rows pass 1 left empty, so the rule is strictly monotone:
+    /// no basis that completes today can be shortened by it.
+    fn select_row_substitutes(&self, dual: &[f64]) -> Vec<i64> {
+        let mut slack_for_row: Vec<i64> = vec![-1; self.m];
+        for j in 0..self.n {
+            if self.stat[j] == BASIC || self.nb_value(j) != 0.0 {
+                continue;
+            }
+            let (rows, _) = self.cols.col(j);
+            if rows.len() == 1 && slack_for_row[rows[0]] < 0 {
+                slack_for_row[rows[0]] = j as i64;
+            }
+        }
+        if dual.len() != self.m {
+            return slack_for_row; // no usable `y`; pass 2 would be unfounded
+        }
+        for j in 0..self.n {
+            if self.stat[j] == BASIC {
+                continue;
+            }
+            let (rows, vals) = self.cols.col(j);
+            if rows.len() != 1 || slack_for_row[rows[0]] >= 0 {
+                continue;
+            }
+            // d_j = c_j − yᵀA_j, with A_j a singleton in row rows[0].
+            if (self.c[j] - dual[rows[0]] * vals[0]).abs() <= self.tol {
+                slack_for_row[rows[0]] = j as i64;
+            }
+        }
+        slack_for_row
+    }
+
     fn expel_zero_basic_artificials(&mut self, art_sign: &[f64]) -> Result<(), ()> {
         const PIVOT_MIN: f64 = 1e-7;
         const ART_TOL: f64 = 1e-9;
@@ -2596,16 +2654,8 @@ impl<'a> Simplex<'a> {
         // B's support and x_B bit-identical (the entering column was contributing
         // 0 to the RHS and its new basic value is 0), so this is a pure
         // representation fix — the optimum and bound are unchanged.
-        let mut slack_for_row: Vec<i64> = vec![-1; self.m];
-        for j in 0..self.n {
-            if self.stat[j] == BASIC || self.nb_value(j) != 0.0 {
-                continue;
-            }
-            let (rows, _) = self.cols.col(j);
-            if rows.len() == 1 && slack_for_row[rows[0]] < 0 {
-                slack_for_row[rows[0]] = j as i64;
-            }
-        }
+        let slack_for_row = self.select_row_substitutes(&dual);
+
         let mut col_status: Vec<i8> = (0..self.n).map(|j| self.stat[j]).collect();
         let mut basic_vars: Vec<usize> = Vec::with_capacity(self.m);
         for i in 0..self.m {
@@ -2662,6 +2712,119 @@ impl<'a> Simplex<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #A0'.1: a nonbasic row singleton at a NONZERO bound is a valid basis
+    /// substitute when its reduced cost vanishes.
+    ///
+    /// The export pass that completes a short basis used to require the candidate
+    /// to sit at value 0. That tests the wrong quantity. Swapping a row singleton
+    /// `s` into the slot replaces B's `±e_r` with `a·e_r` and leaves `x`
+    /// bit-identical whatever `s`'s value — a basic variable may hold any value.
+    /// What the swap can invalidate is the exported `dual`, which needs
+    /// `c_s − yᵀA_s = 0`. So the admissible test is on the reduced cost, and the
+    /// value test misses every dual-degenerate case.
+    ///
+    /// Concretely: `neos-2624317-amur` exported 338 basic variables for m = 342
+    /// because 50 rows had their slack nonbasic at a nonzero value. A short basis
+    /// makes `separate_gomory_cols` return empty (`lp/gomory.rs:233`) and
+    /// `PreparedDual::prepare` refuse every warm start — no cuts, no warm starts,
+    /// and no counter recording either.
+    ///
+    /// This pins the rule itself. Row 1's singleton `x2` is nonbasic at its
+    /// nonzero upper bound with `c = 0`, so under any `y` with `y[1] = 0` its
+    /// reduced cost is 0 and it must be accepted; `x3`, a singleton in row 2 with
+    /// `c = 5`, has reduced cost 5 and must be refused.
+    #[test]
+    fn a_nonzero_valued_row_singleton_substitutes_when_its_reduced_cost_vanishes() {
+        // 3 rows x 4 cols. x0 spans rows 0-2; x1,x2,x3 are singletons in rows
+        // 0,1,2 respectively.
+        //   col0 = (1,1,1)  col1 = (1,0,0)  col2 = (0,1,0)  col3 = (0,0,1)
+        let a = [
+            1.0, 1.0, 1.0, // col 0
+            1.0, 0.0, 0.0, // col 1
+            0.0, 1.0, 0.0, // col 2
+            0.0, 0.0, 1.0, // col 3
+        ];
+        // column-major dense -> the LpView the constructor consumes is row-major,
+        // so build the CSC-equivalent through LpView's own layout: a[i*n + j].
+        let n = 4usize;
+        let m = 3usize;
+        let mut row_major = vec![0.0; m * n];
+        for j in 0..n {
+            for i in 0..m {
+                row_major[i * n + j] = a[j * m + i];
+            }
+        }
+        let c = [0.0, 0.0, 0.0, 5.0];
+        let l = [0.0, 0.0, 0.0, 2.0];
+        let u = [10.0, 10.0, 4.0, 10.0];
+        let b = [1.0, 1.0, 1.0];
+        let lp = LpView {
+            a: &row_major,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let mut sx = Simplex::new(&lp, &b, &SimplexOptions::default());
+
+        // Hand-set the nonbasic statuses the rule reads. x2 sits AT_UPPER (value
+        // 4, nonzero); x1 and x3 sit at their zero lower bounds.
+        sx.stat[0] = BASIC;
+        sx.stat[1] = AT_LOWER;
+        sx.stat[2] = AT_UPPER;
+        sx.stat[3] = AT_LOWER;
+        assert_eq!(
+            sx.nb_value(2),
+            4.0,
+            "x2 must be nonbasic at a NONZERO value"
+        );
+        assert_eq!(
+            sx.nb_value(3),
+            2.0,
+            "x3 must also be nonbasic at a NONZERO value"
+        );
+
+        // A dual with y = 0 everywhere: d_j = c_j. So x1 (c=0) and x2 (c=0)
+        // qualify on reduced cost; x3 (c=5) does not.
+        let dual = vec![0.0; m];
+        let pick = sx.select_row_substitutes(&dual);
+
+        assert_eq!(
+            pick[0], 1,
+            "row 0: x1 is a zero-valued singleton, accepted by the original pass"
+        );
+        assert_eq!(
+            pick[1], 2,
+            "row 1: x2 is nonbasic at 4.0 with zero reduced cost -- the case the \
+             value test misses and this change adds"
+        );
+        assert_eq!(
+            pick[2], -1,
+            "row 2: x3 has reduced cost 5, so substituting it would contradict \
+             the exported dual; it must be refused"
+        );
+
+        // Note on pass 1's own rule, unchanged here: it admits a zero-VALUED
+        // candidate without consulting its reduced cost, so it can hand back a
+        // basis whose dual solution differs from the exported `y`. That is
+        // pre-existing and benign in effect -- `separate_gomory_cols` recomputes
+        // the vertex from the basis, and `PreparedDual::prepare` re-checks dual
+        // feasibility and declines -- so the cost is a refused warm start, never
+        // a wrong bound. Tightening pass 1 to match pass 2 would be a strictly
+        // narrower rule and is deliberately NOT done here: it could shorten a
+        // basis that completes today.
+
+        // Monotonicity: with no usable `y`, pass 2 is skipped and the result is
+        // exactly the original value-test outcome.
+        let none = sx.select_row_substitutes(&[]);
+        assert_eq!(none[0], 1, "pass 1 still fires without a dual");
+        assert_eq!(
+            none[1], -1,
+            "without a dual the nonzero-valued singleton must NOT be taken"
+        );
+    }
 
     fn solve(a: &[f64], m: usize, n: usize, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> LpSolve {
         let lp = LpView { a, m, n, c, l, u };
