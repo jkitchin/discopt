@@ -18,8 +18,18 @@ use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Enable profiling iff `DISCOPT_PROFILE` is present in the environment. Cheap to
-/// call repeatedly; the first call per process fixes the flag.
+/// Enable profiling iff `DISCOPT_PROFILE` is set to something other than an
+/// off-word (`0`, `false`, `no`, or empty). Cheap to call repeatedly.
+///
+/// This used to arm on mere *presence*, which made `DISCOPT_PROFILE=0` turn
+/// profiling **on** — the opposite of what it reads as, and the opposite of the
+/// convention every other discopt env flag follows (`DISCOPT_MILP_ROOT_CUTS`,
+/// `DISCOPT_OBJ_INTEGRALITY`, …). That is not a cosmetic inconsistency: the
+/// instrument adds an `Instant::now()` per phase and an atomic increment per
+/// counter, so a timing panel that defensively exported `DISCOPT_PROFILE=0`
+/// measured the instrument along with the solver, and its numbers were not the
+/// numbers it reported (CLAUDE.md §9). Caught doing exactly that to a root-cut
+/// graduation panel on 2026-09-05.
 ///
 /// In a **test** build this yields to an explicit [`set_enabled(true)`] override
 /// (see [`TEST_OVERRIDE`]). Every MILP solve calls this on entry, and `cargo test`
@@ -33,10 +43,20 @@ pub fn init_from_env() {
     if TEST_OVERRIDE.load(Ordering::Relaxed) {
         return;
     }
-    ENABLED.store(
-        std::env::var_os("DISCOPT_PROFILE").is_some(),
-        Ordering::Relaxed,
-    );
+    ENABLED.store(env_arms_profiling(), Ordering::Relaxed);
+}
+
+/// Whether `DISCOPT_PROFILE`'s current value means "on". Unset is off; set to an
+/// off-word is off; anything else (`1`, `true`, `yes`, a stray value) is on, so
+/// the historical `DISCOPT_PROFILE=1` keeps working unchanged.
+fn env_arms_profiling() -> bool {
+    match std::env::var("DISCOPT_PROFILE") {
+        Err(_) => false, // unset, or not valid UTF-8 -- treat as off
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        ),
+    }
 }
 
 /// The profiling side of entering a MILP solve: arm from the environment, then
@@ -625,6 +645,58 @@ pub fn dump() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DISCOPT_PROFILE=0` must mean OFF.
+    ///
+    /// The flag armed on mere *presence*, so the one value a careful caller would
+    /// export to suppress the instrument turned it on. The cost is not cosmetic:
+    /// the instrument adds an `Instant::now()` per phase and an atomic per
+    /// counter, so a timing panel that set `DISCOPT_PROFILE=0` for hygiene was
+    /// timing the instrument too, and its numbers were not the numbers it
+    /// reported (CLAUDE.md §9). Caught doing that to a root-cut graduation panel
+    /// on 2026-09-05.
+    ///
+    /// Calls the real predicate against the real variable -- asserting a
+    /// re-typed copy of the rule would pass even if the shipped rule were
+    /// deleted. Holds [`TEST_LOCK`] because it mutates process-global state that
+    /// every sibling solve's `init_from_env` reads, and restores the prior value
+    /// on the way out so it cannot leak into the rest of the suite.
+    #[test]
+    fn discopt_profile_zero_means_off_not_on() {
+        let _guard = test_guard();
+        let prior = std::env::var_os("DISCOPT_PROFILE");
+        let mut checked = 0;
+        for (v, want) in [
+            ("", false),
+            ("0", false),
+            ("false", false),
+            ("FALSE", false),
+            ("no", false),
+            (" 0 ", false),
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("2", true),
+        ] {
+            std::env::set_var("DISCOPT_PROFILE", v);
+            assert_eq!(
+                env_arms_profiling(),
+                want,
+                "DISCOPT_PROFILE={v:?} should arm profiling = {want}"
+            );
+            checked += 1;
+        }
+        std::env::remove_var("DISCOPT_PROFILE");
+        assert!(!env_arms_profiling(), "unset DISCOPT_PROFILE must be off");
+        checked += 1;
+
+        match prior {
+            Some(v) => std::env::set_var("DISCOPT_PROFILE", v),
+            None => std::env::remove_var("DISCOPT_PROFILE"),
+        }
+        // §6: the probe must prove it fired rather than report a silent pass.
+        assert_eq!(checked, 11, "the value table was not walked");
+    }
 
     /// `init_from_env` must not disarm a measurement a test explicitly armed.
     ///
