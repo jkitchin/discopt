@@ -257,6 +257,15 @@ def test_milp_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
     m.subject_to(x[0] + x[1] >= 3)
     m.subject_to(x[0] <= 4 * y)
 
+    # This test covers the gate on the *Python* ``_solve_milp_bb`` exit, which is
+    # what ``_patch_offrow_tree`` can reach: it proxies ``PyTreeManager``, and the
+    # Rust MILP engine runs its whole search inside Rust with no such tree. Since
+    # the routing change a pure MILP goes to that engine by default and would
+    # simply solve this model, never entering the loop under test — so pin the
+    # path explicitly rather than let the coverage evaporate. The routed engine's
+    # own exit gate is covered by ``test_routed_engine_gate_refuses_an_off_row_incumbent``.
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
+
     # Variable order is y (1 binary) then x (2 continuous).
     state = _patch_offrow_tree(monkeypatch, slice(1, 3), -1e-3)
 
@@ -264,6 +273,90 @@ def test_milp_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
         m.solve(time_limit=60)
 
     assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
+
+
+def test_routed_engine_gate_refuses_an_off_row_incumbent(monkeypatch):
+    """The same gate on the ROUTED path: the Rust MILP engine's returned point.
+
+    Since a pure MILP routes to the monolithic Rust engine by default, that
+    engine's exit is the one a user actually reaches — and it must not take the
+    engine's ``optimal`` label on faith either. ``_solve_milp_simplex``'s gate
+    re-checks the point against the model's own rows/bounds/integrality and
+    DEFERS (returns ``None``) on violation, so the caller falls back to the
+    sound Python path rather than returning a wrong ``optimal``.
+
+    Deferral, not a raise, is the right response here: unlike the Python path
+    (which has already spent the whole budget when it reaches its exit), the
+    engine is a fast first attempt with a sound fallback behind it, so a bad
+    point costs a retry rather than the solve.
+    """
+    import discopt._rust as _rust
+
+    m = dm.Model("milp952")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    m.minimize(x[0] + 2 * x[1] + 3 * y)
+    m.subject_to(x[0] + x[1] >= 3)
+    m.subject_to(x[0] <= 4 * y)
+
+    real_solve = _rust.solve_milp_py
+    state = {"applied": False}
+
+    def _off_row_solve(*args, **kwargs):
+        status, x_struct, obj, bound, nodes, iters = real_solve(*args, **kwargs)
+        if status not in ("optimal", "feasible") or x_struct is None:
+            return status, x_struct, obj, bound, nodes, iters
+        sol = np.asarray(x_struct, dtype=np.float64).copy()
+        # Variable order is y (1 binary) then x (2 continuous); push the larger
+        # x coordinate down so the point leaves the tight ``x0 + x1 >= 3`` row
+        # while staying inside every bound and leaving the binary integral.
+        block = sol[1:3]
+        if np.all(np.isfinite(block)) and float(np.max(block)) > 1e-2:
+            sol[1 + int(np.argmax(block))] -= 1e-3
+            state["applied"] = True
+        return status, sol, obj, bound, nodes, iters
+
+    monkeypatch.setattr(_rust, "solve_milp_py", _off_row_solve)
+
+    import time as _time
+
+    res = S._solve_milp_simplex(
+        m,
+        time_limit=60.0,
+        gap_tolerance=1e-6,
+        max_nodes=100_000,
+        t_start=_time.perf_counter(),
+    )
+    assert state["applied"], "the engine point was never perturbed; the test proved nothing"
+    assert res is None, (
+        f"the routed engine returned an off-row point as {getattr(res, 'status', res)!r} "
+        "instead of deferring to the sound path"
+    )
+
+
+def test_routed_engine_gate_control_accepts_the_real_incumbent():
+    """Control for the test above: unperturbed, the same model is solved by the
+    routed engine, so the deferral there is the gate firing and not the engine
+    declining this model for some unrelated reason."""
+    import time as _time
+
+    m = dm.Model("milp952")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    m.minimize(x[0] + 2 * x[1] + 3 * y)
+    m.subject_to(x[0] + x[1] >= 3)
+    m.subject_to(x[0] <= 4 * y)
+
+    res = S._solve_milp_simplex(
+        m,
+        time_limit=60.0,
+        gap_tolerance=1e-6,
+        max_nodes=100_000,
+        t_start=_time.perf_counter(),
+    )
+    assert res is not None, "the routed engine declined the clean model; the gate test is vacuous"
+    assert res.status == "optimal", res.status
+    assert res.objective == pytest.approx(6.0, abs=1e-6)
 
 
 def test_milp_baseline_solve_is_unaffected():
@@ -330,6 +423,9 @@ def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
             # Variable order is z (5 integers) then x.
             return np.concatenate([z_near, [x_val]]), obj
 
+    # Same reason as the test above: the snap call site under test lives in the
+    # Python ``_solve_milp_bb`` path, which the routed Rust engine bypasses.
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     monkeypatch.setattr(S, "PyTreeManager", _NearIntegralTree)
 
     r = m.solve(time_limit=60)  # must NOT raise: the unrounded point is feasible

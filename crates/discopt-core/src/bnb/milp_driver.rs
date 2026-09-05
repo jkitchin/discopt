@@ -666,6 +666,19 @@ pub fn solve_milp_node_hooked(
     let glb = base_l[..ns].to_vec();
     let gub = base_u[..ns].to_vec();
     let mut tm = TreeManager::new(ns, glb, gub, int_info, SelectionStrategy::BestFirst);
+    // Objective-lattice fathoming. Derived from the ORIGINAL cost vector and
+    // integrality pattern, before any cut adds a slack column to `c_w`: the
+    // lattice is a property of the model, and appended slacks carry zero cost so
+    // they would not change it, but reading `c` here keeps that independent of
+    // what the cut loop does later.
+    tm.set_objective_lattice(
+        if obj_integrality_enabled() {
+            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int)
+        } else {
+            None
+        },
+        obj_const,
+    );
     tm.initialize();
 
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
@@ -2514,6 +2527,20 @@ fn strong_branch(
 /// LP solve already exported. Off by default; it exists so the reuse path and the
 /// legacy refactor path can be run against each other on the same binary (the
 /// differential test in this module, and any interleaved A/B timing per CLAUDE.md §9).
+/// Whether objective-lattice fathoming is active (`DISCOPT_OBJ_INTEGRALITY`,
+/// default ON; set to `0` for the legacy incumbent-only cutoff).
+///
+/// A bound-changing lever, so it ships with the CLAUDE.md §5 opt-out intact: the
+/// OFF arm is the exact pre-change search, which is what the differential panel
+/// A/Bs against.
+fn obj_integrality_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("DISCOPT_OBJ_INTEGRALITY")
+            .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "no"))
+    })
+}
+
 fn rc_fix_force_refactor() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("DISCOPT_MILP_RC_FIX_REFACTOR").is_ok_and(|v| v.trim() == "1"))
@@ -3473,6 +3500,164 @@ pub fn solve_milp_csc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- objective-lattice fathoming (DISCOPT_OBJ_INTEGRALITY) ----
+
+    /// The odd-hole vertex cover on `k` vertices (`k` odd): `min Σ x_i` subject to
+    /// `x_i + x_{i+1} >= 1` around the cycle, `x` binary. Its LP relaxation sits at
+    /// exactly `k/2` (all halves) while the integer optimum is `(k+1)/2` — a gap of
+    /// half a unit that **no** cut in the engine closes and that branching can only
+    /// close by enumerating the cycle. The half unit is precisely what objective
+    /// integrality is for, so this fixture isolates the rule.
+    ///
+    /// Working form: `A x = b` with a surplus column per row.
+    fn odd_cycle_cover(
+        k: usize,
+    ) -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        assert!(k >= 3 && k % 2 == 1, "odd hole needs an odd k >= 3");
+        let (ns, m) = (k, k);
+        let n = ns + m;
+        let mut dense = vec![0.0f64; m * n];
+        for i in 0..m {
+            dense[i * n + i] = 1.0;
+            dense[i * n + (i + 1) % k] = 1.0;
+            dense[i * n + ns + i] = -1.0;
+        }
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let mut c = vec![0.0f64; n];
+        for cj in c.iter_mut().take(ns) {
+            *cj = 1.0;
+        }
+        let b = vec![1.0; m];
+        let l = vec![0.0; n];
+        let mut u = vec![INF; n];
+        for uj in u.iter_mut().take(ns) {
+            *uj = 1.0;
+        }
+        (sp, m, ns, c, b, l, u)
+    }
+
+    /// Cycle length for the fixture. Odd, and large enough that the OFF arm has to
+    /// enumerate rather than stumble into the answer at the root.
+    const K: usize = 15;
+
+    /// Driver options for the cover fixture: the engine's own defaults for every
+    /// lever, so the test measures the lattice rule and not a bespoke configuration.
+    fn cover_opts(ns: usize) -> MilpOptions {
+        MilpOptions {
+            n_struct: ns,
+            integer_cols: (0..ns).collect(),
+            max_nodes: 100_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 1,
+            gmi_cuts: false,
+            cut_select: false,
+            node_cuts: false,
+            max_pool_cuts: 0,
+            heuristics: true,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: false,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1000,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    #[test]
+    fn odd_cycle_cover_lp_bound_really_is_fractional() {
+        // Anti-vacuity (CLAUDE.md §6): if the relaxation were already integral the
+        // fathoming test below would prove nothing about the lattice rule.
+        let (sp, m, ns, c, b, l, u) = odd_cycle_cover(K);
+        let n = l.len();
+        let sol =
+            crate::lp::simplex::solve_lp_cols(sp, m, n, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!(
+            (sol.obj - K as f64 / 2.0).abs() < 1e-6,
+            "fixture must relax to k/2, got {} (ns={ns})",
+            sol.obj
+        );
+    }
+
+    /// End-to-end soundness: the driver wires the lattice in, and the answer is
+    /// still right. The node-level behaviour of the rule is pinned in
+    /// `tree_manager`'s tests; what this covers is the wiring — a granularity read
+    /// off the wrong vector, or applied in the wrong objective sense, shows up here
+    /// as a wrong optimum or a bound above it.
+    #[test]
+    fn odd_cycle_cover_solves_correctly_with_the_lattice_wired_in() {
+        let (sp, m, ns, c, b, l, u) = odd_cycle_cover(K);
+        let n = l.len();
+        let is_int: Vec<bool> = (0..n).map(|j| j < ns).collect();
+        // Anti-vacuity (CLAUDE.md §6): the driver's detector must actually fire on
+        // this fixture, or the run below exercises nothing.
+        assert_eq!(
+            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int[..ns]),
+            Some(1.0),
+            "fixture must present a unit objective lattice"
+        );
+        let opts = cover_opts(ns);
+        let res = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &opts);
+        let optimum = ((K + 1) / 2) as f64;
+        assert_eq!(
+            res.status,
+            MilpStatus::Optimal,
+            "must certify, not merely find"
+        );
+        assert!(
+            (res.obj - optimum).abs() < 1e-6,
+            "optimum is {optimum}, got {} -- a wrong objective here means the cutoff \
+             fathomed the optimum (CLAUDE.md §1)",
+            res.obj
+        );
+        assert!(
+            res.bound <= optimum + 1e-6,
+            "dual bound {} exceeds the true optimum -- false certificate",
+            res.bound
+        );
+    }
+
+    /// Same cover, but one unit of continuous cost. The objective can now take any
+    /// value, so the detector must refuse — pruning on `U - 1` here could fathom a
+    /// solution worth `U - 0.3`.
+    #[test]
+    fn a_continuous_cost_column_disables_the_lattice_rule() {
+        let (sp, m, ns, mut c, b, l, mut u) = odd_cycle_cover(K);
+        let n = l.len();
+        // Give the first surplus column a real cost and a finite bound.
+        c[ns] = 0.3;
+        u[ns] = 1.0;
+        let is_int: Vec<bool> = (0..n).map(|j| j < ns).collect();
+        assert_eq!(
+            crate::bnb::obj_integral::objective_granularity(&c, &is_int),
+            None,
+            "a costed continuous column must disable the lattice"
+        );
+        let opts = cover_opts(ns);
+        let res = solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &opts);
+        assert_eq!(res.status, MilpStatus::Optimal);
+        assert!(
+            res.bound <= res.obj + 1e-6,
+            "bound {} above incumbent {}",
+            res.bound,
+            res.obj
+        );
+    }
 
     // ---- #1066: reduced-cost fixing reuses the LP's own duals ----
 
