@@ -562,9 +562,16 @@ fn get_or_make_aux(
     }
 
     // Compute M5 derived bounds on a · b via forward interval propagation.
-    let node_bounds = forward_propagate(&model.arena, a, var_bounds);
-    let a_iv = node_bounds[a.0];
-    let b_iv = node_bounds[b.0];
+    //
+    // Two calls, not one: `b` is not in general reachable from `a`, and
+    // `forward_propagate` evaluates only the subtree of the root it is given.
+    // Reading `node_bounds[b.0]` off the `a` propagation used to work only
+    // because the old implementation evaluated the entire arena for every
+    // call — the quadratic that made root FBBT unusable on large models.
+    let bounds_a = forward_propagate(&model.arena, a, var_bounds);
+    let a_iv = bounds_a[a.0];
+    let bounds_b = forward_propagate(&model.arena, b, var_bounds);
+    let b_iv = bounds_b[b.0];
     let prod = interval_mul(&a_iv, &b_iv);
     let derived_finite = prod.lo.is_finite() && prod.hi.is_finite();
     if derived_finite {

@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use super::fbbt::{forward_propagate, Interval};
+use super::fbbt::{forward_propagate, forward_propagate_into, FwdScratch, Interval};
 use crate::expr::{BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, UnOp, VarType};
 
 /// Result of simplification.
@@ -117,6 +117,8 @@ pub fn simplify_until(
     }
 
     // 3. Redundant constraint removal.
+    // One buffer for the whole scan, not one per constraint.
+    let mut scratch = FwdScratch::new();
     for (ci, constr) in model.constraints.iter().enumerate() {
         if let Some(dl) = deadline {
             if ci % SIMPLIFY_DEADLINE_POLL_STRIDE == 0 && Instant::now() >= dl {
@@ -124,7 +126,8 @@ pub fn simplify_until(
                 return result;
             }
         }
-        let node_bounds = forward_propagate(&model.arena, constr.body, var_bounds);
+        let node_bounds =
+            forward_propagate_into(&model.arena, constr.body, var_bounds, &mut scratch);
         let body_interval = node_bounds[constr.body.0];
 
         let redundant = match constr.sense {
