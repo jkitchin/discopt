@@ -22,3 +22,5 @@
 [38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)
   rep0 DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0   305.0s status=node_limit nodes=3 bound=-141697.43348991615 obj=None
 [38;2;138;109;59m INFO[0m pounce::linesearch: theta_max raised 3.314e5 -> 3.314e7 (raise 1 of 4): 3 consecutive line searches had every trial rejected at the theta_max gate (pounce#546)
+### uptime after:
+ 17:44:31 up 54 min,  0 user,  load average: 1.00, 1.00, 1.00

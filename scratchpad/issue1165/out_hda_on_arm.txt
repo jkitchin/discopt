@@ -1,0 +1,4 @@
+ 17:46:29 up 56 min,  0 user,  load average: 0.60, 0.84, 0.94
+[§8] discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x47 (lb=0, ub=inf), x48 (lb=0, ub=inf).  Nonlinear tightening can adjust 103 bounds via defined_variable_forward, bilinear_product_equality, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)

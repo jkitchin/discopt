@@ -1,0 +1,4 @@
+### load at start (deliberate: the hda ON-arm probe is running, so this
+### exercises the new assertions on a LOADED box -- the condition that
+### produced the original flake)
+ 17:47:30 up 57 min,  0 user,  load average: 0.79, 0.86, 0.94

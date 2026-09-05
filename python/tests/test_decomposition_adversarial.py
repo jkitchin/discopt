@@ -447,6 +447,17 @@ def test_rand_multicut_sound_and_deterministic(seed):
             assert r.bound <= opt + 1e-2, f"{name}: unsound bound {r.bound} > opt {opt}"
         if r.status == "optimal":
             assert r.objective == pytest.approx(opt, abs=ABS), f"{name} wrong certified opt"
+    # §6/#1165: the same precondition the Lagrangian comparison below carries.
+    # These instances all close in <0.05 s (measured, 8 seeds x 2 reps,
+    # ``scratchpad/issue1165/probe_affordable_comparisons.py``: every arm
+    # ``optimal``, every pair bit-identical), so the 30 s cap has never bound
+    # here -- assert that rather than assume it, so a future instance that does
+    # truncate fails loudly instead of comparing two different amounts of search.
+    for name, r in res.items():
+        assert r.status != "time_limit", (
+            f"{name}: terminated on time_limit, so the bit-equality assertions "
+            "below would be comparing two wall-truncated runs"
+        )
     assert res["mc_seq"].objective == res["mc_thr"].objective  # determinism
     assert res["mc_seq"].bound == res["mc_thr"].bound
 
