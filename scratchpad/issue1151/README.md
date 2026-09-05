@@ -105,3 +105,29 @@ Both arms certify; OFF's speed is manufactured by its own too-low incumbent (the
 tree stops at `bound >= incumbent - gap_tol`). The trade is a slow true
 certificate for a fast false one, which is the only direction CLAUDE.md §1
 allows.
+
+## Not ours: `test_rand_lagrangian_dual_is_valid_lower_bound[kelley-4]`
+
+The local correctness lane on the #1162 merge showed one failure:
+
+```
+assert seq.bound == thr.bound and seq.objective == thr.objective  # determinism
+14.000000000718945 == 14.000000000667704
+```
+
+Both arms are `status='time_limit'`, `nodes=0`, `objective=None` — the assertion
+compares two **wall-clock-truncated** runs (sequential vs threads backend, 15 s
+each) for **bit-equality**. Established as not this PR's, three ways:
+
+1. **Reach probe** (`probe_reach_decomposition.py`): running the failing case's
+   own two `solve_lagrangian` calls with counters on all three changed sites
+   gives `{'verify_point': 0, 'jacobian_row_scales': 0, '_row_scales': 0}` —
+   **zero calls**. The diff cannot move that bound.
+2. **With the diff**, quiet machine (load ~0.6): **4 failed / 3 passed** in 7 runs.
+3. **Without the diff**, base sources restored from `origin/main` with the §8
+   marker asserted at 0: **2 failed / 4 passed** in 6 runs.
+
+So it is a pre-existing flaky assertion on `main`, independent of #1151. It never
+failed in CI on this PR — CI is green on the pushed head — so there is nothing to
+stand down from here; it is recorded because it is a real latent defect and the
+next person to see it should not re-derive this.
