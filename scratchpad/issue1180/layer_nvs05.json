@@ -1,0 +1,425 @@
+{
+ "probe": "issue1180_layer_split",
+ "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+ "time_limit_s": 20.0,
+ "python": "3.12.3",
+ "records": [
+  {
+   "instance": "nvs05",
+   "clean": {
+    "wall_s": 20.498725082999954,
+    "nodes": 27,
+    "nodes_per_s": 1.317155086020042,
+    "status": "feasible",
+    "objective": 1107.8904814191037,
+    "bound": 2.6671185091366,
+    "root_time_s": 8.67415839900002,
+    "ffi_rust_s": 6.097447096999758,
+    "ffi_python_s": 14.14507588400022,
+    "ffi_jax_s": 0.0,
+    "jax_imported": false
+   },
+   "cprofile": {
+    "entries": 1530,
+    "components": {
+     "rust_lp_warm": {
+      "ncalls": 1175,
+      "self_s": 10.193695108,
+      "cum_s": 10.193695108
+     },
+     "rust_milp": {
+      "ncalls": 3,
+      "self_s": 0.088071496,
+      "cum_s": 0.088071496
+     },
+     "tape_objective": {
+      "ncalls": 17399,
+      "self_s": 0.021218976,
+      "cum_s": 0.021218976
+     },
+     "tape_gradient": {
+      "ncalls": 4937,
+      "self_s": 0.010284960000000001,
+      "cum_s": 0.010284960000000001
+     },
+     "tape_constraints": {
+      "ncalls": 19549,
+      "self_s": 0.07367259100000001,
+      "cum_s": 0.07367259100000001
+     },
+     "tape_jacobian": {
+      "ncalls": 9759,
+      "self_s": 0.049310810000000004,
+      "cum_s": 0.049310810000000004
+     },
+     "tape_hessian": {
+      "ncalls": 7872,
+      "self_s": 0.084283281,
+      "cum_s": 0.084283281
+     },
+     "pounce_ipm": {
+      "ncalls": 59,
+      "self_s": 5.045451336,
+      "cum_s": 6.554236781
+     },
+     "lp_relaxer_solve": {
+      "ncalls": 68,
+      "self_s": 0.001626321,
+      "cum_s": 2.5633079640000003
+     },
+     "obbt_probe_lp": {
+      "ncalls": 1082,
+      "self_s": 0.006549817,
+      "cum_s": 8.865865301000001
+     },
+     "mccormick_node_solve": {
+      "ncalls": 8,
+      "self_s": 0.0010847860000000001,
+      "cum_s": 2.8373232930000003
+     },
+     "obbt_root": {
+      "ncalls": 14,
+      "self_s": 0.0037482600000000002,
+      "cum_s": 10.486397539
+     },
+     "node_nlp_solve": {
+      "ncalls": 59,
+      "self_s": 0.0036760100000000004,
+      "cum_s": 6.5664412610000005
+     },
+     "build_milp_relaxation": {
+      "ncalls": 47,
+      "self_s": 0.000469892,
+      "cum_s": 1.6075550070000002
+     },
+     "_matched_entries": 14
+    },
+    "total_self_s": 20.264587289,
+    "by_layer_s": {
+     "pounce_native": 5.287851709000001,
+     "rust_discopt": 10.284676365,
+     "jax": 0.0,
+     "callback_path": 0.950799941,
+     "python_discopt": 1.673867215000001,
+     "python_numpy_scipy": 0.9766250650000002,
+     "python_other": 1.090766994
+    },
+    "by_layer_pct": {
+     "pounce_native": 26.09405083650702,
+     "rust_discopt": 50.751965575843315,
+     "jax": 0.0,
+     "callback_path": 4.6919284732539905,
+     "python_discopt": 8.26006072133829,
+     "python_numpy_scipy": 4.819368147359856,
+     "python_other": 5.382626245697532
+    },
+    "hot20": [
+     {
+      "self_s": 10.1937,
+      "what": "rust_discopt|~:<built-in method discopt._rust.solve_lp_warm_csc_py>",
+      "ncalls": 1175
+     },
+     {
+      "self_s": 5.0455,
+      "what": "pounce_native|~:<function Problem.solve at 0x7fd2052659e0>",
+      "ncalls": 59
+     },
+     {
+      "self_s": 0.2706,
+      "what": "callback_path|_tape_nlp_evaluator.py:_x",
+      "ncalls": 59516
+     },
+     {
+      "self_s": 0.1947,
+      "what": "python_discopt|interval.py:__mul__",
+      "ncalls": 5606
+     },
+     {
+      "self_s": 0.1762,
+      "what": "callback_path|_timing.py:charge",
+      "ncalls": 118752
+     },
+     {
+      "self_s": 0.1531,
+      "what": "callback_path|nlp_ipopt.py:wrapper",
+      "ncalls": 59317
+     },
+     {
+      "self_s": 0.124,
+      "what": "python_numpy_scipy|_sputils.py:get_index_dtype",
+      "ncalls": 15310
+     },
+     {
+      "self_s": 0.0962,
+      "what": "python_other|~:<built-in method numpy.asarray>",
+      "ncalls": 223678
+     },
+     {
+      "self_s": 0.0881,
+      "what": "rust_discopt|~:<built-in method discopt._rust.solve_milp_csc_py>",
+      "ncalls": 3
+     },
+     {
+      "self_s": 0.0843,
+      "what": "pounce_native|~:<method 'hessian' of 'pounce.NlProblem' objects>",
+      "ncalls": 7872
+     },
+     {
+      "self_s": 0.0737,
+      "what": "pounce_native|~:<method 'constraints' of 'pounce.NlProblem' objects>",
+      "ncalls": 19549
+     },
+     {
+      "self_s": 0.0704,
+      "what": "python_other|~:<method 'reduce' of 'numpy.ufunc' objects>",
+      "ncalls": 59273
+     },
+     {
+      "self_s": 0.0702,
+      "what": "python_discopt|interval.py:__post_init__",
+      "ncalls": 23745
+     },
+     {
+      "self_s": 0.0631,
+      "what": "python_other|~:<built-in method builtins.next>",
+      "ncalls": 118752
+     },
+     {
+      "self_s": 0.0615,
+      "what": "python_other|~:<built-in method builtins.getattr>",
+      "ncalls": 266039
+     },
+     {
+      "self_s": 0.0579,
+      "what": "python_other|~:<built-in method builtins.isinstance>",
+      "ncalls": 339188
+     },
+     {
+      "self_s": 0.0558,
+      "what": "python_other|contextlib.py:__init__",
+      "ncalls": 59376
+     },
+     {
+      "self_s": 0.0557,
+      "what": "callback_path|_tape_nlp_evaluator.py:evaluate_hessian_values",
+      "ncalls": 7872
+     },
+     {
+      "self_s": 0.0542,
+      "what": "python_numpy_scipy|fromnumeric.py:_wrapreduction_any_all",
+      "ncalls": 34767
+     },
+     {
+      "self_s": 0.0511,
+      "what": "python_discopt|outward_rounding.py:bounded_mag",
+      "ncalls": 127330
+     }
+    ],
+    "wall_s": 20.31211716400003,
+    "nodes": 27,
+    "jax_imported": false
+   },
+   "cprofile_root_only": {
+    "entries": 1527,
+    "components": {
+     "rust_lp_warm": {
+      "ncalls": 313,
+      "self_s": 4.291225407000001,
+      "cum_s": 4.291225407000001
+     },
+     "rust_milp": {
+      "ncalls": 2,
+      "self_s": 0.063239718,
+      "cum_s": 0.063239718
+     },
+     "tape_objective": {
+      "ncalls": 17015,
+      "self_s": 0.022525161000000002,
+      "cum_s": 0.022525161000000002
+     },
+     "tape_gradient": {
+      "ncalls": 4756,
+      "self_s": 0.010471723,
+      "cum_s": 0.010471723
+     },
+     "tape_constraints": {
+      "ncalls": 19103,
+      "self_s": 0.078791201,
+      "cum_s": 0.078791201
+     },
+     "tape_jacobian": {
+      "ncalls": 9393,
+      "self_s": 0.050680550000000005,
+      "cum_s": 0.050680550000000005
+     },
+     "tape_hessian": {
+      "ncalls": 7599,
+      "self_s": 0.087793778,
+      "cum_s": 0.087793778
+     },
+     "pounce_ipm": {
+      "ncalls": 55,
+      "self_s": 4.998961497000001,
+      "cum_s": 6.554619561
+     },
+     "lp_relaxer_solve": {
+      "ncalls": 10,
+      "self_s": 0.0005184300000000001,
+      "cum_s": 1.1635513290000001
+     },
+     "obbt_probe_lp": {
+      "ncalls": 293,
+      "self_s": 0.002066458,
+      "cum_s": 3.6670985340000004
+     },
+     "mccormick_node_solve": {
+      "ncalls": 2,
+      "self_s": 0.00030265,
+      "cum_s": 1.23139566
+     },
+     "obbt_root": {
+      "ncalls": 4,
+      "self_s": 0.000867544,
+      "cum_s": 4.009616392
+     },
+     "node_nlp_solve": {
+      "ncalls": 55,
+      "self_s": 0.003309053,
+      "cum_s": 6.566116751
+     },
+     "build_milp_relaxation": {
+      "ncalls": 12,
+      "self_s": 0.000111309,
+      "cum_s": 0.371596802
+     },
+     "_matched_entries": 14
+    },
+    "total_self_s": 12.079854341,
+    "by_layer_s": {
+     "pounce_native": 5.2512836609999995,
+     "rust_discopt": 4.357812215000001,
+     "jax": 0.0,
+     "callback_path": 0.974453162,
+     "python_discopt": 0.5394936799999995,
+     "python_numpy_scipy": 0.37917407200000014,
+     "python_other": 0.5776375509999998
+    },
+    "by_layer_pct": {
+     "pounce_native": 43.47141540586892,
+     "rust_discopt": 36.075039416735635,
+     "jax": 0.0,
+     "callback_path": 8.066762516271634,
+     "python_discopt": 4.466061135927065,
+     "python_numpy_scipy": 3.138896060303084,
+     "python_other": 4.7818254648936565
+    },
+    "hot20": [
+     {
+      "self_s": 4.999,
+      "what": "pounce_native|~:<function Problem.solve at 0x7fd2052659e0>",
+      "ncalls": 55
+     },
+     {
+      "self_s": 4.2912,
+      "what": "rust_discopt|~:<built-in method discopt._rust.solve_lp_warm_csc_py>",
+      "ncalls": 313
+     },
+     {
+      "self_s": 0.2766,
+      "what": "callback_path|_tape_nlp_evaluator.py:_x",
+      "ncalls": 57866
+     },
+     {
+      "self_s": 0.1781,
+      "what": "callback_path|_timing.py:charge",
+      "ncalls": 115586
+     },
+     {
+      "self_s": 0.1591,
+      "what": "callback_path|nlp_ipopt.py:wrapper",
+      "ncalls": 57738
+     },
+     {
+      "self_s": 0.0878,
+      "what": "pounce_native|~:<method 'hessian' of 'pounce.NlProblem' objects>",
+      "ncalls": 7599
+     },
+     {
+      "self_s": 0.0788,
+      "what": "pounce_native|~:<method 'constraints' of 'pounce.NlProblem' objects>",
+      "ncalls": 19103
+     },
+     {
+      "self_s": 0.0641,
+      "what": "python_other|~:<built-in method builtins.next>",
+      "ncalls": 115586
+     },
+     {
+      "self_s": 0.0632,
+      "what": "rust_discopt|~:<built-in method discopt._rust.solve_milp_csc_py>",
+      "ncalls": 2
+     },
+     {
+      "self_s": 0.0598,
+      "what": "python_other|~:<built-in method numpy.asarray>",
+      "ncalls": 140708
+     },
+     {
+      "self_s": 0.0569,
+      "what": "python_other|contextlib.py:__init__",
+      "ncalls": 57793
+     },
+     {
+      "self_s": 0.0565,
+      "what": "callback_path|_tape_nlp_evaluator.py:evaluate_hessian_values",
+      "ncalls": 7599
+     },
+     {
+      "self_s": 0.0535,
+      "what": "python_other|~:<built-in method builtins.getattr>",
+      "ncalls": 208079
+     },
+     {
+      "self_s": 0.0507,
+      "what": "pounce_native|~:<method 'jacobian' of 'pounce.NlProblem' objects>",
+      "ncalls": 9393
+     },
+     {
+      "self_s": 0.0505,
+      "what": "python_numpy_scipy|_sputils.py:get_index_dtype",
+      "ncalls": 5487
+     },
+     {
+      "self_s": 0.0458,
+      "what": "callback_path|_tape_nlp_evaluator.py:evaluate_constraints",
+      "ncalls": 19103
+     },
+     {
+      "self_s": 0.0455,
+      "what": "callback_path|contextlib.py:helper",
+      "ncalls": 57793
+     },
+     {
+      "self_s": 0.0425,
+      "what": "python_discopt|interval.py:__mul__",
+      "ncalls": 1373
+     },
+     {
+      "self_s": 0.0401,
+      "what": "callback_path|contextlib.py:__exit__",
+      "ncalls": 57793
+     },
+     {
+      "self_s": 0.0301,
+      "what": "python_other|~:<method 'ravel' of 'numpy.ndarray' objects>",
+      "ncalls": 68748
+     }
+    ],
+    "wall_s": 12.100428019999981,
+    "nodes": 3,
+    "jax_imported": false
+   }
+  }
+ ],
+ "executed_assertions": 10
+}
