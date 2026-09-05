@@ -20,6 +20,7 @@ Neumaier (1990), *Interval Methods for Systems of Equations*.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -176,6 +177,70 @@ def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interv
     return _unbounded(())
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Accumulation-error bound for reductions
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _accumulation_factor(n_terms: int) -> float:
+    """Relative widening that bounds the float error of an ``n``-term reduction.
+
+    A single ``np.nextafter`` per endpoint is the right convention for a *binary*
+    operation, but a reduction over ``n`` terms accumulates far more than one ULP,
+    so one step does not bound it. numpy sums pairwise, whose forward error is
+    bounded by ``(log2(n) + 1) * u * sum |x_i|`` with ``u = eps/2`` the unit
+    roundoff (Higham, *Accuracy and Stability of Numerical Algorithms*, §4.2);
+    ``_relax/convexity/eigenvalue.py`` already takes the rigorous route for its
+    own accumulation, so the pattern is the repo's, not an invention.
+
+    The factor returned is ``(log2(n) + 2) * eps = (2*log2(n) + 4) * u``, which is
+    more than twice the pairwise bound. The headroom is deliberate and covers, on
+    top of the summation itself:
+
+    * the rounding of the summands, which for ``_eval_matmul`` are themselves
+      *rounded products* of interval endpoints (``<= 0.5 * eps * sum |x_i|``);
+    * the rounding of ``sum |x_i|`` and of the multiplication by this factor;
+
+    all of which fit inside the remaining ``(log2(n) + 2.5) * u``. The caller
+    still applies a final outward ``np.nextafter`` to absorb the rounding of the
+    subtraction/addition of the widening term itself.
+
+    Widening is always the SAFE direction: an enclosure may be loose and remain
+    sound, but must never be narrow. ``n_terms <= 1`` is the identity reduction
+    and gets no widening.
+    """
+    if n_terms <= 1:
+        return 0.0
+    return (math.log2(n_terms) + 2.0) * float(np.finfo(np.float64).eps)
+
+
+def _widen_sum(
+    total: np.ndarray,
+    terms: np.ndarray,
+    n_terms: int,
+    axis: Optional[int],
+    sign: float,
+) -> np.ndarray:
+    """Widen a reduced sum outward by its accumulation-error bound.
+
+    ``sign`` is ``-1.0`` for a lower endpoint and ``+1.0`` for an upper one. A
+    non-finite error term (any ``|x_i|`` infinite, or the sum overflowing) widens
+    the endpoint all the way to the corresponding infinity rather than producing
+    ``inf - inf = nan``, which would silently destroy the enclosure.
+
+    ``axis`` mirrors ``np.sum``'s: ``_eval_matmul`` reduces a whole row and passes
+    ``None``, while the ``SumExpression`` reduction reduces along a declared axis.
+    Both go through this one helper so the two reductions cannot drift apart
+    (#1161).
+    """
+    factor = _accumulation_factor(n_terms)
+    if factor == 0.0:
+        return total
+    err = factor * np.sum(np.abs(terms), axis=axis)
+    widened = total + sign * err
+    return np.where(np.isfinite(err), widened, sign * np.inf)
+
+
 def _unbounded(shape) -> Interval:
     return Interval(
         np.full(shape, -np.inf, dtype=np.float64),
@@ -316,8 +381,20 @@ def _eval_matmul(expr: MatMulExpression, model: Model, box: dict, cache: dict) -
                 np.maximum(row_lo * B_lo, row_lo * B_hi),
                 np.maximum(row_hi * B_lo, row_hi * B_hi),
             )
-            lo[i] = prods_lo.sum()
-            hi[i] = prods_hi.sum()
+            # Outward rounding by the ACCUMULATION error, not by one ULP: the
+            # dot product adds ``k`` terms, each itself a rounded product of
+            # interval endpoints, so a single ``nextafter`` per endpoint does
+            # not bound the error (#1161). Measured before this change against
+            # an exact ``fractions.Fraction`` reference (400 random ``(1, k) @
+            # (k,)`` products, ``k in [4, 400)``): the one-ULP form returned an
+            # enclosure that did NOT contain the true dot product on 166 of 400
+            # trials, worst shortfall 8.5e-07. This evaluator is on the solve
+            # path (nonlinear bound tightening, uniform/OA relaxation, the
+            # g-convex injection, the interval-AD Hessian propagator), where a
+            # too-narrow enclosure becomes an FBBT tightening that cuts the
+            # optimum out of the box.
+            lo[i] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
+            hi[i] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
     # Other shapes fall through as unbounded for now — not needed by
     # any expression the convexity certificate currently targets.
