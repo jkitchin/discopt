@@ -11753,7 +11753,7 @@ def solve_model(
             return _heur_nlp_cost["default"]
         return _heur_nlp_cost["max"]
 
-    def _root_heur_nlp_entry_ok(_ev=None) -> bool:
+    def _root_heur_nlp_entry_ok(_ev=None, *, finder: bool = False) -> bool:
         """Whether a compile-/solve-triggering root heuristic NLP may start now.
 
         Returns False when either the deadline has effectively passed (no room to
@@ -11776,18 +11776,24 @@ def solve_model(
         # tree explores 3. Dividing by the admitted share turns "does it fit at
         # all?" into "does it fit the way an optional stage should?".
         #
-        # Bounding the stage's own clock instead (``_heur_stage_deadline``) was
-        # tried first and MEASURED INERT: the pump's sub-NLPs overrun their own
-        # ``max_wall_time`` grant (3.27 s against 3.0 s), and the pump polls its
-        # deadline only between rounds, so a share-sized deadline does not bind on
-        # round one. heatexch_gen2 at 10 s stayed at 3 nodes in both arms. The cap
-        # is kept — it is sound, costs nothing, and did turn up an incumbent at
-        # 20 s that the legacy arm missed — but the entry rule is what works.
+        # Bounding the stage's own CLOCK instead was tried first, MEASURED INERT,
+        # and removed: the pump's sub-NLPs overrun their own ``max_wall_time``
+        # grant (3.27 s against 3.0 s) and the pump polls its deadline only
+        # between rounds, so a share-sized deadline never binds on round one —
+        # heatexch_gen2 at 10 s stayed at 3 nodes in both arms. Its one apparent
+        # gain (an incumbent at 20 s) was later shown to be the legacy arm's own
+        # bimodality, so it bought nothing and is gone. Entry is the lever.
         #
         # The share is 1.0 (this exact rule, byte-identical) with the flag off.
-        if _remaining <= max(
-            _DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _heuristic_entry_share()
-        ):
+        # #1153 applies the share ONLY to a finder-role caller. This gate is
+        # shared by 13 root-heuristic entries, several of them improver-role
+        # (the enumerate/integer_box_search/node-diving sites, which already
+        # answer to ``_improver_allowed``'s success-weighted, node-proportional
+        # contingent). Dividing here unconditionally double-gated those — their
+        # own contingent AND a 4x-stricter entry test — which is the shape of the
+        # three lost incumbents in the §6.6 panel.
+        _share = _heuristic_entry_share() if finder else 1.0
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost() / _share):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
@@ -11800,40 +11806,6 @@ def solve_model(
             if _compile_est > 0.0 and _remaining < _compile_est:
                 return False
         return True
-
-    def _heur_stage_deadline() -> float:
-        """The deadline a *finder*-role primal heuristic runs under (#1153).
-
-        These stages were handed ``_deadline`` — the whole SOLVE deadline — so
-        what they cost was set by the caller's ``time_limit`` rather than by the
-        stage. That is #1116's role-1 clock doing a role-2 job, and #1153
-        measured the harm: on ``heatexch_gen2`` (3 reps, zero spread) a 5 s budget
-        never admits the feasibility pump and explores 7 nodes, while a 10 s
-        budget admits it, its two sub-NLPs spend 6.4 s of the 10 s, they return
-        NO incumbent, and the tree explores 3. Doubling the budget bought one more
-        heuristic that ate 64 % of it and produced nothing.
-
-        Bounding the stage's own clock to a share of what is left fixes that by
-        construction and without an estimate: the stage can never take more than
-        its share, so the search always keeps the rest, at every budget. It is
-        also strictly better than refusing the stage — measured on ``tspn12``,
-        where the pump is PRODUCTIVE (it finds 262.647 against 282.244) and
-        refusing it loses that incumbent, while capping its clock does not.
-
-        Returns ``_deadline`` unchanged — the legacy behaviour, byte-identical —
-        when the share is 1.0 (``DISCOPT_HEUR_ENTRY_SHARE`` off).
-
-        Sound: a truncated primal heuristic changes which incumbent is found and
-        when, never the dual bound or the certificate (§0.3 heuristic-policy).
-        """
-        _share = _heuristic_entry_share()
-        if _share >= 1.0:
-            return _deadline
-        _now = time.perf_counter()
-        return min(
-            _deadline,
-            _now + max(_DEADLINE_NODE_FLOOR_S, _share * (_deadline - _now)),
-        )
 
     def _hess_compile_refuses(_ev) -> bool:
         """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
@@ -13590,7 +13562,7 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
+            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator, finder=True):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
 
@@ -13601,7 +13573,7 @@ def solve_model(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=_heur_stage_deadline(),
+                        deadline=_deadline,
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_fp)
                     if fp_sol is not None:
@@ -13636,7 +13608,7 @@ def solve_model(
                 if (
                     _mc_lp_relaxer is not None
                     and not _model_is_convex
-                    and _root_heur_nlp_entry_ok(_active_evaluator)
+                    and _root_heur_nlp_entry_ok(_active_evaluator, finder=True)
                 ):
                     try:
                         from discopt._relax.primal_heuristics import feasibility_pump
@@ -13670,7 +13642,7 @@ def solve_model(
                                 max_rounds=5,
                                 backend=_resolve_heuristic_backend(nlp_solver),
                                 evaluator=evaluator,
-                                deadline=_heur_stage_deadline(),
+                                deadline=_deadline,
                             )
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))

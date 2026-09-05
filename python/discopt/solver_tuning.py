@@ -1242,6 +1242,20 @@ class SolverTuning:
     :data:`HEURISTIC_ENTRY_SHARE` of what is left. A large budget still admits it;
     a budget that would be eaten by it does not.
 
+    **Scope.** The share is applied only where the caller passes ``finder=True``
+    — the two feasibility-pump entries. ``_root_heur_nlp_entry_ok`` is the shared
+    gate for thirteen root-heuristic entries, several of them improver-role
+    (enumerate, ``integer_box_search``, node diving), and those already answer to
+    their own contingent; dividing there unconditionally double-gated them.
+
+    **Known structural limit, and why it cannot graduate as written.**
+    ``_mean_heur_nlp_cost()`` returns its 2.0 s *default* until a heuristic NLP
+    has actually been observed, so at the FIRST call this gate reduces to "is
+    more than ``2.0 / share`` seconds left?" — on any model, independent of the
+    pump's real cost, which was measured at 6.4 s. That first call is the whole
+    effect on the 5-10 s rungs where #1153's harm lives, so the rule is acting on
+    a 3x-wrong estimate exactly where it matters most.
+
     Sound: every gated call is a primal heuristic, so refusing one can change
     which incumbent is found and when, never the dual bound or the certificate
     (§0.3 heuristic-policy). ``DISCOPT_ROOT_BUDGET_GATE=0`` still disables the

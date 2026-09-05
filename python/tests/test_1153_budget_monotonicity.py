@@ -28,10 +28,17 @@ What this file pins
     The unit contract of :func:`discopt.solver_tuning.saturate_role2`.
 
 ``test_no_unsaturated_role2_carve``
-    The **ratchet**, in the idiom of ``test_912_wall_budget_inventory``: every
-    sub-budget in the package computed by multiplying or dividing a role-1 budget
-    is either provably bounded above by a constant, or recorded in :data:`KNOWN`
-    with the reason it is not a role-2 carve. A new uncapped carve fails here.
+    The **ratchet**, in the idiom of ``test_912_wall_budget_inventory``: a
+    sub-budget computed by multiplying or dividing a role-1 budget is either
+    provably bounded above by a constant, or recorded in :data:`KNOWN` with the
+    reason it is not a role-2 carve. A new uncapped carve fails here.
+
+    **The coverage limit, stated rather than implied.** "A role-1 budget" means a
+    name in :data:`_ROLE1_NAMES`, a 13-name whitelist. A carve off a role-1 value
+    held under some *other* name — ``_budget_left * 0.42`` — is invisible to this
+    scan, and no amount of AST work fixes that without whole-package dataflow.
+    The ratchet is a tripwire on the spellings this codebase actually uses, not a
+    proof of absence.
 
 ``test_incumbent_quality_is_monotone_in_time_limit``
     The behavioural gate: over a panel of instances and an increasing ladder of
@@ -205,9 +212,23 @@ def _bounded(node: ast.AST) -> bool:
     return False
 
 
-def _scan() -> set[tuple[str, str]]:
-    """Every carve of a role-1 budget that is NOT bounded above by a constant."""
-    found: set[tuple[str, str]] = set()
+def _scan() -> dict[tuple[str, str], int]:
+    """Every carve of a role-1 budget that is NOT bounded above by a constant,
+    **counted per key**.
+
+    A set keyed on ``(path, first source line)`` is not enough, and the gap is the
+    one this ratchet exists to close. Several recorded lines are generic prefixes
+    of a widened multi-line expression — ``deadline=min(``, ``_route_budget =
+    max(``, ``float(time_limit)`` — so a NEW unbounded carve whose widened
+    expression happens to start with the same text is absorbed by the existing
+    entry and reported clean, while ``test_recorded_carves_still_exist`` also
+    stays green because the recorded line is still there. Verified by injecting
+    such a carve into ``solve_model``: the set-based scan reported nothing.
+
+    Counting closes it: a second site landing on a recorded line takes the count
+    from 1 to 2 and fails against the pinned count in :data:`KNOWN`.
+    """
+    found: dict[tuple[str, str], int] = {}
     for root, dirs, files in os.walk(_PKG):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in sorted(files):
@@ -244,11 +265,15 @@ def _scan() -> set[tuple[str, str]]:
                 seen.add(top.lineno)
                 if _bounded(top):
                     continue
-                found.add((str(path.relative_to(_PKG)), src[top.lineno - 1].strip()))
+                key = (str(path.relative_to(_PKG)), src[top.lineno - 1].strip())
+                found[key] = found.get(key, 0) + 1
     return found
 
 
-# (module-relative path, source line, why it is not an unsaturated role-2 carve).
+# (module-relative path, source line, count, why it is not an unsaturated role-2
+# carve). The COUNT is load-bearing: see ``_scan``. Every entry is 1 today; a new
+# carve colliding with one of the generic recorded prefixes would make it 2 and
+# fail, which a set-keyed ratchet missed entirely.
 #
 # ``split``   the value is a division of the caller's own role-1 budget between
 #             two consumers, not a work allowance — growing with ``time_limit``
@@ -258,61 +283,72 @@ def _scan() -> set[tuple[str, str]]:
 #             the scanner cannot see across that boundary.
 # ``counted`` the wall figure is a secondary bound; a deterministic count is the
 #             real one.
-KNOWN: tuple[tuple[str, str, str], ...] = (
+KNOWN: tuple[tuple[str, str, int, str], ...] = (
     (
         "_relax/root_reduce.py",
         "obbt_budget = remaining * float(obbt_stage_frac)",
+        1,
         "derived",  # ``remaining`` descends from the (saturated) root-fixpoint grant
     ),
     (
         "modeling/core.py",
         "_fb_reserve = 0.35 * _remaining_tl",
+        1,
         "split",  # the #844 fallback's share of the caller's budget
     ),
     (
         "solver.py",
         "_bound_reserve = min(float(rr_reserve_s), 0.5 * remaining)",
+        1,
         "derived",  # ``rr_reserve_s`` <= ``_ROOT_FALLBACK_RESERVE_S`` (3 s)
     ),
     (
         "solver.py",
         "per_solve_limit = max(0.05, time_limit / (2 * len(candidate_var_indices) + 1))",
+        1,
         "split",  # divides the helper's own budget across its candidate variables
     ),
     (
         "solver.py",
         "_route_budget = max(",
+        1,
         "split",  # the auto-routed sub-solver's own role-1 budget
     ),
     (
         "solver.py",
         "deadline=min(",
+        1,
         "derived",  # an absolute deadline; the duration inside ceilings at 15 s
     ),
     (
         "solver.py",
         "self.budget = (_ROUND_TIME_FRAC if frac is None else float(frac)) * float(time_limit)",
+        1,
         "counted",  # ``_ROUND_ATTEMPT_CAP`` (64) is the real bound
     ),
     (
         "solver.py",
         "float(time_limit)",
+        1,
         "derived",  # the ``deterministic`` no-clock arm; the live arm caps at
         # ``_SIMPLEX_MILP_BUDGET_CAP_S``
     ),
     (
         "solvers/amp.py",
         "iter_budget = remaining / horizon",
+        1,
         "derived",  # capped at 60 s by the ``return min(...)`` on the next line
     ),
     (
         "solvers/oa.py",
         "budget = remaining * _MASTER_NO_INCUMBENT_BUDGET_FRAC",
+        1,
         "split",  # the OA master's share of the caller's budget
     ),
 )
 
-_KNOWN_KEYS = {(p, s) for p, s, _ in KNOWN}
+_KNOWN_COUNT = {(p, s): n for p, s, n, _ in KNOWN}
+_KNOWN_KEYS = set(_KNOWN_COUNT)
 
 
 @pytest.mark.unit
@@ -320,7 +356,9 @@ def test_no_unsaturated_role2_carve():
     """A role-2 sub-budget must saturate, or be recorded as not being one."""
     found = _scan()
     assert found, "the scanner matched nothing — it has stopped working (CLAUDE.md §6)"
-    new = sorted(found - _KNOWN_KEYS)
+    new = sorted(
+        (path, line) for (path, line), n in found.items() if n > _KNOWN_COUNT.get((path, line), 0)
+    )
     assert not new, (
         "unsaturated role-2 wall carve(s) — #1153.\n"
         "A sub-budget carved as a fraction of the caller's ``time_limit`` must\n"
@@ -328,7 +366,9 @@ def test_no_unsaturated_role2_carve():
         "instead of more search and the answer gets WORSE (nvs19: 30 s ->\n"
         "-1098.2 over 38403 nodes, 60 s -> -1001.2 over 7619). Wrap it in\n"
         "``solver_tuning.saturate_role2(seconds, frac)``, give it a constant\n"
-        "``min(...)`` ceiling, or record it in KNOWN with a category.\n\n"
+        "``min(...)`` ceiling, or record it in KNOWN with a category.\n"
+        "(A line already in KNOWN is reported when a SECOND site lands on the same\n"
+        "text — bump its recorded count only if the new site is genuinely exempt.)\n\n"
         + "\n".join(f"  {p}: {s}" for p, s in new)
     )
 
@@ -336,7 +376,7 @@ def test_no_unsaturated_role2_carve():
 @pytest.mark.unit
 def test_recorded_carves_still_exist():
     """The ratchet must not rot into stale bookkeeping."""
-    stale = sorted(_KNOWN_KEYS - _scan())
+    stale = sorted(_KNOWN_KEYS - set(_scan()))
     assert not stale, "KNOWN lists carve(s) that no longer exist — remove them:\n" + "\n".join(
         f"  {p}: {s}" for p, s in stale
     )
