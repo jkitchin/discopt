@@ -526,6 +526,46 @@ confirming panel on an unloaded machine for the wall-clock column, then the
 default flips.
 *Expected: +2 instances, already measured.*
 
+**A0 configuration check (2026-09-05) — the shipped setting is not the banked
+one, and it had never been measured.** The banked arm is `cut500_prune` =
+`root_cuts=500, cut_rounds=8, cut_select=False, root_cut_prune=True`. What
+`_milp_root_cut_budget` (`solver.py:21476-21510`) actually hands `solve_milp_py`
+is **different**: `root_cuts=500, cut_rounds=50, cut_select=True,
+root_cut_time_s=max(0.5, 0.5·engine_budget)`. Flipping the default as written
+would therefore have shipped a configuration no panel had ever run — the A0.1
+wiring step above silently changes the thing A0 measured.
+
+Measured with a **node**-budget panel (`scratchpad/miplib/armpanel.py`, 38
+instances, `max_nodes=2000`, `gap_tol=1e-4`, three arms rotated per instance).
+Node budgets rather than time budgets deliberately: the machine was at load ~21
+all day, and node counts, iteration counts and dual bounds are load-independent
+where wall-clock is not (CLAUDE.md §9). `time_limit_s=300` was present only as a
+hang guard and bound on no row.
+
+| arm | config | solved | nodes | simplex iters |
+|---|---|---|---|---|
+| `off` | 16 / 1 / no-select (today's default) | 11/38 | 59,070 | 1,498,688 |
+| `prod` | 500 / 50 / select (what `_milp_root_cut_budget` ships) | 11/38 | 57,524 | 1,618,863 |
+| `p500` | 500 / 8 / no-select (the banked `cut500_prune`) | 11/38 | 58,646 | 1,941,550 |
+
+Cert-clean: 114 bound-vs-reference-optimum comparisons, **zero violations**, and
+no instance changed solved status in either direction.
+
+The payoff is in the **bound**, on the 27 instances no arm finished within 2000
+nodes — mean dual gap `off` 0.2496 → `prod` **0.1883** (−25 %), median 0.1435 →
+**0.0404**; `prod` is strictly better than `off` on 16, worse on 4, tied on 7.
+The four `mik-250-20-75-*` move 0.143/0.127/0.145/0.162 → 0.038/0.036/0.037/0.038
+— the §1b pure-dual family is exactly where the cuts land.
+
+**The banked claim transfers, and the shipped configuration is the better of the
+two**: `prod` beats `p500` on mean gap (0.1883 vs 0.1919), on best-arm wins
+(19 vs 12) and on simplex iterations (1.62 M vs 1.94 M). So A0.1's wiring does
+not need to be re-pointed at `cut500_prune`; `_milp_root_cut_budget` stays as it
+is. Caveat on scope: at a 2000-node budget no arm converts a better bound into a
+*solve*, so this panel confirms cert-cleanliness and bound quality but says
+nothing about the banked "+2 instances", which was a 20 s wall-clock result. That
+column still needs the unloaded-machine panel named above before the flip.
+
 **A0.1 — wire the graduated budget to the product path.** The
 `_STRONG_CUT_PROFILE` 200 × 10 escalation
 (`python/discopt/solvers/milp_simplex.py:66-96, 985-1022`) sits on the OA/relaxer
