@@ -42,6 +42,28 @@ examiner primal_con_feas (scaled)         -> passed=False
 All three now call one helper, `validation.feasibility.jacobian_row_scales`, so
 they cannot drift again.
 
+### Second review pass: the guard did not survive the refactor
+
+Extracting `jacobian_row_scales` unified the formula but left its **non-finite
+guard** behind in `_row_scales`, so the two direct callers had none. An unbounded
+derivative at a variable pinned to zero (`d/dx log(x)` at `x = 0`) makes
+`inf * 0` a NaN, and a NaN scale compares False against every tolerance:
+
+```
+J = [[inf, 1.0]], x = [0.0, 2.0]
+term magnitude (extracted) : [nan]  -> RuntimeWarning, examiner [FAIL] with scale=nan
+floored form   (pre-#1151) : [inf]  -> infinite tolerance, passes unconditionally
+term magnitude (guarded)   : [0.0]  -> caller's floor, i.e. plain ABS_TOL
+```
+
+Both post-#1151 arms were already conservative — no false certificate — but the
+NaN produced a spurious failure and a numpy warning in the very tool this PR
+makes authoritative. The guard now lives *with* the definition. `_row_scales`
+keeps its stricter **whole-batch** fallback via `_jacobian_row_scales_checked`:
+zeroing per row there would leave co-occurring rows on their own larger scales,
+which is looser than the pre-refactor behaviour — a relaxation smuggled in by a
+refactor, which is the same shape of mistake as the original defect.
+
 **One correction to the review's finding 2.** It describes the harm on a quotient
 aux's *defining* row. That row is an `==`, and `_dual_recovery`'s `row_select`
 takes `is_eq` unconditionally — `near` is never consulted for an equality — so

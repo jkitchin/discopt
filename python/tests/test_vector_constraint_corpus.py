@@ -14,6 +14,8 @@ rather than argued from a commit message.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from discopt import Model
@@ -574,3 +576,89 @@ def test_jacobian_row_scales_rejects_shape_mismatches():
         jacobian_row_scales(np.zeros((2, 3)), np.zeros(4))
     assert jacobian_row_scales(np.zeros((0, 3)), np.zeros(3)).shape == (0,)
     assert jacobian_row_scales(np.array([[2.0, -3.0]]), np.array([5.0, 1.0]))[0] == 10.0
+
+
+def test_row_scale_is_finite_when_a_derivative_is_unbounded_at_zero():
+    """#1157 second review: the non-finite guard must live WITH the definition.
+
+    ``d/dx log(x)`` at ``x = 0`` is unbounded, so ``|J_ij| * |x_j|`` is
+    ``inf * 0`` — a NaN, which numpy warns about and which compares False
+    against every tolerance downstream. ``_row_scales`` had a guard for this;
+    factoring the formula out into ``jacobian_row_scales`` left the two direct
+    callers without one, so they emitted a RuntimeWarning and a spurious
+    ``[FAIL] primal_con_feas (scaled)`` carrying ``scale=nan``.
+
+    Direction: 0.0 means "no usable estimate", so the caller's floor applies and
+    the row is held to the plain absolute tolerance — the STRICTEST answer. The
+    pre-#1151 floored form gave that row ``inf``, hence an *infinite* tolerance,
+    passing it unconditionally; this keeps the safe direction.
+    """
+    J = np.array([[np.inf, 1.0]])
+    x = np.array([0.0, 2.0])
+
+    assert not np.isfinite((np.abs(J) * np.maximum(1.0, np.abs(x))).max()), (
+        "precondition: the pre-#1151 form yields a non-finite scale here"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        scales = jacobian_row_scales(J, x)
+    assert np.all(np.isfinite(scales)), f"non-finite row scale leaked: {scales}"
+    assert scales[0] == 0.0, "a non-finite row must fall back to the caller's floor"
+
+    # A finite row sharing the batch keeps its own scale; only the bad row is zeroed.
+    mixed = jacobian_row_scales(np.array([[np.inf, 1.0], [2.0, 3.0]]), np.array([0.0, 4.0]))
+    assert mixed.tolist() == [0.0, 12.0]
+
+
+def test_row_scales_keeps_its_whole_batch_fallback():
+    """``_row_scales`` must NOT inherit the public helper's per-row zeroing.
+
+    One non-finite row there sends *every* suspect row to the Jacobian-free
+    bound. Relaxing that to per-row would leave the co-occurring rows on their
+    own larger scales — looser than before the helper was extracted, i.e. a
+    relaxation in the accepting direction smuggled in by a refactor.
+    """
+    from discopt.validation.feasibility import _jacobian_row_scales_checked, _row_scales
+
+    scales, all_finite = _jacobian_row_scales_checked(
+        np.array([[np.inf, 1.0], [2.0, 3.0]]), np.array([0.0, 4.0])
+    )
+    assert all_finite is False, "the checked form must report the non-finite row"
+    assert scales.tolist() == [0.0, 12.0]
+
+    class _Ev:
+        def evaluate_jacobian(self, _x):
+            return np.array([[np.inf, 1.0], [2.0, 3.0]])
+
+    assert _row_scales(_Ev(), np.array([0.0, 4.0]), np.array([0, 1])) is None, (
+        "_row_scales must decline the whole batch, not zero one row and keep the rest"
+    )
+
+
+def test_examiner_does_not_warn_or_spuriously_fail_on_an_unbounded_derivative():
+    """End to end: the tool this PR makes authoritative must stay quiet and
+    correct at a feasible point with an unbounded derivative."""
+    from types import SimpleNamespace
+
+    import discopt.modeling as dm
+    from discopt.validation.examiner import examine
+
+    m = Model("logmodel")
+    m.continuous("a", lb=0.0, ub=10.0)
+    m.continuous("b", lb=0.0, ub=10.0)
+    a, _b = m._variables
+    m.subject_to(dm.log(a) + _b <= 100.0)
+    m.minimize(_b)
+
+    pt = SimpleNamespace(x={"a": 0.0, "b": 2.0}, objective=None, bound=None, status="optimal")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = examine(pt, m, recover_duals=False)
+        runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+
+    assert not runtime, (
+        f"examiner emitted numpy RuntimeWarnings: {[str(w.message) for w in runtime]}"
+    )
+    scaled = [c for c in report.checks if c.name == "primal_con_feas (scaled)"]
+    assert len(scaled) == 1, "the scaled primal-feasibility check did not run"
+    assert scaled[0].passed is True, "a NaN row scale made the scaled check fail a feasible point"

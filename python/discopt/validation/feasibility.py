@@ -208,6 +208,35 @@ def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
     flooring ``|x_j|`` *inside* the max is precisely the #1151 defect — see the
     module docstring. Returns zeros where every term of a row vanishes; the
     caller's floor is what keeps such a row on the plain absolute tolerance.
+
+    **Non-finite rows return 0.0**, i.e. the caller's floor, i.e. the plain
+    absolute tolerance — the STRICTEST answer, and the same direction
+    :func:`_row_scales` already takes when the Jacobian is unavailable. This is
+    not hypothetical: an unbounded derivative at a variable pinned to zero
+    (``d/dx log(x)`` at ``x = 0``) makes ``inf * 0`` a NaN, and a NaN scale
+    propagates into ``violation / row_scale`` as a NaN that compares False
+    against every tolerance. Reported by the second review pass on #1157: the
+    guard lived in ``_row_scales`` and did not survive being factored out here,
+    so the two consumers that call this directly emitted a numpy RuntimeWarning
+    and a spurious ``[FAIL] primal_con_feas (scaled)`` with ``scale=nan``. Note
+    the pre-#1151 floored form gave that row ``inf`` and so an INFINITE
+    tolerance, passing it unconditionally; 0.0 keeps the safe direction while
+    dropping the warning and the bogus detail line.
+    """
+    scales, _all_finite = _jacobian_row_scales_checked(J, x_flat)
+    return scales
+
+
+def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.ndarray, bool]:
+    """:func:`jacobian_row_scales` plus "was every row finite?".
+
+    Split out so :func:`_row_scales` can keep its **whole-batch** fallback: one
+    non-finite row there sends *every* suspect row to the Jacobian-free bound.
+    Zeroing per row instead would leave the co-occurring rows on their own
+    (larger) scales, which is looser than what that function did before this
+    helper existed — a relaxation, in the accepting direction, smuggled in by a
+    refactor. The public helper's per-row 0.0 is right for callers that have no
+    batch to fall back for.
     """
     J = np.asarray(J, dtype=np.float64)
     xw = np.abs(np.asarray(x_flat, dtype=np.float64))
@@ -216,8 +245,21 @@ def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
     if J.shape[1] != xw.shape[0]:
         raise ValueError(f"Jacobian has {J.shape[1]} columns, point has {xw.shape[0]}")
     if J.shape[0] == 0:
-        return np.zeros(0, dtype=np.float64)
-    return np.asarray((np.abs(J) * xw[None, :]).max(axis=1), dtype=np.float64)
+        return np.zeros(0, dtype=np.float64), True
+    # ``inf * 0`` is NaN and numpy warns; the result is discarded either way, so
+    # the warning is noise on a path that has already decided what to do.
+    with np.errstate(invalid="ignore"):
+        terms = np.abs(J) * xw[None, :]
+    finite = np.isfinite(terms)
+    all_finite = bool(finite.all())
+    if not all_finite:
+        # Any non-finite term makes the whole row's magnitude unestimatable.
+        terms = np.where(finite, terms, 0.0)
+        bad_rows = ~finite.all(axis=1)
+        scales = np.asarray(terms.max(axis=1), dtype=np.float64)
+        scales[bad_rows] = 0.0
+        return scales, False
+    return np.asarray(terms.max(axis=1), dtype=np.float64), True
 
 
 def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.ndarray]:
@@ -245,8 +287,8 @@ def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.
     if J.ndim != 2 or J.shape[0] <= int(rows.max()):
         logger.debug("feasibility: Jacobian shape %s cannot cover rows; stricter bound", J.shape)
         return None
-    sub = jacobian_row_scales(J[rows, :], x_flat)
-    if not np.all(np.isfinite(sub)):
+    sub, all_finite = _jacobian_row_scales_checked(J[rows, :], x_flat)
+    if not all_finite:
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")
         return None
     return sub
