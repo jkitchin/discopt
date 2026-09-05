@@ -1121,11 +1121,27 @@ figures need one quiet re-run before they are quoted outside this document.
 
 discopt is **EPL-2.0**. HiGHS is MIT (compatible inbound). SCIP 10 is Apache-2.0,
 which can be combined but not relicensed. Both reviews were instructed to
-describe algorithms, not paste source, and neither returned code. If the cMIR δ
-and complementation loop in Stage 2 ends up a close derivation of
-`SCIPcutGenerationHeuristicCMIR`, or the transform step of
-`HighsTransformedLp::transform`, that is an attribution decision for the owner
-before merge, not something to settle in a PR.
+describe algorithms, not paste source, and neither returned code.
+
+**Decided 2026-09-05; the standing policy is `docs/dev/reference-provenance.md`.**
+Read for the idea, implement independently from the published paper, cite and
+acknowledge the source. So Stage 2 builds cMIR from {cite:t}`Marchand2001` and
+lifted covers from {cite:t}`Gu1998` / {cite:t}`Gu1999`, using
+`SCIPcutGenerationHeuristicCMIR` and `HighsTransformedLp::transform` only to
+settle a specific ambiguity the papers leave open -- not as the thing being
+transcribed -- and names the file that informed it in the module header.
+
+One caveat that policy file states and that this note previously implied the
+wrong way round: **being in Rust is not itself the protection.** A translation
+into another language is still a derivative work. What protects an independent
+reimplementation is that algorithms and mathematical methods are not
+copyrightable, only their expression is -- so the safety comes from working from
+the paper, which is a practice that can be skipped, not from the change of
+language, which is automatic. The distinction decides which step is load-bearing.
+
+What still comes to the owner is narrower than this note used to say: a routine
+with **no published description**, where the reference implementation is the
+specification.
 
 ## 6. Reproduction
 
