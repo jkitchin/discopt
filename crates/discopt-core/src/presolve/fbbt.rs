@@ -408,20 +408,130 @@ fn contains_angle(lo_norm: f64, hi_norm: f64, target: f64) -> bool {
 // Forward propagation
 // ─────────────────────────────────────────────────────────────
 
+/// Push the direct children of `id` onto `out`.
+fn push_children(arena: &ExprArena, id: ExprId, out: &mut Vec<ExprId>) {
+    match arena.get(id) {
+        ExprNode::BinaryOp { left, right, .. } | ExprNode::MatMul { left, right } => {
+            out.push(*left);
+            out.push(*right);
+        }
+        ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => out.push(*operand),
+        ExprNode::FunctionCall { args, .. } => out.extend(args.iter().copied()),
+        ExprNode::Index { base, .. } => out.push(*base),
+        ExprNode::SumOver { terms } => out.extend(terms.iter().copied()),
+        ExprNode::Variable { .. }
+        | ExprNode::Constant(_)
+        | ExprNode::ConstantArray(_, _)
+        | ExprNode::Parameter { .. } => {}
+    }
+}
+
+/// Reusable buffers for [`forward_propagate_into`], allocated once per FBBT
+/// pass instead of once per constraint.
+///
+/// This type exists because forward propagation used to evaluate **every node
+/// in the arena** for **every constraint**, making one FBBT sweep
+/// `O(n_constraints x arena_len)` rather than `O(sum of constraint sizes)`.
+/// On a set-covering model with ~900 rows that is ~1e8 interval evaluations
+/// per sweep, which is why root probing — five sweeps per probe, two probes
+/// per binary — consumed its entire time budget and tightened nothing
+/// (measured: probing 60,362 ms, 27,900 work units, 0 bounds tightened).
+///
+/// The `seen`/`epoch` stamp is what keeps the per-call cost proportional to
+/// the subtree: clearing an `O(arena_len)` visited array per constraint would
+/// re-introduce the same quadratic, just with a cheaper constant.
+#[derive(Debug, Default)]
+pub struct FwdScratch {
+    bounds: Vec<Interval>,
+    seen: Vec<u32>,
+    epoch: u32,
+    stack: Vec<ExprId>,
+    order: Vec<usize>,
+}
+
+impl FwdScratch {
+    /// An empty scratch buffer; it sizes itself on first use.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Prepare for a propagation over an arena of `n` nodes.
+    fn begin(&mut self, n: usize) {
+        if self.bounds.len() != n {
+            self.bounds = vec![Interval::entire(); n];
+            self.seen = vec![0u32; n];
+            self.epoch = 0;
+        }
+        self.epoch = match self.epoch.checked_add(1) {
+            Some(e) => e,
+            None => {
+                // Wrapped. A stale stamp could alias the new epoch and make a
+                // node look already-evaluated, so clear before reusing 1.
+                self.seen.iter_mut().for_each(|s| *s = 0);
+                1
+            }
+        };
+    }
+}
+
+/// Forward-propagate interval bounds over the subtree rooted at `id`, reusing
+/// `scratch`.
+///
+/// Returns the whole node-bounds slice, but **only the slots reachable from
+/// `id` are written by this call**; every other slot holds whatever the
+/// previous call left there. That is sound for the one thing these bounds are
+/// used for — [`backward_propagate`] descends from the same `id`, so it reads
+/// only that subtree — and it is the difference between `O(arena_len)` and
+/// `O(subtree)` per constraint.
+///
+/// **Do not read a slot outside the subtree of `id`.** If you need bounds for
+/// two unrelated expressions, propagate twice; forward propagation is a pure
+/// function of `var_bounds`, so the second call cannot disagree with the
+/// first. (`polynomial.rs` did read across subtrees, relying on the old
+/// whole-arena behaviour, and now calls twice.)
+pub fn forward_propagate_into<'a>(
+    arena: &ExprArena,
+    id: ExprId,
+    var_bounds: &[Interval],
+    scratch: &'a mut FwdScratch,
+) -> &'a [Interval] {
+    scratch.begin(arena.len());
+
+    // Collect the reachable node set. The arena appends children before
+    // parents, so ascending index order over that set is a valid topological
+    // order — the same order the whole-arena walk used.
+    scratch.order.clear();
+    scratch.stack.clear();
+    scratch.stack.push(id);
+    while let Some(nid) = scratch.stack.pop() {
+        let i = nid.0;
+        if scratch.seen[i] == scratch.epoch {
+            continue;
+        }
+        scratch.seen[i] = scratch.epoch;
+        scratch.order.push(i);
+        push_children(arena, nid, &mut scratch.stack);
+    }
+    scratch.order.sort_unstable();
+
+    for k in 0..scratch.order.len() {
+        let i = scratch.order[k];
+        let v = eval_node_interval(arena, ExprId(i), var_bounds, &scratch.bounds);
+        scratch.bounds[i] = v;
+    }
+    &scratch.bounds
+}
+
 /// Forward-propagate interval bounds from leaves to root.
 ///
-/// Returns a vector of intervals, one per arena node.
-pub fn forward_propagate(arena: &ExprArena, _id: ExprId, var_bounds: &[Interval]) -> Vec<Interval> {
-    let n = arena.len();
-    let mut bounds = vec![Interval::entire(); n];
-
-    // Walk nodes in topological order (0..n). Because the arena adds
-    // children before parents, indices 0..n are already topologically sorted.
-    for i in 0..n {
-        let eid = ExprId(i);
-        bounds[i] = eval_node_interval(arena, eid, var_bounds, &bounds);
-    }
-    bounds
+/// Returns a vector of intervals, one per arena node. Nodes outside the
+/// subtree rooted at `id` are left at [`Interval::entire`] — see
+/// [`forward_propagate_into`], which this wraps, for why that is sound and
+/// for the one call site that had to change.
+pub fn forward_propagate(arena: &ExprArena, id: ExprId, var_bounds: &[Interval]) -> Vec<Interval> {
+    let mut scratch = FwdScratch::new();
+    forward_propagate_into(arena, id, var_bounds, &mut scratch);
+    scratch.bounds
 }
 
 /// Compute the interval for a single node given its children's intervals.
@@ -1275,6 +1385,9 @@ pub fn fbbt_with_cutoff_until(
     let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
 
     // Determine the objective cutoff constraint (if any).
+    // One buffer for the whole call, not one per constraint per sweep.
+    let mut scratch = FwdScratch::new();
+
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
         let output_bound = match model.objective_sense {
             ObjectiveSense::Minimize => Interval::new(f64::NEG_INFINITY, bound),
@@ -1299,7 +1412,8 @@ pub fn fbbt_with_cutoff_until(
                     return var_bounds;
                 }
             }
-            let node_bounds = forward_propagate(&model.arena, constr.body, &var_bounds);
+            let node_bounds =
+                forward_propagate_into(&model.arena, constr.body, &var_bounds, &mut scratch);
 
             let output_bound = match constr.sense {
                 ConstraintSense::Le => Interval::new(f64::NEG_INFINITY, constr.rhs),
@@ -1322,14 +1436,15 @@ pub fn fbbt_with_cutoff_until(
                 &model.arena,
                 constr.body,
                 output_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }
 
         // Propagate the objective cutoff constraint.
         if let Some((obj_expr, ref cutoff_bound)) = obj_cutoff {
-            let node_bounds = forward_propagate(&model.arena, obj_expr, &var_bounds);
+            let node_bounds =
+                forward_propagate_into(&model.arena, obj_expr, &var_bounds, &mut scratch);
             let obj_bound = node_bounds[obj_expr.0];
             if obj_bound.intersect(cutoff_bound).is_empty_beyond(FEAS_TOL) {
                 for b in &mut var_bounds {
@@ -1341,7 +1456,7 @@ pub fn fbbt_with_cutoff_until(
                 &model.arena,
                 obj_expr,
                 *cutoff_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }
@@ -1386,6 +1501,8 @@ pub fn fbbt_until(
     // C-31: seed each block from the element-wise union of its bounds (a valid
     // outer bound for every element), NOT element 0 — see `seed_block_interval`.
     let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
+    // One buffer for the whole call, not one per constraint per sweep.
+    let mut scratch = FwdScratch::new();
 
     for _ in 0..max_iter {
         if let Some(dl) = deadline {
@@ -1402,7 +1519,8 @@ pub fn fbbt_until(
                 }
             }
             // Forward propagation.
-            let node_bounds = forward_propagate(&model.arena, constr.body, &var_bounds);
+            let node_bounds =
+                forward_propagate_into(&model.arena, constr.body, &var_bounds, &mut scratch);
 
             // Determine the output bound from the constraint sense and rhs.
             let output_bound = match constr.sense {
@@ -1430,7 +1548,7 @@ pub fn fbbt_until(
                 &model.arena,
                 constr.body,
                 output_bound,
-                &node_bounds,
+                node_bounds,
                 &mut var_bounds,
             );
         }
@@ -1809,6 +1927,164 @@ mod tests {
         let result = bounds[exp_x.0];
         assert!((result.lo - 1.0).abs() < 1e-14);
         assert!((result.hi - 1.0_f64.exp()).abs() < 1e-14);
+    }
+
+    // -- subtree-restricted forward propagation (the O(rows x arena) fix) --
+
+    /// Reference implementation: the whole-arena walk that `forward_propagate`
+    /// used to be. Every subtree-restricted result must agree with this on the
+    /// subtree it evaluated.
+    fn forward_propagate_whole_arena(arena: &ExprArena, var_bounds: &[Interval]) -> Vec<Interval> {
+        let n = arena.len();
+        let mut bounds = vec![Interval::entire(); n];
+        for i in 0..n {
+            bounds[i] = eval_node_interval(arena, ExprId(i), var_bounds, &bounds);
+        }
+        bounds
+    }
+
+    /// Three unrelated expressions in one arena, so a subtree walk provably
+    /// skips work: `x*y`, `exp(z)`, `x + z`.
+    fn make_three_tree_arena() -> (ExprArena, Vec<ExprId>) {
+        let mut arena = ExprArena::new();
+        let mut v = |a: &mut ExprArena, name: &str, index: usize| {
+            a.add(ExprNode::Variable {
+                name: name.into(),
+                index,
+                size: 1,
+                shape: vec![],
+            })
+        };
+        let x = v(&mut arena, "x", 0);
+        let y = v(&mut arena, "y", 1);
+        let z = v(&mut arena, "z", 2);
+        let prod = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: y,
+        });
+        let expz = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Exp,
+            args: vec![z],
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: z,
+        });
+        (arena, vec![prod, expz, sum])
+    }
+
+    #[test]
+    fn subtree_propagation_agrees_with_the_whole_arena_walk() {
+        let (arena, roots) = make_three_tree_arena();
+        let var_bounds = vec![
+            Interval::new(1.0, 3.0),
+            Interval::new(2.0, 5.0),
+            Interval::new(0.0, 1.0),
+        ];
+        let reference = forward_propagate_whole_arena(&arena, &var_bounds);
+
+        let mut checked = 0usize;
+        let mut scratch = FwdScratch::new();
+        for &root in &roots {
+            let got = forward_propagate_into(&arena, root, &var_bounds, &mut scratch);
+            // Every node reachable from `root` must match the reference exactly.
+            let mut stack = vec![root];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(nid) = stack.pop() {
+                if !seen.insert(nid.0) {
+                    continue;
+                }
+                assert_eq!(
+                    got[nid.0].lo, reference[nid.0].lo,
+                    "lo differs at node {} under root {}",
+                    nid.0, root.0
+                );
+                assert_eq!(
+                    got[nid.0].hi, reference[nid.0].hi,
+                    "hi differs at node {} under root {}",
+                    nid.0, root.0
+                );
+                checked += 1;
+                push_children(&arena, nid, &mut stack);
+            }
+        }
+        // Anti-vacuity (CLAUDE.md section 6): a walk that visited nothing would
+        // pass every assertion above.
+        // 3 nodes under x*y + 2 under exp(z) + 3 under x+z.
+        assert!(checked >= 8, "comparisons executed: {checked}");
+    }
+
+    #[test]
+    fn the_fresh_vec_wrapper_leaves_other_subtrees_entire() {
+        let (arena, roots) = make_three_tree_arena();
+        let var_bounds = vec![
+            Interval::new(1.0, 3.0),
+            Interval::new(2.0, 5.0),
+            Interval::new(0.0, 1.0),
+        ];
+        // Propagate only `exp(z)`. `x*y` shares no node with it.
+        let bounds = forward_propagate(&arena, roots[1], &var_bounds);
+        assert_eq!(bounds[roots[1].0].lo, 1.0);
+        let prod = bounds[roots[0].0];
+        assert!(
+            prod.lo == f64::NEG_INFINITY && prod.hi == f64::INFINITY,
+            "an unvisited root must stay entire, got {prod:?}"
+        );
+    }
+
+    #[test]
+    fn propagation_evaluates_only_the_subtree() {
+        // The whole point of the change. `exp(z)` is 2 nodes out of 6; the old
+        // implementation evaluated all 6 for it, and did so once per
+        // constraint per sweep.
+        let (arena, roots) = make_three_tree_arena();
+        assert_eq!(arena.len(), 6, "arena shape changed; update this test");
+        let var_bounds = vec![
+            Interval::new(1.0, 3.0),
+            Interval::new(2.0, 5.0),
+            Interval::new(0.0, 1.0),
+        ];
+        let mut scratch = FwdScratch::new();
+        forward_propagate_into(&arena, roots[1], &var_bounds, &mut scratch);
+        assert_eq!(
+            scratch.order.len(),
+            2,
+            "expected exp(z) and z, evaluated {:?}",
+            scratch.order
+        );
+        forward_propagate_into(&arena, roots[0], &var_bounds, &mut scratch);
+        assert_eq!(scratch.order.len(), 3, "expected x*y, x, y");
+    }
+
+    #[test]
+    fn a_reused_scratch_does_not_leak_a_stale_epoch() {
+        // The stamp is what keeps the per-call cost proportional to the
+        // subtree. If a stale stamp aliased the current epoch, nodes would be
+        // silently skipped and read back at their previous values.
+        let (arena, roots) = make_three_tree_arena();
+        let mut scratch = FwdScratch::new();
+        let tight = vec![
+            Interval::new(1.0, 1.0),
+            Interval::new(2.0, 2.0),
+            Interval::new(0.0, 0.0),
+        ];
+        let loose = vec![
+            Interval::new(1.0, 3.0),
+            Interval::new(2.0, 5.0),
+            Interval::new(0.0, 1.0),
+        ];
+        let mut checked = 0usize;
+        for _ in 0..3 {
+            let b = forward_propagate_into(&arena, roots[0], &tight, &mut scratch);
+            assert_eq!((b[roots[0].0].lo, b[roots[0].0].hi), (2.0, 2.0));
+            checked += 1;
+            let b = forward_propagate_into(&arena, roots[0], &loose, &mut scratch);
+            assert_eq!((b[roots[0].0].lo, b[roots[0].0].hi), (2.0, 15.0));
+            checked += 1;
+        }
+        assert_eq!(checked, 6, "assertions executed: {checked}");
     }
 
     // -- FBBT tests --

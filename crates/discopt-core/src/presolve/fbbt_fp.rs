@@ -45,7 +45,8 @@
 use std::collections::VecDeque;
 
 use super::fbbt::{
-    backward_propagate, forward_propagate, snap_integral_interval, Interval, FEAS_TOL,
+    backward_propagate, forward_propagate_into, snap_integral_interval, FwdScratch, Interval,
+    FEAS_TOL,
 };
 use crate::expr::{ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, VarType};
 
@@ -130,6 +131,9 @@ pub fn fbbt_fixed_point(
         *slot = true;
     }
 
+    // One buffer for the whole pass, not one per constraint visit.
+    let mut scratch = FwdScratch::new();
+
     while let Some(ci) = queue.pop_front() {
         in_queue[ci] = false;
         stats.constraint_visits += 1;
@@ -139,7 +143,7 @@ pub fn fbbt_fixed_point(
         }
 
         let constr = &model.constraints[ci];
-        let node_bounds = forward_propagate(&model.arena, constr.body, bounds);
+        let node_bounds = forward_propagate_into(&model.arena, constr.body, bounds, &mut scratch);
 
         let output_bound = match constr.sense {
             ConstraintSense::Le => Interval::new(f64::NEG_INFINITY, constr.rhs),
@@ -172,13 +176,7 @@ pub fn fbbt_fixed_point(
             .filter_map(|&v| bounds.get(v).map(|b| (v, *b)))
             .collect();
 
-        backward_propagate(
-            &model.arena,
-            constr.body,
-            output_bound,
-            &node_bounds,
-            bounds,
-        );
+        backward_propagate(&model.arena, constr.body, output_bound, node_bounds, bounds);
 
         // Detect changes; queue downstream constraints. Integer/binary vars
         // are snapped inward to integrality first, so an indicator fixing
