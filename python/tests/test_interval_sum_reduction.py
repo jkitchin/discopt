@@ -70,6 +70,69 @@ def test_axis_reduction_keeps_the_remaining_axis():
     _checked(float(np.max(enc.hi)) >= 3.0, f"and encloses 3, got {enc.hi!r}")
 
 
+def test_the_enclosure_contains_the_exact_sum_under_cancellation():
+    """The reduction must be widened by the ACCUMULATION error, not by one ULP.
+
+    A single ``nextafter`` per endpoint is the right convention for a binary
+    operation and is what ``_eval_matmul`` uses, but a reduction over n terms
+    accumulates far more than one ULP. Measured against an exact
+    :class:`fractions.Fraction` reference before the fix: the one-ULP form
+    returned an enclosure that did **not** contain the true sum on 2289 of 3000
+    random trials (n in [4, 600], heavy cancellation at ~1e8), worst shortfall
+    1.5e-6 (#1158 review 3).
+
+    The reference is ``Fraction``, deliberately **not** ``np.longdouble``: that is
+    float64 on arm64, so the comparison degrades to ``fl == fl`` and the probe
+    measures nothing — the CLAUDE.md §6 failure, which caught the reviewer's own
+    first two attempts at this.
+    """
+    from fractions import Fraction  # noqa: PLC0415
+
+    rng = np.random.default_rng(20260905)
+    misses = 0
+    trials = 200
+    for trial in range(trials):
+        n = int(rng.integers(4, 601))
+        vals = rng.normal(0.0, 1e8, size=n)
+        half = n // 2
+        vals[:half] = -vals[half : 2 * half][:half]  # force cancellation
+
+        m = dm.Model(f"cancel{trial}")
+        x = m.continuous("x", shape=n, lb=0, ub=1)
+        m.minimize(x[0])
+        enc = evaluate_interval(dm.sum(x), m, {x: Interval(vals.copy(), vals.copy())})
+        exact = sum((Fraction(float(v)) for v in vals), Fraction(0))
+        if not (Fraction(float(enc.lo)) <= exact <= Fraction(float(enc.hi))):
+            misses += 1
+    _checked(
+        misses == 0,
+        f"{misses}/{trials} enclosures did not contain the exact sum — the widening "
+        "does not bound the accumulation error",
+    )
+
+
+def test_widening_does_not_break_a_degenerate_point_evaluation():
+    """The error bound must stay far below the residual probe's degeneracy guard.
+
+    The two requirements pull in opposite directions: wide enough to be sound,
+    tight enough that ``mpec_report.evaluate_at_point`` still accepts a point-box
+    evaluation as degenerate. Checked at sizes where the ``log2(n)`` term is
+    largest.
+    """
+    from discopt.mpec_report import evaluate_at_point, point_from_flat  # noqa: PLC0415
+
+    for n in (10, 1000, 20000):
+        m = dm.Model(f"degenerate{n}")
+        x = m.continuous("x", shape=n, lb=0, ub=1e6)
+        m.minimize(x[0])
+        vals = np.full(n, 1234.5678)
+        got = float(evaluate_at_point(m, dm.sum(x), point_from_flat(m, vals))[0])
+        _checked(
+            abs(got - n * 1234.5678) <= 1e-6 * max(1.0, abs(got)),
+            f"n={n}: point evaluation returned {got!r}, expected {n * 1234.5678!r}",
+        )
+
+
 def test_the_reduction_rounds_outward():
     """The module's stated invariant, and what ``_eval_matmul`` already did.
 

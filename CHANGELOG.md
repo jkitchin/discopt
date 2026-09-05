@@ -24,8 +24,12 @@ The release procedure that produces these entries is documented in
   which read a violation of `0.0` on a row `sum(x) <= 10` at `x = (6, 6)` where
   the truth is `2.0`. The reduction now sums the endpoints (summation is monotone,
   so no interval subtlety) and rounds outward, as the sibling `_eval_matmul`
-  reduction already did; an un-rounded sum of *n* terms accumulates ~*n* ULP per
-  endpoint and can itself be narrower than the true image.
+  reduction already did. The outward step is the **accumulation** bound
+  `(log2(n) + 2)·eps·Σ|x_i|` (numpy sums pairwise), not a single ULP: measured
+  against an exact `fractions.Fraction` reference over 3000 random sums
+  (*n* ∈ [4, 600], heavy cancellation at ~1e8), a one-ULP widening still returned
+  an enclosure that did **not** contain the true sum on 2289 of them, worst
+  shortfall 1.5e-6; with the accumulation bound, 0 of 3000.
 
   **Who was exposed:** models built through the Python modeling API that use
   `dm.sum(...)`. The `.nl` reader emits no `SumExpression` at all (measured: 0 of
@@ -33,6 +37,11 @@ The release procedure that produces these entries is documented in
   or gate could exercise this — which is why it survived. Regression coverage is
   `python/tests/test_interval_sum_reduction.py`, including a differential check
   that a dual bound never exceeds the true optimum on Python-API `dm.sum` models.
+  The sibling reduction in `_eval_matmul` has the same one-ULP gap over its
+  `k`-term dot products (measured: 190 of 400 random products miss the truth); it
+  predates this work and is tracked as #1161 rather than folded in, because
+  widening matmul enclosures is a bound-affecting change that needs its own
+  differential evidence.
 
 ### Added
 
