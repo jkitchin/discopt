@@ -89,6 +89,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from discopt.modeling.core import (
+    GDP_AUX_PREFIX,
     Constraint,
     DisjunctionSemantics,
     Expression,
@@ -113,8 +114,11 @@ __all__ = [
 ]
 
 #: Name prefix of the Theorem-1 weight variables. They are *witnesses*, not
-#: selectors — see the module docstring.
-SIMPLEX_WEIGHT_PREFIX = "_simplex_lam_"
+#: selectors — see the module docstring. Built on ``GDP_AUX_PREFIX`` on purpose:
+#: that is the namespace ``Model._check_name`` refuses to user-facing factories
+#: (``docs/disjunction_semantics.md`` §4), so a user variable cannot collide with
+#: a weight, and the existential-auxiliary status is visible in the name.
+SIMPLEX_WEIGHT_PREFIX = f"{GDP_AUX_PREFIX}simplex_lam_"
 
 #: Clause budget per disjunction. CNF distribution is multiplicative in the
 #: disjunct sizes, so a disjunction of four 3-row disjuncts is already 81

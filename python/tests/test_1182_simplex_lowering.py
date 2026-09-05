@@ -553,3 +553,21 @@ def test_jacobian_nonzeros_is_the_fourth_size_quantity_and_refuses_a_gdp_row():
 
     with pytest.raises(ValueError, match="unlowered disjunction"):
         structural_jacobian_nonzeros(build())
+
+
+@pytest.mark.unit
+def test_a_weight_name_cannot_collide_with_a_user_variable():
+    """The prefix lives inside the reserved ``GDP_AUX_PREFIX`` namespace.
+
+    ``docs/disjunction_semantics.md`` §4 makes that namespace the enforced
+    boundary between user Boolean identities and existential compiler
+    auxiliaries. A weight is the latter, so it belongs inside it — and
+    ``Model._check_name`` then keeps a user variable out of the namespace
+    rather than leaving the guarantee to a naming convention.
+    """
+    from discopt.modeling.core import GDP_AUX_PREFIX
+
+    assert SIMPLEX_WEIGHT_PREFIX.startswith(GDP_AUX_PREFIX)
+    m, _x = _overlap_model()
+    with pytest.raises(ValueError, match="reserved"):
+        m.continuous(f"{SIMPLEX_WEIGHT_PREFIX}0", lb=0.0, ub=1.0)
