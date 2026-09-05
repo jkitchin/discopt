@@ -413,6 +413,50 @@ work-budget question (#912's `WorkBudget` would make the cost knowable in advanc
 rather than guessed), not an estimator one — and it is the single most promising
 open item, now backed by a direct measurement rather than by argument.
 
+### 6.6c Panel D — capping the stage instead of refusing it, and the family verdict
+
+§6.4 concluded that bounding the pump's *clock* was inert. **That conclusion was
+an artifact of an incomplete change**, and finding out why is what made this panel
+worth running. A finder stage is TWO NLP consumers — a multistart seed producing
+the rounding point (3.27 s measured) and the pump itself (3.11 s) — and §6.4
+bounded only the pump, leaving the more expensive seed on the global deadline. It
+capped the cheaper half.
+
+A second defect surfaced while fixing that: the stage deadline was recomputed at
+each call site as ``now + share * (deadline - now)``, which is Zeno's bound —
+every call takes a share of whatever is left *at that moment* and the total is
+never bounded. Measured on `heatexch_gen2` at 10 s: per-call grants fell
+3.0 s -> 1.75 s while total stage wall did **not** move (7.08 s -> 7.47 s),
+because the stage simply ran more, cheaper rounds. `_finder_stage_deadline` is now
+taken **once** per stage and shared. Both defects were caught by checking that
+the cap *bound* before panelling — the step §6.4 skipped.
+
+With the stage genuinely bounded (panel D), against the refuse arm (panel B):
+
+| | B: refuse entry | D: cap the stage |
+|---|---|---|
+| monotonicity violations | 0 / 0 | 0 / 0 |
+| incumbent better / worse / same | 2 / 2 / 64 | **3 / 2** / 63 |
+| node count up / down | **20 / 0** | 5 / 1 |
+| certification regressions | none | none |
+
+Capping recovers what refusing destroyed — `nvs05` goes from *losing* its
+incumbent to **finding one at 5 s and improving it at 10 s** (`1269.70 ->
+1107.89`) — and `tspn12`'s regression disappears. But it gives back nearly all the
+throughput: 5 instance-rungs up instead of 20.
+
+**The family verdict, and it is the useful part.** The throughput gain and the
+incumbent losses have the *same* cause: not running the pump. Refusing buys nodes
+and costs incumbents; capping keeps incumbents and returns the nodes. No setting
+of a wall-budget policy separates the pump's cost from its value, because the
+policy only ever decides *how much pump* runs, and cost and value both scale with
+that. **This rules out the whole "gate or bound the pump by wall budget" family**,
+which is the family §6.1, §6.4, §6.5 and §6.6 were all drawn from.
+
+Neither arm graduates: D still loses `tanksize`@5 s outright and degrades
+`tspn10`@5 s. The flag ships OFF in its **cap** form, which is the more principled
+mechanism (bound, don't refuse) and the one with a net-positive incumbent column.
+
 ### 6.7 Status
 
 Neither flag graduates, and **#1153 is not closed.**
@@ -434,11 +478,16 @@ What is settled, and is the substance of this work:
 * **The obvious fix is sound but costs more primal quality than it buys** (§6.6),
   and two other candidate mechanisms were falsified outright (§6.1, §6.4, §6.5).
 
-What remains is a way to spend less on a fruitless finder *without* refusing a
-productive one, given that outcome is unknown before the call and success
-weighting (§6.5) is too late to help. Two directions the evidence points at, both
-unexplored: give the pump a *deterministic* work budget rather than a wall one
-(the #912 `WorkBudget` machinery already exists and would make the cost knowable
-in advance instead of estimated at a 3x-wrong default), or make the pump itself
-interruptible so a share-sized deadline can actually bind on round one — §6.4
-showed it currently cannot, because a single sub-NLP overruns its own grant.
+What remains is now a **single** direction, because §6.6c eliminates the rest.
+
+Budget policy cannot fix this: refusing the pump buys nodes and costs incumbents,
+capping it keeps incumbents and returns the nodes, and every intermediate setting
+trades along that same line, because the policy only decides *how much pump* runs
+while cost and value both scale with that. The pump must become **cheaper for the
+same value**, not smaller.
+
+That is the #912 `WorkBudget` direction: bound the pump in deterministic
+operations rather than seconds, so its cost is knowable in advance instead of
+estimated at a 2.0 s default that is 3x wrong, and so the same work is done on
+every machine. It is the one lever left that changes the cost/value ratio rather
+than sliding along it.
