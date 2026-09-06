@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from benchmarks.metrics import (
+    DISCOPT_STATUS_MAP,
     BenchmarkResults,
     InstanceInfo,
     SolveResult,
@@ -331,15 +332,11 @@ class BenchmarkRunner:
                 raise box["error"]
             result = box["result"]
 
-            # Map discopt status to benchmark status
-            status_map = {
-                "optimal": SolveStatus.OPTIMAL,
-                "feasible": SolveStatus.FEASIBLE,
-                "infeasible": SolveStatus.INFEASIBLE,
-                "time_limit": SolveStatus.TIME_LIMIT,
-                "node_limit": SolveStatus.TIME_LIMIT,
-            }
-            bench_status = status_map.get(result.status, SolveStatus.UNKNOWN)
+            # Map discopt status to benchmark status. One shared table
+            # (``DISCOPT_STATUS_MAP``) so this runner, the subprocess worker and the
+            # category runner cannot drift; anything unmapped falls to UNKNOWN,
+            # which fails closed.
+            bench_status = DISCOPT_STATUS_MAP.get(result.status, SolveStatus.UNKNOWN)
 
             # Compute layer profiling fractions.
             #

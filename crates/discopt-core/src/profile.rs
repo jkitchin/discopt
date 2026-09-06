@@ -192,6 +192,12 @@ counters!(
     // schedule that never fired (CLAUDE.md §6).
     DiveOffRoot,
     DiveOffRootHits,
+    // A solve whose objective lattice was found ONLY by resolving a costed
+    // continuous column through its defining equality row -- the base detector
+    // refused and the substitution did not. This is the exact population the A13
+    // flag exists for; a zero here means the lever never engaged and any timing
+    // read off that run is measuring nothing (CLAUDE.md §6).
+    ObjLatticeSubst,
     // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
     // >= run >= improved -- so an implausible ordering is an arithmetic error
     // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`

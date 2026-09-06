@@ -1,0 +1,52 @@
+discopt: /Users/jkitchin/projects/discopt/wt-a13/python/discopt/__init__.py
+load at start: 8:06  up 5 days, 23:47, 6 users, load averages: 21.64 25.53 39.01
+
+instance                status     incumbent         bound       optimum  primal%   dual%
+neos-1425699           optimal   3.17993e+09   3.17967e+09    3.1797e+09       -      -
+blend2                 optimal       7.59899       7.59899       7.59898       -      -
+gr4x6                  optimal        202.35        202.35        202.35       -      -
+enlight8               optimal            27            27            27       -      -
+p0201                  optimal          7615          7615          7615       -      -
+mik-250-20-75-5       feasible        -28299      -52722.7        -51532    95.1    4.9
+neos-911970           feasible        215.69         23.26         54.76    83.6   16.4
+mik-250-20-75-3       feasible        -40559      -53381.5        -52242    91.1    8.9
+fiber                  optimal        405935        405929        405935       -      -
+khb05250               optimal    1.0694e+08    1.0694e+08    1.0694e+08       -      -
+nexp-50-20-1-1        feasible            45            24            29    76.2   23.8
+mik-250-20-75-2       feasible        -29347      -52253.1        -50768    93.5    6.5
+22433                  optimal         21477         21477         21477       -      -
+nexp-50-20-4-2        feasible            85            65            71    70.0   30.0
+gt2                    optimal         21166         21166         21166       -      -
+mik-250-20-75-1       feasible        -34400      -51075.1        -49716    91.8    8.2
+23588                  optimal          8090          8090          8090       -      -
+flugpl                 optimal    1.2015e+06    1.2015e+06    1.2015e+06       -      -
+dcmulti                optimal        188182        188168        188182       -      -
+enlight_hard        node_limit             -            33            37   100.0    0.0
+sp150x300d            feasible            85            66            69    84.2   15.8
+gen                    optimal        112313        112312        112313       -      -
+neos17                feasible      0.360525      0.123304      0.150003    88.7   11.3
+beavma                feasible        593880        369383        383285    93.8    6.2
+neos-3611447-jijia     optimal           107           107           107       -      -
+neos-3610051-istra     optimal            49            49            49       -      -
+neos-3118745-obra     feasible           345           254           255    98.9    1.1
+neos-3611689-kaihu     optimal           119           119           119       -      -
+neos-3610040-iskar     optimal            37            37            37       -      -
+neos-5192052-neckar    optimal    -1.167e+07    -1.167e+07    -1.167e+07       -      -
+neos-2624317-amur   node_limit             -             0        3.5224   100.0    0.0
+app2-2                 optimal        212042        212040        212040       -      -
+b-ball                feasible          -1.5      -1.50058          -1.5    -0.0  100.0
+bppc8-02               optimal           507           507           507       -      -
+supportcase16          optimal           288           288           288       -      -
+supportcase14          optimal           288           288           288       -      -
+f2gap40400             optimal         20772         20772         20772       -      -
+gsvm2rl3              feasible      0.586355      0.227203      0.336528    69.6   30.4
+
+INSTANCES RUN: 38
+UNSOLVED: 15   SCORED (the comparison count): 15   of which NO INCUMBENT AT ALL: 2
+  no incumbent at the time limit: enlight_hard, neos-2624317-amur
+
+MEDIAN PRIMAL SHARE over the 15 unsolved instances: 91.1%
+MEDIAN DUAL   SHARE: 8.9%
+
+VERDICT: PRIMAL is the lever -- build heuristics (Track B2) before branching work
+load at end: 8:11  up 5 days, 23:53, 6 users, load averages: 27.88 29.54 36.67

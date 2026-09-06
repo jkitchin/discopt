@@ -44,6 +44,8 @@
 /// objective uses (halves, thirds, 0.01, 0.001). It also floors the granularity
 /// at 1e-3, below which the cutoff `U - g` is indistinguishable from `U` and the
 /// rule buys nothing anyway.
+use crate::lp::simplex::sparse::SparseCols;
+
 const MAX_DENOM: i64 = 1_000;
 
 /// Relative tolerance for accepting `d·c` as an integer.
@@ -120,8 +122,7 @@ fn denominator_of(v: f64) -> Option<i64> {
 /// spacing, and every use here is a *difference* of objective values.
 pub fn objective_granularity(c: &[f64], is_int: &[bool]) -> Option<f64> {
     debug_assert_eq!(c.len(), is_int.len());
-    let mut den: i64 = 1;
-    let mut any = false;
+    let mut terms: Vec<f64> = Vec::new();
     for (j, &cj) in c.iter().enumerate() {
         if cj.abs() <= ZERO_TOL {
             continue;
@@ -130,26 +131,43 @@ pub fn objective_granularity(c: &[f64], is_int: &[bool]) -> Option<f64> {
         if !is_int.get(j).copied().unwrap_or(false) {
             return None;
         }
+        terms.push(cj);
+    }
+    spacing_of(&terms)
+}
+
+/// The spacing of the lattice `{ k*g : k integer }` containing every value of
+/// `Sum_j t_j x_j` over integer `x_j`, or `None` when it cannot be proven.
+///
+/// Shared by both entry points so the rationalization and gcd — the part whose
+/// failure mode is a false bound — exists once.
+fn spacing_of(terms: &[f64]) -> Option<f64> {
+    let mut den: i64 = 1;
+    let mut any = false;
+    for &t in terms {
+        if t.abs() <= ZERO_TOL {
+            continue;
+        }
         any = true;
-        den = lcm_i64(den, denominator_of(cj)?)?;
+        den = lcm_i64(den, denominator_of(t)?)?;
         if den > MAX_DENOM {
             return None;
         }
     }
     if !any {
-        // A constant objective: every value is `obj_const`. Sound to call this
-        // granular, but there is nothing to prune, so decline and keep the
-        // downstream arithmetic free of a degenerate case.
+        // A constant objective: every value is the same. Sound to call granular,
+        // but there is nothing to prune, so decline and keep the downstream
+        // arithmetic free of a degenerate case.
         return None;
     }
-    // With `d·c_j` all integral, the objective is `(1/d)·Σ (d·c_j) x_j` over
-    // integer `x_j`, hence a multiple of `gcd_j(d·c_j) / d`.
+    // With `d*t_j` all integral, the sum is `(1/d)*Sum (d*t_j) x_j` over integer
+    // `x_j`, hence a multiple of `gcd_j(d*t_j) / d`.
     let mut g_num: i64 = 0;
-    for &cj in c.iter() {
-        if cj.abs() <= ZERO_TOL {
+    for &t in terms {
+        if t.abs() <= ZERO_TOL {
             continue;
         }
-        let scaled = cj * den as f64;
+        let scaled = t * den as f64;
         let r = scaled.round();
         if (scaled - r).abs() > RATIONAL_TOL * scaled.abs().max(1.0) {
             return None;
@@ -169,9 +187,491 @@ pub fn objective_granularity(c: &[f64], is_int: &[bool]) -> Option<f64> {
     Some(g)
 }
 
+/// A proven objective lattice: every attainable objective value equals
+/// `k*spacing + shift + obj_const` for some integer `k`.
+///
+/// `shift` is the constant the substitution below contributes; it is zero for a
+/// directly-integral objective. It exists because the anchor is load-bearing:
+/// rounding a dual bound onto a lattice whose offset is wrong lifts it past the
+/// optimum, which is a false certificate (CLAUDE.md §1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObjLattice {
+    /// Lattice spacing `g > 0`.
+    pub spacing: f64,
+    /// Constant the substitution contributes; zero for a directly-integral
+    /// objective. Added to the model's objective constant to anchor the lattice.
+    pub shift: f64,
+}
+
+/// True only for a bit-exactly fixed column.
+///
+/// No tolerance, deliberately. A column declared fixed when it is merely narrow
+/// lets the objective vary by `c_j * width` off the claimed lattice, and the
+/// bound rounding would then lift past the optimum. Fixed MPS columns and the
+/// slacks of equality rows come out bit-identical, so exactness costs nothing.
+fn is_fixed(lo: f64, up: f64) -> bool {
+    lo.is_finite() && up.is_finite() && lo == up
+}
+
+/// The equality system a lattice derivation reads, in the column-major form the
+/// driver already holds.
+///
+/// Grouped rather than passed as four parameters so that the row view travels as
+/// one thing: `m` and `n` must agree with `csc`, and splitting them across an
+/// argument list is how a caller ends up passing the structural count where the
+/// total was meant.
+pub struct LatticeRows<'a> {
+    /// The constraint matrix `A`, column-major over all `n` columns.
+    pub csc: &'a SparseCols,
+    /// The right-hand side `b`, one entry per row.
+    pub b: &'a [f64],
+    /// Row count.
+    pub m: usize,
+    /// Total column count: structural columns followed by slacks.
+    pub n: usize,
+}
+
+/// The objective lattice, resolving a costed *continuous* column through an
+/// equality row that pins it to integer columns.
+///
+/// [`objective_granularity`] refuses the moment a continuous column carries
+/// cost, and that pattern is common: a model written as `min z  s.t.  z = <integer
+/// expression>` routes its whole objective through one continuous column. Measured
+/// over a 104-instance MIPLIB draw, 20 instances present a directly-integral
+/// objective and a further **13** are of exactly this shape -- the whole
+/// `neos-361*` family, `misc07` (spacing 5), `markshare*`, `rout` (spacing 0.01).
+/// All 13 were verified to have their true optimum on the derived lattice.
+///
+/// The model is **not** rewritten. This only reads the row to compute a spacing,
+/// so there is no substitution to undo and no postsolve obligation -- the
+/// distinction from the free-column-singleton substitution HiGHS performs in
+/// presolve (`highs/src/presolve/HPresolve.cpp` `freeColSubstitution`), which
+/// removes the column and must restore it. SCIP reaches the same lattice from the
+/// other side, aggregating the variable away before `SCIPprobCheckObjIntegral`
+/// runs (`scip/src/scip/prob.c`). Ours is the cheaper, narrower move: a detector,
+/// not a transformation.
+///
+/// # Soundness
+/// If row `i` is `Sum_k a_ik z_k = b_i` and column `j` has `a_ij != 0`, then at
+/// *every* feasible point `z_j = (b_i - Sum_{k!=j} a_ik z_k) / a_ij`. So when every
+/// other column of that row is integer-constrained or bit-exactly fixed, the term
+/// `c_j z_j` is itself a lattice value. Other constraints only remove feasible
+/// points, which cannot invalidate a claim quantified over all of them. Every
+/// unproven case returns `None`.
+///
+/// Arguments are the engine form: `c`/`lo`/`up` span all `n` columns (structural
+/// then slack), `is_int` only the `ns` structural ones, and `rows` is the equality
+/// system `A z = b`.
+pub fn objective_lattice(
+    c: &[f64],
+    is_int: &[bool],
+    lo: &[f64],
+    up: &[f64],
+    rows: &LatticeRows<'_>,
+) -> Option<ObjLattice> {
+    let (csc, b, m, n) = (rows.csc, rows.b, rows.m, rows.n);
+    let ns = is_int.len();
+    if lo.len() < n || up.len() < n || c.len() < ns || b.len() < m {
+        return None;
+    }
+    let integral = |k: usize| k < ns && is_int[k];
+
+    let mut terms: Vec<f64> = Vec::new();
+    let mut shift = 0.0f64;
+    let mut pending: Vec<usize> = Vec::new();
+    for j in 0..ns {
+        let cj = c[j];
+        if cj.abs() <= ZERO_TOL {
+            continue;
+        }
+        if integral(j) {
+            terms.push(cj);
+        } else if is_fixed(lo[j], up[j]) {
+            shift += cj * lo[j];
+        } else {
+            pending.push(j);
+        }
+    }
+    // Nothing to resolve: identical to `objective_granularity`, and no row work.
+    if pending.is_empty() {
+        return spacing_of(&terms).map(|spacing| ObjLattice { spacing, shift });
+    }
+
+    // Row-wise view, built only over the rows the pending columns touch. One
+    // O(nnz) pass at the root, and only for models that need it.
+    let mut want = vec![false; m];
+    for &j in &pending {
+        for &i in csc.col(j).0 {
+            if i < m {
+                want[i] = true;
+            }
+        }
+    }
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for k in 0..n {
+        let (ri, va) = csc.col(k);
+        for (t, &i) in ri.iter().enumerate() {
+            if i < m && want[i] {
+                rows[i].push((k, va[t]));
+            }
+        }
+    }
+
+    for &j in &pending {
+        let mut resolved = false;
+        for &i in csc.col(j).0 {
+            if i >= m {
+                continue;
+            }
+            let a_ij = rows[i]
+                .iter()
+                .find(|&&(k, _)| k == j)
+                .map(|&(_, v)| v)
+                .unwrap_or(0.0);
+            if a_ij.abs() <= ZERO_TOL {
+                continue;
+            }
+            // Usable only if every *other* column of the row is integral or
+            // fixed. A second free continuous column -- another pending
+            // objective column included -- makes the row prove nothing, so no
+            // pair of pending columns can resolve through the same row and no
+            // resolution can depend on another.
+            if rows[i].iter().any(|&(k, v)| {
+                k != j && v.abs() > ZERO_TOL && !integral(k) && !is_fixed(lo[k], up[k])
+            }) {
+                continue;
+            }
+            let s = c[j] / a_ij;
+            if !s.is_finite() {
+                continue;
+            }
+            shift += s * b[i];
+            for &(k, v) in &rows[i] {
+                if k == j || v.abs() <= ZERO_TOL {
+                    continue;
+                }
+                if integral(k) {
+                    terms.push(-s * v);
+                } else {
+                    shift -= s * v * lo[k];
+                }
+            }
+            resolved = true;
+            break;
+        }
+        if !resolved {
+            return None;
+        }
+    }
+    if !shift.is_finite() {
+        return None;
+    }
+    spacing_of(&terms).map(|spacing| ObjLattice { spacing, shift })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the engine form `A z = b` from dense row-major `A`.
+    fn csc(a: &[f64], m: usize, n: usize) -> SparseCols {
+        SparseCols::from_dense(a, m, n)
+    }
+
+    /// The shape the lever exists for: `min z` with `z` continuous and pinned by
+    /// `z - 2x - 4y = 0` over integers. The base detector must refuse; the
+    /// substitution must find spacing 2.
+    #[test]
+    fn resolves_a_continuous_objective_column_through_its_defining_row() {
+        // columns: z(0, continuous), x(1, int), y(2, int)
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, true];
+        let a = vec![1.0, -2.0, -4.0];
+        let lo = vec![-100.0, 0.0, 0.0];
+        let up = vec![100.0, 10.0, 10.0];
+        let b = vec![0.0];
+
+        assert_eq!(
+            objective_granularity(&c, &is_int),
+            None,
+            "base detector must refuse a costed continuous column"
+        );
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 3),
+                b: &b,
+                m: 1,
+                n: 3,
+            },
+        )
+        .expect("row pins z to an integer lattice");
+        assert!((got.spacing - 2.0).abs() < 1e-12, "spacing {}", got.spacing);
+        assert!((got.shift - 0.0).abs() < 1e-12, "shift {}", got.shift);
+    }
+
+    /// A nonzero right-hand side shifts the lattice but not its spacing, and the
+    /// shift is what anchors the rounding. Getting it wrong lifts a dual bound
+    /// past the optimum, so it is asserted on its own.
+    #[test]
+    fn a_nonzero_rhs_moves_the_anchor_not_the_spacing() {
+        let c = vec![1.0, 0.0];
+        let is_int = vec![false, true];
+        // z - 3x = 7  =>  z = 7 + 3x, lattice {3k + 7}
+        let a = vec![1.0, -3.0];
+        let lo = vec![-100.0, 0.0];
+        let up = vec![100.0, 10.0];
+        let b = vec![7.0];
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 2),
+                b: &b,
+                m: 1,
+                n: 2,
+            },
+        )
+        .expect("pinned by the row");
+        assert!((got.spacing - 3.0).abs() < 1e-12, "spacing {}", got.spacing);
+        assert!((got.shift - 7.0).abs() < 1e-12, "shift {}", got.shift);
+    }
+
+    /// The refusal that keeps it sound: the defining row carries a *second* free
+    /// continuous column, so it proves nothing about `z`.
+    #[test]
+    fn refuses_when_the_defining_row_holds_another_free_continuous_column() {
+        // z - 2x - w = 0, with w continuous and free
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, false];
+        let a = vec![1.0, -2.0, -1.0];
+        let lo = vec![-100.0, 0.0, 0.0];
+        let up = vec![100.0, 10.0, 5.0];
+        let b = vec![0.0];
+        assert_eq!(
+            objective_lattice(
+                &c,
+                &is_int,
+                &lo,
+                &up,
+                &LatticeRows {
+                    csc: &csc(&a, 1, 3),
+                    b: &b,
+                    m: 1,
+                    n: 3
+                }
+            ),
+            None
+        );
+    }
+
+    /// A *fixed* continuous column in the row is a constant, so it is admissible
+    /// -- and it lands in the shift, not the spacing.
+    #[test]
+    fn a_fixed_continuous_column_in_the_row_is_a_constant() {
+        // z - 2x - w = 0 with w fixed at 1.5  =>  z = 2x + 1.5
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, false];
+        let a = vec![1.0, -2.0, -1.0];
+        let lo = vec![-100.0, 0.0, 1.5];
+        let up = vec![100.0, 10.0, 1.5];
+        let b = vec![0.0];
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 3),
+                b: &b,
+                m: 1,
+                n: 3,
+            },
+        )
+        .expect("a fixed column is a constant, not a free variable");
+        assert!((got.spacing - 2.0).abs() < 1e-12, "spacing {}", got.spacing);
+        assert!((got.shift - 1.5).abs() < 1e-12, "shift {}", got.shift);
+    }
+
+    /// `is_fixed` takes no tolerance on purpose: a merely-narrow column lets the
+    /// objective drift off the claimed lattice, which is a false bound.
+    #[test]
+    fn a_nearly_fixed_column_is_not_treated_as_fixed() {
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, false];
+        let a = vec![1.0, -2.0, -1.0];
+        let lo = vec![-100.0, 0.0, 1.5];
+        let up = vec![100.0, 10.0, 1.5 + 1e-9];
+        let b = vec![0.0];
+        assert_eq!(
+            objective_lattice(
+                &c,
+                &is_int,
+                &lo,
+                &up,
+                &LatticeRows {
+                    csc: &csc(&a, 1, 3),
+                    b: &b,
+                    m: 1,
+                    n: 3
+                }
+            ),
+            None,
+            "a 1e-9-wide column is not fixed"
+        );
+    }
+
+    /// An inequality row cannot pin anything. In engine form that is a row whose
+    /// slack column is free, so the slack itself is the disqualifying continuous
+    /// column -- the same test, reached from the model's own encoding.
+    #[test]
+    fn an_inequality_row_does_not_pin_the_objective_column() {
+        // z - 2x - s = 0 with s in [0, 10]: the row is `z - 2x >= 0`, not an equality.
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true];
+        let a = vec![1.0, -2.0, -1.0];
+        let lo = vec![-100.0, 0.0, 0.0];
+        let up = vec![100.0, 10.0, 10.0];
+        let b = vec![0.0];
+        assert_eq!(
+            objective_lattice(
+                &c,
+                &is_int,
+                &lo,
+                &up,
+                &LatticeRows {
+                    csc: &csc(&a, 1, 3),
+                    b: &b,
+                    m: 1,
+                    n: 3
+                }
+            ),
+            None
+        );
+    }
+
+    /// With no continuous cost column the result must agree with the base
+    /// detector exactly -- that agreement is what makes the OFF arm and the ON arm
+    /// identical on the 91 % of models the substitution never touches.
+    #[test]
+    fn agrees_with_the_base_detector_when_nothing_needs_resolving() {
+        let c = vec![4.0, 6.0];
+        let is_int = vec![true, true];
+        let a = vec![1.0, 1.0];
+        let lo = vec![0.0, 0.0];
+        let up = vec![10.0, 10.0];
+        let b = vec![3.0];
+        let base = objective_granularity(&c, &is_int).expect("4x + 6y");
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 2),
+                b: &b,
+                m: 1,
+                n: 2,
+            },
+        )
+        .expect("same lattice");
+        assert!((got.spacing - base).abs() < 1e-12);
+        assert!(got.shift == 0.0, "shift {}", got.shift);
+    }
+
+    /// The soundness property for the substituted path, stated as a test: for
+    /// random integer points the *implied* objective must land on the derived
+    /// lattice, anchored by the shift. A spacing too large or an anchor off the
+    /// grid is a false bound, so this is the guard that matters.
+    #[test]
+    fn substituted_lattice_contains_every_implied_objective() {
+        let mut state = 0xD1B54A32D192ED03u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut checked = 0usize;
+        for _ in 0..300 {
+            let nx = 1 + (next() % 4) as usize; // integer columns
+            let n = 1 + nx; // z at column 0
+                            // z*a0 + sum a_k x_k = rhs, cost only on z
+            let a0 = {
+                let v = ((next() % 7) as i64) - 3;
+                if v == 0 {
+                    1
+                } else {
+                    v
+                }
+            } as f64;
+            let ak: Vec<f64> = (0..nx)
+                .map(|_| (((next() % 13) as i64) - 6) as f64)
+                .collect();
+            let rhs = (((next() % 21) as i64) - 10) as f64;
+            let cz = {
+                let v = ((next() % 5) as i64) - 2;
+                if v == 0 {
+                    1
+                } else {
+                    v
+                }
+            } as f64;
+
+            let mut a = vec![a0];
+            a.extend_from_slice(&ak);
+            let mut c = vec![cz];
+            c.extend(std::iter::repeat(0.0).take(nx));
+            let mut is_int = vec![false];
+            is_int.extend(std::iter::repeat(true).take(nx));
+            let mut lo = vec![-1e6];
+            lo.extend(std::iter::repeat(-20.0).take(nx));
+            let mut up = vec![1e6];
+            up.extend(std::iter::repeat(20.0).take(nx));
+            let b = vec![rhs];
+
+            let Some(l) = objective_lattice(
+                &c,
+                &is_int,
+                &lo,
+                &up,
+                &LatticeRows {
+                    csc: &csc(&a, 1, n),
+                    b: &b,
+                    m: 1,
+                    n: n,
+                },
+            ) else {
+                continue;
+            };
+            for _ in 0..15 {
+                let x: Vec<f64> = (0..nx)
+                    .map(|_| (((next() % 41) as i64) - 20) as f64)
+                    .collect();
+                // The row forces this value of z at every feasible point.
+                let z = (rhs - ak.iter().zip(&x).map(|(a, x)| a * x).sum::<f64>()) / a0;
+                let obj = cz * z;
+                let k = (obj - l.shift) / l.spacing;
+                assert!(
+                    (k - k.round()).abs() < 1e-6,
+                    "implied objective {obj} is off the lattice (spacing {}, shift {}, a0 {a0}, ak {ak:?}, rhs {rhs}, cz {cz})",
+                    l.spacing,
+                    l.shift
+                );
+                checked += 1;
+            }
+        }
+        // CLAUDE.md §6: a probe that asserted nothing must fail, not pass.
+        assert!(
+            checked > 400,
+            "substituted-lattice property never exercised ({checked})"
+        );
+    }
 
     #[test]
     fn unit_binary_objective_has_granularity_one() {
