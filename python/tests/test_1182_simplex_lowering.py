@@ -36,6 +36,8 @@ guard against measuring nothing itself measure nothing.
 """
 
 import math
+import re
+from pathlib import Path
 
 import discopt.modeling as dm
 import numpy as np
@@ -65,16 +67,52 @@ _COMPARISONS = [0]
 def _residuals(model, point):
     """``disjunction_residuals`` plus the executed-comparison bookkeeping."""
     report = disjunction_residuals(model, point)
+    # Per CALL, not merely per module (#1187). This is the stronger form of the
+    # §6 guarantee and the one that survives xdist: every worker that exercises
+    # the residual machinery proves it measured something, right where it ran.
+    assert report.comparisons > 0, (
+        "disjunction_residuals executed no source-predicate comparison; a probe "
+        "that measures nothing reports 0 violations and reads as a pass "
+        "(CLAUDE.md §6)"
+    )
     _COMPARISONS[0] += report.comparisons
     return report
 
 
 def teardown_module(module):  # noqa: ARG001
-    assert _COMPARISONS[0] > 0, (
-        "no source-predicate comparison was executed; a suite that measures "
-        "nothing reports 0 violations and reads as a pass (CLAUDE.md §6)"
+    """The §6 guard, made xdist-correct (#1187).
+
+    This used to assert ``_COMPARISONS[0] > 0`` unconditionally. ``_COMPARISONS``
+    is a module global, CI runs ``-n <workers> --dist loadgroup``, and the tests
+    in this module carry no ``xdist_group`` — so a worker handed only the
+    *refusal* tests (which never call :func:`_residuals`) reached this teardown
+    with a zero counter and errored, while all 26 tests passed. It is
+    worker-count dependent: clean at ``-n 2``, one error at ``-n 4``, two at
+    ``-n 8``, and it reproduces identically on ``main``. It surfaced on #1187
+    only because that PR turned three failures into passes and so reshuffled the
+    distribution.
+
+    Both halves of the original intent are kept, and neither depends on which
+    tests a worker happened to receive:
+
+    * *the machinery measured something* — asserted per call in
+      :func:`_residuals` above, so a silently-zero report fails immediately;
+    * *somebody still calls it* — asserted here against this module's own
+      source, which is identical in every worker. That is the case a per-call
+      assertion cannot see: deleting every call site would otherwise leave the
+      suite green and measuring nothing.
+    """
+    # A bare-name match, not a substring one: ``count("_residuals(")`` also
+    # matches ``disjunction_residuals(`` — the import and this module's own
+    # wrapper body — so it stays above any threshold even with every call site
+    # deleted, which is the vacuous instrument this guard exists to prevent.
+    sites = re.findall(r"(?<![A-Za-z0-9_])_residuals\(", Path(__file__).read_text())
+    assert len(sites) > 1, (  # the ``def`` line itself is one occurrence
+        "no test calls _residuals any more; the source-predicate comparison "
+        "guard is measuring nothing (CLAUDE.md §6)"
     )
-    print(f"\nexecuted source-predicate comparisons: {_COMPARISONS[0]}")
+    if _COMPARISONS[0]:
+        print(f"\nexecuted source-predicate comparisons: {_COMPARISONS[0]}")
 
 
 # ── fixtures reused from the semantic-contract work (#1124) ──────────────────
