@@ -2313,6 +2313,59 @@ three-fold. Build order follows the plan's Track B2 list, re-ordered for A5's
 finding that the common case is a *poor* incumbent rather than none: the shared
 reduced-copy sub-MILP call first, then RINS on top of it.
 
+#### A12 built and gated — the flag panel (PR #1186)
+
+RINS is implemented behind `DISCOPT_RINS`, default off. Four interleaved
+ON-vs-OFF panels over the §0 38-instance set at 20 s/instance:
+
+| mechanism | better / 17 unsolved | worse | both-solved wall | both-solved nodes |
+|---|---|---|---|---|
+| stride 16, no backoff | 6 | 0 | +45.9 % | −14.9 % |
+| + neighborhood dedup | 7 | 0 | +44.9 % | −14.9 % |
+| backoff, cap 6 doublings | 4 | 0 | +8.9 % | +0.8 % |
+| backoff, cap 2 doublings | 4 | 0 | +6.4 % | −6.2 % |
+
+**Cert-clean: PASS on all four.** Zero violations; `RinsRejected = 0` across
+152 instance-arms, i.e. RINS never proposed a point the driver could not
+independently verify. Incumbents were re-verified in numpy against the original
+model rather than through the Rust validator RINS itself calls, so the check
+could not inherit a bug in the thing it checks.
+
+**A12 delivers what A5 said was missing.** RINS never made an incumbent worse in
+any run, and its improvements land *on* the reference optimum: `beavma`
+593880 → 383285, `mik-250-20-75-2` −29347 → −50768, `mik-250-20-75-3`
+−40559 → −52242, `nexp-50-20-1-1` 45 → 29. So the A12 precondition converts to
+benefit on the real class — the #727 failure mode did not recur.
+
+**Falsified sub-hypothesis (recorded per §4/§11).** The +45 % wall tax was
+attributed to RINS re-solving identical neighborhoods and a dedup guard was
+built on the fixed columns and their pinned values. The panel measured
+`RinsSkippedDup = 0` over 1422 considerations: RINS runs against a *different
+node's LP* each batch, so the agreement set changes even while the incumbent is
+frozen, and the 121 `enlight8` calls were 121 distinct neighborhoods. The guard
+was a no-op and was removed. The true diagnosis is yield, not repetition:
+1401 runs → 35 improvements, a 2.5 % hit rate.
+
+**Falsified kill criterion (recorded per §4).** Before the backoff panel the
+criterion registered was "retain ≥ 6 of the 7 improved instances and wall
+≤ 1.10". It retained **4**. The backoff is kept — it removes a pathological
+cost (`enlight8` 121 → 6 runs, `neos-3611689-kaihu` +8.80 s → +0.06 s) without
+ever worsening an incumbent — but no claim is made that it preserves the primal
+gains. At a 20 s limit the run-to-run spread is large (`enlight_hard` found an
+incumbent in three runs and not the fourth), so 4 vs 7 is not a clean mechanism
+comparison.
+
+**A retraction (§11).** The first panel's net-positive predicate gated on
+solved-count and primal quality and omitted wall; it reported PASS while
+both-solved wall regressed 45.9 %. §5 names wall explicitly. The bar now
+enforces `wall_ratio ≤ 1.10` and that first PASS is withdrawn.
+
+**Status: default OFF.** Both bars pass at cap 2, but that is *eligibility* to
+graduate, not a decision, and the primal criterion failed. The trade on offer is
+roughly +6 % wall on a both-solved set totalling ~30 s (median 0.13 s/instance)
+against materially better incumbents on the instances that hit the time limit.
+Flipping the default is an owner call.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
