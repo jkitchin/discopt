@@ -547,8 +547,24 @@ class TapeNLPEvaluator:
 
     # -- values -------------------------------------------------------------
 
-    def _x(self, x: np.ndarray) -> list:
-        return [float(v) for v in np.asarray(x, dtype=float).ravel()]
+    def _x(self, x: np.ndarray) -> np.ndarray:
+        """The iterate, in the form pounce's tape entry points want.
+
+        A contiguous ``float64`` array, NOT a Python list. pounce accepts either
+        and returns bit-identical values for both (verified elementwise on
+        ``objective`` / ``gradient`` / ``constraints`` / ``jacobian`` /
+        ``hessian``), but the list form was a per-callback ``O(n)`` Python loop
+        on the hottest path in the solver: 2.11 µs to build-and-evaluate against
+        0.20 µs for the array on ``nvs05`` (n=15), and 12.29 µs against 1.52 µs
+        on ``4stufen`` (n=157) -- i.e. the marshaling cost *scaled with n* while
+        the arithmetic underneath it did not (#1180). The array path is also
+        faster inside pounce (0.199 µs vs 0.308 µs for the same evaluation), so
+        the list was costing on both sides of the boundary.
+
+        Zero-copy when the caller already has a contiguous ``float64`` vector,
+        which the IPM always does; ``ravel`` copies only when it must.
+        """
+        return np.asarray(x, dtype=np.float64).ravel()
 
     def evaluate_objective(self, x: np.ndarray) -> float:
         self._ensure_fresh()
@@ -585,8 +601,9 @@ class TapeNLPEvaluator:
     ) -> np.ndarray:
         """Lower-triangle Lagrangian Hessian values, aligned to ``hessian_structure``."""
         self._ensure_fresh()
-        lam = np.asarray(lambda_, dtype=float).ravel()
-        lam_list = [float(v) for v in lam]
+        # Same reasoning as ``_x``: the multiplier vector goes across as an
+        # array, not a rebuilt Python list (#1180).
+        lam_list = np.asarray(lambda_, dtype=np.float64).ravel()
         if self._residual_exprs is None:
             return np.asarray(
                 self._problem.hessian(self._x(x), lam=lam_list, obj_factor=float(obj_factor)),

@@ -1,0 +1,83 @@
+{
+ "probe": "issue1180_callback_ab",
+ "deterministic": false,
+ "max_nodes": null,
+ "time_limit_s": 120.0,
+ "reps": 3,
+ "median_speedup": 0.969188709549441,
+ "all_neutral": false,
+ "records": [
+  {
+   "instance": "beuster",
+   "median_wall_old_s": 120.08463356499851,
+   "median_wall_new_s": 123.90222088000155,
+   "speedup": 0.969188709549441,
+   "sd_old_s": 0.03834498660784057,
+   "sd_new_s": 1.1943692957657601,
+   "nodes_identical": false,
+   "objective_identical": true,
+   "bound_identical": false,
+   "runs": {
+    "old": [
+     {
+      "wall_s": 120.0191336559983,
+      "nodes": 3,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 6395.1083389659125,
+      "arm": "old",
+      "rep": 0
+     },
+     {
+      "wall_s": 120.08463356499851,
+      "nodes": 7,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 6395.1083389659125,
+      "arm": "old",
+      "rep": 1
+     },
+     {
+      "wall_s": 120.0864282980001,
+      "nodes": 7,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 6395.1083389659125,
+      "arm": "old",
+      "rep": 2
+     }
+    ],
+    "new": [
+     {
+      "wall_s": 122.21736167600102,
+      "nodes": 15,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 8322.324554385208,
+      "arm": "new",
+      "rep": 0
+     },
+     {
+      "wall_s": 123.90222088000155,
+      "nodes": 15,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 8322.324554385208,
+      "arm": "new",
+      "rep": 1
+     },
+     {
+      "wall_s": 124.52624657599881,
+      "nodes": 15,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 8322.324554385208,
+      "arm": "new",
+      "rep": 2
+     }
+    ]
+   }
+  }
+ ],
+ "executed_assertions": 14
+}

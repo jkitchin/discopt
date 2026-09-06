@@ -1,0 +1,83 @@
+{
+ "probe": "issue1180_callback_ab",
+ "deterministic": true,
+ "max_nodes": 20,
+ "time_limit_s": 120.0,
+ "reps": 3,
+ "median_speedup": 1.0853830108216367,
+ "all_neutral": false,
+ "records": [
+  {
+   "instance": "clay0303hfsg",
+   "median_wall_old_s": 18.7466901350017,
+   "median_wall_new_s": 17.271958330000416,
+   "speedup": 1.0853830108216367,
+   "sd_old_s": 0.22651111563170734,
+   "sd_new_s": 4.5566692102000035,
+   "nodes_identical": true,
+   "objective_identical": false,
+   "bound_identical": false,
+   "runs": {
+    "old": [
+     {
+      "wall_s": 18.76458856700083,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 46785.551237214655,
+      "bound": -1.2309090604747465e-05,
+      "arm": "old",
+      "rep": 0
+     },
+     {
+      "wall_s": 18.363616913999067,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 46785.551237214655,
+      "bound": -1.2309090604747465e-05,
+      "arm": "old",
+      "rep": 1
+     },
+     {
+      "wall_s": 18.7466901350017,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 46785.551237214655,
+      "bound": -1.2309090604747465e-05,
+      "arm": "old",
+      "rep": 2
+     }
+    ],
+    "new": [
+     {
+      "wall_s": 25.100917638999817,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 46785.551237214655,
+      "bound": -1.2309090604747463e-05,
+      "arm": "new",
+      "rep": 0
+     },
+     {
+      "wall_s": 17.271958330000416,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 41573.26258778966,
+      "bound": -1.2309090603206172e-05,
+      "arm": "new",
+      "rep": 1
+     },
+     {
+      "wall_s": 17.146605070000078,
+      "nodes": 27,
+      "status": "feasible",
+      "objective": 41573.26258778966,
+      "bound": -1.2309090603206172e-05,
+      "arm": "new",
+      "rep": 2
+     }
+    ]
+   }
+  }
+ ],
+ "executed_assertions": 14
+}

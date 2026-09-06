@@ -5482,3 +5482,84 @@ the deferred lowering is expected to beat the exact GDP/SOS1 path" and reads tha
 performance question. E1/E2 answer it negatively and that answer is binding: no
 default may be changed on this mechanism, and any future claim that it is faster owes
 a measurement that contradicts these two tables first.
+
+## 27. #1180 per-node layer split, post-tape: the marshaling era is over, and the remaining Python is worth 1.20× (2026-09-06)
+
+**Claim under test.** `baron-gap-plan.md` §1.3's attribution of `nvs05` —
+`python 82.5 % / jax 12.3 % / rust 3.4 %`, with `pounce.Problem.solve` marshaling
+scalars across the Python/JAX boundary one point at a time — and its conclusion
+that "`solve_lp_warm_csc_py`: 0.67 s — the node LP is nothing".
+
+**Instrument.** cProfile self time aggregated across binding boundaries (never a
+single-layer label), with a clean unprofiled control arm reporting the
+`discopt._timing` FFI split and the profiler's own distortion (median 1.23×
+wall). 66 in-repo instances at 20 s, 5185 nodes, 333 executed assertions.
+Probes in `discopt_benchmarks/scripts/issue1180_*.py`; full record in
+`docs/dev/issue-1180-per-node-layer-split-2026-09-05.md`.
+
+**Result: the split has inverted.**
+
+| layer | corpus (wall-weighted) | `nvs05` | §1.3's `nvs05` |
+|---|---:|---:|---:|
+| POUNCE native (IPM + tape) | **47.7 %** | 26.1 % | 0.1 % |
+| `discopt._rust` (LP/MILP) | 15.0 % | **50.8 %** | 3.4 % |
+| `discopt` Python | 15.4 % | 8.3 % | — |
+| evaluator callback glue | 9.2 % | 4.7 % | — |
+| other Python + numpy/scipy | 12.8 % | 10.2 % | — |
+| **jax / XLA** | **0.00 %** | **0.00 %** | 12.3 % |
+
+The dominant seam is the NLP solve itself (`nlp_pounce.solve_nlp`, 57.4 % of
+corpus wall; the native IPM alone is 44.9 % of *all* self time). 1.95 M
+derivative callbacks cost **11.5 s of tape arithmetic wrapped in 47.7 s of Python
+frames** — so the whole marshaling story is now worth at most 1.10× corpus-wide,
+against the 82.5 % it used to be. `nvs05`'s LP dominance is a two-instance
+phenomenon (`nvs05` 41.6 % OBBT, `nvs09` 30.0 %, every other instance ≤ 10.6 %).
+
+**Falsified, with the replacement measured.**
+
+| withdrawn | measurement |
+|---|---|
+| "the node LP is nothing" (0.06 % of panel wall) | 9.3 % + 3.6 % corpus-wide; 50.8 % on `nvs05` |
+| #764's "~70 % of an OBBT probe is Python marshaling" (tanksize, 2026-07) | **1–3 %** on four instances (nvs05 7.82 ms/probe = 7.77 native + 0.05 Python) — the persistent-CSC + warm-basis work removed it |
+| "every node re-solves from scratch" | the parent point already beats a cold midpoint on 7 of 10 instances (gkocis 3.4×, tanksize 3.2×) |
+| a full `pounce.WarmStart` across nodes would help | 0.53×–1.95×, **median 0.99×** on iteration count — 4 better, 4 worse, 2 neutral. Kill criterion met, not built. It is also structurally blocked: on `tls2`, 10 of 12 consecutive node NLPs have different `(n, m)` because the cut pool changes the row count |
+
+**What shipped (bound-neutral).** The one in-repo lever the measurement leaves:
+`_timing.charge` as a `__slots__` context manager instead of a generator
+(1.93 µs → 1.05 µs per `with`, entered once per derivative callback), and
+`TapeNLPEvaluator._x` handing pounce a contiguous `float64` array instead of a
+per-callback Python list (`nvs05` n=15: 2.11 µs → 0.20 µs; `4stufen` n=157:
+12.29 µs → 1.52 µs — the cost scaled with `n` while the arithmetic under it did
+not). Gate: 1610 bit-identity comparisons over 66 instances, 0 mismatches; smoke
+1133 passed; A/B interleaved in one process, **52 of 53 comparable rows exactly
+neutral** on nodes/objective/bound, median **1.198×** on rows with ≥ 1 s of wall
+(1.221× on the callback-heavy panel).
+
+**Three methodological results worth carrying forward.**
+
+1. *A deterministic budget makes node counts comparable but makes wall clock
+   meaningless for any phase whose stopping rule **is** the wall budget.* On
+   `beuster`, `deterministic=True` produced a reproducible **0.516×** that was
+   pure artifact: the two arms issued **3858 OBBT probes against 942** for the
+   same 3 nodes. On the ordinary wall budget the same instance honours its limit
+   and returns **5× the nodes at a 30 % tighter dual bound**. Read neutrality and
+   speed from different arms, and exclude limit-terminated rows from both.
+2. *`node_callback` is a routing signal, not an observer.* `alan`, fresh
+   subprocesses, both orders, same 13 nodes and objective: **54 POUNCE solves and
+   11 130 tape evaluations without it, 1 and 0 with it.** Any profile taken with
+   one attached is a profile of a different engine — `profile_instance.py`
+   attaches one by default.
+3. *A replay-based "pure-binding floor" compares the wrong population.* An
+   earlier version of the probe-LP instrument replayed one captured call against
+   the raw binding and reported a **negative** Python overhead, because the
+   captured call cold-starts while the in-loop population is warm-started. Two
+   nested timers in the same run have no such failure mode. This is the same
+   shape as the measurement #764's 70 % figure came from.
+
+**Open, not fixed here.** `clay0303hfsg` is **not reproducible under
+`deterministic=True`**: four identical repeats on unmodified code give two
+different objectives (55092.52 ×3, then 46785.55) at an identical 27 nodes, with
+the dual bound agreeing to 12 significant figures — the *incumbent* moves, so the
+nondeterministic component is a primal heuristic. That is a `deterministic=`
+contract defect and a live hazard for every bound-neutrality gate that trusts the
+flag; filed as **#1187**, successor in kind to #912.

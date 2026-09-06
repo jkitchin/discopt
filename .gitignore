@@ -135,3 +135,13 @@ scratchpad/_*_worker.py
 # generates. `issue844_primal_quality_panel.py` defaults `--out` to a bare
 # filename, so a run from the repo root leaves one here.
 /*_quality_panel.json
+
+# #1180 raw profiler dumps (regenerate with issue1180_layer_split.py --pstats-dir)
+scratchpad/**/*.pstats
+
+# #1180 probe-chain completion sentinels
+scratchpad/**/*_stacks.txt
+
+# Completion sentinels dropped by the #1180 measurement runs (touch <name>_DONE
+# so a waiter can block on a long panel). They are run bookkeeping, never evidence.
+scratchpad/**/*_DONE

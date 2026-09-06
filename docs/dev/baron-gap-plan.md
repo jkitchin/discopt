@@ -55,6 +55,19 @@ repo. Read §0 and §8 first regardless of which task you take.
 > the per-layer *shares*, which have not been re-measured post-tape. That
 > re-measurement is the one open deliverable of #1026.
 
+> **RESOLVED — §1.1 and §1.3 are now fully superseded (2026-09-06, #1180).** The
+> re-measurement the note above asks for is done, over the 66-instance in-repo
+> corpus:
+> [`issue-1180-per-node-layer-split-2026-09-05.md`](issue-1180-per-node-layer-split-2026-09-05.md).
+> The layer split has **inverted** — POUNCE native 47.7 % / `discopt` Python
+> 15.4 % / `discopt._rust` 15.0 % / callback glue 9.2 % / **jax 0.0 %**. The node
+> NLP is 57.4 % of corpus wall and is native code, so the *structure* the note
+> above expected to survive does survive — but "the node LP is nothing" does not
+> (it is 50.8 % of `nvs05` and 9.3 % corpus-wide), and neither does §1.1's
+> `import jax 299 ms` row or its 86 % import tax. §1.2 and §1.4 are unaffected.
+> §8's do-not-do list is unaffected and was re-confirmed against the new data.
+
+
 `wall_gap ≈ floor × per_node_cost × node_count`, with different factors
 dominating different instance families. TX0's binding-constraint histogram
 (62-instance panel, `docs/dev/data/tenx-attribution.json`): **floor 26

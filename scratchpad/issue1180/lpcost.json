@@ -1,0 +1,167 @@
+{
+ "probe": "issue1180_probe_lp_cost",
+ "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+ "records": [
+  {
+   "instance": "nvs05.nl",
+   "wall_s": 20.406703993000065,
+   "nodes": 27,
+   "binding_calls": 1373,
+   "binding_wall_s": 11.559656974000745,
+   "binding_share_of_wall_pct": 56.64636963404749,
+   "binding_ms_per_call": 8.419269463948103,
+   "obbt_probes": 1237,
+   "obbt_probes_per_node": 45.81481481481482,
+   "obbt_probe_wall_s": 9.677519947998917,
+   "obbt_probe_share_of_wall_pct": 47.42323871272163,
+   "obbt_probe_ms_per_probe": 7.823379101050054,
+   "obbt_native_ms_per_probe": 7.770090088924417,
+   "obbt_python_ms_per_probe": 0.05328901212563712,
+   "obbt_python_pct_of_probe": 0.6811508356853712,
+   "obbt_warm_basis_pct": 71.13985448666128,
+   "binding_calls_inside_probes": 1237,
+   "by_lp_rows": {
+    "326": {
+     "n": 445,
+     "ms_per_call": 12.414085008987987
+    },
+    "312": {
+     "n": 702,
+     "ms_per_call": 4.3610462749287935
+    },
+    "325": {
+     "n": 90,
+     "ms_per_call": 11.398656955553735
+    },
+    "451": {
+     "n": 12,
+     "ms_per_call": 18.765360416712912
+    },
+    "439": {
+     "n": 8,
+     "ms_per_call": 27.308384499946214
+    },
+    "433": {
+     "n": 12,
+     "ms_per_call": 17.21314183331894
+    }
+   }
+  },
+  {
+   "instance": "nvs09.nl",
+   "wall_s": 8.288856116999796,
+   "nodes": 31,
+   "binding_calls": 2470,
+   "binding_wall_s": 3.7386363159839675,
+   "binding_share_of_wall_pct": 45.104369809439895,
+   "binding_ms_per_call": 1.513617941693914,
+   "obbt_probes": 1288,
+   "obbt_probes_per_node": 41.54838709677419,
+   "obbt_probe_wall_s": 2.478712483002255,
+   "obbt_probe_share_of_wall_pct": 29.904156231142792,
+   "obbt_probe_ms_per_probe": 1.9244662135110675,
+   "obbt_native_ms_per_probe": 1.8777189945569082,
+   "obbt_python_ms_per_probe": 0.04674721895415935,
+   "obbt_python_pct_of_probe": 2.4291005280301587,
+   "obbt_warm_basis_pct": 98.83540372670808,
+   "binding_calls_inside_probes": 1288,
+   "by_lp_rows": {
+    "335": {
+     "n": 1180,
+     "ms_per_call": 1.9399082432108241
+    },
+    "10": {
+     "n": 108,
+     "ms_per_call": 2.5088352129564053
+    },
+    "334": {
+     "n": 82,
+     "ms_per_call": 2.5693878780391346
+    },
+    "11": {
+     "n": 76,
+     "ms_per_call": 2.1622225657737495
+    },
+    "9": {
+     "n": 118,
+     "ms_per_call": 0.8475658644059322
+    },
+    "8": {
+     "n": 122,
+     "ms_per_call": 0.23787264755258952
+    }
+   }
+  },
+  {
+   "instance": "tanksize.nl",
+   "wall_s": 20.01320892500007,
+   "nodes": 2627,
+   "binding_calls": 234,
+   "binding_wall_s": 0.4497590059954746,
+   "binding_share_of_wall_pct": 2.247310801985609,
+   "binding_ms_per_call": 1.9220470341686948,
+   "obbt_probes": 234,
+   "obbt_probes_per_node": 0.08907499048344118,
+   "obbt_probe_wall_s": 0.460548043007293,
+   "obbt_probe_share_of_wall_pct": 2.3012203826643027,
+   "obbt_probe_ms_per_probe": 1.9681540299456968,
+   "obbt_native_ms_per_probe": 1.9220470341686948,
+   "obbt_python_ms_per_probe": 0.04610699577700186,
+   "obbt_python_pct_of_probe": 2.3426517983591966,
+   "obbt_warm_basis_pct": 98.71794871794872,
+   "binding_calls_inside_probes": 234,
+   "by_lp_rows": {
+    "187": {
+     "n": 234,
+     "ms_per_call": 1.9220470341686948
+    }
+   }
+  },
+  {
+   "instance": "tspn05.nl",
+   "wall_s": 15.320842191999873,
+   "nodes": 51,
+   "binding_calls": 1234,
+   "binding_wall_s": 2.3160318740028742,
+   "binding_share_of_wall_pct": 15.116870502146698,
+   "binding_ms_per_call": 1.8768491685598656,
+   "obbt_probes": 260,
+   "obbt_probes_per_node": 5.098039215686274,
+   "obbt_probe_wall_s": 0.4215169440003592,
+   "obbt_probe_share_of_wall_pct": 2.751264837258515,
+   "obbt_probe_ms_per_probe": 1.621219015385997,
+   "obbt_native_ms_per_probe": 1.5772939115217575,
+   "obbt_python_ms_per_probe": 0.043925103864239645,
+   "obbt_python_pct_of_probe": 2.7093874083250555,
+   "obbt_warm_basis_pct": 97.6923076923077,
+   "binding_calls_inside_probes": 260,
+   "by_lp_rows": {
+    "365": {
+     "n": 48,
+     "ms_per_call": 9.32638218753823
+    },
+    "246": {
+     "n": 220,
+     "ms_per_call": 1.6447411227214945
+    },
+    "245": {
+     "n": 45,
+     "ms_per_call": 1.698083888823021
+    },
+    "539": {
+     "n": 2,
+     "ms_per_call": 17.765991500027667
+    },
+    "535": {
+     "n": 2,
+     "ms_per_call": 17.190686500271113
+    },
+    "370": {
+     "n": 22,
+     "ms_per_call": 1.4998835909368196
+    }
+   }
+  }
+ ],
+ "executed_assertions": 9
+}

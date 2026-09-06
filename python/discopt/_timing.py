@@ -51,27 +51,10 @@ the two layers separately rather than billing the callbacks to POUNCE.
 
 from __future__ import annotations
 
-import contextlib
-import dataclasses
 import threading
 import time
-from typing import Iterator
 
 __all__ = ["charge", "snapshot", "since", "BUCKETS"]
-
-
-@dataclasses.dataclass(slots=True)
-class _Frame:
-    """One open ``charge`` region.
-
-    ``child`` accumulates the wall time of nested regions so the parent can
-    report *self* time. A plain list was used here first; it typed as
-    ``list[object]`` and silently defeated the arithmetic below.
-    """
-
-    bucket: str
-    started: float
-    child: float = 0.0
 
 
 #: Boundary buckets. ``rust`` and ``python`` partition the wall clock; ``pounce``
@@ -88,7 +71,7 @@ def _totals() -> dict[str, float]:
     return totals
 
 
-def _stack() -> list[_Frame]:
+def _stack() -> list["_Charge"]:
     """Active regions on this thread, innermost last."""
     stack = getattr(_state, "stack", None)
     if stack is None:
@@ -96,8 +79,43 @@ def _stack() -> list[_Frame]:
     return stack
 
 
-@contextlib.contextmanager
-def charge(bucket: str) -> Iterator[None]:
+class _Charge:
+    """The context manager :func:`charge` returns.
+
+    A ``__slots__`` class rather than a ``@contextlib.contextmanager``
+    generator, and that is a measured choice, not a style one: this object is
+    entered once per *derivative callback*, which is the highest-frequency
+    Python construct on the solve path (1.95 M entries over the 66-instance
+    corpus at 20 s each, #1180). The generator form costs **1.93 µs** per
+    ``with``; this one costs **1.05 µs** (200 k reps, same process, same box) --
+    against a POUNCE tape evaluation of 0.2-0.6 µs underneath it. The
+    accounting below is identical to the generator's, line for line.
+    """
+
+    __slots__ = ("bucket", "started", "child")
+
+    def __init__(self, bucket: str) -> None:
+        self.bucket = bucket
+        self.child = 0.0
+        self.started = 0.0
+
+    def __enter__(self) -> None:
+        self.child = 0.0
+        self.started = time.perf_counter()
+        _stack().append(self)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # In a ``__exit__``, so a boundary that raises is still charged -- an
+        # exception costing 2 s of Rust must not vanish from the profile.
+        stack = _stack()
+        stack.pop()
+        elapsed = time.perf_counter() - self.started
+        _totals()[self.bucket] += elapsed - self.child  # minus children's claim
+        if stack:
+            stack[-1].child += elapsed  # parent must not also count our wall
+
+
+def charge(bucket: str) -> "_Charge":
     """Charge the enclosed block's **self time** to ``bucket``.
 
     Self time, not wall time: any nested ``charge`` region is subtracted from the
@@ -121,23 +139,13 @@ def charge(bucket: str) -> Iterator[None]:
     back to the same bucket), so POUNCE's LP path reached from inside an NLP
     solve is not double-counted.
 
-    The bookkeeping is in a ``finally``, so a boundary that raises is still
-    charged — an exception costing 2 s of Rust must not vanish from the profile.
+    Each call returns a fresh :class:`_Charge`, so the returned object is safe to
+    enter once. (The generator form it replaced had the same restriction: a
+    ``@contextlib.contextmanager`` value cannot be re-entered either.)
     """
     if bucket not in BUCKETS:
         raise ValueError(f"unknown timing bucket {bucket!r}; expected one of {BUCKETS}")
-    stack = _stack()
-    frame = _Frame(bucket, time.perf_counter())
-    stack.append(frame)
-    try:
-        yield
-    finally:
-        stack.pop()
-        elapsed = time.perf_counter() - frame.started
-        self_time = elapsed - frame.child  # minus time already claimed by children
-        _totals()[bucket] += self_time
-        if stack:
-            stack[-1].child += elapsed  # parent must not also count our wall
+    return _Charge(bucket)
 
 
 def snapshot() -> dict[str, float]:

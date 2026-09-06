@@ -1,0 +1,179 @@
+{
+ "probe": "issue1180_floor_decomposition",
+ "instance": "python/tests/data/minlplib_nl/alan.nl",
+ "bare_interpreter_ms": 12.160354000002371,
+ "import_jax_standalone_ms": 429.9352769999132,
+ "default_arm": {
+  "arm": "tape",
+  "reps": 5,
+  "median": {
+   "process_wall_s": 1.7517849839999826,
+   "import_discopt_s": 0.2478011800000104,
+   "import_pounce_s": 0.20958214600000247,
+   "parse_s": 0.001828887999977269,
+   "solve_s": 1.2107836610000504,
+   "child_total_s": 1.6575217270000167,
+   "startup_and_teardown_s": 0.09426325699996596
+  },
+  "spread_total_ms": 38.33730889742063,
+  "nodes": 13,
+  "status": "optimal",
+  "objective": 2.9249999999513205,
+  "jax_imported": false,
+  "n_jax_modules": 0,
+  "runs": [
+   {
+    "import_discopt_s": 0.24784075499997016,
+    "import_pounce_s": 0.20876083600001039,
+    "parse_s": 0.0018397310000182188,
+    "solve_s": 1.2494278310000482,
+    "child_total_s": 1.7078773730000876,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": false,
+    "n_jax_modules": 0,
+    "process_wall_s": 1.8092023830000699
+   },
+   {
+    "import_discopt_s": 0.24034945799996876,
+    "import_pounce_s": 0.21180414800005565,
+    "parse_s": 0.0019575180000401815,
+    "solve_s": 1.1788725430000113,
+    "child_total_s": 1.6329913380000107,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": false,
+    "n_jax_modules": 0,
+    "process_wall_s": 1.7256839299999456
+   },
+   {
+    "import_discopt_s": 0.26675952899995536,
+    "import_pounce_s": 0.2100025720000076,
+    "parse_s": 0.001828887999977269,
+    "solve_s": 1.1378921919999812,
+    "child_total_s": 1.616491279999991,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": false,
+    "n_jax_modules": 0,
+    "process_wall_s": 1.7105122010000287
+   },
+   {
+    "import_discopt_s": 0.2478011800000104,
+    "import_pounce_s": 0.20958214600000247,
+    "parse_s": 0.0016834479999943142,
+    "solve_s": 1.214772456999981,
+    "child_total_s": 1.673845682000092,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": false,
+    "n_jax_modules": 0,
+    "process_wall_s": 1.7659659949999877
+   },
+   {
+    "import_discopt_s": 0.2395817660000148,
+    "import_pounce_s": 0.20546234899995852,
+    "parse_s": 0.0016857580000078087,
+    "solve_s": 1.2107836610000504,
+    "child_total_s": 1.6575217270000167,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": false,
+    "n_jax_modules": 0,
+    "process_wall_s": 1.7517849839999826
+   }
+  ]
+ },
+ "control_arm_jax": {
+  "arm": "jax",
+  "reps": 5,
+  "median": {
+   "process_wall_s": 2.8061762469999394,
+   "import_discopt_s": 0.23930550099998982,
+   "import_pounce_s": 0.2052712329999622,
+   "parse_s": 0.0017042000000628832,
+   "solve_s": 2.1500758580000365,
+   "child_total_s": 2.596675653000034,
+   "startup_and_teardown_s": 0.2095005939999055
+  },
+  "spread_total_ms": 108.7145089471508,
+  "nodes": 13,
+  "status": "optimal",
+  "objective": 2.9249999999513205,
+  "jax_imported": true,
+  "n_jax_modules": 217,
+  "runs": [
+   {
+    "import_discopt_s": 0.2523385540000618,
+    "import_pounce_s": 0.20869198700006564,
+    "parse_s": 0.001629301999969357,
+    "solve_s": 2.3632413090000455,
+    "child_total_s": 2.82590846100004,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": true,
+    "n_jax_modules": 217,
+    "process_wall_s": 3.027851944999952
+   },
+   {
+    "import_discopt_s": 0.23930550099998982,
+    "import_pounce_s": 0.2052712329999622,
+    "parse_s": 0.0019024150000177542,
+    "solve_s": 2.1380548099999714,
+    "child_total_s": 2.5845416230000637,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": true,
+    "n_jax_modules": 217,
+    "process_wall_s": 2.779176408000012
+   },
+   {
+    "import_discopt_s": 0.23781739499997911,
+    "import_pounce_s": 0.2068879950001019,
+    "parse_s": 0.0018869169999788937,
+    "solve_s": 2.1500758580000365,
+    "child_total_s": 2.596675653000034,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": true,
+    "n_jax_modules": 217,
+    "process_wall_s": 2.8061762469999394
+   },
+   {
+    "import_discopt_s": 0.2328600710000046,
+    "import_pounce_s": 0.1965128959999447,
+    "parse_s": 0.0016524889999800507,
+    "solve_s": 2.130868730999964,
+    "child_total_s": 2.5619008870000926,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": true,
+    "n_jax_modules": 217,
+    "process_wall_s": 2.7584107720000475
+   },
+   {
+    "import_discopt_s": 0.24002529500000946,
+    "import_pounce_s": 0.20324192600003244,
+    "parse_s": 0.0017042000000628832,
+    "solve_s": 2.204470993999962,
+    "child_total_s": 2.6494507340000837,
+    "nodes": 13,
+    "status": "optimal",
+    "objective": 2.9249999999513205,
+    "jax_imported": true,
+    "n_jax_modules": 217,
+    "process_wall_s": 2.8684086480000133
+   }
+  ]
+ },
+ "executed_assertions": 16
+}
