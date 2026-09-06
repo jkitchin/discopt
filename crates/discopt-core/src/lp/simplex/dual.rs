@@ -219,6 +219,29 @@ pub(super) fn cost_perturb_default() -> f64 {
 /// the true one (1e-3 costs 1920 perturbed pivots against 534 at 1e-5).
 const COST_PERTURB_EPS: f64 = 1e-5;
 
+/// Consecutive degenerate dual pivots after which the warm loop is abandoned for
+/// the cost-perturbed restart (#1013).
+///
+/// Derived from the 102-LP in-repo relaxation panel, not chosen: arming on every
+/// warm solve saves 14 754 pivots across the panel and costs 640, but makes all
+/// 100 comparable LPs pay for an attempt most of them do not need. Sweeping the
+/// arming run over the base arm's `DualDegenerateRunMax`:
+///
+/// | arm at | LPs armed | pivots saved | pivots lost | net    |
+/// |-------:|----------:|-------------:|------------:|-------:|
+/// | 0 (always) |   100 |       14 754 |         640 | 14 114 |
+/// | 32     |        27 |       14 584 |         429 | 14 155 |
+/// | **64** |    **20** |   **14 581** |     **395** | **14 186** |
+/// | 200    |        13 |       14 158 |         308 | 13 850 |
+/// | 900    |         6 |       12 442 |         308 | 12 134 |
+///
+/// 64 is the net maximum: it keeps 99% of the pivots always-on arming saves while
+/// 80 of the 100 LPs never leave the ordinary path. Well below the 902-pivot run
+/// that the #1018 panel measured as the longest run on a *converging* warm loop,
+/// because unlike that bail this arming does not abandon the LP — it re-solves it
+/// with the ties broken, and falls back to the untouched path if that fails.
+const PERTURB_ARM_RUN: usize = 64;
+
 /// The parse table behind [`cost_perturb_default`]. Unrecognized input is refused
 /// rather than defaulted, for the reason spelled out on [`parse_stall_patience`].
 fn parse_cost_perturb(raw: &str) -> Result<f64, String> {
@@ -491,7 +514,10 @@ fn cost_perturbed_warm_solve(
     opts: &SimplexOptions,
 ) -> Option<LpSolve> {
     let eps = opts.dual_cost_perturb;
-    if !(eps > 0.0) || basis.col_status.len() != n {
+    // `is_nan` first: a NaN eps must disable the mechanism, not slip through a
+    // negated comparison (and `parse_cost_perturb` already refuses one at the
+    // source, so this only guards a caller that set the field directly).
+    if eps.is_nan() || eps <= 0.0 || basis.col_status.len() != n {
         return None;
     }
     let mut attempt = opts.clone();
@@ -524,17 +550,9 @@ fn cost_perturbed_warm_solve(
     // re-solve (which only needs primal feasibility) takes it when it is not.
     let clean = match PreparedDual::prepare_cols(sp, m, n, c, l, u, &pert.basis, &attempt) {
         Some(p) => p.reoptimize(l, u, b, &attempt),
-        None => super::primal::solve_lp_cols_warm(
-            sp.clone(),
-            m,
-            n,
-            c,
-            l,
-            u,
-            b,
-            &pert.basis,
-            &attempt,
-        ),
+        None => {
+            super::primal::solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, &pert.basis, &attempt)
+        }
     };
     if clean.status != LpStatus::Optimal {
         return reject();
@@ -608,17 +626,36 @@ fn solve_csc_core(
     opts: &SimplexOptions,
 ) -> LpSolve {
     match start {
-        Some(basis) => match {
-            // #1013: try the cost-perturbed start first (default-OFF). It returns
-            // `Some` only for a clean-up solve on the TRUE costs that came back
-            // `Optimal`; anything else falls through to the ordinary path below
-            // with its full iteration budget and at least half the wall budget.
-            if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
-                return sol;
+        Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
+            Some(p) => {
+                // #1013: the cost perturbation (default-OFF) is armed by a STALL,
+                // not applied unconditionally. Run the ordinary warm loop first
+                // with the degenerate-run bail set to `PERTURB_ARM_RUN`: an LP that
+                // converges without a long degenerate run returns from here having
+                // paid nothing at all, and only one that stalls goes on to the
+                // perturbed restart. Anything the restart cannot finish falls
+                // through to the unmodified `reoptimize` below.
+                if opts.dual_cost_perturb > 0.0 {
+                    let mut probe = opts.clone();
+                    probe.dual_stall_patience = match opts.dual_stall_patience {
+                        0 => PERTURB_ARM_RUN,
+                        p => p.min(PERTURB_ARM_RUN),
+                    };
+                    // Counted here as well as in `reoptimize`: a warm dual solve
+                    // ran, and a harness that gates on `DualWarmSolves >= 1` to
+                    // prove it measured anything (CLAUDE.md §6) must see it.
+                    crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
+                    let mut banked = Vec::new();
+                    if let Some(sol) = p.run_dual(l, u, b, &probe, &mut banked) {
+                        return sol;
+                    }
+                    if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts)
+                    {
+                        return sol;
+                    }
+                }
+                p.reoptimize(l, u, b, opts)
             }
-            PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts)
-        } {
-            Some(p) => p.reoptimize(l, u, b, opts),
             // Warm basis rejected by the dual (wrong size / singular /
             // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
             // same basis first — a coefficient-patched child is usually still
@@ -3068,5 +3105,4 @@ mod tests {
         }
         assert_eq!(compared, 4, "every captured LP must have been compared");
     }
-
 }
