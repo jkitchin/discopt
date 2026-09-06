@@ -286,9 +286,11 @@ def main() -> int:
         check(os.path.exists(nl), f"missing instance file {nl}")
         print(f"[{name}] clean arm ...", flush=True)
         clean = clean_run(nl, args.time_limit)
-        print(f"[{name}] clean: {clean['nodes']} nodes in {clean['wall_s']:.2f}s "
-              f"({clean['nodes_per_s']:.2f} nodes/s), jax_imported={clean['jax_imported']}",
-              flush=True)
+        print(
+            f"[{name}] clean: {clean['nodes']} nodes in {clean['wall_s']:.2f}s "
+            f"({clean['nodes_per_s']:.2f} nodes/s), jax_imported={clean['jax_imported']}",
+            flush=True,
+        )
         check(not clean["jax_imported"], f"{name}: jax imported on the default solve path")
         ps = None
         if args.pstats_dir:
@@ -297,8 +299,11 @@ def main() -> int:
         print(f"[{name}] cProfile arm ...", flush=True)
         prof = profiled_run(nl, args.time_limit, ps)
         pct = prof["by_layer_pct"]
-        print(f"[{name}] layers: " + "  ".join(
-            f"{k}={pct[k]:.1f}%" for k in LAYERS if pct[k] >= 0.05), flush=True)
+        print(
+            f"[{name}] layers: "
+            + "  ".join(f"{k}={pct[k]:.1f}%" for k in LAYERS if pct[k] >= 0.05),
+            flush=True,
+        )
         rec = {"instance": name, "clean": clean, "cprofile": prof}
         if args.root_arm:
             print(f"[{name}] root-only arm ...", flush=True)

@@ -34,7 +34,6 @@ import os
 import statistics
 import sys
 import time
-from typing import Iterator
 
 import numpy as np
 
@@ -54,7 +53,7 @@ def _old_x(self, x):
 
 def _make_old_charge(timing):
     @contextlib.contextmanager
-    def charge(bucket: str) -> Iterator[None]:
+    def charge(bucket: str):
         """The pre-#1180 generator-based context manager, verbatim."""
         if bucket not in timing.BUCKETS:
             raise ValueError(f"unknown timing bucket {bucket!r}")
@@ -198,8 +197,8 @@ def main() -> int:
                 )
         arms.install("new")
 
-        def med(arm, key):
-            return statistics.median(r[key] for r in runs[arm])
+        def med(arm, key, _runs=runs):
+            return statistics.median(r[key] for r in _runs[arm])
 
         old_w, new_w = med("old", "wall_s"), med("new", "wall_s")
         nodes_match = {r["nodes"] for r in runs["old"]} == {r["nodes"] for r in runs["new"]}
@@ -210,8 +209,12 @@ def main() -> int:
             "median_wall_old_s": old_w,
             "median_wall_new_s": new_w,
             "speedup": old_w / new_w if new_w > 0 else None,
-            "sd_old_s": statistics.stdev([r["wall_s"] for r in runs["old"]]) if args.reps > 1 else 0.0,
-            "sd_new_s": statistics.stdev([r["wall_s"] for r in runs["new"]]) if args.reps > 1 else 0.0,
+            "sd_old_s": statistics.stdev([r["wall_s"] for r in runs["old"]])
+            if args.reps > 1
+            else 0.0,
+            "sd_new_s": statistics.stdev([r["wall_s"] for r in runs["new"]])
+            if args.reps > 1
+            else 0.0,
             "nodes_identical": nodes_match,
             "objective_identical": obj_match,
             "bound_identical": bound_match,
@@ -226,8 +229,9 @@ def main() -> int:
         )
 
     speedups = [r["speedup"] for r in records if r["speedup"]]
-    neutral = all(r["nodes_identical"] and r["objective_identical"] and r["bound_identical"]
-                  for r in records)
+    neutral = all(
+        r["nodes_identical"] and r["objective_identical"] and r["bound_identical"] for r in records
+    )
     out = {
         "probe": "issue1180_callback_ab",
         "deterministic": args.deterministic,

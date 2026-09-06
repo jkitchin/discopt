@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from discopt import _timing
 
 pytestmark = pytest.mark.smoke
@@ -35,8 +34,8 @@ def _small_model():
     x = m.continuous("x", lb=0.5, ub=3.0)
     y = m.continuous("y", lb=0.5, ub=3.0)
     m.minimize(x * y + dm.log(x) + y**3)
-    m.constraint(x + y >= 1.5)
-    m.constraint(x * y <= 4.0)
+    m.subject_to(x + y >= 1.5)
+    m.subject_to(x * y <= 4.0)
     return m
 
 

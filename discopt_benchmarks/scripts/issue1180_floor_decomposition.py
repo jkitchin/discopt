@@ -41,7 +41,7 @@ def check(cond: bool, msg: str) -> None:
         raise AssertionError(msg)
 
 
-CHILD = r'''
+CHILD = r"""
 import json, sys, time
 t_start = time.perf_counter()
 t0 = time.perf_counter(); import discopt; t_discopt = time.perf_counter() - t0
@@ -68,14 +68,16 @@ print("PHASES " + json.dumps({
     "jax_imported": "jax" in sys.modules,
     "n_jax_modules": sum(1 for k in sys.modules if k == "jax" or k.startswith("jax.")),
 }))
-'''
+"""
 
 # The jax arm needs the import located rather than buried in `solve`, so it runs
 # a variant that times `import jax` explicitly right after the evaluator picks it.
-CHILD_JAX_IMPORT = r'''
+CHILD_JAX_IMPORT = r"""
 import json, time
-t0 = time.perf_counter(); import jax; print("JAXIMPORT " + json.dumps({"s": time.perf_counter() - t0}))
-'''
+t0 = time.perf_counter()
+import jax  # noqa: F401
+print("JAXIMPORT " + json.dumps({"s": time.perf_counter() - t0}))
+"""
 
 
 def run_child(code: str, argv: list[str], env_extra: dict, python: str) -> tuple[float, dict]:
@@ -115,9 +117,17 @@ def arm(name: str, nl: str, time_limit: float, env_extra: dict, reps: int, pytho
             f"solve {rec['solve_s'] * 1000:.0f}), jax={rec['jax_imported']}",
             flush=True,
         )
-    med = {k: median_of(runs, k) for k in
-           ("process_wall_s", "import_discopt_s", "import_pounce_s", "parse_s", "solve_s",
-            "child_total_s")}
+    med = {
+        k: median_of(runs, k)
+        for k in (
+            "process_wall_s",
+            "import_discopt_s",
+            "import_pounce_s",
+            "parse_s",
+            "solve_s",
+            "child_total_s",
+        )
+    }
     med["startup_and_teardown_s"] = med["process_wall_s"] - med["child_total_s"]
     return {
         "arm": name,
@@ -160,10 +170,10 @@ def main() -> int:
     check(not default["jax_imported"], "default arm imported jax -- the tape default is not live")
     check(default["n_jax_modules"] == 0, "default arm loaded jax submodules")
 
-    print("control arm (DISCOPT_NLP_EVAL=jax) -- proves the probe can SEE an import:",
-          flush=True)
-    control = arm("jax", args.instance, args.time_limit, {"DISCOPT_NLP_EVAL": "jax"},
-                  args.reps, args.python)
+    print("control arm (DISCOPT_NLP_EVAL=jax) -- proves the probe can SEE an import:", flush=True)
+    control = arm(
+        "jax", args.instance, args.time_limit, {"DISCOPT_NLP_EVAL": "jax"}, args.reps, args.python
+    )
     check(
         control["jax_imported"],
         "control arm did NOT import jax: the probe cannot see imports, so the default "
@@ -188,14 +198,15 @@ def main() -> int:
             fh.write(json.dumps(out, indent=1))
 
     m = default["median"]
-    print("\n--- default (tape) floor, median of %d ---" % args.reps)
+    print(f"\n--- default (tape) floor, median of {args.reps} ---")
     print(f"  interpreter startup+teardown : {m['startup_and_teardown_s'] * 1000:7.0f} ms")
     print(f"  import discopt               : {m['import_discopt_s'] * 1000:7.0f} ms")
     print(f"  import pounce                : {m['import_pounce_s'] * 1000:7.0f} ms")
     print(f"  parse .nl                    : {m['parse_s'] * 1000:7.0f} ms")
     print(f"  solve ({default['nodes']} nodes){'':13s}: {m['solve_s'] * 1000:7.0f} ms")
-    print(f"  TOTAL process wall           : {m['process_wall_s'] * 1000:7.0f} ms"
-          f"  (sd {default['spread_total_ms']:.0f} ms)")
+    sd = default["spread_total_ms"]
+    sd_txt = "n/a (1 rep)" if sd is None else f"{sd:.0f} ms"
+    print(f"  TOTAL process wall           : {m['process_wall_s'] * 1000:7.0f} ms  (sd {sd_txt})")
     cm = control["median"]
     print(f"  [control jax arm total       : {cm['process_wall_s'] * 1000:7.0f} ms]")
     print(f"\nexecuted assertions: {ASSERTS['n']}")

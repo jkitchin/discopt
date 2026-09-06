@@ -424,20 +424,40 @@ be mistaken for a behavior change.
 and not by speed; in that same wall the new arm reaches **7 nodes against 3**, at
 an identical bound. A time-truncated row measures throughput, not behavior.
 
-**Whole-corpus sweep** (66 instances, `deterministic=True`, `max_nodes=20`, 1 rep):
-median **1.099×**, and **62 of 66 exactly neutral** on node count, objective and
-bound. The four that are not:
+**Whole-corpus sweep** (66 instances, `deterministic=True`, `max_nodes=20`, 1 rep).
+This arm needs one correction applied before it is read, and the correction is
+the whole reason `beuster` below looked like a disaster: **`deterministic=True`
+cannot equalise work on a run that terminates on the wall clock**, because the
+terminating condition *is* the wall clock. 13 of the 66 hit a time or node limit
+in at least one arm, and on those the faster arm simply gets further — measured
+directly on `beuster`, where the two arms issue **3858 OBBT probes against 942**
+for the same 3 nodes and the same bound. Those 13 rows carry no neutrality
+information and no wall information; they are excluded from the gate and read for
+progress instead.
 
-* `4stufen`, `heatexch_gen1`, `heatexch_gen3` — time-truncated in at least one
-  arm, so the faster arm reaches more nodes. Bound identical or better.
-* `clay0303hfsg` — **pre-existing nondeterminism, not an effect of this change**.
-  The *old* arm alone returns two different objectives across four identical
-  repeats under `deterministic=True` (55092.52 three times, then 46785.55), and
-  so does the new one, always at the same 27 nodes. The dual bound agrees to 12
-  significant figures across every run; it is the *incumbent* that moves, so a
-  primal heuristic is the nondeterministic component. Recorded in §5 as a
-  separate defect — an instance that cannot reproduce itself cannot serve in a
-  bound-neutrality gate.
+On the **53 comparable rows**:
+
+| | |
+|---|---|
+| exactly neutral on node count, objective **and** bound | **52 of 53** |
+| the one exception | `clay0303hfsg` — pre-existing nondeterminism (below) |
+| median speedup | **1.142×** |
+| median speedup, rows with ≥ 1 s of wall (30 rows) | **1.198×** |
+| aggregate wall | 1236.5 s → 1204.5 s (**1.027×**) |
+
+The aggregate is much smaller than the median because two long instances
+(`nvs05`, `tanksize`) dominate the sum and are exactly the ones whose wall is
+*not* callback-bound — `nvs05` is OBBT-LP-bound (§2.2) and both gain ~1.03–1.07×.
+That is the honest shape of this change: **it concentrates where the callbacks
+are**, and it is close to free elsewhere.
+
+`clay0303hfsg` is **pre-existing nondeterminism, not an effect of this change**.
+The *old* arm alone returns two different objectives across four identical repeats
+under `deterministic=True` (55092.52 three times, then 46785.55), and so does the
+new one, always at the same 27 nodes. The dual bound agrees to 12 significant
+figures across every run; it is the *incumbent* that moves, so a primal heuristic
+is the nondeterministic component. Recorded in §5 — an instance that cannot
+reproduce itself cannot serve in a bound-neutrality gate.
 
 **The one apparent regression, and why it is not one.** `beuster` measured
 **0.516×** (233 s vs 120 s), reproducibly, over three interleaved reps at
@@ -475,4 +495,81 @@ Two measurements dissolve it:
 `nvs12`, the only other sub-1.0× row in the corpus sweep, is **0.945×** over
 three reps with fully overlapping spreads (new 37.17–45.42 s, old 36.04–47.46 s)
 — noise, and reported as noise rather than as a result.
+
+---
+
+## §5. What is now on the record
+
+### §5.1 Retractions — `baron-gap-plan.md` §1 figures that no longer describe `main`
+
+Per CLAUDE.md §11, stated as retractions rather than left to be inferred:
+
+| withdrawn | replaced by |
+|---|---|
+| §1.3 "python **82.5 %** / jax 12.3 % / rust 3.4 % / pounce-native 0.1 %" on nvs05 | §2.2: rust **50.8 %** / pounce-native 26.1 % / jax **0.0 %** / all Python 23.2 % |
+| §1.3 "`solve_lp_warm_csc_py`: 0.67 s — **the node LP is nothing**" | it is the largest single item on `nvs05` (50.8 %), and 9.3 % corpus-wide |
+| §1.3 "`np.asarray` 1.71 s / `array._value` 1.53 s / `__float__` 2.17 s" | the engine that produced them is gone; tape evaluation is 11.5 s over **1.95 M** callbacks corpus-wide (2.2 %) |
+| §1.1 "`import jax` 299 ms; 86 % import tax; total 595 ms" | §1: no `import jax` at all (control-arm verified); 554 ms of a 1752 ms process on this box |
+| TX0 "node-LP = **0.06 %** of panel wall" | 9.3 % (`solve_lp_warm_csc_py`) + 3.6 % (`solve_milp_csc_py`) |
+| #764's tanksize probe-LP figure (4.25 ms in-loop vs 1.28 ms pure-binding, "~70 % marshaling") | §5.2: 1–3 % Python per probe on four instances — the persistent-CSC + warm-basis work has since removed it |
+
+**Not** withdrawn, and re-confirmed: the node NLP is the bound source and remains
+the dominant consumer (57.4 % of corpus wall), and every entry on
+`baron-gap-plan.md` §8's do-not-do list stands untouched — nothing here truncates
+a bound-producing solve, adds an LP deadline, disables the node NLP, trusts a
+single-layer label, or reorders the root-relaxation fallback's candidates.
+
+### §5.2 The OBBT probe loop is native, not marshaling
+
+Two nested timers in the same run (`_PersistentProbeLP.solve` around the whole
+probe, the binding around the native call):
+
+| instance | probes | warm-started | ms/probe | native | Python | Python share |
+|---|---:|---:|---:|---:|---:|---:|
+| nvs05 | 1237 | 71 % | 7.823 | 7.770 | 0.053 | **1 %** |
+| nvs09 | 1288 | 99 % | 1.924 | 1.878 | 0.047 | **2 %** |
+| tanksize | 234 | 99 % | 1.968 | 1.922 | 0.046 | **2 %** |
+| tspn05 | 260 | 98 % | 1.621 | 1.577 | 0.044 | **3 %** |
+
+An earlier version of this probe replayed one *captured* LP call against the raw
+binding and reported a **negative** Python overhead. That was the probe's fault,
+not a finding: the captured call cold-starts while the in-loop population is
+warm-started, so it compared two different LPs. Recorded because the failure mode
+— a replay-based "pure-binding floor" that silently compares the wrong
+population — is the same shape as the one #764's figure came from.
+
+### §5.3 Two instrument defects found while measuring
+
+1. **`node_callback` is not observation-neutral.** It is a documented routing
+   signal, so a probe that attaches one measures a different engine: `alan`, in
+   fresh subprocesses, both orders, same 13 nodes and same objective — **54
+   POUNCE solves and 11 130 tape evaluations without it, 1 and 0 with it**.
+   `discopt_benchmarks/scripts/profile_instance.py` attaches one by default, so
+   its `--no-trace` flag is not optional on an auto-routable instance.
+2. **`_ElasticFeasibilityEvaluator` declares no `timing_bucket`**, so it trips the
+   `[timing-bucket-unknown]` warning and its derivative-callback time is left with
+   the enclosing region. An attribution gap in the FFI instrument, which is why
+   the cProfile arm is primary here.
+
+### §5.4 Open, not fixed here
+
+**`clay0303hfsg` is not reproducible under `deterministic=True`.** Four identical
+repeats on unmodified code give two different objectives (55092.52 ×3, then
+46785.55) at an identical 27 nodes, with the dual bound agreeing to 12
+significant figures. `deterministic=True` promises a search that is a function of
+the model rather than of machine speed; this instance's *primal* side is not.
+Out of scope for #1180 — it is a `deterministic=` contract defect in the primal
+heuristics, not a per-node-cost question — but it is a live hazard for every
+bound-neutrality gate that trusts that flag, including this one, and it should be
+tracked separately.
+
+### §5.5 What #1180 does **not** claim
+
+The per-node gap to BARON was **not** re-measured. It cannot be from this box:
+`alan`'s solve is 15× slower here than on the machine `baron-gap-plan.md` §1 used,
+and no BARON licence is reachable (`reference-solver-guide.md`; the full licence
+lives inside GAMS). Every figure here is a *composition* — a share, a call count,
+a per-call cost — and the one wall-clock claim is an A/B of two arms interleaved
+on this same box. The ~90× per-node figure in the issue remains a citation, not a
+re-measurement.
 

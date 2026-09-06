@@ -76,7 +76,6 @@ def instrument():
     catch an exception (CLAUDE.md §7).
     """
     import pounce
-
     from discopt.solvers import nlp_ipopt
 
     state: dict = {
@@ -144,7 +143,7 @@ def instrument():
                 "info": info,
                 "x0": x0,
                 "mid": mid,
-                }
+            }
         )
 
     def problem_solve_wrapper(self, *a, **k):
@@ -378,9 +377,7 @@ def run_instance(nl: str, time_limit: float, reps: int, rounds: int, max_cases: 
         state["recording"] = False
         cb_costs = None
         if state["last_callbacks"] is not None and state["last_x"] is not None:
-            cb_costs = callback_layer_costs(
-                state["last_callbacks"], state["last_x"], reps, rounds
-            )
+            cb_costs = callback_layer_costs(state["last_callbacks"], state["last_x"], reps, rounds)
         ab = warm_start_ab(state["captures"], max_cases)
     finally:
         restore()
@@ -470,8 +467,9 @@ def main() -> int:
         c = rec["callback_layer_costs_us"]
         if c:
             for k in sorted(c):
-                print(f"    {k:32s} {c[k]['median_us']:8.2f} us  (sd {c[k]['sd_us']:.2f})",
-                      flush=True)
+                print(
+                    f"    {k:32s} {c[k]['median_us']:8.2f} us  (sd {c[k]['sd_us']:.2f})", flush=True
+                )
 
     out = {
         "probe": "issue1180_node_nlp_candidates",

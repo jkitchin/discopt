@@ -34,8 +34,6 @@ import os
 import sys
 import time
 
-import numpy as np
-
 ASSERTS = {"n": 0}
 
 
@@ -46,11 +44,11 @@ def check(cond: bool, msg: str) -> None:
 
 
 def run(nl: str, time_limit: float) -> dict:
-    import discopt._rust as R
+    from discopt import _rust
     from discopt._relax import obbt
     from discopt.modeling.core import from_nl
 
-    orig_binding = R.solve_lp_warm_csc_py
+    orig_binding = _rust.solve_lp_warm_csc_py
     orig_probe = obbt._PersistentProbeLP.solve
 
     st = {
@@ -93,7 +91,7 @@ def run(nl: str, time_limit: float) -> dict:
             st["probe_wall"] += time.perf_counter() - t
             st["in_probe"] = False
 
-    R.solve_lp_warm_csc_py = binding
+    _rust.solve_lp_warm_csc_py = binding
     obbt._PersistentProbeLP.solve = probe
     try:
         model = from_nl(nl)
@@ -101,7 +99,7 @@ def run(nl: str, time_limit: float) -> dict:
         result = model.solve(time_limit=time_limit, gap_tolerance=1e-4)
         wall = time.perf_counter() - t0
     finally:
-        R.solve_lp_warm_csc_py = orig_binding
+        _rust.solve_lp_warm_csc_py = orig_binding
         obbt._PersistentProbeLP.solve = orig_probe
 
     check(st["native_n"] > 0, f"{nl}: the LP binding was never called -- probe measured nothing")
@@ -119,7 +117,9 @@ def run(nl: str, time_limit: float) -> dict:
         "obbt_probes_per_node": st["probe_n"] / max(result.node_count, 1),
         "obbt_probe_wall_s": st["probe_wall"],
         "obbt_probe_share_of_wall_pct": 100.0 * st["probe_wall"] / wall,
-        "obbt_probe_ms_per_probe": (st["probe_wall"] / st["probe_n"] * 1e3) if st["probe_n"] else None,
+        "obbt_probe_ms_per_probe": (st["probe_wall"] / st["probe_n"] * 1e3)
+        if st["probe_n"]
+        else None,
         "obbt_native_ms_per_probe": (
             (st["probe_native_wall"] / st["probe_n"] * 1e3) if st["probe_n"] else None
         ),
