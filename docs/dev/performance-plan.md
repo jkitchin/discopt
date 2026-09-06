@@ -5708,6 +5708,51 @@ is the one piece of this that has to happen elsewhere.
 `DISCOPT_LP_DUAL_COST_PERTURB=1` (identical counts, so enabling it breaks
 nothing the suite covers); the adversarial suite 19 passed.
 
+**Criterion 1 of the re-scoped issue, tested directly.** The issue asks that the
+anchor cell converge in a pivot count of HiGHS's order *and stop swinging with
+the refactorization cadence*. Warm re-solve of `qplib2170`, sweeping
+`DISCOPT_LP_REFAC_INTERVAL`:
+
+| `REFAC_INTERVAL` | perturbation OFF | perturbation ON |
+|---:|---:|---:|
+| 24  | 20 594 | **576** |
+| 48 (default) | 17 794 | **992** |
+| 100 | 23 869 | **617** |
+| 200 | 23 869 | **617** |
+
+The spread over the cadence collapses from **6 075** pivots to **416**, and the
+absolute count falls ~25x — from 220–290x HiGHS's 81 pivots to 7–12x. The
+pathology this issue is named for is fixed by the mechanism; what is *not*
+established is that fixing it changes whole-solve outcomes (below).
+
+**Tree panel over the stall class** — the 9 vendored QPLIB instances (the class
+the LP panel's biggest reductions live in; `qplib_tree_panel.py`), 120 s each,
+arms interleaved, oracle `qplib.solu`:
+
+| | |
+|---|---|
+| unsound bounds (either arm) | **0** |
+| status / certification regressions | **0** |
+| instances where the mechanism fired | **3 / 9** (238, 5 and 1 attempts) |
+| identical bound in both arms | 5 / 9 |
+| tighter bound in the same wall | ON 2, OFF 2 — and one of the OFF cells never fired, so that difference is time-limit noise |
+
+So at tree level it is a **wash**: mostly inert, no harm, no demonstrated gain.
+The reason is structural, not a tuning miss — the stall is a property of large
+lifted relaxations solved from a slack start, and a tree run spends its time on
+short warm re-solves from a parent basis, which do not stall. No arming of this
+mechanism changes that: even a perfect root-only arming saves one solve out of
+thousands of nodes.
+
+**An instrument defect in that panel, disclosed.** Its first run reported four
+`UNSOUND bound` issues, in **both** arms, on `QPLIB_2967` and `QPLIB_3852`. Both
+are **maximize** instances (4 of the 9 vendored QPLIB instances are), where the
+dual bound is an *upper* bound; the harness had assumed minimize. Every flag was
+false, and the same bug had the sign of the bound *comparison* backwards, so the
+one instance where the mechanism fires heavily read as a regression when it is in
+fact the tighter arm. `tree_panel.py` had carried the sense correctly all along;
+this harness was written without it. Fixed, and the sense now prints per row.
+
 **Falsified along the way** (recorded so they are not retried): the dual Harris
 pass, twice (§18 and #1008); Bland at a reachable threshold (§18); unconditional
 (unarmed) cost perturbation, on wall median 1.044x; and perturbing *every*
