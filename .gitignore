@@ -140,11 +140,8 @@ scratchpad/_*_worker.py
 scratchpad/**/*.pstats
 
 # #1180 probe-chain completion sentinels
-scratchpad/**/PROBES*_DONE
-scratchpad/**/SMOKE_DONE
-scratchpad/**/AB_DONE
 scratchpad/**/*_stacks.txt
-scratchpad/**/AB3_DONE
-scratchpad/**/PR_DONE
-scratchpad/**/TESTS_DONE
-scratchpad/**/T2_DONE
+
+# Completion sentinels dropped by the #1180 measurement runs (touch <name>_DONE
+# so a waiter can block on a long panel). They are run bookkeeping, never evidence.
+scratchpad/**/*_DONE
