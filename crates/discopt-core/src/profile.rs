@@ -141,6 +141,8 @@ timed_phases!(
     SepGomory,
     Augment,
     DiveRepair,
+    // A12/RINS: wall time inside the sub-MILP improvement heuristic.
+    Rins,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
@@ -189,6 +191,19 @@ counters!(
     // schedule that never fired (CLAUDE.md §6).
     DiveOffRoot,
     DiveOffRootHits,
+    // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
+    // >= run >= improved -- so an implausible ordering is an arithmetic error
+    // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`
+    // is the safety counter: a sub-MILP point that failed the driver's own
+    // feasibility re-verification. It must stay ZERO; a nonzero value means the
+    // heuristic tried to inject an infeasible incumbent and is a correctness
+    // bug, not a tuning signal.
+    RinsConsidered,
+    RinsGated,
+    RinsRun,
+    RinsImproved,
+    RinsRejected,
+    RinsSubNodes,
     Phase1Pivots,
     Phase2Pivots,
     DegeneratePivots,

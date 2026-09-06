@@ -361,6 +361,7 @@ fn dive_batch_eligible(
 }
 
 /// Options for the MILP driver.
+#[derive(Clone)]
 pub struct MilpOptions {
     /// Number of structural (model) variables; columns `[n_struct, n)` are slacks.
     pub n_struct: usize,
@@ -499,6 +500,287 @@ pub struct MilpOptions {
     pub root_cut_prune: bool,
     /// LP solver options.
     pub simplex: SimplexOptions,
+}
+
+// ---------------------------------------------------------------------------
+// A12: RINS (Relaxation Induced Neighborhood Search) -- an *improvement* heuristic.
+//
+// Motivated by measurement, not assumption. Every dual-side lever on the parity
+// panel is falsified (docs/dev/milp-competitiveness-plan.md, A1-A11 and B1); A5
+// located the residual gap on the PRIMAL side (17/38 unsolved at an 89.6 % median
+// primal share, 12 of them holding a merely-poor incumbent rather than none), and
+// the driver has a rounding heuristic plus a no-incumbent dive (#1060) but nothing
+// whatsoever that improves an incumbent once one exists -- "the first incumbent is
+// very nearly the last". A12 measured RINS's precondition BEFORE this code was
+// written: over 2,023,762 incumbent-present nodes on 38 MIPLIB instances, 98.6 %
+// have an LP/incumbent agreement inside the usable band [0.30, 0.99), and 98.4 %
+// on the unsolved instances specifically.
+//
+// The idea (Danna, Rothberg & Le Pape, "Exploring relaxation induced neighborhoods
+// to improve MIP solutions", Math. Program. 102(1), 2005): fix the integer
+// variables on which the node LP relaxation and the incumbent already agree, and
+// solve what remains as a small MILP. The agreement test is the standard one --
+// exact equality within the feasibility tolerance, NOT a rounding test -- and the
+// refusal threshold below is the customary 0.3 minimum fixing rate.
+//
+// SOUNDNESS. Purely *primal*: RINS can only propose an incumbent, never move a
+// dual bound, so it cannot loosen or falsify a certificate. Three things make
+// that concrete rather than merely argued:
+//   * the sub-MILP is a RESTRICTION of the BASE problem -- same matrix, same rhs,
+//     integer bounds only narrowed to values the incumbent already takes -- so any
+//     point feasible for it is feasible for the model;
+//   * the point that comes back is nevertheless re-validated through
+//     `validate_seed_incumbent`, the same gate a caller-supplied seed passes,
+//     which re-checks integrality, bounds and every original row and reconstructs
+//     the slacks itself. A rejected point is dropped and counted (`RinsRejected`,
+//     which must stay zero); trusting the sub-solve instead would turn a bug there
+//     into a false `Optimal` at the top level, the one outcome CLAUDE.md §1 never
+//     trades;
+//   * it runs against the BASE problem rather than the cut-augmented working one,
+//     so a wrong cut could not launder itself into an incumbent.
+//
+// RINS declines entirely under a lazy separator: on that path a point must be
+// screened before it may become the incumbent, and a heuristic that bypassed the
+// screen would enforce a model the caller did not ask for.
+// ---------------------------------------------------------------------------
+
+/// Minimum share of integer variables that must agree before a sub-MILP is worth
+/// solving. Below it the sub-problem is barely smaller than the original.
+const RINS_MIN_FIXING_RATE: f64 = 0.30;
+
+/// Node budget for one sub-MILP. An improvement heuristic that can outspend the
+/// search it exists to help is a regression however good its solutions are.
+const RINS_SUB_NODE_CAP: usize = 500;
+
+/// Share of the parent search RINS may spend across ALL its sub-solves, plus a
+/// flat allowance so it can work at all before the tree is large. The per-call
+/// cap above bounds one attempt; this bounds the whole solve, which is what
+/// actually matters -- attempts scale with the batch count, so a per-call cap
+/// alone leaves the total unbounded. The quota shape is SCIP's (`nodesquot`).
+const RINS_NODE_QUOT: f64 = 0.05;
+const RINS_NODE_OFFSET: usize = 500;
+
+/// Total sub-solve nodes RINS is still allowed, given the parent's node count and
+/// what it has already spent. Zero means the budget is exhausted for this solve.
+fn rins_node_budget(parent_nodes: usize, spent: usize) -> usize {
+    let allowance = RINS_NODE_OFFSET + (parent_nodes as f64 * RINS_NODE_QUOT) as usize;
+    allowance.saturating_sub(spent).min(RINS_SUB_NODE_CAP)
+}
+
+/// Batches between RINS attempts. Firing every batch would make it a per-node tax
+/// (the #1060 dive lesson).
+const RINS_BATCH_STRIDE: usize = 16;
+
+/// The pristine base problem, captured once before the root cut loop when RINS is
+/// armed, and used for every sub-solve and every re-validation.
+struct RinsBase {
+    csc: SparseCols,
+    m: usize,
+    n: usize,
+    c: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    b: Vec<f64>,
+}
+
+thread_local! {
+    /// Recursion depth of the MILP driver on this thread. A RINS sub-solve
+    /// re-enters [`solve_milp_node_hooked`], and two things must not happen when
+    /// it does: it must not run RINS itself (unbounded recursion), and it must
+    /// not call `profile::begin_solve`, which RESETS the counters -- a nested
+    /// reset would wipe the parent's measurement mid-run and read as "this path
+    /// never executed", the CLAUDE.md §6 failure mode.
+    static MILP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII depth counter for [`MILP_DEPTH`]. The driver has many early returns; a
+/// manual decrement would be missed by one of them and leave the thread
+/// permanently "nested", silently disabling RINS and profiling for the rest of
+/// the process.
+struct MilpDepthGuard;
+
+impl MilpDepthGuard {
+    /// Enter one level; yields the depth *before* entry (0 = outermost solve).
+    fn enter() -> (Self, u32) {
+        let d = MILP_DEPTH.with(|c| c.get());
+        MILP_DEPTH.with(|c| c.set(d + 1));
+        (MilpDepthGuard, d)
+    }
+}
+
+impl Drop for MilpDepthGuard {
+    fn drop(&mut self) {
+        MILP_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// Is the RINS improvement heuristic armed? Off by default: per CLAUDE.md §5 a
+/// mechanism that changes what the search finds ships behind a flag until a
+/// differential panel clears both the cert-clean and the net-positive bar.
+/// `DISCOPT_RINS=1` arms it; unset or `0` disables it.
+///
+/// An unrecognized value is a hard **refusal**. A panel that exports
+/// `DISCOPT_RINS=on` and is quietly handed the OFF arm produces a tidy A/B table
+/// in which both arms ran the same code -- precisely the "instrument measured
+/// nothing and was believed" failure the measurement discipline exists to
+/// prevent.
+fn rins_enabled() -> bool {
+    match std::env::var("DISCOPT_RINS") {
+        Err(_) => false,
+        Ok(v) => match parse_rins_flag(&v) {
+            Ok(on) => on,
+            Err(msg) => panic!("{msg}"),
+        },
+    }
+}
+
+/// Parse a `DISCOPT_RINS` value. Pure so the refusal can be asserted directly
+/// rather than by setting a process-wide variable (CLAUDE.md §6).
+fn parse_rins_flag(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_RINS={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// One RINS attempt against `node_x`, the relaxation solution of some node in the
+/// batch just processed. `inc_obj` is the incumbent's objective as the tree holds
+/// it (i.e. including `obj_const`). Returns a re-validated, strictly improving
+/// incumbent as `(full point over the base columns, objective including
+/// `obj_const`)`, or `None`.
+#[allow(clippy::too_many_arguments)]
+fn try_rins(
+    base: &RinsBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    inc_x: &[f64],
+    inc_obj: f64,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    node_budget: usize,
+    spent: &mut usize,
+) -> Option<(Vec<f64>, f64)> {
+    crate::profile::incr(crate::profile::Ctr::RinsConsidered);
+    if node_x.len() < ns || inc_x.len() < ns {
+        return None;
+    }
+
+    // The agreement test: exact equality within the feasibility tolerance.
+    let mut n_int = 0usize;
+    let mut fixed: Vec<usize> = Vec::new();
+    for j in 0..ns {
+        if is_int[j] {
+            n_int += 1;
+            if (node_x[j] - inc_x[j]).abs() <= 1e-6 {
+                fixed.push(j);
+            }
+        }
+    }
+    if n_int == 0 {
+        return None;
+    }
+    let rate = fixed.len() as f64 / n_int as f64;
+    // Too little fixed and the sub-MILP is the original problem again; everything
+    // fixed and there is nothing left to search, so it cannot beat the incumbent
+    // it was seeded from.
+    if rate < RINS_MIN_FIXING_RATE || fixed.len() == n_int {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::RinsGated);
+
+    let mut sub_l = base.l.clone();
+    let mut sub_u = base.u.clone();
+    for &j in &fixed {
+        // Pinning to a value the incumbent already takes can only narrow the box.
+        // A value outside it means the incumbent and the base bounds disagree,
+        // which is a bug rather than an opportunity -- decline instead of
+        // widening, since a widened bound is exactly what would make the
+        // restriction argument (and with it the soundness argument) false.
+        let v = inc_x[j].round();
+        if v < base.l[j] - 1e-9 || v > base.u[j] + 1e-9 {
+            return None;
+        }
+        sub_l[j] = v;
+        sub_u[j] = v;
+    }
+
+    let mut sub = opts.clone();
+    sub.max_nodes = node_budget;
+    // Seed the incumbent so the sub-solve carries a cutoff from its first node
+    // and can only return something strictly better. It is feasible for the
+    // sub-problem by construction: every pinned variable is pinned *to* its own
+    // value in that point.
+    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
+    // Never let a heuristic outlive the parent's deadline and convert itself into
+    // a timeout.
+    if let Some(d) = deadline {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let budget = (left.as_secs_f64() * 0.25).min(2.0);
+        sub.time_limit_s = Some(match sub.time_limit_s {
+            Some(t) => t.min(budget),
+            None => budget,
+        });
+    }
+
+    crate::profile::incr(crate::profile::Ctr::RinsRun);
+    let res = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::Rins);
+        solve_milp_node_hooked(
+            base.csc.clone(),
+            base.m,
+            base.n,
+            &base.c,
+            &sub_l,
+            &sub_u,
+            &base.b,
+            obj_const,
+            &sub,
+            None,
+            None,
+            None,
+        )
+    };
+    *spent += res.nodes;
+    crate::profile::incr_by(crate::profile::Ctr::RinsSubNodes, res.nodes as u64);
+
+    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
+        return None;
+    }
+    // Strict improvement only. Bound as a `bool` first so a NaN objective reads as
+    // "not an improvement" (the comparison is false) rather than sliding through a
+    // negated `>=`.
+    let strictly_better = res.obj < inc_obj - 1e-9 * (1.0 + inc_obj.abs());
+    if !strictly_better {
+        return None;
+    }
+    // Re-validate through the same gate a caller-supplied seed passes: it
+    // re-checks integrality and bounds, verifies every ORIGINAL row and
+    // reconstructs the slacks, so the point injected here is one this driver has
+    // proven feasible itself rather than one it was told about.
+    match validate_seed_incumbent(
+        &res.x, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
+    ) {
+        Some((sx, sobj)) => {
+            crate::profile::incr(crate::profile::Ctr::RinsImproved);
+            Some((sx, sobj + obj_const))
+        }
+        None => {
+            // The sub-solve returned a point its own driver called feasible and
+            // this driver cannot verify. Never inject it; a nonzero count here is
+            // a correctness bug to chase, not a tuning signal.
+            crate::profile::incr(crate::profile::Ctr::RinsRejected);
+            None
+        }
+    }
 }
 
 /// Map the search's terminal state to a [`MilpStatus`]. Pure so it can be
@@ -660,7 +942,14 @@ pub fn solve_milp_node_hooked(
     } else {
         node
     };
-    crate::profile::begin_solve();
+    // Depth is tracked for the whole call, including every early return, by the
+    // RAII guard. Only the OUTERMOST solve may reset the profile counters: a RINS
+    // sub-solve re-enters here, and a nested `begin_solve` would wipe the parent's
+    // measurement mid-run (CLAUDE.md §6).
+    let (_milp_depth_guard, milp_depth) = MilpDepthGuard::enter();
+    if milp_depth == 0 {
+        crate::profile::begin_solve();
+    }
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -873,6 +1162,29 @@ pub fn solve_milp_node_hooked(
     // Original constraint rows (before any cuts) are the knapsack candidates for
     // cover separation; later rows are themselves cuts.
     let n_orig_rows = m_w;
+
+    // --- A12 RINS: snapshot the base problem before the root cut loop ---
+    // Every sub-solve and every re-validation runs against THIS, not against the
+    // cut-augmented working matrix, so a wrong cut can never launder itself into
+    // an incumbent. The clone is paid for only when the flag is armed. RINS is
+    // declined outright under a lazy separator (a point must be screened there
+    // before it may become the incumbent) and inside a sub-solve (no recursion).
+    // Sub-solve nodes RINS has spent so far, against the quota above.
+    let mut rins_spent: usize = 0;
+    let rins_base: Option<RinsBase> =
+        if rins_enabled() && milp_depth == 0 && lazy.is_none() && !opts.integer_cols.is_empty() {
+            Some(RinsBase {
+                csc: csc_w.clone(),
+                m: m_w,
+                n: n_w,
+                c: c_w.clone(),
+                l: l_w.clone(),
+                u: u_w.clone(),
+                b: b_w.clone(),
+            })
+        } else {
+            None
+        };
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
@@ -1792,6 +2104,49 @@ pub fn solve_milp_node_hooked(
         }
         tm.import_results(&results);
         tm.process_evaluated();
+
+        // --- A12 RINS: one improvement attempt at the batch boundary ---
+        // Deliberately here, in the SEQUENTIAL reduce: every node's relaxation
+        // vector has already arrived, `tm` holds the incumbent this batch
+        // produced, and there is no nested rayon scope, so the attempt is
+        // deterministic and costs no parallelism. The candidate is the most
+        // promising fractional node of the batch -- the one whose subtree the
+        // search is about to spend its time in.
+        if let Some(base) = rins_base.as_ref() {
+            let rins_budget = rins_node_budget(tm.stats().total_nodes, rins_spent);
+            if this_batch % RINS_BATCH_STRIDE == 0 && rins_budget > 0 {
+                let inc = tm.incumbent().and_then(|(x, v)| {
+                    // The tree seeds itself with a sentinel-valued placeholder;
+                    // that is "no incumbent", and RINS has nothing to improve.
+                    (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))
+                });
+                let cand = results
+                    .iter()
+                    .filter(|r| {
+                        !r.is_feasible
+                            && r.lower_bound < INFEAS_SENTINEL - 1.0
+                            && r.solution.len() >= ns
+                    })
+                    .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
+                if let (Some((inc_x, inc_obj)), Some(r)) = (inc, cand) {
+                    if let Some((sx, sobj)) = try_rins(
+                        base,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &r.solution,
+                        &inc_x,
+                        inc_obj,
+                        opts,
+                        deadline,
+                        rins_budget,
+                        &mut rins_spent,
+                    ) {
+                        tm.inject_incumbent(sx, sobj);
+                    }
+                }
+            }
+        }
 
         // Interactive debugger: post prune/branch/fathom, plus the new-incumbent
         // event on a strict improvement (from any source this batch).
@@ -4549,6 +4904,46 @@ mod tests {
         for bad in ["-1", "eight", "1.5", "8x"] {
             assert!(parse_dive_stride(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn rins_flag_refuses_garbage_instead_of_picking_an_arm() {
+        // Same lesson as `parse_dive_stride`: a panel that exports an
+        // unrecognized value and is quietly handed the OFF arm produces a tidy
+        // A/B table in which both arms ran the same code.
+        for off in ["", "  ", "0", "false", "NO"] {
+            assert!(!parse_rins_flag(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " YES "] {
+            assert!(parse_rins_flag(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["on", "2", "enabled", "1.0"] {
+            assert!(parse_rins_flag(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn rins_node_budget_is_bounded_by_the_parent_search() {
+        // The per-call cap alone leaves the TOTAL unbounded, because attempts
+        // scale with the batch count: on a million-node solve a flat 500-node cap
+        // per attempt is thousands of sub-solves. The quota is what makes the
+        // heuristic's cost a fraction of the search it is helping.
+        assert_eq!(
+            rins_node_budget(0, 0),
+            RINS_NODE_OFFSET.min(RINS_SUB_NODE_CAP)
+        );
+        // Spending eats the allowance...
+        assert_eq!(rins_node_budget(0, RINS_NODE_OFFSET), 0);
+        assert_eq!(rins_node_budget(0, RINS_NODE_OFFSET + 10_000), 0);
+        // ...and a bigger tree earns more of it, still capped per call.
+        assert_eq!(
+            rins_node_budget(1_000_000, RINS_NODE_OFFSET),
+            RINS_SUB_NODE_CAP
+        );
+        let spent = RINS_NODE_OFFSET + (1_000_000.0 * RINS_NODE_QUOT) as usize;
+        assert_eq!(rins_node_budget(1_000_000, spent), 0);
+        // Never more than one call's worth at a time, however large the tree.
+        assert!(rins_node_budget(usize::MAX / 2, 0) <= RINS_SUB_NODE_CAP);
     }
 
     fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
