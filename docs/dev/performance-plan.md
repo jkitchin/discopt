@@ -5482,6 +5482,7 @@ the deferred lowering is expected to beat the exact GDP/SOS1 path" and reads tha
 performance question. E1/E2 answer it negatively and that answer is binding: no
 default may be changed on this mechanism, and any future claim that it is faster owes
 a measurement that contradicts these two tables first.
+
 ## 27. #1180 per-node layer split, post-tape: the marshaling era is over, and the remaining Python is worth 1.20× (2026-09-06)
 
 **Claim under test.** `baron-gap-plan.md` §1.3's attribution of `nvs05` —
