@@ -550,21 +550,21 @@ const RINS_MIN_FIXING_RATE: f64 = 0.30;
 
 /// Node budget for one sub-MILP. An improvement heuristic that can outspend the
 /// search it exists to help is a regression however good its solutions are.
-const RINS_SUB_NODE_CAP: usize = 500;
+const SUB_MIP_NODE_CAP: usize = 500;
 
 /// Share of the parent search RINS may spend across ALL its sub-solves, plus a
 /// flat allowance so it can work at all before the tree is large. The per-call
 /// cap above bounds one attempt; this bounds the whole solve, which is what
 /// actually matters -- attempts scale with the batch count, so a per-call cap
 /// alone leaves the total unbounded. The quota shape is SCIP's (`nodesquot`).
-const RINS_NODE_QUOT: f64 = 0.05;
-const RINS_NODE_OFFSET: usize = 500;
+const SUB_MIP_NODE_QUOT: f64 = 0.05;
+const SUB_MIP_NODE_OFFSET: usize = 500;
 
 /// Total sub-solve nodes RINS is still allowed, given the parent's node count and
 /// what it has already spent. Zero means the budget is exhausted for this solve.
-fn rins_node_budget(parent_nodes: usize, spent: usize) -> usize {
-    let allowance = RINS_NODE_OFFSET + (parent_nodes as f64 * RINS_NODE_QUOT) as usize;
-    allowance.saturating_sub(spent).min(RINS_SUB_NODE_CAP)
+fn sub_mip_node_budget(parent_nodes: usize, spent: usize) -> usize {
+    let allowance = SUB_MIP_NODE_OFFSET + (parent_nodes as f64 * SUB_MIP_NODE_QUOT) as usize;
+    allowance.saturating_sub(spent).min(SUB_MIP_NODE_CAP)
 }
 
 /// Batches between RINS attempts. Firing every batch would make it a per-node tax
@@ -577,7 +577,7 @@ const RINS_BATCH_STRIDE: usize = 16;
 /// panel lost the improvements on all three `mik-250-*` instances that way,
 /// keeping only 4 of 7. At 2 the heuristic keeps running at a quarter rate on
 /// instances where it is not currently paying, which is the intent.
-const RINS_BACKOFF_MAX_DOUBLINGS: u32 = 2;
+const SUB_MIP_BACKOFF_MAX_DOUBLINGS: u32 = 2;
 
 /// The pristine base problem, captured once before the root cut loop when RINS is
 /// armed, and used for every sub-solve and every re-validation.
@@ -591,11 +591,11 @@ const RINS_BACKOFF_MAX_DOUBLINGS: u32 = 2;
 ///
 /// Pure so the schedule can be asserted directly instead of inferred from a
 /// process-wide counter (CLAUDE.md §6).
-fn rins_backoff_stride(fail_streak: u32) -> usize {
-    RINS_BATCH_STRIDE << fail_streak.min(RINS_BACKOFF_MAX_DOUBLINGS)
+fn sub_mip_backoff_stride(base_stride: usize, fail_streak: u32) -> usize {
+    base_stride << fail_streak.min(SUB_MIP_BACKOFF_MAX_DOUBLINGS)
 }
 
-struct RinsBase {
+struct SubMipBase {
     csc: SparseCols,
     m: usize,
     n: usize,
@@ -676,7 +676,7 @@ fn parse_rins_flag(raw: &str) -> Result<bool, String> {
 /// `obj_const`)`, or `None`.
 #[allow(clippy::too_many_arguments)]
 fn try_rins(
-    base: &RinsBase,
+    base: &SubMipBase,
     obj_const: f64,
     ns: usize,
     is_int: &[bool],
@@ -732,13 +732,108 @@ fn try_rins(
         sub_u[j] = v;
     }
 
+    let seed = inc_x[..ns].to_vec();
+    run_sub_mip(
+        SubMipKind::Rins,
+        base,
+        obj_const,
+        ns,
+        is_int,
+        &sub_l,
+        &sub_u,
+        opts,
+        deadline,
+        node_budget,
+        spent,
+        // Feasible for the sub-problem by construction: every pinned variable is
+        // pinned *to* its own value in this point.
+        Some(&seed),
+        Some(inc_obj),
+    )
+}
+
+/// Which neighborhood a [`run_sub_mip`] call is serving. The two differ only in
+/// how the sub-box is built and whether a seed exists; everything after that --
+/// budget clamping, the recursion guard, the strict-improvement test and the
+/// re-validation -- is identical, and sharing it is what keeps the soundness
+/// argument in one place instead of two that can drift apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubMipKind {
+    Rins,
+    Rens,
+}
+
+impl SubMipKind {
+    fn phase(self) -> crate::profile::Phase {
+        match self {
+            SubMipKind::Rins => crate::profile::Phase::Rins,
+            SubMipKind::Rens => crate::profile::Phase::Rens,
+        }
+    }
+    fn ctr_run(self) -> crate::profile::Ctr {
+        match self {
+            SubMipKind::Rins => crate::profile::Ctr::RinsRun,
+            SubMipKind::Rens => crate::profile::Ctr::RensRun,
+        }
+    }
+    fn ctr_sub_nodes(self) -> crate::profile::Ctr {
+        match self {
+            SubMipKind::Rins => crate::profile::Ctr::RinsSubNodes,
+            SubMipKind::Rens => crate::profile::Ctr::RensSubNodes,
+        }
+    }
+    fn ctr_improved(self) -> crate::profile::Ctr {
+        match self {
+            SubMipKind::Rins => crate::profile::Ctr::RinsImproved,
+            SubMipKind::Rens => crate::profile::Ctr::RensImproved,
+        }
+    }
+    fn ctr_rejected(self) -> crate::profile::Ctr {
+        match self {
+            SubMipKind::Rins => crate::profile::Ctr::RinsRejected,
+            SubMipKind::Rens => crate::profile::Ctr::RensRejected,
+        }
+    }
+}
+
+/// Solve one neighborhood sub-MILP on `[sub_l, sub_u]` and return a re-validated
+/// improving point, or `None`.
+///
+/// `sub_l`/`sub_u` MUST be a contraction of `base.l`/`base.u`. That is the entire
+/// soundness argument: a restriction of the feasible set can only contain points
+/// that are feasible for the original, so nothing this returns can enlarge the
+/// solution set, and a heuristic that only ever *proposes* incumbents cannot move
+/// the dual bound or forge a certificate. Both callers construct their box by
+/// narrowing and decline outright if a value falls outside the base box, rather
+/// than widening to accommodate it.
+///
+/// `cutoff` is the incumbent objective to beat (including `obj_const`), or `None`
+/// when the tree holds no incumbent -- in which case ANY feasible point is an
+/// improvement over having none.
+#[allow(clippy::too_many_arguments)]
+fn run_sub_mip(
+    kind: SubMipKind,
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    sub_l: &[f64],
+    sub_u: &[f64],
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    node_budget: usize,
+    spent: &mut usize,
+    seed: Option<&[f64]>,
+    cutoff: Option<f64>,
+) -> Option<(Vec<f64>, f64)> {
     let mut sub = opts.clone();
     sub.max_nodes = node_budget;
-    // Seed the incumbent so the sub-solve carries a cutoff from its first node
-    // and can only return something strictly better. It is feasible for the
-    // sub-problem by construction: every pinned variable is pinned *to* its own
-    // value in that point.
-    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
+    // Seed only when the caller has established the point lies in the sub-box.
+    // A seed outside it is not "a hint the sub-solve can ignore" -- it is an
+    // incumbent the sub-driver would prune against, and pruning against an
+    // infeasible point is how a heuristic removes the very solution it was sent
+    // to find.
+    sub.initial_incumbent = seed.map(|x| x[..ns].to_vec());
     // Never let a heuristic outlive the parent's deadline and convert itself into
     // a timeout.
     if let Some(d) = deadline {
@@ -753,16 +848,16 @@ fn try_rins(
         });
     }
 
-    crate::profile::incr(crate::profile::Ctr::RinsRun);
+    crate::profile::incr(kind.ctr_run());
     let res = {
-        let _t = crate::profile::Timer::new(crate::profile::Phase::Rins);
+        let _t = crate::profile::Timer::new(kind.phase());
         solve_milp_node_hooked(
             base.csc.clone(),
             base.m,
             base.n,
             &base.c,
-            &sub_l,
-            &sub_u,
+            sub_l,
+            sub_u,
             &base.b,
             obj_const,
             &sub,
@@ -772,16 +867,20 @@ fn try_rins(
         )
     };
     *spent += res.nodes;
-    crate::profile::incr_by(crate::profile::Ctr::RinsSubNodes, res.nodes as u64);
+    crate::profile::incr_by(kind.ctr_sub_nodes(), res.nodes as u64);
 
     if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
         return None;
     }
     // Strict improvement only. Bound as a `bool` first so a NaN objective reads as
     // "not an improvement" (the comparison is false) rather than sliding through a
-    // negated `>=`.
-    let strictly_better = res.obj < inc_obj - 1e-9 * (1.0 + inc_obj.abs());
-    if !strictly_better {
+    // negated `>=`. With no incumbent to beat, any feasible point qualifies -- but
+    // it still has to survive the re-validation below.
+    let good = match cutoff {
+        Some(inc_obj) => res.obj < inc_obj - 1e-9 * (1.0 + inc_obj.abs()),
+        None => res.obj.is_finite(),
+    };
+    if !good {
         return None;
     }
     // Re-validate through the same gate a caller-supplied seed passes: it
@@ -792,17 +891,221 @@ fn try_rins(
         &res.x, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
     ) {
         Some((sx, sobj)) => {
-            crate::profile::incr(crate::profile::Ctr::RinsImproved);
+            crate::profile::incr(kind.ctr_improved());
             Some((sx, sobj + obj_const))
         }
         None => {
             // The sub-solve returned a point its own driver called feasible and
             // this driver cannot verify. Never inject it; a nonzero count here is
             // a correctness bug to chase, not a tuning signal.
-            crate::profile::incr(crate::profile::Ctr::RinsRejected);
+            crate::profile::incr(kind.ctr_rejected());
             None
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// A14 -- RENS (Relaxation Enforced Neighborhood Search), after Berthold, "RENS --
+// the optimal rounding", Math. Prog. Comput. 6(1):33-54, 2014. Independently
+// implemented against the published description of the method; no solver source
+// was copied.
+//
+// WHY IT EXISTS, given that A12 already built RINS. Measured on main+A13 over the
+// 38-instance panel: of the 14 unsolved instances that held an incumbent at 20 s,
+// *none* improved it at 60 s -- 3x the wall and 2-5x the nodes -- while the dual
+// bound improved on 10 of 15. The median primal share of the still-open gap was
+// 91.1 % at 20 s and 91.8 % at 60 s. The primal side is not slow here, it is
+// FROZEN: off the root the only heuristic is plain nearest-rounding, and the one
+// heuristic that repairs continuous variables is root-only by default and
+// additionally gated `!has_incumbent`, so holding an incumbent switches discopt's
+// primal machinery off rather than handing the job to the search.
+//
+// RINS cannot be the answer to that, and its neutral A12 panel is the evidence
+// rather than a puzzle: RINS fixes the integer columns on which the incumbent and
+// the relaxation AGREE, so it is anchored to the incumbent it starts from. On this
+// panel the incumbents are 22-140 % off the optimum, and that anchor is the defect.
+// RENS never looks at the incumbent: it fixes every integer column already integral
+// in the RELAXATION and restricts each fractional one to {floor, ceil}. It
+// therefore also runs when there is no incumbent at all, which RINS structurally
+// cannot.
+//
+// SOUNDNESS. The RENS box is a contraction of the base box, so the sub-problem is a
+// restriction and every point it returns is feasible for the original; the result
+// is re-validated by `validate_seed_incumbent` against the BASE rows and bounds
+// before injection, and it is injected only on strict improvement. Like RINS it
+// declines under a lazy separator and inside a sub-solve.
+//
+// ENTRY EXPERIMENT (CLAUDE.md §4), run before this code was written, bars
+// pre-registered: hit rate >= 5/15 and median primal-gap reduction >= 25 %, with
+// <= 3/15 killing it outright. Result over the 15 unsolved instances, building the
+// box from the ROOT LP only -- the weakest possible form: 7/15 improved, median
+// primal-gap reduction 80.3 %, zero certificate violations, and every feasible
+// sub-MIP solved to optimality inside 20 s.
+// ---------------------------------------------------------------------------
+
+/// Minimum share of integer columns that must already be integral in the
+/// relaxation before the RENS box is worth solving.
+///
+/// Held at RINS's 0.30 rather than lowered, because the `{floor, ceil}` restriction
+/// on the *unfixed* columns is worth much less than it looks: for a BINARY column
+/// with a fractional value, `floor = 0` and `ceil = 1`, so the restriction is
+/// vacuous and the entire neighborhood comes from the fixed columns. On a pure
+/// binary model the fixing rate is the whole story. Measured over the 15 panel
+/// instances the median rate is 70 % and the minimum 43 %, so 0.30 admits every
+/// case the entry experiment scored.
+const RENS_MIN_FIXING_RATE: f64 = 0.30;
+
+/// Batches between RENS attempts. Deliberately the same base stride as RINS: both
+/// are batch-cadenced sub-solves drawing on the same node quota, and giving them
+/// different cadences would make the two flags' panels incomparable.
+const RENS_BATCH_STRIDE: usize = 16;
+
+/// `DISCOPT_RENS=1` arms RENS; unset or `0` disables it. Default OFF until a
+/// differential panel clears both CLAUDE.md §5 bars -- cert-clean AND net-positive.
+/// The `DISCOPT_CUT_INHERIT` lesson applies unchanged: an entry experiment shows a
+/// mechanism *can* pay, never that it pays broadly.
+///
+/// An unrecognized value is a hard **refusal**, for the reason the A13 flag records:
+/// a panel that exports `DISCOPT_RENS=on` and is quietly handed the OFF arm
+/// measures nothing and reads as a result.
+fn rens_enabled() -> bool {
+    match std::env::var("DISCOPT_RENS") {
+        Err(_) => false,
+        Ok(v) => match parse_rens_flag(&v) {
+            Ok(on) => on,
+            Err(msg) => panic!("{msg}"),
+        },
+    }
+}
+
+/// Parse a `DISCOPT_RENS` value. Pure so the refusal can be asserted directly
+/// rather than by setting a process-wide variable (CLAUDE.md §6).
+fn parse_rens_flag(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_RENS={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// Build the RENS box from a relaxation solution: pin the integer columns that are
+/// already integral, clamp the rest to `{floor, ceil}`, leave continuous columns
+/// alone. Returns the box and the fixing rate, or `None` when the neighborhood is
+/// not worth solving.
+///
+/// Pure, and separate from the solve, so the box can be asserted directly instead
+/// of inferred from a sub-solve's node count (CLAUDE.md §6).
+fn rens_box(
+    base_l: &[f64],
+    base_u: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>, f64)> {
+    if node_x.len() < ns || is_int.len() < ns || base_l.len() < ns || base_u.len() < ns {
+        return None;
+    }
+    let mut sub_l = base_l.to_vec();
+    let mut sub_u = base_u.to_vec();
+    let (mut n_int, mut n_fixed) = (0usize, 0usize);
+    for j in 0..ns {
+        if !is_int[j] {
+            continue;
+        }
+        n_int += 1;
+        let v = node_x[j];
+        if !v.is_finite() {
+            return None;
+        }
+        let r = v.round();
+        if (v - r).abs() <= 1e-6 {
+            // A pinned value outside the base box means the relaxation and the
+            // bounds disagree -- a bug, not an opportunity. Decline rather than
+            // widen: a widened bound is exactly what would make the restriction
+            // argument, and with it the soundness argument, false.
+            if r < base_l[j] - 1e-9 || r > base_u[j] + 1e-9 {
+                return None;
+            }
+            sub_l[j] = r;
+            sub_u[j] = r;
+            n_fixed += 1;
+        } else {
+            // Narrow only. `max`/`min` against the base bounds keep this a
+            // contraction even if the relaxation sits a hair outside them.
+            let lo = base_l[j].max(v.floor());
+            let hi = base_u[j].min(v.ceil());
+            if lo > hi {
+                return None;
+            }
+            sub_l[j] = lo;
+            sub_u[j] = hi;
+        }
+    }
+    if n_int == 0 {
+        return None;
+    }
+    let rate = n_fixed as f64 / n_int as f64;
+    // Everything already integral means the relaxation solution IS integer
+    // feasible; the search handles that node itself and the sub-solve would only
+    // re-derive it.
+    if rate < RENS_MIN_FIXING_RATE || n_fixed == n_int {
+        return None;
+    }
+    Some((sub_l, sub_u, rate))
+}
+
+/// One RENS attempt against `node_x`, the relaxation solution of some node in the
+/// batch just processed. `inc` is the incumbent as the tree holds it (point and
+/// objective including `obj_const`) when one exists. Returns a re-validated,
+/// strictly improving incumbent, or `None`.
+#[allow(clippy::too_many_arguments)]
+fn try_rens(
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    inc: Option<(&[f64], f64)>,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    node_budget: usize,
+    spent: &mut usize,
+) -> Option<(Vec<f64>, f64)> {
+    crate::profile::incr(crate::profile::Ctr::RensConsidered);
+    let (sub_l, sub_u, _rate) = rens_box(&base.l, &base.u, ns, is_int, node_x)?;
+    crate::profile::incr(crate::profile::Ctr::RensGated);
+
+    // The incumbent is generally NOT in the RENS box -- its integer values come
+    // from a different assignment than the relaxation's -- so it is seeded only
+    // when it demonstrably lies inside. Seeding a point outside the box would have
+    // the sub-solve prune against an infeasible incumbent, which is how a heuristic
+    // deletes the solution it was sent to find. When it does lie inside, seeding is
+    // free cutoff strength from the first node.
+    let seed = inc.and_then(|(x, _)| {
+        (x.len() >= ns && (0..ns).all(|j| x[j] >= sub_l[j] - 1e-9 && x[j] <= sub_u[j] + 1e-9))
+            .then(|| x[..ns].to_vec())
+    });
+    if seed.is_some() {
+        crate::profile::incr(crate::profile::Ctr::RensSeeded);
+    }
+    run_sub_mip(
+        SubMipKind::Rens,
+        base,
+        obj_const,
+        ns,
+        is_int,
+        &sub_l,
+        &sub_u,
+        opts,
+        deadline,
+        node_budget,
+        spent,
+        seed.as_deref(),
+        inc.map(|(_, v)| v),
+    )
 }
 
 /// Map the search's terminal state to a [`MilpStatus`]. Pure so it can be
@@ -1225,27 +1528,42 @@ pub fn solve_milp_node_hooked(
     // Sub-solve nodes RINS has spent so far, against the quota above.
     let mut rins_spent: usize = 0;
     // Consecutive RINS attempts that did not improve the incumbent, and batches
-    // elapsed since the last attempt. Together they drive `rins_backoff_stride`.
+    // elapsed since the last attempt. Together they drive `sub_mip_backoff_stride`.
     let mut rins_fail_streak: u32 = 0;
     // Starts already due, so the first batch that has an incumbent gets an
     // attempt. That is when the incumbent is at its worst and the neighborhood
     // is most likely to hold something better; making the heuristic sit out the
     // opening stride would give up the case it is best at.
     let mut rins_since: usize = RINS_BATCH_STRIDE;
-    let rins_base: Option<RinsBase> =
-        if rins_enabled() && milp_depth == 0 && lazy.is_none() && !opts.integer_cols.is_empty() {
-            Some(RinsBase {
-                csc: csc_w.clone(),
-                m: m_w,
-                n: n_w,
-                c: c_w.clone(),
-                l: l_w.clone(),
-                u: u_w.clone(),
-                b: b_w.clone(),
-            })
-        } else {
-            None
-        };
+    // RENS's own quota, streak and cadence. Kept separate from RINS's rather than
+    // shared: with one budget the heuristic that fires first would starve the
+    // other, and the A/B panel that graduates either flag could not attribute a
+    // node to the mechanism that spent it.
+    let mut rens_spent: usize = 0;
+    let mut rens_fail_streak: u32 = 0;
+    // Starts already due. Unlike RINS, RENS needs no incumbent, so the first batch
+    // is exactly when it is most valuable -- on an instance that never finds a
+    // feasible point at all, this is the only thing that will.
+    let mut rens_since: usize = RENS_BATCH_STRIDE;
+    let rins_on = rins_enabled();
+    let rens_on = rens_enabled();
+    let sub_base: Option<SubMipBase> = if (rins_on || rens_on)
+        && milp_depth == 0
+        && lazy.is_none()
+        && !opts.integer_cols.is_empty()
+    {
+        Some(SubMipBase {
+            csc: csc_w.clone(),
+            m: m_w,
+            n: n_w,
+            c: c_w.clone(),
+            l: l_w.clone(),
+            u: u_w.clone(),
+            b: b_w.clone(),
+        })
+    } else {
+        None
+    };
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
@@ -2173,10 +2491,10 @@ pub fn solve_milp_node_hooked(
         // deterministic and costs no parallelism. The candidate is the most
         // promising fractional node of the batch -- the one whose subtree the
         // search is about to spend its time in.
-        if let Some(base) = rins_base.as_ref() {
-            let rins_budget = rins_node_budget(tm.stats().total_nodes, rins_spent);
+        if let (true, Some(base)) = (rins_on, sub_base.as_ref()) {
+            let rins_budget = sub_mip_node_budget(tm.stats().total_nodes, rins_spent);
             rins_since += 1;
-            let stride = rins_backoff_stride(rins_fail_streak);
+            let stride = sub_mip_backoff_stride(RINS_BATCH_STRIDE, rins_fail_streak);
             let due = rins_since >= stride;
             if !due && rins_fail_streak > 0 {
                 crate::profile::incr(crate::profile::Ctr::RinsBackoffSkips);
@@ -2218,6 +2536,59 @@ pub fn solve_milp_node_hooked(
                         rins_fail_streak = 0;
                     } else {
                         rins_fail_streak = rins_fail_streak.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        // A14 RENS, on the same batch cadence and node-quota shape as RINS. The
+        // one structural difference is the one that matters: it reads only the
+        // relaxation, so it runs whether or not the tree holds an incumbent --
+        // and an instance with no feasible point at all (`neos-2624317-amur`,
+        // `enlight_hard`) is precisely where RINS cannot be asked the question.
+        if let (true, Some(base)) = (rens_on, sub_base.as_ref()) {
+            let rens_budget = sub_mip_node_budget(tm.stats().total_nodes, rens_spent);
+            rens_since += 1;
+            let stride = sub_mip_backoff_stride(RENS_BATCH_STRIDE, rens_fail_streak);
+            let due = rens_since >= stride;
+            if !due && rens_fail_streak > 0 {
+                crate::profile::incr(crate::profile::Ctr::RensBackoffSkips);
+            }
+            if due && rens_budget > 0 {
+                let cand = results
+                    .iter()
+                    .filter(|r| {
+                        !r.is_feasible
+                            && r.lower_bound < INFEAS_SENTINEL - 1.0
+                            && r.solution.len() >= ns
+                    })
+                    .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
+                if let Some(r) = cand {
+                    // Cloned out of the tree so the borrow ends before the
+                    // injection below needs `tm` mutably. The sentinel-valued
+                    // placeholder the tree seeds itself with is "no incumbent",
+                    // which for RENS is a supported case rather than a bail-out.
+                    let inc = tm.incumbent().and_then(|(x, v)| {
+                        (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))
+                    });
+                    rens_since = 0;
+                    let hit = try_rens(
+                        base,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &r.solution,
+                        inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
+                        opts,
+                        deadline,
+                        rens_budget,
+                        &mut rens_spent,
+                    );
+                    if let Some((sx, sobj)) = hit {
+                        tm.inject_incumbent(sx, sobj);
+                        rens_fail_streak = 0;
+                    } else {
+                        rens_fail_streak = rens_fail_streak.saturating_add(1);
                     }
                 }
             }
@@ -5075,42 +5446,154 @@ mod tests {
     }
 
     #[test]
-    fn rins_node_budget_is_bounded_by_the_parent_search() {
+    fn rens_flag_refuses_garbage_instead_of_picking_an_arm() {
+        for off in ["", "  ", "0", "false", "NO"] {
+            assert!(!parse_rens_flag(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " YES "] {
+            assert!(parse_rens_flag(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["on", "2", "enabled", "1.0"] {
+            assert!(parse_rens_flag(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// The property the whole soundness argument rests on: the RENS box is a
+    /// **contraction** of the base box on every column, so the sub-problem is a
+    /// restriction of the parent and any point it returns is feasible for the
+    /// parent. If this ever fails, RENS is not a heuristic, it is a way to invent
+    /// incumbents outside the model.
+    #[test]
+    fn rens_box_is_always_a_contraction_of_the_base_box() {
+        let ns = 6;
+        let is_int = [true, true, true, true, false, false];
+        let base_l = [0.0, 0.0, -3.0, 0.0, -10.0, 0.0];
+        let base_u = [1.0, 1.0, 7.0, 10.0, 10.0, 4.0];
+        // Two integral (cols 0, 3), two fractional (cols 1, 2) -> rate 2/4 = 0.5.
+        let node_x = [0.0, 0.4, 2.7, 6.0, -1.25, 3.5];
+
+        let (sub_l, sub_u, rate) =
+            rens_box(&base_l, &base_u, ns, &is_int, &node_x).expect("box must be built");
+        assert!((rate - 0.5).abs() < 1e-12, "fixing rate {rate}");
+
+        let mut checked = 0usize;
+        for j in 0..ns {
+            assert!(
+                sub_l[j] >= base_l[j] - 1e-12 && sub_u[j] <= base_u[j] + 1e-12,
+                "column {j} widened: [{}, {}] is not inside [{}, {}]",
+                sub_l[j],
+                sub_u[j],
+                base_l[j],
+                base_u[j]
+            );
+            assert!(sub_l[j] <= sub_u[j], "column {j} inverted");
+            checked += 1;
+        }
+        // CLAUDE.md §6: prove the loop ran rather than trusting "0 violations".
+        assert_eq!(checked, ns, "contraction check never traversed the columns");
+
+        // Continuous columns are untouched -- RENS restricts the integer lattice,
+        // and narrowing a continuous column would be a different (unjustified)
+        // heuristic.
+        assert_eq!((sub_l[4], sub_u[4]), (base_l[4], base_u[4]));
+        assert_eq!((sub_l[5], sub_u[5]), (base_l[5], base_u[5]));
+        // Integral columns pinned; fractional ones clamped to {floor, ceil}.
+        assert_eq!((sub_l[0], sub_u[0]), (0.0, 0.0));
+        assert_eq!((sub_l[3], sub_u[3]), (6.0, 6.0));
+        assert_eq!((sub_l[1], sub_u[1]), (0.0, 1.0));
+        assert_eq!((sub_l[2], sub_u[2]), (2.0, 3.0));
+    }
+
+    #[test]
+    fn rens_box_declines_the_cases_that_are_not_worth_a_sub_solve() {
+        let ns = 4;
+        let is_int = [true, true, true, true];
+        let base_l = [0.0; 4];
+        let base_u = [10.0; 4];
+
+        // All integral: the node LP is already integer feasible and the ordinary
+        // search takes it. A sub-solve here would only re-derive the same point.
+        assert!(
+            rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.0, 3.0, 4.0]).is_none(),
+            "an integral relaxation must not open a sub-solve"
+        );
+
+        // Below the fixing-rate floor: 1 of 4 pinned = 0.25 < 0.30. The sub-MIP
+        // would be nearly as large as the parent, which is the failure mode the
+        // floor exists to prevent.
+        assert!(
+            rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.5, 3.5, 4.5]).is_none(),
+            "a 25% fixing rate must be declined"
+        );
+        // Just above it: 2 of 4 = 0.50.
+        assert!(rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.0, 3.5, 4.5]).is_some());
+
+        // No integer columns at all -- nothing to fix, and a pure-LP sub-solve is
+        // not a primal heuristic.
+        assert!(rens_box(&base_l, &base_u, ns, &[false; 4], &[1.0, 2.5, 3.5, 4.5]).is_none());
+
+        // A non-finite relaxation value: decline rather than round a nan into a
+        // bound (CLAUDE.md §3 -- refuse loudly rather than approximate silently).
+        assert!(rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.0, f64::NAN, 4.5]).is_none());
+
+        // A pinned value outside the base box means the relaxation and the bounds
+        // disagree. Widening would break the contraction property above, so the
+        // box must be declined instead.
+        assert!(
+            rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.0, 3.0, 11.0]).is_none(),
+            "a pinned value outside the base box must be declined, not widened"
+        );
+
+        // Short slices must not panic or read past the end.
+        assert!(rens_box(&base_l, &base_u, ns, &is_int, &[1.0, 2.0]).is_none());
+    }
+
+    #[test]
+    fn sub_mip_node_budget_is_bounded_by_the_parent_search() {
         // The per-call cap alone leaves the TOTAL unbounded, because attempts
         // scale with the batch count: on a million-node solve a flat 500-node cap
         // per attempt is thousands of sub-solves. The quota is what makes the
         // heuristic's cost a fraction of the search it is helping.
         assert_eq!(
-            rins_node_budget(0, 0),
-            RINS_NODE_OFFSET.min(RINS_SUB_NODE_CAP)
+            sub_mip_node_budget(0, 0),
+            SUB_MIP_NODE_OFFSET.min(SUB_MIP_NODE_CAP)
         );
         // Spending eats the allowance...
-        assert_eq!(rins_node_budget(0, RINS_NODE_OFFSET), 0);
-        assert_eq!(rins_node_budget(0, RINS_NODE_OFFSET + 10_000), 0);
+        assert_eq!(sub_mip_node_budget(0, SUB_MIP_NODE_OFFSET), 0);
+        assert_eq!(sub_mip_node_budget(0, SUB_MIP_NODE_OFFSET + 10_000), 0);
         // ...and a bigger tree earns more of it, still capped per call.
         assert_eq!(
-            rins_node_budget(1_000_000, RINS_NODE_OFFSET),
-            RINS_SUB_NODE_CAP
+            sub_mip_node_budget(1_000_000, SUB_MIP_NODE_OFFSET),
+            SUB_MIP_NODE_CAP
         );
-        let spent = RINS_NODE_OFFSET + (1_000_000.0 * RINS_NODE_QUOT) as usize;
-        assert_eq!(rins_node_budget(1_000_000, spent), 0);
+        let spent = SUB_MIP_NODE_OFFSET + (1_000_000.0 * SUB_MIP_NODE_QUOT) as usize;
+        assert_eq!(sub_mip_node_budget(1_000_000, spent), 0);
         // Never more than one call's worth at a time, however large the tree.
-        assert!(rins_node_budget(usize::MAX / 2, 0) <= RINS_SUB_NODE_CAP);
+        assert!(sub_mip_node_budget(usize::MAX / 2, 0) <= SUB_MIP_NODE_CAP);
     }
 
     #[test]
     fn rins_backoff_widens_the_stride_and_is_capped() {
         // No failures yet: fire at the base stride.
-        assert_eq!(rins_backoff_stride(0), RINS_BATCH_STRIDE);
+        assert_eq!(
+            sub_mip_backoff_stride(RINS_BATCH_STRIDE, 0),
+            RINS_BATCH_STRIDE
+        );
         // Each consecutive failure halves the rate.
-        assert_eq!(rins_backoff_stride(1), 2 * RINS_BATCH_STRIDE);
-        assert_eq!(rins_backoff_stride(2), 4 * RINS_BATCH_STRIDE);
+        assert_eq!(
+            sub_mip_backoff_stride(RINS_BATCH_STRIDE, 1),
+            2 * RINS_BATCH_STRIDE
+        );
+        assert_eq!(
+            sub_mip_backoff_stride(RINS_BATCH_STRIDE, 2),
+            4 * RINS_BATCH_STRIDE
+        );
         // Capped, so a long failure run throttles the heuristic rather than
         // silently turning it off -- and the shift can never overflow.
-        let cap = rins_backoff_stride(RINS_BACKOFF_MAX_DOUBLINGS);
-        assert_eq!(cap, RINS_BATCH_STRIDE << RINS_BACKOFF_MAX_DOUBLINGS);
-        assert_eq!(rins_backoff_stride(u32::MAX), cap);
-        assert!(rins_backoff_stride(50) == cap && cap > 0);
+        let cap = sub_mip_backoff_stride(RINS_BATCH_STRIDE, SUB_MIP_BACKOFF_MAX_DOUBLINGS);
+        assert_eq!(cap, RINS_BATCH_STRIDE << SUB_MIP_BACKOFF_MAX_DOUBLINGS);
+        assert_eq!(sub_mip_backoff_stride(RINS_BATCH_STRIDE, u32::MAX), cap);
+        assert!(sub_mip_backoff_stride(RINS_BATCH_STRIDE, 50) == cap && cap > 0);
     }
 
     fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {

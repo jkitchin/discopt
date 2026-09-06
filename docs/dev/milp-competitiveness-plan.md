@@ -2542,6 +2542,86 @@ cert-clean *and* net-positive on a corpus-wide differential panel — before any
 default-ON graduation, and the `DISCOPT_CUT_INHERIT` lesson applies unchanged: sound
 is not the same as helpful.
 
+### A14 (continued) — the graduation panel: RENS is cert-clean and a huge primal win, but FAILS its own net-positive bar. 2026-09-06.
+
+A5 measured the residual gap as primal and specifically the *improving* kind, and
+A12 (RINS) attacks it from the incumbent side. RENS {cite:p}`Berthold2014`
+attacks it from the side that needs no incumbent at all: fix every integer column
+already integral in the **LP relaxation**, restrict each fractional one to
+`{floor, ceil}`, solve the sub-MIP. That precondition is exactly what A5's 12
+instances holding a merely-poor incumbent do not satisfy for RINS.
+
+**Method.** `scratchpad/a14/rens_panel.py`, one build / two arms toggled by
+`DISCOPT_RENS`, arms interleaved, 38-instance MIPLIB easy panel (all 38 with a
+reference optimum), `gap_tol=1e-4`, TL 20 s, 2 reps — the same population and
+settings A13's `gapsplit.py` used, so the numbers are comparable. The §8 load
+gate is *functional*: the panel sets `DISCOPT_RENS="not-a-flag-value"` and
+requires the extension to panic (`milp_driver.rs:976`), which a pre-A14 build
+does not do. Machine was loaded throughout (`load average 14.33`, another
+session holding a core), so **no wall-clock claim is made from this run**;
+every bar is stated on bounds, incumbents and statuses.
+
+**Bars, pre-registered in the script docstring before the run.** BAR 1
+cert-clean (hard, zero slack). BAR 2 net-positive over the 18 instances not
+`optimal` in both arms: (2a) ON median primal gap strictly lower; (2b) incumbent
+wins > losses; (2c) dual-bound losses ≤ 20% of the population.
+
+**Result.**
+
+```
+BAR 1  reference comparisons executed : 152
+       ON incumbents feasibility-verified against the original model : 72
+       PASS: 0 violations
+
+BAR 2  population (not optimal in BOTH arms): 18
+       median primal gap  OFF 38.74%   ON 1.64%
+       incumbent          wins 12   losses 0
+       dual bound         wins  1   losses 9   (cap: 3 of 18)
+
+       2a median primal gap strictly better : PASS
+       2b incumbent wins > losses           : PASS
+       2c dual-bound losses <= 20%          : FAIL
+```
+
+The primal effect is the largest this plan has measured: the median primal gap
+over the contested population falls **38.74% → 1.64%**, with 12 incumbent wins
+and **zero** losses. `mik-250-20-75-2` goes 42.19% → 0.00%, `beavma` 54.94% →
+0.29%, `neos17` 140.35% → 40.00%. Bar 1 is clean and non-vacuous: 152 executed
+reference comparisons and 72 independently feasibility-verified ON incumbents.
+
+**VERDICT: `DISCOPT_RENS` STAYS DEFAULT-OFF.** 2c failed, the pre-registered kill
+criterion fires, and the flag does not graduate on a run that met two of three
+bars. This is the `DISCOPT_CUT_INHERIT` outcome recorded a second time: sound and
+even dramatically helpful on one axis is still not a graduation.
+
+**Post-hoc, and labelled as such: 2c is partly measuring noise, and the panel
+cannot tell how much.** Written after seeing the result, so it justifies a
+re-run, not a re-reading of this one. `pick()` compares `rs[-1]` — a *single*
+rep per arm — while the dual bound at a fixed time limit is itself a noisy
+quantity. Comparing each instance's between-arm difference against the spread
+between the two reps of the *same* arm:
+
+| | count |
+|---|---|
+| dual-bound difference inside same-arm rep-to-rep spread | 5 |
+| difference exceeding it | 5 |
+
+`gsvm2rl3` moves 15.94% between two OFF reps while the OFF↔ON difference is
+4.28%; `beavma`'s ON bound is *better* than OFF in rep0 and worse in rep1. Five
+differences do exceed the noise, but four of those are 0.077–0.339%; only
+`neos17` (10.02%) is both real and large. So the true dual-side cost is real but
+much smaller than a raw count of 9 losses implies — and a zero-tolerance *count*
+under a shared wall-clock budget conflates "RENS harmed the search" with "RENS
+spent some of the 20 s in sub-MIPs".
+
+**What that does NOT license.** It does not license graduating the flag. A bar
+discovered to be badly specified *after* it fails is not thereby satisfied. The
+correct next step is a re-run whose dual-side bar is pre-registered on
+*magnitude and repetition* rather than a single-draw count — more reps, a
+per-instance spread, and a threshold stated in relative terms — on an unloaded
+machine. Until such a panel passes, A14 ships default-OFF with its `=0` opt-out
+and the legacy path intact.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is

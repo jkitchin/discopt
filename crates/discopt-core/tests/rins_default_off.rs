@@ -12,7 +12,7 @@
 //! It also pins the optimum the ON arm asserts against, reached here without RINS
 //! ever executing, so that assertion is not circular.
 
-#[path = "rins_common/mod.rs"]
+#[path = "submip_common/mod.rs"]
 mod cfl;
 
 use discopt_core::bnb::milp_driver::{solve_milp, MilpStatus};

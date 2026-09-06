@@ -18,7 +18,7 @@
 //! Separate binary from `rins_default_off.rs`: `DISCOPT_RINS` is process-wide, so
 //! the two arms cannot share one.
 
-#[path = "rins_common/mod.rs"]
+#[path = "submip_common/mod.rs"]
 mod cfl;
 
 use discopt_core::bnb::milp_driver::{solve_milp, MilpStatus};
