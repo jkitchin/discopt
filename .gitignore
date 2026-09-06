@@ -144,3 +144,5 @@ scratchpad/**/PROBES*_DONE
 scratchpad/**/SMOKE_DONE
 scratchpad/**/AB_DONE
 scratchpad/**/*_stacks.txt
+scratchpad/**/AB3_DONE
+scratchpad/**/PR_DONE
