@@ -65,6 +65,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, ObjectiveSense, VarType
+from discopt.solver_tuning import saturate_role2
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +501,24 @@ def solve_lp_spatial_bb(
             # outside time_limit -- on ball_mk2_30 (30 integers) that alone is up to
             # 150 s against a 30 s budget. Cap it at a third of the remaining time so
             # the node loop always gets the majority of the budget.
-            _obbt_budget = max(0.0, time_limit - (time.perf_counter() - t0)) / 3.0
+            # #1153: saturate the carve. A third of the caller's budget keeps
+            # growing with it, so a generous ``time_limit`` buys more root OBBT
+            # rather than more tree — the coupling #1153 measured. The pass has
+            # its own deterministic cap (``rounds=5``); this only stops the wall
+            # grant from tracking the caller's budget upward without end.
+            #
+            # NOTE on the ``frac`` argument, which the helper documents as "the
+            # fraction of ``time_limit`` this carve was taken from": the value
+            # here is a third of what REMAINS, not of the engine's full
+            # ``time_limit``, so the ceiling it derives (50 s) is an upper bound
+            # on the carve rather than the exact 1/3-of-limit the contract
+            # implies. The effective grant, ``min(remaining / 3, 50)``, is sound
+            # and never looser than the un-saturated original — but anyone
+            # re-tuning ``ROLE2_SATURATION_S`` should read this site as "capped at
+            # 50 s", not as "capped at a third of the limit".
+            _obbt_budget = saturate_role2(
+                max(0.0, time_limit - (time.perf_counter() - t0)) / 3.0, 1.0 / 3.0
+            )
             r = obbt_tighten_root(
                 model,
                 lb0,

@@ -1225,6 +1225,94 @@ class SolverTuning:
     limit.
     """
 
+    # --- budget saturation (#1153) --------------------------------------------
+    budget_saturation: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_BUDGET_SATURATION", default=False)
+    )
+    """Stop role-2 sub-budgets from growing without bound in the caller's
+    ``time_limit``. ``DISCOPT_BUDGET_SATURATION``, default **OFF** (bound-changing,
+    CLAUDE.md §5).
+
+    #1153 is the harm. On ``nvs19`` a 30 s budget reached ``-1098.2`` over 38 403
+    nodes and a 60 s budget reached ``-1001.2`` over 7 619 — doubling the budget
+    made the answer *worse* and explored **5x fewer nodes**. A user who doubles
+    ``time_limit`` and gets a worse answer has no way to reason about the solver,
+    and node throughput falling as the wall budget grows is measurable
+    independently of whether that instance is ever solved.
+
+    The mechanism is #1116's role-1/role-2 split read one step further. Role 1
+    (*"when do we stop?"*) is the user's ``time_limit``. Role 2 (*"how much work
+    does this stage do?"*) is a sub-budget carved as a fraction of it. Carving
+    role 2 out of role 1 is fine as long as it **saturates**: a root stage whose
+    grant keeps growing with the caller's budget goes on separating cuts that
+    every subsequent node LP then carries, so the per-node cost rises with
+    ``time_limit`` and the tree covered by the remaining budget shrinks.
+
+    Under this flag each such sub-budget is capped at the value it would take at a
+    :data:`ROLE2_SATURATION_S` (150 s) role-1 budget, so beyond
+    that point every additional second the caller grants goes to the *search*.
+    150 s is not a new number: it is the reference the root OBBT grant already
+    carries (``min(max(0.1 * time_limit, 2.0), 15.0)``), and it is the loosest
+    choice consistent with the ceilings the sibling root stages already have — the
+    conservative direction for a default-path change. Below it nothing changes at
+    all, which is why the flag is inert on short solves.
+
+    Sound in every arm: each capped stage is optional *tightening* whose truncation
+    only ever yields a weaker relaxation (fewer cuts, fewer OBBT rounds), never an
+    invalid one, so no bound can rise above its true value and no certificate can
+    be fabricated. The flag can only change *which* valid answer path is walked."""
+
+    heuristic_entry_share: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HEUR_ENTRY_SHARE", default=False)
+    )
+    """Require an optional root primal heuristic to fit a bounded SHARE of the
+    remaining budget, not merely to fit inside it. ``DISCOPT_HEUR_ENTRY_SHARE``,
+    default **OFF** (heuristic-policy, CLAUDE.md §5).
+
+    The measured #1153 mechanism. ``heatexch_gen2``, three repetitions, zero
+    spread: a 5 s budget explores **7** nodes and a 10 s budget explores **3**.
+    The layer profile says where the extra five seconds went — ``root_time`` is
+    3.5 s of 5.1 s at the small budget and *the entire* 10.1 s at the large one —
+    and the NLP probe names the consumer: at 5 s the feasibility pump never
+    starts, at 10 s it starts and its two sub-NLPs spend 6.4 s of the 10 s budget
+    and return **no incumbent** (identical ``obj=None``, identical bound, in both
+    arms). Doubling the budget bought one extra heuristic that consumed 64 % of it
+    and produced nothing, and the tree paid for it.
+
+    The entry gate is what admits that. It refuses a heuristic only when the time
+    left cannot absorb *one whole* solve of the largest size seen so far — so a
+    heuristic may consume up to 100 % of the remaining budget and still be
+    admitted. Crossing that threshold therefore costs more than the budget
+    increment that unlocked it, which is precisely a non-monotone step.
+
+    The repository already applies the right doctrine one role over: an
+    *improver*-role heuristic must fit a success-weighted, node-proportional
+    contingent (``_improver_allowed``). The *finder* role is deliberately exempt,
+    because securing a first incumbent takes priority — but priority should mean
+    *runs first*, not *may consume everything*. This flag keeps the exemption and
+    bounds it: a finder may start when its measured cost fits
+    :data:`HEURISTIC_ENTRY_SHARE` of what is left. A large budget still admits it;
+    a budget that would be eaten by it does not.
+
+    **Scope.** The share is applied only where the caller passes ``finder=True``
+    — the two feasibility-pump entries. ``_root_heur_nlp_entry_ok`` is the shared
+    gate for thirteen root-heuristic entries, several of them improver-role
+    (enumerate, ``integer_box_search``, node diving), and those already answer to
+    their own contingent; dividing there unconditionally double-gated them.
+
+    **Known structural limit, and why it cannot graduate as written.**
+    ``_mean_heur_nlp_cost()`` returns its 2.0 s *default* until a heuristic NLP
+    has actually been observed, so at the FIRST call this gate reduces to "is
+    more than ``2.0 / share`` seconds left?" — on any model, independent of the
+    pump's real cost, which was measured at 6.4 s. That first call is the whole
+    effect on the 5-10 s rungs where #1153's harm lives, so the rule is acting on
+    a 3x-wrong estimate exactly where it matters most.
+
+    Sound: every gated call is a primal heuristic, so refusing one can change
+    which incumbent is found and when, never the dual bound or the certificate
+    (§0.3 heuristic-policy). ``DISCOPT_ROOT_BUDGET_GATE=0`` still disables the
+    whole gate, flag or no flag."""
+
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
@@ -1892,3 +1980,62 @@ def enter_scope(tuning: SolverTuning | None):
 
 def reset_current(token) -> None:
     _current.reset(token)
+
+
+#: The role-1 budget at which every role-2 sub-budget saturates (#1153).
+#:
+#: Not a new number. It is the reference the root OBBT grant already carries —
+#: ``min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())`` ceilings at
+#: 15 s, i.e. at ``time_limit = 150`` — and it is the LOOSEST of the ceilings the
+#: sibling root stages carry (the 0.25-fraction presolve grant ceilings at 30 s /
+#: 120 s, the 0.2-fraction convexity grant at 20 s / 100 s, the 0.15-fraction NBT
+#: grant at 30 s / 200 s). Taking the loosest is the conservative direction for a
+#: change that moves the default path: it caps the stages written without a
+#: ceiling at the point their already-ceilinged siblings stop, and nowhere tighter.
+ROLE2_SATURATION_S = 150.0
+
+
+def saturate_role2(seconds: float, frac: float) -> float:
+    """Cap a role-2 sub-budget carved as ``frac`` of ``time_limit`` (#1153).
+
+    ``seconds`` is what the site computed; ``frac`` is the fraction of
+    ``time_limit`` it was carved from. The cap is the value that carve reaches at
+    a :data:`ROLE2_SATURATION_S` role-1 budget, so the grant *saturates* instead
+    of tracking the caller's budget upward forever.
+
+    Why saturation and not merely "a fraction". A fraction is monotone in
+    ``time_limit`` but not harmless: a root stage whose grant keeps growing keeps
+    separating cuts, and every subsequent node LP carries them, so the per-node
+    cost rises with the caller's budget and the tree the remaining budget can
+    cover *shrinks*. #1153 measured the end of that: ``nvs19`` at 30 s reached
+    -1098.2 over 38 403 nodes and at 60 s reached -1001.2 over 7 619 — a worse
+    answer from twice the budget. Saturating the carve makes every second granted
+    beyond :data:`ROLE2_SATURATION_S` go to the search.
+
+    Default-off behind ``SolverTuning.budget_saturation`` (bound-changing,
+    CLAUDE.md §5); with the flag off this returns ``seconds`` unchanged, so the
+    legacy path is byte-identical.
+
+    Sound either way: every site this guards is optional *tightening*, and a
+    truncated tightening pass yields a weaker relaxation, never an invalid one.
+    """
+    if not current().budget_saturation:
+        return float(seconds)
+    return min(float(seconds), float(frac) * ROLE2_SATURATION_S)
+
+
+#: The share of the REMAINING budget an optional root primal heuristic must fit
+#: inside before it may start, under ``SolverTuning.heuristic_entry_share``
+#: (#1153). 1.0 is the legacy rule — "it may consume everything" — which is what
+#: lets a 6.4 s feasibility pump be admitted into an 8 s remainder and collapse
+#: the tree from 7 nodes to 3.
+HEURISTIC_ENTRY_SHARE = 0.25
+
+
+def heuristic_entry_share() -> float:
+    """The budget share a finder-role heuristic must fit in (#1153).
+
+    Returns ``1.0`` — the legacy rule, byte-identical — unless
+    ``SolverTuning.heuristic_entry_share`` is on.
+    """
+    return HEURISTIC_ENTRY_SHARE if current().heuristic_entry_share else 1.0
