@@ -496,6 +496,28 @@ Two measurements dissolve it:
 three reps with fully overlapping spreads (new 37.17–45.42 s, old 36.04–47.46 s)
 — noise, and reported as noise rather than as a result.
 
+### §4.4 Re-validated after `main` was merged into the branch (2026-09-06)
+
+The author merged `origin/main` into this branch at `18ef9bb`, which brought in
+2 533 lines of Rust plus changes to `interval_eval.py`, `modeling/core.py`,
+`mpec.py` and `status.py` (#1185/#1186/#1189/#1190 — RINS, RENS, objective-lattice
+substitution). Every number in §4.3 was therefore measured on a base that is no
+longer this branch's head, so the extension was rebuilt and the gate re-run
+rather than left to stand:
+
+| check | pre-merge | on the merged base |
+|---|---|---|
+| bit-identity, 66 instances × 5 points × 5 entry points | 1610 comparisons, 0 mismatches | **1610, 0** |
+| `test_1180_callback_marshaling` + `test_74_layer_time_attribution` | 19 passed | **19 passed** |
+| callback-heavy A/B, 14 instances × 3 interleaved reps | median 1.221× | **median 1.232×** |
+| neutrality on that panel | all but the time-truncated `4stufen` | **unchanged** |
+
+Best and worst rows on the merged base: `ex1226` 1.415×, `ex1221` 1.393×,
+`gkocis` 1.326× at the top; `nvs05` 1.026× and `alan` 0.998× at the bottom —
+the same shape as §4.3, since the two instances that gain least are the two whose
+wall is not callback-bound. The §4.3 figure is the conservative one and is left
+as the headline.
+
 ---
 
 ## §5. What is now on the record
