@@ -2366,6 +2366,64 @@ roughly +6 % wall on a both-solved set totalling ~30 s (median 0.13 s/instance)
 against materially better incumbents on the instances that hit the time limit.
 Flipping the default is an owner call.
 
+### A13 — the objective lattice a continuous column was hiding: SURVIVES, and it graduated. 2026-09-06.
+
+**Why this one.** A12 closed the primal side of the residual. What remained on
+the `neos-361*` family was cruder than either: `neos-3610051-istra` has an
+integral optimum of 49 and sat at `bound = 48.53` until the clock ran out. discopt
+*has* objective-integrality fathoming, so the question was why it was not firing.
+
+**The measurement.** `objective_granularity` refuses the moment a *continuous*
+column carries objective cost. These models are written `min z  s.t.  z = <integer
+expression>`, routing the whole objective through one continuous column, so the
+detector refuses and the lattice is lost outright. Not a bug — a gap in what the
+detector can prove.
+
+**Entry experiment, run before the implementation.** Kill criterion stated in
+advance: fewer than ~5 instances gaining a usable lattice kills the lever. Over a
+104-instance MIPLIB draw, 20 already had a directly-integral objective and a
+further **13** are of exactly this shape — the whole `neos-361*` family, `misc07`
+(spacing 5), `markshare*`, `rout` (spacing 0.01). 13/104 = 12.5 % cleared it. Each
+of the 13 derived lattices was then checked to contain that instance's true
+optimum, including the non-unit cases (`misc07` puts the optimum at k=562 exactly;
+`rout` at k=-129769). Zero violations. This is the #727 RLT lesson honored: the
+mechanism was validated on the real class, never on a synthetic proxy.
+
+**What was built (PR #1189).** `objective_lattice` resolves a costed continuous
+column through an equality row that pins it to integer columns. The model is not
+rewritten — it reads the row to compute a spacing, so there is no postsolve
+obligation, which is what separates it from HiGHS's `freeColSubstitution` and from
+SCIP's aggregation ahead of `SCIPprobCheckObjIntegral`. The substitution
+introduces a constant, so the return type carries `{ spacing, shift }`: five panel
+instances have a nonzero shift, and a bare spacing would have mis-anchored the
+lattice and lifted the dual bound past the optimum.
+
+**Panel (44 instances, 20 s, interleaved).** Both §5 bars pass. Cert-clean with 0
+violations over 83 independently feasibility-verified incumbents. Net-positive:
+25/44 solved vs 23/44 with **none lost**, both-solved wall −11.6 % and nodes
+−7.8 %, and among the 21 instances neither arm closed, the dual bound improved on
+6 and worsened on none. `istra` and `iskar` go from timed-out-feasible to
+certified optimal.
+
+**Status: graduated default-ON**, with the `DISCOPT_OBJ_LATTICE_SUBST=0` opt-out
+intact. Unlike A12 this needed no owner call: wall, nodes, solved-count and dual
+bound all move the right way at once.
+
+**Honest limit.** `b-ball`, one of the three instances that motivated the work, is
+*not* resolved — its objective column has no defining equality row over integers,
+so the detector refuses rather than guessing.
+
+**An instrumentation failure, recorded because §6 is written from exactly these.**
+The first run of this panel measured nothing. The flag read was cached in a
+`OnceLock`, so the first solve in the process fixed the arm for every later one
+and the whole ON arm ran OFF code. The signature was `neos-3611447-jijia` at an
+*identical* 313,441 nodes in both arms. It was caught by reading the interim log
+mid-run, not by the end-of-run non-vacuity check. The flag is now read fresh per
+solve, an unrecognized value is a hard refusal rather than a silently chosen arm,
+and `obj_lattice_subst_reread.rs` fails if the cache ever returns. **Any A/B that
+switches a flag inside one process must prove the flag is not cached before its
+table means anything.**
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
