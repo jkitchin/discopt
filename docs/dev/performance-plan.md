@@ -5562,4 +5562,4 @@ different objectives (55092.52 ×3, then 46785.55) at an identical 27 nodes, wit
 the dual bound agreeing to 12 significant figures — the *incumbent* moves, so the
 nondeterministic component is a primal heuristic. That is a `deterministic=`
 contract defect and a live hazard for every bound-neutrality gate that trusts the
-flag.
+flag; filed as **#1187**, successor in kind to #912.

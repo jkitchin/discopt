@@ -560,8 +560,11 @@ significant figures. `deterministic=True` promises a search that is a function o
 the model rather than of machine speed; this instance's *primal* side is not.
 Out of scope for #1180 — it is a `deterministic=` contract defect in the primal
 heuristics, not a per-node-cost question — but it is a live hazard for every
-bound-neutrality gate that trusts that flag, including this one, and it should be
-tracked separately.
+bound-neutrality gate that trusts that flag, including this one, and it is
+tracked as **#1187** (successor in kind to #912, whose own verdict was that
+deterministic work budgets are "unimplemented and the real fix"). Until it is
+fixed, `clay0303hfsg` should be excluded from bound-neutrality panels by name
+*with #1187 cited*, not silently tolerated as drift.
 
 ### §5.5 What #1180 does **not** claim
 
