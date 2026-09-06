@@ -419,9 +419,11 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "residual",
     ),
     # ``max_wall_time`` clamps on root heuristic / polish / recovery NLPs.
+    # #1153 renamed this stage's deadline ``_deadline`` -> ``_fp_stage_deadline``
+    # when it gave the feasibility pump its own clock; same gate, same category.
     (
         "solver.py",
-        "min(3.0, _deadline - time.perf_counter())",
+        "min(3.0, _fp_stage_deadline - time.perf_counter())",
         "residual",
     ),
     (
