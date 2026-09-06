@@ -1,0 +1,124 @@
+discopt: /Users/jkitchin/projects/discopt/wt-a14/python/discopt/__init__.py
+
+thread '<unnamed>' (29778021) panicked at crates/discopt-core/src/bnb/milp_driver.rs:976:25:
+DISCOPT_RENS="not-a-flag-value" is not recognized (expected 1/true/yes or 0/false/no). Refusing rather than silently picking an arm.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+load gate: A14 build confirmed (garbage DISCOPT_RENS refused)
+load at start: 9:13  up 6 days, 55 mins, 5 users, load averages: 14.33 14.27 20.94
+  rep0 neos-1425699           OFF    optimal obj=3179927209.0 bnd=3179670010.2 | ON    optimal obj=3179698977.0 bnd=3179670010.2
+  rep0 blend2                 OFF    optimal obj=7.598985000000009 bnd=7.598985000000009 | ON    optimal obj=    7.598985 bnd=    7.598985
+  rep0 gr4x6                  OFF    optimal obj=202.35000000000005 bnd=202.35000000000005 | ON    optimal obj=      202.35 bnd=      202.35
+  rep0 enlight8               OFF    optimal obj=        27.0 bnd=        27.0 | ON    optimal obj=        27.0 bnd=        27.0
+  rep0 p0201                  OFF    optimal obj=      7615.0 bnd=      7615.0 | ON    optimal obj=      7615.0 bnd=      7615.0
+  rep0 mik-250-20-75-5        OFF   feasible obj=-28299.000000000015 bnd=-52700.8239221413 | ON   feasible obj=-51032.000000000015 bnd=-52866.263299630715
+  rep0 neos-911970            OFF   feasible obj=215.68999999999997 bnd=23.259999999999994 | ON   feasible obj=82.34999999999991 bnd=23.259999999999994
+  rep0 mik-250-20-75-3        OFF   feasible obj=-40558.999999999985 bnd=-53370.153855271245 | ON   feasible obj=    -52042.0 bnd=-53403.2593516889
+  rep0 fiber                  OFF    optimal obj=405935.17999999993 bnd=405929.1943740805 | ON    optimal obj=405935.17999999993 bnd=405929.1943740805
+  rep0 khb05250               OFF    optimal obj=106940225.99999951 bnd=106940225.99999951 | ON    optimal obj=106940225.99999951 bnd=106940225.99999951
+  rep0 nexp-50-20-1-1         OFF   feasible obj=        45.0 bnd=        24.0 | ON   feasible obj=        30.0 bnd=        24.0
+  rep0 mik-250-20-75-2        OFF   feasible obj=-29347.000000000015 bnd=-52218.10422387205 | ON   feasible obj=    -50768.0 bnd=-52297.05410418314
+  rep0 22433                  OFF    optimal obj=21476.999999999996 bnd=21476.999999999996 | ON    optimal obj=21476.999999999996 bnd=21476.999999999996
+  rep0 nexp-50-20-4-2         OFF   feasible obj=        85.0 bnd=        65.0 | ON   feasible obj=        84.0 bnd=        65.0
+  rep0 gt2                    OFF    optimal obj=     21166.0 bnd=     21166.0 | ON    optimal obj=     21166.0 bnd=     21166.0
+  rep0 mik-250-20-75-1        OFF   feasible obj=-34399.999999999985 bnd=-51062.88568267561 | ON   feasible obj=-49016.00000000003 bnd=-51113.123078767814
+  rep0 23588                  OFF    optimal obj=8089.999999999999 bnd=8089.999999999999 | ON    optimal obj=8089.999999999999 bnd=8089.999999999999
+  rep0 flugpl                 OFF    optimal obj=1201499.9999999995 bnd=1201499.9999999995 | ON    optimal obj=1201499.9999999995 bnd=1201499.9999999995
+  rep0 dcmulti                OFF    optimal obj=188182.00000000003 bnd=188167.8932541513 | ON    optimal obj=188182.00000000003 bnd=188167.8932541513
+  rep0 enlight_hard           OFF node_limit obj=        None bnd=        32.0 | ON node_limit obj=        None bnd=        33.0
+  rep0 sp150x300d             OFF   feasible obj=        85.0 bnd=        66.0 | ON   feasible obj=        69.0 bnd=        66.0
+  rep0 gen                    OFF    optimal obj=112313.36271799979 bnd=112311.8315824987 | ON    optimal obj=112313.36271799979 bnd=112311.8315824987
+  rep0 neos17                 OFF   feasible obj=0.36052486513486537 bnd=0.12522408376403094 | ON   feasible obj=0.2100014485514491 bnd=0.11350749147317155
+  rep0 beavma                 OFF   feasible obj=    593880.3 bnd=373086.85536491056 | ON   feasible obj=384407.09999999154 bnd=374066.8295750122
+  rep0 neos-3611447-jijia     OFF    optimal obj=       107.0 bnd=106.99499999999995 | ON    optimal obj=       107.0 bnd=106.99249999999998
+  rep0 neos-3610051-istra     OFF   feasible obj=48.99999999999988 bnd=48.66499999999998 | ON   feasible obj=48.99999999999988 bnd=48.624999999999986
+  rep0 neos-3118745-obra      OFF   feasible obj=344.99999999999994 bnd=253.83333333333346 | ON   feasible obj=       285.0 bnd=253.83333333333346
+  rep0 neos-3611689-kaihu     OFF    optimal obj=118.99999999999999 bnd=118.9895064748201 | ON    optimal obj=118.99999999999999 bnd=118.9895064748201
+  rep0 neos-3610040-iskar     OFF   feasible obj=36.99999999999811 bnd=       36.71 | ON   feasible obj=36.99999999999989 bnd=36.85249999999991
+  rep0 neos-5192052-neckar    OFF    optimal obj=-11670000.00000002 bnd=-11670000.00000002 | ON    optimal obj=-11670000.00000002 bnd=-11670000.00000002
+  rep0 neos-2624317-amur      OFF node_limit obj=        None bnd=         0.0 | ON node_limit obj=        None bnd=         0.0
+  rep0 app2-2                 OFF    optimal obj=212042.49999999732 bnd=212040.35714285716 | ON    optimal obj=212042.49999999732 bnd=212040.35714285716
+  rep0 b-ball                 OFF   feasible obj=-1.5000000009961507 bnd=-1.5005766558170517 | ON   feasible obj=-1.5000000009961507 bnd=-1.5005766558170517
+  rep0 bppc8-02               OFF    optimal obj=       507.0 bnd=       507.0 | ON    optimal obj=       507.0 bnd=       507.0
+  rep0 supportcase16          OFF    optimal obj=       288.0 bnd=       288.0 | ON    optimal obj=       288.0 bnd=       288.0
+  rep0 supportcase14          OFF    optimal obj=       288.0 bnd=       288.0 | ON    optimal obj=       288.0 bnd=       288.0
+  rep0 f2gap40400             OFF    optimal obj=20772.000000000102 bnd=20772.000000000102 | ON    optimal obj=20772.000000000102 bnd=20772.000000000102
+  rep0 gsvm2rl3               OFF   feasible obj=0.5863548183028108 bnd=0.2313503893214682 | ON   feasible obj=0.5863548183028108 bnd=0.21291657397107894
+  rep1 neos-1425699           OFF    optimal obj=3179927209.0 bnd=3179670010.2 | ON    optimal obj=3179698977.0 bnd=3179670010.2
+  rep1 blend2                 OFF    optimal obj=7.598985000000009 bnd=7.598985000000009 | ON    optimal obj=    7.598985 bnd=    7.598985
+  rep1 gr4x6                  OFF    optimal obj=202.35000000000005 bnd=202.35000000000005 | ON    optimal obj=      202.35 bnd=      202.35
+  rep1 enlight8               OFF    optimal obj=        27.0 bnd=        27.0 | ON    optimal obj=        27.0 bnd=        27.0
+  rep1 p0201                  OFF    optimal obj=      7615.0 bnd=      7615.0 | ON    optimal obj=      7615.0 bnd=      7615.0
+  rep1 mik-250-20-75-5        OFF   feasible obj=-28299.000000000015 bnd=-52675.04482618471 | ON   feasible obj=-51032.000000000015 bnd=-52853.468028923235
+  rep1 neos-911970            OFF   feasible obj=215.68999999999997 bnd=23.259999999999994 | ON   feasible obj=82.34999999999991 bnd=23.259999999999994
+  rep1 mik-250-20-75-3        OFF   feasible obj=-40558.999999999985 bnd=-53353.57280697341 | ON   feasible obj=    -52042.0 bnd=-53394.58790680605
+  rep1 fiber                  OFF    optimal obj=405935.17999999993 bnd=405929.1943740805 | ON    optimal obj=405935.17999999993 bnd=405929.1943740805
+  rep1 khb05250               OFF    optimal obj=106940225.99999951 bnd=106940225.99999951 | ON    optimal obj=106940225.99999951 bnd=106940225.99999951
+  rep1 nexp-50-20-1-1         OFF   feasible obj=        45.0 bnd=        24.0 | ON   feasible obj=        30.0 bnd=        24.0
+  rep1 mik-250-20-75-2        OFF   feasible obj=-29347.000000000015 bnd=-52205.11107977893 | ON   feasible obj=    -50768.0 bnd=-52287.650878812376
+  rep1 22433                  OFF    optimal obj=21476.999999999996 bnd=21476.999999999996 | ON    optimal obj=21476.999999999996 bnd=21476.999999999996
+  rep1 nexp-50-20-4-2         OFF   feasible obj=        85.0 bnd=        65.0 | ON   feasible obj=        84.0 bnd=        65.0
+  rep1 gt2                    OFF    optimal obj=     21166.0 bnd=     21166.0 | ON    optimal obj=     21166.0 bnd=     21166.0
+  rep1 mik-250-20-75-1        OFF   feasible obj=-34399.999999999985 bnd=-51057.177129764095 | ON   feasible obj=-49016.00000000003 bnd=-51108.995140380866
+  rep1 23588                  OFF    optimal obj=8089.999999999999 bnd=8089.999999999999 | ON    optimal obj=8089.999999999999 bnd=8089.999999999999
+  rep1 flugpl                 OFF    optimal obj=1201499.9999999995 bnd=1201499.9999999995 | ON    optimal obj=1201499.9999999995 bnd=1201499.9999999995
+  rep1 dcmulti                OFF    optimal obj=188182.00000000003 bnd=188167.8932541513 | ON    optimal obj=188182.00000000003 bnd=188167.8932541513
+  rep1 enlight_hard           OFF node_limit obj=        None bnd=        34.0 | ON node_limit obj=        None bnd=        34.0
+  rep1 sp150x300d             OFF   feasible obj=        85.0 bnd=        66.0 | ON   feasible obj=        69.0 bnd=        66.0
+  rep1 gen                    OFF    optimal obj=112313.36271799979 bnd=112311.8315824987 | ON    optimal obj=112313.36271799979 bnd=112311.8315824987
+  rep1 neos17                 OFF   feasible obj=0.36052486513486537 bnd=0.1269343176784396 | ON   feasible obj=0.2100014485514491 bnd=0.1142122902223466
+  rep1 beavma                 OFF   feasible obj=    593880.3 bnd=373080.9769015721 | ON   feasible obj=384407.09999999154 bnd=365448.2744164633
+  rep1 neos-3611447-jijia     OFF   feasible obj=       110.0 bnd=106.69437499999997 | ON   feasible obj=       109.0 bnd=106.37374999999997
+  rep1 neos-3610051-istra     OFF   feasible obj=48.99999999999999 bnd=48.15624999999997 | ON   feasible obj=48.99999999999999 bnd=48.1448810393258
+  rep1 neos-3118745-obra      OFF   feasible obj=344.99999999999994 bnd=253.8333333333334 | ON   feasible obj=290.9999999999996 bnd=253.8333333333334
+  rep1 neos-3611689-kaihu     OFF    optimal obj=118.99999999999999 bnd=118.9895064748201 | ON    optimal obj=118.99999999999999 bnd=118.9895064748201
+  rep1 neos-3610040-iskar     OFF   feasible obj=36.99999999999811 bnd=36.68499999999998 | ON   feasible obj=36.99999999999989 bnd=36.75499999999998
+  rep1 neos-5192052-neckar    OFF    optimal obj=-11670000.00000002 bnd=-11670000.00000002 | ON    optimal obj=-11670000.00000002 bnd=-11670000.00000002
+  rep1 neos-2624317-amur      OFF node_limit obj=        None bnd=         0.0 | ON node_limit obj=        None bnd=         0.0
+  rep1 app2-2                 OFF    optimal obj=212042.49999999732 bnd=212040.35714285716 | ON    optimal obj=212042.49999999732 bnd=212040.35714285716
+  rep1 b-ball                 OFF   feasible obj=-1.5000000009961507 bnd=-1.5005766558170524 | ON   feasible obj=-1.5000000009961507 bnd=-1.5005766558170621
+  rep1 bppc8-02               OFF    optimal obj=       507.0 bnd=       507.0 | ON    optimal obj=       507.0 bnd=       507.0
+  rep1 supportcase16          OFF    optimal obj=       288.0 bnd=       288.0 | ON    optimal obj=       288.0 bnd=       288.0
+  rep1 supportcase14          OFF    optimal obj=       288.0 bnd=       288.0 | ON    optimal obj=       288.0 bnd=       288.0
+  rep1 f2gap40400             OFF    optimal obj=20772.000000000102 bnd=20772.000000000102 | ON    optimal obj=20772.000000000102 bnd=20772.000000000102
+  rep1 gsvm2rl3               OFF   feasible obj=0.5863548183028108 bnd=0.19448275862068967 | ON   feasible obj=0.5863548183028108 bnd=0.1861535038932146
+load at end: 9:40  up 6 days,  1:22, 5 users, load averages: 82.13 43.09 29.25
+
+BAR 1 -- CERT-CLEAN
+  reference comparisons executed : 152
+  ON incumbents feasibility-verified against the original model : 72
+  PASS: 0 violations over the comparisons above
+
+BAR 2 -- NET-POSITIVE   population (not optimal in BOTH arms): 18
+
+instance                    OFF inc       ON inc  OFF gap%   ON gap%      OFF bnd       ON bnd
+mik-250-20-75-5              -28299       -51032     45.08      0.97       -52675     -52853.5
+neos-911970                  215.69        82.35    293.88     50.38        23.26        23.26
+mik-250-20-75-3              -40559       -52042     22.36      0.38     -53353.6     -53394.6
+nexp-50-20-1-1                   45           30     55.17      3.45           24           24
+mik-250-20-75-2              -29347       -50768     42.19      0.00     -52205.1     -52287.7
+nexp-50-20-4-2                   85           84     19.72     18.31           65           65
+mik-250-20-75-1              -34400       -49016     30.81      1.41     -51057.2       -51109
+enlight_hard                      -            -    100.00    100.00           34           34
+sp150x300d                       85           69     23.19      0.00           66           66
+neos17                     0.360525     0.210001    140.35     40.00     0.126934     0.114212
+beavma                       593880       384407     54.94      0.29       373081       365448
+neos-3611447-jijia              110          109      2.80      1.87      106.694      106.374
+neos-3610051-istra               49           49      0.00      0.00      48.1562      48.1449
+neos-3118745-obra               345          291     35.29     14.12      253.833      253.833
+neos-3610040-iskar               37           37      0.00      0.00       36.685       36.755
+neos-2624317-amur                 -            -    100.00    100.00            0            0
+b-ball                         -1.5         -1.5      0.00      0.00     -1.50058     -1.50058
+gsvm2rl3                   0.586355     0.586355     74.24     74.24     0.194483     0.186154
+
+  median primal gap  OFF 38.74%   ON 1.64%
+  incumbent          wins 12   losses 0
+  dual bound         wins 1   losses 9   (cap: 3 of 18)
+
+  2a median primal gap strictly better : PASS
+  2b incumbent wins > losses           : PASS
+  2c dual-bound losses <= 20%          : FAIL
+
+  wall over the population   OFF 362.2s   ON 361.0s   (median per-instance sd over 2 reps: OFF 0.01s, ON 0.00s)
+  NOT a timing claim: the machine was loaded throughout (another session held a core).
+
+VERDICT: STAYS OFF: cert-clean but not net-positive -- record the measurement (the DISCOPT_CUT_INHERIT outcome)

@@ -1,0 +1,1994 @@
+{
+ "tl": 20.0,
+ "reps": 2,
+ "rows": {
+  "neos-1425699|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 3179927209.0,
+    "bound": 3179670010.2,
+    "nodes": 3,
+    "wall": 0.0036616669967770576,
+    "has_inc": true,
+    "x": null,
+    "ref": 3179698976.996124,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 3179927209.0,
+    "bound": 3179670010.2,
+    "nodes": 3,
+    "wall": 0.002971709007397294,
+    "has_inc": true,
+    "x": null,
+    "ref": 3179698976.996124,
+    "viol": []
+   }
+  ],
+  "neos-1425699|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 3179698977.0,
+    "bound": 3179670010.2,
+    "nodes": 3,
+    "wall": 0.002633291995152831,
+    "has_inc": true,
+    "x": null,
+    "ref": 3179698976.996124,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 3179698977.0,
+    "bound": 3179670010.2,
+    "nodes": 3,
+    "wall": 0.002702375000808388,
+    "has_inc": true,
+    "x": null,
+    "ref": 3179698976.996124,
+    "viol": []
+   }
+  ],
+  "blend2|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 7.598985000000009,
+    "bound": 7.598985000000009,
+    "nodes": 10819,
+    "wall": 0.9844007500214502,
+    "has_inc": true,
+    "x": null,
+    "ref": 7.598985,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 7.598985000000009,
+    "bound": 7.598985000000009,
+    "nodes": 10819,
+    "wall": 0.9053504170151427,
+    "has_inc": true,
+    "x": null,
+    "ref": 7.598985,
+    "viol": []
+   }
+  ],
+  "blend2|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 7.598985,
+    "bound": 7.598985,
+    "nodes": 1147,
+    "wall": 0.3590083750314079,
+    "has_inc": true,
+    "x": null,
+    "ref": 7.598985,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 7.598985,
+    "bound": 7.598985,
+    "nodes": 1147,
+    "wall": 0.34442329104058444,
+    "has_inc": true,
+    "x": null,
+    "ref": 7.598985,
+    "viol": []
+   }
+  ],
+  "gr4x6|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 202.35000000000005,
+    "bound": 202.35000000000005,
+    "nodes": 69,
+    "wall": 0.05383250000886619,
+    "has_inc": true,
+    "x": null,
+    "ref": 202.3499999999979,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 202.35000000000005,
+    "bound": 202.35000000000005,
+    "nodes": 69,
+    "wall": 0.053398167015984654,
+    "has_inc": true,
+    "x": null,
+    "ref": 202.3499999999979,
+    "viol": []
+   }
+  ],
+  "gr4x6|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 202.35,
+    "bound": 202.35,
+    "nodes": 27,
+    "wall": 0.054671208024956286,
+    "has_inc": true,
+    "x": null,
+    "ref": 202.3499999999979,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 202.35,
+    "bound": 202.35,
+    "nodes": 27,
+    "wall": 0.053903874999377877,
+    "has_inc": true,
+    "x": null,
+    "ref": 202.3499999999979,
+    "viol": []
+   }
+  ],
+  "enlight8|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 27.0,
+    "bound": 27.0,
+    "nodes": 129509,
+    "wall": 2.9101587920449674,
+    "has_inc": true,
+    "x": null,
+    "ref": 27.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 27.0,
+    "bound": 27.0,
+    "nodes": 129509,
+    "wall": 2.5213231660309248,
+    "has_inc": true,
+    "x": null,
+    "ref": 27.0,
+    "viol": []
+   }
+  ],
+  "enlight8|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 27.0,
+    "bound": 27.0,
+    "nodes": 129509,
+    "wall": 2.8105117499944754,
+    "has_inc": true,
+    "x": null,
+    "ref": 27.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 27.0,
+    "bound": 27.0,
+    "nodes": 129509,
+    "wall": 2.3937344580190256,
+    "has_inc": true,
+    "x": null,
+    "ref": 27.0,
+    "viol": []
+   }
+  ],
+  "p0201|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 7615.0,
+    "bound": 7615.0,
+    "nodes": 441,
+    "wall": 0.11060412495862693,
+    "has_inc": true,
+    "x": null,
+    "ref": 7614.999999999997,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 7615.0,
+    "bound": 7615.0,
+    "nodes": 441,
+    "wall": 0.09075312502682209,
+    "has_inc": true,
+    "x": null,
+    "ref": 7614.999999999997,
+    "viol": []
+   }
+  ],
+  "p0201|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 7615.0,
+    "bound": 7615.0,
+    "nodes": 441,
+    "wall": 0.09443225001450628,
+    "has_inc": true,
+    "x": null,
+    "ref": 7614.999999999997,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 7615.0,
+    "bound": 7615.0,
+    "nodes": 441,
+    "wall": 0.08416258404031396,
+    "has_inc": true,
+    "x": null,
+    "ref": 7614.999999999997,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-5|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -28299.000000000015,
+    "bound": -52700.8239221413,
+    "nodes": 272561,
+    "wall": 20.250705583021045,
+    "has_inc": true,
+    "x": null,
+    "ref": -51532.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -28299.000000000015,
+    "bound": -52675.04482618471,
+    "nodes": 327935,
+    "wall": 20.210744708019774,
+    "has_inc": true,
+    "x": null,
+    "ref": -51532.0,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-5|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -51032.000000000015,
+    "bound": -52866.263299630715,
+    "nodes": 205519,
+    "wall": 20.161608625028748,
+    "has_inc": true,
+    "x": null,
+    "ref": -51532.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -51032.000000000015,
+    "bound": -52853.468028923235,
+    "nodes": 245949,
+    "wall": 20.05875179101713,
+    "has_inc": true,
+    "x": null,
+    "ref": -51532.0,
+    "viol": []
+   }
+  ],
+  "neos-911970|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 215.68999999999997,
+    "bound": 23.259999999999994,
+    "nodes": 59,
+    "wall": 20.011107374972198,
+    "has_inc": true,
+    "x": null,
+    "ref": 54.76,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 215.68999999999997,
+    "bound": 23.259999999999994,
+    "nodes": 59,
+    "wall": 20.01043345796643,
+    "has_inc": true,
+    "x": null,
+    "ref": 54.76,
+    "viol": []
+   }
+  ],
+  "neos-911970|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 82.34999999999991,
+    "bound": 23.259999999999994,
+    "nodes": 57,
+    "wall": 20.013727625017054,
+    "has_inc": true,
+    "x": null,
+    "ref": 54.76,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 82.34999999999991,
+    "bound": 23.259999999999994,
+    "nodes": 55,
+    "wall": 20.009150542027783,
+    "has_inc": true,
+    "x": null,
+    "ref": 54.76,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-3|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -40558.999999999985,
+    "bound": -53370.153855271245,
+    "nodes": 236159,
+    "wall": 20.04926349996822,
+    "has_inc": true,
+    "x": null,
+    "ref": -52242.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -40558.999999999985,
+    "bound": -53353.57280697341,
+    "nodes": 302463,
+    "wall": 20.073371417005546,
+    "has_inc": true,
+    "x": null,
+    "ref": -52242.0,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-3|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -52042.0,
+    "bound": -53403.2593516889,
+    "nodes": 181559,
+    "wall": 20.04682716698153,
+    "has_inc": true,
+    "x": null,
+    "ref": -52242.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -52042.0,
+    "bound": -53394.58790680605,
+    "nodes": 206789,
+    "wall": 20.05106208298821,
+    "has_inc": true,
+    "x": null,
+    "ref": -52242.0,
+    "viol": []
+   }
+  ],
+  "fiber|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 405935.17999999993,
+    "bound": 405929.1943740805,
+    "nodes": 23537,
+    "wall": 12.032410832995083,
+    "has_inc": true,
+    "x": null,
+    "ref": 405935.18,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 405935.17999999993,
+    "bound": 405929.1943740805,
+    "nodes": 23537,
+    "wall": 9.47801454103319,
+    "has_inc": true,
+    "x": null,
+    "ref": 405935.18,
+    "viol": []
+   }
+  ],
+  "fiber|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 405935.17999999993,
+    "bound": 405929.1943740805,
+    "nodes": 23537,
+    "wall": 12.49463987495983,
+    "has_inc": true,
+    "x": null,
+    "ref": 405935.18,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 405935.17999999993,
+    "bound": 405929.1943740805,
+    "nodes": 23537,
+    "wall": 9.60367550002411,
+    "has_inc": true,
+    "x": null,
+    "ref": 405935.18,
+    "viol": []
+   }
+  ],
+  "khb05250|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 106940225.99999951,
+    "bound": 106940225.99999951,
+    "nodes": 101,
+    "wall": 0.12483108299784362,
+    "has_inc": true,
+    "x": null,
+    "ref": 106940225.9999999,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 106940225.99999951,
+    "bound": 106940225.99999951,
+    "nodes": 101,
+    "wall": 0.1534700409974903,
+    "has_inc": true,
+    "x": null,
+    "ref": 106940225.9999999,
+    "viol": []
+   }
+  ],
+  "khb05250|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 106940225.99999951,
+    "bound": 106940225.99999951,
+    "nodes": 35,
+    "wall": 0.48740641603944823,
+    "has_inc": true,
+    "x": null,
+    "ref": 106940225.9999999,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 106940225.99999951,
+    "bound": 106940225.99999951,
+    "nodes": 35,
+    "wall": 0.4984475419623777,
+    "has_inc": true,
+    "x": null,
+    "ref": 106940225.9999999,
+    "viol": []
+   }
+  ],
+  "nexp-50-20-1-1|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 45.0,
+    "bound": 24.0,
+    "nodes": 86649,
+    "wall": 20.415437582996674,
+    "has_inc": true,
+    "x": null,
+    "ref": 28.99999999999999,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 45.0,
+    "bound": 24.0,
+    "nodes": 97151,
+    "wall": 20.079122582974378,
+    "has_inc": true,
+    "x": null,
+    "ref": 28.99999999999999,
+    "viol": []
+   }
+  ],
+  "nexp-50-20-1-1|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 30.0,
+    "bound": 24.0,
+    "nodes": 68863,
+    "wall": 20.01687808299903,
+    "has_inc": true,
+    "x": null,
+    "ref": 28.99999999999999,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 30.0,
+    "bound": 24.0,
+    "nodes": 87831,
+    "wall": 20.02550520800287,
+    "has_inc": true,
+    "x": null,
+    "ref": 28.99999999999999,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-2|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -29347.000000000015,
+    "bound": -52218.10422387205,
+    "nodes": 176835,
+    "wall": 20.038105625018943,
+    "has_inc": true,
+    "x": null,
+    "ref": -50768.00000000001,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -29347.000000000015,
+    "bound": -52205.11107977893,
+    "nodes": 204671,
+    "wall": 20.044784583966248,
+    "has_inc": true,
+    "x": null,
+    "ref": -50768.00000000001,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-2|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -50768.0,
+    "bound": -52297.05410418314,
+    "nodes": 145783,
+    "wall": 20.03851633303566,
+    "has_inc": true,
+    "x": null,
+    "ref": -50768.00000000001,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -50768.0,
+    "bound": -52287.650878812376,
+    "nodes": 194709,
+    "wall": 20.04595641704509,
+    "has_inc": true,
+    "x": null,
+    "ref": -50768.00000000001,
+    "viol": []
+   }
+  ],
+  "22433|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 21476.999999999996,
+    "bound": 21476.999999999996,
+    "nodes": 159,
+    "wall": 2.626329999999143,
+    "has_inc": true,
+    "x": null,
+    "ref": 21477.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 21476.999999999996,
+    "bound": 21476.999999999996,
+    "nodes": 159,
+    "wall": 2.574481125047896,
+    "has_inc": true,
+    "x": null,
+    "ref": 21477.0,
+    "viol": []
+   }
+  ],
+  "22433|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 21476.999999999996,
+    "bound": 21476.999999999996,
+    "nodes": 159,
+    "wall": 4.5892275419901125,
+    "has_inc": true,
+    "x": null,
+    "ref": 21477.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 21476.999999999996,
+    "bound": 21476.999999999996,
+    "nodes": 159,
+    "wall": 4.571251917048357,
+    "has_inc": true,
+    "x": null,
+    "ref": 21477.0,
+    "viol": []
+   }
+  ],
+  "nexp-50-20-4-2|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 85.0,
+    "bound": 65.0,
+    "nodes": 20565,
+    "wall": 20.045606250001583,
+    "has_inc": true,
+    "x": null,
+    "ref": 70.99999999999999,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 85.0,
+    "bound": 65.0,
+    "nodes": 23541,
+    "wall": 20.022565833991393,
+    "has_inc": true,
+    "x": null,
+    "ref": 70.99999999999999,
+    "viol": []
+   }
+  ],
+  "nexp-50-20-4-2|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 84.0,
+    "bound": 65.0,
+    "nodes": 16853,
+    "wall": 20.028140916954726,
+    "has_inc": true,
+    "x": null,
+    "ref": 70.99999999999999,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 84.0,
+    "bound": 65.0,
+    "nodes": 21825,
+    "wall": 20.03763933299342,
+    "has_inc": true,
+    "x": null,
+    "ref": 70.99999999999999,
+    "viol": []
+   }
+  ],
+  "gt2|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 21166.0,
+    "bound": 21166.0,
+    "nodes": 2643,
+    "wall": 0.07198729197261855,
+    "has_inc": true,
+    "x": null,
+    "ref": 21165.99999999978,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 21166.0,
+    "bound": 21166.0,
+    "nodes": 2643,
+    "wall": 0.05734100000699982,
+    "has_inc": true,
+    "x": null,
+    "ref": 21165.99999999978,
+    "viol": []
+   }
+  ],
+  "gt2|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 21166.0,
+    "bound": 21166.0,
+    "nodes": 2643,
+    "wall": 0.06248470803257078,
+    "has_inc": true,
+    "x": null,
+    "ref": 21165.99999999978,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 21166.0,
+    "bound": 21166.0,
+    "nodes": 2643,
+    "wall": 0.051032999996095896,
+    "has_inc": true,
+    "x": null,
+    "ref": 21165.99999999978,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-1|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -34399.999999999985,
+    "bound": -51062.88568267561,
+    "nodes": 292307,
+    "wall": 20.077425625000615,
+    "has_inc": true,
+    "x": null,
+    "ref": -49716.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -34399.999999999985,
+    "bound": -51057.177129764095,
+    "nodes": 320843,
+    "wall": 20.072065374988597,
+    "has_inc": true,
+    "x": null,
+    "ref": -49716.0,
+    "viol": []
+   }
+  ],
+  "mik-250-20-75-1|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -49016.00000000003,
+    "bound": -51113.123078767814,
+    "nodes": 226063,
+    "wall": 20.05872716702288,
+    "has_inc": true,
+    "x": null,
+    "ref": -49716.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -49016.00000000003,
+    "bound": -51108.995140380866,
+    "nodes": 252883,
+    "wall": 20.061491415952332,
+    "has_inc": true,
+    "x": null,
+    "ref": -49716.0,
+    "viol": []
+   }
+  ],
+  "23588|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 8089.999999999999,
+    "bound": 8089.999999999999,
+    "nodes": 4449,
+    "wall": 1.319453667034395,
+    "has_inc": true,
+    "x": null,
+    "ref": 8089.999999999998,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 8089.999999999999,
+    "bound": 8089.999999999999,
+    "nodes": 4449,
+    "wall": 1.3563557909801602,
+    "has_inc": true,
+    "x": null,
+    "ref": 8089.999999999998,
+    "viol": []
+   }
+  ],
+  "23588|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 8089.999999999999,
+    "bound": 8089.999999999999,
+    "nodes": 4449,
+    "wall": 2.0974566250224598,
+    "has_inc": true,
+    "x": null,
+    "ref": 8089.999999999998,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 8089.999999999999,
+    "bound": 8089.999999999999,
+    "nodes": 4449,
+    "wall": 1.9128542079706676,
+    "has_inc": true,
+    "x": null,
+    "ref": 8089.999999999998,
+    "viol": []
+   }
+  ],
+  "flugpl|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 1201499.9999999995,
+    "bound": 1201499.9999999995,
+    "nodes": 323,
+    "wall": 0.024067125050351024,
+    "has_inc": true,
+    "x": null,
+    "ref": 1201500.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 1201499.9999999995,
+    "bound": 1201499.9999999995,
+    "nodes": 323,
+    "wall": 0.023002083995379508,
+    "has_inc": true,
+    "x": null,
+    "ref": 1201500.0,
+    "viol": []
+   }
+  ],
+  "flugpl|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 1201499.9999999995,
+    "bound": 1201499.9999999995,
+    "nodes": 323,
+    "wall": 0.0244079579715617,
+    "has_inc": true,
+    "x": null,
+    "ref": 1201500.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 1201499.9999999995,
+    "bound": 1201499.9999999995,
+    "nodes": 323,
+    "wall": 0.023184332996606827,
+    "has_inc": true,
+    "x": null,
+    "ref": 1201500.0,
+    "viol": []
+   }
+  ],
+  "dcmulti|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 188182.00000000003,
+    "bound": 188167.8932541513,
+    "nodes": 3593,
+    "wall": 1.918817209021654,
+    "has_inc": true,
+    "x": null,
+    "ref": 188182.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 188182.00000000003,
+    "bound": 188167.8932541513,
+    "nodes": 3593,
+    "wall": 1.529574499989394,
+    "has_inc": true,
+    "x": null,
+    "ref": 188182.0,
+    "viol": []
+   }
+  ],
+  "dcmulti|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 188182.00000000003,
+    "bound": 188167.8932541513,
+    "nodes": 3451,
+    "wall": 1.821111666969955,
+    "has_inc": true,
+    "x": null,
+    "ref": 188182.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 188182.00000000003,
+    "bound": 188167.8932541513,
+    "nodes": 3451,
+    "wall": 1.558382416027598,
+    "has_inc": true,
+    "x": null,
+    "ref": 188182.0,
+    "viol": []
+   }
+  ],
+  "enlight_hard|OFF": [
+   {
+    "arm": "OFF",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 32.0,
+    "nodes": 128353,
+    "wall": 20.043941291980445,
+    "has_inc": false,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 34.0,
+    "nodes": 163367,
+    "wall": 20.04829895903822,
+    "has_inc": false,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   }
+  ],
+  "enlight_hard|ON": [
+   {
+    "arm": "ON",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 33.0,
+    "nodes": 136047,
+    "wall": 20.02830287499819,
+    "has_inc": false,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 34.0,
+    "nodes": 171285,
+    "wall": 20.035066707991064,
+    "has_inc": false,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   }
+  ],
+  "sp150x300d|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 85.0,
+    "bound": 66.0,
+    "nodes": 265865,
+    "wall": 20.2858157500159,
+    "has_inc": true,
+    "x": null,
+    "ref": 69.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 85.0,
+    "bound": 66.0,
+    "nodes": 245361,
+    "wall": 20.426331707974896,
+    "has_inc": true,
+    "x": null,
+    "ref": 69.0,
+    "viol": []
+   }
+  ],
+  "sp150x300d|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 69.0,
+    "bound": 66.0,
+    "nodes": 220521,
+    "wall": 20.06215366598917,
+    "has_inc": true,
+    "x": null,
+    "ref": 69.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 69.0,
+    "bound": 66.0,
+    "nodes": 272927,
+    "wall": 20.10347933298908,
+    "has_inc": true,
+    "x": null,
+    "ref": 69.0,
+    "viol": []
+   }
+  ],
+  "gen|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 112313.36271799979,
+    "bound": 112311.8315824987,
+    "nodes": 769,
+    "wall": 0.32132987497607246,
+    "has_inc": true,
+    "x": null,
+    "ref": 112313.3627179998,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 112313.36271799979,
+    "bound": 112311.8315824987,
+    "nodes": 769,
+    "wall": 0.28049933299189433,
+    "has_inc": true,
+    "x": null,
+    "ref": 112313.3627179998,
+    "viol": []
+   }
+  ],
+  "gen|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 112313.36271799979,
+    "bound": 112311.8315824987,
+    "nodes": 769,
+    "wall": 0.3055674159550108,
+    "has_inc": true,
+    "x": null,
+    "ref": 112313.3627179998,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 112313.36271799979,
+    "bound": 112311.8315824987,
+    "nodes": 769,
+    "wall": 0.26087162498151883,
+    "has_inc": true,
+    "x": null,
+    "ref": 112313.3627179998,
+    "viol": []
+   }
+  ],
+  "neos17|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 0.36052486513486537,
+    "bound": 0.12522408376403094,
+    "nodes": 69335,
+    "wall": 20.019511083024554,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.1500025774,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 0.36052486513486537,
+    "bound": 0.1269343176784396,
+    "nodes": 78553,
+    "wall": 20.021588125033304,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.1500025774,
+    "viol": []
+   }
+  ],
+  "neos17|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 0.2100014485514491,
+    "bound": 0.11350749147317155,
+    "nodes": 40809,
+    "wall": 20.01325470901793,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.1500025774,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 0.2100014485514491,
+    "bound": 0.1142122902223466,
+    "nodes": 41965,
+    "wall": 20.016089875018224,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.1500025774,
+    "viol": []
+   }
+  ],
+  "beavma|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 593880.3,
+    "bound": 373086.85536491056,
+    "nodes": 147763,
+    "wall": 20.092975875013508,
+    "has_inc": true,
+    "x": null,
+    "ref": 383285.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 593880.3,
+    "bound": 373080.9769015721,
+    "nodes": 147543,
+    "wall": 20.144438292016275,
+    "has_inc": true,
+    "x": null,
+    "ref": 383285.0,
+    "viol": []
+   }
+  ],
+  "beavma|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 384407.09999999154,
+    "bound": 374066.8295750122,
+    "nodes": 157397,
+    "wall": 20.05261704197619,
+    "has_inc": true,
+    "x": null,
+    "ref": 383285.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 384407.09999999154,
+    "bound": 365448.2744164633,
+    "nodes": 74185,
+    "wall": 20.030837707978208,
+    "has_inc": true,
+    "x": null,
+    "ref": 383285.0,
+    "viol": []
+   }
+  ],
+  "neos-3611447-jijia|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 107.0,
+    "bound": 106.99499999999995,
+    "nodes": 100541,
+    "wall": 4.918846291024238,
+    "has_inc": true,
+    "x": null,
+    "ref": 107.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 110.0,
+    "bound": 106.69437499999997,
+    "nodes": 80295,
+    "wall": 20.267837500025053,
+    "has_inc": true,
+    "x": null,
+    "ref": 107.0,
+    "viol": []
+   }
+  ],
+  "neos-3611447-jijia|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 107.0,
+    "bound": 106.99249999999998,
+    "nodes": 87189,
+    "wall": 4.745072124991566,
+    "has_inc": true,
+    "x": null,
+    "ref": 107.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 109.0,
+    "bound": 106.37374999999997,
+    "nodes": 54027,
+    "wall": 20.052423333050683,
+    "has_inc": true,
+    "x": null,
+    "ref": 107.0,
+    "viol": []
+   }
+  ],
+  "neos-3610051-istra|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 48.99999999999988,
+    "bound": 48.66499999999998,
+    "nodes": 176633,
+    "wall": 20.208123666001484,
+    "has_inc": true,
+    "x": null,
+    "ref": 49.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 48.99999999999999,
+    "bound": 48.15624999999997,
+    "nodes": 51215,
+    "wall": 20.234796250006184,
+    "has_inc": true,
+    "x": null,
+    "ref": 49.0,
+    "viol": []
+   }
+  ],
+  "neos-3610051-istra|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 48.99999999999988,
+    "bound": 48.624999999999986,
+    "nodes": 163707,
+    "wall": 20.052505208994262,
+    "has_inc": true,
+    "x": null,
+    "ref": 49.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 48.99999999999999,
+    "bound": 48.1448810393258,
+    "nodes": 47667,
+    "wall": 20.0711981250206,
+    "has_inc": true,
+    "x": null,
+    "ref": 49.0,
+    "viol": []
+   }
+  ],
+  "neos-3118745-obra|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 344.99999999999994,
+    "bound": 253.83333333333346,
+    "nodes": 31359,
+    "wall": 20.055299875035416,
+    "has_inc": true,
+    "x": null,
+    "ref": 255.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 344.99999999999994,
+    "bound": 253.8333333333334,
+    "nodes": 10111,
+    "wall": 20.033577916037757,
+    "has_inc": true,
+    "x": null,
+    "ref": 255.0,
+    "viol": []
+   }
+  ],
+  "neos-3118745-obra|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 285.0,
+    "bound": 253.83333333333346,
+    "nodes": 31359,
+    "wall": 20.01284325000597,
+    "has_inc": true,
+    "x": null,
+    "ref": 255.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 290.9999999999996,
+    "bound": 253.8333333333334,
+    "nodes": 21701,
+    "wall": 20.012589082994964,
+    "has_inc": true,
+    "x": null,
+    "ref": 255.0,
+    "viol": []
+   }
+  ],
+  "neos-3611689-kaihu|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 118.99999999999999,
+    "bound": 118.9895064748201,
+    "nodes": 97269,
+    "wall": 11.461545875004958,
+    "has_inc": true,
+    "x": null,
+    "ref": 119.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 118.99999999999999,
+    "bound": 118.9895064748201,
+    "nodes": 97269,
+    "wall": 13.184664083004463,
+    "has_inc": true,
+    "x": null,
+    "ref": 119.0,
+    "viol": []
+   }
+  ],
+  "neos-3611689-kaihu|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 118.99999999999999,
+    "bound": 118.9895064748201,
+    "nodes": 96943,
+    "wall": 9.9334324169904,
+    "has_inc": true,
+    "x": null,
+    "ref": 119.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 118.99999999999999,
+    "bound": 118.9895064748201,
+    "nodes": 96943,
+    "wall": 11.627757583977655,
+    "has_inc": true,
+    "x": null,
+    "ref": 119.0,
+    "viol": []
+   }
+  ],
+  "neos-3610040-iskar|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 36.99999999999811,
+    "bound": 36.71,
+    "nodes": 323327,
+    "wall": 20.214352792012505,
+    "has_inc": true,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 36.99999999999811,
+    "bound": 36.68499999999998,
+    "nodes": 311989,
+    "wall": 20.188401249994058,
+    "has_inc": true,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   }
+  ],
+  "neos-3610040-iskar|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 36.99999999999989,
+    "bound": 36.85249999999991,
+    "nodes": 310929,
+    "wall": 20.111702708993107,
+    "has_inc": true,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 36.99999999999989,
+    "bound": 36.75499999999998,
+    "nodes": 282791,
+    "wall": 20.091689791996032,
+    "has_inc": true,
+    "x": null,
+    "ref": 37.0,
+    "viol": []
+   }
+  ],
+  "neos-5192052-neckar|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": -11670000.00000002,
+    "bound": -11670000.00000002,
+    "nodes": 7,
+    "wall": 0.0018687080009840429,
+    "has_inc": true,
+    "x": null,
+    "ref": -11670000.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": -11670000.00000002,
+    "bound": -11670000.00000002,
+    "nodes": 7,
+    "wall": 0.002160125004593283,
+    "has_inc": true,
+    "x": null,
+    "ref": -11670000.0,
+    "viol": []
+   }
+  ],
+  "neos-5192052-neckar|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": -11670000.00000002,
+    "bound": -11670000.00000002,
+    "nodes": 7,
+    "wall": 0.002949874964542687,
+    "has_inc": true,
+    "x": null,
+    "ref": -11670000.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": -11670000.00000002,
+    "bound": -11670000.00000002,
+    "nodes": 7,
+    "wall": 0.0034286250011064112,
+    "has_inc": true,
+    "x": null,
+    "ref": -11670000.0,
+    "viol": []
+   }
+  ],
+  "neos-2624317-amur|OFF": [
+   {
+    "arm": "OFF",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 0.0,
+    "nodes": 61,
+    "wall": 20.009906041959766,
+    "has_inc": false,
+    "x": null,
+    "ref": 3.5223968,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 0.0,
+    "nodes": 31,
+    "wall": 20.00471241597552,
+    "has_inc": false,
+    "x": null,
+    "ref": 3.5223968,
+    "viol": []
+   }
+  ],
+  "neos-2624317-amur|ON": [
+   {
+    "arm": "ON",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 0.0,
+    "nodes": 59,
+    "wall": 20.01244212500751,
+    "has_inc": false,
+    "x": null,
+    "ref": 3.5223968,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "node_limit",
+    "obj": null,
+    "bound": 0.0,
+    "nodes": 15,
+    "wall": 20.00713933299994,
+    "has_inc": false,
+    "x": null,
+    "ref": 3.5223968,
+    "viol": []
+   }
+  ],
+  "app2-2|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 212042.49999999732,
+    "bound": 212040.35714285716,
+    "nodes": 225,
+    "wall": 0.01360983302583918,
+    "has_inc": true,
+    "x": null,
+    "ref": 212040.3571429,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 212042.49999999732,
+    "bound": 212040.35714285716,
+    "nodes": 225,
+    "wall": 0.01688599999761209,
+    "has_inc": true,
+    "x": null,
+    "ref": 212040.3571429,
+    "viol": []
+   }
+  ],
+  "app2-2|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 212042.49999999732,
+    "bound": 212040.35714285716,
+    "nodes": 225,
+    "wall": 0.01372774998890236,
+    "has_inc": true,
+    "x": null,
+    "ref": 212040.3571429,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 212042.49999999732,
+    "bound": 212040.35714285716,
+    "nodes": 225,
+    "wall": 0.018165000015869737,
+    "has_inc": true,
+    "x": null,
+    "ref": 212040.3571429,
+    "viol": []
+   }
+  ],
+  "b-ball|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -1.5000000009961507,
+    "bound": -1.5005766558170517,
+    "nodes": 758081,
+    "wall": 20.28945445799036,
+    "has_inc": true,
+    "x": null,
+    "ref": -1.50000000000001,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": -1.5000000009961507,
+    "bound": -1.5005766558170524,
+    "nodes": 611927,
+    "wall": 20.241991791001055,
+    "has_inc": true,
+    "x": null,
+    "ref": -1.50000000000001,
+    "viol": []
+   }
+  ],
+  "b-ball|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -1.5000000009961507,
+    "bound": -1.5005766558170517,
+    "nodes": 727655,
+    "wall": 20.21561983297579,
+    "has_inc": true,
+    "x": null,
+    "ref": -1.50000000000001,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": -1.5000000009961507,
+    "bound": -1.5005766558170621,
+    "nodes": 464539,
+    "wall": 20.20978016697336,
+    "has_inc": true,
+    "x": null,
+    "ref": -1.50000000000001,
+    "viol": []
+   }
+  ],
+  "bppc8-02|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 507.0,
+    "bound": 507.0,
+    "nodes": 11883,
+    "wall": 0.6596957090077922,
+    "has_inc": true,
+    "x": null,
+    "ref": 506.9999999999998,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 507.0,
+    "bound": 507.0,
+    "nodes": 11883,
+    "wall": 2.5215046670055017,
+    "has_inc": true,
+    "x": null,
+    "ref": 506.9999999999998,
+    "viol": []
+   }
+  ],
+  "bppc8-02|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 507.0,
+    "bound": 507.0,
+    "nodes": 59385,
+    "wall": 3.3421952920034528,
+    "has_inc": true,
+    "x": null,
+    "ref": 506.9999999999998,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 507.0,
+    "bound": 507.0,
+    "nodes": 59385,
+    "wall": 17.659710915992036,
+    "has_inc": true,
+    "x": null,
+    "ref": 506.9999999999998,
+    "viol": []
+   }
+  ],
+  "supportcase16|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 57,
+    "wall": 0.11252845800481737,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 57,
+    "wall": 0.23121829197043553,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   }
+  ],
+  "supportcase16|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 57,
+    "wall": 0.11210424994351342,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 57,
+    "wall": 0.2791014999966137,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   }
+  ],
+  "supportcase14|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 145,
+    "wall": 0.0957940419903025,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 145,
+    "wall": 0.5177234169677831,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   }
+  ],
+  "supportcase14|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 145,
+    "wall": 0.09664608398452401,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 288.0,
+    "bound": 288.0,
+    "nodes": 145,
+    "wall": 0.18611241597682238,
+    "has_inc": true,
+    "x": null,
+    "ref": 288.0,
+    "viol": []
+   }
+  ],
+  "f2gap40400|OFF": [
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 20772.000000000102,
+    "bound": 20772.000000000102,
+    "nodes": 1,
+    "wall": 0.009886124986223876,
+    "has_inc": true,
+    "x": null,
+    "ref": 20771.99999999983,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "optimal",
+    "obj": 20772.000000000102,
+    "bound": 20772.000000000102,
+    "nodes": 1,
+    "wall": 0.0176533330231905,
+    "has_inc": true,
+    "x": null,
+    "ref": 20771.99999999983,
+    "viol": []
+   }
+  ],
+  "f2gap40400|ON": [
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 20772.000000000102,
+    "bound": 20772.000000000102,
+    "nodes": 1,
+    "wall": 0.009723542025312781,
+    "has_inc": true,
+    "x": null,
+    "ref": 20771.99999999983,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "optimal",
+    "obj": 20772.000000000102,
+    "bound": 20772.000000000102,
+    "nodes": 1,
+    "wall": 0.018476541968993843,
+    "has_inc": true,
+    "x": null,
+    "ref": 20771.99999999983,
+    "viol": []
+   }
+  ],
+  "gsvm2rl3|OFF": [
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 0.5863548183028108,
+    "bound": 0.2313503893214682,
+    "nodes": 364179,
+    "wall": 20.72710745903896,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.33652753,
+    "viol": []
+   },
+   {
+    "arm": "OFF",
+    "status": "feasible",
+    "obj": 0.5863548183028108,
+    "bound": 0.19448275862068967,
+    "nodes": 75021,
+    "wall": 20.06215804198291,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.33652753,
+    "viol": []
+   }
+  ],
+  "gsvm2rl3|ON": [
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 0.5863548183028108,
+    "bound": 0.21291657397107894,
+    "nodes": 169281,
+    "wall": 20.029104667017236,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.33652753,
+    "viol": []
+   },
+   {
+    "arm": "ON",
+    "status": "feasible",
+    "obj": 0.5863548183028108,
+    "bound": 0.1861535038932146,
+    "nodes": 44343,
+    "wall": 20.048364666989073,
+    "has_inc": true,
+    "x": null,
+    "ref": 0.33652753,
+    "viol": []
+   }
+  ]
+ },
+ "median_gap_off": 0.3874400965870115,
+ "median_gap_on": 0.01638578151940375,
+ "wins": 12,
+ "losses": 0,
+ "bnd_wins": 1,
+ "bnd_losses": 9,
+ "bars": {
+  "2a": true,
+  "2b": true,
+  "2c": false
+ },
+ "verdict": "STAYS OFF: cert-clean but not net-positive -- record the measurement (the DISCOPT_CUT_INHERIT outcome)"
+}

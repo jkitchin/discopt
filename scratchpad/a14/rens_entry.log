@@ -1,0 +1,29 @@
+discopt: /Users/jkitchin/projects/discopt/wt-a13/python/discopt/__init__.py
+load at start: 8:36  up 6 days, 17 mins, 6 users, load averages: 28.47 53.98 61.54
+
+instance               fix%   free   RENS st     RENS obj       inc@20      optimum  better?  gapcut%
+mik-250-20-75-5        70.0     75   optimal  4.79085e-14       -28299       -51532       no   -121.8
+neos-911970            93.2     57   optimal       115.85       215.69        54.76      YES     62.0
+mik-250-20-75-3        70.0     75   optimal   1.3573e-13       -40559       -52242       no   -347.2
+nexp-50-20-1-1         86.9     32   optimal           35           45           29      YES     62.5
+mik-250-20-75-2        70.0     75   optimal         -667       -29347       -50768       no   -133.9
+nexp-50-20-4-2         97.0     29   optimal          112           85           71       no   -192.9
+mik-250-20-75-1        70.0     75   optimal -4.56407e-14       -34400       -49716       no   -224.6
+enlight_hard           85.5     29infeasible            -            -           37       no        -
+sp150x300d             76.7     70   optimal           70           85           69      YES     93.8
+neos17                 43.0    171   optimal     0.191443     0.360525     0.150003      YES     80.3
+beavma                 54.9     88   optimal       407840       593880       383285      YES     88.3
+neos-3118745-obra      97.3     31   optimal          331          345          255      YES     15.6
+neos-2624317-amur      60.7    206infeasible            -            -       3.5224       no        -
+b-ball                 83.0     15   optimal         -1.5         -1.5         -1.5       no        -
+gsvm2rl3               48.3     31   optimal     0.336528     0.586355     0.336528      YES    100.0
+
+INSTANCES RUN: 15
+SCORED (the comparison count): 15
+
+HIT RATE: RENS improved the 20s incumbent on 7/15
+MEDIAN PRIMAL-GAP REDUCTION over improved instances: 80.3% (n=7)
+MEDIAN LP-INTEGRAL FIXING RATE: 70.0%
+
+VERDICT: SURVIVES -- both pre-registered bars met; implement A14/RENS
+load at end: 8:36  up 6 days, 17 mins, 6 users, load averages: 28.03 53.46 61.31

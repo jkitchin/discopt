@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from benchmarks.metrics import (
+    DISCOPT_STATUS_MAP,
     BenchmarkResults,
     InstanceInfo,
     SolveResult,
@@ -266,15 +267,9 @@ class CategoryBenchmarkRunner:
                 )
             elapsed = time.monotonic() - start
 
-            # Map status
-            status_map = {
-                "optimal": SolveStatus.OPTIMAL,
-                "feasible": SolveStatus.FEASIBLE,
-                "infeasible": SolveStatus.INFEASIBLE,
-                "unbounded": SolveStatus.UNBOUNDED,
-                "time_limit": SolveStatus.TIME_LIMIT,
-                "node_limit": SolveStatus.TIME_LIMIT,
-            }
+            # Shared table (#1148) plus this runner's own "unbounded" entry;
+            # unmapped -> UNKNOWN, which fails closed.
+            status_map = DISCOPT_STATUS_MAP | {"unbounded": SolveStatus.UNBOUNDED}
             bench_status = status_map.get(result.status, SolveStatus.UNKNOWN)
 
             return SolveResult(

@@ -141,6 +141,9 @@ timed_phases!(
     SepGomory,
     Augment,
     DiveRepair,
+    // A12/RINS: wall time inside the sub-MILP improvement heuristic.
+    Rins,
+    Rens,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
@@ -189,6 +192,47 @@ counters!(
     // schedule that never fired (CLAUDE.md §6).
     DiveOffRoot,
     DiveOffRootHits,
+    // A solve whose objective lattice was found ONLY by resolving a costed
+    // continuous column through its defining equality row -- the base detector
+    // refused and the substitution did not. This is the exact population the A13
+    // flag exists for; a zero here means the lever never engaged and any timing
+    // read off that run is measuring nothing (CLAUDE.md §6).
+    ObjLatticeSubst,
+    // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
+    // >= run >= improved -- so an implausible ordering is an arithmetic error
+    // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`
+    // is the safety counter: a sub-MILP point that failed the driver's own
+    // feasibility re-verification. It must stay ZERO; a nonzero value means the
+    // heuristic tried to inject an infeasible incumbent and is a correctness
+    // bug, not a tuning signal.
+    RinsConsidered,
+    RinsGated,
+    RinsRun,
+    RinsImproved,
+    RinsRejected,
+    RinsSubNodes,
+    // A batch that reached the RINS call site but was skipped because the
+    // failure backoff had widened the stride past it. This is the counter that
+    // proves the backoff engaged: the first A12 panel ran RINS 1401 times for 35
+    // improvements (a 2.5 % hit rate) at a cost of +44.9 % wall on the
+    // both-solved set, and cutting the low-yield tail is what this exists for.
+    RinsBackoffSkips,
+    // A14 RENS (`DISCOPT_RENS`). Same funnel discipline as RINS above --
+    // considered >= gated >= run >= improved -- and `RensRejected` is the same
+    // safety counter that must stay ZERO. `RensSeeded` counts the attempts in
+    // which the incumbent happened to lie inside the RENS box and could be used
+    // as a cutoff; it is expected to be a small fraction, and a value equal to
+    // `RensRun` would mean the box is not actually moving off the incumbent,
+    // i.e. RENS has degenerated into RINS and the panel is comparing a mechanism
+    // against itself.
+    RensConsidered,
+    RensGated,
+    RensRun,
+    RensImproved,
+    RensRejected,
+    RensSubNodes,
+    RensSeeded,
+    RensBackoffSkips,
     Phase1Pivots,
     Phase2Pivots,
     DegeneratePivots,
