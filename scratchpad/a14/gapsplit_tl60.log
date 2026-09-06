@@ -1,0 +1,30 @@
+discopt: /Users/jkitchin/projects/discopt/wt-a13/python/discopt/__init__.py
+load at start: 8:16  up 5 days, 23:58, 6 users, load averages: 35.16 31.50 35.35
+TL=60.0s over 15 instances unsolved at 20s
+
+instance                status     incumbent         bound       optimum  primal%   dual%
+mik-250-20-75-5       feasible        -28299      -52619.3        -51532    95.5    4.5
+neos-911970           feasible        215.69         23.26         54.76    83.6   16.4
+mik-250-20-75-3       feasible        -40559      -53324.1        -52242    91.5    8.5
+nexp-50-20-1-1        feasible            45            24            29    76.2   23.8
+mik-250-20-75-2       feasible        -29347      -52167.3        -50768    93.9    6.1
+nexp-50-20-4-2        feasible            85            66            71    73.7   26.3
+mik-250-20-75-1       feasible        -34400      -51034.5        -49716    92.1    7.9
+enlight_hard           optimal            37            37            37       -      -
+sp150x300d            feasible            85            67            69    88.9   11.1
+neos17                feasible      0.360525      0.133735      0.150003    92.8    7.2
+beavma                feasible        593880        378468        383285    97.8    2.2
+neos-3118745-obra     feasible           345           254           255    98.9    1.1
+neos-2624317-amur   node_limit             -             0        3.5224   100.0    0.0
+b-ball                feasible          -1.5      -1.50058          -1.5    -0.0  100.0
+gsvm2rl3              feasible      0.586355      0.244779      0.336528    73.1   26.9
+
+INSTANCES RUN: 15
+UNSOLVED: 14   SCORED (the comparison count): 14   of which NO INCUMBENT AT ALL: 1
+  no incumbent at the time limit: neos-2624317-amur
+
+MEDIAN PRIMAL SHARE over the 14 unsolved instances: 91.8%
+MEDIAN DUAL   SHARE: 8.2%
+
+VERDICT: PRIMAL is the lever -- build heuristics (Track B2) before branching work
+load at end: 8:31  up 6 days, 13 mins, 6 users, load averages: 53.72 76.58 69.84

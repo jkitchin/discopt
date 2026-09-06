@@ -94,6 +94,13 @@ instance closes until the bound arrives regardless of how good the incumbent is.
 That is a strict ordering, and the stages below follow it: bound first, primal as
 the accelerant that makes the bound's tree cheaper.
 
+> **FALSIFIED 2026-09-06 — see A14.** The "strict ordering" inference is wrong:
+> necessity and sufficiency do not order work, and the primal side is not an
+> accelerant here but the binding constraint. Given 3x the wall budget the dual
+> bound improved on 10 of 15 unsolved instances and the incumbent improved on
+> **0 of the 14** that held one. Median primal share of the open gap: 91.1 % at
+> 20 s, 91.8 % at 60 s. Read A14 before using this paragraph to order any work.
+
 ## 1. Where the gap is
 
 ### 1a. The failures present as primal-short
@@ -391,6 +398,13 @@ sufficient on none — no instance closes until the bound arrives, however good 
 incumbent. That is a strict ordering, and it is why Track A precedes Track B. But
 Track B is not optional: on the `mik` family the bound is already within 2.6 % and
 the tree still does not close, so Track A alone does not reach 38/38 either.
+
+> **FALSIFIED 2026-09-06 — see A14.** Re-measured on main+A13: median primal share
+> of the open gap is 91.1 % at 20 s and 91.8 % at 60 s, and at 3x the budget the
+> incumbent improved on **0 of the 14** unsolved instances that held one while the
+> dual bound improved on 10 of 15. Track B is not the accelerant behind Track A; on
+> this panel it is the binding constraint. The `mik` observation in this paragraph
+> was the tell and should have been read as one.
 
 ### Track A0′ — the audit's two candidate defects. One survives; do it first.
 
@@ -2423,6 +2437,110 @@ solve, an unrecognized value is a hard refusal rather than a silently chosen arm
 and `obj_lattice_subst_reread.rs` fails if the cache ever returns. **Any A/B that
 switches a flag inside one process must prove the flag is not cached before its
 table means anything.**
+
+### A14 — §0's ordering principle is FALSIFIED: the primal side is *frozen*, and RENS clears its entry gate. 2026-09-06.
+
+**What §0 claims.** "Bound work is necessary everywhere. Primal work is necessary
+on 14 and sufficient on none, because no instance closes until the bound arrives
+regardless of how good the incumbent is. That is a strict ordering, and the stages
+below follow it: bound first, primal as the accelerant."
+
+**That inference does not hold, and the data now says the opposite.** Necessity and
+sufficiency do not order work. Closing a gap needs *both* halves, so the ordering
+question is which residual is larger and which is cheaper to remove — and a better
+incumbent is not merely an "accelerant", it is what makes the bound arrive at all,
+through pruning and reduced-cost fixing. §0's own §1a heading ("the failures present
+as primal-short") and A5 both pointed here; §0's ordering sentence outran them.
+
+**The measurement.** The pre-registered attribution probe (`gapsplit.py`, reading
+`>= 0.60 -> PRIMAL`, `<= 0.20 -> DUAL`, written before the run) was re-run against
+main+A13 on the 38-instance panel, because the ranking §0 orders against was
+measured 2026-09-05 and predates A12, A13 and node-propagation.
+
+| | 20 s | 60 s (3x budget) |
+|---|---|---|
+| unsolved / scored | 15 / 15 | 14 / 14 |
+| **median primal share** | **91.1 %** | **91.8 %** |
+| median dual share | 8.9 % | 8.2 % |
+| cert violations | 0 | 0 |
+
+The 60 s run was itself a pre-registered kill criterion — *median primal share
+< 0.60 at 3x the budget means the 20 s verdict is a time-limit artifact and Track
+B2 is not promoted on this evidence*. It came back **higher**, not lower.
+
+**The sharper statement, and the one that is immune to the load caveat** (machine
+load was 21–76 throughout, so per CLAUDE.md §9 **no wall-clock claim is made from
+either run**; these are within-instance comparisons of bound and incumbent *values*,
+which are load-independent):
+
+> Given 3x the wall budget and 2–5x the nodes, the dual bound improved on **10 of
+> 15** instances. Of the 14 instances that already held an incumbent at 20 s, the
+> incumbent improved on **0**. Not one. `b-ball` explored 1.24 M nodes without
+> moving its incumbent.
+
+`enlight_hard` is the natural control: it is the single instance with *no* incumbent
+at 20 s, and it is the single instance that gained primally, reaching the optimum by
+60 s. The one instance where the primal machinery was still permitted to run is the
+one that improved.
+
+**Root cause — this is a design gate, not a missing feature.** Off the root,
+discopt's only primal heuristic is plain nearest-rounding (`try_rounding_csc`), which
+never re-solves the continuous variables; it fires at every fractional node and
+produced zero improvements across ~500 K nodes. The one heuristic that *does* repair
+continuous variables (`try_dive_repair`) is root-only by default
+(`DIVE_STRIDE_DEFAULT = 0`) and, even when enabled, is hard-gated `!has_incumbent`
+on the stated assumption that "once any incumbent lands, the ordinary search (warm
+starts, cuts, reduced-cost fixing) is strictly the better use of the budget."
+
+**That assumption is what the table above falsifies.** The ordinary search was handed
+3x the budget on 14 instances holding an incumbent and improved it zero times. So the
+consequence of holding an incumbent is not that the search takes over the primal
+job — it is that discopt's primal machinery switches itself off permanently and
+nothing replaces it.
+
+**Why the answer is RENS and not more RINS.** A12 built RINS and it measured
+neutral-or-harmful; this data explains why rather than dismissing it. RINS fixes the
+integer variables on which the incumbent and the LP relaxation *agree* — it is an
+improvement heuristic anchored to the incumbent it starts from. Here the incumbents
+are 22–140 % off the optimum (`mik-250-*` ~30 %, `beavma` ~55 %, `neos17` ~140 %), so
+that anchor *is* the defect, not a usable starting point. RENS (Berthold, *RENS — the optimal rounding*, Math. Prog. Comput.
+6(1):33–54, 2014) ignores the incumbent entirely: fix every integer column already integral in the LP
+relaxation, restrict each fractional one to `{floor, ceil}`, solve the sub-MIP. It
+needs no incumbent at all — which also covers `neos-2624317-amur`, which has none.
+
+**Entry experiment, run before any implementation (CLAUDE.md §4), bars pre-registered:**
+*hit rate >= 5/15 (Berthold's ~1/3) and median primal-gap reduction >= 25 %; <= 3/15
+kills A14 outright.* Per instance: solve the pure LP relaxation, build the RENS box,
+run discopt on that box for the same 20 s, compare against the incumbent the full
+20 s solve reached.
+
+| | result | bar |
+|---|---|---|
+| hit rate | **7 / 15** | >= 5 |
+| median primal-gap reduction (improved) | **80.3 %** | >= 25 % |
+| median LP-integral fixing rate | 70.0 % | — |
+| cert violations | **0** | 0 (hard) |
+
+`gsvm2rl3` went from 0.586355 to the exact optimum 0.336528; `sp150x300d` cut 93.8 %
+of its primal gap, `beavma` 88.3 %, `neos17` 80.3 %. **Every** sub-MIP that was
+feasible solved to *optimality* inside the 20 s — the neighborhoods are cheap, which
+is the operational precondition. Two boxes came back infeasible (`enlight_hard`,
+`neos-2624317-amur`), detected fast; the correctness gate holds by construction and
+was checked explicitly, since a RENS box is a *restriction* and can never beat the
+reference optimum.
+
+**The honest limit.** On the four `mik-250-20-75-*` instances the root RENS box is
+*worse* than the incumbent (objective ~0 against −28 299), because the root LP fixes
+70 % of the integers at values that force a near-zero objective. This does not cost
+incumbent quality — a heuristic result is injected only if strictly better — but it
+does cost budget, and it is why real RENS runs at nodes throughout the tree off
+*different* LP solutions rather than once at the root. The entry experiment measured
+the weakest possible form of RENS and it still cleared both bars.
+
+**Status: A14 is entered, not shipped.** It still owes the CLAUDE.md §5 double bar —
+cert-clean *and* net-positive on a corpus-wide differential panel — before any
+default-ON graduation, and the `DISCOPT_CUT_INHERIT` lesson applies unchanged: sound
+is not the same as helpful.
 
 ## 4. Success metric
 
