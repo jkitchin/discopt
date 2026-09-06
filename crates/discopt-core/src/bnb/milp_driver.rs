@@ -1031,13 +1031,44 @@ pub fn solve_milp_node_hooked(
     // lattice is a property of the model, and appended slacks carry zero cost so
     // they would not change it, but reading `c` here keeps that independent of
     // what the cut loop does later.
-    tm.set_objective_lattice(
-        if obj_integrality_enabled() {
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int)
+    let lattice = if obj_integrality_enabled() {
+        let base =
+            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int).map(|spacing| {
+                crate::bnb::obj_integral::ObjLattice {
+                    spacing,
+                    shift: 0.0,
+                }
+            });
+        if obj_lattice_subst_enabled() {
+            // Bounds are the presolved ones on purpose: presolve only narrows and
+            // never cuts a feasible point, so a column it fixed is fixed at every
+            // point the tree can still reach -- which is all the lattice claim is
+            // quantified over, and it resolves strictly more objectives.
+            let subst = crate::bnb::obj_integral::objective_lattice(
+                c,
+                &is_int,
+                &base_l,
+                &base_u,
+                &crate::bnb::obj_integral::LatticeRows {
+                    csc: &csc_w,
+                    b,
+                    m,
+                    n,
+                },
+            );
+            if base.is_none() && subst.is_some() {
+                crate::profile::incr(crate::profile::Ctr::ObjLatticeSubst);
+            }
+            subst
         } else {
-            None
-        },
-        obj_const,
+            base
+        }
+    } else {
+        None
+    };
+    tm.set_objective_lattice(
+        lattice.map(|l| l.spacing),
+        obj_const + lattice.map_or(0.0, |l| l.shift),
     );
     tm.initialize();
 
@@ -3192,6 +3223,56 @@ fn obj_integrality_enabled() -> bool {
     })
 }
 
+/// Whether a costed *continuous* objective column may be resolved through an
+/// equality row that pins it to integer columns (`DISCOPT_OBJ_LATTICE_SUBST`,
+/// default ON; set to `0` for the legacy detector-only lattice).
+///
+/// Bound-changing, so it shipped behind a default-OFF opt-in until a differential
+/// panel cleared both CLAUDE.md §5 bars; it graduated default-ON on that panel
+/// (44 MIPLIB instances, 20 s each, arms interleaved per instance: 83 incumbents
+/// independently feasibility-verified, zero cert violations, 25/44 solved vs
+/// 23/44 with none lost, both-solved wall -11.6% and nodes -7.8%, and among the
+/// 21 instances neither arm closed the dual bound improved on 6 and worsened on
+/// none). The `=0`
+/// opt-out and the legacy path stay intact: with it set, the base detector's
+/// result is what reaches the tree, bit-identical to the pre-change search.
+///
+/// Read fresh on every solve rather than cached in a `OnceLock`. A cached read is
+/// what a differential panel cannot survive: the first solve in the process fixes
+/// the arm for every later one, so the ON arm silently runs the OFF code and the
+/// panel reports a tidy table of a comparison that never happened. That is exactly
+/// how the first attempt at this panel came back with both arms at an identical
+/// 313,441 nodes. One `getenv` per solve is not measurable.
+///
+/// An unrecognized value is a hard **refusal**, for the same reason: a panel that
+/// exports `DISCOPT_OBJ_LATTICE_SUBST=on` and is quietly handed the OFF arm
+/// measures nothing and reads as a result.
+fn obj_lattice_subst_enabled() -> bool {
+    match std::env::var("DISCOPT_OBJ_LATTICE_SUBST") {
+        Err(_) => true,
+        Ok(v) => match parse_obj_lattice_subst_flag(&v) {
+            Ok(on) => on,
+            Err(msg) => panic!("{msg}"),
+        },
+    }
+}
+
+/// Parse a `DISCOPT_OBJ_LATTICE_SUBST` value. Pure so the refusal can be asserted
+/// directly rather than by setting a process-wide variable (CLAUDE.md §6).
+fn parse_obj_lattice_subst_flag(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        // An empty value is how a shell spells "unset", so it takes the default
+        // rather than silently meaning the opposite arm.
+        "" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_OBJ_LATTICE_SUBST={other:?} is not recognized (expected \
+             1/true/yes or 0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
 fn rc_fix_force_refactor() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("DISCOPT_MILP_RC_FIX_REFACTOR").is_ok_and(|v| v.trim() == "1"))
@@ -4536,6 +4617,33 @@ pub fn solve_milp_csc(
 
 #[cfg(test)]
 mod tests {
+
+    /// An unrecognized flag value must refuse loudly, not fall through to an arm.
+    /// A panel that exports `=on` and is handed OFF produces a comparison of the
+    /// OFF arm against itself and reports it as a result (CLAUDE.md §6).
+    #[test]
+    fn obj_lattice_subst_flag_refuses_garbage_instead_of_picking_an_arm() {
+        for off in ["0", "false", "no", " NO ", "False"] {
+            assert!(
+                !parse_obj_lattice_subst_flag(off).unwrap(),
+                "{off:?} must read as off"
+            );
+        }
+        // "" is the shell's way of spelling "unset", so it takes the default (on)
+        // rather than quietly selecting the opposite arm.
+        for on in ["", "  ", "1", "true", "yes", " YES ", "True"] {
+            assert!(
+                parse_obj_lattice_subst_flag(on).unwrap(),
+                "{on:?} must read as on"
+            );
+        }
+        for bad in ["on", "2", "enable", "-1", "0.0"] {
+            assert!(
+                parse_obj_lattice_subst_flag(bad).is_err(),
+                "{bad:?} must be refused, not silently mapped to an arm"
+            );
+        }
+    }
     use super::*;
 
     // ---- objective-lattice fathoming (DISCOPT_OBJ_INTEGRALITY) ----
