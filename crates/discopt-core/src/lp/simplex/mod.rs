@@ -182,6 +182,46 @@ pub struct SimplexOptions {
     /// `dual::STALL_PATIENCE` for how the patience was derived and
     /// `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails` for the case.
     pub dual_stall_patience: usize,
+    /// Relative size of the **cost perturbation** applied to a warm dual start;
+    /// `0.0` disables it (#1013).
+    ///
+    /// The stall this addresses is *dual* degeneracy: the per-pivot trace of the
+    /// worst panel cell shows the chosen pivot magnitude at a median of exactly
+    /// 1.0 and a primal step that is never zero, while `d_q ≈ 0` — a sparse
+    /// objective on a lifted relaxation ties the reduced costs at zero, so the
+    /// ratio test takes a zero-length *dual* step however it breaks the tie. That
+    /// is why both tie-break arms (a dual Harris pass scoped to the stall, and
+    /// Bland at a reachable threshold) were falsified: neither has anything to
+    /// discriminate. Perturbing the costs removes the ties themselves, which is
+    /// the classical remedy (Koberstein 2005; Huangfu & Hall 2015).
+    ///
+    /// Only **nonbasic** costs move, each in the sign that preserves the start's
+    /// dual feasibility (`AT_LOWER` up, `AT_UPPER` down), so `y = B⁻ᵀc_B` and the
+    /// basic reduced costs are untouched and the start stays dual feasible by
+    /// construction. Nonbasic *free* columns are skipped — they must price to
+    /// exactly zero, and perturbing one makes the start dual infeasible outright.
+    ///
+    /// The answer the caller receives is always computed on the **true** costs:
+    /// the perturbed solve only supplies a starting basis, from which a clean-up
+    /// re-solve on the unperturbed `c` produces the returned point, objective,
+    /// basis and duals. Anything other than an `Optimal` clean-up is discarded and
+    /// the ordinary unperturbed path runs, so the perturbation can change how many
+    /// pivots a solve takes but never what it certifies.
+    ///
+    /// **Default-ON** (1e-5), graduated on the CLAUDE.md §5 panel:
+    /// 100 in-repo relaxation LPs x 3 reps, arms interleaved — 0 status
+    /// regressions, max relative objective drift 4.9e-11, no objective in the
+    /// unsound direction, 77/100 cells bit-identical, total pivots 62 098 →
+    /// 35 542 (−42.8 %) and total wall 85.16 s → 70.32 s (0.826x); plus two
+    /// tree-level differential panels (16 MINLPLib instances with recorded
+    /// optima, bit-identical objective/bound/node count; 9 QPLIB instances, no
+    /// unsound bound and no status or certification regression). On the captured
+    /// `QPLIB_2170` relaxation the pivot count falls ~25x and its spread over the
+    /// refactorization cadence collapses from 6 075 pivots to 416.
+    ///
+    /// `DISCOPT_LP_DUAL_COST_PERTURB=0` opts out and restores the previous path
+    /// exactly; a float sets a specific size.
+    pub dual_cost_perturb: f64,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -252,6 +292,7 @@ impl Default for SimplexOptions {
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             dual_stall_patience: dual::stall_patience_default(),
+            dual_cost_perturb: dual::cost_perturb_default(),
             cold_dual_start: false,
         }
     }
