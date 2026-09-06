@@ -46,7 +46,9 @@ from discopt.modeling.core import (
 )
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
+from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_share
 from discopt.solver_tuning import reset_current as _reset_tuning
+from discopt.solver_tuning import saturate_role2 as _role2_saturate
 from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
@@ -1547,7 +1549,24 @@ def _try_native_spatial_kernel(
     if res is None:
         return None  # model outside the covered subset -> Python path
     native_status = res.get("status")
-    if native_status not in ("optimal", "time_limit"):
+    # #1153: ``node_limit`` belongs on this list for exactly the reason ``time_limit``
+    # does — it is a *budgeted* exit that still carries a feasible incumbent and a
+    # rigorous global bound over the unexplored tree; it simply cannot claim
+    # optimality. Omitting it discarded a complete, sound kernel result and restarted
+    # the Python spatial fallback from scratch with the wall budget already spent,
+    # which is strictly worse on all three axes and overruns ``time_limit``.
+    #
+    # It presented as "more budget makes the solve worse", because which exit the
+    # kernel takes is budget-dependent: on ``nvs19`` at ``time_limit=30`` the kernel
+    # runs out of *clock* first (``time_limit`` -> accepted, obj -1098.2), while at
+    # ``time_limit=60`` the larger grant lets it reach ``max_nodes=100_000`` first
+    # (``node_limit`` -> discarded). Measured before/after on nvs19 @60 s:
+    # kernel returned obj=-1098.2 bound=-1472.35 at 100k nodes and was thrown away;
+    # the fallback then reported obj=-1001.2 bound=-7363.4 in 78.3 s of a 60 s budget.
+    # ``solver.py``'s #764 note had already observed that ``node_limit`` "sends the
+    # kernel back to the Python path" — as a nuisance for a benchmark panel, without
+    # recognizing it as a live defect on the default solve path.
+    if native_status not in ("optimal", "time_limit", "node_limit"):
         return None  # other incomplete exits retain the established Python fallback
     if native_status == "optimal" and res.get("incumbent") is None:
         return None  # an optimal result must carry a feasible incumbent
@@ -1627,7 +1646,7 @@ def _try_native_spatial_kernel(
     # unspent when its own bound is still non-finite at its shortened deadline
     # (see `bound_time_extension_s` above), so this arm costs nothing on solves
     # that prove their own bound.
-    if native_status == "time_limit" and not math.isfinite(bound_val):
+    if native_status in ("time_limit", "node_limit") and not math.isfinite(bound_val):
         from discopt.modeling.core import ObjectiveSense as _ObjSenseNK
 
         _nk_maximize = (
@@ -6594,6 +6613,33 @@ def _role2_budget(seconds):
     return None if _tuning().deterministic else seconds
 
 
+def _finder_stage_deadline(outer_deadline: float) -> float:
+    """Bound a finder-role primal-heuristic STAGE to a share of what is left (#1153).
+
+    ``outer_deadline`` is the role-1 deadline the stage would otherwise inherit.
+    The result is never later than it, so this can only ever *reduce* a stage's
+    clock — it is a division of the caller's remaining budget between the finder
+    stage and the search, not a work allowance that grows with ``time_limit``.
+    That is why the #1153 ratchet records it as a ``split``.
+
+    Take this ONCE per stage and share it among every consumer. Recomputing it
+    per call is Zeno's bound — each call gets a share of whatever is left at that
+    moment, and the total is never bounded (measured: per-call grants fell
+    3.0 s -> 1.75 s while total stage wall did not move, 7.08 s -> 7.47 s).
+
+    Returns ``outer_deadline`` unchanged when the share is 1.0 (flag off), so the
+    legacy path is byte-identical.
+    """
+    share = _heuristic_entry_share()
+    if share >= 1.0:
+        return float(outer_deadline)
+    now = time.perf_counter()
+    return min(
+        float(outer_deadline),
+        now + max(_DEADLINE_NODE_FLOOR_S, share * (float(outer_deadline) - now)),
+    )
+
+
 def _role2_deadline(deadline):
     """The absolute-deadline form of :func:`_role2_budget` (``None`` = no clock)."""
     return None if _tuning().deterministic else deadline
@@ -11248,7 +11294,11 @@ def solve_model(
                             # is off.
                             _probe_remaining = _setup_remaining_budget()
                             _probe_budget = min(
-                                max(time_limit * 0.1, 2.0),
+                                # #1153: the comment above says this mirrors the
+                                # root OBBT heuristic — and it did, except for that
+                                # site's 15 s ceiling, so this grant alone tracked
+                                # the caller's budget upward forever.
+                                _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
                                 max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _probe = _mc_lp_relaxer.solve_at_node(
@@ -11337,7 +11387,12 @@ def solve_model(
                             # root setup and must leave the fallback its reserve.
                             _root_remaining = _setup_remaining_budget()
                             _pool_budget = min(
-                                max(time_limit * 0.25, 5.0),
+                                # #1153: the pool this separates is inherited by
+                                # EVERY node LP, so an uncapped grant here raises
+                                # the per-node cost in step with the caller's
+                                # budget and shrinks the tree the rest of it can
+                                # cover. Saturate the carve.
+                                _role2_saturate(max(time_limit * 0.25, 5.0), 0.25),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             _pool_res = _mc_lp_relaxer.solve_at_node(
@@ -11418,7 +11473,12 @@ def solve_model(
                             # root setup and must leave the fallback its reserve.
                             _root_remaining = _setup_remaining_budget()
                             _pool_budget = min(
-                                max(time_limit * 0.25, 5.0),
+                                # #1153: the pool this separates is inherited by
+                                # EVERY node LP, so an uncapped grant here raises
+                                # the per-node cost in step with the caller's
+                                # budget and shrinks the tree the rest of it can
+                                # cover. Saturate the carve.
+                                _role2_saturate(max(time_limit * 0.25, 5.0), 0.25),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
                             # CUT-INHERIT-GRAD structure predicate: snapshot the
@@ -11903,7 +11963,19 @@ def solve_model(
         if wall >= 0.0 and wall > _heur_nlp_cost["max"]:
             _heur_nlp_cost["max"] = float(wall)
 
-    def _mean_heur_nlp_cost() -> float:
+    def _worst_heur_nlp_cost() -> float:
+        """The running MAX observed heuristic/root NLP wall — the legacy guard.
+
+        Renamed from ``_mean_heur_nlp_cost`` (#1153 review): it returned a max,
+        was named "mean", and was consumed as one at the division site. A name
+        that misreports its own statistic is how the share came to divide a
+        worst-case-ever by a fraction and read as "4x typical".
+
+        The max is right *here*: a heuristic NLP can overrun its own clamp by
+        ~10 s, so once one long solve is seen another must not be launched unless
+        that much budget remains. It answers "could another solve of the worst
+        size still fit?", not "what does one usually cost?".
+        """
         if _heur_nlp_cost["max"] <= 0.0:
             return _heur_nlp_cost["default"]
         return _heur_nlp_cost["max"]
@@ -11921,7 +11993,37 @@ def solve_model(
             return True
         _remaining = _deadline - time.perf_counter()
         # No budget left to absorb even one typical (already-compiled) solve.
-        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost()):
+        #
+        # #1153: "absorb" meant 100 % of what is left, so a heuristic costing the
+        # whole remainder was still admitted — and crossing that threshold then
+        # costs more than the budget increment that unlocked it. Measured on
+        # heatexch_gen2 (3 reps, zero spread): at 5 s the feasibility pump is
+        # refused here and the tree explores 7 nodes; at 10 s it is admitted, its
+        # sub-NLPs spend 6.4 s of the 10 s budget, return NO incumbent, and the
+        # tree explores 3. Dividing by the admitted share turns "does it fit at
+        # all?" into "does it fit the way an optional stage should?".
+        #
+        # Bounding the stage's own CLOCK instead was tried first, MEASURED INERT,
+        # and removed: the pump's sub-NLPs overrun their own ``max_wall_time``
+        # grant (3.27 s against 3.0 s) and the pump polls its deadline only
+        # between rounds, so a share-sized deadline never binds on round one —
+        # heatexch_gen2 at 10 s stayed at 3 nodes in both arms. Its one apparent
+        # gain (an incumbent at 20 s) was later shown to be the legacy arm's own
+        # bimodality, so it bought nothing and is gone. Entry is the lever.
+        #
+        # The share is 1.0 (this exact rule, byte-identical) with the flag off.
+        # #1153 applies the share ONLY to a finder-role caller. This gate is
+        # shared by 13 root-heuristic entries, several of them improver-role
+        # (the enumerate/integer_box_search/node-diving sites, which already
+        # answer to ``_improver_allowed``'s success-weighted, node-proportional
+        # contingent). Dividing here unconditionally double-gated those — their
+        # own contingent AND a 4x-stricter entry test — which is the shape of the
+        # three lost incumbents in the §6.6 panel.
+        # #1153: this flag CAPS a finder stage's clock (``_heur_stage_deadline``)
+        # rather than refusing its entry. Refusing was measured and rejected: it
+        # costs nvs05 its incumbent outright (1269.7 -> none) and degrades tspn12,
+        # because a productive pump never runs. So the entry rule stays legacy.
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _worst_heur_nlp_cost()):
             return False
         # First-time compile risk: an uninterruptible XLA compile can dwarf the
         # whole budget and cannot be polled once entered, so only enter when the
@@ -11934,6 +12036,21 @@ def solve_model(
             if _compile_est > 0.0 and _remaining < _compile_est:
                 return False
         return True
+
+    def _heur_stage_deadline() -> float:
+        """This solve's finder-stage deadline — see :func:`_finder_stage_deadline`.
+
+        A finder stage is TWO NLP consumers, not one: a multistart seed that
+        produces the rounding point (3.27 s measured) and the pump itself
+        (3.11 s). #1153's first attempt bounded only the pump and left the seed on
+        the global deadline, capped the cheaper half, and measured inert — §6.4's
+        null was that artifact, not evidence against the approach.
+
+        Capping beats REFUSING: refusing costs nvs05 its incumbent outright and
+        degrades tspn12, because a productive pump never runs. A productive pump
+        usually succeeds early, so bounding its clock keeps the win.
+        """
+        return _finder_stage_deadline(_deadline)
 
     def _hess_compile_refuses(_ev) -> bool:
         """#966 (``DISCOPT_HESS_COMPILE_GATE``, default OFF): whether a NONCONVEX
@@ -12038,7 +12155,12 @@ def solve_model(
     _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
     _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
     _pn_obbt_spent = 0.0
-    _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
+    # #1153: a cumulative IN-TREE grant, so an uncapped carve spends a fixed
+    # 60 % of however long the caller waits on bound tightening instead of on
+    # the search. Saturate it like the root carves.
+    _pn_obbt_budget_total = _role2_saturate(
+        time_limit * _PER_NODE_OBBT_BUDGET_FRAC, _PER_NODE_OBBT_BUDGET_FRAC
+    )
     if _per_node_obbt_enabled:
         from discopt._relax.obbt import obbt_tighten_root
 
@@ -13678,6 +13800,14 @@ def solve_model(
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
+            # #1153: ONE deadline for the whole stage, taken here and shared by
+            # every consumer below. Recomputing ``now + share * (deadline - now)``
+            # per call is Zeno's bound: each call gets a share of whatever is left
+            # AT THAT MOMENT, so the total is never bounded. Measured on
+            # heatexch_gen2 at 10 s — per-call grants did fall (3.0 -> 1.75) while
+            # total NLP wall did not (7.08 s -> 7.36 s), because the stage simply
+            # ran more, cheaper rounds. A stage budget has to be a stage budget.
+            _fp_stage_deadline = _heur_stage_deadline()
             # Find the best relaxation solution from this batch
             best_root_idx = None
             best_root_obj = np.inf
@@ -13696,7 +13826,7 @@ def solve_model(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=_deadline,
+                        deadline=_fp_stage_deadline,
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_fp)
                     if fp_sol is not None:
@@ -13740,7 +13870,7 @@ def solve_model(
                         _relax_opts = dict(opts)
                         _relax_opts["max_wall_time"] = max(
                             _DEADLINE_NODE_FLOOR_S,
-                            min(3.0, _deadline - time.perf_counter()),
+                            min(3.0, _fp_stage_deadline - time.perf_counter()),
                         )
                         _root_relax = _solve_root_node_multistart(
                             _active_evaluator,
@@ -13750,7 +13880,10 @@ def solve_model(
                             _relax_opts,
                             nlp_solver,
                             n_random=0,
-                            deadline=_deadline,
+                            # #1153: the SEED is the expensive half of this stage
+                            # (3.27 s of the measured 6.4 s). Leaving it on the
+                            # global deadline is what made the first attempt inert.
+                            deadline=_fp_stage_deadline,
                             observe_cost=_observe_heur_nlp,
                         )
                         if (
@@ -13765,7 +13898,7 @@ def solve_model(
                                 max_rounds=5,
                                 backend=_resolve_heuristic_backend(nlp_solver),
                                 evaluator=evaluator,
-                                deadline=_deadline,
+                                deadline=_fp_stage_deadline,
                             )
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
@@ -14994,7 +15127,12 @@ def solve_model(
                         _rf_gap_ok = _rf_rel_gap > _ROOT_FIXPOINT_MIN_GAP
                 # R1 budget: ~10% of the time limit (loop converges in <=2 iters,
                 # S3 OBBT gets ~85% of it inside the loop). Hard deadline-bounded.
-                _rf_budget = min(max(time_limit * 0.10, 1.0), max(_remaining_budget(), 0.0))
+                # #1153: saturate the carve — the fixpoint's own round cap
+                # (<=2 iterations) is what should end it, not the caller's budget.
+                _rf_budget = min(
+                    _role2_saturate(max(time_limit * 0.10, 1.0), 0.10),
+                    max(_remaining_budget(), 0.0),
+                )
                 if _rf_gap_ok and _rf_budget > _DEADLINE_NODE_FLOOR_S:
                     _rf_res = run_root_fixpoint(
                         model,
@@ -17201,7 +17339,11 @@ def _solve_nlp_bb(
                             max_rounds=5,
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
-                            deadline=t_start + time_limit,
+                            # #1153: same class as the ``solve_model`` finder
+                            # stage — this pump was handed the whole SOLVE
+                            # deadline, so what it costs was set by the caller's
+                            # time_limit rather than by the stage.
+                            deadline=_finder_stage_deadline(t_start + time_limit),
                         )
                         if fp_sol is not None:
                             fp_obj = float(evaluator.evaluate_objective(fp_sol))
