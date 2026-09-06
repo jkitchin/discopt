@@ -1,19 +1,28 @@
 # #1153 — incumbent quality must be non-decreasing in `time_limit`
 
-Status: **diagnosed; no fix graduates. #1153 stays open.**
+Status: **diagnosed; the whole wall-budget fix family is ruled out. #1153 stays
+open.**
 
-Four candidate mechanisms were built and measured. Two were falsified outright
-(`DISCOPT_BUDGET_SATURATION` §6.1, the stage-deadline form §6.4), one was inert
-and was deleted rather than shipped (finder success weighting §6.5), and the one
-that works (`DISCOPT_HEUR_ENTRY_SHARE`, the flat finder share) is **cert-clean
-but not net-positive** — it raises node throughput on 17 of 21 moving
-instance-rungs and costs three incumbents against one gained, so it ships default
-OFF (§6.6).
+Six candidate mechanisms were built and measured across four decision panels.
+Five were falsified, inert, or superseded and were deleted; the survivor
+(`DISCOPT_HEUR_ENTRY_SHARE`, in its **stage-cap** form) is cert-clean but does
+not pay for itself, and ships default OFF.
 
-Read §6.7 first if you are picking this up: the issue's stated gate already
-passes on this corpus, the reported `nvs19` reproduction does not reproduce here,
-and what actually reproduces is the *throughput* half — which is diagnosed to a
-single heuristic call.
+**The headline is §6.6c's family verdict, not any individual arm.** Refusing the
+feasibility pump buys node throughput (20 instance-rungs up, 0 down) and costs
+incumbents; capping it keeps the incumbents (`nvs05` goes from *losing* its
+incumbent to improving it) and hands the throughput back (5 up). Both effects
+have the same cause — how much pump runs — so **no wall-budget policy separates
+the pump's cost from its value**; every setting trades along that one line. That
+retires §6.1, §6.4, §6.5 and all four panels of §6.6 as instances of one family,
+and leaves exactly one direction: make the pump *cheaper for the same value* via
+#912's `WorkBudget` (§6.7).
+
+Read §6.7 first if you are picking this up. Also note two framing facts: the
+issue's stated gate **already passes** on this corpus (198 comparisons, one
+violation), and the reported `nvs19` reproduction **does not reproduce here** at
+any budget. What does reproduce is the *throughput* half, diagnosed to a single
+heuristic call.
 
 ## 1. The defect
 
@@ -103,26 +112,38 @@ flag can only change which valid answer path is walked.
 This is the hypothesis §6.1 falsifies. It ships default OFF and is not proposed
 for graduation; the inventory and ratchet it came with are what survive.
 
-### 3.2 Bounded finder entry (`DISCOPT_HEUR_ENTRY_SHARE`, default OFF)
+### 3.2 Bounded finder STAGE (`DISCOPT_HEUR_ENTRY_SHARE`, default OFF)
 
-`_root_heur_nlp_entry_ok` admits an optional root primal heuristic whenever the
-time left can absorb one whole solve of the largest size seen so far — i.e. a
-heuristic may consume 100 % of the remainder and still be admitted.
-`solver_tuning.heuristic_entry_share()` turns that into a bounded share (25 %),
-returning `1.0` — the legacy rule, byte-identical — with the flag off.
+**The flag caps; it does not refuse.** That is the opposite of what it did in
+earlier revisions of this PR, and the change is the result of §6.6c rather than a
+preference: refusing costs `nvs05` its incumbent outright, because a productive
+pump never runs at all.
 
-The flag additionally hands the two feasibility-pump call sites a stage-scoped
-deadline (`_heur_stage_deadline`) instead of `_deadline`, the whole *solve*
-deadline. That second half was tried **first, on its own, and measured inert**
-(§6.4); it is kept because it is sound, free, and turned up one incumbent the
-legacy arm missed, but the entry rule is what carries the effect.
+`_root_heur_nlp_entry_ok` — the shared gate for thirteen root-heuristic entries —
+is left on the **legacy rule**. What the flag changes is the *deadline the finder
+stage runs under*: `_heur_stage_deadline()` bounds it to
+:data:`HEURISTIC_ENTRY_SHARE` (25 %) of what is left, returning the global
+`_deadline` unchanged when the share is 1.0 (flag off, byte-identical).
 
-**Soundness.** Every gated call is a primal heuristic, so refusing one changes
-which incumbent is found and when, never the dual bound or the certificate
-(§0.3 heuristic-policy). `DISCOPT_ROOT_BUDGET_GATE=0` still disables the whole
-gate, flag or no flag.
+Two details are load-bearing and both were bugs first (§6.6c):
 
-This is the measured cause (§6.2) and it is **not yet a general fix** (§6.3).
+* **A finder stage is two NLP consumers**, a multistart seed that produces the
+  rounding point (3.27 s measured) and the pump itself (3.11 s). Bounding only
+  the pump caps the cheaper half and measures inert — which is exactly what §6.4
+  concluded, wrongly. Every consumer reads the stage deadline now, including the
+  sibling pump on the `_solve_nlp_bb` route.
+* **The deadline is taken ONCE per stage**, not recomputed per call. Recomputing
+  `now + share * (deadline - now)` at each site is Zeno's bound: per-call grants
+  fell 3.0 s -> 1.75 s while total stage wall did not move (7.08 s -> 7.47 s),
+  because the stage simply ran more, cheaper rounds.
+
+**Soundness.** Every affected call is a primal heuristic, so truncating one
+changes which incumbent is found and when, never the dual bound or the
+certificate (§0.3 heuristic-policy). `DISCOPT_ROOT_BUDGET_GATE=0` still disables
+the whole entry gate independently of this flag.
+
+This is the measured cause (§6.2); the flag is sound and incumbent-positive but
+**does not pay for itself** (§6.6c), so it ships OFF.
 
 ## 4. What is pinned against regression
 
