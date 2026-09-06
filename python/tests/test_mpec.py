@@ -55,7 +55,10 @@ def test_scholtes_reaches_global_optimum():
     m, x, y = _distance_model()
     res = solve_mpec(m, [complementarity(x, y)], method="scholtes")
     assert res is not None and res.x is not None
-    xv, yv = float(res.x[0]), float(res.x[1])
+    # #1148 unified the return type: every method returns a SolveResult, whose
+    # ``x`` is the name -> value dict, not the raw NLP flat vector.
+    xv = float(np.asarray(res.x["x"]))
+    yv = float(np.asarray(res.x["y"]))
     # Objective ~ 1 and complementarity ~ satisfied.
     assert abs(float(res.objective) - 1.0) < 1e-3
     assert xv * yv < 1e-5
