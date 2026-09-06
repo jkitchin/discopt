@@ -341,3 +341,59 @@ NLPs. A dual state cannot be replayed across nodes that do not have the same
 dimensions, so any future attempt has to map the state through the cut pool, not
 merely carry it.
 
+---
+
+## §4. Deliverable 4 — what the measurement names, and what was built
+
+Reading §2 and §3 together, the levers sort as follows.
+
+| candidate | share of corpus wall | verdict |
+|---|---:|---|
+| POUNCE's native IPM | 44.9 % of self time | **not reachable from this repo** — native code in the pounce crate |
+| Rust LP / MILP bindings | 12.9 % | **not reachable by scheduling changes** — `performance-plan.md` §16 established the per-pivot gap is in `feral`, and six in-repo levers are falsified |
+| OBBT probe orchestration | 4.3 % (and 41.6 % on `nvs05` alone) | **already native**: 1–3 % Python per probe (§5) |
+| node count / relaxation strength | — | a bound problem, out of scope here (#196/#208) |
+| **evaluator callback path** | **9.2 %** | **the one in-repo lever**, and it is bound-neutral |
+
+So the build is the callback path, and its ceiling is stated up front: **at most
+1.10× corpus-wide** if every Python frame between POUNCE and the tape vanished.
+
+### §4.1 The two changes
+
+1. **`_timing.charge` is a `__slots__` context-manager class** instead of a
+   `@contextlib.contextmanager` generator. Measured in-process, 200 k reps:
+   **1.93 µs → 1.05 µs** per `with`; fully inlining the bookkeeping into the
+   callback wrapper would give 0.73 µs, and was rejected — duplicating the
+   parent/child self-time accounting in a second place is exactly the kind of
+   defect factory §3 of CLAUDE.md is about, for 0.3 µs.
+2. **`TapeNLPEvaluator._x` hands pounce a contiguous `float64` array** instead of
+   rebuilding a Python list per callback (same for the multiplier vector).
+   pounce accepts both and returns bit-identical values; the list was an `O(n)`
+   Python loop on the hottest path in the solver *and* slower inside pounce
+   (0.308 µs vs 0.199 µs for the same evaluation). Build-and-evaluate:
+   `nvs05` (n=15) **2.11 µs → 0.20 µs**, `4stufen` (n=157) **12.29 µs → 1.52 µs**.
+
+Note what the second one means: the marshaling cost scaled with `n` while the
+arithmetic under it did not, so the benefit grows with model size rather than
+being concentrated on one family.
+
+### §4.2 The gate (CLAUDE.md §5, bound-neutral regime)
+
+*Bit-identity, over the whole in-repo corpus.* Old list path vs new array path on
+every tape entry point (`objective` / `gradient` / `constraints` / `jacobian` /
+`hessian`), 66 instances × 5 points, nan-aware exact equality: **1610
+comparisons, 0 mismatches** (`scratchpad/issue1180/bitcheck.py`, which prints its
+comparison count and exits non-zero at zero).
+
+*Suites.* `pytest -m smoke`: **1133 passed, 21 skipped, 2 xpassed, 0 failures**.
+`test_74_layer_time_attribution.py`: 9 passed. New regression test
+`test_1180_callback_marshaling.py` pins the marshaling contract (float64,
+contiguous, zero-copy on an already-contiguous vector, bit-identity across all
+five entry points with a count assertion so the loop cannot pass vacuously) and
+`charge`'s accounting after the rewrite.
+
+*A/B.* Both arms interleaved **in one process** with alternating order and a
+discarded warm-up, each arm asserting which variant is actually live before it
+runs, on a `deterministic=True` budget so a faster arm cannot do more nodes and
+be mistaken for a behavior change.
+
