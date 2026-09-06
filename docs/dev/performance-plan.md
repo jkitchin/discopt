@@ -5703,6 +5703,11 @@ whole solves. That snapshot is not reachable from this environment (no
 `~/Dropbox`, `qplib.zib.de` blocked by the network policy), so the graduation run
 is the one piece of this that has to happen elsewhere.
 
+**Suites.** `cargo test -p discopt-core` 711 passed, clippy clean;
+`pytest -m smoke` 1209 passed with the flag OFF **and** 1209 passed with
+`DISCOPT_LP_DUAL_COST_PERTURB=1` (identical counts, so enabling it breaks
+nothing the suite covers); the adversarial suite 19 passed.
+
 **Falsified along the way** (recorded so they are not retried): the dual Harris
 pass, twice (§18 and #1008); Bland at a reachable threshold (§18); unconditional
 (unarmed) cost perturbation, on wall median 1.044x; and perturbing *every*

@@ -518,7 +518,9 @@ fn warm_dual_armed(
         };
         // Counted here as well as in `reoptimize`: a warm dual solve ran, and a
         // harness that gates on `DualWarmSolves >= 1` to prove it measured
-        // anything (CLAUDE.md §6) must see it.
+        // anything (CLAUDE.md §6) must see it. A solve that falls through to
+        // `reoptimize` below therefore counts twice — correctly: two warm dual
+        // loops really did run on it.
         crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
         let mut banked = Vec::new();
         if let Some(sol) = p.run_dual(l, u, b, &probe, &mut banked) {
