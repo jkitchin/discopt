@@ -12,14 +12,20 @@
 //! lifts to the optimum; without it the search must branch. That makes the arms
 //! separable by node count, not just by a counter.
 //!
-//! The two arms live in separate test binaries because the flag is read once per
-//! process through a `OnceLock`.
+//! The two arms live in separate test binaries because each sets the flag through
+//! the process environment. The flag itself is read once per SOLVE -- the
+//! `OnceLock` that used to cache it was removed, and `obj_lattice_subst_reread.rs`
+//! pins that re-read so it cannot come back (#1189 review, finding 5).
 
 use discopt_core::bnb::milp_driver::MilpOptions;
 use discopt_core::lp::simplex::SimplexOptions;
 
 /// Odd, so the cover LP bound `K/2` is genuinely fractional.
 pub const K: usize = 15;
+/// Each test binary includes this module and uses a different subset of it: the
+/// reread binary asserts on node counts alone and never reads this, which made
+/// `cargo test -p discopt-core` warn on every build (#1189 review, finding 6).
+#[allow(dead_code)]
 pub const OPTIMUM: f64 = ((K + 1) / 2) as f64;
 
 const INF: f64 = 1e20;

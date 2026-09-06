@@ -55,6 +55,11 @@ const RATIONAL_TOL: f64 = 1e-9;
 /// objective contribution, so they impose no lattice constraint).
 const ZERO_TOL: f64 = 1e-12;
 
+/// The engine's "unbounded" sentinel. `f64::is_finite` is TRUE at this value, so
+/// every bound test in this module must compare against it rather than calling
+/// `is_finite` (CLAUDE.md's `INF` note; #1189 review, finding 2).
+const INF: f64 = 1e20;
+
 fn gcd_i64(a: i64, b: i64) -> i64 {
     let (mut a, mut b) = (a.abs(), b.abs());
     while b != 0 {
@@ -210,7 +215,12 @@ pub struct ObjLattice {
 /// bound rounding would then lift past the optimum. Fixed MPS columns and the
 /// slacks of equality rows come out bit-identical, so exactness costs nothing.
 fn is_fixed(lo: f64, up: f64) -> bool {
-    lo.is_finite() && up.is_finite() && lo == up
+    // NOT `is_finite`: `1e20_f64.is_finite()` is true, so a column pinned at the
+    // engine's INF sentinel used to read as fixed and anchor `shift` at 1e20.
+    // `round_bound_up` then computes `(v - 1e20)/g`, and the cancellation on the
+    // way back to objective units makes the lift numeric garbage that can land
+    // ABOVE `v` and be published as a dual bound (#1189 review, finding 2).
+    lo > -INF && up < INF && lo == up
 }
 
 /// The equality system a lattice derivation reads, in the column-major form the
@@ -336,9 +346,21 @@ pub fn objective_lattice(
             // objective column included -- makes the row prove nothing, so no
             // pair of pending columns can resolve through the same row and no
             // resolution can depend on another.
-            if rows[i].iter().any(|&(k, v)| {
-                k != j && v.abs() > ZERO_TOL && !integral(k) && !is_fixed(lo[k], up[k])
-            }) {
+            //
+            // The magnitude test is `v != 0.0`, NOT `|v| > ZERO_TOL`. A free
+            // continuous column contributes `-(v / a_ij) * z_k` to `z_j` at every
+            // feasible point, and with `INF = 1e20` that is enormous however small
+            // `v` is: at `v = 1e-13` the objective still moves by ~1e7. Judging the
+            // coefficient instead of the coefficient TIMES THE COLUMN'S WIDTH is
+            // exactly the gear4 mistake CLAUDE.md records -- "test unboundedness on
+            // the bound, never on a product" -- and it published a lattice the
+            // optimum does not sit on, i.e. a false certificate (#1189 review,
+            // finding 1). An exact structural zero contributes nothing at any
+            // width, so it stays skippable.
+            if rows[i]
+                .iter()
+                .any(|&(k, v)| k != j && v != 0.0 && !integral(k) && !is_fixed(lo[k], up[k]))
+            {
                 continue;
             }
             let s = c[j] / a_ij;
@@ -347,7 +369,12 @@ pub fn objective_lattice(
             }
             shift += s * b[i];
             for &(k, v) in &rows[i] {
-                if k == j || v.abs() <= ZERO_TOL {
+                // Exact zeros only. Dropping a small-but-nonzero coefficient here
+                // would remove a term from the gcd and hand back a COARSER lattice
+                // than the truth -- unsound in the same direction as finding 1. A
+                // tiny term instead flows into `spacing_of`, where `denominator_of`
+                // refuses it; refusal is the safe outcome.
+                if k == j || v == 0.0 {
                     continue;
                 }
                 if integral(k) {
@@ -783,6 +810,119 @@ mod tests {
         assert!(
             checked > 500,
             "granularity property never exercised ({checked})"
+        );
+    }
+
+    /// #1189 review, finding 1: a tiny coefficient on a FREE CONTINUOUS column
+    /// must disqualify the row, whatever its magnitude.
+    ///
+    /// `|v| <= ZERO_TOL` said nothing about how far the column can move the
+    /// objective: the contribution is `-(v/a_ij) * z_k`, and with the engine's
+    /// `INF = 1e20` sentinel `z_k` is not small. Judging the coefficient instead
+    /// of the coefficient-times-width is the gear4 mistake CLAUDE.md records --
+    /// "test unboundedness on the bound, never on a product" -- and it published
+    /// a lattice the optimum does not sit on.
+    #[test]
+    fn a_tiny_coefficient_on_an_unbounded_column_does_not_make_a_lattice() {
+        // columns: z(0, cont, costed), x(1, int), w(2, cont, free at the sentinel)
+        // row: z - 2x - 1e-13 w = 0
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, false];
+        let a = vec![1.0, -2.0, -1e-13];
+        let lo = vec![-1e20, 0.0, -1e20];
+        let up = vec![1e20, 10.0, 1e20];
+        let b = vec![0.0];
+
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 3),
+                b: &b,
+                m: 1,
+                n: 3,
+            },
+        );
+        assert_eq!(
+            got,
+            None,
+            "a free continuous column with |v|={} moves the objective by up to \
+             {} -- refusing is the only sound answer, got {:?}",
+            1e-13,
+            1e-13 * 1e20,
+            got
+        );
+    }
+
+    /// #1189 review, finding 2: the `1e20` INF sentinel is not a finite bound.
+    ///
+    /// `f64::is_finite` is true at 1e20, so a column "fixed" at the sentinel
+    /// anchored the lattice there. `round_bound_up` then evaluates
+    /// `(v - 1e20)/g`, whose cancellation makes the lift numeric garbage that
+    /// can land above `v` and be published as a dual bound.
+    #[test]
+    fn a_column_pinned_at_the_inf_sentinel_is_not_fixed() {
+        assert!(
+            !is_fixed(1e20, 1e20),
+            "1e20 is the engine's INF sentinel, not a finite bound"
+        );
+        assert!(!is_fixed(-1e20, -1e20), "the negative sentinel likewise");
+        assert!(is_fixed(3.5, 3.5), "an ordinary fixed column still counts");
+
+        // and end to end: the sentinel must not anchor a shift.
+        let c = vec![1.0, 1.0];
+        let is_int = vec![true, false];
+        let a = vec![1.0, 1.0];
+        let lo = vec![0.0, 1e20];
+        let up = vec![10.0, 1e20];
+        let b = vec![0.0];
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 2),
+                b: &b,
+                m: 1,
+                n: 2,
+            },
+        );
+        assert!(
+            got.is_none_or(|l| l.shift.abs() < 1e19),
+            "the lattice must not be anchored at the INF sentinel: {got:?}"
+        );
+    }
+
+    /// #1189 review, finding 1 (companion): an exact structural zero is still
+    /// skippable -- it contributes nothing at any width -- so the fix must not
+    /// refuse rows it previously resolved for a good reason.
+    #[test]
+    fn an_exact_zero_coefficient_still_resolves_the_row() {
+        let c = vec![1.0, 0.0, 0.0];
+        let is_int = vec![false, true, false];
+        let a = vec![1.0, -2.0, 0.0];
+        let lo = vec![-100.0, 0.0, -1e20];
+        let up = vec![100.0, 10.0, 1e20];
+        let b = vec![0.0];
+        let got = objective_lattice(
+            &c,
+            &is_int,
+            &lo,
+            &up,
+            &LatticeRows {
+                csc: &csc(&a, 1, 3),
+                b: &b,
+                m: 1,
+                n: 3,
+            },
+        );
+        assert_eq!(
+            got.map(|l| l.spacing),
+            Some(2.0),
+            "an exact zero contributes nothing and must not disqualify the row"
         );
     }
 }

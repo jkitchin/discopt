@@ -4,9 +4,10 @@
 //!
 //! This fails on the parent commit: the detector there refuses the moment a
 //! continuous column carries cost, so the counter reads zero and the search has to
-//! branch the gap away. See `obj_lattice_subst_default_off.rs` for the other arm,
+//! branch the gap away. See `obj_lattice_subst_optout.rs` for the other arm,
 //! which pins that branching from the other side; they are separate binaries
-//! because the flag is read once per process through a `OnceLock`.
+//! because the flag is read once per solve (the `OnceLock` was removed; see
+//! `obj_lattice_subst_reread.rs`, which pins the re-read).
 
 mod objlat_common;
 

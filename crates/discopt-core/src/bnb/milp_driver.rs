@@ -1059,7 +1059,15 @@ pub fn solve_milp_node_hooked(
             if base.is_none() && subst.is_some() {
                 crate::profile::incr(crate::profile::Ctr::ObjLatticeSubst);
             }
-            subst
+            // `.or(base)`, not bare `subst`: the ON arm must never be WEAKER than
+            // the OFF arm. `objective_lattice` can refuse where `objective_
+            // granularity` succeeds -- the length guard does it today, and finding
+            // 1's magnitude guard adds more -- and returning `subst` unconditionally
+            // would then drop a valid directly-integral lattice on the DEFAULT path,
+            // costing pruning and certification with no signal (#1189 review,
+            // finding 3). This makes "strictly more objectives" structurally true
+            // rather than incidentally true.
+            subst.or(base)
         } else {
             base
         }
@@ -3249,7 +3257,14 @@ fn obj_integrality_enabled() -> bool {
 /// measures nothing and reads as a result.
 fn obj_lattice_subst_enabled() -> bool {
     match std::env::var("DISCOPT_OBJ_LATTICE_SUBST") {
-        Err(_) => true,
+        // Only *absence* takes the default. A non-UTF-8 value is an unrecognized
+        // value, and the doc above promises those are a hard refusal -- `Err(_)`
+        // sent it down the silent-default path instead (#1189 review, finding 4).
+        Err(std::env::VarError::NotPresent) => true,
+        Err(std::env::VarError::NotUnicode(v)) => panic!(
+            "DISCOPT_OBJ_LATTICE_SUBST is not valid UTF-8 ({v:?}); \
+             set it to one of 1/0/true/false/on/off or unset it"
+        ),
         Ok(v) => match parse_obj_lattice_subst_flag(&v) {
             Ok(on) => on,
             Err(msg) => panic!("{msg}"),
