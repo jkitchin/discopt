@@ -1547,7 +1547,24 @@ def _try_native_spatial_kernel(
     if res is None:
         return None  # model outside the covered subset -> Python path
     native_status = res.get("status")
-    if native_status not in ("optimal", "time_limit"):
+    # #1153: ``node_limit`` belongs on this list for exactly the reason ``time_limit``
+    # does — it is a *budgeted* exit that still carries a feasible incumbent and a
+    # rigorous global bound over the unexplored tree; it simply cannot claim
+    # optimality. Omitting it discarded a complete, sound kernel result and restarted
+    # the Python spatial fallback from scratch with the wall budget already spent,
+    # which is strictly worse on all three axes and overruns ``time_limit``.
+    #
+    # It presented as "more budget makes the solve worse", because which exit the
+    # kernel takes is budget-dependent: on ``nvs19`` at ``time_limit=30`` the kernel
+    # runs out of *clock* first (``time_limit`` -> accepted, obj -1098.2), while at
+    # ``time_limit=60`` the larger grant lets it reach ``max_nodes=100_000`` first
+    # (``node_limit`` -> discarded). Measured before/after on nvs19 @60 s:
+    # kernel returned obj=-1098.2 bound=-1472.35 at 100k nodes and was thrown away;
+    # the fallback then reported obj=-1001.2 bound=-7363.4 in 78.3 s of a 60 s budget.
+    # ``solver.py``'s #764 note had already observed that ``node_limit`` "sends the
+    # kernel back to the Python path" — as a nuisance for a benchmark panel, without
+    # recognizing it as a live defect on the default solve path.
+    if native_status not in ("optimal", "time_limit", "node_limit"):
         return None  # other incomplete exits retain the established Python fallback
     if native_status == "optimal" and res.get("incumbent") is None:
         return None  # an optimal result must carry a feasible incumbent
@@ -1627,7 +1644,7 @@ def _try_native_spatial_kernel(
     # unspent when its own bound is still non-finite at its shortened deadline
     # (see `bound_time_extension_s` above), so this arm costs nothing on solves
     # that prove their own bound.
-    if native_status == "time_limit" and not math.isfinite(bound_val):
+    if native_status in ("time_limit", "node_limit") and not math.isfinite(bound_val):
         from discopt.modeling.core import ObjectiveSense as _ObjSenseNK
 
         _nk_maximize = (
