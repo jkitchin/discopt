@@ -204,6 +204,12 @@ counters!(
     RinsImproved,
     RinsRejected,
     RinsSubNodes,
+    // A batch that reached the RINS call site but was skipped because the
+    // failure backoff had widened the stride past it. This is the counter that
+    // proves the backoff engaged: the first A12 panel ran RINS 1401 times for 35
+    // improvements (a 2.5 % hit rate) at a cost of +44.9 % wall on the
+    // both-solved set, and cutting the low-yield tail is what this exists for.
+    RinsBackoffSkips,
     Phase1Pivots,
     Phase2Pivots,
     DegeneratePivots,

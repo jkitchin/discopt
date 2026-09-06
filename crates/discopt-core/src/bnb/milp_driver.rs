@@ -570,9 +570,31 @@ fn rins_node_budget(parent_nodes: usize, spent: usize) -> usize {
 /// Batches between RINS attempts. Firing every batch would make it a per-node tax
 /// (the #1060 dive lesson).
 const RINS_BATCH_STRIDE: usize = 16;
+/// Cap on the backoff doublings, so the stride tops out at 16 << 2 = 64 batches.
+/// The cap is what separates *throttling* the heuristic from *disabling* it, and
+/// it was measured rather than picked: at 6 doublings the stride reaches 1024
+/// batches, which inside a 20 s solve means RINS never fires again -- the A12
+/// panel lost the improvements on all three `mik-250-*` instances that way,
+/// keeping only 4 of 7. At 2 the heuristic keeps running at a quarter rate on
+/// instances where it is not currently paying, which is the intent.
+const RINS_BACKOFF_MAX_DOUBLINGS: u32 = 2;
 
 /// The pristine base problem, captured once before the root cut loop when RINS is
 /// armed, and used for every sub-solve and every re-validation.
+/// Batches to wait before the next RINS attempt, given how many attempts in a
+/// row have failed to improve the incumbent. Doubling with a cap turns a fixed
+/// tax into one that fades on instances where the heuristic is not paying: the
+/// first A12 panel measured 1401 runs for 35 improvements, a 2.5 % hit rate that
+/// cost +44.9 % wall across the both-solved set while cutting nodes 14.9 %. The
+/// streak resets on every improvement, so an instance where RINS *is* working
+/// keeps firing at the base stride.
+///
+/// Pure so the schedule can be asserted directly instead of inferred from a
+/// process-wide counter (CLAUDE.md §6).
+fn rins_backoff_stride(fail_streak: u32) -> usize {
+    RINS_BATCH_STRIDE << fail_streak.min(RINS_BACKOFF_MAX_DOUBLINGS)
+}
+
 struct RinsBase {
     csc: SparseCols,
     m: usize,
@@ -1171,6 +1193,14 @@ pub fn solve_milp_node_hooked(
     // before it may become the incumbent) and inside a sub-solve (no recursion).
     // Sub-solve nodes RINS has spent so far, against the quota above.
     let mut rins_spent: usize = 0;
+    // Consecutive RINS attempts that did not improve the incumbent, and batches
+    // elapsed since the last attempt. Together they drive `rins_backoff_stride`.
+    let mut rins_fail_streak: u32 = 0;
+    // Starts already due, so the first batch that has an incumbent gets an
+    // attempt. That is when the incumbent is at its worst and the neighborhood
+    // is most likely to hold something better; making the heuristic sit out the
+    // opening stride would give up the case it is best at.
+    let mut rins_since: usize = RINS_BATCH_STRIDE;
     let rins_base: Option<RinsBase> =
         if rins_enabled() && milp_depth == 0 && lazy.is_none() && !opts.integer_cols.is_empty() {
             Some(RinsBase {
@@ -2114,7 +2144,13 @@ pub fn solve_milp_node_hooked(
         // search is about to spend its time in.
         if let Some(base) = rins_base.as_ref() {
             let rins_budget = rins_node_budget(tm.stats().total_nodes, rins_spent);
-            if this_batch % RINS_BATCH_STRIDE == 0 && rins_budget > 0 {
+            rins_since += 1;
+            let stride = rins_backoff_stride(rins_fail_streak);
+            let due = rins_since >= stride;
+            if !due && rins_fail_streak > 0 {
+                crate::profile::incr(crate::profile::Ctr::RinsBackoffSkips);
+            }
+            if due && rins_budget > 0 {
                 let inc = tm.incumbent().and_then(|(x, v)| {
                     // The tree seeds itself with a sentinel-valued placeholder;
                     // that is "no incumbent", and RINS has nothing to improve.
@@ -2129,6 +2165,11 @@ pub fn solve_milp_node_hooked(
                     })
                     .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
                 if let (Some((inc_x, inc_obj)), Some(r)) = (inc, cand) {
+                    // Only a real attempt restarts the clock. With no incumbent
+                    // yet there is nothing to improve, so the batch counter keeps
+                    // running and RINS fires on the first batch after one appears
+                    // instead of waiting out another full stride.
+                    rins_since = 0;
                     if let Some((sx, sobj)) = try_rins(
                         base,
                         obj_const,
@@ -2143,6 +2184,9 @@ pub fn solve_milp_node_hooked(
                         &mut rins_spent,
                     ) {
                         tm.inject_incumbent(sx, sobj);
+                        rins_fail_streak = 0;
+                    } else {
+                        rins_fail_streak = rins_fail_streak.saturating_add(1);
                     }
                 }
             }
@@ -4944,6 +4988,21 @@ mod tests {
         assert_eq!(rins_node_budget(1_000_000, spent), 0);
         // Never more than one call's worth at a time, however large the tree.
         assert!(rins_node_budget(usize::MAX / 2, 0) <= RINS_SUB_NODE_CAP);
+    }
+
+    #[test]
+    fn rins_backoff_widens_the_stride_and_is_capped() {
+        // No failures yet: fire at the base stride.
+        assert_eq!(rins_backoff_stride(0), RINS_BATCH_STRIDE);
+        // Each consecutive failure halves the rate.
+        assert_eq!(rins_backoff_stride(1), 2 * RINS_BATCH_STRIDE);
+        assert_eq!(rins_backoff_stride(2), 4 * RINS_BATCH_STRIDE);
+        // Capped, so a long failure run throttles the heuristic rather than
+        // silently turning it off -- and the shift can never overflow.
+        let cap = rins_backoff_stride(RINS_BACKOFF_MAX_DOUBLINGS);
+        assert_eq!(cap, RINS_BATCH_STRIDE << RINS_BACKOFF_MAX_DOUBLINGS);
+        assert_eq!(rins_backoff_stride(u32::MAX), cap);
+        assert!(rins_backoff_stride(50) == cap && cap > 0);
     }
 
     fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
