@@ -2237,6 +2237,82 @@ measurements is not an ambiguous signal. The next experiment is an
 diving), not another search-order change and not a feasibility heuristic.
 
 
+### A12 — RINS's precondition: SURVIVES, and it is the first lever that does
+
+**Why this one.** A11 closed the dual side. A5 had already measured the residual
+gap as primal (17/38 unsolved, 89.6 % median primal share, 12 holding a
+merely-poor incumbent rather than none) and A10's `gt2` showed the same thing
+from the other end — dual bound exactly on the reference optimum, incumbent
+stuck at 72966. discopt has a rounding heuristic (`try_rounding_csc`) and a
+no-incumbent continuous-repair dive (#1060, which by construction stops firing
+the moment an incumbent exists); it has **no improvement heuristic at all**,
+which is the mechanism behind "discopt's first incumbent is very nearly its
+last".
+
+**Hypothesis.** RINS — fix the integer variables on which the node LP
+relaxation agrees with the incumbent, solve the remainder as a sub-MILP — has a
+precondition that can be measured before any of it is built: the agreement has
+to be *high enough* that the sub-MILP is genuinely smaller, and *not so high*
+that nothing is left free to improve.
+
+**Instrument.** At every node with an LP solution, a real incumbent (the
+`INFEAS_SENTINEL` placeholder excluded) and at least one integer variable, the
+fraction of integer variables where the node LP value equals the incumbent
+value within 1e-6. That is SCIP's own test — `SCIPisFeasEQ(lpsolval, solval)`,
+`heur_rins.c:169`, an equality test and **not** a rounding test. Six buckets
+partition the node count exactly, so a miswired probe fails the sum identity
+rather than returning a plausible ratio (CLAUDE.md §6).
+
+**Pre-registered criterion.** The *usable band* is `[0.30, 0.99)`: 0.30 is
+SCIP's `DEFAULT_MINFIXINGRATE` (`heur_rins.c:74`), below which SCIP refuses to
+run RINS at all; `>= 0.99` leaves essentially nothing free, so it is a failure
+of the precondition and is bucketed separately rather than pooled with the
+band. Share of incumbent-present nodes in the band: `>= 30 %` SURVIVES,
+`10-30 %` WEAK, `< 10 %` FALSIFIED.
+
+**Result.** 38 instances, shipped configuration, 20 s each, **2,023,762
+incumbent-present nodes measured**, 33/38 instances contributing.
+
+| fixing rate | nodes | share |
+|---|---|---|
+| `< 0.30` (SCIP would refuse) | 28,746 | 1.4 % |
+| `[0.30, 0.50)` | 312,942 | 15.5 % |
+| `[0.50, 0.70)` | 714,150 | 35.3 % |
+| `[0.70, 0.90)` | 934,272 | 46.2 % |
+| `[0.90, 0.99)` | 33,275 | 1.6 % |
+| `>= 0.99` (nothing left free) | 377 | 0.0 % |
+
+**Usable band: 1,994,639 / 2,023,762 = 98.6 %** against a 30 % bar. **SURVIVES**,
+and not marginally. The distribution is centred where RINS is designed to work:
+81.5 % of nodes sit in `[0.50, 0.90)`, a sub-MILP with 10-50 % of the integers
+free. The degenerate ends are both empty — 1.4 % below SCIP's refusal threshold
+and 377 nodes in total at `>= 0.99`.
+
+**It holds on the population that matters.** Split by outcome, the band share is
+98.4 % over the 1,792,775 incumbent-present nodes of the **17 unsolved**
+instances and 99.7 % over the solved ones, so this is not an artifact of easy
+instances: 15 of the 17 unsolved instances carry an incumbent, and every one of
+them is at 84 % band or better (`gsvm2rl3` 86.7 %, `neos17` 84.4 %, the other
+thirteen at 100.0 %). The five instances contributing no measured node —
+`neos-1425699`, `22433`, `enlight_hard`, `neos-2624317-amur`, `f2gap40400` —
+are the root-solved and the genuinely **no-incumbent** cases. Two of those are
+the ones §3's Track B2 already named for shift-and-propagate; they are a
+*feasibility* problem and are explicitly not what RINS addresses.
+
+**What this does and does not establish.** It establishes the precondition, not
+the benefit: a heuristic that fires often on a well-sized subproblem can still
+fail to improve anything, and the §5 double bar (cert-clean AND net-positive)
+is what decides that, on a flag panel, after it is built. What A12 removes is
+the risk that killed the RLT work (#727) — a mechanism validated on a proxy
+that turns out to be a no-op on the real class. Here the measurement is on the
+real corpus, at full solve depth, on the exact population the gap lives in.
+
+**Status: this is the lever.** Nine dual-side hypotheses were measured and
+falsified; the first primal precondition tested clears its bar by more than
+three-fold. Build order follows the plan's Track B2 list, re-ordered for A5's
+finding that the common case is a *poor* incumbent rather than none: the shared
+reduced-copy sub-MILP call first, then RINS on top of it.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
