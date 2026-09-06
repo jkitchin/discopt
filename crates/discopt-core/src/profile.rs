@@ -143,6 +143,7 @@ timed_phases!(
     DiveRepair,
     // A12/RINS: wall time inside the sub-MILP improvement heuristic.
     Rins,
+    Rens,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
@@ -210,6 +211,22 @@ counters!(
     // improvements (a 2.5 % hit rate) at a cost of +44.9 % wall on the
     // both-solved set, and cutting the low-yield tail is what this exists for.
     RinsBackoffSkips,
+    // A14 RENS (`DISCOPT_RENS`). Same funnel discipline as RINS above --
+    // considered >= gated >= run >= improved -- and `RensRejected` is the same
+    // safety counter that must stay ZERO. `RensSeeded` counts the attempts in
+    // which the incumbent happened to lie inside the RENS box and could be used
+    // as a cutoff; it is expected to be a small fraction, and a value equal to
+    // `RensRun` would mean the box is not actually moving off the incumbent,
+    // i.e. RENS has degenerated into RINS and the panel is comparing a mechanism
+    // against itself.
+    RensConsidered,
+    RensGated,
+    RensRun,
+    RensImproved,
+    RensRejected,
+    RensSubNodes,
+    RensSeeded,
+    RensBackoffSkips,
     Phase1Pivots,
     Phase2Pivots,
     DegeneratePivots,
