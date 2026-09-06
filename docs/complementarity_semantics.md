@@ -238,16 +238,24 @@ is nonzero. How large depends on which residual definition is being read:
 
 `Residual.admitted_scale` carries that number and `admitted_scale_definition`
 records the formula it came from, so the two can never be read against each
-other's units. `Residual.within_admitted_scale` says whether the point is inside
-what the relaxation allows.
+other's units. `Residual.within_admitted_scale` compares the residual against
+that upper bound and nothing else. **This comparison alone does not establish
+feasibility of the relaxed rows.** Only one direction is implied: for a
+nonnegative pair, a `min` residual *above* `sqrt(t)` forces `f·g > t`, so being
+outside the scale does mean the relaxed row is violated. The converse fails — at
+`t = 1e-8`, `(f, g) = (1e-4, 1)` has `min(f, g) = 1e-4 = sqrt(t)` so the flag is
+true, while `f·g = 1e-4` exceeds `t` by four orders of magnitude. Feasibility of
+the generated rows is a separate number: `lowered_row_residual`.
 
 **This is an upper bound on the admitted residual, not a lower limit on
 attainable accuracy.** `(f, g) = (0, 1)` satisfies `f·g <= t` for every positive
 `t` with a residual of exactly `0`, and solvers routinely land far below the
 scale — so a residual much smaller than `sqrt(t)` is ordinary, not surprising.
 What the number buys is the other direction: a `min` residual of `1e-4` from a
-`t = 1e-8` continuation sits at the edge of the admitted set rather than outside
-it, which is a different statement from "the subsolver failed to converge".
+`t = 1e-8` continuation is no larger than the worst case the relaxation admits,
+which is a different statement from "the subsolver failed to converge" — and,
+per the previous paragraph, also a different statement from "the relaxed rows
+hold at this point".
 Whether the subsolver could have done better is an empirical question about the
 subsolver; the continuation trace's per-stage statuses are where that evidence
 lives, not here. POUNCE Gate 0

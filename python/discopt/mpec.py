@@ -1836,7 +1836,8 @@ def _stage_reason(certified: bool, has_point: bool, status) -> str:
     code = getattr(status, "value", status)
     return (
         f"subsolver stalled ({code}) at a point it could not certify to tolerance; "
-        "taken as a local iterate, which is what 'local_optimal' claims"
+        "kept as an iterate — a usable warm start carrying its residuals — under "
+        "'local_limit', which asserts no stationarity"
     )
 
 

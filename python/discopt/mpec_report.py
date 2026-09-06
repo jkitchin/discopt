@@ -208,12 +208,18 @@ class Residual:
 
     @property
     def within_admitted_scale(self) -> bool:
-        """True when the residual is no larger than what the relaxation admits.
+        """True when the residual is no larger than the scale the relaxation admits.
 
-        A statement about the *relaxation*, not about the solver: being outside
-        the admitted scale means the point does not even satisfy the relaxed
-        condition, while being inside says nothing about how close to the true
-        condition the solver got.
+        A comparison against :attr:`admitted_scale` and nothing else. **It does
+        not establish feasibility of the relaxed rows**, and only one direction is
+        implied: for a nonnegative pair, a ``min`` residual *above* ``sqrt(t)``
+        forces both operands above ``sqrt(t)`` and hence ``f*g > t``, so ``False``
+        does mean the relaxed row is violated. The converse fails — at
+        ``t = 1e-8``, ``(f, g) = (1e-4, 1)`` gives ``min(f, g) = 1e-4 = sqrt(t)``
+        and this returns ``True`` while ``f*g = 1e-4`` exceeds ``t`` by four orders
+        of magnitude (#1158 review 4). Whether the generated rows actually hold is
+        :attr:`SourceResidualReport.lowered_row_residual`; how close the solver got
+        to the true condition is not this number either.
         """
         return self.admitted_scale is not None and float(self.value) <= float(self.admitted_scale)
 

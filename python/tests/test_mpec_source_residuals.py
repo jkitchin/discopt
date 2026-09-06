@@ -1483,3 +1483,47 @@ def test_review3_3_a_converged_stage_still_reports_local_optimal():
             res.status == "local_limit" and res.x is not None,
             f"a stalled reported point is local_limit with the point kept, got {res.status!r}",
         )
+
+
+def test_within_admitted_scale_does_not_imply_the_relaxed_rows_hold():
+    """Review 4 closeout: the flag compares against a bound, not against feasibility.
+
+    Earlier wording said it reported whether a point was "inside what the
+    relaxation allows", which over-claims in one direction. At ``t = 1e-8`` the
+    ``min``-form admitted scale is ``sqrt(t) = 1e-4``, so ``(f, g) = (1e-4, 1)``
+    sets the flag ``True`` while the generated row ``f*g <= t`` is violated by
+    four orders of magnitude. The converse direction *does* hold and is asserted
+    below, because that is the only implication the flag actually carries.
+    """
+    from discopt.mpec_report import ComplementarityKind, Residual  # noqa: PLC0415
+
+    t = 1e-8
+    scale = admitted_residual_scale(t, ComplementarityKind.MIN)
+
+    def _flag(f, g):
+        return Residual(
+            name="source_complementarity",
+            value=min(f, g),
+            definition=ComplementarityKind.formula(ComplementarityKind.MIN),
+            admitted_scale=scale,
+        ).within_admitted_scale
+
+    f, g = 1e-4, 1.0
+    _checked(
+        _flag(f, g) is True and (f * g) > t,
+        f"({f}, {g}) must set the flag while violating f*g <= t "
+        f"(f*g={f * g!r}, t={t!r}) — the flag is not a feasibility statement",
+    )
+    # The one implication that DOES hold: above the scale, both operands exceed
+    # sqrt(t), so the relaxed row is necessarily violated too.
+    f2, g2 = 1e-3, 1e-3
+    _checked(
+        _flag(f2, g2) is False and (f2 * g2) > t,
+        f"({f2}, {g2}) is outside the scale, and that direction does imply the "
+        f"relaxed row is violated (f*g={f2 * g2!r} > {t!r})",
+    )
+    # And an exactly complementary point satisfies both.
+    _checked(
+        _flag(0.0, 1.0) is True and (0.0 * 1.0) <= t,
+        "an exactly complementary point is both within the scale and feasible",
+    )
