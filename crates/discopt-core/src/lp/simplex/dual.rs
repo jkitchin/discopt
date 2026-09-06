@@ -189,6 +189,53 @@ fn parse_unstable_pivot_recovery(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// Default for [`SimplexOptions::dual_cost_perturb`], read once from
+/// `DISCOPT_LP_DUAL_COST_PERTURB`: unset → **off**, `1`/`true`/`on` →
+/// [`COST_PERTURB_EPS`], `0`/`false`/`off` → off, any finite float > 0 → that
+/// relative size.
+///
+/// Read once per process for the reason on [`stall_patience_default`]: the
+/// perturbation changes the pivot *path*, so flipping it mid-solve would make a
+/// measurement incomparable with itself.
+pub(super) fn cost_perturb_default() -> f64 {
+    static EPS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    f64::from_bits(*EPS.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_DUAL_COST_PERTURB").unwrap_or_default();
+        parse_cost_perturb(&raw)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .to_bits()
+    }))
+}
+
+/// Relative perturbation size behind the `=1` spelling of
+/// `DISCOPT_LP_DUAL_COST_PERTURB`.
+///
+/// Measured over the four captured stall fixtures (`qplib2170`, `tspn12`,
+/// `st_testgr3`, `nvs01`) at 1e-9 / 1e-7 / 1e-5 / 1e-3: 1e-5 is the only size that
+/// drives `DualDegeneratePivots` to **0** on all four while keeping the clean-up
+/// short. Too small and the ties survive rounding — at 1e-9 the `qplib2170`
+/// clean-up costs 26 164 pivots, *worse* than the 17 794 of the unperturbed solve;
+/// too large and the perturbed problem is a different LP whose optimum is far from
+/// the true one (1e-3 costs 1920 perturbed pivots against 534 at 1e-5).
+const COST_PERTURB_EPS: f64 = 1e-5;
+
+/// The parse table behind [`cost_perturb_default`]. Unrecognized input is refused
+/// rather than defaulted, for the reason spelled out on [`parse_stall_patience`].
+fn parse_cost_perturb(raw: &str) -> Result<f64, String> {
+    match raw.trim() {
+        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(0.0),
+        "1" | "true" | "True" | "on" | "ON" => Ok(COST_PERTURB_EPS),
+        other => match other.parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+            _ => Err(format!(
+                "DISCOPT_LP_DUAL_COST_PERTURB={other:?} is not a recognized value. \
+                 Use 1/true/on (={COST_PERTURB_EPS:e}), 0/false/off (the default), \
+                 or a finite positive float."
+            )),
+        },
+    }
+}
+
 /// The parse table behind [`stall_patience_default`], split out so the accepted
 /// and rejected spellings are testable without a process-global `OnceLock`.
 ///
@@ -411,6 +458,141 @@ fn solve_lp_warm_csc_inner(
     }
 }
 
+/// The #1013 cost-perturbed warm start: solve the LP once with ties among the
+/// nonbasic reduced costs broken by a tiny cost perturbation, then re-solve on the
+/// **true** costs from the basis that lands on.
+///
+/// Returns `Some` only when the clean-up solve — the one carrying the true `c` —
+/// returns `Optimal`. That solve is an ordinary call into the same engine on the
+/// caller's own data, so the point, objective, basis and duals it produces are
+/// exactly what the unperturbed path would have had to certify; the perturbation
+/// only chose where the search started. Every other outcome returns `None` and the
+/// caller runs the unperturbed path, so this can change a solve's pivot count but
+/// never its verdict. Statuses from the *perturbed* problem are never propagated:
+/// a different cost vector can be unbounded (or bounded) where the true one is not.
+///
+/// Budget: the attempt gets half the remaining wall time and half the iteration
+/// cap, so a rejected attempt leaves the ordinary path its full iteration budget
+/// and at least half the caller's deadline. A perturbation must never be able to
+/// cost a bound the plain solve would have returned (CLAUDE.md §1).
+///
+/// The returned [`LpSolve::iters`] is the sum of both solves' pivots, so the cost
+/// of the perturbed attempt is visible in the same number an A/B harness reads.
+#[allow(clippy::too_many_arguments)]
+fn cost_perturbed_warm_solve(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    basis: &Basis,
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    let eps = opts.dual_cost_perturb;
+    if !(eps > 0.0) || basis.col_status.len() != n {
+        return None;
+    }
+    let mut attempt = opts.clone();
+    attempt.dual_cost_perturb = 0.0; // the attempt itself is never re-perturbed
+    attempt.max_iter = (opts.max_iter / 2).max(1);
+    if let Some(d) = opts.deadline {
+        let now = std::time::Instant::now();
+        let left = d.checked_duration_since(now)?; // already expired: do not start
+        attempt.deadline = Some(now + left / 2);
+    }
+
+    crate::profile::incr(crate::profile::Ctr::DualCostPerturbAttempts);
+    let reject = || {
+        crate::profile::incr(crate::profile::Ctr::DualCostPerturbRejected);
+        None
+    };
+
+    let cp = perturbed_costs(c, l, u, basis, eps);
+    let pert = match PreparedDual::prepare_cols(sp, m, n, &cp, l, u, basis, &attempt) {
+        Some(p) => p.reoptimize(l, u, b, &attempt),
+        None => return reject(),
+    };
+    if pert.status != LpStatus::Optimal {
+        return reject();
+    }
+
+    // Clean-up on the true costs. The perturbed optimum is primal feasible for the
+    // same rows and bounds, so it is a legitimate warm start either way: the dual
+    // loop takes it when it is still dual feasible for `c`, and the primal warm
+    // re-solve (which only needs primal feasibility) takes it when it is not.
+    let clean = match PreparedDual::prepare_cols(sp, m, n, c, l, u, &pert.basis, &attempt) {
+        Some(p) => p.reoptimize(l, u, b, &attempt),
+        None => super::primal::solve_lp_cols_warm(
+            sp.clone(),
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            &pert.basis,
+            &attempt,
+        ),
+    };
+    if clean.status != LpStatus::Optimal {
+        return reject();
+    }
+    crate::profile::incr(crate::profile::Ctr::DualCostPerturbAccepted);
+    // Report the pivots BOTH solves cost, not just the clean-up's. `iters` is the
+    // work measure a caller (and every A/B harness here) compares arms on; charging
+    // it only the second solve would make the perturbation look free.
+    let mut clean = clean;
+    clean.iters = clean.iters.saturating_add(pert.iters);
+    Some(clean)
+}
+
+/// The perturbed cost vector behind [`cost_perturbed_warm_solve`].
+///
+/// `c_j ± eps·r_j·(1+|c_j|)` on nonbasic columns only, `+` at a lower bound and
+/// `-` at an upper one — the signs in which a nonbasic reduced cost is dual
+/// feasible, so the perturbation can only push the start further inside dual
+/// feasibility, never out of it. Basic costs are untouched, which leaves
+/// `y = B⁻ᵀc_B` (and every basic reduced cost) exactly as it was.
+///
+/// A nonbasic **free** column is skipped: it is dual feasible only at `d_j = 0`
+/// exactly, so any perturbation of its cost makes the start dual infeasible and
+/// the warm loop refuses it outright. Measured: `qplib2170` has 351 such columns,
+/// and perturbing them turned every arm of the entry experiment into a rejected
+/// start (no warm solve at all) rather than a faster one.
+///
+/// `r_j ∈ [0.5, 1.5)` comes from a splitmix hash of the column index, not an RNG:
+/// the perturbation must be a pure function of the LP so that two runs of the same
+/// solve take the same pivot path and a bound-neutrality check compares like with
+/// like.
+fn perturbed_costs(c: &[f64], l: &[f64], u: &[f64], basis: &Basis, eps: f64) -> Vec<f64> {
+    let mut cp = c.to_vec();
+    for j in 0..cp.len() {
+        if l[j] <= -INF && u[j] >= INF {
+            continue;
+        }
+        let dir = match basis.col_status[j] {
+            AT_LOWER => 1.0,
+            AT_UPPER => -1.0,
+            _ => continue,
+        };
+        cp[j] += dir * eps * jitter(j) * (1.0 + c[j].abs());
+    }
+    cp
+}
+
+/// Deterministic `r_j ∈ [0.5, 1.5)` for column `j` (splitmix64 finalizer). Spread
+/// matters more than quality here: equal perturbations would leave the ties this
+/// is meant to break intact between equal-cost columns.
+fn jitter(j: usize) -> f64 {
+    let mut z = (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    0.5 + (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// Warm dual (or cold) solve of an already-scaled CSC LP. Shared by the scaled and
 /// unscaled branches of [`solve_lp_warm_csc`].
 #[allow(clippy::too_many_arguments)]
@@ -426,7 +608,16 @@ fn solve_csc_core(
     opts: &SimplexOptions,
 ) -> LpSolve {
     match start {
-        Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
+        Some(basis) => match {
+            // #1013: try the cost-perturbed start first (default-OFF). It returns
+            // `Some` only for a clean-up solve on the TRUE costs that came back
+            // `Optimal`; anything else falls through to the ordinary path below
+            // with its full iteration budget and at least half the wall budget.
+            if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
+                return sol;
+            }
+            PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts)
+        } {
             Some(p) => p.reoptimize(l, u, b, opts),
             // Warm basis rejected by the dual (wrong size / singular /
             // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
@@ -2680,4 +2871,202 @@ mod tests {
 
         crate::profile::set_enabled(false);
     }
+    /// #1013: the flag's spellings, and the refusal of anything else.
+    ///
+    /// Same footgun as [`parse_stall_patience`]: a typo in an A/B harness's arm
+    /// that silently reads as a valid setting makes the harness measure one arm
+    /// twice. Counts its own assertions (CLAUDE.md §6).
+    #[test]
+    fn cost_perturb_parses_or_refuses() {
+        let mut checked = 0usize;
+        for off in ["", "  ", "0", "false", "False", "off", "OFF"] {
+            assert_eq!(parse_cost_perturb(off), Ok(0.0), "{off:?} must disable");
+            checked += 1;
+        }
+        for on in ["1", "true", "True", "on", "ON"] {
+            assert_eq!(
+                parse_cost_perturb(on),
+                Ok(COST_PERTURB_EPS),
+                "{on:?} must read as the measured default"
+            );
+            checked += 1;
+        }
+        for (raw, want) in [("1e-7", 1e-7), ("0.001", 1e-3)] {
+            assert_eq!(parse_cost_perturb(raw), Ok(want));
+            checked += 1;
+        }
+        for bad in ["-1e-5", "0.0", "nan", "inf", "yes", "1e-5x"] {
+            assert!(
+                parse_cost_perturb(bad).is_err(),
+                "{bad:?} must be refused, not defaulted"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 20, "the parse table must be exercised in full");
+    }
+
+    /// #1013: the perturbation moves only what it is allowed to move.
+    ///
+    /// The soundness of the whole mechanism rests on the start staying dual
+    /// feasible: basic costs fixed (so `y` and every basic reduced cost are
+    /// untouched), nonbasic costs moved in the dual-feasible direction, and
+    /// nonbasic FREE columns — which are dual feasible only at `d_j = 0` — not
+    /// moved at all. Asserted directly on the vector rather than inferred from a
+    /// solve.
+    #[test]
+    fn perturbed_costs_moves_only_dual_feasible_directions() {
+        let c = [1.0, -2.0, 3.0, 4.0, 5.0];
+        let l = [0.0, 0.0, 0.0, -1e30, 0.0];
+        let u = [1.0, 1.0, 1.0, 1e30, 1.0];
+        let basis = Basis {
+            col_status: vec![AT_LOWER, AT_UPPER, BASIC, AT_LOWER, AT_UPPER],
+            basic_vars: vec![2],
+        };
+        let cp = perturbed_costs(&c, &l, &u, &basis, 1e-5);
+
+        assert!(cp[0] > c[0], "at lower: d_j >= 0, so the cost must go UP");
+        assert!(cp[1] < c[1], "at upper: d_j <= 0, so the cost must go DOWN");
+        assert_eq!(cp[2], c[2], "a basic cost must not move (y stays fixed)");
+        assert_eq!(cp[3], c[3], "a nonbasic FREE column must not move");
+        assert!(cp[4] < c[4], "at upper: the cost must go DOWN");
+        for j in 0..c.len() {
+            assert!(
+                (cp[j] - c[j]).abs() <= 1e-5 * 1.5 * (1.0 + c[j].abs()),
+                "column {j} moved by more than eps·1.5·(1+|c_j|)"
+            );
+        }
+        // Deterministic: the same LP must perturb identically every call, or two
+        // runs of one solve take different pivot paths.
+        assert_eq!(cp, perturbed_costs(&c, &l, &u, &basis, 1e-5));
+    }
+
+    /// #1013 (the issue's anchor cell): cost perturbation breaks the dual
+    /// degeneracy that neither existing escape can, and returns the same optimum.
+    ///
+    /// The captured `QPLIB_2170` root relaxation warm-solves in ~18k pivots of
+    /// which every one is degenerate — `d_q ≈ 0`, so the dual objective never
+    /// moves — with `DualStallTrips` at 0 and Bland engaged but not helping. HiGHS
+    /// certifies the same LP in 81 pivots. Perturbing the nonbasic costs removes
+    /// the ties, and the clean-up on the true costs returns the same objective.
+    #[test]
+    fn cost_perturbation_breaks_the_degeneracy_on_the_captured_stall() {
+        let json = include_str!("testdata/qplib2170_cold_fail_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let mut off = opts();
+        off.recover_unstable_pivot = true;
+        off.dual_cost_perturb = 0.0;
+        let base = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+        let base_degen = crate::profile::counter(crate::profile::Ctr::DualDegeneratePivots);
+
+        crate::profile::reset();
+        let mut on = off.clone();
+        on.dual_cost_perturb = COST_PERTURB_EPS;
+        let pert = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &on);
+        let attempts = crate::profile::counter(crate::profile::Ctr::DualCostPerturbAttempts);
+        let accepted = crate::profile::counter(crate::profile::Ctr::DualCostPerturbAccepted);
+        let pert_degen = crate::profile::counter(crate::profile::Ctr::DualDegeneratePivots);
+        crate::profile::set_enabled(false);
+
+        // The mechanism fired, proven by counter rather than inferred from the
+        // outcome (CLAUDE.md §6).
+        assert_eq!(attempts, 1, "exactly one perturbed attempt must be made");
+        assert_eq!(accepted, 1, "the clean-up must have carried the answer");
+
+        assert_eq!(base.status, LpStatus::Optimal);
+        assert_eq!(pert.status, LpStatus::Optimal);
+        assert!(
+            (pert.obj - base.obj).abs() <= 1e-6 * (1.0 + base.obj.abs()),
+            "perturbed obj {} must equal the unperturbed obj {}",
+            pert.obj,
+            base.obj
+        );
+
+        // The stall is what changed. Both numbers are deterministic.
+        assert!(
+            base_degen > 10_000,
+            "the baseline cell must still be the ~18k-degenerate-pivot stall; got {base_degen}"
+        );
+        assert!(
+            pert_degen * 10 < base_degen,
+            "the perturbation must remove the degeneracy: {pert_degen} vs {base_degen}"
+        );
+        assert!(
+            pert.iters * 4 < base.iters,
+            "total pivots (perturbed + clean-up) {} must be far below the \
+             unperturbed {}",
+            pert.iters,
+            base.iters
+        );
+    }
+
+    /// #1013: on every captured LP in the suite the perturbed path returns the
+    /// SAME verdict and the same objective as the unperturbed one.
+    ///
+    /// This is the bound-neutrality claim the mechanism rests on (CLAUDE.md §5,
+    /// bound-neutral regime): the perturbed solve only chooses a starting basis,
+    /// and the answer is produced by an ordinary solve on the true costs.
+    #[test]
+    fn cost_perturbation_is_verdict_neutral_on_every_captured_lp() {
+        let mut compared = 0usize;
+        for (name, json) in [
+            (
+                "qplib2170",
+                include_str!("testdata/qplib2170_cold_fail_lp.json") as &str,
+            ),
+            (
+                "tspn12",
+                include_str!("testdata/tspn12_dual_stall_lp.json") as &str,
+            ),
+            (
+                "st_testgr3",
+                include_str!("testdata/st_testgr3_degenerate_stall_lp.json") as &str,
+            ),
+            (
+                "nvs01",
+                include_str!("testdata/nvs01_warm_stall_lp.json") as &str,
+            ),
+        ] {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                parse_stall_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let start = Basis {
+                col_status,
+                basic_vars,
+            };
+            let mut off = opts();
+            off.recover_unstable_pivot = true;
+            off.dual_cost_perturb = 0.0;
+            let mut on = off.clone();
+            on.dual_cost_perturb = COST_PERTURB_EPS;
+
+            let base = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+            let pert = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &on);
+            assert_eq!(
+                base.status, pert.status,
+                "{name}: the perturbation must not change the verdict"
+            );
+            if base.status == LpStatus::Optimal {
+                assert!(
+                    (pert.obj - base.obj).abs() <= 1e-6 * (1.0 + base.obj.abs()),
+                    "{name}: obj {} vs {}",
+                    pert.obj,
+                    base.obj
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 4, "every captured LP must have been compared");
+    }
+
 }

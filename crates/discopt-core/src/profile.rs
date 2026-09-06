@@ -303,6 +303,17 @@ counters!(
     DualDegenerateRunArms,
     DualDegenerateRunMax,
     DualDegenerateStallBails,
+    // Cost perturbation of the warm dual start (#1013). The degeneracy the three
+    // counters above measure is *dual* (`d_q ≈ 0`), so the remedy aimed at it is a
+    // perturbed cost vector, not a tie-break on pivot magnitude (falsified twice).
+    //   `DualCostPerturbAttempts` — warm solves that built a perturbed start;
+    //   `DualCostPerturbAccepted` — attempts whose true-cost clean-up returned
+    //     `Optimal`, i.e. the answer the caller got came off the perturbed basis;
+    //   `DualCostPerturbRejected` — attempts discarded (perturbed or clean-up
+    //     solve not `Optimal`), which fall through to the unperturbed path.
+    DualCostPerturbAttempts,
+    DualCostPerturbAccepted,
+    DualCostPerturbRejected,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced
