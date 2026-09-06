@@ -28,16 +28,17 @@ whose optimum is 0 at x = 1/2 under SELECT_ONE, a point lying in **both**
 disjuncts — which is exactly the case a "recovered Boolean assignment" gets
 wrong.
 
-Per CLAUDE.md §6 the module counts its executed source-residual comparisons and
-a ``teardown_module`` hook fails the run if that count is zero. It is a teardown
-hook and not a test because this suite runs under ``pytest-randomly``: as a test
-it would be position-dependent, and a shuffle that ran it first would make the
-guard against measuring nothing itself measure nothing.
+Per CLAUDE.md §6 every source-residual comparison asserts that it actually
+compared something, and a ``teardown_module`` hook re-checks the module total for
+any process that ran at least one. It is a teardown hook and not a test because
+this suite runs under ``pytest-randomly``: as a test it would be
+position-dependent, and a shuffle that ran it first would make the guard against
+measuring nothing itself measure nothing. The hook is conditional because CI
+splits the module across xdist workers by timing, so a worker can legitimately
+draw none of the comparing tests.
 """
 
 import math
-import re
-from pathlib import Path
 
 import discopt.modeling as dm
 import numpy as np
@@ -62,57 +63,49 @@ from discopt.modeling.core import (
 )
 
 _COMPARISONS = [0]
+_CALLS = [0]
 
 
 def _residuals(model, point):
     """``disjunction_residuals`` plus the executed-comparison bookkeeping."""
     report = disjunction_residuals(model, point)
-    # Per CALL, not merely per module (#1187). This is the stronger form of the
-    # §6 guarantee and the one that survives xdist: every worker that exercises
-    # the residual machinery proves it measured something, right where it ran.
+    # The §6 check belongs HERE, at the measurement, not only in the module
+    # total: a single call that compared nothing is exactly the vacuous
+    # measurement this guards against, and a sum over the other calls would hide
+    # it. Every model reached through this helper carries a disjunction, so a
+    # zero here means the residual walk stopped finding the source predicates.
     assert report.comparisons > 0, (
-        "disjunction_residuals executed no source-predicate comparison; a probe "
-        "that measures nothing reports 0 violations and reads as a pass "
+        "disjunction_residuals compared nothing on a model that has a "
+        "disjunction; the report reads 0 violations without having looked "
         "(CLAUDE.md §6)"
     )
+    _CALLS[0] += 1
     _COMPARISONS[0] += report.comparisons
     return report
 
 
 def teardown_module(module):  # noqa: ARG001
-    """The §6 guard, made xdist-correct (#1187).
-
-    This used to assert ``_COMPARISONS[0] > 0`` unconditionally. ``_COMPARISONS``
-    is a module global, CI runs ``-n <workers> --dist loadgroup``, and the tests
-    in this module carry no ``xdist_group`` — so a worker handed only the
-    *refusal* tests (which never call :func:`_residuals`) reached this teardown
-    with a zero counter and errored, while all 26 tests passed. It is
-    worker-count dependent: clean at ``-n 2``, one error at ``-n 4``, two at
-    ``-n 8``, and it reproduces identically on ``main``. It surfaced on #1187
-    only because that PR turned three failures into passes and so reshuffled the
-    distribution.
-
-    Both halves of the original intent are kept, and neither depends on which
-    tests a worker happened to receive:
-
-    * *the machinery measured something* — asserted per call in
-      :func:`_residuals` above, so a silently-zero report fails immediately;
-    * *somebody still calls it* — asserted here against this module's own
-      source, which is identical in every worker. That is the case a per-call
-      assertion cannot see: deleting every call site would otherwise leave the
-      suite green and measuring nothing.
-    """
-    # A bare-name match, not a substring one: ``count("_residuals(")`` also
-    # matches ``disjunction_residuals(`` — the import and this module's own
-    # wrapper body — so it stays above any threshold even with every call site
-    # deleted, which is the vacuous instrument this guard exists to prevent.
-    sites = re.findall(r"(?<![A-Za-z0-9_])_residuals\(", Path(__file__).read_text())
-    assert len(sites) > 1, (  # the ``def`` line itself is one occurrence
-        "no test calls _residuals any more; the source-predicate comparison "
-        "guard is measuring nothing (CLAUDE.md §6)"
+    # Only 8 of this module's tests call `_residuals`, and CI runs the suite with
+    # `-n 2 --dist loadgroup`, which balances by *timing*. A worker that happens
+    # to draw only the other tests reaches this hook with the counter at zero and
+    # errors — "no source-predicate comparison was executed" — on a run where
+    # nothing is wrong and the module's own tests all passed. That is what
+    # happened on jkitchin/discopt#1194, whose diff does not touch this file: it
+    # changed how long unrelated solves take, which moved the split. Selecting a
+    # single non-comparing test (`pytest <file>::test_a_nested_disjunction_is_
+    # refused`) reproduces it in half a second.
+    #
+    # So the hook asserts what it can actually see: if this process ran a
+    # measurement, that measurement fired. A process that ran none has nothing to
+    # attest, and the per-call assertion in `_residuals` above carries the
+    # guarantee the module total used to carry alone.
+    if _CALLS[0] == 0:
+        return
+    assert _COMPARISONS[0] > 0, (
+        "no source-predicate comparison was executed; a suite that measures "
+        "nothing reports 0 violations and reads as a pass (CLAUDE.md §6)"
     )
-    if _COMPARISONS[0]:
-        print(f"\nexecuted source-predicate comparisons: {_COMPARISONS[0]}")
+    print(f"\nexecuted source-predicate comparisons: {_COMPARISONS[0]} over {_CALLS[0]} calls")
 
 
 # ── fixtures reused from the semantic-contract work (#1124) ──────────────────

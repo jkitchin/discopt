@@ -76,6 +76,13 @@ COUNTERS = (
     "DualDegenerateRunArms",
     "DualDegenerateRunMax",
     "DualDegenerateStallBails",
+    # #1013 cost perturbation: `Attempts` is what proves the perturb arm actually
+    # perturbed. Without it a mis-spelled env value in an arm reads as "off" and
+    # the panel measures the base arm twice -- the footgun `parse_cost_perturb`
+    # refuses at the source, checked again here at the point of measurement.
+    "DualCostPerturbAttempts",
+    "DualCostPerturbAccepted",
+    "DualCostPerturbRejected",
 )
 missing = [k for k in COUNTERS if k not in snap]
 if missing:
