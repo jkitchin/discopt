@@ -44,7 +44,12 @@ def _solve(
     options: dict,
 ) -> dict:
     """Run model.solve and return a SolveResult-shaped dict."""
-    from benchmarks.metrics import SolveResult, SolveStatus, time_fraction
+    from benchmarks.metrics import (
+        DISCOPT_STATUS_MAP,
+        SolveResult,
+        SolveStatus,
+        time_fraction,
+    )
     import discopt.modeling as dm
 
     start = time.monotonic()
@@ -79,14 +84,11 @@ def _solve(
             wall_time=time.monotonic() - start,
         ).to_dict() | {"_error": f"solve raised: {e}", "_traceback": traceback.format_exc()}
 
-    status_map = {
-        "optimal": SolveStatus.OPTIMAL,
-        "feasible": SolveStatus.FEASIBLE,
-        "infeasible": SolveStatus.INFEASIBLE,
-        "time_limit": SolveStatus.TIME_LIMIT,
-        "node_limit": SolveStatus.TIME_LIMIT,
-    }
-    bench_status = status_map.get(getattr(result, "status", "unknown"), SolveStatus.UNKNOWN)
+    # Shared table with the in-process runner (#1148): a status mapped differently
+    # here than there would score the same solve two ways depending on --subprocess.
+    bench_status = DISCOPT_STATUS_MAP.get(
+        getattr(result, "status", "unknown"), SolveStatus.UNKNOWN
+    )
 
     # `time_fraction` rather than truthiness: a measured 0.0 must survive as 0.0.
     # See its docstring -- this worker had the same collapse as the in-process

@@ -35,28 +35,39 @@ Example
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 
+from discopt import status as _status
 from discopt.constants import CONSTRAINT_INF
 from discopt.modeling.core import Expression, Model, Variable
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from discopt.modeling.core import SolveResult
 
 __all__ = [
     "Complementarity",
     "ComplementarityProvenanceError",
     "ComplementarityRole",
+    "LoweringRecord",
     "box_mcp",
     "carry_complementarities",
     "complementarity",
     "flat_source_indices",
+    "generated_rows",
     "reformulate_gdp",
     "reformulate_scholtes",
     "reformulate_sos1",
     "require_all_relations_lowered",
+    "RELAXING_METHODS",
+    "register_relations",
+    "relaxed_relations",
     "resolve_source_variables",
+    "source_residuals",
     "source_variables",
     "tighten_complementarity_bounds",
     "unlowered_relations",
@@ -284,7 +295,7 @@ class Complementarity:
 
     # ── lowering state ──
 
-    def mark_lowered(self, model: Model, method: str) -> None:
+    def mark_lowered(self, model: Model, method: str, rows: Optional[list] = None) -> None:
         """Record that ``model``'s rows already encode this relation.
 
         Kept per-model on purpose. The same relation object may legitimately be
@@ -305,8 +316,16 @@ class Complementarity:
         so ``m1``'s provenance no longer described its own disjunctive rows
         (reviews of #1149, HIGH 3 and blocking 2). A relation is shared; what a
         given model did with it is that model's fact.
+
+        ``rows`` are the :class:`~discopt.modeling.core.Constraint` objects the
+        lowering just emitted into ``model``, when the caller knows them. They
+        let #1148 report the *lowered* residual beside the source one — the two
+        differ by orders of magnitude at a Scholtes point, and only a report that
+        holds both can show it. ``None`` means "not tracked for this model",
+        which is what a rebuilding pass must record: it carries the relation
+        forward, but the rows in the rebuilt model are different objects.
         """
-        _lowered_map(model)[self] = method
+        _lowered_map(model)[self] = LoweringRecord(method=method, rows=rows)
 
     def is_lowered_into(self, model: Model) -> bool:
         """True when ``model`` already carries the rows generated from this relation."""
@@ -318,7 +337,20 @@ class Complementarity:
         Per-model on purpose — see :meth:`mark_lowered`. Ask the model that
         carries the rows you are reasoning about, never the relation.
         """
-        return getattr(model, "_lowered_complementarities", {}).get(self)
+        record = getattr(model, "_lowered_complementarities", {}).get(self)
+        return None if record is None else record.method
+
+    def rows_in(self, model: Model) -> Optional[list]:
+        """The rows this relation generated in ``model``, or ``None`` if untracked.
+
+        ``None`` and ``[]`` are different answers and must stay so: ``[]`` means
+        "this lowering emitted no rows", ``None`` means "this model does not know
+        which rows came from this relation" — and a lowered-row residual computed
+        from ``None`` treated as ``[]`` would report 0.0 for rows it never looked
+        at (CLAUDE.md §6).
+        """
+        record = getattr(model, "_lowered_complementarities", {}).get(self)
+        return None if record is None else record.rows
 
     # ── elementwise view ──
 
@@ -333,8 +365,53 @@ class Complementarity:
         return _scalarize_pairs(model, [self])
 
 
+#: Lowering methods whose rows are a **relaxation** of the relation, not an
+#: encoding of it. Scholtes replaces ``f·g = 0`` with ``f·g <= t``, so its rows
+#: admit points the relation forbids and a solve over them certifies the
+#: *relaxation*. Everything else here (``gdp``, ``sos1``) encodes the relation
+#: exactly.
+#:
+#: This distinction is load-bearing for the solve guard, not bookkeeping. #1148
+#: made ``solve_mpec`` record its relations on the model, and a Scholtes run then
+#: left the relation marked lowered — so ``require_all_relations_lowered``, whose
+#: entire purpose is to catch "a declared relation solved as if absent", *vouched*
+#: for a relaxation. Measured on the balanced probe (``max x+y s.t. x==y,
+#: 0 <= x ⊥ y >= 0``, true optimum 0): ``solve_mpec(method="scholtes")`` followed
+#: by ``model.solve()`` returned ``status='optimal' objective=2.83e-04
+#: gap_certified=True`` — a certified optimum strictly better than the true one,
+#: straight past the guard (#1158 review, MEDIUM 4).
+RELAXING_METHODS = frozenset({"scholtes"})
+
+
+@dataclass
+class LoweringRecord:
+    """What one model did with one relation: the method, and the rows it emitted.
+
+    Per-model state, keyed by relation identity in
+    ``Model._lowered_complementarities`` — see
+    :meth:`Complementarity.mark_lowered` for why neither field may live on the
+    relation. ``rows`` is ``None`` when the generated rows are not tracked for
+    this model (a rebuilding pass carries the relation forward, but the rebuilt
+    model's rows are different objects), and that is deliberately distinct from
+    an empty list.
+    """
+
+    method: str
+    rows: Optional[list] = None
+
+    @property
+    def is_exact(self) -> bool:
+        """True when the rows ENCODE the relation rather than relax it.
+
+        See :data:`RELAXING_METHODS`. Keyed on the method that emitted the rows,
+        which is the only thing that knows whether the generated feasible set is
+        the relation's own or a superset of it.
+        """
+        return self.method not in RELAXING_METHODS
+
+
 def _lowered_map(model: Model) -> dict:
-    """The model's identity map ``relation -> lowering method``, created on demand.
+    """The model's identity map ``relation -> lowering record``, created on demand.
 
     ``getattr``-with-default rather than a bare attribute read: a ``Model``
     built by a code path that bypasses ``__init__`` must not crash here.
@@ -715,7 +792,53 @@ def carry_complementarities(src: Model, dst: Model, *, pass_name: str) -> None:
         dst._complementarities.append(pair)
         method = pair.lowering_in(src)
         if method is not None:
+            # ``rows`` is deliberately left untracked: ``dst`` was rebuilt from
+            # ``src``'s rows, so it *carries* the generated rows, but they are
+            # different ``Constraint`` objects. Forwarding ``src``'s row list
+            # would hand a #1148 residual probe rows that belong to another
+            # model — a number that looks like a measurement and is not one.
             pair.mark_lowered(dst, method)
+
+
+def generated_rows(model: Model, pairs: list[Complementarity]) -> Optional[list]:
+    """Every row ``model`` holds that was generated from ``pairs``, or ``None``.
+
+    ``None`` when the rows of **any** relation in ``pairs`` are untracked in
+    ``model``: a partial list would let a lowered-row residual report the maximum
+    over the rows it happened to know about and read as a complete measurement.
+    Rows are tracked by the lowering that emitted them (see
+    :class:`LoweringRecord`) and are never reconstructed from generated *names*,
+    which a later pass renames.
+    """
+    out: list = []
+    for pair in pairs:
+        rows = pair.rows_in(model)
+        if rows is None:
+            return None
+        out.extend(rows)
+    return out
+
+
+def register_relations(model: Model, pairs: list[Complementarity]) -> None:
+    """Record ``pairs`` on ``model`` as its declared relations, once each.
+
+    ``Model.complementarity``/``Model.mcp`` do this themselves; a pair built with
+    :func:`complementarity` and handed straight to :func:`solve_mpec` was never
+    recorded, so ``model._complementarities`` — the durable record every
+    rebuilding pass forwards (#1147) — came back **empty** after a solve, and a
+    later source-residual query over the model measured nothing at all.
+
+    Membership is object identity, never a structural or name comparison: two
+    structurally identical pairs are two relations (see
+    :class:`Complementarity`), and ``Expression.__eq__`` builds a ``Constraint``
+    rather than returning a bool, so ``pair in list`` would raise before it could
+    be wrong.
+    """
+    known = {id(p) for p in model._complementarities}
+    for pair in pairs:
+        if id(pair) not in known:
+            model._complementarities.append(pair)
+            known.add(id(pair))
 
 
 def unlowered_relations(model: Model) -> list[Complementarity]:
@@ -726,6 +849,23 @@ def unlowered_relations(model: Model) -> list[Complementarity]:
     as if the condition were absent, and certified.
     """
     return [p for p in model._complementarities if not p.is_lowered_into(model)]
+
+
+def relaxed_relations(model: Model) -> list[Complementarity]:
+    """Relations whose rows in ``model`` are a **relaxation**, not an encoding.
+
+    Distinct from :func:`unlowered_relations`: the rows are present, they are
+    just weaker than the relation. A global solve over them certifies the
+    relaxation, which is not the model the user declared — see
+    :data:`RELAXING_METHODS` for the measured false certificate this exists to
+    stop.
+    """
+    out = []
+    for p in model._complementarities:
+        record = getattr(model, "_lowered_complementarities", {}).get(p)
+        if record is not None and not record.is_exact:
+            out.append(p)
+    return out
 
 
 def require_all_relations_lowered(model: Model, *, context: str) -> None:
@@ -744,16 +884,32 @@ def require_all_relations_lowered(model: Model, *, context: str) -> None:
     if not getattr(model, "_complementarities", None):
         return
     pending = unlowered_relations(model)
-    if not pending:
-        return
-    raise NotImplementedError(
-        f"{context}: model declares complementarity relation(s) with no lowering: "
-        + "; ".join(p.describe() for p in pending)
-        + ". The box-bounded MCP form is represented but not lowered (#1147), so "
-        "solving would silently drop the condition and certify a point it forbids. "
-        "Restrict the complementary variable to [0, +inf) and use "
-        "Model.complementarity, or reformulate the relation explicitly."
-    )
+    if pending:
+        raise NotImplementedError(
+            f"{context}: model declares complementarity relation(s) with no lowering: "
+            + "; ".join(p.describe() for p in pending)
+            + ". The box-bounded MCP form is represented but not lowered (#1147), so "
+            "solving would silently drop the condition and certify a point it forbids. "
+            "Restrict the complementary variable to [0, +inf) and use "
+            "Model.complementarity, or reformulate the relation explicitly."
+        )
+    relaxed = relaxed_relations(model)
+    if relaxed:
+        # Rows present but WEAKER than the relation. A global solve over them
+        # reports a certified optimum of the relaxation, which on the balanced
+        # probe is strictly better than the true optimum -- see RELAXING_METHODS.
+        # "Has a lowering" was never the right test; "has an EXACT lowering" is.
+        methods = sorted({p.lowering_in(model) or "?" for p in relaxed})
+        raise NotImplementedError(
+            f"{context}: model carries a RELAXATION of complementarity relation(s), not "
+            "an encoding of them: "
+            + "; ".join(p.describe() for p in relaxed)
+            + f" (lowered by {', '.join(methods)}). Those rows admit points the relation "
+            "forbids, so a global solve over this model would certify the relaxation "
+            "rather than the MPEC. Use discopt.mpec.solve_mpec(..., method='scholtes'), "
+            "which returns a LOCAL result that claims no certificate, or lower the "
+            "relation exactly with method='gdp' / 'sos1' on a fresh model."
+        )
 
 
 # ─────────────────────────── scalarization ────────────────────────────
@@ -911,6 +1067,43 @@ def _require_lowerable(pairs: list[Complementarity], method: str) -> None:
 # ─────────────────────────── reformulations ───────────────────────────
 
 
+def _lower_each(model: Model, todo: list[Complementarity], method: str, emit) -> None:
+    """Lower each relation in turn, recording **that relation's own** rows.
+
+    ``emit`` is called once per scalar element of one relation; the rows it
+    appends to ``model._constraints`` between the relation's start and end
+    positions are the rows attributed to it.
+
+    Per relation, not per call. The first version took one slice around the whole
+    list and assigned that aggregate to *every* pair, so
+    :meth:`Complementarity.rows_in` — documented as "the rows **this relation**
+    generated" — returned other relations' rows, and :func:`generated_rows` then
+    concatenated the aggregate once per pair: ``3N²`` rows for ``N`` scalar
+    relations, so a vector relation with 1000 elements walked ~3M rows instead of
+    3000 in the lowered-row residual (#1158 review, MEDIUM 6).
+
+    Rows are identified by *position*, never by matching generated names. Name
+    matching is what #1147 removed from provenance resolution and for the same
+    reason: a later pass renames, and a prefix match on ``compl0_`` silently picks
+    up ``compl0_extra`` from somewhere else.
+
+    Scalarizing one relation at a time also closes a naming hole: two *unnamed*
+    relations lowered in a single call were both named before either emitted a
+    row, so ``_ensure_relation_name`` saw neither the other's name nor its rows
+    and handed out ``compl0`` twice. Emitting between namings makes the second
+    lookup see the first's rows.
+
+    A relation whose lowering emits no ``_constraints`` row records an empty list,
+    which is a *measured* answer and distinct from the untracked ``None`` a
+    rebuilding pass leaves behind.
+    """
+    for parent in todo:
+        start = len(model._constraints)
+        for elem in _scalarize_pairs(model, [parent]):
+            emit(elem)
+        parent.mark_lowered(model, method, list(model._constraints[start:]))
+
+
 def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
     """Add Scholtes constraints ``f >= 0``, ``g >= 0``, ``f·g <= t`` for each pair.
 
@@ -923,13 +1116,14 @@ def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "scholtes")
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         tag = p.name
         model.subject_to(p.f >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(p.g >= 0, name=f"{tag}_g_nonneg")
         model.subject_to(p.f * p.g <= t, name=f"{tag}_reg")
-    for p in todo:
-        p.mark_lowered(model, "scholtes")
+
+    _lower_each(model, todo, "scholtes", emit)
 
 
 def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
@@ -945,7 +1139,8 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "sos1")
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         tag = p.name
         members: list[Variable] = []
         for side, expr in (("f", p.f), ("g", p.g)):
@@ -962,8 +1157,8 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
                 model.subject_to(aux == expr, name=f"{tag}_{side}_link")
                 members.append(aux)
         model.sos1(members, name=f"{tag}_sos1")
-    for p in todo:
-        p.mark_lowered(model, "sos1")
+
+    _lower_each(model, todo, "sos1", emit)
 
 
 def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
@@ -992,7 +1187,8 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
     """
     todo = _pending(model, pairs)
     _require_lowerable(todo, "gdp")
-    for p in _scalarize_pairs(model, todo):
+
+    def emit(p: Complementarity) -> None:
         # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
         tag = p.name or "compl"
         fv = _gdp_operand(model, p.f, tag, "f")
@@ -1000,8 +1196,8 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
         model.either_or([[fv == 0], [gv == 0]], name=tag)
-    for p in todo:
-        p.mark_lowered(model, "gdp")
+
+    _lower_each(model, todo, "gdp", emit)
 
 
 def _gdp_operand(model: Model, expr: Expression, tag: str, side: str) -> Expression:
@@ -1081,6 +1277,166 @@ def _fix_partner_to_zero(partner: Variable, *, driver: Variable, tag: str | None
 # ─────────────────────────────── solve ───────────────────────────────
 
 
+def _source_snapshot(model: Model) -> tuple[list, dict[int, tuple]]:
+    """Freeze what "the source model" means, **before** any lowering runs.
+
+    Returns the model's constraint rows and a copy of every variable's declared
+    bounds. Both halves matter and both are easy to get wrong by taking them
+    later:
+
+    * the rows, because after a Scholtes lowering the model also holds
+      ``f·g <= t`` — measuring "source primal feasibility" against that includes
+      the regularized row and stops being a statement about the user's model;
+    * the bounds, because a complementarity bound tightening or a presolve moves
+      them, and a point is then judged against a box the user never declared.
+
+    Rows are captured as the ``Constraint`` objects themselves (not copies): the
+    source expression tree is exactly what #1148 requires the residual to be
+    evaluated against.
+    """
+    from discopt.mpec_report import _model_rows
+
+    rows = _model_rows(model)
+    bounds = {
+        id(v): (
+            np.array(v.lb, dtype=np.float64, copy=True),
+            np.array(v.ub, dtype=np.float64, copy=True),
+        )
+        for v in model._variables
+    }
+    return rows, bounds
+
+
+def _report_for(
+    model: Model,
+    pairs: list[Complementarity],
+    snapshot: tuple[Optional[list], Optional[dict[int, tuple]]],
+    point_fn,
+    *,
+    kind: str,
+    continuation=None,
+    notes: tuple[str, ...] = (),
+):
+    """Build the #1148 source-residual report for a point, or ``None`` without one.
+
+    A residual that cannot be measured **refuses** — ``evaluate_at_point`` raises
+    rather than reporting the midpoint of a widened enclosure, which is the whole
+    point of the instrument. But that refusal must not take the *solve* with it:
+    ``_report_for`` runs after ``Model.solve`` has already returned a certified
+    result, and the report is a reporting layer on top of it. Before this, a model
+    with one row the interval evaluator cannot walk (a variable exponent ``u**v``,
+    say) turned a completed ``solve_mpec`` call into a ``ValueError`` — and the
+    offending row need not have anything to do with the relations, since source
+    primal feasibility walks every source row (#1158 review, HIGH 3).
+
+    So the failure is downgraded to ``mpec_report = None`` — but never silently
+    (CLAUDE.md §7): it warns, naming the exception. ``None`` means "not measured",
+    never "measured clean"; :attr:`SolveResult.mpec_report` says so.
+    """
+    import warnings
+
+    from discopt.mpec_report import source_residual_report
+
+    rows, bounds = snapshot
+    try:
+        # ``point_fn`` is a CALLABLE, not a point, so resolving the point happens
+        # INSIDE this guard. It used to be an argument expression -- evaluated
+        # before the function was entered, so ``_result_point``'s own
+        # "result does not carry variable ..." refusal sailed straight past the
+        # ``except`` and turned a finished, certified ``Model.solve`` into an
+        # exception out of ``solve_mpec``: the very HIGH-3 class this guard exists
+        # to close (#1158 review 2, MEDIUM 4).
+        point = point_fn() if callable(point_fn) else point_fn
+        if point is None:
+            return None
+        return source_residual_report(
+            model,
+            pairs,
+            point=point,
+            kind=kind,
+            source_constraints=rows,
+            source_bounds=bounds,
+            continuation=continuation,
+            lowered_rows=generated_rows(model, pairs),
+            notes=notes,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported loudly, never swallowed
+        warnings.warn(
+            f"solve_mpec: the source-residual report could not be measured "
+            f"({type(exc).__name__}: {exc}). The solve result is unaffected and is "
+            "returned as-is; result.mpec_report is None, which means NOT MEASURED — "
+            "it does not mean the source residuals are clean.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+
+
+def _result_point(model: Model, result):
+    """``point_from_flat`` for a solver result's incumbent, or ``None`` if it has none.
+
+    A result with no incumbent legitimately has nothing to measure. A result
+    whose ``x`` is a dict *missing* one of the model's variables is a different
+    thing entirely — an inconsistency between the result and the model — and
+    raises rather than silently producing a report over a partial point.
+    """
+    from discopt.mpec_report import point_from_flat
+
+    x = getattr(result, "x", None)
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return point_from_flat(model, x)
+    if not x:
+        return None
+    parts = []
+    for v in model._variables:
+        if v.name not in x:
+            raise ValueError(
+                f"solve result does not carry variable {v.name!r}, so a source residual "
+                "would be measured at a partial point. Refusing (CLAUDE.md §6)."
+            )
+        parts.append(np.atleast_1d(np.asarray(x[v.name], dtype=np.float64)).ravel())
+    return point_from_flat(model, np.concatenate(parts)) if parts else None
+
+
+def source_residuals(
+    model: Model,
+    result,
+    *,
+    kind: str = "auto",
+    source_constraints=None,
+    source_bounds=None,
+):
+    """The #1148 source-residual report for any result over ``model``'s relations.
+
+    :func:`solve_mpec` attaches one automatically; this is the entry point for a
+    model whose relations were lowered by :meth:`Model.complementarity` and
+    solved with a plain :meth:`Model.solve` — that path returns a certified
+    global result, and this says what the *source* relations read at its
+    incumbent (§C: validation is performed on the source model, not only on the
+    generated NLP; a smoothing tolerance can be small while a truth value near a
+    strict predicate boundary has already flipped).
+
+    ``source_constraints``/``source_bounds`` are the pre-lowering snapshot, when
+    the caller has one. Without it the report is measured against the model's
+    *current* rows and bounds, and says so in its ``notes`` rather than
+    presenting a mixed reading as a source one.
+
+    Returns ``None`` when the result carries no incumbent — there is nothing to
+    measure, and a report of zeros would read as a clean pass.
+    """
+    return _report_for(
+        model,
+        list(model._complementarities),
+        (source_constraints, source_bounds)
+        if source_constraints is not None
+        else (None, source_bounds),
+        lambda: _result_point(model, result),
+        kind=kind,
+    )
+
+
 def solve_mpec(
     model: Model,
     pairs: list[Complementarity],
@@ -1092,8 +1448,9 @@ def solve_mpec(
     max_iter: int = 16,
     x0: Optional[np.ndarray] = None,
     nlp_options: Optional[dict] = None,
+    residual_kind: str = "auto",
     **solve_kwargs,
-):
+) -> "SolveResult":
     """Solve an MPEC by reformulating its complementarity conditions.
 
     Parameters
@@ -1111,27 +1468,143 @@ def solve_mpec(
         standard model and call the global MINLP solver (``solve_kwargs``
         forwarded to :meth:`Model.solve`). ``"gdp"`` typically explores far
         fewer nodes than the smooth bilinear encoding.
+    residual_kind : str
+        Which complementarity residual definition to report; see
+        :class:`discopt.mpec_report.ComplementarityKind`. Reporting only — it
+        changes no lowering and no solver behaviour.
 
     Returns
     -------
-    The solver result. For ``"scholtes"`` this is the final NLP result
-    (with ``.x`` and ``.objective``); for ``"sos1"`` / ``"gdp"`` it is the
-    :meth:`Model.solve` result.
-    """
-    if method == "sos1":
-        reformulate_sos1(model, pairs)
-        return model.solve(**solve_kwargs)
+    discopt.modeling.core.SolveResult
+        **The same type for all three methods** (#1148 §D). Before this, switching
+        one keyword changed the returned type, the type of ``status`` (enum vs.
+        str) and whether a certification field existed at all, so no caller could
+        write one branch that read a result.
 
-    if method == "gdp":
-        reformulate_gdp(model, pairs)
-        return model.solve(**solve_kwargs)
+        The global methods return the certified result of :meth:`Model.solve`
+        unchanged. The Scholtes arm returns a **local** result:
+        ``status="local_optimal"`` for a converged stationary point,
+        ``"local_infeasible"`` when no local point was found —
+        never ``"infeasible"``, which would publish a stalled continuation as an
+        infeasibility proof. A local result carries ``gap_certified=False`` and
+        no ``bound``; :class:`~discopt.modeling.core.SolveResult` enforces that.
+
+        Every method attaches ``result.mpec_report``, a
+        :class:`~discopt.mpec_report.SourceResidualReport` measured on the
+        relations' **source** operands, with the lowered rows' own residual
+        beside it. On a Scholtes result it also carries the continuation trace
+        (per-stage ``t``, status, accept/reject reason and source residual) and
+        the ``sqrt(t)`` accuracy floor, so the achieved source residual is
+        reported independently of the final homotopy parameter.
+    """
+    # The relations become the model's durable record (#1147) before anything is
+    # lowered, so ``model._complementarities`` describes the model afterwards and a
+    # later ``source_residuals(model, result)`` measures the relations that were
+    # actually solved rather than an empty list.
+    register_relations(model, list(pairs))
+    report_pairs = list(pairs) if pairs else list(model._complementarities)
+    snapshot = _source_snapshot(model)
+
+    if method in ("sos1", "gdp"):
+        if solve_kwargs.get("stream"):
+            # The unified return type is a SolveResult (#1148 §D). ``stream=True``
+            # makes ``Model.solve`` return an iterator of updates instead, which
+            # carries no place to attach a residual report and would silently make
+            # one method's return type differ from the other two again.
+            raise ValueError(
+                "solve_mpec does not support stream=True: it returns one SolveResult "
+                "for every method (#1148). Call Model.solve(stream=True) directly on "
+                "the reformulated model if you need the update stream."
+            )
+        (reformulate_sos1 if method == "sos1" else reformulate_gdp)(model, pairs)
+        result = cast("SolveResult", model.solve(**solve_kwargs))
+        result.mpec_report = _report_for(
+            model,
+            report_pairs,
+            snapshot,
+            lambda: _result_point(model, result),
+            kind=residual_kind,
+            notes=(
+                f"global method {method!r}: the status and bound are the solver's own "
+                "certified result; the residuals below are the SOURCE reading of the "
+                "returned incumbent",
+            ),
+        )
+        return result
 
     if method != "scholtes":
         raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', or 'gdp'")
 
-    # Scholtes regularization homotopy via local NLP solves.
+    return _solve_scholtes(
+        model,
+        pairs,
+        report_pairs=report_pairs,
+        snapshot=snapshot,
+        t0=t0,
+        sigma=sigma,
+        t_min=t_min,
+        max_iter=max_iter,
+        x0=x0,
+        nlp_options=nlp_options,
+        residual_kind=residual_kind,
+        solve_kwargs=solve_kwargs,
+    )
+
+
+def _solve_scholtes(
+    model: Model,
+    pairs: list[Complementarity],
+    *,
+    report_pairs: list[Complementarity],
+    snapshot,
+    t0: float,
+    sigma: float,
+    t_min: float,
+    max_iter: int,
+    x0,
+    nlp_options,
+    residual_kind: str,
+    solve_kwargs: dict,
+) -> "SolveResult":
+    """The Scholtes regularization homotopy, as a local :class:`SolveResult`.
+
+    The continuation is a sequence of *local* NLP solves on a relaxed problem, so
+    nothing it produces is a certificate. What the result reports instead:
+
+    * ``status`` from :mod:`discopt.status` — ``local_optimal`` when a stage
+      converged, ``local_infeasible`` when none did. A stalled continuation is
+      **not** an infeasibility proof and must never be published as one (#1148 §B);
+    * the full continuation trace rather than the final ``t`` alone, so
+      "converged at 1e-8" and "stalled at 1e-2" are distinguishable;
+    * the achieved **source** complementarity residual, independent of that final
+      ``t``, beside the ``sqrt(t)`` accuracy floor the regularization imposes.
+    """
     from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.modeling.core import SolveResult
+    from discopt.mpec_report import (
+        ContinuationStage,
+        ContinuationTrace,
+        admitted_residual_scale,
+        max_source_complementarity,
+        point_from_flat,
+    )
+    from discopt.solvers import SolveStatus
     from discopt.solvers.nlp_backend import get_nlp_solver
+
+    # Terminal codes whose returned point is worth taking forward. OPTIMAL is a
+    # certified local solution; ITERATION_LIMIT covers Ipopt's code 3 stall, which
+    # is the expected late-stage outcome of a Scholtes homotopy. INFEASIBLE and
+    # ERROR are NOT here: their "point" is wherever restoration stopped and stands
+    # for nothing. See the comment at the acceptance test below.
+    _USABLE_STAGE_STATUSES = (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
+
+    if solve_kwargs:
+        raise TypeError(
+            "solve_mpec(method='scholtes') takes no Model.solve keyword arguments "
+            f"(got {sorted(solve_kwargs)}). The homotopy is a sequence of local NLP "
+            "solves, not a call to the global solver, so a forwarded 'time_limit' or "
+            "'validate' would have been accepted and silently ignored."
+        )
 
     t = model.parameter("_mpec_t", value=t0)
     reformulate_scholtes(model, pairs, t)
@@ -1145,9 +1618,18 @@ def solve_mpec(
         np.clip(np.asarray(x0, dtype=np.float64), lb, ub) if x0 is not None else _midpoint(lb, ub)
     )
 
-    result = None
+    stages: list[ContinuationStage] = []
+    residual_failures: list[str] = []
+    best_x: Optional[np.ndarray] = None
+    best_obj: Optional[float] = None
+    best_t: Optional[float] = None
+    # Whether the stage that produced ``best_x`` CONVERGED, as opposed to merely
+    # handing back the point it stopped at. The reported status turns on this.
+    best_certified = False
+    termination = "max_iter"
+    wall0 = time.perf_counter()
     tv = t0
-    for _ in range(max_iter):
+    for it in range(max_iter):
         t.value = np.asarray(tv, dtype=np.float64)
         # Re-request the evaluator so the updated parameter value is compiled in.
         # #1063: the canonical funnel, not the JAX ctor. The cache fingerprint
@@ -1156,22 +1638,222 @@ def solve_mpec(
         # the current ``t``.
         evaluator = make_evaluator(model)
         try:
-            result = backend(evaluator, x_cur, options=opts)
+            stage_result = backend(evaluator, x_cur, options=opts)
         except Exception as e:
             # MP-2: never swallow silently. A first-iteration failure has no
-            # result to fall back on — surface it; a later continuation failure
-            # keeps the best point found so far (valid at a larger t).
-            if result is None:
+            # point to fall back on — surface it; a later continuation failure
+            # keeps the best point found so far (valid at a larger t) and is
+            # recorded in the trace rather than erased from it.
+            if best_x is None:
                 raise RuntimeError(
                     f"MPEC NLP solve failed on the first homotopy iteration (t={tv:g}): {e}"
                 ) from e
+            stages.append(
+                ContinuationStage(
+                    iteration=it,
+                    t=float(tv),
+                    status="error",
+                    accepted=False,
+                    reason=f"subsolver raised {type(e).__name__}: {e}",
+                )
+            )
+            termination = "subsolver_failure"
             break
-        if result.x is not None:
-            x_cur = np.asarray(result.x, dtype=np.float64)
+
+        # A stage is USABLE when the subsolver returned a point it stopped at, not
+        # only when it reported OPTIMAL. Scholtes subproblems get progressively
+        # more degenerate as t -> 0 (MFCQ fails in the limit), so Ipopt code 3
+        # (``Search_Direction_Becomes_Too_Small`` -> ITERATION_LIMIT here) at the
+        # late, small-t stages is the EXPECTED case, not a failure: this repo's own
+        # note on that code says it means the IPM stalled at or near a local
+        # solution it cannot certify to tolerance. Accepting only OPTIMAL threw
+        # those away, so a run whose t=1e-1 stage converged and whose t=1e-2..1e-8
+        # stages stalled reported the t=1e-1 point (source residual ~1e-1) instead
+        # of the ~1e-4 one the pre-#1148 code returned -- and a run where every
+        # stage stalled returned ``local_infeasible`` with no point at all, having
+        # had one in hand (#1158 review 2, MEDIUM 5).
+        #
+        # ``local_optimal`` still means "a local stationary point"; a stalled-but-
+        # usable stage is recorded as such in the trace's ``reason`` and in
+        # ``stage_certified``, so the distinction survives rather than being
+        # flattened either way.
+        certified_stage = stage_result.status is SolveStatus.OPTIMAL
+        usable = stage_result.status in _USABLE_STAGE_STATUSES
+        has_point = stage_result.x is not None
+        converged = certified_stage
+        # In MODEL units, like the returned ``SolveResult.objective``. The NLP
+        # backend minimises the negation for a MAXIMIZE model, and recording the
+        # raw value left ``stages[-1].objective`` and ``result.objective``
+        # differing by a sign on every maximize MPEC -- in the very trace schema
+        # this slice proposes to share across repositories (#1158 review, LOW 8).
+        stage_obj = (
+            None if stage_result.objective is None else _model_units(model, stage_result.objective)
+        )
+        stage_res = None
+        if has_point:
+            x_cur = np.asarray(stage_result.x, dtype=np.float64)
+            try:
+                stage_res = max_source_complementarity(
+                    model, report_pairs, point_from_flat(model, x_cur), kind=residual_kind
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded in the trace, never silent
+                # Same rule as ``_report_for``: the residual may refuse, and the
+                # refusal must not take the SOLVE with it. This call was bare, so
+                # one operand the interval evaluator cannot walk aborted the whole
+                # homotopy on its first iteration -- strictly worse than the
+                # pre-#1148 behaviour (#1158 review 2, MEDIUM 3). The stage records
+                # ``source_complementarity=None`` (not measured) and says why.
+                stage_res = None
+                residual_failures.append(f"{type(exc).__name__}: {exc}")
+        # A stage is ACCEPTED only when the subsolver converged. A non-converged
+        # iterate is still carried forward as the next warm start (it is the best
+        # guess available), but it must not become the reported point: that is the
+        # difference between "a local stationary point" and "wherever the solver
+        # stopped", and only the first is what ``local_optimal`` claims.
+        if usable and has_point:
+            best_x, best_obj, best_t = x_cur.copy(), stage_obj, float(tv)
+            best_certified = certified_stage
+        stages.append(
+            ContinuationStage(
+                iteration=it,
+                t=float(tv),
+                status=str(getattr(stage_result.status, "value", stage_result.status)),
+                accepted=bool(usable and has_point),
+                certified=bool(certified_stage and has_point),
+                reason=_stage_reason(converged, has_point, stage_result.status)
+                + (
+                    f"; source residual not measured ({residual_failures[-1]})"
+                    if residual_failures and stage_res is None and has_point
+                    else ""
+                ),
+                objective=stage_obj,
+                source_complementarity=stage_res,
+            )
+        )
         if tv <= t_min:
+            termination = "t_min_reached"
             break
         tv = max(tv * sigma, t_min)
-    return result
+
+    # ``final_t`` is the last t a stage was actually SOLVED at, read off the
+    # trace -- not the loop's ``tv``, which the schedule has already advanced one
+    # step past the last solve by the time a ``max_iter`` exit is taken
+    # (#1158 review, LOW 9).
+    last_solved_t = float(stages[-1].t) if stages else None
+    final_t = best_t if best_t is not None else last_solved_t
+    if termination == "t_min_reached" and best_t is not None and best_t > t_min * (1.0 + 1e-9):
+        # The schedule reached t_min, but the point being REPORTED came from an
+        # earlier, larger t -- so the run did not converge at the accuracy the
+        # final t implies, and ``converged`` must not say it did (#1158 review 2,
+        # MEDIUM 5). ``final_t`` already names the t the reported point came from;
+        # this keeps the two consistent.
+        termination = "t_min_reached_but_best_point_is_from_a_larger_t"
+    trace = ContinuationTrace(
+        parameter="t",
+        stages=tuple(stages),
+        final_t=final_t,
+        termination_reason=termination,
+        admitted_residual_scale=admitted_residual_scale(best_t),
+        any_stage_accepted=any(st.accepted for st in stages),
+        reported_point_certified=best_certified,
+    )
+    if residual_failures:
+        import warnings
+
+        warnings.warn(
+            "solve_mpec: the per-stage source residual could not be measured on "
+            f"{len(residual_failures)} homotopy stage(s) ({residual_failures[-1]}). The "
+            "continuation was unaffected; those stages report "
+            "source_complementarity=None, which means NOT MEASURED.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    wall = time.perf_counter() - wall0
+    if best_x is None:
+        # No stage converged. This is "the local solver failed to find a point",
+        # NOT an infeasibility proof — publishing it as ``infeasible`` would be a
+        # false certificate in the direction nothing downstream checks (#1148 §B).
+        return SolveResult(
+            status=_status.LOCAL_INFEASIBLE,
+            objective=None,
+            wall_time=wall,
+            gap_certified=False,
+            mpec_report=_report_for(
+                model,
+                report_pairs,
+                snapshot,
+                (lambda: point_from_flat(model, x_cur)) if stages else (lambda: None),
+                kind=residual_kind,
+                continuation=trace,
+                notes=(
+                    "no homotopy stage converged: the residuals below are measured at "
+                    "the last iterate, which is NOT a solution and carries no claim",
+                ),
+            ),
+        )
+
+    from discopt.solver import _unpack_solution
+
+    # ``best_obj`` is already in model units: every stage objective is converted
+    # as it is recorded, so the trace and the result cannot disagree.
+    objective = best_obj
+
+    # ``local_optimal`` is defined as a local STATIONARY point, so it is reserved
+    # for a point a subsolver actually converged to. A stalled iterate is still
+    # reported -- it is a warm start, it carries its residuals, and throwing it
+    # away is what #1158 review 2 (MEDIUM 5) fixed -- but under the weaker
+    # ``local_limit``. Unconditional promotion meant a subsolver allowed zero
+    # iterations returned its own starting point as a stationary point, with the
+    # generated product row violated by 24 (#1158 review 3, blocking 3). Neither
+    # branch carries a bound or certification: a local solve proves nothing about
+    # the global problem either way (#1148 §C).
+    return SolveResult(
+        status=_status.LOCAL_OPTIMAL if best_certified else _status.LOCAL_LIMIT,
+        objective=objective,
+        # bound stays None: a local solve may contribute an incumbent (after
+        # independent feasibility verification) and never a dual bound (#1148 §C).
+        x=_unpack_solution(model, best_x),
+        wall_time=wall,
+        gap_certified=False,
+        mpec_report=_report_for(
+            model,
+            report_pairs,
+            snapshot,
+            lambda: point_from_flat(model, best_x),
+            kind=residual_kind,
+            continuation=trace,
+        ),
+    )
+
+
+def _stage_reason(certified: bool, has_point: bool, status) -> str:
+    """One sentence saying what a homotopy stage produced, and how strong it is."""
+    if not has_point:
+        return "subsolver returned no point"
+    if certified:
+        return "subsolver converged"
+    code = getattr(status, "value", status)
+    return (
+        f"subsolver stalled ({code}) at a point it could not certify to tolerance; "
+        "kept as an iterate — a usable warm start carrying its residuals — under "
+        "'local_limit', which asserts no stationarity"
+    )
+
+
+def _model_units(model: Model, objective: float) -> float:
+    """An NLP-backend objective converted to the model's own sense.
+
+    The backend always minimises, negating the objective for a MAXIMIZE model, so
+    a raw subsolver value is in *internal* units. One helper, used for both the
+    per-stage trace entries and the returned result, so the two cannot drift.
+    """
+    from discopt.modeling.core import ObjectiveSense
+
+    obj = float(objective)
+    if model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        return -obj
+    return obj
 
 
 def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:

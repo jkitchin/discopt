@@ -23,16 +23,62 @@ import numpy as np
 
 
 class SolveStatus(Enum):
-    """Standardized solve status across all solvers."""
+    """Standardized solve status across all solvers.
+
+    ``LOCAL`` is the one member that is neither a success nor a failure: it means
+    the solver returned a **local** result that makes no claim about the global
+    problem (discopt's ``"local_optimal"`` / ``"local_limit"`` /
+    ``"local_infeasible"``, added by #1148 — an MPEC Scholtes continuation, for
+    instance). It is deliberately NOT
+    ``OPTIMAL``: ``is_solved`` is ``status == OPTIMAL``, and
+    ``proved_optimal_count`` counts ``gap is None and is_solved`` as a proved
+    optimum, so a local stationary point reported as ``OPTIMAL`` would be scored
+    by the release gate as a certificate — CLAUDE.md §1's hard gate, with no
+    slack. With ``LOCAL`` both ``incorrect_count`` and ``proved_optimal_count``
+    skip the row, which is the fail-closed behaviour an *unmapped* status would
+    also produce; naming it makes that intentional and testable rather than
+    accidental, and keeps it distinguishable from a genuinely unknown status.
+    """
     OPTIMAL = "optimal"                 # Proven global optimum found
     FEASIBLE = "feasible"               # Feasible solution found, not proven optimal
     INFEASIBLE = "infeasible"           # Proven infeasible
     UNBOUNDED = "unbounded"             # Proven unbounded
+    LOCAL = "local"                     # Local result; no claim about the global problem
     TIME_LIMIT = "time_limit"           # Hit time limit
     MEMORY_LIMIT = "memory_limit"       # Hit memory limit
     NUMERICAL_ERROR = "numerical_error" # Solver failed numerically
     ERROR = "error"                     # Other solver error
     UNKNOWN = "unknown"
+
+
+#: discopt ``SolveResult.status`` -> benchmark :class:`SolveStatus`. One table so
+#: the in-process runner and the subprocess worker cannot drift on what a status
+#: means -- the same solve must not score differently under ``--subprocess``.
+#: Runners that see extra spellings (GDPLib's Pyomo/GAMS terminations) extend it
+#: rather than re-spelling the shared entries.
+#:
+#: Deliberately the exact set the panel runners already mapped, PLUS the #1148
+#: local statuses. Widening it further (``"unbounded"``, ``"error"``) would move
+#: rows between report outcome buckets on every existing panel -- a real
+#: improvement, but not this change's, and not one to fold into a baseline diff
+#: silently. Anything absent maps to ``UNKNOWN`` at the call site, which fails
+#: closed.
+DISCOPT_STATUS_MAP = {
+    "optimal": SolveStatus.OPTIMAL,
+    "feasible": SolveStatus.FEASIBLE,
+    "infeasible": SolveStatus.INFEASIBLE,
+    "time_limit": SolveStatus.TIME_LIMIT,
+    "node_limit": SolveStatus.TIME_LIMIT,
+    # #1148: a local result is not a certificate and must never be scored as one.
+    # Both counters of the release gate skip a LOCAL row.
+    "local_optimal": SolveStatus.LOCAL,
+    # A local search that produced a point but never established stationarity.
+    # Weaker than ``local_optimal`` and mapped the same way: an unmapped status
+    # would already fail closed to UNKNOWN, but naming it keeps that intentional
+    # and testable rather than accidental, which is this table's whole point.
+    "local_limit": SolveStatus.LOCAL,
+    "local_infeasible": SolveStatus.LOCAL,
+}
 
 
 def time_fraction(seconds: Optional[float], wall: float) -> Optional[float]:

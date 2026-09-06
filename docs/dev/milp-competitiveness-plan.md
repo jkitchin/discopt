@@ -94,6 +94,13 @@ instance closes until the bound arrives regardless of how good the incumbent is.
 That is a strict ordering, and the stages below follow it: bound first, primal as
 the accelerant that makes the bound's tree cheaper.
 
+> **FALSIFIED 2026-09-06 — see A14.** The "strict ordering" inference is wrong:
+> necessity and sufficiency do not order work, and the primal side is not an
+> accelerant here but the binding constraint. Given 3x the wall budget the dual
+> bound improved on 10 of 15 unsolved instances and the incumbent improved on
+> **0 of the 14** that held one. Median primal share of the open gap: 91.1 % at
+> 20 s, 91.8 % at 60 s. Read A14 before using this paragraph to order any work.
+
 ## 1. Where the gap is
 
 ### 1a. The failures present as primal-short
@@ -391,6 +398,13 @@ sufficient on none — no instance closes until the bound arrives, however good 
 incumbent. That is a strict ordering, and it is why Track A precedes Track B. But
 Track B is not optional: on the `mik` family the bound is already within 2.6 % and
 the tree still does not close, so Track A alone does not reach 38/38 either.
+
+> **FALSIFIED 2026-09-06 — see A14.** Re-measured on main+A13: median primal share
+> of the open gap is 91.1 % at 20 s and 91.8 % at 60 s, and at 3x the budget the
+> incumbent improved on **0 of the 14** unsolved instances that held one while the
+> dual bound improved on 10 of 15. Track B is not the accelerant behind Track A; on
+> this panel it is the binding constraint. The `mik` observation in this paragraph
+> was the tell and should have been read as one.
 
 ### Track A0′ — the audit's two candidate defects. One survives; do it first.
 
@@ -1678,6 +1692,856 @@ falsification test on this very panel: if a degeneracy signal separates `p0201`
 from `fiber`, it is a mechanism; if it does not, it is dropped. That, not a
 default-value refinement, is the next experiment.
 
+### A8 — degeneracy does **not** explain A4's bimodality. The explanation is dropped. 2026-09-05.
+
+**What A4 left owing.** A4 measured the strong-branching node budget and found it
+is not the lever (1.221× at unlimited, below that probe's own 1.25× floor), but its
+per-instance table was *bimodal*, not flat: `fiber` 11.31× and `dcmulti` 3.25×
+against `p0201` 0.644× — SB actively **harmful** — and `22433` 0.726×. A4
+registered exactly one explanation for that split, and one test of it. HiGHS shuts
+strong branching off entirely on a degenerate LP:
+
+```cpp
+if (degeneracyFac >= 10.0) pseudocost.setMinReliable(0);   // HighsSearch.cpp:1114-1116
+```
+
+The registered test: *if degeneracy separates the instances where SB pays from the
+ones where it hurts, the shut-off is a mechanism to port; if it does not, the
+explanation is dropped rather than kept as a story.*
+
+**What was measured, and why not `computeLPDegneracy` directly.** HiGHS's
+degeneracy factor (`HighsLpRelaxation.cpp:478-493`) is a proxy computed from
+fixed-row/column shares; the thing it is a proxy *for* is that probing a degenerate
+node cannot move the LP value, so the probe returns no ranking. discopt can measure
+that end directly at the branching site — cheaper, and not dependent on reproducing
+another solver's heuristic constants. Four counters were added to `strong_branch`
+(`milp_driver.rs`), inert unless `DISCOPT_PROFILE=1`, both tests relative to the
+objective scale rather than absolute (the same defect A7 found in the pseudocost
+default, this time in the instrument):
+
+| counter | meaning |
+|---|---|
+| `SbProbeZeroGain` | an `Optimal` probe whose child objective did not move |
+| `SbCallFlat` | ≥2 candidates, all scored alike — no ranking bought |
+| `SbCallDiscriminating` | ≥2 candidates and a real spread |
+| `SbCallSingleton` | exactly 1 candidate — cannot discriminate by construction |
+
+`SbCalls == Flat + Discriminating + Singleton` is asserted per instance in the
+panel and in a unit test (§6), as is `SbProbeZeroGain ≤ SbProbeOptimal`.
+
+**Pre-registered kill criterion, committed to `profile.rs` before the run.** Split
+the both-solved instances by A4's own node table into SB-PAYS (shipped48 / best
+larger-budget arm ≥ 1.15) and SB-WASTES (≤ 0.95), leaving the 0.95–1.15 band out as
+noise — a numeric threshold on A4's table, not a hand-picked set (§2). *If the
+median zero-gain probe share in SB-WASTES does not exceed SB-PAYS's median by at
+least 1.5×, flatness does not explain A4's bimodality and the degeneracy
+explanation is dropped.*
+
+**Result — 20 instances, 2,781 SB calls, 17,566 SB probes, `sb_node_budget` at the
+3000-node cap (the regime the shut-off would act in):**
+
+| instance | group | probes | optimal | zero-gain % | flat-call % | nodes |
+|---|---|---|---|---|---|---|
+| 23588 | PAYS | 1660 | 1630 | 0.0% | 0.0% | 2523 |
+| bppc8-02 | PAYS | 1496 | 1496 | **82.2%** | 43.1% | 3059 |
+| dcmulti | PAYS | 1142 | 1052 | 0.1% | 0.0% | 1507 |
+| enlight8 | PAYS | 1088 | 991 | **48.3%** | 38.9% | 3023 |
+| fiber | PAYS | 2660 | 2466 | 10.0% | 19.6% | 2547 |
+| gt2 | PAYS | 1222 | 1222 | **68.3%** | 32.3% | 3043 |
+| neos-3611447-jijia | PAYS | 766 | 746 | 9.7% | 4.3% | 3051 |
+| 22433 | WASTES | 1264 | 845 | 0.6% | 0.9% | 213 |
+| khb05250 | WASTES | 148 | 148 | 0.0% | 0.0% | 99 |
+| p0201 | WASTES | 1504 | 1504 | 17.2% | 1.9% | 665 |
+| supportcase16 | WASTES | 348 | 300 | 41.0% | 0.0% | 59 |
+
+Median zero-gain share: **SB-PAYS 0.0998, SB-WASTES 0.0887**. Criterion asked for
+`0.0887 / 0.0998 ≥ 1.5`; observed **0.889**.
+
+**Verdict: FALSIFIED, and not marginally — the sign is wrong.** The instances where
+SB pays are, if anything, the *more* degenerate ones: the three largest zero-gain
+shares on the panel (bppc8-02 82.2%, gt2 68.3%, enlight8 48.3%) are all in SB-PAYS,
+and the flat-call share separates the groups in the same wrong direction (PAYS
+median 19.7% vs WASTES 0.5%). A HiGHS-style shut-off keyed on degeneracy would have
+disabled strong branching precisely on the instances where A4 measured it earning
+3–11× node reductions.
+
+Per A4's own commitment the degeneracy explanation is **dropped**, not carried
+forward as a story, and the shut-off is **not built**. The counters stay (they are
+inert without `DISCOPT_PROFILE`, and they are what makes the claim falsifiable), but
+no behavior is keyed on them.
+
+**What this closes.** A1 (cut aging), A2 (in-tree aging), A4 (SB budget), A6→A7
+(pseudocost default, cert-clean but not net-positive), and now A8 (SB
+discrimination) have all been measured and none is the lever. Every one of them was
+a *dual*-side search-order hypothesis. A5 measured directly that the gap is
+**primal** — 17/38 unsolved with an 89.6% median primal share, and 12 of those hold
+a merely-poor incumbent rather than none — and that finding is now the only
+surviving lever on this panel. The target class is *improvement* heuristics
+(RINS-style neighborhood search, local branching, diving), not feasibility
+heuristics (RENS, feasibility pump).
+
+### B1 — #1183, an external reproducer, and four more falsified levers. 2026-09-05.
+
+A1–A8 all ran on the 38-instance MIPLIB panel. #1183 (filed by an outside
+reporter) is an independent instance of the same symptom on a completely
+different model class — a plant-layout **generalized disjunctive program**
+reformulated to MILP by Pyomo's `gdp.bigm`, 291 rows × 202 cols, 112 binaries,
+optimum 224 — and it is small enough to falsify hypotheses in seconds rather than
+hours. Every number below is on the **identical MPS**, with HiGHS as the reader for
+both solvers, so there is no conversion-fidelity risk in the comparison itself.
+
+| measurement | value | share of the 68.3% formulation gap closed |
+|---|---|---|
+| pure LP relaxation (the formulation, handed to both solvers) | 71.0 | 0% |
+| discopt root bound | 169.4 | **64.3%** |
+| HiGHS root bound (after its restart and second cut pass) | 198.4 | **83.3%** |
+| optimum | 224.0 | 100% |
+| discopt nodes (engine, defaults) | **2199** | |
+| discopt nodes (via the Pyomo plugin) | 4389 | |
+| HiGHS nodes | **157** | |
+
+**The formulation is not the story.** The big-M relaxation is genuinely weak — a
+68.3% root gap — but *both* solvers start from the identical 71.0. discopt closes
+64.3% of it at the root, which is not far off HiGHS's own first pass (163.6 in its
+log). The gap is what happens after.
+
+**Four levers, each with a pre-registered bar, each falsified:**
+
+1. **The incumbent (primal).** discopt holds an incumbent of **492** against an
+   optimum of 224 from node 3 through node 625 — a 120% primal gap during which no
+   bound can prune. That looked like A5's finding reproduced. It is not: handing
+   discopt the **proven optimum** as `initial_incumbent` gives **2199 → 1537 nodes,
+   1.43×**, against a 3× bar. On this instance the gap is *dual*, not primal.
+   (The seed was verified injected, not assumed — `validate_seed_incumbent`
+   rejects silently by design (`milp_driver.rs:3729`), so the probe asserts the
+   3-node seeded run reports 224 before believing either arm.)
+2. **Presolve.** HiGHS's presolve reduces 291×202 with 112 binaries to **80×66
+   with 45 binaries** — 72% of rows and 60% of the binaries gone. discopt's
+   `presolve` option is documented at `milp_driver.rs:406` as "Root
+   feasibility-based bound tightening (sound, dimension-preserving)" and is a
+   single `tighten_bounds_csc` (FBBT) call at `:690`: it narrows bounds and never
+   removes a row, removes a column, or fixes a binary out of the model. There is no
+   presolve/postsolve pair on the MILP path. Handing discopt the **HiGHS-presolved
+   model** gives **2199 → 1539 nodes, 1.43×**, against the same 3× bar. A model
+   3.6× smaller with 60% fewer binaries buys almost nothing.
+3. **MIR and c-MIR.** `lp/mir.rs` (single-row MIR) and `lp/aggregation.rs`
+   (Marchand–Wolsey aggregation c-MIR) exist, are tested, and are exposed to Python
+   — but the MILP driver imports only `separate_cover_csc` and
+   `separate_gomory_cols` (`milp_driver.rs:21,24`; the only `Sep*` timers in the
+   driver are `SepCover` and `SepGomory`). MIR is reachable from `convex_kernel.rs`
+   and the bindings and from nowhere on the MILP path, which looked like an obvious
+   omission on a big-M model. Run against the root LP they separate **145 cuts,
+   every one valid** (each checked against the proven optimum; none cuts it off)
+   and move the bound by **+0.00**. Wiring them would not fix this.
+4. **Every switch discopt already has.** A 2×5 sweep over {original,
+   HiGHS-presolved} × {defaults, `node_propagation`, `node_cuts`, both, both + SB
+   unrestricted}, all ten proving 224.0:
+
+   | model | switches | nodes |
+   |---|---|---|
+   | original | defaults | 2199 |
+   | original | node_propagation | 2667 |
+   | original | node_cuts | 2199 |
+   | original | both | 2667 |
+   | original | both + SB unrestricted | 1573 |
+   | presolved | defaults | 1539 |
+   | presolved | node_propagation | **1349** |
+   | presolved | node_cuts | 1539 |
+   | presolved | both | 1349 |
+   | presolved | both + SB unrestricted | 1473 |
+
+   Best configuration reachable today: **1349 nodes, 1.63× off the baseline and
+   still 8.6× behind HiGHS**. `node_propagation` *hurts* on the unpresolved model
+   (2199 → 2667). `node_cuts` is a **complete no-op** on this model (2199 → 2199,
+   1539 → 1539): cover cuts need knapsack rows, and big-M no-overlap rows are not
+   knapsacks.
+
+**Why more of the same cuts cannot help.** The root cut loop ran with
+`root_cuts=500, cut_rounds=50` and made only **24 Gomory calls**. It stopped
+because its separators found no further violated cut, not because it ran out of
+budget. discopt's root is *exhausted* at 169.4. Reaching HiGHS's 198.4 requires cut
+families discopt does not have, not more rounds of the ones it does.
+
+**What is left, from HiGHS's own log.** Its root is two passes, not one: cuts,
+then `2.2% inactive integer columns, restarting`, a re-presolve to 79×65, then a
+second pass to 198.4 — and it carries 41–105 cuts *in the LP* down the tree while
+accumulating 280 **conflicts**. discopt has no restart, no conflict analysis, and
+no cuts retained in node LPs. A9 measures which of these is actually worth
+anything.
+
+> **Retraction (§11), 2026-09-05.** An earlier version of this section attributed
+> a `71 → 163.6` jump to HiGHS's *first cut pass*. That reading is wrong. Log
+> lines with `Src == kSolutionSourceNone` are throttled by
+> `mip_min_logging_interval`, default **5 seconds**
+> (`mip/HighsMipSolverData.cpp:1657-1661`), so `71 → 163.6` spans every separation
+> round that fit in one 5 s window, not one pass. No single pass is measured.
+> The same paragraph named the **restart** as a leading surviving candidate; A9d
+> measures it at **166 nodes vs 157**, i.e. worth 1.06×. Both claims are
+> withdrawn.
+
+**Instrumentation note (§6).** A first attempt to attribute HiGHS's root by
+ablating its per-cut-family options produced a clean-looking nine-row table in
+which **six rows were silent no-ops**: `mip_gomory`, `mip_flow_cover`,
+`mip_clique`, `mip_mixed_integer_rounding`, `mip_implied_bound` and
+`mip_lifted_knapsack_cover` are not HiGHS options, and `setOptionValue` returns
+`kError` **without raising**. Every "OFF" row was the default configuration
+reporting the default bound. The table was discarded before it was used. Only
+`presolve` and `mip_heuristic_effort` are real options in that build; the
+attribution above comes from HiGHS's log and source instead.
+
+### A9 — #1183 continued: the gap is the SEARCH, not the relaxation. 2026-09-05.
+
+> **§8 CORRECTION, same day.** A9a–A9e and all of B1 were first measured in the
+> `wt-probe` worktree, which sits **behind main**: it predates #1173, which had
+> already graduated `node_propagation` to default-ON
+> (`crates/discopt-python/src/lp_bindings.rs:1101`). Every `discopt.__file__`
+> assertion passed — the file *was* the code under test — but the build's defaults
+> were not the shipped ones, so the baselines were inflated. §8 says to assert a
+> **marker unique to the version under test**; a path is not that marker when the
+> question is "what does shipped discopt do". Re-measured on main below. The
+> ratios inside each experiment remain valid (both arms always shared one build);
+> the absolute baselines do not.
+>
+> | | on `wt-probe` (reported first) | on main (correct) |
+> |---|---|---|
+> | #1183 default nodes | 2371 | **1543** |
+> | probing-tightened bounds | 2217 (1.07×) | **2737 (0.56× — actively worse)** |
+> | best legitimate configuration | 1109 | **1109** |
+>
+> Two further claims are withdrawn: that `node_propagation` was awaiting
+> graduation (it shipped in **#1173**), and that the panel showed
+> `neos-3611689-kaihu` gaining a certification — under a clean load that instance
+> proves optimality in *both* arms, so the "gain" was an artifact of the
+> contaminated run it was scored from.
+
+
+B1 falsified four levers. A9 ran four more, then turned the question around and
+ablated **HiGHS's** mechanisms instead. Same MPS, same reader, optimum 224.
+
+**A9a — implied bounds from a single row's residual activity.** The HiGHS
+mechanism (`presolve/HPresolve.cpp:7957-8055`, `mip/HighsImplications.cpp:673-698`)
+reads a row with exactly one binary and emits `x + (ub_x − v)·y ≤ ub_x` — a big-M
+row with the modeller's `M` replaced by a derived one. On this model 112 of 291
+rows qualify, and the derived `M` is tighter on **100% of 180 triples, by a median
+of 108.0** — Pyomo's `gdp.bigm` over-estimates by exactly that much. Arm 1 is
+therefore strongly supported. But the 180 cuts (all valid, each checked against
+the proven optimum) move the root LP **71.0 → 71.5**. **FALSIFIED** against a
++10-point bar.
+
+**A9b — full probing.** A9a is a weak proxy: HiGHS *fixes* the binary and
+propagates over **every** row. Doing that (FBBT to a fixpoint on each of the two
+branches of each binary) is a different animal — 89 binaries probed, **13 branches
+propagate infeasible so 13 binaries are fixed outright**, 5 global tightenings,
+470 implied-bound cuts, 672 soundness checks all passing:
+
+| root LP | bound |
+|---|---|
+| raw | 71.00 |
+| + FBBT alone — *what discopt's presolve already does* | 71.00 (**+0.00**) |
+| + probing | 90.00 (**+19.00** incremental) |
+| + implied-bound cuts on top, 87 separated | 93.33 (+22.33) |
+
+Note the middle row: discopt's entire root presolve tightens 86 bounds and buys
+**nothing** on the root LP of this model. Probing is the whole gain.
+
+**A9c — but it does not move the tree.** Handing discopt the probing-tightened
+model (13 binaries fixed): on main, **1543 → 2737 nodes = 0.56×**. Not merely
+short of the 1.5× bar — **actively worse**. **FALSIFIED.** discopt's own cut loop
+already reaches 169.4, far past 90, so the probing bound is subsumed, and the
+tightened box then perturbs branching and propagation onto a worse trajectory.
+Even *fixing 13 of 112 binaries outright* does not pay for that.
+
+That is now **six** levers that improve the bound or shrink the model and do not
+move discopt's tree: a perfect incumbent (1.43×), the HiGHS-presolved model
+(1.43×), MIR/c-MIR (+0.00), single-row implied bounds (+0.50), full probing
+(1.07×), and every existing switch (1.63×). At that point the hypothesis class
+itself is wrong.
+
+**A9d — so ablate HiGHS instead.** Which of *its* mechanisms is worth its 157
+nodes? Every option name status-checked, and one that exists in `ref/HiGHS` but
+not in the installed 1.12.0 build is reported as skipped rather than silently run
+at its default:
+
+| HiGHS configuration | nodes |
+|---|---|
+| defaults | **157** |
+| no restart | 166 |
+| cuts age out of the LP immediately | 167 |
+| no presolve | 206 |
+| no strong branching | **367** |
+| cut pool ~disabled | **516** |
+| no heuristics / no symmetry / no probing lifting | 157 (no effect at all) |
+
+Cuts are worth 3.3× to HiGHS and branching 2.3×; the restart, node-LP cut
+retention, heuristics and symmetry are worth essentially nothing here. **The
+decisive row is `cut pool ~disabled`: HiGHS solves from a root bound of 71 in 516
+nodes, while discopt solves from a root bound of 169.4 in 2667 as shipped.** A solver with a
+*much stronger root* taking 4.6× more nodes is not losing on its relaxation.
+
+**A9e — confirming it on discopt's side.** On main, varying the strong-branching
+budget (`node_propagation` is already on by default here):
+
+> **Baseline label corrected, same day.** The row below first read
+> "defaults". It is not: it is the shipped root-cut budget **minus**
+> `cut_select`. The configuration a user actually gets is
+> `_milp_root_cut_budget` (`python/discopt/solver.py:21569-21637`, graduated
+> default-ON 2026-09-05), which sets `root_cuts=500, cut_rounds=50,
+> **cut_select=True**, root_cut_time_s`. Measured on main over the same
+> `i1183.mps`: binding defaults (`root_cuts=16, cut_rounds=1`) **10765**; the
+> shipped budget **2667**; the shipped budget with `cut_select=False` **1543**;
+> that plus SB 64/5000 **1109**. So `cut_select` *costs* 1.7× on this instance —
+> which is the documented shape of that graduation ("cuts buy the hard instances
+> by taxing the easy ones"), not a new defect, and one instance is not grounds to
+> touch a corpus-graduated default (§2). Two of my own scripts disagreed on "the
+> default" (1543 vs 2667) purely because one omitted `cut_select`; naming the
+> configuration rather than the word "defaults" is the fix.
+
+| discopt configuration | nodes |
+|---|---|
+| shipped budget, `cut_select=False` (`sb_max_cands=6`, `sb_node_budget=48`) | 1543 |
+| SB 16 / 500 | 2323 — **worse than the default** |
+| SB 64 / 5000 | **1109** |
+| SB exhaustive (256 / 10⁶) | 1109 — *saturates at 64* |
+| SB exhaustive + explicit `node_propagation` | 1109 — *confirms it is already on* |
+| SB exhaustive + seeded optimum (not a legitimate configuration) | 463 |
+
+Two things here. The reachable gain is **1543 → 1109 = 1.39×** from the SB budget
+alone, and it **saturates at 64 candidates** — discopt's scoring rule is already
+extracting everything it can, so ranking quality is not the lever. And the budget
+is **non-monotonic**: 16/500 is *worse* than 6/48. A wider probe changes which
+variable is chosen, and on this instance the intermediate choice is unlucky. That
+rules out simply raising the default without a corpus panel, and it is the same
+shape of result as A6→A7.
+
+**Conclusion for this class.** The relaxation is not the problem — six bound- and
+model-side levers moved the tree by at most 1.63×, and one (probing) moved it
+backwards. The search is: HiGHS with its cut pool disabled proves optimality from
+a root bound of **71** in **516** nodes; discopt, from a root bound of **169.4**,
+takes **1543** with `cut_select` off and **2667** as shipped. Three to five
+times the nodes from more than twice the root bound. The
+open levers are per-node work and the cut families discopt lacks, not better
+bounds from the ones it has.
+
+**Corpus re-validation of #1173.** `node_propagation` shipped default-ON in #1173;
+the 38-instance MIPLIB panel was re-run here on a clean main build. The first
+scoring of it was wrong in an instructive way: it pooled all 38 instances and
+reported 1.267× on nodes. **Node counts are only deterministic on instances that
+actually finish** — for a clock-terminated instance the node count measures how
+much machine it got, and that run's load ran 6.5–20.4. Split correctly:
+
+*21 instances where **both** arms proved optimality (node counts verified
+deterministic: 42 rep-pairs, zero mismatches):*
+
+| | OFF | ON | |
+|---|---|---|---|
+| total nodes | 1,115,897 | 386,543 | **2.89×** |
+| total wall | 56.32 s | 31.04 s | **1.81×** |
+
+`flugpl` 13.4×, `enlight8` 3.2×, `neos-3611689-kaihu` 3.2×,
+`neos-3611447-jijia` 3.1×, `gt2` 2.3×, `bppc8-02` 2.0×. Three regressions:
+`fiber` 0.82×, `supportcase14` 0.79×, `khb05250` 0.94× — only `fiber` loses
+wall (7.90 s → 9.39 s).
+
+*17 clock-terminated instances,* compared on dual bound rather than nodes: ON
+tighter on 5, looser on 6, equal on 6 — **a wash**, with the four
+`mik-250-20-75-*` all in the "looser" column.
+
+*Certification:* 152 checks, **0** bounds above a reference optimum, **0**
+certifications lost, 0 gained. Cert-clean.
+
+No selection bias in the split: zero instances changed certification status
+between arms, so the 21-instance subset is identical for both. #1173 was the right
+call, and this is the measurement that should have accompanied it.
+
+### A10 — the strong-branching budget, at corpus scale: FALSIFIED as a default
+
+A9e left the SB budget as the one open discopt-side lever with a measured gain
+(2667 → 1109 on #1183). Per §2 a single-instance gain is not a result, so it went
+to the 38-instance MIPLIB panel — `sbbudget.py`, `gap_tol=1e-4`, 20 s/instance,
+arms run back-to-back on each instance so they meet the same machine load.
+
+**The panel was extended from one dimension to two before it ever produced a
+number.** Its original arms varied `sb_node_budget` alone. A9e had by then
+measured that the budget alone is *non-monotonic* (16 candidates / 500 nodes is
+worse than the shipped 6/48) while 64 candidates / 5000 nodes gives 1.39× and then
+**saturates** at 64. A budget-only sweep would have reported a wash and falsified
+the wrong hypothesis. `n50k` was kept precisely so the budget-alone dimension was
+still *measured* rather than assumed.
+
+**Pre-registered kill criterion** (written before the run): geometric mean node
+reduction over the instances **every arm** drives to optimality — only there is a
+node count a complete quantity rather than a disguised timing measurement.
+≥ 1.5× survives; < 1.25× falsified; in between, weak — report, do not build on it.
+
+| arm | `sb_max_cands` | `sb_node_budget` | solved | geomean nodes vs shipped |
+|---|---|---|---|---|
+| shipped | 6 | 48 | **21/38** | — |
+| n50k | 6 | 50 000 | **21/38** | 1.22× |
+| c64n5000 | 64 | 5 000 | 20/38 | **1.43×** |
+| c64n50k | 64 | 50 000 | 20/38 | 1.42× |
+
+**Verdict: WEAK by the pre-registered criterion, and it fails the §5
+net-positive bar outright.** Cert-clean — 152 bound-vs-oracle comparisons and 82
+solved-incumbent-in-band checks executed, zero violations — but not helpful:
+
+- It **loses an instance**. `gt2` goes from *optimal in 0.06 s / 2643 nodes* to
+  *unproven after 20.4 s / 828 901 nodes*. Solved count 21 → 20.
+- Total wall over the 20-instance comparable set is **worse**: 29.1 s → 31.1 s,
+  *despite* 1.43× fewer nodes. The per-node strong-branching cost eats the entire
+  node gain and then some. A node-count win is not a win.
+- The distribution is violently **bimodal**: `fiber` 20.3×, `22433` 5.5×,
+  `dcmulti` 3.0×, `23588` 2.9× against `neos-3611689-kaihu` 0.59×, `gen` 0.73×,
+  `supportcase16` 0.78× — better on 8, worse on 4, neutral on 8.
+
+**The `gt2` mechanism is the useful part.** In every arm the dual bound is
+**21166.0 — exactly the reference optimum**. The wide-SB arms fail purely on the
+*primal* side: their incumbent is stuck at **72966** while the bound sits on the
+answer. Wide strong branching reorders the search so the dive never reaches the
+good solution, and the tree then cannot close a gap the dual side had already
+won. This is the same shape as A9e's non-monotonicity, seen from the other end.
+
+**Conclusion: the fixed-node-prefix *shape* is wrong, not its size.** Too small
+(6/48) under-informs the pseudocosts; too large starves the primal search and
+overspends per node — and no constant sits between those failures, which is what
+"non-monotonic and bimodal" means. HiGHS does not pick a constant: it budgets
+strong branching in **LP iterations**, about a third of all non-heuristic LP
+iterations, recomputed at every branching decision, so the budget never fully
+expires and never runs away (`HighsSearch.cpp:1272-1290`). That is a plausible
+next design, but per the pre-registered criterion **nothing is built on the 1.43×**;
+it would have to enter as its own hypothesis with its own entry experiment.
+
+With A10 closed the discopt-side ledger for this class is: relaxation levers all
+falsified (A9a-A9c), the SB budget falsified as a default (A10). What remained
+untested at that point was node selection, conflict analysis and the
+restart-and-resolve loop — the mechanisms A9d showed HiGHS keeping when its cut
+pool is taken away. Node selection was taken next (Track B1), then the
+shape of the strong-branching gate (A11); both are falsified below, after which
+the dual-side ledger is exhausted.
+
+### Track B1 — node selection: FALSIFIED as a lever
+
+**Hypothesis.** `SelectionStrategy::BestFirst` was hardcoded at
+`milp_driver.rs:717`; `DepthFirst` and `BestEstimate` already existed in
+`bnb/pool.rs:10-18` (impls at `:66-81` and `:82-96`) and the driver never used
+either. Best-first is the correct rule for the *dual* bound and a poor one for
+the *primal* side, and SCIP does not default to it — `nodesel_estimate` carries
+`STDPRIORITY 200000` (`nodesel_estimate.c:48`) with plunging on top (`:56-62`).
+A10 had just localized the `gt2` failure to the primal side alone (dual bound
+exactly at the reference optimum, incumbent stuck at 72966), so node selection
+was the next mechanism in line rather than a guess.
+
+**Pre-registered kill criterion.** ≥1.5× geomean node reduction survives;
+<1.25× falsifies. §5's net-positive bar applies on top: an arm must not lose a
+solved instance and must not regress total wall.
+
+**Non-vacuity, established before the experiment was written.** `BestEstimate`
+degrades silently to `BestFirst` whenever a node's estimate is unset, and
+`branching.rs` sets `best_estimate: inherited_lb` — identical to the lower
+bound — at all six of its sites (`:309,325,359,375,584,599`). Had the MILP
+driver used that path, the `bestest` arm would have been an elaborate no-op
+reporting "no difference" as a result. It does not: the driver calls
+`tm.process_evaluated()` (`milp_driver.rs:1786`, `:1793`), and
+`tree_manager.rs:719-724` computes a real pseudocost estimate,
+`node_lb + down_cost(var) * frac` / `node_lb + up_cost(var) * (1 - frac)`.
+The panel confirmed this empirically after the fact: **31 of 38 instances
+produced different node counts across the arms.**
+
+**Result.** 38 MIPLIB instances, `gap_tol = 1e-4`, 20 s/instance, arms
+back-to-back per instance, shipped configuration otherwise.
+
+| arm | `node_select` | solved | geomean nodes vs best-first | wall |
+|---|---|---|---|---|
+| bestfirst (shipped) | 0 | **21**/38 | — | 41.4 s |
+| depthfirst | 1 | 20/38 | 1.11× | 33.5 s |
+| bestest | 2 | **21**/38 | 1.11× | 33.8 s |
+
+Cert-clean: **114 bound-vs-oracle comparisons, 62 solved-incumbent-in-band
+checks, zero violations.** The wall column is corroboration only — end-of-run
+load average was 39.96, self-generated by the panel; the node counts on the 20
+all-solved instances carry the conclusion.
+
+**Verdict: FALSIFIED.** 1.11× is below the 1.25× line, and it is the *best*
+arm — both alternatives land on the same number. `depthfirst` additionally
+fails §5's net-positive bar outright by losing a solved instance. `bestest`
+neither gains nor loses solves.
+
+**Consequence.** The `node_select` plumbing does not ship: a knob that no
+default uses and no measurement supports is a dead flag (§3). It stays on
+`perf/b1-node-select` as the instrument that produced this table, alongside the
+A2/A7/A8 probe branches. What the result *rules out* is worth stating plainly,
+because it is the second mechanism in a row to fall this way: A10 killed the
+strong-branching budget as a default and located the fault in the *shape* of
+the node-prefix rule rather than its size; B1 now shows that the order in which
+nodes leave the pool is not where the missing factor lives either. Best-first
+was not costing discopt anything measurable. The remaining untested mechanisms
+from A9d's list are conflict analysis and the restart-and-resolve loop, plus
+the reliability-branching shape A10 pointed at — and reliability branching is
+the one with a measurement behind it rather than an absence.
+
+### A11 — branching on unreliable pseudocosts: FALSIFIED, and it re-derived A6-A8
+
+**Hypothesis.** A10 located the strong-branching fault in the *shape* of the
+gate rather than its size: `milp_driver.rs:1434` arms SB on a node-index prefix
+(`total_nodes < sb_node_budget`, shipped 48) and the prefix then expires for the
+rest of the tree. The claim to test was that this leaves most branching
+decisions resting on pseudocosts that never became reliable.
+
+**Instrument.** Every branching decision was classified into a three-way
+partition at the decision site inside `process_evaluated` — `BranchFromHint`
+(the driver's injected SB decision), `BranchPcostReliable`, and
+`BranchPcostUnreliable` (chosen variable below `reliability_threshold = 8`) —
+plus `BranchUnreliableCands`, the summed size of the unreliable candidate set,
+so "how often a reliability gate would fire" stayed separable from "how much
+work it would find". Pre-registered kill line: unreliable share of pseudocost
+decisions below 20 % falsifies.
+
+**Result.** 38 instances, shipped configuration, 20 s each, **2,036,670
+classified decisions**; decisions/nodes within [0.2, 1.0] on all 35 instances
+with more than 20 nodes, so the partition tracks the tree rather than one code
+path.
+
+| | count |
+|---|---|
+| from hint (strong branching) | 1,001 |
+| pseudocost, reliable | 1,996,520 |
+| pseudocost, **unreliable** | 39,149 |
+| unreliable candidates seen | 31,579,317 |
+
+**Unreliable share: 1.9 %** against a 20 % kill line. **FALSIFIED**, by an order
+of magnitude. The variable actually chosen is almost always one that has
+observations — which on reflection is what a product pseudocost score *must*
+do, since an unobserved variable scores on the `default_cost` constant while an
+observed one scores its measured gain.
+
+**What the fourth counter says, and why it is not a rescue.** Unreliable
+candidates run at **15.5 per pseudocost decision** and 31.6 M in total. The
+candidate set is overwhelmingly unreliable while the winner is reliable: the
+search commits to the variables that got observations early and rarely learns
+about the rest. That is a real description — and it is **already measured and
+already acted on**. A6 found 39.9 % of scored candidates unobserved and 17.4 %
+of decisions won by one, at a 3000-node cap; this probe puts the winner figure
+at 1.9 % at full solve depth, which sharpens A6 rather than contradicting it
+(pseudocosts have matured by then). And the fix it points at — score an
+unobserved variable at the running mean instead of the constant `1.0` — **is
+A7**, which was implemented behind `DISCOPT_PCOST_DEFAULT=mean`, measured
+cert-clean, and refused graduation for being 8-better/7-worse with its gains
+confined to the `mik-250-20-75-*` family.
+
+**Process note, recorded because it cost a panel.** `docs/dev/` is canonical and
+CLAUDE.md binds its negative results; A6, A7 and A8 should have been read before
+this probe was instrumented, and they answer its question. Two of A11's premises
+were also already retracted in A7: discopt **is** a reliability brancher —
+`strong_branch` filters candidates by `c.2 < ctx.reliability`
+(`milp_driver.rs:2678`) and is documented as such at `:408` — so what the
+node-index prefix gates is whether SB runs at all, not whether reliability is
+consulted. The counters are kept: they are inert without `DISCOPT_PROFILE` and
+they are what makes the claim falsifiable. No behavior is keyed on them.
+
+**Where this leaves the ledger.** A1 (cut aging), A2 (in-tree aging), A4 (SB
+budget), A6→A7 (pseudocost default), A8 (SB discrimination), A9a–A9c
+(relaxation), A10 (SB budget at corpus scale), A11 and B1 (node selection)
+have all been measured, and every one of them is a **dual-side search-order**
+hypothesis. A5 measured directly that the gap is **primal** — 17/38 unsolved at
+an 89.6 % median primal share, 12 of them holding a merely-poor incumbent rather
+than none — and A10's `gt2` finding is the same result seen from another angle:
+the dual bound sat *exactly* on the reference optimum while the incumbent stayed
+at 72966. Nine falsified dual-side levers and two independent primal
+measurements is not an ambiguous signal. The next experiment is an
+**improvement** heuristic (RINS-style neighborhood search, local branching,
+diving), not another search-order change and not a feasibility heuristic.
+
+
+### A12 — RINS's precondition: SURVIVES, and it is the first lever that does
+
+**Why this one.** A11 closed the dual side. A5 had already measured the residual
+gap as primal (17/38 unsolved, 89.6 % median primal share, 12 holding a
+merely-poor incumbent rather than none) and A10's `gt2` showed the same thing
+from the other end — dual bound exactly on the reference optimum, incumbent
+stuck at 72966. discopt has a rounding heuristic (`try_rounding_csc`) and a
+no-incumbent continuous-repair dive (#1060, which by construction stops firing
+the moment an incumbent exists); it has **no improvement heuristic at all**,
+which is the mechanism behind "discopt's first incumbent is very nearly its
+last".
+
+**Hypothesis.** RINS — fix the integer variables on which the node LP
+relaxation agrees with the incumbent, solve the remainder as a sub-MILP — has a
+precondition that can be measured before any of it is built: the agreement has
+to be *high enough* that the sub-MILP is genuinely smaller, and *not so high*
+that nothing is left free to improve.
+
+**Instrument.** At every node with an LP solution, a real incumbent (the
+`INFEAS_SENTINEL` placeholder excluded) and at least one integer variable, the
+fraction of integer variables where the node LP value equals the incumbent
+value within 1e-6. That is SCIP's own test — `SCIPisFeasEQ(lpsolval, solval)`,
+`heur_rins.c:169`, an equality test and **not** a rounding test. Six buckets
+partition the node count exactly, so a miswired probe fails the sum identity
+rather than returning a plausible ratio (CLAUDE.md §6).
+
+**Pre-registered criterion.** The *usable band* is `[0.30, 0.99)`: 0.30 is
+SCIP's `DEFAULT_MINFIXINGRATE` (`heur_rins.c:74`), below which SCIP refuses to
+run RINS at all; `>= 0.99` leaves essentially nothing free, so it is a failure
+of the precondition and is bucketed separately rather than pooled with the
+band. Share of incumbent-present nodes in the band: `>= 30 %` SURVIVES,
+`10-30 %` WEAK, `< 10 %` FALSIFIED.
+
+**Result.** 38 instances, shipped configuration, 20 s each, **2,023,762
+incumbent-present nodes measured**, 33/38 instances contributing.
+
+| fixing rate | nodes | share |
+|---|---|---|
+| `< 0.30` (SCIP would refuse) | 28,746 | 1.4 % |
+| `[0.30, 0.50)` | 312,942 | 15.5 % |
+| `[0.50, 0.70)` | 714,150 | 35.3 % |
+| `[0.70, 0.90)` | 934,272 | 46.2 % |
+| `[0.90, 0.99)` | 33,275 | 1.6 % |
+| `>= 0.99` (nothing left free) | 377 | 0.0 % |
+
+**Usable band: 1,994,639 / 2,023,762 = 98.6 %** against a 30 % bar. **SURVIVES**,
+and not marginally. The distribution is centred where RINS is designed to work:
+81.5 % of nodes sit in `[0.50, 0.90)`, a sub-MILP with 10-50 % of the integers
+free. The degenerate ends are both empty — 1.4 % below SCIP's refusal threshold
+and 377 nodes in total at `>= 0.99`.
+
+**It holds on the population that matters.** Split by outcome, the band share is
+98.4 % over the 1,792,775 incumbent-present nodes of the **17 unsolved**
+instances and 99.7 % over the solved ones, so this is not an artifact of easy
+instances: 15 of the 17 unsolved instances carry an incumbent, and every one of
+them is at 84 % band or better (`gsvm2rl3` 86.7 %, `neos17` 84.4 %, the other
+thirteen at 100.0 %). The five instances contributing no measured node —
+`neos-1425699`, `22433`, `enlight_hard`, `neos-2624317-amur`, `f2gap40400` —
+are the root-solved and the genuinely **no-incumbent** cases. Two of those are
+the ones §3's Track B2 already named for shift-and-propagate; they are a
+*feasibility* problem and are explicitly not what RINS addresses.
+
+**What this does and does not establish.** It establishes the precondition, not
+the benefit: a heuristic that fires often on a well-sized subproblem can still
+fail to improve anything, and the §5 double bar (cert-clean AND net-positive)
+is what decides that, on a flag panel, after it is built. What A12 removes is
+the risk that killed the RLT work (#727) — a mechanism validated on a proxy
+that turns out to be a no-op on the real class. Here the measurement is on the
+real corpus, at full solve depth, on the exact population the gap lives in.
+
+**Status: this is the lever.** Nine dual-side hypotheses were measured and
+falsified; the first primal precondition tested clears its bar by more than
+three-fold. Build order follows the plan's Track B2 list, re-ordered for A5's
+finding that the common case is a *poor* incumbent rather than none: the shared
+reduced-copy sub-MILP call first, then RINS on top of it.
+
+#### A12 built and gated — the flag panel (PR #1186)
+
+RINS is implemented behind `DISCOPT_RINS`, default off. Four interleaved
+ON-vs-OFF panels over the §0 38-instance set at 20 s/instance:
+
+| mechanism | better / 17 unsolved | worse | both-solved wall | both-solved nodes |
+|---|---|---|---|---|
+| stride 16, no backoff | 6 | 0 | +45.9 % | −14.9 % |
+| + neighborhood dedup | 7 | 0 | +44.9 % | −14.9 % |
+| backoff, cap 6 doublings | 4 | 0 | +8.9 % | +0.8 % |
+| backoff, cap 2 doublings | 4 | 0 | +6.4 % | −6.2 % |
+
+**Cert-clean: PASS on all four.** Zero violations; `RinsRejected = 0` across
+152 instance-arms, i.e. RINS never proposed a point the driver could not
+independently verify. Incumbents were re-verified in numpy against the original
+model rather than through the Rust validator RINS itself calls, so the check
+could not inherit a bug in the thing it checks.
+
+**A12 delivers what A5 said was missing.** RINS never made an incumbent worse in
+any run, and its improvements land *on* the reference optimum: `beavma`
+593880 → 383285, `mik-250-20-75-2` −29347 → −50768, `mik-250-20-75-3`
+−40559 → −52242, `nexp-50-20-1-1` 45 → 29. So the A12 precondition converts to
+benefit on the real class — the #727 failure mode did not recur.
+
+**Falsified sub-hypothesis (recorded per §4/§11).** The +45 % wall tax was
+attributed to RINS re-solving identical neighborhoods and a dedup guard was
+built on the fixed columns and their pinned values. The panel measured
+`RinsSkippedDup = 0` over 1422 considerations: RINS runs against a *different
+node's LP* each batch, so the agreement set changes even while the incumbent is
+frozen, and the 121 `enlight8` calls were 121 distinct neighborhoods. The guard
+was a no-op and was removed. The true diagnosis is yield, not repetition:
+1401 runs → 35 improvements, a 2.5 % hit rate.
+
+**Falsified kill criterion (recorded per §4).** Before the backoff panel the
+criterion registered was "retain ≥ 6 of the 7 improved instances and wall
+≤ 1.10". It retained **4**. The backoff is kept — it removes a pathological
+cost (`enlight8` 121 → 6 runs, `neos-3611689-kaihu` +8.80 s → +0.06 s) without
+ever worsening an incumbent — but no claim is made that it preserves the primal
+gains. At a 20 s limit the run-to-run spread is large (`enlight_hard` found an
+incumbent in three runs and not the fourth), so 4 vs 7 is not a clean mechanism
+comparison.
+
+**A retraction (§11).** The first panel's net-positive predicate gated on
+solved-count and primal quality and omitted wall; it reported PASS while
+both-solved wall regressed 45.9 %. §5 names wall explicitly. The bar now
+enforces `wall_ratio ≤ 1.10` and that first PASS is withdrawn.
+
+**Status: default OFF.** Both bars pass at cap 2, but that is *eligibility* to
+graduate, not a decision, and the primal criterion failed. The trade on offer is
+roughly +6 % wall on a both-solved set totalling ~30 s (median 0.13 s/instance)
+against materially better incumbents on the instances that hit the time limit.
+Flipping the default is an owner call.
+
+### A13 — the objective lattice a continuous column was hiding: SURVIVES, and it graduated. 2026-09-06.
+
+**Why this one.** A12 closed the primal side of the residual. What remained on
+the `neos-361*` family was cruder than either: `neos-3610051-istra` has an
+integral optimum of 49 and sat at `bound = 48.53` until the clock ran out. discopt
+*has* objective-integrality fathoming, so the question was why it was not firing.
+
+**The measurement.** `objective_granularity` refuses the moment a *continuous*
+column carries objective cost. These models are written `min z  s.t.  z = <integer
+expression>`, routing the whole objective through one continuous column, so the
+detector refuses and the lattice is lost outright. Not a bug — a gap in what the
+detector can prove.
+
+**Entry experiment, run before the implementation.** Kill criterion stated in
+advance: fewer than ~5 instances gaining a usable lattice kills the lever. Over a
+104-instance MIPLIB draw, 20 already had a directly-integral objective and a
+further **13** are of exactly this shape — the whole `neos-361*` family, `misc07`
+(spacing 5), `markshare*`, `rout` (spacing 0.01). 13/104 = 12.5 % cleared it. Each
+of the 13 derived lattices was then checked to contain that instance's true
+optimum, including the non-unit cases (`misc07` puts the optimum at k=562 exactly;
+`rout` at k=-129769). Zero violations. This is the #727 RLT lesson honored: the
+mechanism was validated on the real class, never on a synthetic proxy.
+
+**What was built (PR #1189).** `objective_lattice` resolves a costed continuous
+column through an equality row that pins it to integer columns. The model is not
+rewritten — it reads the row to compute a spacing, so there is no postsolve
+obligation, which is what separates it from HiGHS's `freeColSubstitution` and from
+SCIP's aggregation ahead of `SCIPprobCheckObjIntegral`. The substitution
+introduces a constant, so the return type carries `{ spacing, shift }`: five panel
+instances have a nonzero shift, and a bare spacing would have mis-anchored the
+lattice and lifted the dual bound past the optimum.
+
+**Panel (44 instances, 20 s, interleaved).** Both §5 bars pass. Cert-clean with 0
+violations over 83 independently feasibility-verified incumbents. Net-positive:
+25/44 solved vs 23/44 with **none lost**, both-solved wall −11.6 % and nodes
+−7.8 %, and among the 21 instances neither arm closed, the dual bound improved on
+6 and worsened on none. `istra` and `iskar` go from timed-out-feasible to
+certified optimal.
+
+**Status: graduated default-ON**, with the `DISCOPT_OBJ_LATTICE_SUBST=0` opt-out
+intact. Unlike A12 this needed no owner call: wall, nodes, solved-count and dual
+bound all move the right way at once.
+
+**Honest limit.** `b-ball`, one of the three instances that motivated the work, is
+*not* resolved — its objective column has no defining equality row over integers,
+so the detector refuses rather than guessing.
+
+**An instrumentation failure, recorded because §6 is written from exactly these.**
+The first run of this panel measured nothing. The flag read was cached in a
+`OnceLock`, so the first solve in the process fixed the arm for every later one
+and the whole ON arm ran OFF code. The signature was `neos-3611447-jijia` at an
+*identical* 313,441 nodes in both arms. It was caught by reading the interim log
+mid-run, not by the end-of-run non-vacuity check. The flag is now read fresh per
+solve, an unrecognized value is a hard refusal rather than a silently chosen arm,
+and `obj_lattice_subst_reread.rs` fails if the cache ever returns. **Any A/B that
+switches a flag inside one process must prove the flag is not cached before its
+table means anything.**
+
+### A14 — §0's ordering principle is FALSIFIED: the primal side is *frozen*, and RENS clears its entry gate. 2026-09-06.
+
+**What §0 claims.** "Bound work is necessary everywhere. Primal work is necessary
+on 14 and sufficient on none, because no instance closes until the bound arrives
+regardless of how good the incumbent is. That is a strict ordering, and the stages
+below follow it: bound first, primal as the accelerant."
+
+**That inference does not hold, and the data now says the opposite.** Necessity and
+sufficiency do not order work. Closing a gap needs *both* halves, so the ordering
+question is which residual is larger and which is cheaper to remove — and a better
+incumbent is not merely an "accelerant", it is what makes the bound arrive at all,
+through pruning and reduced-cost fixing. §0's own §1a heading ("the failures present
+as primal-short") and A5 both pointed here; §0's ordering sentence outran them.
+
+**The measurement.** The pre-registered attribution probe (`gapsplit.py`, reading
+`>= 0.60 -> PRIMAL`, `<= 0.20 -> DUAL`, written before the run) was re-run against
+main+A13 on the 38-instance panel, because the ranking §0 orders against was
+measured 2026-09-05 and predates A12, A13 and node-propagation.
+
+| | 20 s | 60 s (3x budget) |
+|---|---|---|
+| unsolved / scored | 15 / 15 | 14 / 14 |
+| **median primal share** | **91.1 %** | **91.8 %** |
+| median dual share | 8.9 % | 8.2 % |
+| cert violations | 0 | 0 |
+
+The 60 s run was itself a pre-registered kill criterion — *median primal share
+< 0.60 at 3x the budget means the 20 s verdict is a time-limit artifact and Track
+B2 is not promoted on this evidence*. It came back **higher**, not lower.
+
+**The sharper statement, and the one that is immune to the load caveat** (machine
+load was 21–76 throughout, so per CLAUDE.md §9 **no wall-clock claim is made from
+either run**; these are within-instance comparisons of bound and incumbent *values*,
+which are load-independent):
+
+> Given 3x the wall budget and 2–5x the nodes, the dual bound improved on **10 of
+> 15** instances. Of the 14 instances that already held an incumbent at 20 s, the
+> incumbent improved on **0**. Not one. `b-ball` explored 1.24 M nodes without
+> moving its incumbent.
+
+`enlight_hard` is the natural control: it is the single instance with *no* incumbent
+at 20 s, and it is the single instance that gained primally, reaching the optimum by
+60 s. The one instance where the primal machinery was still permitted to run is the
+one that improved.
+
+**Root cause — this is a design gate, not a missing feature.** Off the root,
+discopt's only primal heuristic is plain nearest-rounding (`try_rounding_csc`), which
+never re-solves the continuous variables; it fires at every fractional node and
+produced zero improvements across ~500 K nodes. The one heuristic that *does* repair
+continuous variables (`try_dive_repair`) is root-only by default
+(`DIVE_STRIDE_DEFAULT = 0`) and, even when enabled, is hard-gated `!has_incumbent`
+on the stated assumption that "once any incumbent lands, the ordinary search (warm
+starts, cuts, reduced-cost fixing) is strictly the better use of the budget."
+
+**That assumption is what the table above falsifies.** The ordinary search was handed
+3x the budget on 14 instances holding an incumbent and improved it zero times. So the
+consequence of holding an incumbent is not that the search takes over the primal
+job — it is that discopt's primal machinery switches itself off permanently and
+nothing replaces it.
+
+**Why the answer is RENS and not more RINS.** A12 built RINS and it measured
+neutral-or-harmful; this data explains why rather than dismissing it. RINS fixes the
+integer variables on which the incumbent and the LP relaxation *agree* — it is an
+improvement heuristic anchored to the incumbent it starts from. Here the incumbents
+are 22–140 % off the optimum (`mik-250-*` ~30 %, `beavma` ~55 %, `neos17` ~140 %), so
+that anchor *is* the defect, not a usable starting point. RENS (Berthold, *RENS — the optimal rounding*, Math. Prog. Comput.
+6(1):33–54, 2014) ignores the incumbent entirely: fix every integer column already integral in the LP
+relaxation, restrict each fractional one to `{floor, ceil}`, solve the sub-MIP. It
+needs no incumbent at all — which also covers `neos-2624317-amur`, which has none.
+
+**Entry experiment, run before any implementation (CLAUDE.md §4), bars pre-registered:**
+*hit rate >= 5/15 (Berthold's ~1/3) and median primal-gap reduction >= 25 %; <= 3/15
+kills A14 outright.* Per instance: solve the pure LP relaxation, build the RENS box,
+run discopt on that box for the same 20 s, compare against the incumbent the full
+20 s solve reached.
+
+| | result | bar |
+|---|---|---|
+| hit rate | **7 / 15** | >= 5 |
+| median primal-gap reduction (improved) | **80.3 %** | >= 25 % |
+| median LP-integral fixing rate | 70.0 % | — |
+| cert violations | **0** | 0 (hard) |
+
+`gsvm2rl3` went from 0.586355 to the exact optimum 0.336528; `sp150x300d` cut 93.8 %
+of its primal gap, `beavma` 88.3 %, `neos17` 80.3 %. **Every** sub-MIP that was
+feasible solved to *optimality* inside the 20 s — the neighborhoods are cheap, which
+is the operational precondition. Two boxes came back infeasible (`enlight_hard`,
+`neos-2624317-amur`), detected fast; the correctness gate holds by construction and
+was checked explicitly, since a RENS box is a *restriction* and can never beat the
+reference optimum.
+
+**The honest limit.** On the four `mik-250-20-75-*` instances the root RENS box is
+*worse* than the incumbent (objective ~0 against −28 299), because the root LP fixes
+70 % of the integers at values that force a near-zero objective. This does not cost
+incumbent quality — a heuristic result is injected only if strictly better — but it
+does cost budget, and it is why real RENS runs at nodes throughout the tree off
+*different* LP solutions rather than once at the root. The entry experiment measured
+the weakest possible form of RENS and it still cleared both bars.
+
+**Status: A14 is entered, not shipped.** It still owes the CLAUDE.md §5 double bar —
+cert-clean *and* net-positive on a corpus-wide differential panel — before any
+default-ON graduation, and the `DISCOPT_CUT_INHERIT` lesson applies unchanged: sound
+is not the same as helpful.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is
@@ -1703,7 +2567,7 @@ so a stage can be scored before parity is reached:
 | A1 | 24/38 | cut lifecycle makes a >500 budget affordable |
 | A2 | 30/38 | the family HiGHS actually closes its last few percent with |
 | A3 | — | branching quality; scored on nodes at fixed solved-count, not on solves |
-| B1 + B3 | 33/38 | node selection + restarts, both cheap and both measured to matter |
+| ~~B1~~ + B3 | 33/38 | **B1 FALSIFIED 2026-09-05** at 1.11x nodes against a 1.25x kill line — see Track B1 above. The target now rests on restarts alone and is not carried forward on B1's share |
 | B2 | 35/38 | the sub-MIP/pump ladder |
 
 These are targets, not predictions — a stage that misses its target is re-scoped
