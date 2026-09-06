@@ -214,6 +214,7 @@ def main():
     print(f"\n{'instance':<22}{'OFF gap%':>10}{'ON gap%':>10}{'OFF bnd':>14}{'ON bnd':>14}"
           f"{'noise%':>9}{'diff%':>9}{'':>13}")
     wins = losses = dual_reg = dual_win = 0
+    raw_losses = 0          # panel-1-style: ANY decrease counts. Diagnostic only.
     goff, gon, compared = [], [], 0
     for name, ref, o, n in pop:
         compared += 1
@@ -231,6 +232,8 @@ def main():
             den = max(abs(o["bound"]), 1e-12)
             noise = max(o["bspread"], n["bspread"], NOISE_FLOOR_REL)
             diff = (o["bound"] - n["bound"]) / den      # >0 means ON is WORSE (min sense)
+            if diff > 0:
+                raw_losses += 1
             if diff > noise:
                 dual_reg += 1
                 verdict = "DUAL REGRESSION"
@@ -251,6 +254,11 @@ def main():
     print(f"  incumbent                  wins {wins}   losses {losses}")
     print(f"  dual regressions           {dual_reg}   (cap {cap:.1f} of {len(pop)});"
           f" dual wins {dual_win}")
+    print(f"  raw dual losses (panel-1 rule, ANY decrease, diagnostic only) {raw_losses}")
+    print("  NOTE ON BIAS: a loaded machine widens the measured per-instance noise")
+    print("  floor, which makes 2c' MORE permissive, not less. The bias runs in the")
+    print("  flag's favour, so the raw count above is printed next to it and the load")
+    print("  is recorded at both ends of the run. Read them together.")
     print(f"  solved to optimal          OFF {opt_off}   ON {opt_on}")
 
     a2a, a2b = m1 < m0, wins > losses
@@ -269,6 +277,7 @@ def main():
     json.dump({"reps": REPS, "tl": BASE["time_limit_s"], "population": len(pop),
                "median_gap_off": m0, "median_gap_on": m1, "wins": wins, "losses": losses,
                "dual_regressions": dual_reg, "dual_wins": dual_win, "cap": cap,
+               "raw_dual_losses_panel1_rule": raw_losses,
                "opt_off": opt_off, "opt_on": opt_on,
                "bars": {"2a": a2a, "2b": a2b, "2c_prime": a2c, "2d": a2d},
                "cert_comparisons": checked_cert, "incumbents_verified": verified_inc,
