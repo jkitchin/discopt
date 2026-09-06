@@ -1074,10 +1074,15 @@ impl TreeManager {
     /// past the optimum — both false certificates, the one outcome forbidden
     /// outright (CLAUDE.md §1). So the only supported `spacing` is
     /// [`crate::bnb::obj_integral::objective_granularity`], which refuses rather
-    /// than guesses, and the only supported `offset` is the model's objective
-    /// constant, because `TreeManager` objective values include it (the driver
-    /// injects `sobj + obj_const` and imports `sol.obj + obj_const`). A
-    /// non-finite or non-positive `spacing`, or a non-finite `offset`, is ignored.
+    /// than guesses. `offset` must anchor the lattice in the same units
+    /// `TreeManager` uses, which include the objective constant (the driver
+    /// injects `sobj + obj_const` and imports `sol.obj + obj_const`): either that
+    /// constant alone, or it plus the `shift` from
+    /// [`crate::bnb::obj_integral::objective_lattice`] when the lattice was
+    /// derived by resolving a costed continuous column through its defining
+    /// equality row. Anything else mis-anchors the lattice and the rounding below
+    /// lifts the dual bound past the optimum. A non-finite or non-positive
+    /// `spacing`, or a non-finite `offset`, is ignored.
     pub fn set_objective_lattice(&mut self, spacing: Option<f64>, offset: f64) {
         self.obj_lattice = match spacing {
             Some(g) if g.is_finite() && g > 0.0 && offset.is_finite() => {
