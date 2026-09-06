@@ -208,9 +208,19 @@ pub struct SimplexOptions {
     /// the ordinary unperturbed path runs, so the perturbation can change how many
     /// pivots a solve takes but never what it certifies.
     ///
-    /// **Default-OFF** pending the CLAUDE.md §5 corpus panel;
-    /// `DISCOPT_LP_DUAL_COST_PERTURB=1` opts in at the measured default (1e-5), or
-    /// pass a float for a specific size.
+    /// **Default-ON** (1e-5), graduated on the CLAUDE.md §5 panel:
+    /// 100 in-repo relaxation LPs x 3 reps, arms interleaved — 0 status
+    /// regressions, max relative objective drift 4.9e-11, no objective in the
+    /// unsound direction, 77/100 cells bit-identical, total pivots 62 098 →
+    /// 35 542 (−42.8 %) and total wall 85.16 s → 70.32 s (0.826x); plus two
+    /// tree-level differential panels (16 MINLPLib instances with recorded
+    /// optima, bit-identical objective/bound/node count; 9 QPLIB instances, no
+    /// unsound bound and no status or certification regression). On the captured
+    /// `QPLIB_2170` relaxation the pivot count falls ~25x and its spread over the
+    /// refactorization cadence collapses from 6 075 pivots to 416.
+    ///
+    /// `DISCOPT_LP_DUAL_COST_PERTURB=0` opts out and restores the previous path
+    /// exactly; a float sets a specific size.
     pub dual_cost_perturb: f64,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.

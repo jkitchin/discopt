@@ -190,9 +190,9 @@ fn parse_unstable_pivot_recovery(raw: &str) -> Result<bool, String> {
 }
 
 /// Default for [`SimplexOptions::dual_cost_perturb`], read once from
-/// `DISCOPT_LP_DUAL_COST_PERTURB`: unset → **off**, `1`/`true`/`on` →
-/// [`COST_PERTURB_EPS`], `0`/`false`/`off` → off, any finite float > 0 → that
-/// relative size.
+/// `DISCOPT_LP_DUAL_COST_PERTURB`: unset → [`COST_PERTURB_EPS`] (**on**),
+/// `1`/`true`/`on` → the same, `0`/`false`/`off` → off, any finite float > 0 →
+/// that relative size.
 ///
 /// Read once per process for the reason on [`stall_patience_default`]: the
 /// perturbation changes the pivot *path*, so flipping it mid-solve would make a
@@ -246,13 +246,13 @@ const PERTURB_ARM_RUN: usize = 64;
 /// rather than defaulted, for the reason spelled out on [`parse_stall_patience`].
 fn parse_cost_perturb(raw: &str) -> Result<f64, String> {
     match raw.trim() {
-        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(0.0),
-        "1" | "true" | "True" | "on" | "ON" => Ok(COST_PERTURB_EPS),
+        "" | "1" | "true" | "True" | "on" | "ON" => Ok(COST_PERTURB_EPS),
+        "0" | "false" | "False" | "off" | "OFF" => Ok(0.0),
         other => match other.parse::<f64>() {
             Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
             _ => Err(format!(
                 "DISCOPT_LP_DUAL_COST_PERTURB={other:?} is not a recognized value. \
-                 Use 1/true/on (={COST_PERTURB_EPS:e}), 0/false/off (the default), \
+                 Use 1/true/on (={COST_PERTURB_EPS:e}, the default), 0/false/off, \
                  or a finite positive float."
             )),
         },
@@ -1817,6 +1817,22 @@ mod tests {
         SimplexOptions::default()
     }
 
+    /// [`opts`] with the #1013 cost perturbation OFF.
+    ///
+    /// The perturbation is default-ON since its graduation, and on a captured
+    /// stall fixture it resolves the degeneracy before any of the *older* warm-path
+    /// mechanisms can engage — so a test of the stall bail, the unstable-pivot
+    /// recovery or the warm stall guard would silently stop exercising the thing it
+    /// names (its counters read 0 and the assertions fail, which is how this was
+    /// found). Those tests pin the legacy path deliberately; they are not weakened
+    /// by it, since each still asserts its own mechanism fires by counter.
+    fn legacy_warm_opts() -> SimplexOptions {
+        SimplexOptions {
+            dual_cost_perturb: 0.0,
+            ..SimplexOptions::default()
+        }
+    }
+
     /// #1013 D2: an *off* spelling must actually disable the bail, and anything
     /// unrecognized must be refused rather than silently read as the default-ON
     /// patience. Before this test's fix, `"False"` (Python's `str(False)`) parsed
@@ -2554,7 +2570,7 @@ mod tests {
         // Through the production entry point (`solve_lp_warm_csc`), so the replay
         // sees the same equilibration — and therefore the same pivot path — as the
         // panel that measured this LP's 1242-pivot no-progress window.
-        let mut off = opts();
+        let mut off = legacy_warm_opts();
         off.dual_stall_patience = 0;
         let ground = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
         assert_eq!(ground.status, LpStatus::Optimal, "bail off: warm converges");
@@ -2571,7 +2587,7 @@ mod tests {
         // Patience set explicitly (below this LP's 620-pivot run): the shipped
         // default is 2048, derived from a panel whose stalling cells are far too
         // large to vendor as a fixture. The mechanism under test is the same one.
-        let mut on = opts();
+        let mut on = legacy_warm_opts();
         on.dual_stall_patience = 256;
         let bailed = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &on);
         let bails = crate::profile::counter(crate::profile::Ctr::DualDegenerateStallBails);
@@ -2624,7 +2640,7 @@ mod tests {
             basic_vars,
         };
 
-        let mut off = opts();
+        let mut off = legacy_warm_opts();
         off.bank_deadline_duals = true;
         off.recover_unstable_pivot = false;
         assert!(off.deadline.is_none(), "no arm may carry a deadline");
@@ -2753,10 +2769,10 @@ mod tests {
         };
 
         // Arm 1 is the guarantee: the SHIPPED options must retain the bound. It
-        // reads `opts()` rather than setting the patience by hand, so the default
+        // reads `legacy_warm_opts()` rather than setting the patience by hand, so the default
         // itself is what is under test — this arm returned `Unbounded` while the
         // bail was default-ON.
-        let mut shipped = opts();
+        let mut shipped = legacy_warm_opts();
         shipped.bank_deadline_duals = true;
         shipped.recover_unstable_pivot = true;
         let ground = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &shipped);
@@ -2782,7 +2798,7 @@ mod tests {
         // nothing. Only the firing is asserted: what the handoff *returns* here
         // (`Unbounded`, against a true optimum of 0) is the defect that motivates
         // the default, and pinning it would cement a bug rather than a guarantee.
-        let mut forced = opts();
+        let mut forced = legacy_warm_opts();
         forced.dual_stall_patience = STALL_PATIENCE;
         forced.bank_deadline_duals = true;
         forced.recover_unstable_pivot = true;
@@ -2886,7 +2902,7 @@ mod tests {
             l: &hl,
             u: &hu,
         };
-        let cold0 = solve_lp(&lp, &hb, &opts());
+        let cold0 = solve_lp(&lp, &hb, &legacy_warm_opts());
         assert_eq!(cold0.status, LpStatus::Optimal);
         let u2 = [0.5, 0.5, INF, INF];
         let lp2 = LpView {
@@ -2897,12 +2913,12 @@ mod tests {
             l: &hl,
             u: &u2,
         };
-        let cold_ref = solve_lp(&lp2, &hb, &opts());
+        let cold_ref = solve_lp(&lp2, &hb, &legacy_warm_opts());
         assert_eq!(cold_ref.status, LpStatus::Optimal);
 
         // Guarded with a 1-pivot cap: the warm loop can't converge in one pivot, so
         // it trips and cold-falls-back to the SAME optimum.
-        let mut capped = opts();
+        let mut capped = legacy_warm_opts();
         capped.warm_stall_cap_override = Some(1);
         assert_eq!(capped.warm_stall_cap(2, 4), 1, "override honored");
         let before = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
@@ -2923,7 +2939,7 @@ mod tests {
 
         // Default cap (size-derived, ~600 pivots here): the same re-solve converges
         // in a few pivots, far below the cap — no trip.
-        let _ = solve_lp_warm(&lp2, &hb, &cold0.basis, &opts());
+        let _ = solve_lp_warm(&lp2, &hb, &cold0.basis, &legacy_warm_opts());
         let after_healthy = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
         assert_eq!(
             after_healthy, after_stall,
@@ -2940,15 +2956,16 @@ mod tests {
     #[test]
     fn cost_perturb_parses_or_refuses() {
         let mut checked = 0usize;
-        for off in ["", "  ", "0", "false", "False", "off", "OFF"] {
+        for off in ["0", "false", "False", "off", "OFF"] {
             assert_eq!(parse_cost_perturb(off), Ok(0.0), "{off:?} must disable");
             checked += 1;
         }
-        for on in ["1", "true", "True", "on", "ON"] {
+        for on in ["", "  ", "1", "true", "True", "on", "ON"] {
             assert_eq!(
                 parse_cost_perturb(on),
                 Ok(COST_PERTURB_EPS),
-                "{on:?} must read as the measured default"
+                "{on:?} must read as the measured default (unset is ON since \
+                 the #1013 graduation)"
             );
             checked += 1;
         }
@@ -3198,5 +3215,4 @@ mod tests {
             base.obj
         );
     }
-
 }

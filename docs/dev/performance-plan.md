@@ -5691,22 +5691,33 @@ Objective, bound and node count identical on all 16, and the mechanism is
 confirmed live on that corpus (`clay0303hfsg`: 52 attempts, 41 accepted, 11
 rejected, same optimum, same 307 nodes).
 
-**Verdict: the flag stays default-OFF.** Gate 1 passes at both levels and gate 2
-passes decisively at LP level, but the tree panel shows **no gain** — the 16
-vendored instances with oracles are not the stall class, so the mechanism fires
-and changes nothing there. That is the `DISCOPT_CUT_INHERIT` situation (sound but
-not measurably helpful *at the level that matters*), and the rule for it is that
-the flag stays off. What would graduate it: a tree-level panel over the full
-QPLIB/MINLPLib snapshot — the corpus that actually contains the degenerate lifted
-relaxations this addresses — showing the LP-level 0.826x wall surviving into
-whole solves. That snapshot is not reachable from this environment (no
-`~/Dropbox`, `qplib.zib.de` blocked by the network policy), so the graduation run
-is the one piece of this that has to happen elsewhere.
+**Verdict: graduated default-ON** (owner decision, 2026-09-06), keeping the
+`DISCOPT_LP_DUAL_COST_PERTURB=0` opt-out and the legacy path intact.
 
-**Suites.** `cargo test -p discopt-core` 711 passed, clippy clean;
-`pytest -m smoke` 1209 passed with the flag OFF **and** 1209 passed with
-`DISCOPT_LP_DUAL_COST_PERTURB=1` (identical counts, so enabling it breaks
-nothing the suite covers); the adversarial suite 19 passed.
+The call was genuinely close and is recorded as such. Gate 1 passes at every
+level measured. Gate 2 passes decisively at the level the change operates — the
+100-LP panel — while the two tree panels (16 MINLPLib + 9 QPLIB whole solves)
+show **no harm and no gain**. Read strictly, the `DISCOPT_CUT_INHERIT` rule
+("cert-clean but neutral stays OFF") argues for OFF; read by #1018's precedent
+(the LP panel carries net-positive, the tree panel carries cert-cleanliness) it
+graduates. What settled it: the tree-level neutrality is *structural and
+explained* — the stall belongs to large lifted relaxations solved from a slack
+start, while a tree run spends its time on short warm re-solves from a parent
+basis that do not stall — rather than an unexplained failure of the LP win to
+translate, which is what `DISCOPT_CUT_INHERIT` actually was.
+
+The residual risk to watch, stated plainly: a rejected perturbed attempt
+consumes up to half the remaining wall budget, so on a deadline-bound solve it
+could in principle turn an `Optimal` into an `IterLimit`. It did not on any of
+the 100 LPs (20 s limit) or 25 tree solves (60 s and 120 s limits) measured, and
+the attempt can never take the iteration budget or the fallback path away. If a
+nightly panel ever shows that trade, the fix is to cut the attempt's share to a
+quarter rather than to turn the mechanism off.
+
+Still worth running when the corpus is reachable: a tree panel over the full
+QPLIB/MINLPLib snapshot. `scratchpad/i1013/{tree_panel,qplib_tree_panel}.py`
+select instances by filter and take the flag as a parameter, so that run needs no
+code change on a machine that has it.
 
 **Criterion 1 of the re-scoped issue, tested directly.** The issue asks that the
 anchor cell converge in a pivot count of HiGHS's order *and stop swinging with
