@@ -2100,8 +2100,9 @@ With A10 closed the discopt-side ledger for this class is: relaxation levers all
 falsified (A9a-A9c), the SB budget falsified as a default (A10). What remained
 untested at that point was node selection, conflict analysis and the
 restart-and-resolve loop — the mechanisms A9d showed HiGHS keeping when its cut
-pool is taken away. Node selection was taken next, and is falsified immediately
-below.
+pool is taken away. Node selection was taken next (Track B1), then the
+shape of the strong-branching gate (A11); both are falsified below, after which
+the dual-side ledger is exhausted.
 
 ### Track B1 — node selection: FALSIFIED as a lever
 
@@ -2162,6 +2163,79 @@ was not costing discopt anything measurable. The remaining untested mechanisms
 from A9d's list are conflict analysis and the restart-and-resolve loop, plus
 the reliability-branching shape A10 pointed at — and reliability branching is
 the one with a measurement behind it rather than an absence.
+
+### A11 — branching on unreliable pseudocosts: FALSIFIED, and it re-derived A6-A8
+
+**Hypothesis.** A10 located the strong-branching fault in the *shape* of the
+gate rather than its size: `milp_driver.rs:1434` arms SB on a node-index prefix
+(`total_nodes < sb_node_budget`, shipped 48) and the prefix then expires for the
+rest of the tree. The claim to test was that this leaves most branching
+decisions resting on pseudocosts that never became reliable.
+
+**Instrument.** Every branching decision was classified into a three-way
+partition at the decision site inside `process_evaluated` — `BranchFromHint`
+(the driver's injected SB decision), `BranchPcostReliable`, and
+`BranchPcostUnreliable` (chosen variable below `reliability_threshold = 8`) —
+plus `BranchUnreliableCands`, the summed size of the unreliable candidate set,
+so "how often a reliability gate would fire" stayed separable from "how much
+work it would find". Pre-registered kill line: unreliable share of pseudocost
+decisions below 20 % falsifies.
+
+**Result.** 38 instances, shipped configuration, 20 s each, **2,036,670
+classified decisions**; decisions/nodes within [0.2, 1.0] on all 35 instances
+with more than 20 nodes, so the partition tracks the tree rather than one code
+path.
+
+| | count |
+|---|---|
+| from hint (strong branching) | 1,001 |
+| pseudocost, reliable | 1,996,520 |
+| pseudocost, **unreliable** | 39,149 |
+| unreliable candidates seen | 31,579,317 |
+
+**Unreliable share: 1.9 %** against a 20 % kill line. **FALSIFIED**, by an order
+of magnitude. The variable actually chosen is almost always one that has
+observations — which on reflection is what a product pseudocost score *must*
+do, since an unobserved variable scores on the `default_cost` constant while an
+observed one scores its measured gain.
+
+**What the fourth counter says, and why it is not a rescue.** Unreliable
+candidates run at **15.5 per pseudocost decision** and 31.6 M in total. The
+candidate set is overwhelmingly unreliable while the winner is reliable: the
+search commits to the variables that got observations early and rarely learns
+about the rest. That is a real description — and it is **already measured and
+already acted on**. A6 found 39.9 % of scored candidates unobserved and 17.4 %
+of decisions won by one, at a 3000-node cap; this probe puts the winner figure
+at 1.9 % at full solve depth, which sharpens A6 rather than contradicting it
+(pseudocosts have matured by then). And the fix it points at — score an
+unobserved variable at the running mean instead of the constant `1.0` — **is
+A7**, which was implemented behind `DISCOPT_PCOST_DEFAULT=mean`, measured
+cert-clean, and refused graduation for being 8-better/7-worse with its gains
+confined to the `mik-250-20-75-*` family.
+
+**Process note, recorded because it cost a panel.** `docs/dev/` is canonical and
+CLAUDE.md binds its negative results; A6, A7 and A8 should have been read before
+this probe was instrumented, and they answer its question. Two of A11's premises
+were also already retracted in A7: discopt **is** a reliability brancher —
+`strong_branch` filters candidates by `c.2 < ctx.reliability`
+(`milp_driver.rs:2678`) and is documented as such at `:408` — so what the
+node-index prefix gates is whether SB runs at all, not whether reliability is
+consulted. The counters are kept: they are inert without `DISCOPT_PROFILE` and
+they are what makes the claim falsifiable. No behavior is keyed on them.
+
+**Where this leaves the ledger.** A1 (cut aging), A2 (in-tree aging), A4 (SB
+budget), A6→A7 (pseudocost default), A8 (SB discrimination), A9a–A9c
+(relaxation), A10 (SB budget at corpus scale), A11 and B1 (node selection)
+have all been measured, and every one of them is a **dual-side search-order**
+hypothesis. A5 measured directly that the gap is **primal** — 17/38 unsolved at
+an 89.6 % median primal share, 12 of them holding a merely-poor incumbent rather
+than none — and A10's `gt2` finding is the same result seen from another angle:
+the dual bound sat *exactly* on the reference optimum while the incumbent stayed
+at 72966. Nine falsified dual-side levers and two independent primal
+measurements is not an ambiguous signal. The next experiment is an
+**improvement** heuristic (RINS-style neighborhood search, local branching,
+diving), not another search-order change and not a feasibility heuristic.
+
 
 ## 4. Success metric
 
