@@ -225,7 +225,7 @@ def run_cert_neutrality(
         # either way — the work it did was set by the budget, not by the flag — so
         # it is excluded from the comparison and reported as unmeasured. It is not
         # silently dropped: the excluded set travels back with the verdict.
-        "skipped = wall_limited_rows(new_rows, reference)\n"
+        "skipped = wall_limited_rows(new_rows, reference, budgets=budgets)\n"
         "viol = check_neutrality(new_rows, reference, known_perf_gated=_KNOWN_PERF_GATED,\n"
         "    regime=regime, oracle=oracle, exclude=skipped)\n"
         "print('SKIPJSON:' + json.dumps(skipped))\n"

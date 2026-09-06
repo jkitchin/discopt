@@ -217,7 +217,7 @@ def main() -> int:
     # neutrality off such a row is reading noise (#1180 manufactured a reproducible
     # "0.516x regression" that way, on 13 of 66 rows). Excluded, and REPORTED as
     # unmeasured — the verdict below is only over the rows actually compared.
-    unmeasured = wall_limited_rows(new_rows, baseline)
+    unmeasured = wall_limited_rows(new_rows, baseline, budgets=budgets)
     violations = check_neutrality(
         new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED, exclude=unmeasured
     )

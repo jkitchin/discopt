@@ -33,22 +33,36 @@ The release procedure that produces these entries is documented in
   It now goes through a new `solver._role2_slice(seconds, whole=…)`, whose no-clock
   value is the caller's own `time_limit` rather than `None`/`math.inf` — a nested
   solve's `time_limit` is its own role-1 contract, and removing it would trade a
-  reproducibility bug for a broken promise. Measured over five repetitions after
-  the fix: the 25 % spread is gone, the dual bound is **bit-identical** across
-  every repetition, and the incumbent agrees to 13 significant figures — at a
-  *better* value (26669.11) than any wall-truncated repetition found, the #1116
-  result again. **Default-off flag; the default solve path is unchanged
-  bit-for-bit** (`_role2_slice` returns its argument when the flag is off).
+  reproducibility bug for a broken promise.
 
-  Not fully closed. A ~1.3e-14 relative objective residual remains, alternating
-  between two values in step with the run's wall time. `_deadline_wall_cap`'s 3 s
-  clamp on one heuristic sub-NLP was the leading suspect — a `fractional_diving`
-  step it caps is where the caller trace puts the divergence — and suppressing it
-  under the flag was **tried and falsified**: five repetitions alternated between
-  the same two objectives in the same wall-correlated pattern, at no measurable
-  wall cost. That change was not shipped (CLAUDE.md §4: a fix with no measured
-  effect is a hypothesis), and the falsification is recorded at the helper and in
-  the inventory. #1187 stays open on the residual.
+  That collapsed the spread and made the dual bound bit-identical, and exposed a
+  second gate the 25 % spread had been hiding: a ~1.3e-14 relative objective wobble
+  that still alternated with the run's wall time. The cause is the more instructive
+  half of this issue. The GDP-config constructor's plan wave
+  (`one_hot_config_subnlp`) *already carried* a deterministic bound —
+  `_WAVE_SOLVE_CAP = 48` — but `_gdp_config_deadline`'s 15 s slice always expired
+  first, so the cap was decorative and the extent was machine speed: measured
+  36 / 37 / 38 / 37 plans across four repetitions, and a different prefix of the
+  plan order picks a different disjunct. **A cap that is never reached is not a
+  bound.** Under the flag the wave is now bounded by its own cap; the caller's
+  deadline is left to the *dive* that follows it, which is what still bounds the
+  stage — freeing both was tried and overran `time_limit` (241 s against 120 s)
+  while staying nondeterministic.
+
+  Measured after both, five repetitions: `clay0303hfsg` reproduces **bit-exactly**
+  on node count, incumbent and dual bound, in 76 s against its 120 s limit, at a
+  better incumbent (26669.11) than any wall-truncated repetition found — the #1116
+  result again. Where the slice never bound there is no change at all: `flay03m`
+  (72 plans in 2.62 s) and `flay02m` (66 in 1.69 s) return identical objectives,
+  node counts and plan counts before and after. **Default-off flag; the default
+  solve path is unchanged bit-for-bit.**
+
+  One arm is recorded because it cost real time to rule out: `_deadline_wall_cap`'s
+  3 s sub-NLP clamp was the leading suspect, and suppressing it under the flag left
+  the alternation *exactly* unchanged over five repetitions. It was not shipped.
+  The trace had pointed there because it resolved every read in that module to the
+  `_now` seam's own frame instead of the site that called it; resolving through the
+  seam named the wave immediately.
 
   The construction that hid this is now scanned for. `test_912_wall_budget_inventory`
   knew two shapes — `clock() + budget` and `clock() - origin <cmp> budget` — and a
@@ -75,6 +89,15 @@ The release procedure that produces these entries is documented in
   UNMEASURED — an excluded row yields no verdict rather than a silent pass. A row
   wall-limited in only one arm (a *lost* certification) stays a violation, and
   `node_limit` rows stay comparable: that budget is a deterministic count.
+
+  Status alone does not identify these rows, which the #1187 panel demonstrated by
+  hitting one: a run cut off by `time_limit` while holding an incumbent reports
+  **feasible**, and that is the common case. `tls2` at a 30 s budget ends
+  `feasible` at the wall every time and returned 245 / 217 / 179 nodes with three
+  different dual bounds across three *baseline* runs — it does not reproduce
+  against itself, in either arm of an interleaved A/B. So `wall_limited_rows` also
+  takes the per-instance `budgets` and treats an unsettled row that spent >=98 % of
+  its budget as wall-limited; both gate scripts now pass them.
 
 - **`interval_eval` did not reduce a `SumExpression`** — it returned the
   operand's *elementwise* enclosure while `dag_compiler` lowers the same node to

@@ -67,11 +67,49 @@ def test_both_arms_wall_limited_is_not_evidence():
     assert check_neutrality(new, base, exclude=skipped) == []
 
 
+def test_a_wall_cut_row_that_reports_feasible_is_caught():
+    """Status alone is not enough, and this is the COMMON case.
+
+    A run cut off by ``time_limit`` while holding an incumbent reports
+    ``feasible``, not ``time_limit``. Measured on ``tls2``: every run ends
+    ``feasible`` at the wall, and three *baseline* runs returned 245 / 217 / 179
+    nodes with three different dual bounds — an instance that does not reproduce
+    against itself. A status-only test compares it anyway and charges the
+    difference to whatever change is under review.
+    """
+    # Two of tls2's own baseline runs, in the order that trips the node guard.
+    budgets = {"tls2": 30.0}
+    base = {"tls2": {"status": "feasible", "objective": 5.3, "node_count": 179, "wall_time": 31.1}}
+    new = {"tls2": {"status": "feasible", "objective": 5.3, "node_count": 245, "wall_time": 30.6}}
+
+    assert wall_limited_rows(new, base) == {}, "no budgets -> cannot tell, must not guess"
+    skipped = wall_limited_rows(new, base, budgets=budgets)
+    assert set(skipped) == {"tls2"}
+    assert check_neutrality(new, base, exclude=skipped) == []
+    # Without the exclusion this reads as a 37 % node regression invented by the wall
+    # — and both rows are the SAME build.
+    assert any(v.kind == "node_regression" for v in check_neutrality(new, base))
+
+
+def test_a_settled_row_is_never_excluded_by_its_wall_time():
+    """An instance that certified in its last second is a verdict, not a coincidence."""
+    budgets = {"foo": 30.0}
+    base = {"foo": {"status": "optimal", "objective": 1.0, "node_count": 5, "wall_time": 29.9}}
+    new = {"foo": {"status": "optimal", "objective": 2.0, "node_count": 5, "wall_time": 29.9}}
+    assert wall_limited_rows(new, base, budgets=budgets) == {}
+    assert any(v.kind == "objective" for v in check_neutrality(new, base))
+
+
 def test_a_lost_certification_is_still_a_violation():
     """The exclusion must not swallow a real regression.
 
     baseline ``optimal`` -> new ``time_limit`` is the flag losing a certificate the
-    reference had. Only one arm is wall-limited, so the row is NOT excluded.
+    reference had. Only one arm is wall-limited, so the row is NOT excluded — and
+    that is deliberate even for an instance known to be wall-flaky. A certified
+    baseline is a verdict; refusing to compare against it because the new run ran
+    out of clock would hide exactly the regression this check exists for. The cost
+    is a false positive on an instance that does not reproduce against itself,
+    which a re-run settles; the alternative silently accepts a lost certificate.
     """
     base = {"foo": _row(100.0, status="optimal")}
     new = {"foo": _row(None, status="time_limit")}
@@ -119,6 +157,10 @@ def test_both_gate_scripts_actually_exclude():
     for rel in ("scripts/check_cert_neutrality.py", "scripts/graduation_gate.py"):
         text = (_BENCH_ROOT / rel).read_text()
         assert "wall_limited_rows" in text, f"{rel} does not compute the excluded set"
+        assert "budgets=budgets" in text, (
+            f"{rel} does not pass the budgets, so it only catches an explicit "
+            "time_limit status and misses the wall-cut feasible rows"
+        )
         assert "exclude=" in text, f"{rel} does not pass it to check_neutrality"
         assert "UNMEASURED" in text, f"{rel} excludes rows without reporting them"
         checked += 1

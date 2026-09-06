@@ -397,10 +397,11 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
     # routing #1187's RENS slice, and suppressing it under ``deterministic`` was
     # tried and FALSIFIED: with it returning ``None`` under the flag,
     # ``clay0303hfsg`` alternated between the same two objectives in the same
-    # wall-correlated pattern over five repetitions. Converting it needs a
-    # deterministic iteration budget inside the NLP backend — the layer-natural
-    # work metric the module docstring says a conversion requires — and it needs a
-    # cause that has actually been measured.
+    # wall-correlated pattern over five repetitions. The real cause was the
+    # GDP-config plan wave one frame further out. This stays ``residual`` — still a
+    # role-2 gate, just not that one — and converting it needs a deterministic
+    # iteration budget inside the NLP backend, the layer-natural work metric the
+    # module docstring says a conversion requires.
     (
         "_relax/primal_heuristics.py",
         "min(_DEADLINE_NLP_CAP_S, float(deadline) - _now())",

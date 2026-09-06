@@ -1214,8 +1214,24 @@ class SolverTuning:
     three incumbents 25 % apart (55092.52 / 46785.55 / 41573.26) on
     ``clay0303hfsg`` at an *identical* 27 nodes with the dual bound agreeing to 12
     significant figures — this flag on, in one process, on one binary. As in
-    #1116, routing it made the instance reproduce **and** find a better incumbent
-    (26669.11) than any wall-truncated repetition.
+    #1116, routing it made the instance find a better incumbent (26669.11) than any
+    wall-truncated repetition.
+
+    Fixing that exposed a second gate the 25 % spread had been hiding, and it is
+    the more instructive one: the GDP-config constructor's plan wave
+    (``_relax/primal_heuristics.one_hot_config_subnlp``) *already carried* a
+    deterministic bound — ``_WAVE_SOLVE_CAP = 48`` — but ``_gdp_config_deadline``'s
+    15 s slice always expired first, so the cap was decorative and the extent was
+    machine speed: 36 / 37 / 38 / 37 plans across four repetitions, and a different
+    prefix of the plan order picks a different disjunct. Under the flag the wave is
+    now bounded by its own cap, and the caller's deadline is left to the *dive*
+    that follows it, which is what still bounds the stage overall. ``clay0303hfsg``
+    then reproduces bit-exactly — node count, incumbent and dual bound — in 76 s
+    against its 120 s limit.
+
+    The lesson generalizes past this gate: a stage can carry a perfectly good
+    deterministic cap and still be nondeterministic, because a wall budget upstream
+    retires first. A cap that is never reached is not a bound.
 
     **What the flag does not cover, and why.** Two role-1 mechanisms are left
     alone on purpose, because neutralizing them would let preprocessing overrun

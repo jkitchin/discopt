@@ -61,6 +61,20 @@ LIMIT_STATUSES = frozenset({"time_limit", "node_limit", "iteration_limit"})
 #: two runs that hit them did the same amount of work and remain comparable.
 WALL_LIMIT_STATUSES = frozenset({"time_limit"})
 
+#: Statuses that mean the run reached a verdict of its own, so a wall-clock
+#: coincidence cannot explain a difference between two of them.
+_SETTLED_STATUSES = frozenset({"optimal", "infeasible", "unbounded"})
+
+#: Fraction of the budget at which a non-settled row is treated as wall-limited
+#: even though its status does not say so. Status alone is not enough: a run that
+#: is cut off by ``time_limit`` while holding an incumbent reports **feasible**,
+#: not ``time_limit``, and that is the common case rather than the exception.
+#: Measured on ``tls2`` at a 60 s budget (30 s in the smaller panel): every run
+#: ends ``feasible`` at the wall, and three *baseline* runs returned 245 / 217 /
+#: 179 nodes with three different dual bounds — an instance that does not
+#: reproduce against itself, which a status-only test would have compared anyway.
+WALL_LIMIT_WALL_FRACTION = 0.98
+
 
 @dataclass
 class NeutralityViolation:
@@ -136,9 +150,33 @@ def _objective_violation(
     return None
 
 
+def _is_wall_limited(row: dict, budget: float | None) -> bool:
+    """Whether ``row`` stopped because the wall clock ran out.
+
+    Two ways to tell, and both are needed. The status says so outright
+    (``time_limit``), or the run did not settle and spent essentially its whole
+    budget — which is how a wall-cut run that *has* an incumbent presents, since
+    it reports ``feasible``.
+    """
+    status = row.get("status")
+    if status in WALL_LIMIT_STATUSES:
+        return True
+    if status in _SETTLED_STATUSES or budget is None:
+        return False
+    wall = row.get("wall_time")
+    if wall is None:
+        return False
+    try:
+        return float(wall) >= WALL_LIMIT_WALL_FRACTION * float(budget)
+    except (TypeError, ValueError):
+        return False
+
+
 def wall_limited_rows(
     new_rows: dict[str, dict],
     baseline: dict[str, dict],
+    *,
+    budgets: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """Instances whose neutrality verdict would be read off the wall clock (#1187).
 
@@ -157,21 +195,28 @@ def wall_limited_rows(
     wall-limited run the terminating condition *is* the clock, and no amount of
     role-2 suppression makes two such runs comparable.
 
+    ``budgets`` maps instance -> the wall budget the run was given. Pass it: without
+    it only an explicit ``time_limit`` status is detected, and a wall-cut run that
+    found an incumbent reports ``feasible`` instead (see
+    :data:`WALL_LIMIT_WALL_FRACTION`).
+
     Returns ``instance -> reason``. Only rows limited on the **wall** in both arms
     are returned: a row that lost a certification (baseline ``optimal`` -> new
     ``time_limit``) is a genuine regression and stays a violation, and a row that
     stopped on ``max_nodes`` stopped on a deterministic count and stays comparable.
     """
+    budgets = budgets or {}
     out: dict[str, str] = {}
     for inst, base in baseline.items():
         new = new_rows.get(inst)
         if new is None:
             continue
-        bs, ns = base.get("status"), new.get("status")
-        if bs in WALL_LIMIT_STATUSES and ns in WALL_LIMIT_STATUSES:
+        budget = budgets.get(inst)
+        if _is_wall_limited(base, budget) and _is_wall_limited(new, budget):
             out[inst] = (
-                f"both arms ended on the wall clock (status={bs!r}); the work done "
-                f"is set by the budget, not by the change under test (#1187)"
+                f"both arms ended on the wall clock (status "
+                f"{base.get('status')!r} -> {new.get('status')!r}); the work done is "
+                f"set by the budget, not by the change under test (#1187)"
             )
     return out
 

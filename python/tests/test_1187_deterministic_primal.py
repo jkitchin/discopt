@@ -43,6 +43,7 @@ import dataclasses
 import re
 from pathlib import Path
 
+import discopt._relax.primal_heuristics as ph
 import discopt.solver as solver
 import discopt.solver_tuning as solver_tuning
 import pytest
@@ -59,23 +60,24 @@ _NL = Path(__file__).parent / "data" / "minlplib_nl" / "clay0303hfsg.nl"
 #: changes what a fixed wall slice buys.
 _REPEATS = 3
 
-#: What "reproducible" means for this assertion.
+#: Two role-2 gates had to go before this instance reproduced, and the second was
+#: found only after the first was fixed — the 25 % spread was hiding it.
 #:
-#: The 25 % primal spread the issue reports is 12 orders of magnitude outside this
-#: band. A residual this fix does NOT remove is inside it: ~1.3e-14 relative,
-#: alternating between two values in step with the run's wall time, with the dual
-#: bound bit-identical across every repetition. Asserting bit-equality here would
-#: assert something the change does not deliver; asserting a loose tolerance would
-#: not catch the defect. This is the band between them, and it is deliberately far
-#: tighter than the residual so a *return* of the defect cannot hide under it.
+#: 1. The NLP-BB root RENS budget (``solver._role2_slice``). Removing it collapsed
+#:    the spread and made the dual bound bit-identical, leaving a ~1.3e-14 relative
+#:    objective wobble that still alternated with the run's wall time.
+#: 2. The GDP-config constructor's plan wave. It already carried a deterministic
+#:    bound — ``_WAVE_SOLVE_CAP = 48`` — but ``_gdp_config_deadline``'s 15 s slice
+#:    expired first, so the wave stopped at 36 / 37 / 38 / 37 plans across four
+#:    repetitions and a different prefix of the plan order chose a different
+#:    disjunct. Freeing the wave's extent to its own cap under the flag is what
+#:    closed it.
 #:
-#: What the residual is NOT: ``_deadline_wall_cap``'s 3 s clamp on one heuristic
-#: sub-NLP, which a ``perf_counter``-caller trace pointed at (the divergence lands
-#: on a ``fractional_diving`` step that clamp bounds). Suppressing it under the
-#: flag left the alternation *exactly* unchanged over five repetitions — …842466
-#: at 67.8/67.3 s, …842823 at 64.1/64.0/64.7 s — so that hypothesis is falsified
-#: and the change was not shipped. #1187 stays open on the residual.
-_OBJ_RTOL = 1e-9
+#: What the residual was NOT, recorded because it cost a full arm to rule out:
+#: ``_deadline_wall_cap``'s 3 s clamp on one heuristic sub-NLP. A caller-resolving
+#: ``perf_counter`` trace pointed at it, and suppressing it under the flag left the
+#: alternation *exactly* unchanged over five repetitions — …842466 at 67.8/67.3 s,
+#: …842823 at 64.1/64.0/64.7 s. That change was not shipped.
 
 
 def _tuning(**kw):
@@ -119,6 +121,34 @@ def test_role2_slice_is_wired_into_the_solve_path():
     assert body.count("_role2_slice(") - 1 >= 1, "_role2_slice has no call site"
 
 
+def test_the_gdp_config_wave_is_count_bounded_under_the_flag():
+    """Pin the second gate: the plan wave's extent must be its solve cap, not a clock.
+
+    The wave already carried ``_WAVE_SOLVE_CAP``; the defect was that the caller's
+    slice expired first, so the cap was decorative and the extent was machine
+    speed. If someone re-couples the wave loop to the caller's ``deadline`` under
+    the flag, ``clay0303hfsg`` goes straight back to alternating incumbents and
+    only the slow reproduction test would catch it.
+    """
+    src = Path(ph.__file__).read_text()
+    assert "_WAVE_SOLVE_CAP" in src, "the wave cap is gone — retarget this test"
+    i = src.index("wave_plans = plans[")
+    window = src[i : i + 2000]
+    assert "wave_deadline" in window, (
+        "the wave loop no longer distinguishes its own deadline from the caller's "
+        "— deterministic=True has stopped covering the gate #1187 measured"
+    )
+    assert "current().deterministic" in window, (
+        "the wave's deadline is no longer suppressed under the flag (#1187)"
+    )
+    # The dive keeps the caller's deadline: it is what still bounds the envelope.
+    j = src.index("one_hot_config_dive(")
+    assert "deadline=deadline" in src[j : j + 600], (
+        "the dive must keep the caller's deadline — freeing it too removed the "
+        "only bound on the stage and overran time_limit (#1187)"
+    )
+
+
 def test_the_rens_slice_is_routed():
     """Pin the specific gate #1187 measured, so it cannot quietly lose the wrapper.
 
@@ -144,10 +174,11 @@ def test_clay0303hfsg_primal_is_reproducible_under_the_flag():
     """The issue's own reproduction, as a regression test.
 
     Fails on the pre-fix tree: three incumbents 25 % apart at 27 nodes. Passes
-    after the RENS slice is routed. The first solve is discarded as a warm-up,
-    exactly as the issue's reproduction says to — the divergence is driven by the
-    process warming up, so comparing against a cold first run measures the warm-up
-    rather than the defect.
+    once both gates above are routed — measured 5/5 bit-identical on node count,
+    objective and dual bound, at 76 s against the 120 s limit. The first solve is
+    discarded as a warm-up, exactly as the issue's reproduction says to: the
+    divergence is driven by the process warming up, so comparing against a cold
+    first run measures the warm-up rather than the defect.
     """
     from discopt.modeling.core import from_nl
 
@@ -170,9 +201,13 @@ def test_clay0303hfsg_primal_is_reproducible_under_the_flag():
         comparisons += 1
         assert nodes == base_nodes, f"node_count moved: {base_nodes} -> {nodes}"
         assert obj is not None, "an incumbent was lost between repetitions"
-        assert abs(obj - base_obj) <= _OBJ_RTOL * abs(base_obj), (
+        # Bit-exact, not a tolerance. CLAUDE.md §5's bound-neutral regime asserts
+        # the certified objective is *exactly* unchanged, and this instance now
+        # delivers that; a tolerance here would let the 1.3e-14 wobble that the
+        # GDP-config wave fix removed creep back unnoticed.
+        assert obj == base_obj, (
             f"incumbent moved: {base_obj!r} -> {obj!r} "
-            f"(rel {abs(obj - base_obj) / abs(base_obj):.2e} > {_OBJ_RTOL:.0e}) — "
+            f"(rel {abs(obj - base_obj) / abs(base_obj):.2e}) — "
             "a role-2 wall budget is deciding the primal answer again (#1187)"
         )
         assert bound == base_bound, f"dual bound moved: {base_bound!r} -> {bound!r}"

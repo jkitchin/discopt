@@ -6631,12 +6631,12 @@ def _role2_slice(seconds, *, whole):
     ``solve_model`` as its ``time_limit``. As the process warmed up (25.5 s → 17.0 s
     for the same solve) the same nominal slice bought more of the sub-MINLP, so the
     neighbourhood search returned a different point. Routing it through here
-    collapsed the 25 % spread: over five repetitions the dual bound is now
-    bit-identical and the incumbent agrees to 13 significant figures, at a *better*
-    value (26669.11) than any wall-truncated repetition found — the #1116 result
-    again. A ~1.3e-14 relative objective residual survives and is still open on
-    #1187; ``_relax/primal_heuristics._deadline_wall_cap`` was tried as its cause
-    and falsified (see that function).
+    collapsed the 25 % spread and made the dual bound bit-identical, at a *better*
+    incumbent (26669.11) than any wall-truncated repetition found — the #1116
+    result again. It also exposed a second, much smaller gate the spread had been
+    hiding (the GDP-config plan wave; see
+    ``_relax/primal_heuristics.one_hot_config_subnlp``), after which the instance
+    reproduces bit-exactly.
     """
     return float(whole) if _tuning().deterministic else float(seconds)
 
