@@ -104,7 +104,7 @@ class _Charge:
         self.started = time.perf_counter()
         _stack().append(self)
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> None:
         # In a ``__exit__``, so a boundary that raises is still charged -- an
         # exception costing 2 s of Rust must not vanish from the profile.
         stack = _stack()
@@ -113,7 +113,6 @@ class _Charge:
         _totals()[self.bucket] += elapsed - self.child  # minus children's claim
         if stack:
             stack[-1].child += elapsed  # parent must not also count our wall
-        return False
 
 
 def charge(bucket: str) -> "_Charge":
