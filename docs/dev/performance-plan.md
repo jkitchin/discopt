@@ -5563,3 +5563,147 @@ the dual bound agreeing to 12 significant figures — the *incumbent* moves, so 
 nondeterministic component is a primal heuristic. That is a `deterministic=`
 contract defect and a live hazard for every bound-neutrality gate that trusts the
 flag; filed as **#1187**, successor in kind to #912.
+
+## 28. #1013 dual degeneracy: the stall is *dual*, so the cure is a cost perturbation, not a tie-break (2026-09-06)
+
+**Claim under test.** #1013, re-scoped: the warm dual loop has no reachable
+anti-degeneracy escape, and on a 100 %-degenerate LP its pivot count is set by
+rounding-level accidents. §18 established what the stall is *not* — not tiny
+pivots (chosen `|pivot|` median exactly 1.0, none below 1e-4, primal step never
+zero), and not curable by either tie-break arm (a dual Harris pass scoped to the
+stall, and Bland at a reachable threshold, both falsified with an
+`optimal → iter_limit` regression on `tspn10_rlt1`). What it *is*: **dual**
+degeneracy — `d_q ≈ 0`, a sparse objective on a lifted relaxation ties the
+reduced costs at zero, so the dual step is zero however the tie is broken.
+
+**Hypothesis.** Perturbing the costs removes the ties themselves — the classical
+remedy for dual degeneracy (Koberstein 2005; Huangfu & Hall 2015, the device
+HiGHS's dual simplex uses) and the one arm #1008 and #1018 never tried.
+**Kill criterion:** if a perturbed solve plus a true-cost clean-up does not come
+in well below the unperturbed pivot count on the captured stall LPs, the
+hypothesis dies and nothing gets built.
+
+**Entry experiment** (before any implementation), four captured stall fixtures,
+warm re-solve from the captured basis, total pivots (perturbed + clean-up):
+
+| fixture    | off   | 1e-9  | 1e-7  | **1e-5** | 1e-3 |
+|------------|------:|------:|------:|---------:|-----:|
+| qplib2170  | 17794 | 26782 | 18435 | **534**  | 1920 |
+| tspn12     |  1727 |   957 |  1000 | **811**  |  780 |
+| st_testgr3 |   216 |    47 |    47 |  **43**  |   45 |
+| nvs01      |    41 |     4 |     4 |  **11**  |   13 |
+
+The objective is identical to the unperturbed solve in every cell. On
+`qplib2170` — the LP HiGHS certifies in 81 pivots — `DualDegeneratePivots` goes
+**17 794 → 0**: the mechanism is confirmed to act on the thing it claims to act
+on, not merely to correlate with a speed-up. 1e-5 is the only size that clears
+the degeneracy on all four with a short clean-up; at 1e-9 the ties survive
+rounding and the `qplib2170` clean-up costs 26 164 pivots, *worse* than not
+perturbing at all.
+
+**A negative result inside the entry experiment, recorded because it nearly
+inverted the reading.** The first arm perturbed every nonbasic cost and made
+`qplib2170` *worse* — a rejected start, no warm solve at all, in every `eps`
+arm. The cause was not the perturbation size: the LP has **351 nonbasic free
+columns**, and a free column is dual feasible only at `d_j = 0` exactly, so
+perturbing its cost makes the start dual infeasible outright. Skipping free
+columns is what produced the table above. Had the identical `iters=944` across
+all four `eps` values been read as "perturbation does not help this cell"
+instead of as the constant it obviously was, the hypothesis would have been
+falsified by a bug in its own instrument (CLAUDE.md §6).
+
+**Design.** `SimplexOptions::dual_cost_perturb` (`DISCOPT_LP_DUAL_COST_PERTURB`).
+Only nonbasic costs move, each in the sign that preserves the start's dual
+feasibility (at-lower up, at-upper down), free columns skipped, basic costs
+untouched so `y = B⁻ᵀc_B` and the basic reduced costs are unchanged. The answer
+is always produced by an ordinary solve on the **true** costs from the basis the
+perturbed solve lands on; anything but an `Optimal` clean-up is discarded and the
+unperturbed path runs. The attempt is capped at half the iteration budget and
+half the remaining wall time, so a rejected attempt can never cost a bound the
+plain solve would have returned.
+
+**Arming, and the measurement that forced it.** Applied unconditionally the
+mechanism was cert-clean and cut total pivots 43 %, but its **wall median was
+1.044x**: every healthy LP paid for a second prepared solve it did not need —
+the same "sound but not helpful" shape that disqualified `DISCOPT_CUT_INHERIT`.
+So it is armed by the degeneracy signal §18 already ships: the warm loop runs
+first with the degenerate-run bail set to `PERTURB_ARM_RUN`, and only a loop that
+stalls restarts perturbed. The arming run was swept over the base arm's
+`DualDegenerateRunMax` rather than chosen:
+
+| arm at     | LPs armed | pivots saved | pivots lost | net    |
+|-----------:|----------:|-------------:|------------:|-------:|
+| 0 (always) |       100 |       14 754 |         640 | 14 114 |
+| 32         |        27 |       14 584 |         429 | 14 155 |
+| **64**     |    **20** |   **14 581** |     **395** | **14 186** |
+| 200        |        13 |       14 158 |         308 | 13 850 |
+| 900        |         6 |       12 442 |         308 | 12 134 |
+
+64 is the net maximum: 99 % of the benefit of always-on arming, with 80 of the
+100 LPs never leaving the ordinary path.
+
+**Graduation panel** — 100 in-repo relaxation LPs (all 9 vendored QPLIB and all
+68 vendored MINLPLib instances at `rlt_lineq` off/on, those with a dual-feasible
+slack start), 3 reps, arms interleaved per rep, 20 s limit, single job on an idle
+box (load 1.0–1.5), `scratchpad/i1013/report_perturb.py`:
+
+| gate 1 — cert-clean | |
+|---|---|
+| status regressions (`optimal` → not) | **0** |
+| status improvements | 0 |
+| max relative objective drift (n=97) | **4.943e-11** |
+| objectives above base (the unsound direction) | **0** |
+| LPs stalling past the arm that failed to arm | **0** |
+
+| gate 2 — net-positive | |
+|---|---|
+| bit-identical cells (status **and** iteration count) | **77 / 100** |
+| fewer pivots / more / unchanged | 18 / 2 / 77 |
+| total pivots | **62 098 → 35 542** (−42.8 %) |
+| total wall | **85.16 s → 70.32 s** (0.826x) |
+| per-rep sd on armed cells | ≤ 0.22 s |
+
+The two cells that take *more* pivots are not slower: `QPLIB_3814_rlt1` goes
+760 → 1068 pivots and **6.139 s → 0.692 s**, i.e. the perturbed pivots are
+cheaper as well as differently chosen. The worst wall cost anywhere on the panel
+is +0.03 s (`QPLIB_3815_rlt0`).
+
+**The panel that measured nothing, and the defect it hid.** The first tree-level
+run of this mechanism reported **16/16 instances with bit-identical objective,
+bound and node count** and read as a clean bound-neutrality result. It was
+worthless: profiling a single solve of `clay0303hfsg` with the flag ON gave
+`DualCostPerturbAttempts` = **0** through 307 nodes and 1731 warm solves whose
+longest degenerate run was **4870** — 76x the arming threshold. The mechanism
+had been wired into `solve_lp_warm_csc` only, and the B&B driver's per-node path
+is `solve_lp_warm_scaled_csc`, a *different* warm entry. Both now route through
+one `warm_dual_armed` helper, and
+`cost_perturbation_is_reachable_from_the_per_node_warm_entry` pins it.
+
+This is the §6 failure mode in its purest form — a probe that ran the *baseline*
+in both arms and reported the agreement as evidence. The counters were what
+caught it, and only because they were read against an expectation ("a 4870-pivot
+degenerate run must have armed something") rather than for their own sake.
+
+**Tree panel, re-run against the wired build** — every vendored `.nl` instance
+with a recorded optimum (16 of 16 available; `known_optima.toml` is the only
+oracle in-repo), 60 s each, arms interleaved: **96 assertions, 0 issues**.
+Objective, bound and node count identical on all 16, and the mechanism is
+confirmed live on that corpus (`clay0303hfsg`: 52 attempts, 41 accepted, 11
+rejected, same optimum, same 307 nodes).
+
+**Verdict: the flag stays default-OFF.** Gate 1 passes at both levels and gate 2
+passes decisively at LP level, but the tree panel shows **no gain** — the 16
+vendored instances with oracles are not the stall class, so the mechanism fires
+and changes nothing there. That is the `DISCOPT_CUT_INHERIT` situation (sound but
+not measurably helpful *at the level that matters*), and the rule for it is that
+the flag stays off. What would graduate it: a tree-level panel over the full
+QPLIB/MINLPLib snapshot — the corpus that actually contains the degenerate lifted
+relaxations this addresses — showing the LP-level 0.826x wall surviving into
+whole solves. That snapshot is not reachable from this environment (no
+`~/Dropbox`, `qplib.zib.de` blocked by the network policy), so the graduation run
+is the one piece of this that has to happen elsewhere.
+
+**Falsified along the way** (recorded so they are not retried): the dual Harris
+pass, twice (§18 and #1008); Bland at a reachable threshold (§18); unconditional
+(unarmed) cost perturbation, on wall median 1.044x; and perturbing *every*
+nonbasic cost, which makes an LP with free columns reject its own warm start.

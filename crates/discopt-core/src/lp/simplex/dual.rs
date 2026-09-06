@@ -481,6 +481,56 @@ fn solve_lp_warm_csc_inner(
     }
 }
 
+/// Warm dual re-optimization with the #1013 perturbed restart armed by a stall.
+///
+/// The cost perturbation is armed by the degeneracy signal, not applied to every
+/// warm solve: the ordinary loop runs first with the degenerate-run bail set to
+/// [`PERTURB_ARM_RUN`], so an LP that converges without a long degenerate run
+/// returns from here having paid nothing at all, and only one that stalls goes on
+/// to the perturbed restart. Anything the restart cannot finish falls through to
+/// the unmodified [`PreparedDual::reoptimize`], so the mechanism can change how
+/// many pivots a solve takes but never what it certifies.
+///
+/// Every warm entry point routes through here. The B&B driver's per-node path is
+/// [`solve_lp_warm_scaled_csc`], NOT the CSC entry — wiring only the latter left
+/// the mechanism unreachable from an actual solve (`DualCostPerturbAttempts` = 0
+/// through a 307-node solve whose longest degenerate run was 4870) while a
+/// tree-level panel reported 16/16 identical results and read as a pass. That is
+/// the CLAUDE.md §6 failure mode: the probe measured nothing.
+#[allow(clippy::too_many_arguments)]
+fn warm_dual_armed(
+    p: &PreparedDual<'_>,
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    basis: &Basis,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    if opts.dual_cost_perturb > 0.0 {
+        let mut probe = opts.clone();
+        probe.dual_stall_patience = match opts.dual_stall_patience {
+            0 => PERTURB_ARM_RUN,
+            set => set.min(PERTURB_ARM_RUN),
+        };
+        // Counted here as well as in `reoptimize`: a warm dual solve ran, and a
+        // harness that gates on `DualWarmSolves >= 1` to prove it measured
+        // anything (CLAUDE.md §6) must see it.
+        crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
+        let mut banked = Vec::new();
+        if let Some(sol) = p.run_dual(l, u, b, &probe, &mut banked) {
+            return sol;
+        }
+        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
+            return sol;
+        }
+    }
+    p.reoptimize(l, u, b, opts)
+}
+
 /// The #1013 cost-perturbed warm start: solve the LP once with ties among the
 /// nonbasic reduced costs broken by a tiny cost perturbation, then re-solve on the
 /// **true** costs from the basis that lands on.
@@ -627,35 +677,7 @@ fn solve_csc_core(
 ) -> LpSolve {
     match start {
         Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
-            Some(p) => {
-                // #1013: the cost perturbation (default-OFF) is armed by a STALL,
-                // not applied unconditionally. Run the ordinary warm loop first
-                // with the degenerate-run bail set to `PERTURB_ARM_RUN`: an LP that
-                // converges without a long degenerate run returns from here having
-                // paid nothing at all, and only one that stalls goes on to the
-                // perturbed restart. Anything the restart cannot finish falls
-                // through to the unmodified `reoptimize` below.
-                if opts.dual_cost_perturb > 0.0 {
-                    let mut probe = opts.clone();
-                    probe.dual_stall_patience = match opts.dual_stall_patience {
-                        0 => PERTURB_ARM_RUN,
-                        p => p.min(PERTURB_ARM_RUN),
-                    };
-                    // Counted here as well as in `reoptimize`: a warm dual solve
-                    // ran, and a harness that gates on `DualWarmSolves >= 1` to
-                    // prove it measured anything (CLAUDE.md §6) must see it.
-                    crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
-                    let mut banked = Vec::new();
-                    if let Some(sol) = p.run_dual(l, u, b, &probe, &mut banked) {
-                        return sol;
-                    }
-                    if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts)
-                    {
-                        return sol;
-                    }
-                }
-                p.reoptimize(l, u, b, opts)
-            }
+            Some(p) => warm_dual_armed(&p, sp, m, n, c, l, u, b, basis, opts),
             // Warm basis rejected by the dual (wrong size / singular /
             // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
             // same basis first — a coefficient-patched child is usually still
@@ -698,7 +720,7 @@ pub fn solve_lp_warm_scaled_csc(
     sp: &SparseCols,
 ) -> LpSolve {
     match PreparedDual::prepare(lp, start, opts, sp) {
-        Some(p) => p.reoptimize(lp.l, lp.u, b, opts),
+        Some(p) => warm_dual_armed(&p, sp, lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
         // cert:T1.4: try a primal warm re-solve from the inherited basis before the
         // full cold solve (same rationale as the CSC path above). Safe: falls to
         // cold two-phase whenever the warm basis is unusable.
@@ -3105,4 +3127,74 @@ mod tests {
         }
         assert_eq!(compared, 4, "every captured LP must have been compared");
     }
+    /// #1013: the perturbation must be reachable from the entry the B&B driver
+    /// actually uses for a node LP.
+    ///
+    /// Wiring only `solve_lp_warm_csc` left it unreachable from a real solve:
+    /// `DISCOPT_LP_DUAL_COST_PERTURB=1` on `clay0303hfsg` gave
+    /// `DualCostPerturbAttempts = 0` through a 307-node solve whose longest
+    /// degenerate run was 4870 — while the tree-level panel dutifully reported
+    /// 16/16 identical objectives, bounds and node counts and read as a clean
+    /// bound-neutrality result. It was measuring a mechanism that never ran
+    /// (CLAUDE.md §6). The per-node path is [`solve_lp_warm_scaled_csc`]; this
+    /// pins it.
+    #[test]
+    fn cost_perturbation_is_reachable_from_the_per_node_warm_entry() {
+        let json = include_str!("testdata/st_testgr3_degenerate_stall_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        // The dense row-major view this entry takes, rebuilt from the same CSC.
+        let mut a = vec![0.0; m * n];
+        for j in 0..n {
+            let (rows, vs) = sp.col(j);
+            for (&r, &v) in rows.iter().zip(vs) {
+                a[r * n + j] = v;
+            }
+        }
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let mut off = opts();
+        off.dual_cost_perturb = 0.0;
+        let base = solve_lp_warm_scaled_csc(&lp, &b, &start, &off, &sp);
+
+        crate::profile::reset();
+        let mut on = off.clone();
+        on.dual_cost_perturb = COST_PERTURB_EPS;
+        let pert = solve_lp_warm_scaled_csc(&lp, &b, &start, &on, &sp);
+        let attempts = crate::profile::counter(crate::profile::Ctr::DualCostPerturbAttempts);
+        let accepted = crate::profile::counter(crate::profile::Ctr::DualCostPerturbAccepted);
+        crate::profile::set_enabled(false);
+
+        assert_eq!(
+            attempts, 1,
+            "the per-node warm entry must arm the perturbation on this stall; \
+             attempts=0 means the entry is not wired to it"
+        );
+        assert_eq!(accepted, 1, "and the clean-up must have carried the answer");
+        assert_eq!(base.status, LpStatus::Optimal);
+        assert_eq!(pert.status, LpStatus::Optimal);
+        assert!(
+            (pert.obj - base.obj).abs() <= 1e-6 * (1.0 + base.obj.abs()),
+            "obj {} vs {}",
+            pert.obj,
+            base.obj
+        );
+    }
+
 }

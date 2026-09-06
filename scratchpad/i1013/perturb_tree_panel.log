@@ -1,0 +1,20 @@
+instances with a recorded optimum: 16  time limit 60.0s  flag DISCOPT_LP_DUAL_COST_PERTURB
+clay0303hfsg         off optimal    obj=26669.109572842786 bound=26669.109551603415 nodes=307 47.2s | on optimal    obj=26669.109572842786 bound=26669.109551603415 nodes=307 47.4s
+nvs03                off optimal    obj=16.0 bound=15.999999999999915 nodes=0 0.0s | on optimal    obj=16.0 bound=15.999999999999915 nodes=0 0.0s
+nvs04                off optimal    obj=0.720000000000006 bound=0.7199999999999773 nodes=5 0.5s | on optimal    obj=0.720000000000006 bound=0.7199999999999773 nodes=5 0.5s
+nvs06                off optimal    obj=1.7703124999998527 bound=1.7703124999998527 nodes=5 0.9s | on optimal    obj=1.7703124999998527 bound=1.7703124999998527 nodes=5 0.9s
+nvs07                off optimal    obj=3.9999999999999987 bound=3.9999999999999987 nodes=3 0.1s | on optimal    obj=3.9999999999999987 bound=3.9999999999999987 nodes=3 0.1s
+nvs09                off optimal    obj=-43.134336918035466 bound=-43.134336918043346 nodes=31 10.2s | on optimal    obj=-43.134336918035466 bound=-43.134336918043346 nodes=31 9.9s
+nvs10                off optimal    obj=-310.80000000000007 bound=-310.80000000000064 nodes=0 0.0s | on optimal    obj=-310.80000000000007 bound=-310.80000000000064 nodes=0 0.0s
+nvs11                off optimal    obj=-431.0 bound=-431.00000000000017 nodes=0 0.1s | on optimal    obj=-431.0 bound=-431.00000000000017 nodes=0 0.1s
+nvs12                off optimal    obj=-481.20000000000005 bound=-481.20000000000016 nodes=0 0.1s | on optimal    obj=-481.20000000000005 bound=-481.20000000000016 nodes=0 0.1s
+nvs13                off optimal    obj=-585.2 bound=-585.2000000000182 nodes=637 1.5s | on optimal    obj=-585.2 bound=-585.2000000000182 nodes=637 1.5s
+nvs15                off optimal    obj=1.0 bound=0.9999999999999941 nodes=0 0.3s | on optimal    obj=1.0 bound=0.9999999999999941 nodes=0 0.3s
+st_miqp1             off optimal    obj=281.0 bound=280.9999999999995 nodes=0 0.3s | on optimal    obj=281.0 bound=280.9999999999995 nodes=0 0.3s
+st_miqp2             off optimal    obj=2.0 bound=2.0 nodes=0 0.3s | on optimal    obj=2.0 bound=2.0 nodes=0 0.3s
+st_miqp3             off optimal    obj=-5.999999997493812 bound=-6.000000003759528 nodes=0 0.3s | on optimal    obj=-5.999999997493812 bound=-6.000000003759528 nodes=0 0.3s
+st_test1             off optimal    obj=0.0 bound=-7.716050021144838e-14 nodes=0 0.3s | on optimal    obj=0.0 bound=-7.716050021144838e-14 nodes=0 0.3s
+st_testgr3           off optimal    obj=-20.59 bound=-20.590000000000003 nodes=0 0.6s | on optimal    obj=-20.59 bound=-20.590000000000003 nodes=0 0.6s
+
+assertions checked: 96
+issues: 0
