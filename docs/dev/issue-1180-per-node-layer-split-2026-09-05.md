@@ -397,3 +397,82 @@ discarded warm-up, each arm asserting which variant is actually live before it
 runs, on a `deterministic=True` budget so a faster arm cannot do more nodes and
 be mistaken for a behavior change.
 
+### §4.3 Results
+
+**Callback-heavy panel** (14 instances chosen from §2.4 by callback-glue share;
+`deterministic=True`, `max_nodes=50`, `time_limit=120`, 3 interleaved reps):
+
+| instance | old | new | speedup | neutral? |
+|---|---:|---:|---:|---|
+| ex1226 | 5.77 s | 4.14 s | **1.394×** | yes |
+| ex1221 | 2.31 | 1.72 | 1.348× | yes |
+| gkocis | 1.41 | 1.05 | 1.345× | yes |
+| oaer | 1.78 | 1.39 | 1.279× | yes |
+| tspn08 | 65.62 | 51.96 | 1.263× | yes |
+| st_e29 | 4.90 | 3.89 | 1.260× | yes |
+| tls2 | 6.19 | 5.04 | 1.228× | yes |
+| ex1225 | 6.56 | 5.40 | 1.214× | yes |
+| tspn10 | 49.50 | 40.81 | 1.213× | yes |
+| nvs21 | 2.95 | 2.44 | 1.208× | yes |
+| tanksize | 51.16 | 47.70 | 1.072× | yes |
+| nvs05 | 51.97 | 50.38 | 1.032× | yes |
+| alan | 0.04 | 0.04 | 1.010× | yes |
+| 4stufen | 120.26 | 120.58 | 0.997× | time-truncated † |
+| **median** | | | **1.221×** | |
+
+† `4stufen` hits the 120 s limit in *both* arms, so its wall is set by the limit
+and not by speed; in that same wall the new arm reaches **7 nodes against 3**, at
+an identical bound. A time-truncated row measures throughput, not behavior.
+
+**Whole-corpus sweep** (66 instances, `deterministic=True`, `max_nodes=20`, 1 rep):
+median **1.099×**, and **62 of 66 exactly neutral** on node count, objective and
+bound. The four that are not:
+
+* `4stufen`, `heatexch_gen1`, `heatexch_gen3` — time-truncated in at least one
+  arm, so the faster arm reaches more nodes. Bound identical or better.
+* `clay0303hfsg` — **pre-existing nondeterminism, not an effect of this change**.
+  The *old* arm alone returns two different objectives across four identical
+  repeats under `deterministic=True` (55092.52 three times, then 46785.55), and
+  so does the new one, always at the same 27 nodes. The dual bound agrees to 12
+  significant figures across every run; it is the *incumbent* that moves, so a
+  primal heuristic is the nondeterministic component. Recorded in §5 as a
+  separate defect — an instance that cannot reproduce itself cannot serve in a
+  bound-neutrality gate.
+
+**The one apparent regression, and why it is not one.** `beuster` measured
+**0.516×** (233 s vs 120 s), reproducibly, over three interleaved reps at
+identical node counts — which would have sunk the change if taken at face value.
+Two measurements dissolve it:
+
+1. *Where the time goes.* The new arm's `root_time` is **112.6 s against the old
+   arm's 120.1 s** — the root gets *cheaper*, as intended — and the wall runs on
+   to 231 s anyway. `faulthandler.dump_traceback_later` (a timing wrapper that
+   prints on return never fires for a call that does not return) puts the process
+   at t = 150 s, 30 s past the limit, inside **root OBBT**
+   (`_solve_probe` ← `run_obbt_on_relaxation` ← `obbt_tighten_root` ←
+   `root_reduce._stage_obbt` ← `run_root_fixpoint`). The extra wall is an
+   existing phase running past its deadline, reached further because the root got
+   cheaper — not new work the change introduced.
+2. *The gate's own setting caused it.* `deterministic=True` renders the role-2
+   wall budgets **inert by design**, so that OBBT stage has no deadline to stop
+   at. Re-run on the **ordinary wall budget** — the configuration a user actually
+   gets — three interleaved reps:
+
+   | arm | wall | nodes | dual bound |
+   |---|---:|---:|---:|
+   | old | 120.0 / 120.1 / 120.1 s | 3 / 7 / 7 | 6395.11 |
+   | new | 122.2 / 123.9 / 124.5 s | **15 / 15 / 15** | **8322.32** |
+
+   Same limit honoured to within 2–4 % on both arms, **5× the nodes**, and a
+   **30 % tighter dual bound**. On the user-facing budget `beuster` is one of the
+   change's better results, not its worst.
+
+   The lesson generalises and is the reason this section exists: **a deterministic
+   budget makes node counts comparable but makes wall clock meaningless for any
+   phase whose stopping rule *is* the wall budget.** Neutrality and speed have to
+   be read from different arms.
+
+`nvs12`, the only other sub-1.0× row in the corpus sweep, is **0.945×** over
+three reps with fully overlapping spreads (new 37.17–45.42 s, old 36.04–47.46 s)
+— noise, and reported as noise rather than as a result.
+
