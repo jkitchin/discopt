@@ -146,6 +146,22 @@ def _deadline_wall_cap(deadline: Optional[float]) -> Optional[float]:
     keeps a just-expired deadline from handing the backend a zero/negative
     ``max_wall_time`` (whose meaning is backend-defined) — a solve started at the
     edge gets a small positive slice rather than an undefined one.
+
+    This clamp is a role-2 gate by #912's definition — the caller's ``deadline``
+    may be an hour away and it still cuts one sub-NLP off after 3 s of *wall*, so
+    which iterate comes back is a function of machine speed — and it is **not**
+    suppressed under ``deterministic``. That was tried and falsified (#1187,
+    CLAUDE.md §4). After routing the RENS slice, ``clay0303hfsg`` still alternated
+    its incumbent between 26669.109572842466 and 26669.109572842823 in step with
+    the run's wall time, and a ``perf_counter``-caller trace put the divergence at
+    a ``fractional_diving`` step one repetition took and the other did not — a
+    step this helper caps. Returning ``None`` here under the flag left the
+    alternation *exactly* unchanged (…842466 at 67.8/67.3 s, …842823 at
+    64.1/64.0/64.7 s, five repetitions) at no measurable wall cost, so the clamp is
+    not what is moving it. The change did not ship: a fix with no measured effect
+    is a hypothesis, not a fix. The line stays recorded ``residual`` in
+    ``test_912_wall_budget_inventory``'s carved-slice inventory, and the residual
+    itself is open on #1187.
     """
     if deadline is None or not np.isfinite(deadline):
         return None

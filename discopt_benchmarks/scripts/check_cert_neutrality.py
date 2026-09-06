@@ -41,7 +41,11 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig  # noqa: E402
 from scripts.gen_cert_baseline import _instance_budgets  # noqa: E402
-from utils.cert_neutrality import check_neutrality, load_baseline  # noqa: E402
+from utils.cert_neutrality import (  # noqa: E402
+    check_neutrality,
+    load_baseline,
+    wall_limited_rows,
+)
 
 _CERT_BASELINE = _REPO_ROOT / "docs" / "dev" / "data" / "cert-baseline.jsonl"
 _CERT_BASELINE_META = _REPO_ROOT / "docs" / "dev" / "data" / "cert-baseline-meta.json"
@@ -206,7 +210,17 @@ def main() -> int:
     for inst, why in _KNOWN_PERF_GATED.items():
         if inst in baseline:
             print(f"  [perf-gated] {inst}: {why} (soundness still checked)")
-    violations = check_neutrality(new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED)
+    # #1187: a row that ended on the wall clock in BOTH arms is not evidence either
+    # way. ``deterministic=True`` neutralizes the role-2 budgets, but ``time_limit``
+    # is role 1 and stays live by design, so on a wall-limited run the terminating
+    # condition IS the clock and the two arms did different amounts of work. Reading
+    # neutrality off such a row is reading noise (#1180 manufactured a reproducible
+    # "0.516x regression" that way, on 13 of 66 rows). Excluded, and REPORTED as
+    # unmeasured — the verdict below is only over the rows actually compared.
+    unmeasured = wall_limited_rows(new_rows, baseline)
+    violations = check_neutrality(
+        new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED, exclude=unmeasured
+    )
     ratio, n_cal = host_speed_ratio(new_rows, baseline)
     print("\n─── neutrality result ───")
     if ratio is None:
@@ -220,9 +234,14 @@ def main() -> int:
             f"  host-speed calibration: this box is {ratio:.2f}x the reference machine's "
             f"wall on {n_cal} unrouted instance(s) that reproduced their node_count exactly"
         )
+    if unmeasured:
+        print(f"  {len(unmeasured)} instance(s) UNMEASURED (#1187) — not compared:")
+        for inst, why in sorted(unmeasured.items()):
+            print(f"    {inst:20s} {why}")
+    measured = len(baseline) - len(unmeasured)
     if not violations:
-        print("  NEUTRAL — all certifying instances pass (objective to tol, still "
-              "optimal, node_count not materially worse).")
+        print(f"  NEUTRAL over the {measured} instance(s) compared (objective to tol, "
+              "still optimal, node_count not materially worse).")
         return 0
     print(f"  {len(violations)} VIOLATION(S):")
     for v in violations:

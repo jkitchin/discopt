@@ -12,6 +12,70 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`deterministic=True` did not hold on the primal path** (#1187). `clay0303hfsg`
+  at `deterministic=True, max_nodes=20, time_limit=120` returned three different
+  incumbents — 55092.52 / 46785.55 / 41573.26, a 25 % spread — across repetitions
+  of the same binary in one process, at an *identical* 27 nodes and with the dual
+  bound agreeing to 12 significant figures. The tree was not moving; a primal
+  heuristic was choosing differently, under a flag whose whole promise is that
+  this cannot happen.
+
+  The gate was localized by recording the caller of every `perf_counter` read and
+  diffing the sequences between a slow repetition and a fast one: the NLP-BB root
+  RENS budget, `_RENS_BUDGET_FRAC * (time_limit - elapsed)` capped at
+  `_RENS_BUDGET_CAP_S` and handed to a nested `solve_model` as its `time_limit`.
+  A fraction of what is left on the clock is the textbook role-2 gate — it decides
+  how much of the rounding neighbourhood the sub-MINLP gets through — and it was
+  never routed through `_role2_*`. As the process warmed up (the same solve went
+  25.5 s → 17.0 s) the same nominal slice bought more sub-MINLP, so the search
+  returned a different point.
+
+  It now goes through a new `solver._role2_slice(seconds, whole=…)`, whose no-clock
+  value is the caller's own `time_limit` rather than `None`/`math.inf` — a nested
+  solve's `time_limit` is its own role-1 contract, and removing it would trade a
+  reproducibility bug for a broken promise. Measured over five repetitions after
+  the fix: the 25 % spread is gone, the dual bound is **bit-identical** across
+  every repetition, and the incumbent agrees to 13 significant figures — at a
+  *better* value (26669.11) than any wall-truncated repetition found, the #1116
+  result again. **Default-off flag; the default solve path is unchanged
+  bit-for-bit** (`_role2_slice` returns its argument when the flag is off).
+
+  Not fully closed. A ~1.3e-14 relative objective residual remains, alternating
+  between two values in step with the run's wall time. `_deadline_wall_cap`'s 3 s
+  clamp on one heuristic sub-NLP was the leading suspect — a `fractional_diving`
+  step it caps is where the caller trace puts the divergence — and suppressing it
+  under the flag was **tried and falsified**: five repetitions alternated between
+  the same two objectives in the same wall-correlated pattern, at no measurable
+  wall cost. That change was not shipped (CLAUDE.md §4: a fix with no measured
+  effect is a hypothesis), and the falsification is recorded at the helper and in
+  the inventory. #1187 stays open on the residual.
+
+  The construction that hid this is now scanned for. `test_912_wall_budget_inventory`
+  knew two shapes — `clock() + budget` and `clock() - origin <cmp> budget` — and a
+  budget carved from what is *left* matches neither, because the subtraction feeds
+  arithmetic rather than a comparison. `_scan_carved_slice` + `KNOWN_SLICES` add
+  that third shape, discriminating a *fraction or capped piece* of the remaining
+  time (role 2, recorded) from *all* of it (role 1, the caller passing its budget
+  down).
+
+### Changed
+
+- **The benchmark neutrality harness refuses wall-limited rows** (#1187, part 2).
+  `deterministic=True` cannot equalise work on a run that terminates on the wall
+  clock, because the terminating condition *is* the wall clock — `time_limit` is
+  role 1 and stays live by design. Two arms that both ended `status=time_limit`
+  therefore did different amounts of work: measured on `beuster` at 120 s, two
+  builds differing only in Python marshaling cost issued 3858 OBBT probe LPs
+  against 942 — 4.1× the work — for the same 3 nodes and the same bound. Reading
+  neutrality off such a row is reading noise; #1180's sweep did, on 13 of 66 rows,
+  and manufactured a reproducible "0.516× regression" that re-measured as a
+  5×-more-nodes, 30 %-tighter-bound improvement. `cert_neutrality.wall_limited_rows`
+  names those rows, `check_neutrality(..., exclude=…)` skips exactly the named set,
+  and both `check_cert_neutrality.py` and `graduation_gate.py` print them as
+  UNMEASURED — an excluded row yields no verdict rather than a silent pass. A row
+  wall-limited in only one arm (a *lost* certification) stays a violation, and
+  `node_limit` rows stay comparable: that budget is a deterministic count.
+
 - **`interval_eval` did not reduce a `SumExpression`** — it returned the
   operand's *elementwise* enclosure while `dag_compiler` lowers the same node to
   `jnp.sum(operand, axis=...)`. `sum(x)` over `x in [0,10]^2` came back as

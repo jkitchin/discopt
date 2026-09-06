@@ -1205,6 +1205,18 @@ class SolverTuning:
     counts, iteration caps, the node budget). Expect a run to take longer:
     nothing truncates a stage early any more.
 
+    A 28th site joined them with #1187, in a shape the first three helpers could
+    not express: a slice handed to a *nested* :func:`~discopt.solver.solve_model`
+    as its ``time_limit``, where neither ``None`` nor ``math.inf`` is a legal
+    value. ``solver._role2_slice`` returns the caller's own ``time_limit`` there —
+    elapsed-independent, and still finite, so the nested solve keeps a role-1
+    bound. The gate was the NLP-BB root RENS budget, and it was measured returning
+    three incumbents 25 % apart (55092.52 / 46785.55 / 41573.26) on
+    ``clay0303hfsg`` at an *identical* 27 nodes with the dual bound agreeing to 12
+    significant figures — this flag on, in one process, on one binary. As in
+    #1116, routing it made the instance reproduce **and** find a better incumbent
+    (26669.11) than any wall-truncated repetition.
+
     **What the flag does not cover, and why.** Two role-1 mechanisms are left
     alone on purpose, because neutralizing them would let preprocessing overrun
     the user's ``time_limit`` without bound — trading a reproducibility bug for a
@@ -1219,10 +1231,23 @@ class SolverTuning:
     — i.e. it terminates on work (``max_nodes``/gap) with real slack against
     ``time_limit``. A run cut short by ``time_limit``, or run on a machine slow
     enough that a phase-entry gate flips, is not reproducible and does not claim
-    to be. The residual was measured not to bind on the reproduction instance:
-    the 30 s POUNCE cap was live and real during the arm that reproduced
-    bit-exactly, and the solve finished in ~7 min against the default 3600 s
-    limit.
+    to be.
+
+    That is not a footnote for a panel author, it is the panel's admission rule.
+    **This flag cannot equalise work on a run that terminates on the wall clock,
+    because the terminating condition IS the wall clock.** Measured on ``beuster``
+    at ``time_limit=120`` with this flag on: two builds differing only in Python
+    marshaling cost issued 3858 OBBT probe LPs against 942 — 4.1x the work — for
+    the same 3 nodes and the same bound, both ending ``status=time_limit``. A gate
+    that compares such rows is measuring the budget; #1180's sweep did, on 13 of
+    66 rows, and manufactured a reproducible "0.516x regression" that re-measured
+    as a 5x-more-nodes, 30 %-tighter-bound improvement. The benchmark harness now
+    refuses those rows and reports them as unmeasured rather than passing them
+    (``discopt_benchmarks/utils/cert_neutrality.wall_limited_rows``).
+
+    The residual was measured not to bind on the reproduction instance: the 30 s
+    POUNCE cap was live and real during the arm that reproduced bit-exactly, and
+    the solve finished in ~7 min against the default 3600 s limit.
     """
 
     # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------

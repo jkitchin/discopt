@@ -31,6 +31,28 @@ dataflow that closes it, and its findings join the line-based ones. The hole was
 sized before it was closed: across the package, five call sites hand a clock read
 to a function defined here, and exactly one of them built a budget from it.
 
+The third construction (#1187)
+------------------------------
+
+Both patterns above end in a *comparison* or a ``+``. A budget carved from what
+is **left** ends in neither::
+
+    _rens_budget = max(0.5, min(_RENS_BUDGET_FRAC * (time_limit - (now - t0)),
+                                _RENS_BUDGET_CAP_S))
+
+The clock read has no ``+`` after it, and the subtraction feeds arithmetic rather
+than a comparison, so this matched nothing and was invisible for its whole life —
+the same failure the paragraph above describes, in a different spelling. It was
+not hypothetical: that exact expression, handed to a nested ``solve_model`` as its
+``time_limit``, returned three incumbents 25 % apart on ``clay0303hfsg`` at an
+*identical* 27 nodes with the dual bound stable to 12 significant figures, under
+``deterministic=True`` — a flag whose whole promise is that this cannot happen.
+``_scan_carved_slice`` closes it, and ``KNOWN_SLICES`` is its inventory.
+
+The discriminator it uses is the one that matters: *all* of what is left is role 1
+(the caller passing its own remaining ``time_limit`` down), a *fraction* or a
+*constant-capped piece* of what is left is role 2. Only the latter is recorded.
+
 Categories:
 
 ``contract``
@@ -243,6 +265,201 @@ def _scan_via_argument() -> set[tuple[str, str]]:
                     if hit:
                         found.add((rel, src[dpath][inner.lineno - 1].strip()))
     return found
+
+
+def _carves(node: ast.AST) -> bool:
+    """``min(<cap>, <elapsed-or-remaining>)`` or ``<frac> * <elapsed>`` / ``/ <n>``.
+
+    A budget that is *all* of what is left ("pass my remaining ``time_limit`` to
+    the sub-solve") answers "when do we stop?" and is role 1. A budget that is a
+    *carved* piece of what is left — capped by a constant, scaled by a fraction —
+    answers "how much work do we do?" and is role 2. This is the syntactic
+    difference between the two.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "min":
+        return len(node.args) >= 2 and any(_contains_elapsed(a) for a in node.args)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Div)):
+        return _contains_elapsed(node.left) or _contains_elapsed(node.right)
+    return False
+
+
+def _contains_elapsed(node: ast.AST) -> bool:
+    """``clock() - x`` (elapsed) or ``x - clock()`` (remaining) anywhere inside."""
+    for k in ast.walk(node):
+        if (
+            isinstance(k, ast.BinOp)
+            and isinstance(k.op, ast.Sub)
+            and (_is_clock_read(k.left) or _is_clock_read(k.right))
+        ):
+            return True
+    return False
+
+
+def _scan_carved_slice() -> set[tuple[str, str]]:
+    """Budgets carved as a FRACTION or CAPPED PIECE of the wall time left (#1187).
+
+    The third construction, and the one that let #1187 through. The two patterns
+    above are ``clock() +`` (a locally invented deadline) and ``clock() - origin
+    <cmp> budget`` (elapsed compared against a budget). A slice of what is *left*
+    — ``_RENS_BUDGET_FRAC * (time_limit - (perf_counter() - t_start))``, capped at
+    ``_RENS_BUDGET_CAP_S``, handed to a nested ``solve_model`` as its
+    ``time_limit`` — matches neither: the call site has no ``+`` after the clock
+    read, and the subtraction feeds *arithmetic*, never a comparison. So the gate
+    that moved ``clay0303hfsg``'s incumbent by 25 % at a fixed node count was
+    invisible to this file for its whole life, exactly as ``_gdp_config_deadline``
+    was before ``_scan_via_argument`` was written.
+
+    Keys are ``ast.unparse`` renderings rather than raw source lines: these
+    expressions routinely span four or five formatted lines, so a line-text key
+    would record ``"min("`` and match anything. Unparsing also makes the record
+    immune to reformatting, which a line-text ratchet is not.
+
+    A slice nested anywhere inside a ``_role2_*(...)`` call is exempt — that is
+    what "routed through the neutralizer" looks like, and the wrapper is checked
+    by ``test_1116_wrapped_gates_stay_wrapped`` and (for the #1187 site) by
+    ``test_1187_deterministic_primal.py``.
+    """
+    found: set[tuple[str, str]] = set()
+    for root, dirs, files in os.walk(_PKG):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in sorted(files):
+            if not f.endswith(".py"):
+                continue
+            path = Path(root) / f
+            # Not wrapped: an unparseable file must fail loudly, never be skipped
+            # into an "all clear" (rule 7).
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for parent in ast.walk(tree):
+                for child in ast.iter_child_nodes(parent):
+                    child.parent = parent  # type: ignore[attr-defined]
+            for node in ast.walk(tree):
+                if not _carves(node):
+                    continue
+                k: ast.AST | None = node
+                exempt = False
+                while k is not None:
+                    if (
+                        isinstance(k, ast.Call)
+                        and isinstance(k.func, ast.Name)
+                        and k.func.id.startswith("_role2_")
+                    ):
+                        exempt = True
+                        break
+                    k = getattr(k, "parent", None)
+                if not exempt:
+                    found.add((str(path.relative_to(_PKG)), ast.unparse(node)))
+    return found
+
+
+# (module-relative path, ``ast.unparse`` of the carved slice, category).
+#
+# Categories are the module docstring's, plus one this construction needs:
+# ``measurement`` — the arithmetic is a unit conversion or a report of elapsed
+# time that gates nothing. (The gate it feeds, when there is one, is recorded
+# separately in ``KNOWN`` under its own category.)
+KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
+    # Caps one piece LP of the integer-ratio dive by what is left of the dive's
+    # own deadline. That deadline is already ``_role2``-suppressed at its origin
+    # (``mccormick_lp``, recorded in KNOWN), so under the flag it is ``None`` and
+    # this branch is not taken; with the flag off it still decides how many piece
+    # LPs converge.
+    (
+        "_relax/integer_ratio.py",
+        "min(lp_limit, max(0.05, deadline - time.perf_counter()))",
+        "residual",
+    ),
+    # A third of what is left, for root OBBT inside the LP spatial driver.
+    (
+        "_relax/lp_spatial_bb.py",
+        "max(0.0, time_limit - (time.perf_counter() - t0)) / 3.0",
+        "residual",
+    ),
+    # Both are ``elapsed -> milliseconds`` conversions in the presolve
+    # orchestrator. The first stamps ``wall_time_ms`` on a pass delta (a report);
+    # the second is the left operand of the budget compare already recorded as
+    # ``contract`` in KNOWN. Neither carves a budget.
+    (
+        "_relax/presolve/orchestrator.py",
+        "(time.monotonic() - pass_started) * 1000.0",
+        "measurement",
+    ),
+    (
+        "_relax/presolve/orchestrator.py",
+        "(time.monotonic() - started) * 1000.0",
+        "contract",
+    ),
+    # ``_deadline_wall_cap``: a 3 s clamp on ONE heuristic sub-NLP, derived from
+    # the caller's deadline. The clamp makes the sub-NLP's returned iterate a
+    # function of machine speed even when the deadline is an hour away, so it is
+    # ``residual`` and not ``contract``.
+    #
+    # It was the leading suspect for the ~1.3e-14 objective residual that survived
+    # routing #1187's RENS slice, and suppressing it under ``deterministic`` was
+    # tried and FALSIFIED: with it returning ``None`` under the flag,
+    # ``clay0303hfsg`` alternated between the same two objectives in the same
+    # wall-correlated pattern over five repetitions. Converting it needs a
+    # deterministic iteration budget inside the NLP backend — the layer-natural
+    # work metric the module docstring says a conversion requires — and it needs a
+    # cause that has actually been measured.
+    (
+        "_relax/primal_heuristics.py",
+        "min(_DEADLINE_NLP_CAP_S, float(deadline) - _now())",
+        "residual",
+    ),
+    # Local-branching slices, spatial and NLP-BB.
+    (
+        "solver.py",
+        "min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))",
+        "residual",
+    ),
+    (
+        "solver.py",
+        "min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2))",
+        "residual",
+    ),
+    # ``max_wall_time`` clamps on root heuristic / polish / recovery NLPs.
+    (
+        "solver.py",
+        "min(3.0, _deadline - time.perf_counter())",
+        "residual",
+    ),
+    (
+        "solver.py",
+        "min(4.0, deadline - time.perf_counter())",
+        "residual",
+    ),
+    (
+        "solver.py",
+        "min(5.0, time_limit - (time.perf_counter() - t_start))",
+        "residual",
+    ),
+    # Box / MILP-fallback slices.
+    (
+        "solver.py",
+        "min(4.0, max(_DEADLINE_NODE_FLOOR_S, _deadline - time.perf_counter()))",
+        "residual",
+    ),
+    (
+        "solver.py",
+        "min(30.0, max(0.5, time_limit - (time.perf_counter() - t_start)))",
+        "residual",
+    ),
+    # AMP's #875 root-setup NBT share, and the surrogate driver's local refine.
+    (
+        "solvers/amp.py",
+        "min(min(max(0.15 * float(time_limit), 2.0), 30.0), "
+        "max(0.0, float(time_limit) - (time.perf_counter() - t_start)))",
+        "residual",
+    ),
+    (
+        "solvers/surrogate.py",
+        "min(float(local_refine_time_limit), max(0.0, deadline - time.perf_counter()))",
+        "residual",
+    ),
+)
+
+_KNOWN_SLICE_KEYS = {(p, s) for p, s, _ in KNOWN_SLICES}
+_SLICE_CATEGORY = {(p, s): c for p, s, c in KNOWN_SLICES}
 
 
 # (module-relative path, source line, category). See the module docstring.
@@ -600,6 +817,74 @@ def test_residual_count_is_visible():
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "
         "would justify shrinking it.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
+    )
+
+
+@pytest.mark.unit
+def test_no_unrecorded_carved_slice():
+    """A new fraction-of-what-is-left budget must be routed or justified (#1187)."""
+    found = _scan_carved_slice()
+    assert found, "the carved-slice scanner matched nothing — it has stopped working (rule 6)"
+    new = sorted(found - _KNOWN_SLICE_KEYS)
+    assert not new, (
+        "unrecorded carved wall-clock slice(s) — #1187.\n"
+        "A budget that is a FRACTION or a CAPPED PIECE of the time left decides\n"
+        "HOW MUCH WORK a stage does, so the answer becomes a function of machine\n"
+        "speed. This is the construction that moved clay0303hfsg's incumbent by\n"
+        "25 % at an identical node count under deterministic=True. Either route it\n"
+        "through solver._role2_slice / _role2_budget / _role2_deadline /\n"
+        "_role2_horizon, or add it to KNOWN_SLICES with a category.\n\n"
+        + "\n".join(f"  {p}: {s}" for p, s in new)
+    )
+
+
+@pytest.mark.unit
+def test_recorded_slices_still_exist():
+    """The carved-slice ratchet must not rot into stale bookkeeping."""
+    stale = sorted(_KNOWN_SLICE_KEYS - _scan_carved_slice())
+    assert not stale, (
+        "KNOWN_SLICES lists slice(s) that no longer exist — remove them "
+        "(or, if you routed one through _role2_*, that is the fix and the entry "
+        "should go):\n" + "\n".join(f"  {p}: {s}" for p, s in stale)
+    )
+
+
+@pytest.mark.unit
+def test_the_rens_slice_is_no_longer_in_the_carved_inventory():
+    """#1187's own gate must stay routed, not merely recorded.
+
+    ``_scan_carved_slice`` exempts anything nested inside a ``_role2_*`` call, so
+    the RENS budget is absent from its findings exactly while it stays wrapped. If
+    someone unwraps it, the scanner sees it again, ``test_no_unrecorded_carved_slice``
+    fails, and the tempting fix is to record it — which would turn the fix into
+    bookkeeping. This test says that specific entry is not allowed back.
+    """
+    found = _scan_carved_slice()
+    offenders = sorted(s for p, s in found if "_RENS_BUDGET" in s)
+    assert not offenders, (
+        "the RENS sub-MINLP slice is unrouted again — route it through "
+        "solver._role2_slice rather than recording it here (#1187):\n"
+        + "\n".join(f"  {s}" for s in offenders)
+    )
+
+
+@pytest.mark.unit
+def test_carved_slice_residual_count_is_visible():
+    """Publish the carved-slice residual count, as ``KNOWN``'s count is published.
+
+    12, not 14: the two ``* 1000.0`` entries are unit conversions
+    (``measurement`` / ``contract``), not budgets. The count started at 13 and
+    dropped to 12 when #1187's RENS slice was routed through ``_role2_slice`` —
+    which is what lowering this number is supposed to mean. It did **not** drop to
+    11: suppressing ``_deadline_wall_cap`` under the flag was tried and left the
+    residual it was meant to remove exactly unchanged, so it was not shipped.
+    """
+    residual = sorted(k for k, c in _SLICE_CATEGORY.items() if c == "residual")
+    assert len(residual) == 12, (
+        f"the carved-slice residual inventory changed ({len(residual)} entries, "
+        "expected 12). If you routed one through _role2_*, drop it from "
+        "KNOWN_SLICES and lower this number; if you added one, route it "
+        "instead.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
     )
 
 

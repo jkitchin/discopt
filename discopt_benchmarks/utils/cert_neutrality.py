@@ -20,6 +20,7 @@ end-to-end solve against the committed ``cert-baseline.jsonl``.
 from __future__ import annotations
 
 import json
+from collections.abc import Collection  # noqa: TC003
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 
@@ -45,6 +46,20 @@ CORRECTNESS_ATOL = 1e-4
 CORRECTNESS_RTOL = 1e-3
 # Allowed node_count regression before it's a violation (one-directional guard).
 NODE_REGRESSION_FRAC = 0.05
+
+#: Statuses that mean "the run stopped because a budget ran out", not "the run
+#: finished". A row that ended this way did an amount of work set by the budget,
+#: so two such rows are not two measurements of the same thing.
+LIMIT_STATUSES = frozenset({"time_limit", "node_limit", "iteration_limit"})
+
+#: The subset of :data:`LIMIT_STATUSES` whose budget is the **wall clock**. These
+#: are the rows ``deterministic=True`` says nothing about (#1187): the flag makes
+#: the search a function of the model by neutralizing the role-2 budgets, but it
+#: cannot equalise work on a run whose terminating condition *is* the clock, since
+#: that condition is role 1 and is deliberately left live. ``node_limit`` and
+#: ``iteration_limit`` are excluded — those budgets are deterministic counts, so
+#: two runs that hit them did the same amount of work and remain comparable.
+WALL_LIMIT_STATUSES = frozenset({"time_limit"})
 
 
 @dataclass
@@ -121,6 +136,46 @@ def _objective_violation(
     return None
 
 
+def wall_limited_rows(
+    new_rows: dict[str, dict],
+    baseline: dict[str, dict],
+) -> dict[str, str]:
+    """Instances whose neutrality verdict would be read off the wall clock (#1187).
+
+    A row that ended on ``time_limit`` in **both** arms did whatever amount of work
+    the clock allowed on the day, so the two arms are not two measurements of the
+    same search: an objective or ``node_count`` difference between them is a
+    difference in *work*, not in behaviour. Comparing them and calling the result a
+    behavior change is how #1180's corpus sweep manufactured a reproducible
+    "0.516x regression" that re-measured as a 5x-more-nodes, 30 %-tighter-bound
+    improvement — on 13 of 66 rows.
+
+    ``deterministic=True`` does not fix this and does not claim to. The flag
+    neutralizes the **role-2** budgets — the sub-budgets that decide *how much
+    work* a stage does — while ``time_limit`` itself is role 1 and stays live by
+    design (neutralizing it would let a solve run without bound). So on a
+    wall-limited run the terminating condition *is* the clock, and no amount of
+    role-2 suppression makes two such runs comparable.
+
+    Returns ``instance -> reason``. Only rows limited on the **wall** in both arms
+    are returned: a row that lost a certification (baseline ``optimal`` -> new
+    ``time_limit``) is a genuine regression and stays a violation, and a row that
+    stopped on ``max_nodes`` stopped on a deterministic count and stays comparable.
+    """
+    out: dict[str, str] = {}
+    for inst, base in baseline.items():
+        new = new_rows.get(inst)
+        if new is None:
+            continue
+        bs, ns = base.get("status"), new.get("status")
+        if bs in WALL_LIMIT_STATUSES and ns in WALL_LIMIT_STATUSES:
+            out[inst] = (
+                f"both arms ended on the wall clock (status={bs!r}); the work done "
+                f"is set by the budget, not by the change under test (#1187)"
+            )
+    return out
+
+
 def check_neutrality(
     new_rows: dict[str, dict],
     baseline: dict[str, dict],
@@ -131,6 +186,7 @@ def check_neutrality(
     known_perf_gated: dict[str, str] | None = None,
     regime: str = "bound_neutral",
     oracle: dict[str, float] | None = None,
+    exclude: Collection[str] = (),
 ) -> list[NeutralityViolation]:
     """Return the list of neutrality violations of ``new_rows`` vs ``baseline``.
 
@@ -147,6 +203,13 @@ def check_neutrality(
     *always* enforced. This keeps a known, tracked perf issue from blocking a
     sound, node-improving change while never masking a wrong answer.
 
+    ``exclude`` names instances that are not evidence either way and must not be
+    compared at all — pass :func:`wall_limited_rows` here (#1187). This is not a
+    softening of the check: an excluded row yields no verdict, so the caller has to
+    report it as unmeasured rather than count it as a pass. Excluding a row the
+    caller has not established to be indeterminate would hide a real regression, so
+    the set is computed, never hardcoded.
+
     ``regime`` selects the objective check (see :func:`_objective_violation`):
     ``bound_neutral`` (default) demands byte-reproducibility; ``bound_changing``
     demands agreement with the true optimum ``oracle`` (or a correctness-tolerance
@@ -154,11 +217,17 @@ def check_neutrality(
     perf guard in both regimes; the caller decides whether to treat it as fatal.
     """
     perf_gated = known_perf_gated or {}
+    excluded = set(exclude)
     violations: list[NeutralityViolation] = []
     for inst, base in baseline.items():
         new = new_rows.get(inst)
         if new is None:
             violations.append(NeutralityViolation(inst, "missing", "absent from new run"))
+            continue
+        # Not evidence either way (#1187). ``missing`` above is still reported for an
+        # excluded instance that never ran — "we chose not to read this row" and
+        # "the row is not there" are different facts.
+        if inst in excluded:
             continue
         gated = inst in perf_gated
         # status: a REGRESSION relative to the reference, not an absolute demand.

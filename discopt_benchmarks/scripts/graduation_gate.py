@@ -156,6 +156,12 @@ class CertResult:
     # and reuses them as the reference for every arm, so the control is paid for
     # once rather than once per flag.
     panel_rows: dict = field(default_factory=dict)
+    # Rows the comparison refused to read (#1187): instance -> why. A row that ended
+    # on the wall clock in both arms measures the budget, not the flag, so it yields
+    # no verdict. Carried here so the gate reports it as UNMEASURED rather than
+    # counting it as a silent pass — the neutrality claim is only over the rows that
+    # were actually compared.
+    unmeasured: dict = field(default_factory=dict)
 
 
 def run_cert_neutrality(
@@ -192,7 +198,8 @@ def run_cert_neutrality(
         "from pathlib import Path\n"
         "from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig\n"
         "from scripts.gen_cert_baseline import _instance_budgets, _CERT_OPTIMA\n"
-        "from utils.cert_neutrality import check_neutrality, load_baseline\n"
+        "from utils.cert_neutrality import (check_neutrality, load_baseline,\n"
+        "    wall_limited_rows)\n"
         "from scripts.check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED\n"
         "baseline = load_baseline(_CERT_BASELINE)\n"
         # The panel to SOLVE is always the committed baseline's instance list; only
@@ -214,8 +221,14 @@ def run_cert_neutrality(
         "        time_limit=int(budgets.get(name, 60)), num_runs=1, solvers=[solver])\n"
         "    res = BenchmarkRunner(cfg)._run_discopt(solver, name, 0)\n"
         "    new_rows[name] = res.to_dict()\n"
+        # #1187: a row that ended on the wall clock in BOTH arms is not evidence
+        # either way — the work it did was set by the budget, not by the flag — so
+        # it is excluded from the comparison and reported as unmeasured. It is not
+        # silently dropped: the excluded set travels back with the verdict.
+        "skipped = wall_limited_rows(new_rows, reference)\n"
         "viol = check_neutrality(new_rows, reference, known_perf_gated=_KNOWN_PERF_GATED,\n"
-        "    regime=regime, oracle=oracle)\n"
+        "    regime=regime, oracle=oracle, exclude=skipped)\n"
+        "print('SKIPJSON:' + json.dumps(skipped))\n"
         "print('ROWSJSON:' + json.dumps(new_rows))\n"
         "print('CERTJSON:' + json.dumps([{'instance': v.instance, 'kind': v.kind,\n"
         "    'detail': v.detail} for v in viol]))\n"
@@ -253,6 +266,15 @@ def run_cert_neutrality(
     viol = json.loads(line[len("CERTJSON:") :])
     rows_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("ROWSJSON:")), None)
     panel_rows = json.loads(rows_line[len("ROWSJSON:") :]) if rows_line else {}
+    skip_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("SKIPJSON:")), None)
+    unmeasured = json.loads(skip_line[len("SKIPJSON:") :]) if skip_line else {}
+    if unmeasured:
+        print(
+            f"# {len(unmeasured)} cert row(s) UNMEASURED — both arms ended on the wall "
+            f"clock, so their objective/node difference is a difference in work, not "
+            f"behaviour (#1187): {', '.join(sorted(unmeasured))}",
+            flush=True,
+        )
     # Soundness-class violations (objective / status / missing) are hard fails in
     # every regime. node_regression is perf-class: fatal for a bound-neutral flag,
     # a documented note for a bound-changing / heuristic-policy flag.
@@ -262,7 +284,7 @@ def run_cert_neutrality(
         neutral = not viol
         kind = "byte_identical"
         note = "byte-identical required (bound-neutral flag)"
-        return CertResult(neutral, kind, viol, note, panel_rows)
+        return CertResult(neutral, kind, viol, note, panel_rows, unmeasured)
     # bound-changing / control: objective must hold; node drift is a perf note.
     neutral = not hard
     kind = "objective_only"
@@ -271,7 +293,7 @@ def run_cert_neutrality(
         note += (
             f" ({len(node_only)} instance(s) changed node_count — expected where structure present)"
         )
-    return CertResult(neutral, kind, hard, note, panel_rows)
+    return CertResult(neutral, kind, hard, note, panel_rows, unmeasured)
 
 
 # --------------------------------------------------------------------------- #
