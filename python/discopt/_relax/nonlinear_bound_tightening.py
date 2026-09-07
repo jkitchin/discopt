@@ -2861,9 +2861,12 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
     subtree stay bounded, so the spatial dual bound becomes *certifiable* instead of
     being dropped as un-rigorous on an unbounded node (issue: nvs/gear unbounded
     auxiliaries). Sound: an interval enclosure of the defining expression is a valid
-    enclosure of the variable; bounds are only ever intersected, never loosened. The
-    fixpoint loop in :func:`tighten_nonlinear_bounds` resolves chained definitions
-    (``x7`` defined via ``x6`` resolves once ``x6`` is bounded).
+    enclosure of the variable; bounds are only ever intersected, never loosened --
+    the one exception being a sub-tolerance crossing, which is snapped *outward* to
+    the enclosure's own endpoint (see ``tighten``) so eps-scale rounding cannot
+    manufacture an empty box. The fixpoint loop in :func:`tighten_nonlinear_bounds`
+    resolves chained definitions (``x7`` defined via ``x6`` resolves once ``x6`` is
+    bounded).
     """
 
     name = "defined_variable_forward"
@@ -2940,7 +2943,29 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
                 or upd_lo > out_lb[iso_idx] + 1e-12
                 or upd_hi < out_ub[iso_idx] - 1e-12
             )
-            if tightened and upd_lo <= upd_hi + _EMPTY_INTERVAL_FEAS_TOL:
+            # Decide here what a crossed (``upd_lo > upd_hi``) interval means,
+            # rather than constructing the ``Interval`` and letting its dataclass
+            # invariant raise out of the whole tightening pass (#1197).
+            if upd_lo > upd_hi + _EMPTY_INTERVAL_FEAS_TOL:
+                # Beyond any rounding slack the defining expression's enclosure
+                # and the variable's box share no point. That is a genuine empty
+                # interval, reported the way every sibling rule reports one --
+                # the caller turns it into ``stats.infeasible``.
+                _prove_infeasible(
+                    self.name,
+                    con,
+                    f"defining interval [{new_lo}, {new_hi}] for flat variable "
+                    f"{iso_idx} is disjoint from its box "
+                    f"[{out_lb[iso_idx]}, {out_ub[iso_idx]}]",
+                )
+            if upd_lo > upd_hi:
+                # Sub-tolerance crossing: floating-point noise on an effectively
+                # degenerate range (ex7_3_6 crosses by 3e-15 on a variable whose
+                # true range is the single point 1.0), not an infeasibility proof.
+                # Collapse to the degenerate box at the enclosure's endpoint, the
+                # same repair ``_snap_tolerant_crossovers`` applies box-wide.
+                upd_lo = upd_hi
+            if tightened:
                 out_lb[iso_idx] = upd_lo
                 out_ub[iso_idx] = upd_hi
                 var = idx_to_var.get(iso_idx)
