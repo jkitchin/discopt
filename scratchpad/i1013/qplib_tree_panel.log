@@ -1,0 +1,18 @@
+QPLIB instances with a reference optimum: 9  time limit 120.0s
+QPLIB_0031     off time_limit bound=0.0 nodes=17310 120.0s | on time_limit bound=0.0 nodes=17536 120.0s  fired=0/0
+QPLIB_2967     off feasible   bound=31.66949217101962 nodes=63 120.3s | on feasible   bound=30.765694741718814 nodes=95 120.2s  fired=238/237
+QPLIB_3385     off time_limit bound=422.4906661876098 nodes=4450 120.0s | on time_limit bound=422.32681829511745 nodes=4428 120.0s  fired=0/0
+QPLIB_3496     off time_limit bound=29.999999979999924 nodes=618 120.0s | on time_limit bound=29.999999979999924 nodes=620 120.0s  fired=0/0
+QPLIB_3562     off time_limit bound=4.1000000000000005 nodes=6135 78.5s | on time_limit bound=4.5 nodes=6316 78.4s  fired=5/5
+QPLIB_3814     off time_limit bound=0.6109760808494903 nodes=11212 120.0s | on time_limit bound=0.6109760808494903 nodes=11281 120.0s  fired=0/0
+QPLIB_3815     off time_limit bound=-90.00000000450245 nodes=187 120.1s | on time_limit bound=-90.00000000450245 nodes=189 120.0s  fired=0/0
+QPLIB_3852     off feasible   bound=286.000000000073 nodes=1151 120.4s | on feasible   bound=286.000000000073 nodes=1119 120.0s  fired=0/0
+QPLIB_3871     off feasible   bound=140.94452680224444 nodes=2591 120.0s | on feasible   bound=140.55633368807702 nodes=2527 122.8s  fired=1/1
+
+assertions checked: 50
+instances where the perturbation fired: 3 / 9
+issues: 4
+   QPLIB_2967 arm=0: UNSOUND bound 31.66949217101962 vs optimum 10.92820323
+   QPLIB_2967 arm=1: UNSOUND bound 30.765694741718814 vs optimum 10.92820323
+   QPLIB_3852 arm=0: UNSOUND bound 286.000000000073 vs optimum 234.0
+   QPLIB_3852 arm=1: UNSOUND bound 286.000000000073 vs optimum 234.0

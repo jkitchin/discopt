@@ -28,11 +28,25 @@ import pytest
 from discopt.modeling.core import from_nl
 from discopt.solver_tuning import SolverTuning
 
-# ``tspn12`` is in-repo and emits singular-tangent rows through the LAZY separator
-# (the eager anchor is a different code path). It is a probe, not a target: nothing
-# here asserts anything specific to it, and any in-repo instance that emits rows
-# would serve.
-_EMITTING = "tspn12"
+# In-repo instances that emit singular-tangent rows through the LAZY separator
+# (the eager anchor is a different code path). These are probes, not targets:
+# nothing here asserts anything specific to any of them, and any in-repo instance
+# that emits rows would serve — which is why this is a LIST and the tests take the
+# first member that actually emits.
+#
+# It used to be the single name ``tspn12``, and that coupled the instrument to
+# something irrelevant to it: WHICH optimal vertex the node LP happens to land on.
+# The rows come from the lazy separator's trigger at the LP solution, so on a
+# degenerate face any change to the pivot path — a pricing rule, a refactorization
+# cadence, a scaling tweak, #1013's cost perturbation — can move the solve to an
+# equally optimal vertex where the trigger is not met and the probe falls silent
+# on that one instance while the separator is perfectly healthy on others.
+# (Measured: with #1013's perturbation ON, ``tspn12`` reports 0 rows while
+# ``tspn08`` still reports 1, and the two arms agree on status, node count and
+# incumbent, with the bound differing in the 8th significant digit.) A run that
+# silences the separator on EVERY candidate still fails, so the §6 guard is
+# widened rather than weakened.
+_EMITTING_CANDIDATES = ("tspn12", "tspn08", "tspn10", "tspn05")
 
 
 def _solve_with_stats(stem: str, *, on: bool, max_nodes: int = 20, time_limit: float = 30.0):
@@ -80,19 +94,47 @@ def _nl_path(stem: str):
     return path
 
 
+def _first_emitting():
+    """The first candidate whose flag-ON solve emits rows, with its stats.
+
+    Cached so the flag-OFF control uses the same instance without re-solving.
+    Raises rather than skipping if no candidate emits: "nothing emitted anywhere"
+    is the finding this instrument exists to report, not a reason to pass.
+    """
+    if _first_emitting.cache is None:
+        seen = {}
+        for stem in _EMITTING_CANDIDATES:
+            res, stats = _solve_with_stats(stem, on=True)
+            seen[stem] = stats
+            if stats["rows"] >= 1:
+                _first_emitting.cache = (stem, res, stats)
+                break
+        else:
+            raise AssertionError(
+                "no in-repo candidate emitted a singular-tangent row "
+                f"({seen}); the separator emits nothing anywhere, so every "
+                "binding fraction below it is a fraction over zero rows "
+                "(CLAUDE.md §6)"
+            )
+    return _first_emitting.cache
+
+
+_first_emitting.cache = None
+
+
 @pytest.mark.correctness
 def test_the_separator_records_what_it_emits():
     """With the flag ON the accounting must be non-empty and internally consistent.
 
-    An accounting that reports zero rows on an instance that emits them is the
-    CLAUDE.md §6 failure this whole instrument exists to avoid, so the row count
-    is asserted non-zero before any fraction derived from it is believed.
+    An accounting that reports zero rows on every instance that could emit them is
+    the CLAUDE.md §6 failure this whole instrument exists to avoid, so the row
+    count is asserted non-zero before any fraction derived from it is believed.
     """
-    res, stats = _solve_with_stats(_EMITTING, on=True)
+    stem, res, stats = _first_emitting()
     assert res.status in ("optimal", "feasible", "node_limit", "time_limit"), res.status
 
     assert stats["calls"] >= 1, (
-        f"the separator never ran on {_EMITTING} ({stats}) — with the flag ON and a "
+        f"the separator never ran on {stem} ({stats}) — with the flag ON and a "
         "registered spec this test is measuring nothing"
     )
     assert stats["rows"] >= 1, (
@@ -110,7 +152,8 @@ def test_the_flag_off_arm_records_nothing():
     #1119's panel would read a shared-state leak as "the feature costs nothing",
     which is the most flattering possible wrong answer.
     """
-    _, stats = _solve_with_stats(_EMITTING, on=False)
+    stem, _, _ = _first_emitting()
+    _, stats = _solve_with_stats(stem, on=False)
     assert stats["rows"] == 0 and stats["binding"] == 0, (
         f"flag-OFF emitted singular-tangent rows ({stats}) — the arms share state"
     )

@@ -1,4 +1,4 @@
-"""#1013 tree-level differential panel: the stall bail ON vs OFF through B&B.
+"""#1013 tree-level differential panel: one LP-engine flag ON vs OFF through B&B.
 
 The LP panel measures one node LP; this measures whole solves, which is where
 CLAUDE.md §5's cert-clean bar lives: no bound may pass its reference optimum, no
@@ -9,6 +9,11 @@ Instances are every vendored `.nl` with a recorded optimum in
 `python/tests/data/known_optima.toml` (no hardcoded names, §2), capped by
 `I1013_N`. Arms run in child processes (the flag is read once per process),
 interleaved per instance.
+
+The flag under test is `I1013_FLAG` (default `DISCOPT_LP_DUAL_STALL_BAIL`, the
+bail this harness was written for; `DISCOPT_LP_DUAL_COST_PERTURB` is the other
+#1013 mechanism). Both arms assert the loaded build actually carries the flag's
+counters before anything is recorded from it (CLAUDE.md §8).
 
 Prints a checked-assertion count and exits non-zero at zero (§6).
 """
@@ -23,12 +28,25 @@ sys.path.insert(0, os.path.join(ROOT, "python", "tests"))
 from _optima import known_optimum  # noqa: E402
 
 DATA = os.path.join(ROOT, "python/tests/data/minlplib_nl")
+FLAG = os.environ.get("I1013_FLAG", "DISCOPT_LP_DUAL_STALL_BAIL")
+# The counter that proves the build under test carries the flag's mechanism. A
+# panel run against a stale extension would otherwise produce two identical arms
+# and read as "bound-neutral" (CLAUDE.md §8).
+MARKER = {
+    "DISCOPT_LP_DUAL_STALL_BAIL": "DualDegenerateStallBails",
+    "DISCOPT_LP_DUAL_COST_PERTURB": "DualCostPerturbAttempts",
+}[FLAG]
 TL = float(os.environ.get("I1013_TL", "60"))
 N = int(os.environ.get("I1013_N", "14"))
 
 CHILD = r"""
 import json, sys
+import discopt._rust as _rust
 import discopt.modeling as dm
+assert sys.argv[3] in dict(_rust.profile_counters_py()), (
+    f"stale discopt._rust at {_rust.__file__}: no {sys.argv[3]} counter, so this "
+    f"build predates the mechanism under test"
+)
 from discopt.modeling.core import ObjectiveSense
 m = dm.from_nl(sys.argv[1])
 r = m.solve(time_limit=float(sys.argv[2]))
@@ -43,9 +61,9 @@ print('OUT ' + json.dumps({
 
 def run(path, arm):
     env = dict(os.environ)
-    env["DISCOPT_LP_DUAL_STALL_BAIL"] = arm
+    env[FLAG] = arm
     p = subprocess.run(
-        [sys.executable, "-u", "-c", CHILD, path, str(TL)],
+        [sys.executable, "-u", "-c", CHILD, path, str(TL), MARKER],
         capture_output=True,
         text=True,
         env=env,
@@ -66,7 +84,10 @@ for f in sorted(os.listdir(DATA)):
         continue
     names.append(f[:-3])
 names = names[:N]
-print(f"instances with a recorded optimum: {len(names)}  time limit {TL}s", flush=True)
+print(
+    f"instances with a recorded optimum: {len(names)}  time limit {TL}s  flag {FLAG}",
+    flush=True,
+)
 
 checks = 0
 issues = []
