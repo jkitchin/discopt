@@ -583,6 +583,43 @@ heuristic suite (incumbents are not the problem — the *proof* is).
 
 ---
 
+## 2b. The numerical-probing defect class (audit, 2026-09-07)
+
+An audit prompted by #1193 found that four code paths recovered coefficients the
+model **already holds exactly** by evaluating it numerically at unit vectors.
+This is one defect with four instances, not four defects, and it is worth stating
+as a class because the shape recurs: an extractor written against
+`ModelRepr.evaluate_*` when it should have been written against the expression
+arena.
+
+Two costs, and the second is the one that matters. The probe is O(n) or O(n^2)
+*model evaluations* where the arena answers in O(nodes) — and the probe
+identities are differences of nearly-equal floats, so they lose precision
+catastrophically on badly-scaled data. On `min (x - 1e10)^2` the off-diagonal
+identity returns `Q = 0` and the solver certifies a false optimum (#866).
+Reading the arena is both faster and *exact*.
+
+| | path | fires on | cost | mechanism of the fix | status |
+|---|---|---|---|---|---|
+| **P0** | `_extract_qcp_data_from_repr` (`_relax/problem_classifier.py`) | every QCP/MIQCP model (265 MINLPLib instances) | `m*2n` evaluations for the diagonal sweep **plus** `sum_rows |support|^2/2` pair probes — the O(n^2) probe runs **once per constraint** | `constraint_quadratic_form(i)` reads each row's coefficients off the arena in O(nodes) | **fixed** (#1209) |
+| **P1** | `_extract_lp_data_from_repr` | first path for any model with a `_builder`; the only path for `from_nl` LP/MILP | `m*n` full constraint evaluations + `m*n` dense `(n,)` allocations. Static census over the 415 LP/MILP-family MINLPLib instances: **1.11e11 evaluations**, median 3,996/instance | a row is linear exactly when its quadratic COO is empty, and then its linear map *is* the row | **fixed** (#1209) |
+| **P2** | `_AugmentedEvaluator` (`solver.py`) | `cutting_planes=True` and lazy constraints — **not** the default path (`cutting_planes: bool = False`) | it enumerates its members explicitly and omits `has_sparse_structure`, so every POUNCE derivative callback densifies to `(m,n)`/`(n,n)` and `jacobianstructure` builds an `m*n` meshgrid — even though the tape already returns analytical sparse COO Hessians | forward `has_sparse_structure` (as the sibling `_BoundOverrideEvaluator` already does via `__getattr__`) | **open** |
+| **P3** | `_estimate_alpha_fd` (`solver.py`) | never — zero production callers | O(n^2) evaluations + an O(n^3) eigendecomposition, with a `4e-12` divisor | delete it | **fixed** (#1209, deleted) |
+
+Falsified while auditing, and recorded here per §4: the hypothesis that *the
+per-node NLP densifies its Hessian every iteration* is **wrong**.
+`_tape_nlp_evaluator.has_sparse_structure()` returns `True` and
+`nlp_ipopt.py:174` takes the sparse branch, so the default solve path already
+feeds POUNCE analytical sparse Hessians. P2 is the exception, and only because
+one wrapper drops the capability flag — not because the tape lacks it.
+
+Standing rule this class implies: **an extractor that wants coefficients reads
+the arena; only an evaluator evaluates.** A new `evaluate_*` call inside
+`_relax/problem_classifier.py` should be treated as a defect until shown
+otherwise.
+
+---
+
 ## 3. Design principles
 
 1. **Correctness is a gate with zero slack.** Every phase ships behind a flag and must
