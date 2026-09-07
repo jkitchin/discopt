@@ -3142,7 +3142,7 @@ impl QuadForm {
     /// Entries are emitted in ascending key order so the output is
     /// deterministic and byte-reproducible across runs, which iterating the
     /// hash maps directly would not be.
-    pub fn to_coo(&self) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, f64) {
+    pub fn to_coo(&self) -> QuadFormCoo {
         let mut q: Vec<((usize, usize), f64)> =
             self.quadratic.iter().map(|(k, v)| (*k, *v)).collect();
         q.sort_by_key(|(k, _)| *k);
@@ -3158,6 +3158,12 @@ impl QuadForm {
         )
     }
 }
+
+/// The COO payload of [`QuadForm::to_coo`]: `(qi, qj, qd, ci, cd, constant)`,
+/// i.e. the quadratic row/col/value triple, the linear index/value pair, and
+/// the constant term. Named so the tuple stays one thing at every call site
+/// rather than six positional vectors clippy has to read as a type.
+pub type QuadFormCoo = (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, f64);
 
 /// Apply a binary operation elementwise over two flat polynomial arrays,
 /// broadcasting a length-1 operand against a longer one.
