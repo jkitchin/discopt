@@ -194,3 +194,62 @@ def test_graduation_gate_worker_source_still_compiles():
     compile(src, "<graduation_gate worker>", "exec")
     for needle in ("wall_limited_rows", "exclude=skipped", "SKIPJSON:"):
         assert needle in src, f"the worker lost its #1187 wiring: {needle}"
+
+
+def test_a_failing_arm_names_the_rows_that_failed(capsys):
+    """A gate that exits 1 must say WHICH rows did it, on stdout.
+
+    ``graduation_gate`` printed only ``cert=FAIL`` per arm; the offending rows
+    existed solely inside the uploaded JSON artifact. A CI failure whose detail is
+    unreachable from the log is a failure nobody can act on — which is how run
+    34072171566 reported four failing arms that could not be attributed to anything.
+
+    Proven to fire rather than assumed to: the same call with an empty violation
+    list must print no per-row line at all.
+    """
+    import json
+    import types
+
+    import scripts.graduation_gate as gg
+
+    def _run_with(viol: list[dict]) -> str:
+        def fake_run(args, **kw):
+            return types.SimpleNamespace(
+                stdout=(
+                    "SKIPJSON:" + json.dumps({}) + "\n"
+                    "ROWSJSON:" + json.dumps({}) + "\n"
+                    "CERTJSON:" + json.dumps(viol) + "\n"
+                ),
+                stderr="",
+            )
+
+        real = gg.subprocess.run
+        gg.subprocess.run = fake_run
+        try:
+            gg.run_cert_neutrality("lift_loose_products", {}, None)
+        finally:
+            gg.subprocess.run = real
+        return capsys.readouterr().out
+
+    noisy = _run_with(
+        [
+            {"instance": "st_e36", "kind": "objective", "detail": "objective 1.0 -> None"},
+            {
+                "instance": "st_e36",
+                "kind": "status",
+                "detail": "status=feasible (baseline optimal)",
+            },
+            {"instance": "tls2", "kind": "node_regression", "detail": "node_count 153 -> 255"},
+        ]
+    )
+    assert "st_e36" in noisy, "the failing row was not named — the log still cannot be read"
+    assert "objective 1.0 -> None" in noisy
+    assert "status=feasible (baseline optimal)" in noisy
+    assert "tls2" in noisy, "the perf note was dropped; it is context for the failure"
+    assert "2 soundness-class violation(s), 1 node_count note(s)" in noisy
+
+    quiet = _run_with([])
+    assert "soundness-class violation(s)" not in quiet, (
+        "the report fires on a clean arm — it would print on every green run and "
+        "so prove nothing when it prints on a red one"
+    )

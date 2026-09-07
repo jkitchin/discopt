@@ -280,6 +280,24 @@ def run_cert_neutrality(
     # a documented note for a bound-changing / heuristic-policy flag.
     hard = [v for v in viol if v["kind"] in ("objective", "status", "missing")]
     node_only = [v for v in viol if v["kind"] == "node_regression"]
+    # Say WHICH rows failed, on stdout, where the failure is read.
+    #
+    # This gate exits 1 on a hard violation and printed only `cert=FAIL`. The rows
+    # that caused it existed solely inside the uploaded JSON artifact, so the log --
+    # the thing a reviewer actually opens, and the only channel available when the
+    # artifact cannot be downloaded -- named a failure it could not explain. The
+    # control arm is skipped because it has its own drift report below; printing it
+    # here as well would duplicate that under a byte-reproducibility regime whose
+    # 1e-8 jitter this file already documents as noise, not drift.
+    if arm != "off" and (hard or node_only):
+        print(
+            f"# cert-neutrality vs the flag-OFF control: {len(hard)} soundness-class "
+            f"violation(s), {len(node_only)} node_count note(s)",
+            flush=True,
+        )
+        for v in hard + node_only:
+            mark = "FAIL" if v in hard else "note"
+            print(f"#   {mark} {v['instance']:22} {v['kind']:15} {v['detail'][:130]}", flush=True)
     if regime == "bound_neutral":
         neutral = not viol
         kind = "byte_identical"
