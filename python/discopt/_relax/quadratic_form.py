@@ -56,7 +56,18 @@ from typing import Optional
 
 import numpy as np
 
-from discopt.modeling.core import Expression, Model
+from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
+    Expression,
+    IndexExpression,
+    Model,
+    Parameter,
+    SumExpression,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
+)
 
 
 def extract_quadratic(
@@ -92,6 +103,50 @@ def extract_quadratic(
     if n < 0:
         return None
 
+    reduced = extract_quadratic_support(expr, model)
+    if reduced is None:
+        return None
+    support, Q_s, c_s, d = reduced
+    if any(not (0 <= i < n) for i in support):
+        return None
+
+    Q = np.zeros((n, n), dtype=np.float64)
+    c = np.zeros(n, dtype=np.float64)
+    if support:
+        idx = np.asarray(support, dtype=np.intp)
+        Q[np.ix_(idx, idx)] = Q_s
+        c[idx] = c_s
+    return Q, c, d
+
+
+def extract_quadratic_support(
+    expr: Expression, model: Model
+) -> Optional[tuple[tuple[int, ...], np.ndarray, np.ndarray, float]]:
+    """Support-restricted :func:`extract_quadratic`: ``(support, Q, c, d)`` or ``None``.
+
+    Identical recognition and identical arithmetic, but the coefficients come
+    back in the coordinate system of the *support* — the sorted tuple of flat
+    variable indices the expression actually references — so
+
+        ``expr(x) == x[support] @ Q @ x[support] + c @ x[support] + d``
+
+    with ``Q`` of shape ``(m, m)`` and ``c`` of shape ``(m,)`` for
+    ``m = len(support)``. The dense ``(n, n)`` form of :func:`extract_quadratic`
+    costs O(n²) memory *per row*, which is prohibitive for a per-row scan over a
+    model with tens of thousands of variables; a quadratic row's support is
+    typically a handful of variables regardless of ``n``.
+
+    Args:
+        expr: A scalar :class:`~discopt.modeling.core.Expression`.
+        model: The model defining the flat variable layout (prefix-sum over
+            ``model._variables`` by declaration order).
+
+    Returns:
+        ``(support, Q, c, d)``, or ``None`` when ``expr`` is not purely
+        quadratic. ``Q`` is symmetric by construction, using the same
+        symmetric-split convention as :func:`extract_quadratic`. Exact or
+        abstain: an approximate ``Q`` is never returned.
+    """
     # Local imports: keep module import cheap and avoid any import cycle
     # with milp_relaxation (which imports broadly from the _relax package).
     from discopt._relax.milp_relaxation import _expr_to_polynomial
@@ -109,10 +164,24 @@ def extract_quadratic(
         return None
 
     const, terms = poly
-
-    Q = np.zeros((n, n), dtype=np.float64)
-    c = np.zeros(n, dtype=np.float64)
     d = float(const)
+
+    # First pass: collect the support and reject any degree >= 3 monomial,
+    # so the reduced matrix is allocated only for a row we can actually use.
+    support_set: set[int] = set()
+    for _coeff, monomial in terms:
+        if len(monomial) > 2:
+            # Degree >= 3: not purely quadratic. Abstain — never
+            # mis-extract a higher-degree expression as quadratic.
+            return None
+        for raw in monomial:
+            support_set.add(int(raw))
+    support = tuple(sorted(support_set))
+    position = {flat_idx: pos for pos, flat_idx in enumerate(support)}
+
+    m = len(support)
+    Q = np.zeros((m, m), dtype=np.float64)
+    c = np.zeros(m, dtype=np.float64)
 
     for coeff, monomial in terms:
         degree = len(monomial)
@@ -121,14 +190,10 @@ def extract_quadratic(
             # ``const``, but honor it if present).
             d += float(coeff)
         elif degree == 1:
-            i = int(monomial[0])
-            if not (0 <= i < n):
-                return None
+            i = position[int(monomial[0])]
             c[i] += float(coeff)
-        elif degree == 2:
-            i, j = int(monomial[0]), int(monomial[1])
-            if not (0 <= i < n and 0 <= j < n):
-                return None
+        else:
+            i, j = position[int(monomial[0])], position[int(monomial[1])]
             if i == j:
                 # a·x_i²  ->  Q[i,i] += a
                 Q[i, i] += float(coeff)
@@ -137,12 +202,103 @@ def extract_quadratic(
                 half = 0.5 * float(coeff)
                 Q[i, j] += half
                 Q[j, i] += half
-        else:
-            # Degree >= 3: not purely quadratic. Abstain — never
-            # mis-extract a higher-degree expression as quadratic.
-            return None
 
-    return Q, c, d
+    return support, Q, c, d
+
+
+_DEGREE_UNKNOWN = None
+
+
+def polynomial_degree_bound(expr: Expression, _depth: int = 0) -> Optional[int]:
+    """A cheap UPPER BOUND on ``expr``'s polynomial degree, or ``None`` if unknown.
+
+    :func:`extract_quadratic_support` recognizes a row by *expanding* it into a
+    monomial list, and the expansion is what costs: a row like st_e36's
+    ``(x0² - 6x0 - 11 + 0.8x1) * (-0.62x1 + 3.25x0)² ...`` blows up to degree 6
+    and takes 554 ms to expand before the degree check rejects it. Walking the
+    DAG and *bounding* the degree without expanding costs O(nodes) and rejects
+    that row immediately.
+
+    The bound is structural: ``deg(a*b) <= deg(a) + deg(b)``, ``deg(a±b) <=
+    max``, ``deg(a**k) <= k·deg(a)`` for a non-negative integer ``k``. It is an
+    upper bound, not the true degree -- an expression whose leading terms cancel
+    (``x³ - x³ + x²``) is bounded at 3 but is really quadratic. So a caller may
+    use ``bound > 2`` to *skip* a row (a conservative abstention: it tightens
+    less, never more) but must NOT use ``bound <= 2`` as proof of quadraticity;
+    only the exact extraction decides that.
+
+    Returns ``None`` for anything it cannot bound -- a transcendental, a
+    variable denominator, a fractional or variable exponent, an unrecognized
+    node -- so the caller falls through to its existing path unchanged.
+    """
+    if _depth > 200:
+        return _DEGREE_UNKNOWN
+
+    if isinstance(expr, Constant):
+        return 0
+    if isinstance(expr, Parameter):
+        return 0
+    if isinstance(expr, (Variable, IndexExpression)):
+        return 1
+
+    if isinstance(expr, UnaryOp):
+        if expr.op in ("neg", "+"):
+            return polynomial_degree_bound(expr.operand, _depth + 1)
+        return _DEGREE_UNKNOWN
+
+    if isinstance(expr, SumExpression):
+        return polynomial_degree_bound(expr.operand, _depth + 1)
+
+    if isinstance(expr, SumOverExpression):
+        best = 0
+        for term in expr.terms:
+            d = polynomial_degree_bound(term, _depth + 1)
+            if d is _DEGREE_UNKNOWN:
+                return _DEGREE_UNKNOWN
+            best = max(best, d)
+        return best
+
+    if isinstance(expr, BinaryOp):
+        left = polynomial_degree_bound(expr.left, _depth + 1)
+        if left is _DEGREE_UNKNOWN:
+            return _DEGREE_UNKNOWN
+        right = polynomial_degree_bound(expr.right, _depth + 1)
+        if right is _DEGREE_UNKNOWN:
+            return _DEGREE_UNKNOWN
+        if expr.op in ("+", "-"):
+            return max(left, right)
+        if expr.op == "*":
+            return left + right
+        if expr.op == "/":
+            # Only a constant denominator keeps it polynomial.
+            return left if right == 0 else _DEGREE_UNKNOWN
+        if expr.op in ("**", "^"):
+            # A constant, non-negative integer exponent only.
+            if right != 0:
+                return _DEGREE_UNKNOWN
+            k = _constant_exponent(expr.right)
+            if k is None:
+                return _DEGREE_UNKNOWN
+            return left * k
+        return _DEGREE_UNKNOWN
+
+    # MatMulExpression, FunctionCall (exp/log/sin/...), CustomCall, and anything
+    # else: not bounded here. Unknown, so the caller keeps its current path.
+    return _DEGREE_UNKNOWN
+
+
+def _constant_exponent(expr: Expression) -> Optional[int]:
+    """The exponent as a non-negative int, or ``None`` (fractional/negative/not constant)."""
+    value = getattr(expr, "value", None)
+    if value is None:
+        return None
+    try:
+        f = float(np.asarray(value).reshape(()))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(f) or f < 0.0 or f != int(f):
+        return None
+    return int(f)
 
 
 def is_purely_quadratic(expr: Expression, n: int, model: Model) -> bool:
@@ -214,6 +370,8 @@ def quadratic_is_nsd(Q: np.ndarray, tol: float = 1e-10) -> Optional[bool]:
 
 __all__ = [
     "extract_quadratic",
+    "polynomial_degree_bound",
+    "extract_quadratic_support",
     "is_purely_quadratic",
     "quadratic_is_psd",
     "quadratic_is_nsd",
