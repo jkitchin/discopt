@@ -282,3 +282,151 @@ def test_quadratic_constraint_extraction_does_not_probe(monkeypatch):
     # 0.5 * (Q[0,1] + Q[1,0]) * x*y == 1.0 * x*y  =>  Q[0,1] == Q[1,0] == 1.0.
     assert PC.dense_Q(Q)[0, 1] == 1.0
     assert PC.dense_Q(Q)[1, 0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# The probe budget gate (#1187 / test_912_wall_budget_inventory)
+# ---------------------------------------------------------------------------
+#
+# The gate that declines an unaffordable probe sweep is denominated in PROBES,
+# not seconds. The first revision priced the sweep by timing the diagonal pass
+# and multiplying by the pair count, which made *which extractor runs* a
+# function of machine speed -- the exact construction #1187 exists to prevent.
+# The two extractors agree to ~1e-16 but not bitwise, so the fast and slow
+# machine could disagree about Q and branch differently at an identical node
+# count under ``deterministic=True``.
+#
+# These tests pin the property that replaced it: the decision is a pure function
+# of the model, so it is the same on every machine and in every run.
+
+
+def _dense_support_model(n):
+    """A QP whose objective support is all ``n`` variables, fully coupled.
+
+    Every variable carries a square term *and* every pair is present, so the
+    pair count the gate counts is exactly ``n*(n-1)/2`` with nothing to infer.
+
+    The square terms are load-bearing, not decoration. The probe identifies the
+    support from the *diagonal* sweep alone, so a purely bilinear objective
+    (``sum_{i<j} x_i x_j``, no squares) has ``f(e_j) == f(-e_j) == d`` and a zero
+    diagonal for every variable: the support comes back empty, ``Q`` comes back
+    zero, and the #866 verification rejects the whole extraction. That is the
+    probe declining safely rather than answering wrongly -- but it means a
+    bilinear-only model never reaches the budget gate, which is what these tests
+    are about.
+    """
+    m = dm.Model()
+    xs = [m.continuous(f"x{i}", lb=-1.0, ub=1.0) for i in range(n)]
+    obj = 0.0
+    for i in range(n):
+        obj = obj + xs[i] * xs[i]
+        for j in range(i + 1, n):
+            obj = obj + xs[i] * xs[j]
+    m.minimize(obj)
+    return m
+
+
+@pytest.mark.parametrize("n", [6, 9])
+def test_probe_budget_gate_trips_exactly_at_the_pair_count(n):
+    """The gate fires iff ``pairs > budget``, and the boundary is exact.
+
+    Both sides of the boundary are asserted, one probe apart. A gate priced in
+    seconds cannot be tested this way at all -- which is the point.
+    """
+    pairs = n * (n - 1) // 2
+    model = _dense_support_model(n)
+    checks = 0
+
+    # One probe under the pair count: refused, and the message states the count.
+    with pytest.raises(PC._ProbeBudgetExceeded) as exc:
+        PC._extract_qp_data_from_repr(model, probe_budget=pairs - 1)
+    assert f"{pairs:,} probes" in str(exc.value), str(exc.value)
+    checks += 1
+    assert "DISCOPT_QP_PROBE_MAX_PROBES" in str(exc.value), str(exc.value)
+    checks += 1
+
+    # Exactly at the pair count: affordable, so it runs and returns real data.
+    data = PC._extract_qp_data_from_repr(model, probe_budget=pairs)
+    assert data.Q is not None
+    checks += 1
+
+    # ``0`` means "no budget", not "budget of zero" -- the unbudgeted default.
+    data0 = PC._extract_qp_data_from_repr(model, probe_budget=0)
+    assert data0.Q is not None
+    checks += 1
+
+    assert checks == 4
+
+
+def test_probe_budget_decision_is_a_pure_function_of_the_model():
+    """Same model, same budget, same verdict -- with no clock in the loop.
+
+    ``problem_classifier`` no longer imports ``time`` at all, so there is no
+    clock for a slow machine to read differently. Asserting the absence of the
+    import is what keeps a future revision from quietly reintroducing one and
+    restoring the machine-speed dependence; ``test_912_wall_budget_inventory``
+    is the package-wide version of the same guard.
+    """
+    import inspect
+
+    checks = 0
+    src = inspect.getsource(PC)
+    assert "import time" not in src, "a clock read is back in the QP extractor"
+    checks += 1
+
+    model = _dense_support_model(7)
+    budget = 7 * 6 // 2 - 1
+    verdicts = []
+    for _ in range(3):
+        try:
+            PC._extract_qp_data_from_repr(model, probe_budget=budget)
+            verdicts.append("ran")
+        except PC._ProbeBudgetExceeded:
+            verdicts.append("declined")
+    assert verdicts == ["declined"] * 3, verdicts
+    checks += 1
+
+    assert checks == 2
+
+
+def test_a_model_declined_on_cost_still_gets_an_extraction():
+    """Declining is a statement about cost, never a refusal to answer.
+
+    ``extract_qp_data`` routes a declined model to the tape extractor, so the
+    caller gets the same ``Q`` by a cheaper route. If that contract broke, a
+    budget set too low would turn into a solve failure rather than a fallback.
+    """
+    model = _dense_support_model(8)
+    checks = 0
+
+    # Unbudgeted: the probe runs and its answer is the reference.
+    ref = PC.extract_qp_data(model)
+    assert ref.Q is not None
+    checks += 1
+
+    # A budget of one probe declines every non-trivial model, so this exercises
+    # the fallback rather than the happy path.
+    with pytest.raises(PC._ProbeBudgetExceeded):
+        PC._extract_qp_data_from_repr(model, probe_budget=1)
+    checks += 1
+
+    monkey = PC._QP_PROBE_MAX_PROBES
+    try:
+        PC._QP_PROBE_MAX_PROBES = 1
+        got = PC.extract_qp_data(model)
+    finally:
+        PC._QP_PROBE_MAX_PROBES = monkey
+
+    assert got.Q is not None
+    checks += 1
+
+    ref_Q = ref.Q.toarray() if hasattr(ref.Q, "toarray") else np.asarray(ref.Q)
+    got_Q = got.Q.toarray() if hasattr(got.Q, "toarray") else np.asarray(got.Q)
+    assert got_Q.shape == ref_Q.shape, (got_Q.shape, ref_Q.shape)
+    checks += 1
+    np.testing.assert_allclose(got_Q, ref_Q, rtol=0, atol=1e-12)
+    checks += 1
+    np.testing.assert_allclose(np.asarray(got.c), np.asarray(ref.c), rtol=0, atol=1e-12)
+    checks += 1
+
+    assert checks == 6

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -154,7 +153,19 @@ _DENSE_A_MAX_BYTES = 256 * 1024 * 1024
 # on a single instance (unitcommit_200_100_1_mod_8, n = 25,700). Six of those
 # overlap the tracked MIQP failure set, including all four instances that were
 # observed overrunning a 60 s limit by up to 4.8x.
-_QP_PROBE_MAX_SECONDS = float(os.environ.get("DISCOPT_QP_PROBE_BUDGET", "0") or 0.0)
+# Denominated in PROBES, not seconds, and deliberately so. An earlier revision
+# priced the sweep by timing the diagonal pass and multiplying:
+# ``(perf_counter() - t0) / (2 * n_orig) * pairs``. That made *which extractor
+# runs* a function of machine speed -- the construction #1187 exists to stop,
+# and ``test_912_wall_budget_inventory`` caught it. The two extractors agree to
+# ~1e-16 but not bitwise, so a slow machine could take the tape arm, a fast one
+# the probe, and the two Q matrices could branch differently at identical node
+# counts under ``deterministic=True``. The pair count is exactly the quantity
+# the timing was estimating, is known exactly before the sweep starts, and is
+# identical on every machine -- so the deterministic gate is also the more
+# precise one. Conversion is free here (no seconds-valued tuning to re-derive),
+# which is why this is a conversion and not a ``KNOWN_SLICES`` entry.
+_QP_PROBE_MAX_PROBES = int(float(os.environ.get("DISCOPT_QP_PROBE_MAX_PROBES", "0") or 0))
 
 
 # Read the objective's quadratic coefficients off the expression DAG instead of
@@ -364,7 +375,7 @@ class _NotQuadraticError(Exception):
 
 
 class _ProbeBudgetExceeded(Exception):
-    """Raised when the O(|support|^2) probe sweep would exceed its time budget.
+    """Raised when the O(|support|^2) probe sweep would exceed its probe budget.
 
     Distinct from :class:`_NotQuadraticError` because it says nothing about the
     model: the probe *could* have produced an answer, it would just have cost more
@@ -1496,7 +1507,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     )
 
 
-def _extract_qp_data_from_repr(model: Model, probe_budget_s: float | None = None) -> QPData:
+def _extract_qp_data_from_repr(model: Model, probe_budget: int | None = None) -> QPData:
     """Extract QP data by evaluating the Rust ModelRepr numerically.
 
     For the quadratic objective 0.5 x'Qx + c'x + d:
@@ -1516,9 +1527,8 @@ def _extract_qp_data_from_repr(model: Model, probe_budget_s: float | None = None
     x_zero = np.zeros(n_orig, dtype=np.float64)
     d = repr_.evaluate_objective(x_zero)
 
-    # Evaluate at all unit vectors. Timed, because the per-probe cost measured here
-    # is what prices the O(|support|^2) sweep below -- see the budget check.
-    _probe_t0 = time.perf_counter()
+    # Evaluate at all unit vectors. Not timed: the budget check below is denominated
+    # in probes, so nothing here needs a clock.
     f_ej = np.zeros(n_orig, dtype=np.float64)
     f_neg_ej = np.zeros(n_orig, dtype=np.float64)
     for j in range(n_orig):
@@ -1527,7 +1537,6 @@ def _extract_qp_data_from_repr(model: Model, probe_budget_s: float | None = None
         f_ej[j] = repr_.evaluate_objective(ej)
         ej[j] = -1.0
         f_neg_ej[j] = repr_.evaluate_objective(ej)
-    _probe_per_call = (time.perf_counter() - _probe_t0) / max(1, 2 * n_orig)
 
     # Q diagonal: Q[j,j] = f(e_j) + f(-e_j) - 2*d  (kept 1-D; see the note below on
     # why the dense (n, n) is not materialised until the very end)
@@ -1545,22 +1554,20 @@ def _extract_qp_data_from_repr(model: Model, probe_budget_s: float | None = None
     # entries, and a dense (n, n) Q there is 91 GB.
     support = [j for j in range(n_orig) if f_ej[j] != d or f_neg_ej[j] != d or diag[j] != 0.0]
 
-    # Budget gate. |support| is now known exactly, and the diagonal sweep
-    # above just measured what one probe costs on THIS model, so the pair sweep can
-    # be priced before it is paid for -- a prediction validated at ratio 1.00
-    # (275.0 s predicted vs 275.3 s measured on chimera_mis-01). Refuse loudly
-    # rather than silently spending a multiple of the caller's whole time limit;
-    # ``extract_qp_data`` routes a declined model to the tape extractor, which gets
-    # the same Hessian from one AD evaluation instead of |support|^2 probes.
-    _budget = _QP_PROBE_MAX_SECONDS if probe_budget_s is None else probe_budget_s
+    # Budget gate. |support| is now known exactly, so the pair sweep can be counted
+    # before it is paid for -- exactly, not predicted: the sweep below issues one
+    # probe per pair and nothing else. Refuse loudly rather than silently spending a
+    # multiple of the caller's whole time limit; ``extract_qp_data`` routes a
+    # declined model to the tape extractor, which gets the same Hessian from one AD
+    # evaluation instead of |support|^2 probes. For scale, ``chimera_mis-01`` has a
+    # support of 1,818 -> 1,651,653 pairs, which measured 275.3 s.
+    _budget = _QP_PROBE_MAX_PROBES if probe_budget is None else probe_budget
     _pairs = len(support) * (len(support) - 1) // 2
-    _predicted = _pairs * _probe_per_call
-    if _budget > 0.0 and _predicted > _budget:
+    if _budget > 0 and _pairs > _budget:
         raise _ProbeBudgetExceeded(
-            f"pairwise probe sweep would cost ~{_predicted:.1f}s "
-            f"({_pairs:,} probes over a support of {len(support)} of {n_orig} "
-            f"variables at {_probe_per_call * 1e6:.1f}us each), over the "
-            f"{_budget:.1f}s budget (DISCOPT_QP_PROBE_BUDGET)"
+            f"pairwise probe sweep would issue {_pairs:,} probes over a support of "
+            f"{len(support)} of {n_orig} variables, over the {_budget:,}-probe "
+            f"budget (DISCOPT_QP_PROBE_MAX_PROBES)"
         )
 
     off_i: list[int] = []
@@ -2393,7 +2400,7 @@ def extract_qp_data(model: Model) -> QPData:
             type(exc).__name__,
             exc,
         )
-        return _extract_qp_data_from_repr(model, probe_budget_s=0.0)
+        return _extract_qp_data_from_repr(model, probe_budget=0)
 
 
 def extract_qcp_data(model: Model) -> QCPData:
