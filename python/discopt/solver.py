@@ -27,6 +27,7 @@ import numpy as np
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
 from discopt import _timing
 from discopt._relax.model_utils import flat_variable_bounds
+from discopt._relax.problem_classifier import _DENSE_A_MAX_BYTES, _sp_issparse
 from discopt._relax.problem_classifier import dense_A as _dense_A
 from discopt._relax.problem_classifier import dense_Q as _dense_Q
 
@@ -19252,17 +19253,72 @@ def _mip_recover_relaxation_duals(
     return cd, bdl, bdu
 
 
-def _decompose_eq_slack_form(
-    A_eq_full: np.ndarray,
+def _decompose_eq_slack_form_sparse(
+    A_eq_full: Any,
     b_eq_full: np.ndarray,
     n_orig: int,
     n_slack: int,
-) -> tuple[
-    Optional[np.ndarray],
-    Optional[np.ndarray],
-    Optional[np.ndarray],
-    Optional[np.ndarray],
-]:
+) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
+    """Sparse counterpart of :func:`_decompose_eq_slack_form`; same semantics.
+
+    Row classification and ordering match the dense path exactly:
+
+    * a row is an inequality iff its slack block holds an entry with
+      ``abs(v) > 1e-15`` -- a *stored* zero fails that test in both paths;
+    * among the slack entries the dense path takes ``np.argmax(np.abs(...))``,
+      which resolves ties to the LOWEST column index; scanning CSR indices in
+      ascending order with a strict ``>`` does the same;
+    * only the SIGN of that coefficient is used, to orient the row;
+    * ``A_ub`` and ``A_eq`` keep declared row order (see the note at
+      ``_crossover_row_order``), because the masks below are order-preserving.
+
+    Returns sparse ``A_ub``/``A_eq``. Consumers use them only via ``@`` and
+    ``.shape``, which behave identically on scipy sparse matrices.
+    """
+    import scipy.sparse as _sp
+
+    A = A_eq_full.tocsr()
+    m = A.shape[0]
+    b = np.asarray(b_eq_full, dtype=np.float64)
+
+    indptr, indices, data = A.indptr, A.indices, A.data
+    is_ub = np.zeros(m, dtype=bool)
+    sign = np.ones(m, dtype=np.float64)
+    if n_slack > 0:
+        for i in range(m):
+            best_abs = 0.0
+            best_val = 0.0
+            for k in range(indptr[i], indptr[i + 1]):
+                if indices[k] < n_orig:
+                    continue
+                a = abs(data[k])
+                if a > best_abs:  # strict: ties keep the lowest column index
+                    best_abs = a
+                    best_val = data[k]
+            if best_abs > 1e-15:
+                is_ub[i] = True
+                sign[i] = 1.0 if best_val > 0 else -1.0
+
+    orig = A[:, :n_orig]
+    ub_idx = np.flatnonzero(is_ub)
+    eq_idx = np.flatnonzero(~is_ub)
+
+    A_ub = b_ub = A_eq = b_eq = None
+    if ub_idx.size:
+        A_ub = _sp.diags(sign[ub_idx]) @ orig[ub_idx, :]
+        b_ub = sign[ub_idx] * b[ub_idx]
+    if eq_idx.size:
+        A_eq = orig[eq_idx, :]
+        b_eq = b[eq_idx]
+    return A_ub, b_ub, A_eq, b_eq
+
+
+def _decompose_eq_slack_form(
+    A_eq_full: Any,
+    b_eq_full: np.ndarray,
+    n_orig: int,
+    n_slack: int,
+) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
     """Reconstruct (A_ub, b_ub, A_eq, b_eq) from an equality-plus-slack form.
 
     `extract_lp_data` / `extract_qp_data` convert inequalities to equalities
@@ -19273,6 +19329,21 @@ def _decompose_eq_slack_form(
     """
     if A_eq_full.shape[0] == 0:
         return None, None, None, None
+
+    # Sparse input -> sparse output, and never a dense (m, n_orig) in between.
+    # ``extract_lp_data`` emits sparse beyond the #863 budget, and this projection
+    # is on the MILP fast path's feasibility gate, where the dense form cost 770 MB
+    # on ``chimera_k64ising-01`` (16,108 x 5,978 float64) on top of the 2.59 GB the
+    # driver marshaling already spent. Dense input keeps the exact original code
+    # path below, so the eleven dense call sites are bit-identical.
+    try:
+        import scipy.sparse as _sp
+
+        _is_sparse = _sp.issparse(A_eq_full)
+    except ImportError:  # pragma: no cover - scipy is a hard dependency
+        _is_sparse = False
+    if _is_sparse:
+        return _decompose_eq_slack_form_sparse(A_eq_full, b_eq_full, n_orig, n_slack)
 
     eq_rows: list[np.ndarray] = []
     eq_rhs: list[float] = []
@@ -21250,6 +21321,33 @@ def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t
     if not POUNCE_AVAILABLE:
         return lb, ub, None
 
+    # Root reduced-cost fixing needs POUNCE, and POUNCE needs a dense matrix -- so
+    # unlike the driver marshaling above there is no sparse route here. Densifying
+    # unconditionally is what made a 15 s solve of ``chimera_k64ising-01`` allocate
+    # gigabytes: its linearization is 16,108 x 21,074, i.e. 2.59 GB of float64 for
+    # ~48k nonzeros. Skip the tightening instead, on the same #863 budget the
+    # extractor used to decide to go sparse in the first place.
+    #
+    # Sound by this function's own contract: it returns ``(lb, ub, None)`` --
+    # bounds untouched, no incumbent -- whenever it cannot proceed, so a skip only
+    # forgoes tightening and can never weaken the search or the certificate. Logged
+    # rather than silent (CLAUDE.md §3): a tightening that stops firing on big
+    # models must be visible, not a mystery.
+    _rcf_bytes = 0
+    if _sp_issparse(lp_data.A_eq):
+        _rcf_shape = lp_data.A_eq.shape
+        _rcf_bytes = int(_rcf_shape[0]) * int(_rcf_shape[1]) * 8
+    if _rcf_bytes > _DENSE_A_MAX_BYTES:
+        logger.info(
+            "root reduced-cost fixing skipped: dense A_eq would be %.2f GB "
+            "(%d x %d), over the %.0f MB budget",
+            _rcf_bytes / 1024**3,
+            _rcf_shape[0],
+            _rcf_shape[1],
+            _DENSE_A_MAX_BYTES / 1024**2,
+        )
+        return lb, ub, None
+
     _A_eq_dense = _dense_A(lp_data.A_eq)
     n_total = _A_eq_dense.shape[1] if _A_eq_dense.shape[0] > 0 else n_orig
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
@@ -22114,6 +22212,41 @@ def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> O
         return None
 
 
+def _csc_for_rust_milp(A_eq):
+    """Marshal a constraint matrix into the CSC triple the Rust MILP driver wants.
+
+    Accepts either a dense array or a scipy sparse matrix (``extract_lp_data`` emits
+    sparse beyond ``_QP_DENSE_Q_MAX_BYTES``, #863) and NEVER densifies: on
+    ``chimera_k64ising-01`` the QUBO linearization is 16,108 x 21,074, which is
+    **2.72 GB** of float64 holding ~48k nonzeros -- a ~7,000x blowup. Measured on a
+    60 s interleaved panel: without this marshaling the solve is killed at a 12 GB
+    RSS guard (peak 12.39 GB and still climbing); with it, peak RSS is 7.38 GB.
+
+    Bound-neutral by construction (CLAUDE.md §5, regime 1). The dense entry point
+    ``solve_milp_py`` builds its CSC with ``SparseCols::from_dense``
+    (``crates/discopt-core/src/lp/simplex/sparse.rs:21``), which keeps entries with
+    ``v != 0.0`` in ascending row order within each column. ``eliminate_zeros()`` and
+    ``sort_indices()`` reproduce exactly that structure -- an already-sparse ``A_eq``
+    may carry *stored* explicit zeros that ``from_dense`` would have dropped, and
+    scipy does not sort on construction -- so the driver receives the identical CSC
+    it would have built itself, and ``node_count``/``objective`` are unchanged.
+    """
+    import scipy.sparse as _sp
+
+    A = A_eq if _sp.issparse(A_eq) else _sp.csc_matrix(np.asarray(A_eq, dtype=np.float64))
+    A = A.tocsc()
+    A.eliminate_zeros()
+    A.sort_indices()
+    m, n = A.shape
+    return (
+        int(m),
+        int(n),
+        np.ascontiguousarray(A.indptr, dtype=np.int64),
+        np.ascontiguousarray(A.indices, dtype=np.int64),
+        np.ascontiguousarray(A.data, dtype=np.float64),
+    )
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -22142,7 +22275,7 @@ def _solve_milp_simplex(
     from discopt.modeling.core import ObjectiveSense
 
     try:
-        from discopt._rust import solve_milp_py
+        from discopt._rust import solve_milp_csc_py
     except ImportError:
         return None
 
@@ -22194,8 +22327,15 @@ def _solve_milp_simplex(
         return None
 
     lp_data = extract_lp_data(model)
-    A = np.ascontiguousarray(_dense_A(lp_data.A_eq))
-    if A.shape[0] == 0:
+    # The Rust driver is fully sparse: ``solve_milp_py`` immediately rebuilds a CSC
+    # via ``SparseCols::from_dense`` and discards the dense copy, so densifying here
+    # buys nothing and costs an (m, n) float64 that is then copied by
+    # ``ascontiguousarray`` and again across the PyO3 boundary. ``solve_milp_csc_py``
+    # is the same driver with the same options and return tuple, entered without the
+    # densify. See ``_csc_for_rust_milp`` for the measurement and the bit-for-bit
+    # structural equivalence that keeps this bound-neutral.
+    _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(lp_data.A_eq)
+    if _A_m == 0:
         return None  # no constraints — let the default path handle it
     n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
@@ -22244,9 +22384,13 @@ def _solve_milp_simplex(
     # budget is raised HERE and not by changing them.
     _cut_opts = _milp_root_cut_budget(_milp_budget) or {}
 
-    status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
+    status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
-        A,
+        _A_m,
+        _A_n,
+        _A_ptr,
+        _A_idx,
+        _A_val,
         np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
         np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
         np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
@@ -22264,10 +22408,11 @@ def _solve_milp_simplex(
     # Feasibility gate (shared by the return path below and the #698 re-entry
     # adoption test). The row/bound/integrality decomposition is independent of
     # the point, so build it once and close over it.
-    _A_eq_dense = _dense_A(lp_data.A_eq)
-    n_slack = int(_A_eq_dense.shape[1]) - n_orig
+    # Sparse straight through (the whole point); a dense ``A_eq`` still goes via
+    # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
+    _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_eq_dense, np.asarray(lp_data.b_eq), n_orig, n_slack
+        _A_gate, np.asarray(lp_data.b_eq), n_orig, _A_n - n_orig
     )
     _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
@@ -22348,9 +22493,13 @@ def _solve_milp_simplex(
                 _bound2,
                 _nodes2,
                 _iters2,
-            ) = solve_milp_py(
+            ) = solve_milp_csc_py(
                 np.ascontiguousarray(lp_data.c, dtype=np.float64),
-                A,
+                _A_m,
+                _A_n,
+                _A_ptr,
+                _A_idx,
+                _A_val,
                 np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
                 np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
                 np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
@@ -22439,9 +22588,13 @@ def _solve_milp_simplex(
         root_time_val = None
         try:
             _t_root = time.perf_counter()
-            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_py(
+            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
                 np.ascontiguousarray(lp_data.c, dtype=np.float64),
-                A,
+                _A_m,
+                _A_n,
+                _A_ptr,
+                _A_idx,
+                _A_val,
                 np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
                 np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
                 np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
