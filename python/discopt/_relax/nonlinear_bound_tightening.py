@@ -707,30 +707,49 @@ def _tighten_affine_upper_bound(
 
 
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
-    if isinstance(expr, SumOverExpression):
-        for term in expr.terms:
-            _flatten_sum(term, scale, out)
-        return
+    """Flatten an additive expression into ``(scale, leaf)`` terms.
 
-    if isinstance(expr, BinaryOp) and expr.op == "+":
-        _flatten_sum(expr.left, scale, out)
-        _flatten_sum(expr.right, scale, out)
-        return
-    if isinstance(expr, BinaryOp) and expr.op == "-":
-        _flatten_sum(expr.left, scale, out)
-        _flatten_sum(expr.right, -scale, out)
-        return
-    # Distribute negation over its operand: neg(a + b) == (-a) + (-b) is an exact
-    # identity, so pushing the sign inward lets the additive walk see the full
-    # structure underneath a `neg` (e.g. a `neg(sum-of-squares)` term whose
-    # squares would otherwise be hidden inside one opaque leaf, invisible to the
-    # downstream quadratic/interval bounding rules). This mirrors the negation
-    # handling already in `_flatten_sum_terms` (convexity/patterns.py) and is a
-    # sound normalization — it never removes a feasible point (#777).
-    if isinstance(expr, UnaryOp) and expr.op == "neg":
-        _flatten_sum(expr.operand, -scale, out)
-        return
-    out.append((scale, expr))
+    The walk is iterative over an explicit ``(expr, scale)`` stack rather than
+    recursive: a long linear row parses to a left-deep ``((a+b)+c)+d…`` chain
+    whose depth equals the term count, so a recursive walk exhausted the Python
+    stack on models with a few thousand terms (``t1000``) and killed the whole
+    tightening pass with a ``RecursionError`` (#1198). Depth is now bounded only
+    by the heap.
+
+    Children are pushed in reverse so they pop left-to-right, which makes the
+    emitted term order identical to the recursive walk's; the scale carried on a
+    stack entry is the same value the recursion passed down (sign flips are
+    exact), so the term list is bit-for-bit unchanged.
+    """
+    stack: list[tuple[object, float]] = [(expr, scale)]
+    while stack:
+        node, node_scale = stack.pop()
+
+        if isinstance(node, SumOverExpression):
+            for term in reversed(node.terms):
+                stack.append((term, node_scale))
+            continue
+
+        if isinstance(node, BinaryOp) and node.op == "+":
+            stack.append((node.right, node_scale))
+            stack.append((node.left, node_scale))
+            continue
+        if isinstance(node, BinaryOp) and node.op == "-":
+            stack.append((node.right, -node_scale))
+            stack.append((node.left, node_scale))
+            continue
+        # Distribute negation over its operand: neg(a + b) == (-a) + (-b) is an
+        # exact identity, so pushing the sign inward lets the additive walk see
+        # the full structure underneath a `neg` (e.g. a `neg(sum-of-squares)`
+        # term whose squares would otherwise be hidden inside one opaque leaf,
+        # invisible to the downstream quadratic/interval bounding rules). This
+        # mirrors the negation handling already in `_flatten_sum_terms`
+        # (convexity/patterns.py) and is a sound normalization — it never removes
+        # a feasible point (#777).
+        if isinstance(node, UnaryOp) and node.op == "neg":
+            stack.append((node.operand, -node_scale))
+            continue
+        out.append((node_scale, node))
 
 
 def _min_univariate_quadratic(a: float, b: float, lb: float, ub: float) -> float:
