@@ -518,6 +518,8 @@ def _check_constraint_feasibility(
     x: np.ndarray,
     tol: float = 1e-6,
     rtol: float = 1e-9,
+    cl: Optional[np.ndarray] = None,
+    cu: Optional[np.ndarray] = None,
 ) -> bool:
     """Check that ``x`` satisfies the model's constraints to within tolerance.
 
@@ -539,24 +541,99 @@ def _check_constraint_feasibility(
     real consequence is still rejected. The absolute test is tried first and the
     Jacobian (the only added cost) is evaluated only for rows that fail it, so
     well-scaled feasible points keep the original cheap path unchanged.
+
+    ``cl``/``cu`` override the evaluator's own inferred row bounds, for a caller
+    that already holds the bounds its rows were built with (see
+    :func:`row_violations`); :func:`scaled_violation_ratio` reports the same test
+    as a magnitude, for a caller that must RANK two points rather than judge one.
     """
     if evaluator.n_constraints == 0:
         return True
-    g = np.asarray(evaluator.evaluate_constraints(x))
-    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
-
-    cl, cu = (np.asarray(b, dtype=np.float64) for b in _infer_constraint_bounds(evaluator))
-    viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
-    if bool(np.all(viol <= tol)):
+    viol = row_violations(evaluator, x, cl, cu)
+    if viol.size == 0 or bool(np.all(viol <= tol)):
         return True
     # Some row exceeds the absolute tolerance: re-test those rows against a
     # term-magnitude-scaled tolerance before declaring infeasibility.
     try:
-        jac = np.abs(np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64))
-        scale = jac @ np.abs(np.asarray(x, dtype=np.float64))
+        scale = row_term_scale(evaluator, x)
     except Exception:
         return False
-    return bool(np.all(viol <= tol + rtol * scale))
+    return bool(np.all(viol <= combined_tolerance(scale, tol, rtol)))
+
+
+def row_violations(
+    evaluator: NLPEvaluator,
+    x: np.ndarray,
+    cl: Optional[np.ndarray] = None,
+    cu: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Per-row constraint violation of ``x`` (``0`` on every satisfied row).
+
+    ``cl``/``cu`` default to the evaluator's own inferred row bounds; pass them
+    explicitly when the caller already holds the bounds the rows were built with.
+    An evaluator carrying MORE rows than the bounds describe (a cut-augmented one)
+    is truncated to the described rows: cuts are valid for the original feasible
+    set, so they do not define feasibility of a point.
+    """
+    g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+    if cl is None or cu is None:
+        from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+        cl, cu = _infer_constraint_bounds(evaluator)
+    cl = np.asarray(cl, dtype=np.float64)
+    cu = np.asarray(cu, dtype=np.float64)
+    n = min(g.size, cl.size, cu.size)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    g, cl, cu = g[:n], cl[:n], cu[:n]
+    return np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
+
+
+def row_term_scale(evaluator: NLPEvaluator, x: np.ndarray) -> np.ndarray:
+    """Per-row absolute linearized magnitude ``sum_j |J_ij| * |x_j|``.
+
+    The size of the row's additive terms, taken from the Jacobian and NOT from the
+    (possibly +/-1e20 sentinel) bound values, so an unbounded row cannot inflate a
+    tolerance built on it.
+    """
+    jac = np.abs(np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64))
+    return jac @ np.abs(np.asarray(x, dtype=np.float64))
+
+
+def combined_tolerance(scale: np.ndarray, tol: float = 1e-6, rtol: float = 1e-9) -> np.ndarray:
+    """The per-row threshold ``tol + rtol*scale`` of the combined feasibility test.
+
+    One definition, used by every site that decides or reports against that test,
+    so a threshold and the number compared to it can never drift apart.
+    """
+    return tol + rtol * np.asarray(scale, dtype=np.float64)
+
+
+def scaled_violation_ratio(
+    evaluator: NLPEvaluator,
+    x: np.ndarray,
+    cl: Optional[np.ndarray] = None,
+    cu: Optional[np.ndarray] = None,
+    tol: float = 1e-6,
+    rtol: float = 1e-9,
+) -> float:
+    """How far outside the rows ``x`` sits, as a MULTIPLE of the combined tolerance.
+
+    ``max_i viol_i / (tol + rtol*scale_i)``: the same quantity
+    :func:`_check_constraint_feasibility` decides with, reported as a number rather
+    than a bool. ``<= 1.0`` holds exactly when that function accepts, so two points
+    can be RANKED by feasibility on the arbiter's own scale -- which is what a
+    caller choosing between an incumbent and a candidate replacement needs, and
+    what a bool cannot express. Raises rather than degrading to a verdict if the
+    Jacobian cannot be evaluated (CLAUDE.md §7).
+    """
+    if evaluator.n_constraints == 0:
+        return 0.0
+    viol = row_violations(evaluator, x, cl, cu)
+    if viol.size == 0 or not bool(np.any(viol > 0.0)):
+        return 0.0
+    scale = row_term_scale(evaluator, x)
+    return float(np.max(viol / combined_tolerance(scale, tol, rtol)))
 
 
 # --- The false-primal screen (#772 / #815 / #1061) ---------------------------
