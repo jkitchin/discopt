@@ -188,3 +188,101 @@ def test_compute_alphabb_bound_is_sound_lower_bound():
     # Unbounded box -> abstain with -inf, never a fabricated bound.
     bound_inf = _compute_alphabb_bound(ev, m, expr, np.array([-np.inf]), np.array([np.inf]))
     assert bound_inf == -np.inf
+
+
+def _cut_augmented_case():
+    """A constrained model plus two cuts, and the augmented evaluator over them."""
+    m = _constrained_model()
+    ev = NLPEvaluator(m)
+    pool = CutPool()
+    pool.add(LinearCut(coeffs=np.array([1.0, 1.0]), rhs=3.0, sense="<="))
+    pool.add(LinearCut(coeffs=np.array([1.0, -1.0]), rhs=-1.0, sense=">="))
+    return ev, _AugmentedEvaluator(ev, pool)
+
+
+def test_augmented_evaluator_reports_sparse_structure_including_cut_rows():
+    """The cut proxy must implement the sparse-structure protocol (#1193, P2).
+
+    ``_AugmentedEvaluator`` enumerates its members explicitly, and before this
+    it omitted ``has_sparse_structure``. ``_IpoptCallbacks`` probes for that
+    attribute with ``hasattr``, so every derivative callback on a cut-augmented
+    node fell to the dense arm: an ``m x n`` meshgrid for the Jacobian pattern
+    and a dense ``n x n`` Lagrangian Hessian, even though the wrapped tape
+    evaluator returns analytical sparse COO for both.
+
+    Forwarding the flag alone would be unsound rather than merely incomplete:
+    the augmented constraint vector carries ``n_cuts`` extra rows that the
+    wrapped evaluator's pattern does not describe. This test therefore asserts
+    the reconstructed dense Jacobian -- not just the flag.
+    """
+    checks = 0
+    ev, aug = _cut_augmented_case()
+
+    assert ev.has_sparse_structure(), "wrapped evaluator must be sparse for this test to bite"
+    checks += 1
+    assert aug.has_sparse_structure() is True
+    checks += 1
+
+    x = np.array([2.0, 0.5])
+    rows, cols = aug.jacobian_structure()
+    vals = aug.evaluate_jacobian_values(x)
+    assert len(rows) == len(cols) == len(vals)
+    checks += 1
+
+    # Every augmented row must be described, cut rows included.
+    assert set(np.unique(rows)) >= set(range(aug.n_constraints))
+    checks += 1
+
+    # The COO triple must reconstruct the dense Jacobian exactly.
+    dense = np.zeros((aug.n_constraints, aug.n_variables))
+    dense[rows, cols] = vals
+    np.testing.assert_allclose(dense, np.asarray(aug.evaluate_jacobian(x)))
+    checks += 1
+
+    # Hessian: cuts are linear, so structure and values are the wrapped ones,
+    # with the cut multipliers truncated away.
+    lam = np.array([0.3, 0.1, 0.2])
+    hrows, hcols = aug.hessian_structure()
+    hvals = aug.evaluate_hessian_values(x, 1.0, lam)
+    h_ref = np.asarray(ev.evaluate_lagrangian_hessian(x, 1.0, lam[:1]))
+    np.testing.assert_allclose(hvals, h_ref[hrows, hcols])
+    checks += 1
+
+    assert checks == 6, f"expected 6 executed assertions, ran {checks}"
+
+
+def test_ipopt_callbacks_take_the_sparse_arm_for_a_cut_augmented_node():
+    """The consumer must reconstruct the same Jacobian through the sparse arm.
+
+    This is the end the fix is for: ``_IpoptCallbacks`` is what POUNCE is
+    handed (``_solve_batch_pounce``), and its ``_use_sparse`` flag is decided
+    once from ``has_sparse_structure``.
+    """
+    from discopt.solvers.nlp_ipopt import _IpoptCallbacks
+
+    checks = 0
+    _, aug = _cut_augmented_case()
+    cb = _IpoptCallbacks(aug)
+    assert cb._use_sparse is True
+    checks += 1
+
+    x = np.array([2.0, 0.5])
+    rows, cols = cb.jacobianstructure()
+    vals = cb.jacobian(x)
+    dense = np.zeros((aug.n_constraints, aug.n_variables))
+    dense[rows, cols] = vals
+    np.testing.assert_allclose(dense, np.asarray(aug.evaluate_jacobian(x)))
+    checks += 1
+
+    # The sparse arm must not be a dense meshgrid in disguise.
+    assert len(rows) <= aug.n_constraints * aug.n_variables
+    checks += 1
+
+    lam = np.array([0.3, 0.1, 0.2])
+    hrows, hcols = cb.hessianstructure()
+    hvals = cb.hessian(x, lam, 1.0)
+    h_ref = np.asarray(aug.evaluate_lagrangian_hessian(x, 1.0, lam))
+    np.testing.assert_allclose(hvals, h_ref[hrows, hcols])
+    checks += 1
+
+    assert checks == 4, f"expected 4 executed assertions, ran {checks}"
