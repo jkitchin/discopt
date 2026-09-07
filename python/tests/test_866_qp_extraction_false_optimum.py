@@ -1,6 +1,7 @@
 """#866: the repr QP extractor dropped the quadratic term at large coefficient scale.
 
-`_extract_qp_data_from_repr` recovers the objective by unit probes::
+The extractor this file was written against recovered the objective by unit
+probes::
 
     d = f(0);   Q[j,j] = f(e_j) + f(-e_j) - 2d;   c_j = f(e_j) - d - 0.5*Q[j,j]
 
@@ -19,11 +20,17 @@ Measured before the fix::
 A **certified negative objective for a sum of squares** (CLAUDE.md §1), on the
 default path. At wider boxes the same corruption instead produced ``unbounded``.
 
-The fix does not try to make the cancelling probes accurate — it checks them. The
-recovered ``(Q, c, d)`` is re-evaluated against the model's own objective at
-box-scale points, and a disagreement raises so the dispatcher falls through to the
-autodiff extractor, which recovers ``Q=2, c=-2e10`` exactly here. A bad extraction
-now degrades to a slower-but-correct one instead of a wrong answer.
+The first fix did not try to make the cancelling probes accurate — it checked
+them, re-evaluating the recovered ``(Q, c, d)`` against the model's own objective
+at box-scale points so a disagreement raised and the dispatcher fell through to
+the autodiff extractor. That degraded a bad extraction to a slower-but-correct one
+instead of a wrong answer.
+
+The probe is now deleted, so the cancellation has no way to occur in the first
+place: ``extract_qp_data`` reads ``Q=2, c=-2e10`` off the expression arena, where
+they are stored as themselves and never differenced. These tests are unchanged and
+still go through the public dispatcher — they are the guard that no future rung
+reintroduces a differencing extractor ahead of the exact ones.
 
 Residual (documented, not a regression): the reported objective can still be off by
 about one ulp of the constant term (±16384 against 1e20) because the *expanded*
@@ -55,7 +62,7 @@ def _model(ub: float):
 
 def test_extraction_recovers_the_quadratic_term():
     """The dispatched extractor must not lose ``x**2``. Pre-fix this returned
-    ``Q=[0.]`` and a linear objective."""
+    ``Q=[0.]`` and a linear objective, and certified it."""
     data = extract_qp_data(_model(1e11)[0])
     q = float(np.asarray(data.Q).ravel()[0])
     c = float(np.asarray(data.c).ravel()[0])

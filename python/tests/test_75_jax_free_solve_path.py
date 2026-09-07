@@ -335,12 +335,15 @@ def test_jax_arm_of_the_same_check_does_import_jax():
 
 # --------------------------------------------------------------------------
 # QP standard-form extraction (#75): ``extract_qp_data`` falls through to the
-# autodiff extractor whenever ``_extract_qp_data_from_repr``'s numeric probe
-# cannot reproduce the objective. That fallback imported ``jax`` unconditionally,
-# so an ordinary MIQP with no nonlinear constraint anywhere pulled in 210 jax
-# modules on an all-defaults solve (found on ``chimera_mis-01`` via
-# ``qubo_local_search`` -> ``extract_qp_data``). These pin the JAX-free route and
-# its numeric agreement with the JAX one.
+# autodiff extractor when the rungs above it decline. That fallback imported
+# ``jax`` unconditionally, so an ordinary MIQP with no nonlinear constraint
+# anywhere pulled in 210 jax modules on an all-defaults solve (found on
+# ``chimera_mis-01`` via ``qubo_local_search`` -> ``extract_qp_data``, where the
+# numeric probe that used to head the ladder could not reproduce the objective).
+# The probe is deleted and the symbolic walk answers that class outright, so the
+# fallback is reached far less often -- which makes pinning it MORE important,
+# not less: a rung that rarely runs is a rung whose JAX import nobody notices.
+# These pin the JAX-free route and its numeric agreement with the JAX one.
 # --------------------------------------------------------------------------
 
 # f(x, y) = 2x^2 + 3y^2 + xy - 4x + 1  ->  Q = [[4, 1], [1, 6]], c = (-4, 0), d = 1
@@ -359,19 +362,20 @@ import numpy as np
 from discopt import Model
 import discopt._relax.problem_classifier as pc
 
-# extract_qp_data is a ladder: repr(builder) -> algebraic -> repr(probe) ->
-# autodiff. Only the last rung is under test, so BOTH earlier rungs must refuse
-# -- the first draft patched only the repr extractor, the algebraic one answered,
-# and the fallback never ran. The per-rung counters below are what caught that
-# (CLAUDE.md §6: prove the probe fired).
+# extract_qp_data is a ladder: symbolic -> algebraic -> autodiff. Only the last
+# rung is under test, so BOTH earlier rungs must refuse -- the first draft
+# patched only one, the other answered, and the fallback never ran. The per-rung
+# counters below are what caught that (CLAUDE.md §6: prove the probe fired).
 #
-# On the real instance this is not synthetic: repr(probe) refuses on its own when
-# its numeric probe cannot reproduce the objective.
-_reached = {"repr": 0, "alg": 0}
+# Forcing both is synthetic here, which it has to be: the whole point of the
+# symbolic walk is that it does not decline on this class. It declines for real
+# on constructs it cannot represent -- see test_symbolic_quadratic_form.py's
+# decline cases -- and that is when this rung runs in production.
+_reached = {"sym": 0, "alg": 0}
 
 
-def _refuse_repr(model):
-    _reached["repr"] += 1
+def _refuse_sym(model):
+    _reached["sym"] += 1
     raise pc._NotQuadraticError("test: forcing the autodiff fallback")
 
 
@@ -380,7 +384,7 @@ def _refuse_alg(model):
     raise RuntimeError("test: forcing the autodiff fallback")
 
 
-pc._extract_qp_data_from_repr = _refuse_repr
+pc._extract_qp_data_symbolic = _refuse_sym
 pc.extract_qp_data_algebraic = _refuse_alg
 """
     + _QP_MODEL
@@ -388,7 +392,7 @@ pc.extract_qp_data_algebraic = _refuse_alg
 qp = pc.extract_qp_data(m)
 Q = pc.dense_Q(qp.Q)
 c = np.asarray(qp.c, dtype=float)
-print("REFUSALS_REPR:" + str(_reached["repr"]))
+print("REFUSALS_SYM:" + str(_reached["sym"]))
 print("REFUSALS_ALG:" + str(_reached["alg"]))
 print("Q00:" + repr(float(Q[0, 0])))
 print("Q01:" + repr(float(Q[0, 1])))
@@ -462,7 +466,7 @@ def test_qp_extraction_fallback_stays_jax_free():
     # Vacuity control: the forced refusal must actually have fired, or the
     # assertions below say nothing about the fallback.
     assert res["REFUSALS_ALG"] == "1", f"the algebraic extractor was not reached: {res}"
-    assert res["REFUSALS_REPR"] != "0", f"the repr extractor was not reached: {res}"
+    assert res["REFUSALS_SYM"] != "0", f"the symbolic extractor was not reached: {res}"
     assert res["JAXMODS"] == "0", (
         f"QP autodiff fallback imported {res['JAXMODS']} jax modules "
         f"({res.get('LEAKED', '?')}) -- #75 regression"
