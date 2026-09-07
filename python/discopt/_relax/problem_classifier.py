@@ -9,6 +9,8 @@ to classify problems, then extracts standard-form data using the JAX DAG compile
 from __future__ import annotations
 
 import logging
+import os
+import time
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -128,6 +130,31 @@ _QP_DENSE_Q_MAX_BYTES = 256 * 1024 * 1024
 # is 91.5 GB, an equal-sized wall to the 91 GB dense Q above. Above this budget the
 # extractors emit scipy CSR and consumers densify through ``dense_A()``.
 _DENSE_A_MAX_BYTES = 256 * 1024 * 1024
+
+# Wall-clock budget for the pairwise probe sweep in ``_extract_qp_data_from_repr``
+# and ``_extract_quadratic_coefficients_from_values``, in seconds. 0 disables the
+# gate and restores the pre-#1208 behaviour exactly.
+#
+# Those extractors recover the objective Hessian by finite differences: one full
+# model evaluation per SUPPORT PAIR, i.e. O(|support|^2) evaluations. #863 already
+# restricted the sweep to the objective's support, which is decisive for a wide
+# model with a narrow objective (watercontamination0202: 101 of 106,711 variables).
+# It buys nothing for a QUBO, where the support IS every variable -- and that is the
+# whole BQP/MBQP class.
+#
+# Measured on ``chimera_mis-01`` (n = 2,032, |support| = 1,818): 1,651,653 probes at
+# 166.5 us = 275.0 s predicted, 275.3 s measured end-to-end -- on a solve whose
+# ``time_limit`` was 60 s. The search never started; the solve returned no incumbent
+# with zero nodes explored. Worse, the #866 verification below then rejects that
+# Q as unrecovered and the answer is discarded, so all 275 s were spent on work
+# that was thrown away.
+#
+# Sweeping the whole MIQP family of MINLPLib (148 instances readable here): 58 spend
+# over 1 s here, 42 over 10 s, and 29 over 60 s -- 71,330 s in total, up to 28,288 s
+# on a single instance (unitcommit_200_100_1_mod_8, n = 25,700). Six of those
+# overlap the tracked MIQP failure set, including all four instances that were
+# observed overrunning a 60 s limit by up to 4.8x.
+_QP_PROBE_MAX_SECONDS = float(os.environ.get("DISCOPT_QP_PROBE_BUDGET", "0") or 0.0)
 
 
 def _sp_issparse(x) -> bool:
@@ -320,6 +347,16 @@ class _NotLinearError(Exception):
 
 class _NotQuadraticError(Exception):
     """Raised when an expression is not quadratic (at most degree 2)."""
+
+
+class _ProbeBudgetExceeded(Exception):
+    """Raised when the O(|support|^2) probe sweep would exceed its time budget.
+
+    Distinct from :class:`_NotQuadraticError` because it says nothing about the
+    model: the probe *could* have produced an answer, it would just have cost more
+    than the budget allows. The dispatcher treats the two differently -- a model
+    declined on cost is never allowed to end up with no extraction at all.
+    """
 
 
 def _extract_linear_coefficients(expr, model: Model, n: int):
@@ -1409,7 +1446,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     )
 
 
-def _extract_qp_data_from_repr(model: Model) -> QPData:
+def _extract_qp_data_from_repr(model: Model, probe_budget_s: float | None = None) -> QPData:
     """Extract QP data by evaluating the Rust ModelRepr numerically.
 
     For the quadratic objective 0.5 x'Qx + c'x + d:
@@ -1429,7 +1466,9 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     x_zero = np.zeros(n_orig, dtype=np.float64)
     d = repr_.evaluate_objective(x_zero)
 
-    # Evaluate at all unit vectors
+    # Evaluate at all unit vectors. Timed, because the per-probe cost measured here
+    # is what prices the O(|support|^2) sweep below -- see the budget check.
+    _probe_t0 = time.perf_counter()
     f_ej = np.zeros(n_orig, dtype=np.float64)
     f_neg_ej = np.zeros(n_orig, dtype=np.float64)
     for j in range(n_orig):
@@ -1438,6 +1477,7 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
         f_ej[j] = repr_.evaluate_objective(ej)
         ej[j] = -1.0
         f_neg_ej[j] = repr_.evaluate_objective(ej)
+    _probe_per_call = (time.perf_counter() - _probe_t0) / max(1, 2 * n_orig)
 
     # Q diagonal: Q[j,j] = f(e_j) + f(-e_j) - 2*d  (kept 1-D; see the note below on
     # why the dense (n, n) is not materialised until the very end)
@@ -1454,6 +1494,25 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     # the unrestricted sweep issues 5.69e9 probes to discover ~1e4 possibly-nonzero
     # entries, and a dense (n, n) Q there is 91 GB.
     support = [j for j in range(n_orig) if f_ej[j] != d or f_neg_ej[j] != d or diag[j] != 0.0]
+
+    # Budget gate (#1208). |support| is now known exactly, and the diagonal sweep
+    # above just measured what one probe costs on THIS model, so the pair sweep can
+    # be priced before it is paid for -- a prediction validated at ratio 1.00
+    # (275.0 s predicted vs 275.3 s measured on chimera_mis-01). Refuse loudly
+    # rather than silently spending a multiple of the caller's whole time limit;
+    # ``extract_qp_data`` routes a declined model to the tape extractor, which gets
+    # the same Hessian from one AD evaluation instead of |support|^2 probes.
+    _budget = _QP_PROBE_MAX_SECONDS if probe_budget_s is None else probe_budget_s
+    _pairs = len(support) * (len(support) - 1) // 2
+    _predicted = _pairs * _probe_per_call
+    if _budget > 0.0 and _predicted > _budget:
+        raise _ProbeBudgetExceeded(
+            f"pairwise probe sweep would cost ~{_predicted:.1f}s "
+            f"({_pairs:,} probes over a support of {len(support)} of {n_orig} "
+            f"variables at {_probe_per_call * 1e6:.1f}us each), over the "
+            f"{_budget:.1f}s budget (DISCOPT_QP_PROBE_BUDGET)"
+        )
+
     off_i: list[int] = []
     off_j: list[int] = []
     off_v: list[float] = []
@@ -2100,8 +2159,21 @@ def extract_qp_data(model: Model) -> QPData:
     # ``classify_problem``), so ``from_nl`` / repr-only models — where the
     # algebraic DAG walk can't run — skip the per-primitive eager-JAX autodiff
     # path (orders of magnitude faster on small instances; see #330).
+    #
+    # "On small instances" is load-bearing and was not enforced until #1208. The
+    # probe is O(|support|^2) model evaluations against the tape's O(1), so the
+    # ordering inverts as the objective's support grows: measured on ``du-opt``
+    # (n = 20) the probe wins 0.02s to 0.16s, and on ``chimera_mis-01``
+    # (n = 2,032, |support| = 1,818) it loses 275.3s to a fraction of a second.
+    # The two agree to 6.65e-16 relative where both succeed. ``_ProbeBudgetExceeded``
+    # is the probe declining on that basis; it is handled separately below because
+    # it is a statement about cost, not about the model.
+    _declined: _ProbeBudgetExceeded | None = None
     try:
         return _extract_qp_data_from_repr(model)
+    except _ProbeBudgetExceeded as exc:
+        _declined = exc
+        logger.info("QP repr probe declined on cost, using the tape extractor: %s", exc)
     except Exception as exc:  # noqa: BLE001 - falls through to the autodiff extractor
         logger.debug(
             "QP repr extraction (probe) failed, falling back to autodiff: %s: %s",
@@ -2109,7 +2181,24 @@ def extract_qp_data(model: Model) -> QPData:
             exc,
         )
 
-    return _extract_qp_data_autodiff(model)
+    if _declined is None:
+        return _extract_qp_data_autodiff(model)
+
+    # The probe was declined on cost, not on correctness -- it would have produced
+    # an answer eventually. So a declined model must never end up with NO extraction:
+    # if the tape and JAX arms both fail to represent it, pay the cost we skipped
+    # rather than propagate a failure the unbudgeted code would not have had.
+    try:
+        return _extract_qp_data_autodiff(model)
+    except Exception as exc:  # noqa: BLE001 - re-runs the probe it declined
+        logger.warning(
+            "QP autodiff extraction failed after the repr probe was declined on cost "
+            "(%s); re-running the probe without its budget: %s: %s",
+            _declined,
+            type(exc).__name__,
+            exc,
+        )
+        return _extract_qp_data_from_repr(model, probe_budget_s=0.0)
 
 
 def extract_qcp_data(model: Model) -> QCPData:
