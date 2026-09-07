@@ -1408,6 +1408,113 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None):
     return best_internal, best_point
 
 
+def _native_exit_polish_enabled() -> bool:
+    """Whether an uncertified native-kernel exit gets a primal-improvement pass.
+
+    Delegates to the single #1193 predicate (``DISCOPT_INTEGER_BOX_POLISH``,
+    **default ON**) so that this pass and the zero-continuous direct path in
+    :func:`~discopt._relax.primal_heuristics.integer_box_search` switch together;
+    ``=0`` restores pre-#1193 behaviour on both. Sound either way: the pass is a
+    pure incumbent finder on a run that has already given up its certificate, so it
+    can only change *which* feasible point is reported, never the dual bound, the
+    status, or ``gap_certified``.
+    """
+    from discopt._relax.primal_heuristics import integer_box_polish_enabled
+
+    return integer_box_polish_enabled()
+
+
+def _native_exit_primal_polish(model, x_flat, obj_val, bound_val, n_orig, outer_deadline):
+    """Improve an UNCERTIFIED native-kernel incumbent before reporting it (#1193).
+
+    Returns ``(x_new, obj_new)`` — a strictly better, independently re-verified point
+    — or ``None`` to keep the kernel's own incumbent unchanged.
+
+    Why this exists. #1153 put ``node_limit`` on the kernel's accepted-status list,
+    which was right (the alternative threw away a sound result and restarted the
+    Python engine with the budget already spent) but had an unmeasured consequence:
+    the kernel now *terminates* the solve on those exits, so the Python engine's
+    primal heuristic layer — ``integer_local_search``, ``integer_box_search``, the
+    LNS scheduler — never runs on a kernel-routed model at all. Measured on nvs19:
+    ``integer_box_search`` fired **0 times** on a default solve, while
+    ``_try_native_spatial_kernel`` fired once and returned a result every time. The
+    kernel docstring still claimed node-limited runs "retain the established Python
+    fallback"; that has not been true since #1153 and is corrected there.
+
+    What it does. On an uncertified exit that carries an incumbent, run one bounded
+    ``integer_box_search`` over the unit integer box around it. nvs19's stalled
+    ``(2,6,3,2,8,6,6,2)`` = -1098.2 is a strict 2-opt local optimum — an exhaustive
+    scan of its L-inf <= 2 box found 98,429 feasible points and exactly ONE improving
+    one, the global optimum ``(2,6,3,2,8,5,7,1)`` = -1098.4, three coordinates away —
+    so no unit-move descent reaches it and only a box enumeration does.
+
+    Soundness. Three independent gates, each at least as strict as the one the
+    reported incumbent already passed: (1) ``integer_box_search`` returns only points
+    its own acceptance arbiter certifies integer- and constraint-feasible; (2) the
+    candidate is re-verified against the ORIGINAL model by the same
+    ``_native_kernel_verify_point`` guard (#789) that vetted the kernel's incumbent,
+    which also supplies the true model-units objective; (3) it is adopted only on
+    strict improvement in the model's own sense. Nothing here touches ``bound``,
+    ``status`` or ``gap_certified`` — the exit was already uncertified and stays so.
+    """
+    if not _native_exit_polish_enabled():
+        return None
+    from discopt.modeling.core import ObjectiveSense as _ObjSensePP
+
+    is_max = model._objective is not None and model._objective.sense == _ObjSensePP.MAXIMIZE
+
+    try:
+        from discopt._relax.nlp_evaluator import cached_evaluator as _cached_ev
+        from discopt._relax.primal_heuristics import integer_box_search as _ibs
+
+        evaluator = _cached_ev(model)
+        x_full = np.asarray(x_flat, dtype=np.float64)
+        found = _ibs(model, x_full, radius=1, evaluator=evaluator, deadline=outer_deadline)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("native-exit primal polish raised: %s", exc)
+        return None
+    if found is None:
+        return None
+
+    x_new = np.asarray(found[0], dtype=np.float64)
+    if x_new.shape[0] < n_orig:
+        return None
+    ok, obj_new = _native_kernel_verify_point(model, x_new[:n_orig])
+    if not ok or obj_new is None:
+        # The box search's arbiter accepted a point the original-model verifier
+        # rejects. Keep the reported incumbent; never widen an acceptance to make a
+        # heuristic pay off (CLAUDE.md §1).
+        logger.debug("native-exit primal polish: candidate failed original-model verification")
+        return None
+
+    improved = (obj_new > obj_val + 1e-9) if is_max else (obj_new < obj_val - 1e-9)
+    if not improved:
+        return None
+
+    # A verified feasible point cannot beat a VALID global bound. If it does, the
+    # bound is wrong — a pre-existing soundness defect this pass has surfaced, not
+    # caused. Say so at ERROR and decline, leaving the run bit-identical to what it
+    # would have reported anyway (CLAUDE.md §1/§3: surface, never paper over).
+    if math.isfinite(bound_val):
+        crosses = (obj_new > bound_val + 1e-6) if is_max else (obj_new < bound_val - 1e-6)
+        if crosses:
+            logger.error(
+                "native-exit primal polish found a VERIFIED feasible point %.12g beyond "
+                "the reported dual bound %.12g — the bound is invalid; declining the "
+                "polish and reporting the original incumbent (#1193)",
+                obj_new,
+                bound_val,
+            )
+            return None
+
+    logger.info(
+        "native-exit primal polish (#1193): incumbent %.6g -> %.6g on an uncertified exit",
+        obj_val,
+        obj_new,
+    )
+    return x_new, float(obj_new)
+
+
 def _try_native_spatial_kernel(
     model,
     lb,
@@ -1432,10 +1539,13 @@ def _try_native_spatial_kernel(
     Soundness: the producer declines (``None``) any model it cannot reproduce
     bound-neutrally. A fully-certified native solve (``status == 'optimal'``) is
     returned as optimal; a wall-clock-limited native solve returns its rigorous
-    partial incumbent/bound with ``status == 'time_limit'``. Node-limited or declined
-    runs retain the established Python fallback. The kernel's incumbent satisfies the
-    model's linear rows (they are fixed rows in its LP) and every lifted term to
-    ``mccormick_tol``.
+    partial incumbent/bound with ``status == 'time_limit'``. Since #1153 a NODE-limited
+    solve is accepted on the same terms (see the note at the ``native_status`` gate
+    below); only declined or otherwise incomplete runs retain the established Python
+    fallback -- so an accepted uncertified exit is TERMINAL, which is why #1193's
+    primal polish runs here as the last chance to improve its incumbent. The kernel's
+    incumbent satisfies the model's linear rows (they are fixed rows in its LP) and
+    every lifted term to ``mccormick_tol``.
     The internal minimize-convention objective/bound are mapped to model units via the
     producer's ``sign*(value + offset)`` metadata.
 
@@ -1683,6 +1793,20 @@ def _try_native_spatial_kernel(
                 _fb_bound,
             )
             bound_val = _fb_bound
+
+    # #1193: an uncertified exit ends the solve here, so this is the LAST place the
+    # incumbent can still be improved — #1153 made the kernel terminal on
+    # ``node_limit``, which silently removed the Python primal-heuristic layer from
+    # every kernel-routed model. Purely primal: bound, status and certification below
+    # are untouched.
+    if native_status != "optimal" and x_flat is not None and obj_val is not None:
+        _t_phase = time.perf_counter()
+        _polished = _native_exit_primal_polish(
+            model, x_flat, obj_val, bound_val, n_orig, outer_deadline
+        )
+        _native_jax_s += time.perf_counter() - _t_phase
+        if _polished is not None:
+            x_flat, obj_val = _polished
 
     x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start

@@ -5768,3 +5768,169 @@ this harness was written without it. Fixed, and the sense now prints per row.
 pass, twice (§18 and #1008); Bland at a reachable threshold (§18); unconditional
 (unarmed) cost perturbation, on wall median 1.044x; and perturbing *every*
 nonbasic cost, which makes an LP with free columns reject its own warm start.
+
+## 29. #1193 nvs19's primal stall: the dual side was never the problem, and two instruments lied (2026-09-06)
+
+`nvs19` returns **-1098.2** against a **-1098.4** optimum and exits on
+`max_nodes`, not the clock. The issue text proposed reading that as a *dual*
+symptom — "100k nodes with a 34% remaining gap on an 8-variable integer nonlinear
+problem suggests the bound is not tightening, which points at the relaxation
+rather than the search order". **The measurement says otherwise, and the issue's
+own step (1) is what falsified it.** Raising the budget reaches -1098.4
+(radius-1 box search, `obj=-1098.4`, `wall=72.8 s`), so the point is reachable
+and the defect is on the **primal** side: the incumbent search never gets there
+within budget. Everything below follows from taking that measurement first.
+
+**Falsification 1 — the planned fix was a no-op.** The entry plan was a sub-MIP
+escape hatch on the stalled incumbent. Measured on nvs19: it never executes.
+`INTEGER_BOX_SEARCH_CALLS=0`, and the instrumented kernel route reports
+`_try_native_spatial_kernel = 1, returned_None = 0`. No amount of tuning a
+heuristic that is never called can move this instance. Building it would have
+produced a flag that measured nothing and read as a pass — the §6 failure mode,
+reached by skipping §4's entry experiment.
+
+**Falsification 2 — #1153 removed the Python primal layer without measuring it.**
+`_try_native_spatial_kernel` was extended to accept `node_limit` alongside
+`optimal` and `time_limit`. That made an **uncertified** kernel exit *terminal*,
+which silently deleted the entire Python primal-heuristic layer from every
+kernel-routed model. The `_try_native_spatial_kernel` docstring still claimed
+"Node-limited or declined runs retain the established Python fallback" — false
+since #1153, and corrected in this change. A budget-exhausted solve is exactly
+the case where a primal improver is worth the most, and it was the case that lost
+one.
+
+**Falsification 3 — `integer_box_search`'s caps are priced in the wrong
+currency.** Its `max_int_vars=3` / `max_combos=128` caps were sized against a
+per-cell **sub-NLP solve**. On a model with no continuous slots that solve is
+zero-dimensional and the true cost per cell is an evaluation:
+
+| per-cell work | wall |
+|---|---|
+| `subnlp(...)` | 18.922 ms |
+| `_finalize_candidate(...)` | 0.014 ms |
+
+**1385×.** Priced correctly, nvs19's radius-1 grid (3^8 = 6561 cells) costs
+**0.09 s** where the sub-NLP pricing implies **124.1 s** — so the caps declined
+outright a search that is nearly free. End to end the box search went **72.8 s →
+0.352 s (207×)**, which is what makes it affordable at the default budget.
+
+**The fix, and what it is NOT.** Both halves — the zero-continuous *direct path*
+(budgeted in `EVAL`, not `NLP_SOLVE`) and a post-kernel *exit polish* on an
+uncertified exit — sit behind the single flag `DISCOPT_INTEGER_BOX_POLISH`
+(default ON, `=0` restores pre-#1193 behaviour on both). The direct path is gated
+on the *presence* of a continuous slot, not its width: a presolve-fixed
+continuous variable conservatively keeps the sub-NLP path. Acceptance on nvs19 at
+the **default** budget: **-1098.4 ON vs -1098.2 OFF, with an identical bound
+(-1472.35) and an identical node count (100 000)** — the change is purely primal
+on this instance.
+
+**Falsification 4 — gating one half of a two-half fix makes the A/B meaningless.**
+The first cut gated only the exit polish. The re-priced box search therefore
+stayed live in the panel's OFF arm, so "OFF" was a hybrid that was neither `main`
+nor the fix, and the panel measured neither half honestly. One flag now governs
+both call sites; `test_the_flag_gates_the_direct_path_too` pins it.
+
+**Falsification 5 — a neutrality gate on a nondeterministic instance measures
+noise (extends #1187).** The first all-integer panel reported three hard
+cert-clean problems on `ball_mk2_30`: `bound -27.8829 -> -26.8877 MOVED`,
+`node_count 2029 -> 7376 MOVED`, and `ON lost the incumbent OFF had`. All three
+were noise. With the flag **pinned OFF for six runs**, that instance produced
+both outcomes on its own and never repeated a node count:
+
+| run | nodes | bound | obj | status |
+|---|---|---|---|---|
+| 1 | 7282 | -26.8877 | None | node_limit |
+| 2 | 7629 | -26.8877 | None | node_limit |
+| 3 | 7465 | -26.8877 | None | node_limit |
+| 4 | **2029** | **-27.8829** | **0.0** | **feasible** |
+| 5 | 7646 | -26.8877 | None | node_limit |
+| 6 | 7544 | -26.8877 | None | node_limit |
+
+`polish_calls = 0` in all six and in both original panel arms — the hook provably
+never ran on this instance, so the flag could not have caused what it was charged
+with. The correction is **not** to exempt the instance: the panel now runs a
+**third arm (OFF again, after ON)** on every instance and charges a
+neutrality-class finding to the flag only when the two OFF runs agree with each
+other, recording the measured OFF-vs-OFF spread otherwise. Soundness bars — no
+bound past its oracle, no incumbent beating it, no ON-only infeasible incumbent,
+no adoption on a certified exit — stay unconditional, since noise cannot excuse
+them. The general lesson for every bound-neutrality gate in this repo: **an
+empirical per-instance determinism control, not a blanket assumption that a
+repeated run repeats.**
+
+**Falsification 6 — "a certified solve must not notice a primal flag" is false,
+and the bar that encoded it was measuring the wrong property.** The panel's rule
+1b asserted bit-identity on any `optimal` exit. `gear` violated it — and was
+right to:
+
+| arm | obj | bound | status | nodes |
+|---|---|---|---|---|
+| off | 8.606434189258208e-07 | 0.0 | optimal | 31 |
+| on | **3.778766482334665e-08** | 0.0 | optimal | **3** |
+| off2 | 8.606434189258208e-07 | 0.0 | optimal | 31 |
+
+Deterministic (both OFF arms bit-identical), oracle 0.0, certificate intact in
+both, ON strictly closer to the optimum in 10× fewer nodes. A better in-tree
+incumbent prunes harder; that is what a primal heuristic *is*. Rule 1b encoded
+the superseded premise that the flag only ran after the tree finished.
+
+The replacement is stronger, not weaker, and rests on a **measured** fact rather
+than an assumption. The flag can influence a run through exactly one channel: an
+improving point out of `integer_box_search`, or an adopted polish. The panel now
+counts both directly, and asserts exact `bound`/`node_count`/incumbent neutrality
+only where **neither produced a point in either arm** — where the flag is
+*provably* inert, drift is a plumbing bug and is charged as one. In its place, on
+any arm reporting `optimal` the panel now requires the objective to sit **at its
+oracle within tolerance** (a false-certificate detector the old bit-identity rule
+did not contain) and forbids losing certification OFF → ON; both are
+unconditional, since neither noise nor a firing heuristic can excuse them. The
+general rule this yields: **gate on the mechanism you can count, not on an
+invariant you assume the mechanism preserves.**
+
+**Falsification 7 — "the flag is changing these runs through a channel my counter
+misses" was my own hypothesis, and it is false; the counter was measuring the
+wrong thing, and the two-sample determinism control was too weak.** Panel 3 (66
+in-repo instances) failed cert-clean on three findings: `tls2 bound 5.29999995874
+-> 5.2999998753 MOVED`, `tls2 node_count 171 -> 209 MOVED`, and `tspn12
+node_count 159 -> 191 MOVED`. In each the two OFF arms had agreed exactly, so the
+determinism pre-check licensed charging the drift to the flag, and I wrote that
+the flag "really is changing these runs through a channel my `box_hits` counter
+misses." A direct probe (`scratchpad/issue1193/reach.py`, three solves at flags
+0/1/0 with the channel counted) falsified that:
+
+| instance | continuous vars | `ibs_calls` | direct-eligible | nodes at flags 0 / 1 / 0 |
+|---|---|---|---|---|
+| `tls2`   | 4  | 0 | 0 | 171 / 253 / 145 |
+| `tspn12` | 24 | 1 | 0 | 191 / 191 / 191 |
+
+On `tls2` `integer_box_search` is never called at all, so the flag has no channel
+whatever — yet two runs at the *same* flag value differ by 26 nodes. On `tspn12`
+it is called once per solve, but with 24 continuous slots the zero-continuous
+direct path can never engage, so the call behaves identically in both arms; the
+three runs are bit-identical (bound 203.37071810676102, obj 262.64739579632794),
+and the standalone flag=0 run returns **191** nodes — the exact value panel 3 had
+attributed to the flag's ON arm, while both of its OFF arms drew 159. Neither
+finding is the flag. Both are the pre-existing run-to-run nondeterminism of
+falsification 5 (#1187), and on `tspn12` it is process-state-dependent rather than
+per-solve, which is precisely what a two-sample OFF/OFF control cannot see.
+
+Two instrument defects, both of the §6 family — a counter that counts something
+adjacent to what the gate claims to prove:
+
+1. **Inertness was defined on the effect, not the channel.** `box_hits` counts
+   `integer_box_search` *returning a point*; but the flag can only act through a
+   *direct-path-eligible* call. A call on a model with any continuous slot takes
+   the identical route in both arms, and a direct-path call that finds nothing
+   still spends #912 work budget. The panel now counts `direct` — calls where
+   `not np.any(~_get_integer_mask(model))` — and defines `inert` on that, so
+   "the flag was inert here" is a proof rather than an inference.
+2. **Two samples cannot establish determinism.** Any instance carrying a
+   neutrality-class finding is now re-measured with four *additional* OFF runs
+   (`escalate()`); if every OFF outcome still agrees, the drift stays a hard
+   problem. This is an escalation, not an exemption — it widens the control
+   sample before a finding may be excused, and a drift that survives the wider
+   sample fails the panel exactly as before.
+
+The lesson generalizes falsification 6's: *gate on the mechanism you can count* —
+and make sure the thing you count is the mechanism, not a downstream symptom of
+it. A counter one step off the channel reads as rigor while proving nothing.
