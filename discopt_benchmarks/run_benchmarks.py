@@ -304,7 +304,7 @@ def _known_optima_for_gate(args) -> dict[str, float]:
 def _load_minlplib_from_cache(
     args,
     suite_config: dict | None,
-) -> tuple[list, dict[str, float]]:
+) -> tuple[list, dict[str, float], Path]:
     """Load instances + known optima from the fetched MINLPLib cache.
 
     Mirrors _load_minlplib_instances but uses the cache directory and the
@@ -372,7 +372,7 @@ def _load_minlplib_from_cache(
         if len(instances) >= max_instances:
             break
 
-    return instances, known_optima
+    return instances, known_optima, nl_dir
 
 
 def _run_scaled(args, suite_config: dict, instances: list, known_optima: dict[str, float]) -> Path:
@@ -501,18 +501,23 @@ def _run_benchmark(args):
                 name=name, command=name, solver_type="internal",
             ))
 
+    # Load instances either from the MINLPLib cache or the vendored test data.
+    # ``data_dir`` must follow the instances: selecting names from the cache while
+    # the runner resolves .nl files against the vendored corpus silently shrinks the
+    # panel to whatever overlaps (see BenchmarkConfig.data_dir).
+    nl_dir: Path | None = None
+    if args.use_cache:
+        instances, known_optima, nl_dir = _load_minlplib_from_cache(args, suite_config)
+    else:
+        instances, known_optima = _load_minlplib_instances(suite_config)
+
     config = BenchmarkConfig(
         suite_name=args.suite,
         time_limit=time_limit,
         num_runs=1,
         solvers=solver_configs,
+        data_dir=nl_dir,
     )
-
-    # Load instances either from the MINLPLib cache or the vendored test data.
-    if args.use_cache:
-        instances, known_optima = _load_minlplib_from_cache(args, suite_config)
-    else:
-        instances, known_optima = _load_minlplib_instances(suite_config)
 
     # A suite that resolves to nothing must not report metrics. Every rate in
     # the gate table (incorrect_count, geomean ratios, root-gap coverage) is
@@ -536,6 +541,26 @@ def _run_benchmark(args):
     runner = BenchmarkRunner(config)
     runner.load_instances(instances)
     runner.load_known_optima(known_optima)
+
+    # An instance whose .nl cannot be resolved does not fail loudly: the internal
+    # path records status=ERROR with wall_time=inf and the external path hands the
+    # solver a bare name it reports "unknown" for. Both then land in the summary as
+    # "not solved", so a panel that never opened a single model still prints a
+    # plausible-looking "12/150" for every solver. Same class as the empty-panel
+    # refusal above -- refuse before running, and name what is missing.
+    unresolved = [i.name for i in instances if runner._find_nl_file(i.name) is None]
+    if unresolved:
+        shown = ", ".join(unresolved[:10]) + (" ..." if len(unresolved) > 10 else "")
+        print(
+            f"ERROR: {len(unresolved)}/{len(instances)} instances in suite "
+            f"{args.suite!r} have no .nl file reachable from data_dir="
+            f"{config.data_dir or '<vendored corpus>'}: {shown}\n"
+            "Not running: unreachable instances are scored as unsolved, which reads "
+            "as a solver result rather than a missing corpus. Pass --use-cache (and "
+            "--fetch once) to run against the MINLPLib cache.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Run
     runner.run_all()
