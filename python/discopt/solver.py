@@ -2992,6 +2992,60 @@ def _nonlinear_point_excess(
     return float(excess), where, n_compared
 
 
+def _polish_preserves_feasibility(evaluator, x_new, x_old, cl_list, cu_list) -> bool:
+    """May the terminal polish's point replace the incumbent, on FEASIBILITY grounds?
+
+    The terminal KKT polish (see its call site) re-solves the incumbent's
+    continuous completion and adopts the result when the objective is unchanged
+    ("purification") or improved. Neither of those tests looks at the rows, and an
+    objective that did not move says nothing about whether the point still
+    satisfies them: the NLP backend reports its OWN convergence status, not the
+    model's feasibility. Measured on nvs05 (#1199): the tree incumbent -- max row
+    violation 9.0e-6, i.e. 3.5e-7 of the acceptance tolerance, objective
+    5.470934109, the ``minlplib.solu`` oracle to 9 digits -- was replaced by a
+    polish output violating one row by 132.4, whose objective had moved 3.3e-8,
+    far inside the 1e-4 relative window the purification arm treats as unchanged.
+    The solve then reported ``optimal`` with ``gap_certified``, at an objective
+    BELOW the true optimum, on a point the repo's own acceptance arbiter rejects.
+
+    The bar here is NEVER-DEGRADE, not simply "feasible": the polished point is
+    admissible when it clears
+    :func:`_relax.primal_heuristics._check_constraint_feasibility` (the repo's
+    single acceptance arbiter, scale-aware in both legs), or -- when the incumbent
+    it would replace does not clear it either -- when it sits no further outside
+    the rows than that incumbent does. A purification is therefore never blocked
+    by a bar its own input could not meet, and the polish can only ever move the
+    reported point toward the feasible set, never away from it.
+
+    Ranking two points needs the arbiter's MAGNITUDE, not its verdict, hence
+    ``scaled_violation_ratio``; both points are measured against the same rows and
+    the same evaluator, so the comparison is like-for-like.
+    """
+    # ``len(...) == 0``, never ``not cl_list``: on a one-row numpy bound array the
+    # latter evaluates the ELEMENT's truthiness, so a single row at bound 0.0 --
+    # an ordinary equality -- reads as "no rows" and silently disables this gate.
+    if cl_list is None or len(cl_list) == 0:
+        return True
+    from discopt._relax.primal_heuristics import _check_constraint_feasibility as _accept_cc
+    from discopt._relax.primal_heuristics import scaled_violation_ratio
+
+    cl_arr = np.asarray(cl_list, dtype=np.float64)
+    cu_arr = np.asarray(cu_list, dtype=np.float64)
+    if _accept_cc(evaluator, x_new, cl=cl_arr, cu=cu_arr):
+        return True
+    ratio_new = scaled_violation_ratio(evaluator, x_new, cl_arr, cu_arr)
+    ratio_old = scaled_violation_ratio(evaluator, x_old, cl_arr, cu_arr)
+    if ratio_new <= ratio_old:
+        return True
+    logger.debug(
+        "#1199: rejecting the terminal polish -- it moves the incumbent further "
+        "outside the rows (%.4g -> %.4g times the acceptance tolerance).",
+        ratio_old,
+        ratio_new,
+    )
+    return False
+
+
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     """Return True if all discrete variables are integral within tolerance."""
     for off, sz in zip(int_offsets, int_sizes):
@@ -15420,16 +15474,28 @@ def solve_model(
                 # fractional power of a ratio jumped 176.17 -> 0.0). There we keep
                 # only the always-safe purification (unchanged objective).
                 _improved = _model_is_convex and _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
+                # #1199: feasibility gates BOTH arms. The comment above calls the
+                # unchanged-objective arm "always safe" purification; it is not --
+                # on nvs05 that arm adopted a point 132.4 outside a row and
+                # certified an objective below the true optimum. See
+                # ``_polish_preserves_feasibility`` for the measurement and for why
+                # the bar is never-degrade rather than plain feasibility.
                 _accept = (
-                    _unchanged
-                    or (
-                        _improved
-                        and (
-                            not cl_list
-                            or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                    _polish_preserves_feasibility(evaluator, _refined, sol_flat, cl_list, cu_list)
+                    and (
+                        _unchanged
+                        or (
+                            _improved
+                            and (
+                                not cl_list
+                                or _check_constraint_feasibility(
+                                    evaluator, _refined, cl_list, cu_list
+                                )
+                            )
                         )
                     )
-                ) and _pobj >= _min_accept_obj
+                    and _pobj >= _min_accept_obj
+                )
                 if _accept:
                     sol_flat = _refined
                     x_dict = _unpack_solution(model, sol_flat)
@@ -17775,25 +17841,50 @@ def _solve_nlp_bb(
                 # cannot admit a point the gate below refuses. When the two
                 # points agree to within the window, the original branch still
                 # applies and nothing moves.
+                #
+                # #1199: the window is row-blind in the OTHER direction too. When
+                # the two objectives agree it adopted the refined point without
+                # ever asking whether that point still satisfies the rows -- the
+                # same blind spot the spatial path's terminal polish had, where a
+                # 3.3e-8 objective move hid a point 132 outside a row and the solve
+                # certified an objective below the true optimum (nvs05). Here the
+                # exit gate below would catch it, but only by REFUSING the result:
+                # adopting a refine that walked off the rows turns a good solve
+                # into a withheld incumbent. So both arms are now judged on the
+                # same excess, against the same declared rows and box the exit gate
+                # uses, and the rule is never-degrade: a refined point is adopted
+                # when it would clear that gate, or when it is no further outside
+                # than the incumbent it replaces.
                 _ref_obj = float(nlp_refined.objective)
-                _adopt = abs(_ref_obj - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
-                if not _adopt:
-                    _inc_exc, _, _ = _nonlinear_point_excess(
-                        evaluator,
-                        sol_flat,
-                        cl_list,
-                        cu_list,
-                        n_rows=_declared_rows,
-                        box=_declared_box,
-                    )
-                    _ref_exc, _, _ = _nonlinear_point_excess(
-                        evaluator,
-                        refined,
-                        cl_list,
-                        cu_list,
-                        n_rows=_declared_rows,
-                        box=_declared_box,
-                    )
+                _inc_exc, _, _ = _nonlinear_point_excess(
+                    evaluator,
+                    sol_flat,
+                    cl_list,
+                    cu_list,
+                    n_rows=_declared_rows,
+                    box=_declared_box,
+                )
+                _ref_exc, _, _ = _nonlinear_point_excess(
+                    evaluator,
+                    refined,
+                    cl_list,
+                    cu_list,
+                    n_rows=_declared_rows,
+                    box=_declared_box,
+                )
+                if abs(_ref_obj - obj_val) <= 1e-4 * (1.0 + abs(obj_val)):
+                    _adopt = _ref_exc <= _NLPBB_EXIT_ABS_TOL or _ref_exc <= _inc_exc
+                    if not _adopt:
+                        logger.debug(
+                            "NLP-BB: rejecting the refined incumbent (#1199) — its "
+                            "objective matches (%.6g vs %.6g) but it sits further "
+                            "outside the declared rows (excess %.3e -> %.3e).",
+                            _ref_obj,
+                            obj_val,
+                            _inc_exc,
+                            _ref_exc,
+                        )
+                else:
                     _adopt = _ref_exc < _inc_exc and _ref_exc <= _NLPBB_EXIT_ABS_TOL
                     if _adopt:
                         logger.info(
