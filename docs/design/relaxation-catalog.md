@@ -143,7 +143,11 @@ carries explicit lifted product variables and now produces the **exact multiline
 
 **Bound tightening & cuts** (part of the global story, complementary to relaxations):
 `obbt.py` (optimality-based bound tightening via per-variable LPs),
-`nonlinear_bound_tightening.py` (pattern rules: `x**p` ranges, reciprocal bounds),
+`nonlinear_bound_tightening.py` (pattern rules: `x**p` ranges, reciprocal bounds, plus the
+convex-quadratic *ellipsoid* rule behind `DISCOPT_ELLIPSOID_BOUNDS`, default off: for a row
+`x'Qx + c'x + d <= 0` with `Q` positive definite it returns the **exact** coordinate ranges
+`x*_i +- sqrt(r^2 (Q^-1)_ii)`, recovering the cross-term coupling interval FBBT discards when
+it evaluates `x_i x_j` as a product of independent intervals -- see issue #1193),
 `crates/discopt-core/src/presolve/fbbt.rs` (forward/backward interval FBBT),
 `cutting_planes.py` (RLT / OA / lift-and-project cuts), `cover_cuts.py` (knapsack cover
 cuts), `monotonicity.py` (per-expression monotonicity for DCP composition).
