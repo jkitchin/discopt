@@ -77,6 +77,35 @@ class TestSimplexRootDive:
         assert abs(r_s.objective - r_h.objective) < 1e-3
 
 
+# ``solve_milp_csc_py`` positional order, from the call site in
+# ``_solve_milp_simplex``:
+#
+#     0 c | 1 m | 2 n | 3 indptr | 4 indices | 5 data | 6 b_eq | 7 x_l | 8 x_u
+#     9 int_idx | 10 n_orig | 11 obj_const | 12 max_nodes | 13 gap_tolerance
+#
+# and keyword-only from there on.
+_INT_IDX_ARG = 9
+
+
+def _int_idx_of(args):
+    """The ``int_idx`` argument of a ``solve_milp_csc_py`` call.
+
+    Structurally checked rather than indexed blindly. These mocks used to read
+    ``args[5]``, which was ``int_idx`` under the *dense* ``solve_milp_py``
+    signature; when #1207 moved the matrix to a CSC triple, ``args[5]`` became
+    the CSC ``data`` array and every mock silently mis-routed -- so the tests
+    failed with "the re-entry never ran" rather than naming the real cause. The
+    assertion below turns the next such change into an immediate, legible error.
+    """
+    m, n = int(args[1]), int(args[2])
+    indptr = np.asarray(args[3])
+    assert indptr.size == n + 1 and m > 0, (
+        f"args[1:4] are not the CSC (m, n, indptr) header (m={m}, n={n}, "
+        f"indptr.size={indptr.size}); solve_milp_csc_py's signature changed"
+    )
+    return np.asarray(args[_INT_IDX_ARG])
+
+
 class TestFeasibilityGate:
     def test_gate_defers_on_infeasible_result(self, monkeypatch):
         """If the Rust whole-search returns a point that violates the model's
@@ -96,7 +125,7 @@ class TestFeasibilityGate:
         def _lying(*a, **k):
             return ("optimal", np.ones(4, dtype=np.float64), -8.0, -8.0, 1, 1)
 
-        monkeypatch.setattr(_rust, "solve_milp_py", _lying)
+        monkeypatch.setattr(_rust, "solve_milp_csc_py", _lying)
         res = S._solve_milp_simplex(m, 30.0, 1e-9, 1000, time.perf_counter())
         assert res is None  # infeasible "optimal" rejected by the gate
 
@@ -140,7 +169,7 @@ class TestReentryOnUncertifiedFeasible:
     remaining budget, seeded with the best point so far, and keeps run 2 only
     when it certifies or is strictly better.
 
-    Both runs are driven through a monkeypatched ``solve_milp_py`` so the
+    Both runs are driven through a monkeypatched ``solve_milp_csc_py`` so the
     behavior is pinned without depending on any particular instance's runtime.
     Call routing: the first non-empty-``int_idx`` call is run 1; the second is
     the re-entry; a call with an *empty* ``int_idx`` is the root-relaxation
@@ -166,14 +195,14 @@ class TestReentryOnUncertifiedFeasible:
         state = {"n": 0}
 
         def mock(*a, **k):
-            if np.asarray(a[5]).size == 0:  # root-relaxation LP (integers relaxed)
+            if _int_idx_of(a).size == 0:  # root-relaxation LP (integers relaxed)
                 return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
             state["n"] += 1
             if state["n"] == 1:
                 return ("feasible", np.array([1.0, 0, 0, 0]), -2.0, -8.0, 3, 5)
             return ("optimal", np.array([1.0, 1.0, 0, 0]), -4.0, -4.0, 100, 50)
 
-        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        monkeypatch.setattr(_rust, "solve_milp_csc_py", mock)
         res = S._solve_milp_simplex(self._knap(), 30.0, 1e-9, 1000, time.perf_counter())
         assert state["n"] == 2  # the re-entry actually ran
         assert res is not None
@@ -192,12 +221,12 @@ class TestReentryOnUncertifiedFeasible:
         state = {"n": 0}
 
         def mock(*a, **k):
-            if np.asarray(a[5]).size == 0:
+            if _int_idx_of(a).size == 0:
                 return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
             state["n"] += 1
             return ("feasible", np.array([1.0, 0, 0, 0]), -2.0, -8.0, 7, 5)
 
-        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        monkeypatch.setattr(_rust, "solve_milp_csc_py", mock)
         # time_limit == first-slice floor: _milp_budget == remaining, so re-entry
         # is skipped by the "no more time than run 1 had" guard.
         res = S._solve_milp_simplex(self._knap(), 0.5, 1e-9, 1000, time.perf_counter())
@@ -217,13 +246,13 @@ class TestReentryOnUncertifiedFeasible:
         state = {"n": 0}
 
         def mock(*a, **k):
-            if np.asarray(a[5]).size == 0:
+            if _int_idx_of(a).size == 0:
                 return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
             state["n"] += 1
             # Both runs report the same feasible point / bound.
             return ("feasible", np.array([1.0, 1.0, 0, 0]), -4.0, -8.0, 4, 5)
 
-        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        monkeypatch.setattr(_rust, "solve_milp_csc_py", mock)
         res = S._solve_milp_simplex(self._knap(), 30.0, 1e-9, 1000, time.perf_counter())
         assert state["n"] == 2  # re-entry ran...
         assert res is not None
