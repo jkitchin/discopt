@@ -169,15 +169,8 @@ def _contains_expandable_square(model: Model) -> bool:
     # RecursionError on qap. With the memo each unique node is visited once -> O(nodes).
     _seen: dict[int, bool] = {}
 
-    def visit(expr: Expression) -> bool:
-        eid = id(expr)
-        hit = _seen.get(eid)
-        if hit is not None:
-            return hit
-        _seen[eid] = result = _visit_uncached(expr)
-        return result
-
-    def _visit_uncached(expr: Expression) -> bool:
+    def _decide_here(expr: Expression) -> bool | None:
+        """The node's own verdict, when it can be reached without its children."""
         if isinstance(expr, BinaryOp):
             if (
                 expr.op == "**"
@@ -190,20 +183,59 @@ def _contains_expandable_square(model: Model) -> bool:
                 _is_additive_composite(expr.left) or _is_additive_composite(expr.right)
             ):
                 return True
-            return visit(expr.left) or visit(expr.right)
+        return None
+
+    def _children(expr: Expression) -> tuple[Expression, ...]:
+        if isinstance(expr, BinaryOp):
+            return (expr.left, expr.right)
         if isinstance(expr, UnaryOp):
-            return visit(expr.operand)
+            return (expr.operand,)
         if isinstance(expr, FunctionCall):
-            return any(visit(arg) for arg in expr.args)
+            return tuple(expr.args)
         if isinstance(expr, IndexExpression):
-            return not isinstance(expr.base, Variable) and visit(expr.base)
+            # A plain ``v[i]`` is a variable reference, not a composite.
+            return () if isinstance(expr.base, Variable) else (expr.base,)
         if isinstance(expr, SumExpression):
-            return visit(expr.operand)
+            return (expr.operand,)
         if isinstance(expr, SumOverExpression):
-            return any(visit(term) for term in expr.terms)
+            return tuple(expr.terms)
         if isinstance(expr, MatMulExpression):
-            return visit(expr.left) or visit(expr.right)
-        return False
+            return (expr.left, expr.right)
+        return ()
+
+    def visit(root: Expression) -> bool:
+        """Iterative post-order walk.
+
+        The memo above bounds repeated WORK but not recursion DEPTH: a lifted
+        model's objective is a left-deep ``((a + b) + c) + ...`` chain as long as
+        its term count, so a recursive visitor needs one frame per term and dies
+        with RecursionError past ~1000 of them. That exception is an ``Exception``
+        subclass, so the reformulation-adoption guard in ``solve_model`` caught it
+        and silently reported "no reformulation available" -- the pass was skipped
+        on exactly the biggest models it was written for, with nothing but a
+        ``logger.debug`` to say so. An explicit stack removes the depth limit; the
+        memo keeps it O(unique nodes).
+        """
+        stack: list[tuple[Expression, bool]] = [(root, False)]
+        while stack:
+            expr, expanded = stack.pop()
+            eid = id(expr)
+            if eid in _seen:
+                continue
+            if expanded:
+                _seen[eid] = any(_seen.get(id(c), False) for c in _children(expr))
+                continue
+            here = _decide_here(expr)
+            if here is not None:
+                _seen[eid] = here
+                continue
+            kids = _children(expr)
+            if not kids:
+                _seen[eid] = False
+                continue
+            stack.append((expr, True))
+            stack.extend((c, False) for c in kids)
+        return _seen[id(root)]
 
     if model._objective is not None and visit(model._objective.expression):
         return True
@@ -606,18 +638,53 @@ def extract_reciprocal_power(expr: Expression, model: Model) -> tuple[int, float
 # ---------------------------------------------------------------------------
 
 
+def _classify_recursion_headroom(model: Model) -> int:
+    """Recursion-limit headroom the Python classifier walk may need on *model*.
+
+    Sized off the *deepest single expression*, not the constraint count: the
+    hazard is depth concentrated in one giant body (issues #266/#271 hit the
+    same shape).  Returns 0 when the default limit is safe; the estimate is a
+    deliberate over-approximation (depth is bounded by node count) and only
+    decides whether the deep-stack path engages, never what gets classified.
+    """
+    # Deferred: ``factorable_reform`` imports from this module at import time.
+    from .factorable_reform import _DEEP_RECURSION_SIZE_GATE, _max_expr_node_count
+
+    size = _max_expr_node_count(model)
+    if size <= _DEEP_RECURSION_SIZE_GATE:
+        return 0
+    # ``distribute_products`` enters a couple of frames per expression node along
+    # the deepest path, and ``_classify_node`` walks the rebuilt tree after it;
+    # cushion the surrounding stack and cap it as the sibling walks do.
+    return min(2000 + 6 * size, 600_000)
+
+
 def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
     """Walk the model's expression DAG and catalog nonlinear term structure.
 
     Uses the Rust expression-arena classifier for polynomial/product models when
     available, falling back to the Python implementation for unsupported models
     and for cases that need concrete ``general_nl`` expression objects.
+
+    The Python fallback (``distribute_products`` → ``_classify_node``) recurses
+    per expression node, so a deep body blew the default 1000-frame limit and
+    raised ``RecursionError``.  Callers treat that as "no reformulation
+    available" rather than as the bug it is, so a model with a 53k-node body
+    silently lost its whole term catalog.  Run the walk with size-scaled
+    headroom on a large stack, reusing the runner proven for the convexity and
+    factorable walks (issues #266/#271).
     """
-    if not _contains_expandable_square(model):
-        rust_terms = _classify_nonlinear_terms_rust(model)
-        if rust_terms is not None:
-            return rust_terms
-    return _classify_nonlinear_terms_python(model)
+
+    def _classify() -> NonlinearTerms:
+        if not _contains_expandable_square(model):
+            rust_terms = _classify_nonlinear_terms_rust(model)
+            if rust_terms is not None:
+                return rust_terms
+        return _classify_nonlinear_terms_python(model)
+
+    from .convexity.rules import _run_with_deep_recursion
+
+    return _run_with_deep_recursion(_classify, depth_need=_classify_recursion_headroom(model))
 
 
 def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
