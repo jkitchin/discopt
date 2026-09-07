@@ -603,7 +603,7 @@ Reading the arena is both faster and *exact*.
 |---|---|---|---|---|---|
 | **P0** | `_extract_qcp_data_from_repr` (`_relax/problem_classifier.py`) | every QCP/MIQCP model (265 MINLPLib instances) | `m*2n` evaluations for the diagonal sweep **plus** `sum_rows |support|^2/2` pair probes — the O(n^2) probe runs **once per constraint** | `constraint_quadratic_form(i)` reads each row's coefficients off the arena in O(nodes) | **fixed** (#1209) |
 | **P1** | `_extract_lp_data_from_repr` | first path for any model with a `_builder`; the only path for `from_nl` LP/MILP | `m*n` full constraint evaluations + `m*n` dense `(n,)` allocations. Static census over the 415 LP/MILP-family MINLPLib instances: **1.11e11 evaluations**, median 3,996/instance | a row is linear exactly when its quadratic COO is empty, and then its linear map *is* the row | **fixed** (#1209) |
-| **P2** | `_AugmentedEvaluator` (`solver.py`) | `cutting_planes=True` and lazy constraints — **not** the default path (`cutting_planes: bool = False`) | it enumerates its members explicitly and omits `has_sparse_structure`, so every POUNCE derivative callback densifies to `(m,n)`/`(n,n)` and `jacobianstructure` builds an `m*n` meshgrid — even though the tape already returns analytical sparse COO Hessians | forward `has_sparse_structure` (as the sibling `_BoundOverrideEvaluator` already does via `__getattr__`) | **open** |
+| **P2** | `_AugmentedEvaluator` (`solver.py`) | `cutting_planes=True` and lazy constraints — **not** the default path (`cutting_planes: bool = False`) | it enumerates its members explicitly and omits `has_sparse_structure`, so every POUNCE derivative callback densifies to `(m,n)`/`(n,n)` and `jacobianstructure` builds an `m*n` meshgrid — even though the tape already returns analytical sparse COO Hessians | implement the sparse protocol: answer `has_sparse_structure` with the wrapped evaluator's answer, and **append the cut block to the COO structure**. Forwarding the flag alone is *unsound*, not merely incomplete — the augmented constraint vector has `n_cuts` rows the wrapped pattern does not describe, so the solver would receive a Jacobian silently missing every cut row | **fixed** (#1210) |
 | **P3** | `_estimate_alpha_fd` (`solver.py`) | never — zero production callers | O(n^2) evaluations + an O(n^3) eigendecomposition, with a `4e-12` divisor | delete it | **fixed** (#1209, deleted) |
 
 Falsified while auditing, and recorded here per §4: the hypothesis that *the
@@ -612,6 +612,25 @@ per-node NLP densifies its Hessian every iteration* is **wrong**.
 `nlp_ipopt.py:174` takes the sparse branch, so the default solve path already
 feeds POUNCE analytical sparse Hessians. P2 is the exception, and only because
 one wrapper drops the capability flag — not because the tape lacks it.
+
+**Retraction (§11), 2026-09-07.** The P2 row of this table first said the fix
+was to *forward* `has_sparse_structure`, "as the sibling
+`_BoundOverrideEvaluator` already does via `__getattr__`". That was wrong and
+the row has been corrected. Forwarding the flag alone would have been a
+**soundness** bug: the augmented constraint vector carries `n_cuts` rows beyond
+what the wrapped evaluator's pattern describes, so POUNCE would have been handed
+a Jacobian silently missing every cut row. The shipped fix (#1210) extends the
+COO structure with the cut block, whose pattern is exact and constant because
+the cut pool is snapshotted at construction and a cut `a^T x - b` has gradient
+`a`.
+
+Measured there (structural census, `scratchpad/1193/p2_census.py` — counts, not
+timings, so load-independent), 10 cuts on a root pool: `crudeoil_lee1_09`
+(n=963) Jacobian 2,274,606 -> 12,488 entries and Hessian 464,166 -> 1,397;
+`carton9` 325,080 -> 4,935 and 64,980 -> 400. `elec100` is the counter-case in
+the same output: its Hessian is genuinely dense (45,150 either way) while its
+Jacobian still drops 33,000 -> 350. These are per-callback counts, paid every
+IPM iteration of every cut-augmented node NLP.
 
 Standing rule this class implies: **an extractor that wants coefficients reads
 the arena; only an evaluator evaluates.** A new `evaluate_*` call inside
