@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -19,6 +20,10 @@ import numpy as np
 
 from discopt._flat_index import flat_index_in_shape
 from discopt._relax._numeric import is_effectively_finite as _is_effectively_finite
+from discopt._relax.quadratic_form import (
+    extract_quadratic_support,
+    polynomial_degree_bound,
+)
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -707,30 +712,49 @@ def _tighten_affine_upper_bound(
 
 
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
-    if isinstance(expr, SumOverExpression):
-        for term in expr.terms:
-            _flatten_sum(term, scale, out)
-        return
+    """Flatten an additive expression into ``(scale, leaf)`` terms.
 
-    if isinstance(expr, BinaryOp) and expr.op == "+":
-        _flatten_sum(expr.left, scale, out)
-        _flatten_sum(expr.right, scale, out)
-        return
-    if isinstance(expr, BinaryOp) and expr.op == "-":
-        _flatten_sum(expr.left, scale, out)
-        _flatten_sum(expr.right, -scale, out)
-        return
-    # Distribute negation over its operand: neg(a + b) == (-a) + (-b) is an exact
-    # identity, so pushing the sign inward lets the additive walk see the full
-    # structure underneath a `neg` (e.g. a `neg(sum-of-squares)` term whose
-    # squares would otherwise be hidden inside one opaque leaf, invisible to the
-    # downstream quadratic/interval bounding rules). This mirrors the negation
-    # handling already in `_flatten_sum_terms` (convexity/patterns.py) and is a
-    # sound normalization — it never removes a feasible point (#777).
-    if isinstance(expr, UnaryOp) and expr.op == "neg":
-        _flatten_sum(expr.operand, -scale, out)
-        return
-    out.append((scale, expr))
+    The walk is iterative over an explicit ``(expr, scale)`` stack rather than
+    recursive: a long linear row parses to a left-deep ``((a+b)+c)+d…`` chain
+    whose depth equals the term count, so a recursive walk exhausted the Python
+    stack on models with a few thousand terms (``t1000``) and killed the whole
+    tightening pass with a ``RecursionError`` (#1198). Depth is now bounded only
+    by the heap.
+
+    Children are pushed in reverse so they pop left-to-right, which makes the
+    emitted term order identical to the recursive walk's; the scale carried on a
+    stack entry is the same value the recursion passed down (sign flips are
+    exact), so the term list is bit-for-bit unchanged.
+    """
+    stack: list[tuple[object, float]] = [(expr, scale)]
+    while stack:
+        node, node_scale = stack.pop()
+
+        if isinstance(node, SumOverExpression):
+            for term in reversed(node.terms):
+                stack.append((term, node_scale))
+            continue
+
+        if isinstance(node, BinaryOp) and node.op == "+":
+            stack.append((node.right, node_scale))
+            stack.append((node.left, node_scale))
+            continue
+        if isinstance(node, BinaryOp) and node.op == "-":
+            stack.append((node.right, -node_scale))
+            stack.append((node.left, node_scale))
+            continue
+        # Distribute negation over its operand: neg(a + b) == (-a) + (-b) is an
+        # exact identity, so pushing the sign inward lets the additive walk see
+        # the full structure underneath a `neg` (e.g. a `neg(sum-of-squares)`
+        # term whose squares would otherwise be hidden inside one opaque leaf,
+        # invisible to the downstream quadratic/interval bounding rules). This
+        # mirrors the negation handling already in `_flatten_sum_terms`
+        # (convexity/patterns.py) and is a sound normalization — it never removes
+        # a feasible point (#777).
+        if isinstance(node, UnaryOp) and node.op == "neg":
+            stack.append((node.operand, -node_scale))
+            continue
+        out.append((node_scale, node))
 
 
 def _min_univariate_quadratic(a: float, b: float, lb: float, ub: float) -> float:
@@ -2997,6 +3021,234 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
         return None
 
 
+# --- Convex-quadratic (ellipsoid) bound tightening (issue #1193) -------------
+#
+# A row ``x'Qx + c'x + d <= 0`` whose ``Q`` is positive definite describes an
+# ELLIPSOID, and the exact range of every coordinate over an ellipsoid has a
+# closed form. Interval FBBT cannot see that: it evaluates the row one term at a
+# time, so every cross term ``x_i x_j`` is replaced by the product of two
+# independent intervals and the coupling that actually bounds the set is thrown
+# away. Measured on ``nvs19`` (8 integer variables, 8 dense quadratic rows, four
+# of them positive definite): the root box after Rust FBBT + non-cutoff OBBT is
+# ``x_i <= [49, 55, 55, 54, 61, 58, 53, 58]``, while the ellipsoid of the single
+# row ``x'Q5 x <= 930`` already gives ``x_i <= [14, 19, 19, 21, 17, 15, 21, 15]``
+# -- 2.5x to 4x tighter in every one of the eight dimensions, from one row.
+#
+# Derivation. With ``Q > 0`` and ``x* = -Q^-1 c / 2``,
+#
+#     x'Qx + c'x + d <= 0   <=>   (x - x*)' Q (x - x*) <= r2,
+#     r2 = (1/4) c' Q^-1 c - d,
+#
+# and for ``y = x - x*``, Cauchy-Schwarz in the ``Q``-norm gives
+# ``|y_i| = |e_i' y| <= sqrt(e_i' Q^-1 e_i) * ||y||_Q <= sqrt(r2 * (Q^-1)_ii)``,
+# attained -- so the bound is exact for the row in isolation.
+_ELLIPSOID_ENV = "DISCOPT_ELLIPSOID_BOUNDS"
+
+#: Largest row support the rule will factor. The eigendecomposition is O(m^3)
+#: and runs once per row per model (the result is bound-independent and cached),
+#: but a single dense 10k-variable row would still cost minutes. Rows above the
+#: cap are skipped, which only leaves the box looser.
+_ELLIPSOID_MAX_SUPPORT = 250
+
+#: Conditioning gate. ``(Q^-1)_ii`` carries a relative error of order
+#: ``eps * cond(Q)``; at ``1e8`` that is ~2e-8, comfortably inside the slack
+#: below. A worse-conditioned row is refused rather than tightened from digits
+#: that are not there (CLAUDE.md 3: no silent approximations).
+_ELLIPSOID_MAX_COND = 1e8
+
+#: Safety margin on the computed radius, applied outward. Two orders of
+#: magnitude above the round-off the conditioning gate admits, and utterly
+#: negligible against a radius of any practical size -- a bound-tightening error
+#: in the *tight* direction cuts off feasible points, so the margin is one-sided.
+_ELLIPSOID_RADIUS_REL_SLACK = 1e-6
+_ELLIPSOID_RADIUS_ABS_SLACK = 1e-9
+
+
+def _ellipsoid_bounds_enabled() -> bool:
+    """True when the convex-quadratic ellipsoid rule is enabled.
+
+    Bound-changing (CLAUDE.md 5), so it ships behind a flag and default-OFF
+    until the corpus-wide differential panel passes. Read per call rather than
+    at import so a test can flip it without reloading the module.
+    """
+    return os.environ.get(_ELLIPSOID_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+class ConvexQuadraticEllipsoidRule(NonlinearBoundTighteningRule):
+    """Tighten bounds from a positive-definite quadratic row, cross terms included.
+
+    Complements :class:`SeparableQuadraticUpperBoundRule`, which handles the
+    diagonal case ``sum_i (a_i x_i^2 + b_i x_i) <= c`` term by term and abstains
+    as soon as a row contains a bilinear product. This rule takes exactly those
+    rows: it recovers the row's ``(Q, c, d)`` exactly (or abstains -- see
+    :func:`~discopt._relax.quadratic_form.extract_quadratic_support`), and when
+    ``Q`` is positive definite reads the coordinate ranges straight off the
+    ellipsoid.
+    """
+
+    name = "convex_quadratic_ellipsoid"
+    # Each row's ellipsoid is derived from THAT row alone and intersected into
+    # the incoming box, so a prefix of the rows is a looser-but-valid tightening.
+    row_scan_is_anytime = True
+
+    def _row_ellipsoids(self, model: Model, constraint, metadata: FlatVariableMetadata):
+        """Bound-independent half of the row scan; see ``_cached_row_structure``.
+
+        Returns ``(support, le_box, ge_box)`` where ``le_box`` is the coordinate
+        box implied by ``body <= 0`` and ``ge_box`` the one implied by
+        ``body >= 0``; either is ``None`` when that direction is not a usable
+        ellipsoid. Returns ``None`` when the row is of no use at all. Nothing
+        here reads the variable box, so the whole result is cached per model.
+        """
+        # Cheap structural reject before the expensive expansion. Recognizing a
+        # row means expanding it into monomials, and on a high-degree row that
+        # expansion is the whole cost: st_e36 row 0 is a quadratic times a
+        # squared quadratic (degree 6) and takes 554 ms to expand before the
+        # degree check throws it away -- measured as +31.8% wall on that
+        # instance (5 interleaved reps, sd 0.16/0.10 s, node_count identical at
+        # 83) with zero coordinates tightened. The degree BOUND walks the DAG
+        # without expanding, so the same row is rejected in microseconds.
+        # The bound is conservative (it can exceed the true degree when leading
+        # terms cancel), so skipping on ``> 2`` can only make this rule tighten
+        # LESS, never more -- soundness is unaffected. ``None`` means the walk
+        # could not bound the degree, and we fall through to exact extraction.
+        degree = polynomial_degree_bound(constraint.body)
+        if degree is not None and degree > 2:
+            return None
+        reduced = extract_quadratic_support(constraint.body, model)
+        if reduced is None:
+            return None
+        support, Q, c, d = reduced
+
+        # A single-variable row is the separable rule's job and it does it
+        # exactly; below two variables there is no cross term to exploit.
+        if not (2 <= len(support) <= _ELLIPSOID_MAX_SUPPORT):
+            return None
+        if not (np.all(np.isfinite(Q)) and np.all(np.isfinite(c)) and np.isfinite(d)):
+            return None
+
+        sym = 0.5 * (Q + Q.T)
+        try:
+            eigvals, eigvecs = np.linalg.eigh(sym)
+        except np.linalg.LinAlgError as exc:
+            # Not swallowed silently (CLAUDE.md 7): a failed decomposition means
+            # this row yields no bound, and that is recorded rather than guessed.
+            logger.debug("%s: eigendecomposition failed on a row: %s", self.name, exc)
+            return None
+
+        # ``-body <= 0`` is the same problem with every eigenvalue negated, so a
+        # single decomposition serves both senses; at most one of the two can be
+        # positive definite.
+        le_box = self._ellipsoid_box(eigvals, eigvecs, c, d)
+        ge_box = self._ellipsoid_box(-eigvals[::-1], eigvecs[:, ::-1], -c, -d)
+        if le_box is None and ge_box is None:
+            return None
+        return support, le_box, ge_box
+
+    @staticmethod
+    def _ellipsoid_box(eigvals, eigvecs, c, d):
+        """Coordinate box of ``{x : x'Qx + c'x + d <= 0}`` for ``Q = V diag(w) V'``.
+
+        ``None`` unless ``Q`` is positive definite, well enough conditioned to
+        trust, and the ellipsoid is non-degenerate.
+        """
+        lam_min, lam_max = float(eigvals[0]), float(eigvals[-1])
+        if lam_min <= 0.0 or lam_max > _ELLIPSOID_MAX_COND * lam_min:
+            return None
+
+        # x* = -Q^-1 c / 2 and r2 = (1/4) c' Q^-1 c - d, both through the
+        # decomposition rather than an explicit inverse.
+        rotated = eigvecs.T @ c
+        qinv_c = eigvecs @ (rotated / eigvals)
+        r2 = 0.25 * float(c @ qinv_c) - d
+        if not np.isfinite(r2) or r2 <= 0.0:
+            # r2 < 0 means the row alone is infeasible. That is a real inference,
+            # but a *false* one -- from round-off on a near-degenerate row --
+            # would prune a feasible model, so this rule declines to draw it and
+            # leaves infeasibility to the search. r2 == 0 is a single point and
+            # is left to the node NLP for the same reason.
+            return None
+
+        center = -0.5 * qinv_c
+        diag_qinv = (eigvecs**2) @ (1.0 / eigvals)
+        if not (np.all(np.isfinite(center)) and np.all(diag_qinv >= 0.0)):
+            return None
+        radius = np.sqrt(r2 * diag_qinv)
+        radius = radius * (1.0 + _ELLIPSOID_RADIUS_REL_SLACK) + _ELLIPSOID_RADIUS_ABS_SLACK
+        lo = center - radius
+        hi = center + radius
+        if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+            return None
+        return lo, hi
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+        deadline: Optional[float] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+        if not _ellipsoid_bounds_enabled():
+            return tightened_lb, tightened_ub
+
+        for constraint in _rows_until(model, deadline):
+            sense = getattr(constraint, "sense", None)
+            if sense not in ("<=", ">=", "=="):
+                continue
+
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._row_ellipsoids(model, c, metadata),
+            )
+            if structure is None:
+                continue
+            support, le_box, ge_box = structure
+
+            boxes = []
+            if sense in ("<=", "==") and le_box is not None:
+                boxes.append(le_box)
+            if sense in (">=", "==") and ge_box is not None:
+                boxes.append(ge_box)
+            if not boxes:
+                continue
+
+            for lo, hi in boxes:
+                for pos, flat_idx in enumerate(support):
+                    new_lb = max(float(tightened_lb[flat_idx]), float(lo[pos]))
+                    new_ub = min(float(tightened_ub[flat_idx]), float(hi[pos]))
+
+                    var_type = metadata.flat_var_types[flat_idx]
+                    if var_type == VarType.BINARY:
+                        new_lb = max(new_lb, 0.0)
+                        new_ub = min(new_ub, 1.0)
+                    if var_type in (VarType.BINARY, VarType.INTEGER):
+                        new_lb = float(np.ceil(new_lb - 1e-9))
+                        new_ub = float(np.floor(new_ub + 1e-9))
+
+                    if new_lb <= new_ub:
+                        tightened_lb[flat_idx] = new_lb
+                        tightened_ub[flat_idx] = new_ub
+                    elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL:
+                        # Sub-tolerance crossover: snap to a degenerate box
+                        # instead of pruning, leaving validation to the node NLP.
+                        tightened_lb[flat_idx] = new_ub
+                        tightened_ub[flat_idx] = new_ub
+                    else:
+                        _prove_infeasible(
+                            self.name,
+                            constraint,
+                            f"required interval for flat variable {flat_idx} is empty",
+                        )
+
+        return tightened_lb, tightened_ub
+
+
 _EXPR_TYPES = (
     Variable,
     Constant,
@@ -3025,6 +3277,7 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
+    ConvexQuadraticEllipsoidRule(),
     PeriodicVariableBoundRule(),
 )
 
