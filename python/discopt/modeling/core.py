@@ -880,6 +880,29 @@ class Variable(Expression):
         return f"{self.name}{list(self.shape)}"
 
 
+def _pure_integer_index(index) -> Optional[tuple[int, ...]]:
+    """*index* as a tuple of plain ints when it is pure-integer indexing, else ``None``.
+
+    ``bool`` is deliberately excluded even though ``isinstance(True, int)`` holds:
+    numpy treats a scalar boolean as a *mask*, not an index, and adds an axis
+    (``zeros((5,))[True].shape == (1, 5)``). Letting a bool through here would
+    hand back ``()`` and silently mis-shape the node. ``np.bool_`` is not an
+    ``np.integer`` subclass, so it falls out on its own.
+    """
+    if isinstance(index, bool):
+        return None
+    if isinstance(index, (int, np.integer)):
+        return (int(index),)
+    if isinstance(index, tuple):
+        out = []
+        for i in index:
+            if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+                return None
+            out.append(int(i))
+        return tuple(out)
+    return None
+
+
 def _index_result_shape(base_shape: tuple[int, ...], index) -> Optional[tuple[int, ...]]:
     """Numpy result shape of ``base_shape[index]``, or ``None`` when static
     inference is not possible (issue #816).
@@ -892,7 +915,26 @@ def _index_result_shape(base_shape: tuple[int, ...], index) -> Optional[tuple[in
     index object) yields ``None`` = "unknown". The out-of-bounds *guard* that
     surfaces user typos lives in :meth:`Expression.__getitem__`, so that internal
     lazy ``IndexExpression`` construction stays conservative.
+
+    Pure-integer indexing -- a plain int, or an all-int tuple of arity <= ndim,
+    which is what ``x[i]`` produces on every element of every indexed family --
+    is answered arithmetically instead: consuming ``k`` integer axes leaves
+    ``base_shape[k:]``. That is the construction hot path: the numpy probe below
+    ran once per ``x[i]`` purely to re-derive ``()``. Interleaved A/B in one
+    process, 9 reps, 20k-instance bilinear family: 18.49 -> 9.64 us/instance
+    (1.92x, pooled sd 0.016 s); on a 40-form x 5,000 = 200k-instance model,
+    27.92 -> 21.21 us/instance (1.32x, 5 reps). Bound-neutral per CLAUDE.md §5 --
+    paired LP/MILP/NLP/MINLP solves are bit-identical on status, objective and
+    node_count. The fast path reproduces the probe's contract exactly, including
+    returning ``None`` for an out-of-range axis (where numpy raises) rather than
+    guessing a shape; ``test_index_shape_fast_path.py`` is the equivalence grid.
     """
+    ints = _pure_integer_index(index)
+    if ints is not None and len(ints) <= len(base_shape):
+        for i, n in zip(ints, base_shape):
+            if i < -n or i >= n:
+                return None  # numpy would raise IndexError -> "unknown"
+        return tuple(base_shape[len(ints) :])
     try:
         probe = np.broadcast_to(np.zeros((), dtype=np.int8), base_shape)
         return tuple(int(d) for d in np.shape(probe[index]))
