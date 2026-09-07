@@ -185,7 +185,15 @@ _SATURATING = frozenset({"saturate_role2", "_role2_saturate"})
 
 #: Calls that return their argument unchanged (or a no-clock value); a carve
 #: wrapped in one of these is bounded exactly when the carve inside it is.
-_PASSTHROUGH = frozenset({"_role2_budget", "_role2_deadline", "_role2_horizon"})
+#:
+#: ``_role2_slice`` joined the family with #1187. It is the ``time_limit``-valued
+#: sibling of the other three — a nested ``solve_model``'s budget parameter has no
+#: ``None``/``math.inf`` spelling, so its no-clock value is the caller's own
+#: ``time_limit``. That makes it *more* bounded than ``_role2_horizon``, which is
+#: already listed and whose no-clock value is ``math.inf``; either way the
+#: ``deterministic`` regime is not what #1153's saturation rule is about, and the
+#: carve to judge is the one inside the wrapper.
+_PASSTHROUGH = frozenset({"_role2_budget", "_role2_deadline", "_role2_horizon", "_role2_slice"})
 
 
 def _is_clock_read(node: ast.AST) -> bool:

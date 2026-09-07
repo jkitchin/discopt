@@ -146,6 +146,27 @@ def _deadline_wall_cap(deadline: Optional[float]) -> Optional[float]:
     keeps a just-expired deadline from handing the backend a zero/negative
     ``max_wall_time`` (whose meaning is backend-defined) — a solve started at the
     edge gets a small positive slice rather than an undefined one.
+
+    This clamp is a role-2 gate by #912's definition — the caller's ``deadline``
+    may be an hour away and it still cuts one sub-NLP off after 3 s of *wall*, so
+    which iterate comes back is a function of machine speed — and it is **not**
+    suppressed under ``deterministic``. That was tried and falsified (#1187,
+    CLAUDE.md §4), and the arm is recorded here because it cost real time to rule
+    out. After routing the RENS slice, ``clay0303hfsg`` still alternated its
+    incumbent between 26669.109572842466 and 26669.109572842823 in step with the
+    run's wall time, and a ``perf_counter``-caller trace pointed at a step this
+    helper caps. Returning ``None`` here under the flag left the alternation
+    *exactly* unchanged (…842466 at 67.8/67.3 s, …842823 at 64.1/64.0/64.7 s, five
+    repetitions) at no measurable wall cost. The change did not ship: a fix with no
+    measured effect is a hypothesis, not a fix.
+
+    The real cause was one frame further out — the plan wave in
+    :func:`one_hot_config_subnlp`, whose ``_WAVE_SOLVE_CAP`` the caller's slice
+    never let it reach — and the trace had been misread because it resolved every
+    read in this module to the ``_now`` seam's own frame rather than to the site
+    that called it. This clamp stays recorded ``residual`` in
+    ``test_912_wall_budget_inventory``'s carved-slice inventory: still a role-2
+    gate, just not the one that was moving ``clay0303hfsg``.
     """
     if deadline is None or not np.isfinite(deadline):
         return None
@@ -1845,8 +1866,30 @@ def one_hot_config_subnlp(
     wave_plans = plans[: min(max_configs, _WAVE_SOLVE_CAP)]
     if len(wave_plans) < len(plans[:max_configs]):
         stop = "wave-cap"
+    # #1187: under ``deterministic`` the WAVE's extent is its own solve cap, not
+    # the caller's clock.
+    #
+    # The wave already carries a deterministic bound — ``_WAVE_SOLVE_CAP`` — but
+    # the caller's slice routinely expires first, and then *how many* plans get
+    # tried is set by machine speed. Measured on ``clay0303hfsg`` with the flag on,
+    # four repetitions of the same binary in one process: 36 / 37 / 38 / 37 plans
+    # against a cap of 48, and a different prefix of the plan order means a
+    # different disjunct wins. That is #1187's residual, the one that survived
+    # routing the RENS slice — the incumbent alternated between
+    # 26669.109572842466 and 26669.109572842823 in step with the run's wall time.
+    #
+    # Only the *wave* is freed. The dive below keeps the caller's deadline, so the
+    # constructor's total envelope is still bounded by it: where the wave now runs
+    # to 48, the dive polls an expired deadline and returns immediately (the
+    # ``syn20m02m`` row in the comment on that call), which is itself a
+    # deterministic outcome. Where the wave finishes early the dive is unaffected —
+    # ``flay03m`` exhausts 72 plans in 2.62 s and ``flay02m`` 66 in 1.69 s of the
+    # same 15 s slice, both already reproducible, and neither is touched.
+    from discopt import solver_tuning as _st
+
+    wave_deadline = None if _st.current().deterministic else deadline
     for ci, ri in wave_plans:
-        if deadline is not None and _now() >= deadline:
+        if wave_deadline is not None and _now() >= wave_deadline:
             stop = "deadline"
             break
         seed = zero_start.copy()
@@ -1859,8 +1902,10 @@ def one_hot_config_subnlp(
         for j, v in zip(residual, residual_assigns[ri]):
             seed[j] = v
         # The caller's deadline is a stopping contract, so the per-solve budget is
-        # what remains of it — not a slice of it.
-        budget = None if deadline is None else max(0.0, deadline - _now())
+        # what remains of it — not a slice of it. ``wave_deadline`` is ``deadline``
+        # except under ``deterministic``, where the wave is bounded by its solve
+        # cap instead (see above).
+        budget = None if wave_deadline is None else max(0.0, wave_deadline - _now())
         if budget is not None and budget <= 0.0:
             stop = "deadline"
             break

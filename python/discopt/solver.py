@@ -6706,6 +6706,41 @@ def _role2_horizon(seconds):
     return math.inf if _tuning().deterministic else seconds
 
 
+def _role2_slice(seconds, *, whole):
+    """:func:`_role2_budget` for a callee whose budget parameter is a *role-1*
+    ``time_limit`` — a nested :func:`solve_model`, which has no "no clock" value.
+
+    ``None``/``math.inf`` are not answers here: the nested solve's ``time_limit``
+    is its own role-1 contract, and removing it would let a sub-solve run without
+    any wall bound at all. The no-clock value is instead ``whole`` — the caller's
+    own ``time_limit``, a constant of the *model*, not of how far into the run the
+    machine happened to be when the slice was carved. The nested solve is then
+    bounded by the deterministic caps it already carries (``max_nodes``, the gap)
+    and, at worst, by the same role-1 limit the outer solve is honouring, so it can
+    never overrun the user's budget.
+
+    Same treatment the simplex-MILP driver's stall slice already gets (``_milp_budget``).
+
+    #1187 is the measurement that made this its own helper rather than a second
+    inline conditional. ``clay0303hfsg`` at ``deterministic=True, max_nodes=20,
+    time_limit=120`` returned three different incumbents — 55092.52 / 46785.55 /
+    41573.26, a 25 % spread — across repetitions of the same binary in one process,
+    at an *identical* 27 nodes and with the dual bound agreeing to 12 significant
+    figures. The whole divergence was primal, and its origin was the NLP-BB root
+    RENS budget: a fraction of what was left on the clock, handed to a nested
+    ``solve_model`` as its ``time_limit``. As the process warmed up (25.5 s → 17.0 s
+    for the same solve) the same nominal slice bought more of the sub-MINLP, so the
+    neighbourhood search returned a different point. Routing it through here
+    collapsed the 25 % spread and made the dual bound bit-identical, at a *better*
+    incumbent (26669.11) than any wall-truncated repetition found — the #1116
+    result again. It also exposed a second, much smaller gate the spread had been
+    hiding (the GDP-config plan wave; see
+    ``_relax/primal_heuristics.one_hot_config_subnlp``), after which the instance
+    reproduces bit-exactly.
+    """
+    return float(whole) if _tuning().deterministic else float(seconds)
+
+
 def _scoped_determinism(fn: _F) -> _F:
     """Publish ``deterministic=True`` onto the active :class:`SolverTuning`.
 
@@ -7284,6 +7319,12 @@ def solve_model(
         not reproducible and does not claim to be; see
         :class:`~discopt.solver_tuning.SolverTuning.deterministic` for the full
         residual.
+
+        In particular (#1187): this flag says **nothing** about a run that ends
+        ``status="time_limit"``. It cannot — the terminating condition there is
+        the wall clock itself, which is role 1 and stays live by design. Two such
+        runs did different amounts of work, so a panel that reads neutrality off
+        them is reading noise, and must exclude them.
 
         Until #1116 this parameter defaulted to ``True`` and was read nowhere —
         it named a guarantee the solver did not provide. The default is now
@@ -17289,12 +17330,26 @@ def _solve_nlp_bb(
                     try:
                         from discopt._relax.primal_heuristics import rens as _rens_heuristic
 
-                        _rens_budget = max(
-                            0.5,
-                            min(
-                                _RENS_BUDGET_FRAC * (time_limit - (time.perf_counter() - t_start)),
-                                _RENS_BUDGET_CAP_S,
+                        # #1187: this slice is a role-2 clock — a fraction of what
+                        # is LEFT on the wall, handed to a nested ``solve_model`` as
+                        # its ``time_limit``. It decides how much of the rounding
+                        # neighbourhood the sub-MINLP gets through, so the incumbent
+                        # RENS returns is a function of machine speed. Measured on
+                        # ``clay0303hfsg``: three incumbents 25 % apart at an
+                        # identical 27 nodes and a dual bound stable to 12 figures.
+                        # Under ``deterministic`` the sub-solve gets the caller's own
+                        # ``time_limit`` — elapsed-independent — and is bounded by
+                        # its own gap/node caps (see :func:`_role2_slice`).
+                        _rens_budget = _role2_slice(
+                            max(
+                                0.5,
+                                min(
+                                    _RENS_BUDGET_FRAC
+                                    * (time_limit - (time.perf_counter() - t_start)),
+                                    _RENS_BUDGET_CAP_S,
+                                ),
                             ),
+                            whole=time_limit,
                         )
 
                         def _rens_sub_solver(_restricted, _tl=_rens_budget):
