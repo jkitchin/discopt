@@ -2232,6 +2232,90 @@ class _AugmentedEvaluator:
         m_orig = self._ev.n_constraints
         return self._ev.evaluate_lagrangian_hessian(x, obj_factor, lambda_[:m_orig])
 
+    # ---- sparse-structure protocol -------------------------------------
+    #
+    # This class enumerates its members explicitly (see ``timing_bucket``), so
+    # before this block it silently omitted ``has_sparse_structure``. The
+    # ``hasattr`` probe in ``nlp_ipopt._IpoptCallbacks.__init__`` then read
+    # False, and every derivative callback on a cut-augmented node fell to the
+    # dense arm: ``jacobianstructure`` built an ``m x n`` meshgrid and the
+    # Hessian was materialized ``n x n`` -- even though the wrapped tape
+    # evaluator returns analytical sparse COO for both. POUNCE is the consumer
+    # (``_solve_batch_pounce`` builds ``_IpoptCallbacks`` for ``pounce.Problem``),
+    # not cyipopt, which only runs under ``nlp_solver="ipopt"``.
+    #
+    # Forwarding the flag alone would be WRONG, not merely incomplete: the
+    # augmented constraint vector has ``n_cuts`` more rows than the wrapped
+    # evaluator's Jacobian structure describes, so the solver would receive a
+    # Jacobian silently missing every cut row. The structure must be extended,
+    # which is what these methods do.
+
+    def has_sparse_structure(self) -> bool:
+        """True when the wrapped evaluator can report a sparsity pattern.
+
+        The cut block is exactly representable either way -- ``self._A`` is a
+        constant matrix whose nonzero pattern is fixed for the life of this
+        wrapper -- so the answer is entirely the wrapped evaluator's.
+        """
+        return bool(hasattr(self._ev, "has_sparse_structure") and self._ev.has_sparse_structure())
+
+    def _cut_jacobian_coo(self):
+        """``(rows, cols, vals)`` for the cut block, in the augmented row space.
+
+        Cut ``k`` occupies augmented row ``n_constraints_original + k``. Only
+        the structural nonzeros of ``self._A`` are reported: the cut rows are
+        linear with constant coefficients, so this pattern is exact and does
+        not change across iterations, which is what the solver requires.
+        """
+        if not hasattr(self, "_cut_coo_cache"):
+            r, c = np.nonzero(self._A)
+            self._cut_coo_cache = (
+                r.astype(np.int64) + self._ev.n_constraints,
+                c.astype(np.int64),
+                np.asarray(self._A[r, c], dtype=np.float64),
+            )
+        return self._cut_coo_cache
+
+    def jacobian_structure(self):
+        """Jacobian sparsity as COO ``(rows, cols)``, cut rows appended."""
+        rows, cols = self._ev.jacobian_structure()
+        if self._n_cuts == 0:
+            return rows, cols
+        cr, cc, _ = self._cut_jacobian_coo()
+        return np.concatenate([rows, cr]), np.concatenate([cols, cc])
+
+    def evaluate_jacobian_values(self, x):
+        """Jacobian values in ``jacobian_structure`` order, cut values appended.
+
+        The cut values are the constant coefficients themselves -- a cut is
+        ``a^T x - b``, whose gradient is ``a`` and does not depend on ``x``.
+        """
+        vals = self._ev.evaluate_jacobian_values(x)
+        if self._n_cuts == 0:
+            return vals
+        _, _, cv = self._cut_jacobian_coo()
+        return np.concatenate([np.asarray(vals, dtype=np.float64), cv])
+
+    def hessian_structure(self):
+        """Lower-triangle Hessian sparsity, unchanged by the cuts.
+
+        Cuts are linear, so they contribute nothing to the Lagrangian Hessian
+        and add no structural nonzeros -- the same reasoning
+        ``evaluate_lagrangian_hessian`` already relies on.
+        """
+        return self._ev.hessian_structure()
+
+    def evaluate_hessian_values(self, x, obj_factor, lambda_):
+        """Lagrangian Hessian values; the cut multipliers are dropped.
+
+        ``lambda_`` arrives in the augmented row space, so it is truncated to
+        the wrapped evaluator's rows exactly as in
+        :meth:`evaluate_lagrangian_hessian`. Dropping the tail is correct
+        rather than approximate: a linear row's Hessian is zero whatever its
+        multiplier.
+        """
+        return self._ev.evaluate_hessian_values(x, obj_factor, lambda_[: self._ev.n_constraints])
+
     def get_augmented_constraint_bounds(self, original_bounds):
         """Return constraint bounds extended with cut bounds (all <= 0)."""
         if self._n_cuts == 0:
