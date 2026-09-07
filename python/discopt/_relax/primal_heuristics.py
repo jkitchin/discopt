@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
@@ -1299,6 +1300,53 @@ def integer_local_search(
     return best
 
 
+def _box_work_budget(
+    kind: str,
+    limit: int,
+    time_budget: float,
+    deadline: Optional[float],
+) -> WorkBudget:
+    """A deterministic work budget of ``limit`` operations of ``kind``.
+
+    ``limit <= 0`` is the documented #912 escape hatch: it restores the legacy
+    wall-clock gate (``time_budget``), still clamped by the caller's ``deadline``.
+    """
+    if limit > 0:
+        return WorkBudget({kind: limit}, deadline=deadline, clock=_now)
+    _wall = _now() + max(0.0, time_budget)
+    _dl = _wall if deadline is None else min(_wall, deadline)
+    return WorkBudget(None, deadline=_dl, clock=_now)
+
+
+# Default caps for :func:`integer_box_search`, one pair per inner loop. They differ
+# because the per-cell cost does: a sub-NLP solve is 18.922 ms and a direct
+# evaluation 0.014 ms -- 1385x (#1193). These are DEFAULTS only; a caller that
+# passes ``max_int_vars``/``max_combos`` explicitly gets exactly that on either path.
+_SUBNLP_MAX_INT_VARS = 3
+_SUBNLP_MAX_COMBOS = 128
+_DIRECT_MAX_INT_VARS = 64
+_DIRECT_MAX_COMBOS = 20_000
+
+
+def integer_box_polish_enabled() -> bool:
+    """Whether the #1193 integer primal-escape is active
+    (``DISCOPT_INTEGER_BOX_POLISH``, **default ON**; ``=0`` restores pre-#1193
+    behaviour).
+
+    ONE flag deliberately governs BOTH halves of the #1193 fix: the zero-continuous
+    direct path in :func:`integer_box_search` (below) and the post-kernel exit polish
+    in :mod:`discopt.solver`. Gating only the polish made a graduation panel's OFF
+    arm a hybrid -- the re-priced box search stayed live in both arms, so the A/B
+    measured neither half honestly. Keep the two call sites on this one predicate.
+    """
+    return os.environ.get("DISCOPT_INTEGER_BOX_POLISH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def integer_box_search(
     model: Model,
     x_incumbent: np.ndarray,
@@ -1307,12 +1355,13 @@ def integer_box_search(
     backend: Optional[Callable] = None,
     nlp_options: Optional[dict] = None,
     evaluator: Optional[NLPEvaluator] = None,
-    max_int_vars: int = 3,
-    max_combos: int = 128,
+    max_int_vars: Optional[int] = None,
+    max_combos: Optional[int] = None,
     integer_tol: float = 1e-5,
     feas_tol: float = 1e-6,
     time_budget: float = 4.0,
     solve_budget: Optional[int] = None,
+    eval_budget: Optional[int] = None,
     deadline: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Objective-improving integer *box* search around an incumbent.
@@ -1344,6 +1393,30 @@ def integer_box_search(
     stops at the same cell on every machine. ``deadline`` is the caller's
     ``time_limit`` backstop. ``solve_budget=0`` restores the legacy
     ``time_budget`` wall gate.
+
+    **Zero-continuous models take the direct path (issue #1193).** When the model
+    has no continuous slots at all, fixing every integer leaves the per-cell sub-NLP
+    zero-dimensional: :func:`subnlp` degenerates to "round, verify, evaluate",
+    which is exactly :func:`_finalize_candidate` — same acceptance arbiter, same
+    integer snap, same objective. Measured on nvs19 (8 integers, 0 continuous):
+    **18.922 ms/cell via subnlp vs 0.014 ms/cell direct, a 1385x gap** — the
+    radius-1 grid costs 124.1 s one way and 0.09 s the other. ``max_int_vars`` and
+    ``max_combos`` exist only to price that NLP solve, so on this path the *default*
+    caps are re-priced against the operation actually performed
+    (``_DIRECT_MAX_INT_VARS`` / ``_DIRECT_MAX_COMBOS`` instead of
+    ``_SUBNLP_MAX_INT_VARS`` / ``_SUBNLP_MAX_COMBOS``), budgeted in ``EVAL`` rather
+    than ``NLP_SOLVE``. nvs19's 3^8 = 6561-cell radius-1 grid is unreachable under
+    the 3-variable/128-cell defaults and is enumerated in full under the direct ones.
+
+    Only the *defaults* move. Both parameters default to ``None`` meaning "pick the
+    cap that matches the inner loop"; a caller that passes either explicitly gets
+    exactly that number on either path, because silently overriding a caller's cap
+    would be a silent approximation (CLAUDE.md §3).
+
+    The test is the *presence* of a continuous slot, not its width: a continuous
+    variable that presolve has fixed still routes to the sub-NLP path. That is the
+    conservative direction — it can only decline a speedup, never take one that is
+    not warranted.
     """
     # As in ``one_hot_swap_search``: a non-positive ``time_budget`` is the caller
     # saying there is no budget at all, and #912's deterministic cell budget must
@@ -1353,7 +1426,20 @@ def integer_box_search(
     int_mask = _get_integer_mask(model)
     int_idx = np.where(int_mask)[0]
     n_int = int(int_idx.size)
-    if n_int == 0 or n_int > max_int_vars:
+    if n_int == 0:
+        return None
+    # #1193: see the "direct path" paragraph above. The cost of a cell, not the
+    # number of integers, is what the caps were sized against, so the DEFAULT caps
+    # differ by path. An *explicitly passed* cap is honoured on either path --
+    # silently overriding a caller's cap because we happened to pick a cheaper
+    # inner loop would be a silent approximation (CLAUDE.md §3).
+    direct = not bool(np.any(~int_mask)) and integer_box_polish_enabled()
+    eff_max_int_vars = (
+        max_int_vars
+        if max_int_vars is not None
+        else (_DIRECT_MAX_INT_VARS if direct else _SUBNLP_MAX_INT_VARS)
+    )
+    if n_int > eff_max_int_vars:
         return None
 
     lb, ub = _get_variable_bounds(model)
@@ -1375,7 +1461,12 @@ def integer_box_search(
     for ax in axes:
         n_combos *= len(ax)
     # A single-cell grid means the incumbent is pinned with no neighbours to try.
-    if n_combos <= 1 or n_combos > max_combos:
+    cell_cap = int(
+        max_combos
+        if max_combos is not None
+        else (_DIRECT_MAX_COMBOS if direct else _SUBNLP_MAX_COMBOS)
+    )
+    if n_combos <= 1 or n_combos > cell_cap:
         return None
 
     if evaluator is None:
@@ -1408,46 +1499,64 @@ def integer_box_search(
     # ``max_combos``, so this only ever trims a large box — but it trims it at the
     # same cell on every machine. ``deadline`` (the caller's ``time_limit``) stays
     # as a backstop. Both budgets off => the legacy ``time_budget`` wall gate.
-    if solve_budget is None:
-        from discopt import solver_tuning as _st
+    # #1193: the direct path spends *evaluations*, not NLP solves, so it is
+    # budgeted in the cheap currency. #912 keeps the two separate on purpose --
+    # their cost ratio varies 27x across the corpus and one number cannot price
+    # both -- so charging a 0.014 ms cell against the 128-solve budget would
+    # throttle it by a factor of ~1000 for no reason.
+    if direct:
+        if eval_budget is None:
+            from discopt import solver_tuning as _st
 
-        solve_budget = max(1, round(_BOX_BUDGET_RATIO * _st.current().ils_solve_budget))
-    if int(solve_budget) > 0:
-        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=deadline, clock=_now)
+            eval_budget = max(2, round(_BOX_BUDGET_RATIO * _st.current().ils_eval_budget))
+        budget = _box_work_budget(EVAL, int(eval_budget), time_budget, deadline)
     else:
-        _wall = _now() + max(0.0, time_budget)
-        budget = WorkBudget(
-            None, deadline=_wall if deadline is None else min(_wall, deadline), clock=_now
-        )
+        if solve_budget is None:
+            from discopt import solver_tuning as _st
+
+            solve_budget = max(1, round(_BOX_BUDGET_RATIO * _st.current().ils_solve_budget))
+        budget = _box_work_budget(NLP_SOLVE, int(solve_budget), time_budget, deadline)
     best: Optional[tuple[np.ndarray, float]] = None
     for combo in combos:
         if budget.exhausted():
             break
         if combo == center_key:
             continue  # the incumbent's own cell — nothing to improve on
-        # Seed from the nearest already-solved feasible neighbour (smallest L1
-        # gap), falling back to the incumbent's continuous values.
-        seed_src = x_inc
-        best_gap = None
-        for key, cont in cont_at.items():
-            gap = sum(abs(combo[k] - key[k]) for k in range(n_int))
-            if best_gap is None or gap < best_gap:
-                best_gap, seed_src = gap, cont
-        seed = seed_src.copy()
+        if direct:
+            # No continuous slots, so ``cont_at`` propagates nothing and its
+            # nearest-feasible scan would cost O(cells) per cell — quadratic over a
+            # grid whose whole point is that it is large.
+            seed = x_inc.copy()
+        else:
+            # Seed from the nearest already-solved feasible neighbour (smallest L1
+            # gap), falling back to the incumbent's continuous values.
+            seed_src = x_inc
+            best_gap = None
+            for key, cont in cont_at.items():
+                gap = sum(abs(combo[k] - key[k]) for k in range(n_int))
+                if best_gap is None or gap < best_gap:
+                    best_gap, seed_src = gap, cont
+            seed = seed_src.copy()
         for k, j in enumerate(int_idx):
             seed[j] = float(combo[k])
-        budget.charge(NLP_SOLVE)
-        found = subnlp(
-            model,
-            seed,
-            backend=backend,
-            nlp_options=nlp_options,
-            evaluator=evaluator,
-            integer_tol=integer_tol,
-            feas_tol=feas_tol,
-        )
+        if direct:
+            # One constraint-vector evaluation plus one objective evaluation.
+            budget.charge(EVAL, 2)
+            found = _finalize_candidate(evaluator, seed, int_mask, integer_tol, feas_tol)
+        else:
+            budget.charge(NLP_SOLVE)
+            found = subnlp(
+                model,
+                seed,
+                backend=backend,
+                nlp_options=nlp_options,
+                evaluator=evaluator,
+                integer_tol=integer_tol,
+                feas_tol=feas_tol,
+            )
         if found is not None:
-            cont_at[combo] = np.asarray(found[0]).copy()
+            if not direct:
+                cont_at[combo] = np.asarray(found[0]).copy()
             if best is None or found[1] < best[1]:
                 best = (np.asarray(found[0]).copy(), float(found[1]))
     return best
