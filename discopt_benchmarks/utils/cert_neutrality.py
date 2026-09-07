@@ -103,6 +103,7 @@ def _objective_violation(
     oracle: dict[str, float] | None,
     obj_tol: float,
     obj_rtol: float,
+    new_certified: bool = True,
 ) -> NeutralityViolation | None:
     """Decide whether the certified objective drift ``nb -> no`` is a violation.
 
@@ -117,6 +118,33 @@ def _objective_violation(
       more than the correctness tolerance. This never masks a wrong answer — it only
       stops flagging a sound, tolerance-accurate drift (e.g. one that lands closer to
       or exactly on the true optimum) as a soundness fault.
+
+    ``new_certified`` says whether the new row actually carries a certificate
+    (``status == "optimal"``). **Only a certified row can carry a FALSE one.** An
+    uncertified row reports an *incumbent*, and an incumbent above the true optimum
+    is the expected shape of an unclosed gap, not a wrong answer — so bracketing it
+    against the oracle asks the wrong question and answers it "soundness failure".
+    ``graduation_gate`` already states this rule for its own control-panel drift
+    check ("Only a certified row carries a certificate ... so it is skipped"); this
+    function did not implement it, and the two disagreed.
+
+    Measured on the vendored cert panel at half budget (#1187): ``nvs05`` returned
+    ``feasible`` with objective ``1107.8904814191037`` in the flag-OFF control and
+    ``1107.8904814191037`` in the ``root_fixpoint`` arm — the same number to the last
+    bit — and this function reported a soundness-class ``FALSE CERTIFICATE`` against
+    the true optimum ``5.4709``. ``nvs22`` did the same at ``33.55166``. Two
+    identical numbers cannot differ in behaviour; what the check was reading was
+    whether the row *finished*, which the runner decides, not the flag. That is the
+    "the bar measures the runner" failure this repo names elsewhere, and it is a
+    plausible source of the graduation gate's arm failures, which hit a different
+    subset of arms on each run of identical code.
+
+    The soundness check keeps full strength where a certificate exists: a row with
+    ``status == "optimal"`` whose objective disagrees with the oracle is still a
+    false certificate and still fails. A certificate the run *lost*
+    (``optimal -> feasible``) is caught by the ``status`` check and, when the
+    objective goes to ``None``, by the lost-certificate branch in
+    :func:`check_neutrality` — neither is affected here.
     """
     if regime != "bound_changing":
         if abs(no - nb) > obj_tol + obj_rtol * abs(nb):
@@ -125,6 +153,13 @@ def _objective_violation(
             )
         return None
     ctol = CORRECTNESS_ATOL + CORRECTNESS_RTOL * abs(nb)
+    if not new_certified:
+        # No certificate, so no false certificate. The run stopped with an open gap;
+        # its incumbent is bounded by nothing and is not a claim about the optimum.
+        # The genuinely soundness-class facts about such a row -- that it LOST a
+        # certification the reference had -- are raised by the caller's ``status``
+        # check and its lost-certificate branch, not here.
+        return None
     opt = (oracle or {}).get(inst)
     if opt is not None:
         # Genuine soundness: the certified value must agree with the TRUE optimum to
@@ -313,7 +348,14 @@ def check_neutrality(
             violations.append(NeutralityViolation(inst, "objective", f"objective {nb!r} -> {no!r}"))
         else:
             ov = _objective_violation(
-                inst, nb, no, regime=regime, oracle=oracle, obj_tol=obj_tol, obj_rtol=obj_rtol
+                inst,
+                nb,
+                no,
+                regime=regime,
+                oracle=oracle,
+                obj_tol=obj_tol,
+                obj_rtol=obj_rtol,
+                new_certified=new.get("status") == "optimal",
             )
             if ov is not None:
                 violations.append(ov)

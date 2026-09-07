@@ -253,3 +253,64 @@ def test_a_failing_arm_names_the_rows_that_failed(capsys):
         "the report fires on a clean arm — it would print on every green run and "
         "so prove nothing when it prints on a red one"
     )
+
+
+def test_an_uncertified_incumbent_is_not_a_false_certificate():
+    """An incumbent above the optimum is an open gap, not a wrong certificate.
+
+    ``_objective_violation`` bracketed EVERY row's objective against the oracle
+    and labelled a disagreement ``FALSE CERTIFICATE`` — including rows that never
+    certified. A ``feasible`` row holds an incumbent, and an incumbent sitting
+    above the true optimum is the *expected* shape of an unclosed gap.
+
+    Measured on the vendored cert panel at half budget: ``nvs05`` came back
+    ``feasible`` with objective ``1107.8904814191037`` in BOTH arms — the same
+    number to the last bit, the flag having changed nothing — and the comparison
+    reported a soundness-class violation against the true optimum ``5.47``. Same
+    for ``nvs22`` (``33.55166`` in both arms). A guard that hard-fails on two
+    identical numbers is not measuring the flag; it is measuring whether the row
+    finished, which is what the runner decides.
+
+    ``graduation_gate`` already states the correct rule for its own control-panel
+    drift check — "Only a certified row carries a certificate ... so it is
+    skipped" — and this function did not implement it.
+    """
+    oracle = {"nvs05": 5.470934108225147}
+    incumbent = {
+        "nvs05": {"status": "feasible", "objective": 1107.8904814191037, "node_count": 111}
+    }
+    # Both arms uncertified and IDENTICAL: nothing here is attributable to the flag.
+    viol = check_neutrality(incumbent, incumbent, regime="bound_changing", oracle=oracle)
+    kinds = [v.kind for v in viol]
+    assert "objective" not in kinds, (
+        f"an uncertified incumbent was called a false certificate: "
+        f"{[(v.instance, v.kind, v.detail) for v in viol]}"
+    )
+
+    # The guard must KEEP full strength where a certificate really exists: the same
+    # wrong number, but certified, is a genuine false certificate and must fail.
+    certified = {"nvs05": {"status": "optimal", "objective": 1107.8904814191037, "node_count": 111}}
+    viol_cert = check_neutrality(certified, certified, regime="bound_changing", oracle=oracle)
+    assert any(v.kind == "objective" for v in viol_cert), (
+        "a CERTIFIED objective disagreeing with the true optimum must still be a "
+        "false certificate — the fix must not weaken the soundness check"
+    )
+    assert "FALSE CERTIFICATE" in " ".join(v.detail for v in viol_cert)
+
+
+def test_a_lost_certificate_is_still_caught_after_the_incumbent_fix():
+    """The fix must not swallow the case it superficially resembles.
+
+    ``optimal`` -> ``feasible`` is a certification the run LOST, and stays a
+    violation on both the status and the objective axis. Only the *labelling* of
+    an uncertified incumbent as a false certificate is removed.
+    """
+    base = {"x": {"status": "optimal", "objective": 10.0, "node_count": 5}}
+    lost_value = {"x": {"status": "feasible", "objective": None, "node_count": 5}}
+    kinds = {v.kind for v in check_neutrality(lost_value, base, regime="bound_changing")}
+    assert kinds == {"status", "objective"}, kinds
+
+    # ... and when it still reports a number, the lost *status* is the violation.
+    lost_status = {"x": {"status": "feasible", "objective": 10.0, "node_count": 5}}
+    kinds2 = {v.kind for v in check_neutrality(lost_status, base, regime="bound_changing")}
+    assert "status" in kinds2, kinds2
