@@ -613,34 +613,12 @@ class Expression:
     # ``ValueError: Input operand 1 does not have enough dimensions``.
     __array_ufunc__ = None
 
-    # ``__slots__`` throughout the Expression hierarchy: ~85% of every node was
-    # its instance ``__dict__`` (measured: IndexExpression 48 B object + 272 B
-    # dict, BinaryOp 48 + 280, Constant 48 + 272), and a model holds ~6 nodes per
-    # constraint instance. Slots delete that dict. Every class below therefore
-    # declares ``__slots__``; a single un-slotted class anywhere in the chain
-    # silently restores ``__dict__`` for the whole subtree and gives the memory
-    # straight back, so a new subclass MUST declare one (empty is fine).
-    #
-    # The slot names were derived empirically, not by reading ``__init__``: a
-    # ``__setattr__`` recorder ran over the smoke suite and dumped every
-    # attribute ever set on each class. That is how ``Variable._builder_idx``
-    # (assigned from ``Model``, never in ``Variable.__init__``) got into the list.
-    #
-    # ``_shape`` is a slot rather than the class-level ``_UNSET_SHAPE`` default it
-    # replaces -- Python forbids a slot and a class variable of the same name.
-    # This is behaviour-preserving because every read goes through
-    # ``getattr(node, "_shape", _UNSET_SHAPE)`` (see ``_known_shape``), and
-    # ``getattr``-with-default swallows the ``AttributeError`` an unset slot
-    # raises, yielding the same sentinel the class default used to supply.
-    # ``_scalarize_shape`` (memoized by ``_relax/scalarize``) and
-    # ``Variable._builder_idx`` are read the same guarded way -- via
-    # ``getattr(..., default)`` and ``hasattr`` respectively -- so an unset slot
-    # is likewise indistinguishable from the previous "attribute absent" state.
-    #
-    # ``__weakref__`` is kept on the base: nothing in-tree weakrefs an
-    # Expression today, but these are public API objects and 8 bytes against
-    # ~276 saved is cheap insurance.
-    __slots__ = ("_shape", "_scalarize_shape", "__weakref__")
+    # Cached static shape for composite nodes (populated at construction by
+    # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
+    # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
+    # ("computed, unknown") is distinguishable. Leaf nodes (Variable/Constant/
+    # Parameter) carry their own ``.shape`` and are handled in ``_known_shape``.
+    _shape: Any = _UNSET_SHAPE
 
     def __add__(self, other):
         return BinaryOp("+", self, _wrap(other))
@@ -832,8 +810,6 @@ class Expression:
 class Constant(Expression):
     """A numeric constant in the expression DAG."""
 
-    __slots__ = ("value",)
-
     def __init__(self, value: Union[float, int, np.ndarray]):
         if isinstance(value, np.ndarray):
             self.value = value.astype(np.float64)
@@ -866,17 +842,6 @@ class Variable(Expression):
     ub : numpy.ndarray
         Element-wise upper bounds.
     """
-
-    __slots__ = (
-        "_index",
-        "_size",
-        "_builder_idx",
-        "lb",
-        "model",
-        "name",
-        "ub",
-        "var_type",
-    )
 
     # __array_ufunc__ = None is inherited from Expression.
 
@@ -1007,11 +972,6 @@ def _integer_index_out_of_range(base_shape: tuple[int, ...], idx):
 class IndexExpression(Expression):
     """Result of indexing into an array variable: x[i] or x[0, 1]."""
 
-    __slots__ = (
-        "base",
-        "index",
-    )
-
     def __init__(self, base: Expression, index):
         self.base = base
         self.index = index
@@ -1095,12 +1055,6 @@ def _broadcast_shapes(
 class BinaryOp(Expression):
     """Binary operation: a op b."""
 
-    __slots__ = (
-        "left",
-        "op",
-        "right",
-    )
-
     def __init__(self, op: str, left: Expression, right: Expression):
         self.op = op
         self.left = left
@@ -1122,11 +1076,6 @@ class BinaryOp(Expression):
 
 class UnaryOp(Expression):
     """Unary operation: op(a)."""
-
-    __slots__ = (
-        "op",
-        "operand",
-    )
 
     def __init__(self, op: str, operand: Expression):
         self.op = op
@@ -1178,11 +1127,6 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
 
 class FunctionCall(Expression):
     """Named function call: exp(x), log(x), sin(x), etc."""
-
-    __slots__ = (
-        "args",
-        "func_name",
-    )
 
     def __init__(self, func_name: str, *args: Expression):
         self.func_name = func_name
@@ -1249,12 +1193,6 @@ class CustomCall(Expression):
     Built via :func:`custom`; do not instantiate directly in user code.
     """
 
-    __slots__ = (
-        "args",
-        "fn",
-        "name",
-    )
-
     def __init__(self, fn: Callable, *args: Expression, name: Optional[str] = None):
         self.fn = fn
         self.args = tuple(args)
@@ -1268,11 +1206,6 @@ class CustomCall(Expression):
 class MatMulExpression(Expression):
     """Matrix multiplication: A @ x."""
 
-    __slots__ = (
-        "left",
-        "right",
-    )
-
     def __init__(self, left: Expression, right: Expression):
         self.left = left
         self.right = right
@@ -1283,11 +1216,6 @@ class MatMulExpression(Expression):
 
 class SumExpression(Expression):
     """Summation over expressions."""
-
-    __slots__ = (
-        "axis",
-        "operand",
-    )
 
     def __init__(self, operand: Expression, axis: Optional[int] = None):
         self.operand = operand
@@ -1301,8 +1229,6 @@ class SumExpression(Expression):
 
 class SumOverExpression(Expression):
     """Sum of expr(i) for i in index_set — the indexed summation pattern."""
-
-    __slots__ = ("terms",)
 
     def __init__(self, terms: list[Expression]):
         self.terms = terms
@@ -2265,12 +2191,6 @@ class Parameter(Expression):
     >>> m.minimize(price * x[0] + cost * x[1])
     >>> result = m.solve()
     """
-
-    __slots__ = (
-        "model",
-        "name",
-        "value",
-    )
 
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
         self.name = name
