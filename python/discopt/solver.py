@@ -2337,57 +2337,6 @@ def _make_evaluator(model: Model):
     return build_evaluator(model, _jax_evaluator)
 
 
-def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
-    """Estimate alphaBB convexification parameters via finite-difference Hessians.
-
-    Samples random points in [lb, ub], computes the FD Hessian at each,
-    finds the most negative eigenvalue, and returns alpha = max(0, -lambda_min/2 * 1.5 + 1e-6).
-    """
-    n = len(lb)
-    rng = np.random.RandomState(123)
-
-    # Clip infinite bounds for sampling
-    lb_clip = np.clip(lb, -1e4, 1e4)
-    ub_clip = np.clip(ub, -1e4, 1e4)
-    span = ub_clip - lb_clip
-    # Avoid zero-width dimensions
-    span = np.maximum(span, 1e-8)
-
-    eps = 1e-6
-    global_min_eig = 0.0
-
-    for _ in range(n_samples):
-        x = lb_clip + rng.uniform(size=n) * span
-        # Central-difference Hessian
-        hess = np.empty((n, n), dtype=np.float64)
-        for i in range(n):
-            for j in range(i, n):
-                x_pp = x.copy()
-                x_pm = x.copy()
-                x_mp = x.copy()
-                x_mm = x.copy()
-                x_pp[i] += eps
-                x_pp[j] += eps
-                x_pm[i] += eps
-                x_pm[j] -= eps
-                x_mp[i] -= eps
-                x_mp[j] += eps
-                x_mm[i] -= eps
-                x_mm[j] -= eps
-                fpp = evaluator.evaluate_objective(x_pp)
-                fpm = evaluator.evaluate_objective(x_pm)
-                fmp = evaluator.evaluate_objective(x_mp)
-                fmm = evaluator.evaluate_objective(x_mm)
-                h = (fpp - fpm - fmp + fmm) / (4.0 * eps * eps)
-                hess[i, j] = h
-                hess[j, i] = h
-        eigs = np.linalg.eigvalsh(hess)
-        global_min_eig = min(global_min_eig, float(eigs[0]))
-
-    alpha_scalar = max(0.0, -global_min_eig / 2.0 * 1.5 + 1e-6)
-    return np.full(n, alpha_scalar)
-
-
 def _alphabb_node_box(model, node_lb, node_ub):
     """Build the ``{Variable: Interval}`` box ``rigorous_alpha`` expects.
 

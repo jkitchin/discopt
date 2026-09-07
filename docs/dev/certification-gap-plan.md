@@ -520,6 +520,32 @@ From `scip-gap-closing-plan.md` (all measured):
 
 ### C4 — Structure is lost before the relaxation is ever built (multiplier on C1–C3)
 
+> **CLOSED (2026-09-07). All three items below are stale; C4 is no longer a gap.**
+> Verified against the current tree:
+> (1) *CSE/hash-consing* — `ExprArena` is content-addressed via `StructuralKey`
+> (`expr.rs:299-395`) and interning is **enabled on both production build paths**:
+> the `.nl` parser (`nl_parser.rs:788`) and the Python model → `ModelRepr` bridge
+> (`expr_bindings.rs:1284`). The `expr.rs:266` citation below predates it.
+> (2) *AMPL defined variables* — V segments are **inlined, not discarded**
+> (C-7; `nl_parser.rs:1137,1686,3349`, with regression tests
+> `test_defined_variable_inlined_and_evaluated` / `..._chained_reference`).
+> (3) *Quadratic/structure extraction in the IR* — closed by
+> `ExprArena::quadratic_form` (`expr.rs`), which emits the symbolic
+> constant/linear/quadratic coefficients the `max_degree` walk already computes,
+> in `O(nodes)`, exposed as `objective_quadratic_form` /
+> `constraint_quadratic_form` and consumed by `_relax/problem_classifier.py`.
+> It replaced a finite-difference probe costing one model evaluation per variable
+> *pair*: over the 150-instance MINLPLib MIQP family (BQP/IQP/MBQP/MIQP)
+> extraction goes from **71,330 s to 5.99 s**, with zero declines and worst
+> relative error 6.9e-14 over 750 point checks. It also removes the #866
+> cancellation class at its source — the probe identity
+> `f(e_i+e_j) - f(e_i) - f(e_j) + f(0)` is a difference of nearly-equal floats,
+> and on `min (x-1e10)^2` it returns `Q = 0` and certifies a false optimum.
+> Convexity detection remains Python-side; that is unchanged and is not what
+> C4's "only degree checks" referred to.
+
+*Original text, superseded (kept per §0.4):*
+
 - **No CSE/hash-consing** in the Rust expression arena (`expr.rs:266` — `add` never
   dedups); the `.nl` parser **discards AMPL defined variables** (V segments — AMPL's
   own DAG sharing), so shared subexpressions are duplicated into the DAG, the JAX
@@ -550,8 +576,8 @@ heuristic suite (incumbents are not the problem — the *proof* is).
 | Per-node cheap reduction (FBBT+cutoff, DBBT/marginals) | every node                          | components exist, mostly root-only | **wiring**            |
 | Aggregation / c-MIR cuts                               | workhorse (97–169× nodes)           | absent (current cuts net-negative) | **missing + quality** |
 | Cut pool w/ aging on default path                      | yes                                 | opt-in path only                   | wiring                |
-| CSE / defined-variable sharing                         | preserved & exploited               | discarded                          | **missing**           |
-| Quadratic/structure recognition in core                | yes                                 | Python-side convexity only         | missing               |
+| CSE / defined-variable sharing                          | preserved & exploited               | preserved (interned + V inlined)   | closed (see C4)       |
+| Quadratic/structure recognition in core                | yes                                 | `quadratic_form` in the arena      | closed (see C4)       |
 | Root-gap instrumentation                               | n/a (internal)                      | schema exists, never populated     | missing               |
 | Parallel tree search                                   | partial                             | no                                 | out of scope here     |
 
