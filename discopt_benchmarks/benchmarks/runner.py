@@ -65,6 +65,13 @@ class BenchmarkConfig:
     solvers: list[SolverConfig] = None
     instance_filter: dict | None = None
     output_dir: Path = Path("reports")
+    # Directory holding the .nl files for this panel. ``_find_nl_file`` has always
+    # consulted ``config.data_dir``, but the field did not exist, so the lookup was
+    # dead code and every run silently fell back to the 61-file in-repo corpus --
+    # including ``--use-cache`` runs whose instances were selected from the ~1700-file
+    # MINLPLib cache. A 150-instance MIQP panel then reported "12/150" for BOTH
+    # solvers: not a result, a size-biased subset of whatever happened to be vendored.
+    data_dir: Path | None = None
     # Opt-in bound-trajectory recording (cert:T0.2). Default OFF: attaching a
     # node_callback disables discopt's GP fast path (solver.py auto-GP probe),
     # which would change node_count on geometric-program instances — so the
@@ -137,9 +144,14 @@ class BenchmarkRunner:
         print(f"Time limit: {self.config.time_limit}s | Memory: {self.config.memory_limit_mb}MB")
         print(f"{'=' * 70}\n")
 
-        for solver_config in self.config.solvers:
-            print(f"\n--- Solver: {solver_config.name} ---")
-            for instance_name in instances:
+        # Instance-major, solver-minor: every solver sees the same instance in the
+        # same few seconds of wall clock. The old solver-major order ran all of
+        # solver A, then all of solver B, so any drift in machine load between the
+        # two windows was charged to the solver -- the exact confound CLAUDE.md §9
+        # requires an interleaved control against. Ordering only; per-instance
+        # results are unchanged.
+        for instance_name in instances:
+            for solver_config in self.config.solvers:
                 run_times = []
                 best_result = None
 
@@ -210,7 +222,7 @@ class BenchmarkRunner:
                 if gap is not None:
                     gap_str = f"gap={gap:.1%}"
 
-                parts = [f"  {icon} {instance_name:30s}"]
+                parts = [f"  {icon} {instance_name:30s} {solver_config.name:<10s}"]
                 if obj_str:
                     parts.append(f"{obj_str:>16s}")
                 if gap_str:

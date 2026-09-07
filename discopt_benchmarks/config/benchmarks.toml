@@ -34,6 +34,12 @@ instance_list_inline = [
 ]
 time_limit_seconds = 60
 
+[suites.miqp]
+description = "MIQP class: every MINLPLib BQP/IQP/MBQP/MIQP instance (quadratic objective, linear constraints, discrete vars) -- 150 instances, all with a .solu oracle"
+sources = ["minlplib"]
+instance_list = "config/suites/miqp.txt"
+time_limit_seconds = 60
+
 [suites.phase1]
 description = "Phase 1 milestone: small instances, ≤10 vars"
 sources = ["minlplib"]
