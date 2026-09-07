@@ -299,7 +299,7 @@ def test_routed_engine_gate_refuses_an_off_row_incumbent(monkeypatch):
     m.subject_to(x[0] + x[1] >= 3)
     m.subject_to(x[0] <= 4 * y)
 
-    real_solve = _rust.solve_milp_py
+    real_solve = _rust.solve_milp_csc_py
     state = {"applied": False}
 
     def _off_row_solve(*args, **kwargs):
@@ -316,7 +316,7 @@ def test_routed_engine_gate_refuses_an_off_row_incumbent(monkeypatch):
             state["applied"] = True
         return status, sol, obj, bound, nodes, iters
 
-    monkeypatch.setattr(_rust, "solve_milp_py", _off_row_solve)
+    monkeypatch.setattr(_rust, "solve_milp_csc_py", _off_row_solve)
 
     import time as _time
 
