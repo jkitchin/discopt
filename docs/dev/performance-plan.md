@@ -5934,3 +5934,105 @@ adjacent to what the gate claims to prove:
 The lesson generalizes falsification 6's: *gate on the mechanism you can count* —
 and make sure the thing you count is the mechanism, not a downstream symptom of
 it. A counter one step off the channel reads as rigor while proving nothing.
+
+## 30. Model construction: the numpy shape probe was the win; `__slots__` was not (2026-09-07)
+
+Entry question: discopt's Python modeling layer builds a 40-form × 5,000 =
+200,000-instance model in ~5 s and ~1.74 M live Python objects. How much of that
+is recoverable *without* the template-IR representation change?
+
+**Attribution first** (20 000 instances of one form, min of 3 reps):
+
+| stage | wall | per instance |
+|---|---|---|
+| model setup (sets + vars) | 0.005 s | — |
+| expression tree only (`x*y`) | 0.254 s | 12.70 µs |
+| + `Constraint` wrapper (`<= 4.0`) | 0.329 s | 16.43 µs |
+| full `m.constraint(...)` | 0.375 s | 18.75 µs |
+
+**89% of construction is inside expression-node creation**, not the indexed-family
+bookkeeping around it (11%). So the target is the node constructors.
+
+### What worked: pure-integer index shapes (shipped)
+
+`Expression.__getitem__` → `IndexExpression.__init__` → `_index_result_shape`
+ran `np.broadcast_to(np.zeros(()), base_shape)` and indexed the resulting view —
+**once per `x[i]`, on every element of every indexed family** — purely to
+re-derive that a scalar index into a 1-D variable has shape `()`. Answering
+pure-integer indexing arithmetically (`k` integer axes consumed leaves
+`base_shape[k:]`) gave, interleaved in one process with a marker assertion:
+
+| model | before | after | |
+|---|---|---|---|
+| 20k-instance bilinear family, 9 reps | 18.49 µs/inst | 9.64 µs/inst | **1.92×** (pooled sd 0.016 s) |
+| 40 forms × 5 000 = 200k rows, 5 reps | 27.92 µs/inst | 21.21 µs/inst | **1.32×** |
+
+Bound-neutral (CLAUDE.md §5): paired LP/MILP/NLP/MINLP solves bit-identical on
+status, objective and `node_count`. `bool` is excluded from the fast path —
+`isinstance(True, int)` holds but numpy treats a scalar bool as a *mask*
+(`zeros((5,))[True].shape == (1, 5)`), so admitting it would return `()` and
+silently mis-shape the node, with no exception.
+
+### What did not work: `__slots__` (implemented, measured, reverted)
+
+**The hypothesis was built on a bad number and is retracted.** `__slots__` was
+scoped on "85% of every node is its instance `__dict__`", from
+`sys.getsizeof(inst.__dict__)` = 280 B against a 48 B object. That figure is
+wrong: CPython uses **key-sharing (split-table) instance dicts**, so the key
+table lives once on the class and `getsizeof` re-counts it for *every* instance.
+`tracemalloc` on a 3-attribute class puts the real cost at **96 B/instance with
+a dict, 64 B with slots — a 1.5× per-object ratio, not 5×.**
+
+Measured on the 200k model, 20 alternating rounds per arm, fresh process each,
+with a marker assertion that each arm loaded the code it claimed:
+
+| | no slots | slots | |
+|---|---|---|---|
+| retained RSS | 203.4 MB (sd 0.00) | 195.6 MB (sd 0.02) | **−3.8%** (7.8 MB) |
+| build wall | 4.078 s (sd 0.192) | 3.947 s (sd 0.275) | +3.2%, Welch t = 1.74, **95% CI [−0.4%, +6.8%]** |
+
+The time interval **crosses zero at n = 20 per arm** — no demonstrable speedup.
+The memory effect is real but small. Against that, `__slots__` imposes a
+permanent invariant on the hierarchy that fails *silently*: a future
+`Expression` subclass that omits it restores `__dict__` for its whole subtree
+with no error and no failing test. Sound but not helpful — the
+`DISCOPT_CUT_INHERIT` disposition — so it was **reverted**, measurement recorded
+here.
+
+One thing the attempt did earn: slot names were derived by running a
+`__setattr__` recorder over the smoke suite rather than by reading `__init__`,
+and that caught `Variable._builder_idx` (assigned from `Model`, never in
+`Variable.__init__`), which an AST pass over the class bodies had missed. If
+this is ever revisited, derive the attribute set empirically again.
+
+### Where the memory actually is (the durable finding)
+
+Retained allocation by site, 40 000-instance model, **944 B per constraint
+instance**:
+
+| B/inst | site | what |
+|---|---|---|
+| **182** | `core.py:841` | `Constant.value = np.asarray(value, dtype=np.float64)` |
+| 160 | `core.py:747` | `IndexExpression(self, idx)` |
+| 126 | `core.py:1286` | `Constant(x)` in `_wrap` |
+| 110 | `core.py:652` | `BinaryOp("-")` from `__le__` normalization |
+| 72 | `core.py:684` | `Constraint(...)` |
+| 49 | `core.py:3652` | `c.name = f"{name}[{key_label(member)}]"` |
+
+**Every scalar literal in a model becomes a numpy 0-d array** where a Python
+float is 24 B — 182 B/instance, 19% of retained memory, roughly 4× everything
+`__slots__` recovered. That is the next memory target, not slots. It is a wider
+change (consumers read `.value` expecting an ndarray) and needs its own scoping.
+The 49 B/instance of constraint *name strings* — debugging metadata materialized
+for all 200 000 rows — is a second, cheaper candidate.
+
+### Ceiling for this approach
+
+Construction cost is otherwise flat and diffuse across `_known_shape` (called 4×
+per `x[i]`), `_integer_index_out_of_range`, and the node constructors — no
+remaining single hotspot. Python-level work of this kind gets ~1.3–1.9× on time
+and a few percent on memory. For reference, `oximo` (Rust, arena-allocated
+expression nodes, same per-instance construction model) builds the identical
+200k-instance model in **0.132 s / 41 MB** against discopt's ~4 s / ~196 MB.
+That remaining gap is representational, not a constant factor, and is what the
+template IR would address.
