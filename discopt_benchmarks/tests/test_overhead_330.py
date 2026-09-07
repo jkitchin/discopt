@@ -36,7 +36,12 @@ def _require(path: str) -> None:
 def test_repr_qp_extraction_matches_autodiff():
     """The fast repr extractor and the autodiff fallback must agree on Q, c, A_eq
     for a ``from_nl`` MIQP (``_builder is None``) — the fast path is a pure
-    speedup, not a behaviour change."""
+    speedup, not a behaviour change.
+
+    The fast rung was a numeric probe when this test was written and is now the
+    symbolic arena walk; the property under test did not change, and the
+    agreement is exact rather than approximate on both arms now.
+    """
     _require(_ALAN)
     model = dm.from_nl(_ALAN)
     assert getattr(model, "_builder", None) is None  # from_nl: no fast-API builder
@@ -45,12 +50,12 @@ def test_repr_qp_extraction_matches_autodiff():
     with pytest.raises((pc._NotQuadraticError, pc._NotLinearError)):
         pc.extract_qp_data_algebraic(model)
 
-    fast = pc._extract_qp_data_from_repr(model)
+    fast = pc._extract_qp_data_symbolic(model)
     slow = pc._extract_qp_data_autodiff(model)
-    assert np.allclose(np.asarray(fast.Q), np.asarray(slow.Q), atol=1e-9)
+    assert np.allclose(pc.dense_Q(fast.Q), pc.dense_Q(slow.Q), atol=1e-9)
     assert np.allclose(np.asarray(fast.c), np.asarray(slow.c), atol=1e-9)
-    assert np.asarray(fast.A_eq).shape == np.asarray(slow.A_eq).shape
-    assert np.allclose(np.asarray(fast.A_eq), np.asarray(slow.A_eq), atol=1e-9)
+    assert pc.dense_A(fast.A_eq).shape == pc.dense_A(slow.A_eq).shape
+    assert np.allclose(pc.dense_A(fast.A_eq), pc.dense_A(slow.A_eq), atol=1e-9)
 
 
 @pytest.mark.regression
@@ -61,8 +66,8 @@ def test_extract_qp_data_prefers_repr_for_from_nl():
     _require(_ALAN)
     model = dm.from_nl(_ALAN)
     got = pc.extract_qp_data(model)
-    ref = pc._extract_qp_data_from_repr(model)
-    assert np.allclose(np.asarray(got.Q), np.asarray(ref.Q), atol=1e-12)
+    ref = pc._extract_qp_data_symbolic(model)
+    assert np.allclose(pc.dense_Q(got.Q), pc.dense_Q(ref.Q), atol=1e-12)
     assert np.allclose(np.asarray(got.c), np.asarray(ref.c), atol=1e-12)
 
 

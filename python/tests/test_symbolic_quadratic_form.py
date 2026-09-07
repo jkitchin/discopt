@@ -1,10 +1,12 @@
 """Symbolic (analytical, sparse) extraction of the objective's quadratic form.
 
-The QP extractor recovered ``Q`` by finite-difference probing --
-one model evaluation per variable *pair*, O(|support|^2). ``ModelRepr`` already
-holds the full expression DAG and Rust already walks it to answer
-``is_quadratic``; these tests cover the walk that emits the coefficients that
-walk sees, as a sparse COO triplet, in O(nodes).
+The QP extractor recovered ``Q`` by finite-difference probing -- one model
+evaluation per variable *pair*, O(|support|^2). ``ModelRepr`` already holds the
+full expression DAG and Rust already walks it to answer ``is_quadratic``; these
+tests cover the walk that emits the coefficients that walk sees, as a sparse COO
+triplet, in O(nodes). The probe is now deleted and this walk is the first rung of
+every extraction ladder, so these are no longer tests of an alternative -- they
+are tests of the default path.
 
 Two properties matter and both are asserted here:
 
@@ -14,7 +16,12 @@ Two properties matter and both are asserted here:
    floats; on ``min (x - 1e10)**2`` it loses the quadratic term entirely and
    certified a false optimum (#866). The symbolic walk must get that case right.
 2. **Cost.** The walk is O(nodes), and the DAG is orders of magnitude smaller
-   than the pair space it replaces.
+   than the pair space it replaced.
+
+Where a test used to compare the walk against the probe, it now compares the walk
+against the **AD tape** -- the other analytical arm, and the rung the ladder falls
+through to. Two independent exact derivations of the same coefficients is a
+stronger cross-check than agreeing with a differencing scheme was.
 """
 
 import discopt.modeling as dm
@@ -113,9 +120,11 @@ def test_declines_rather_than_approximating(build):
     assert _repr_of(m).objective_quadratic_form() is None
 
 
-def test_extractor_agrees_with_the_probe_it_replaces():
-    """Where the probe succeeds, the two must agree -- this is the
-    bound-neutrality check for the models the probe handles correctly."""
+def test_extractor_agrees_with_the_autodiff_rung():
+    """The two rungs of the ladder that can both handle this model must agree
+    exactly. This is the bound-neutrality check: the walk is what runs, the
+    autodiff rung is what runs when the walk declines, and a disagreement means
+    the answer depends on which one happened to fire."""
     m = dm.Model()
     xs = [m.continuous(f"x{i}", lb=-3, ub=3) for i in range(6)]
     expr = sum((i + 1) * xs[i] * xs[(i + 3) % 6] for i in range(6))
@@ -124,25 +133,64 @@ def test_extractor_agrees_with_the_probe_it_replaces():
     m.minimize(expr)
 
     symbolic = PC._extract_qp_data_symbolic(m)
-    probe = PC._extract_qp_data_from_repr(m)
+    autodiff = PC._extract_qp_data_autodiff(m)
 
-    np.testing.assert_allclose(PC.dense_Q(symbolic.Q), PC.dense_Q(probe.Q), rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(symbolic.c, probe.c, rtol=1e-12, atol=1e-12)
-    assert symbolic.obj_const == pytest.approx(probe.obj_const, rel=1e-12)
+    np.testing.assert_allclose(
+        PC.dense_Q(symbolic.Q), PC.dense_Q(autodiff.Q), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(symbolic.c, autodiff.c, rtol=1e-12, atol=1e-12)
+    assert symbolic.obj_const == pytest.approx(autodiff.obj_const, rel=1e-12)
 
 
-def test_dispatcher_uses_the_symbolic_path_only_when_enabled(monkeypatch):
-    """The flag must be read per call, not cached at import -- a cached
-    module-level bool is how a flag becomes untestable and then dead."""
-    monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "0")
-    assert PC._qp_symbolic_enabled() is False
-    monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
-    assert PC._qp_symbolic_enabled() is True
+def test_the_symbolic_rung_is_first_and_unconditional():
+    """It used to sit behind ``DISCOPT_QP_SYMBOLIC``, default-off, below a numeric
+    probe. Both the flag and the probe are gone, so the walk is what a default
+    solve runs -- and nothing may put it back behind a switch. A spy rather than a
+    result comparison: the ladder's lower rungs return the same numbers, so
+    equality alone would not notice the first rung being skipped."""
+    assert not hasattr(PC, "_qp_symbolic_enabled"), "the opt-in gate is back"
+    assert not hasattr(PC, "_extract_qp_data_from_repr"), "the numeric probe is back"
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-3, ub=3)
+    y = m.continuous("y", lb=-3, ub=3)
+    m.minimize(2 * x * x + 3 * x * y - y + 5)
+    m.subject_to(x + y <= 4)
+
+    calls = []
+    real = PC._extract_qp_data_symbolic
+
+    def _spy(model):
+        try:
+            out = real(model)
+        except Exception as exc:
+            calls.append(("declined", exc))
+            raise
+        calls.append(("returned", out))
+        return out
+
+    PC._extract_qp_data_symbolic = _spy
+    try:
+        data = PC.extract_qp_data(m)
+    finally:
+        PC._extract_qp_data_symbolic = real
+
+    assert len(calls) == 1, f"the symbolic rung ran {len(calls)} times, expected 1"
+    # Not just "it was called" -- "it produced the answer". The lower rungs return
+    # the same numbers, so a symbolic rung that raises on every quadratic
+    # objective would leave every value in this test unchanged while the walk
+    # never ran. That is not hypothetical: splitting the objective out of the
+    # constraint extractor was a fix for exactly that, and this assertion is what
+    # would have caught it. (``_assemble_qp_from_repr`` called the LP extractor
+    # for its constraints; once the LP objective arm started refusing a nonlinear
+    # objective instead of projecting it, the QP path raised on every QP.)
+    assert calls[0][0] == "returned", f"the symbolic rung declined: {calls[0][1]!r}"
+    assert PC.dense_Q(data.Q)[0, 0] == pytest.approx(4.0)
 
 
 def test_dag_is_orders_of_magnitude_smaller_than_the_pair_space():
     """The cost argument, asserted rather than asserted-in-prose: the walk is
-    O(nodes) and the probe is O(|support|^2)."""
+    O(nodes) and the probe it replaced was O(|support|^2)."""
     m = dm.Model()
     n = 120
     xs = [m.continuous(f"x{i}", lb=-1, ub=1) for i in range(n)]
@@ -159,16 +207,17 @@ def test_dag_is_orders_of_magnitude_smaller_than_the_pair_space():
 
 # ---------------------------------------------------------------------------
 # The same defect, one dimension lower and one dimension wider: the LP row
-# extractor and the quadratic *constraint* extractor were both numerical probes.
+# extractor and the quadratic *constraint* extractor were numerical probes too,
+# and are now the same arena walk.
 # ---------------------------------------------------------------------------
 
 
 class _NoEvalRepr:
     """Forwards the symbolic accessors; raises on any numerical evaluation.
 
-    This is the executed proof (S6) that the symbolic arm did the work: if the
-    extractor still touches ``evaluate_objective`` / ``evaluate_constraint``, the
-    test fails loudly instead of silently measuring the probe.
+    This is the executed proof (CLAUDE.md §6) that the symbolic arm did the work:
+    if the extractor touches ``evaluate_objective`` / ``evaluate_constraint`` at
+    all, the test fails loudly instead of silently measuring something else.
     """
 
     def __init__(self, inner):
@@ -183,10 +232,10 @@ class _NoEvalRepr:
         return self._inner.constraint_quadratic_form(i, *a, **k)
 
     def evaluate_objective(self, *a, **k):
-        raise AssertionError("fell back to the numerical probe")
+        raise AssertionError("the extractor evaluated the model")
 
     def evaluate_constraint(self, *a, **k):
-        raise AssertionError("fell back to the numerical probe")
+        raise AssertionError("the extractor evaluated the model")
 
 
 def _lp_model(n=6):
@@ -198,29 +247,49 @@ def _lp_model(n=6):
     return m
 
 
-def test_linear_rows_match_the_probe_they_replace(monkeypatch):
-    """Symbolic and probe LP extraction agree coefficient-for-coefficient."""
+def test_linear_rows_match_the_tape_jacobian():
+    """The walk's rows must equal the AD tape's Jacobian row for row.
+
+    The tape is the independent oracle here: it derives the same coefficients by
+    a different mechanism (reverse-mode AD over the compiled tape) and is the rung
+    ``extract_lp_data`` falls through to, so a disagreement is a real fork in what
+    the solver sees. Compared against the tape's Jacobian at the origin, which for
+    an affine body IS the row.
+    """
+    from discopt._tape_nlp_evaluator import try_build
+
     m = _lp_model()
     r = _repr_of(m)
     n = r.n_vars
+    tape = try_build(m)
+    assert tape is not None, "the tape declined a plain LP"
+    x0 = np.zeros(n, dtype=np.float64)
+    jac = np.asarray(tape.evaluate_jacobian(x0), dtype=np.float64)
+    body0 = np.asarray(tape.evaluate_constraints(x0), dtype=np.float64).reshape(-1)
 
     compared = 0
-    for target in [None] + list(range(r.n_constraints)):
-        monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "0")
-        probe_terms, probe_const = PC._linear_terms_from_repr(r, n, target)
-        monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
-        sym_terms, sym_const = PC._linear_terms_from_repr(r, n, target)
-        assert sym_terms == probe_terms
-        assert sym_const == probe_const
-        compared += 1 + len(probe_terms)
+    for i in range(r.n_constraints):
+        terms, const = PC._linear_terms_from_repr(r, n, i)
+        row = np.zeros(n, dtype=np.float64)
+        for j, v in terms.items():
+            row[j] = v
+        np.testing.assert_allclose(row, jac[i], rtol=1e-12, atol=1e-12)
+        assert const == pytest.approx(float(body0[i]), rel=1e-12, abs=1e-12)
+        compared += 1 + len(terms)
+
+    obj_terms, obj_const = PC._linear_terms_from_repr(r, n, None)
+    grad = np.asarray(tape.evaluate_gradient(x0), dtype=np.float64)
+    for j in range(n):
+        assert obj_terms.get(j, 0.0) == pytest.approx(float(grad[j]), rel=1e-12, abs=1e-12)
+    assert obj_const == pytest.approx(float(tape.evaluate_objective(x0)), rel=1e-12)
+    compared += 1 + n
 
     assert compared > 0, "no comparison executed"
     print(f"EXECUTED_COMPARISONS={compared}")
 
 
-def test_linear_extraction_does_not_evaluate_the_model(monkeypatch):
-    """S6: with the flag on, no unit-vector evaluation happens at all."""
-    monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
+def test_linear_extraction_does_not_evaluate_the_model():
+    """CLAUDE.md §6: no unit-vector evaluation happens at all."""
     m = _lp_model()
     guarded = _NoEvalRepr(_repr_of(m))
     terms, const = PC._linear_terms_from_repr(guarded, guarded.n_vars, 0)
@@ -229,9 +298,15 @@ def test_linear_extraction_does_not_evaluate_the_model(monkeypatch):
     assert const == -20.0
 
 
-def test_linear_extraction_falls_back_when_the_walk_declines(monkeypatch):
-    """A non-quadratic row must still extract -- via the probe, not a wrong answer."""
-    monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
+def test_a_declining_row_refuses_instead_of_projecting():
+    """A row the walk cannot prove linear must RAISE, not return its linear part.
+
+    The probe used to answer here: it evaluated ``g(e_j) - g(0)`` and returned
+    ``y``'s coefficient while silently dropping ``log(x)``, which is a wrong row
+    presented as a right one. The walk declines instead, and ``extract_lp_data``
+    falls through to the tape rung -- so the model still extracts, by an arm that
+    can actually represent it. Refusing loudly is the fix (CLAUDE.md §3).
+    """
     m = dm.Model()
     x = m.continuous("x", lb=1, ub=5)
     y = m.continuous("y", lb=1, ub=5)
@@ -239,12 +314,18 @@ def test_linear_extraction_falls_back_when_the_walk_declines(monkeypatch):
     m.subject_to(dm.log(x) + y <= 3)
     r = _repr_of(m)
     assert r.constraint_quadratic_form(0) is None, "log should decline the walk"
-    terms, _const = PC._linear_terms_from_repr(r, r.n_vars, 0)
-    assert 1 in terms  # y's linear coefficient survives the probe's projection
+
+    with pytest.raises(PC._NotQuadraticError) as exc:
+        PC._linear_terms_from_repr(r, r.n_vars, 0)
+    assert "constraint 0" in str(exc.value), str(exc.value)
 
 
-def test_quadratic_constraint_rows_match_the_probe(monkeypatch):
-    """The QCP twin: per-row Q, c, d agree between the two extractors."""
+def test_quadratic_constraint_rows_match_the_tape():
+    """The QCP twin: per-row Q, c, d agree between the walk and its fallback.
+
+    ``_tape_quadratic_coefficients`` is what runs when the walk declines a row, so
+    the two must be interchangeable. This is also where a factor-of-two convention
+    error would surface -- see that function's docstring."""
     m = dm.Model()
     x = m.continuous("x", lb=-5, ub=5)
     y = m.continuous("y", lb=-5, ub=5)
@@ -254,24 +335,26 @@ def test_quadratic_constraint_rows_match_the_probe(monkeypatch):
     r = _repr_of(m)
     n = r.n_vars
 
+    from discopt._tape_nlp_evaluator import try_build
+
+    tape = try_build(m)
+    assert tape is not None, "the tape declined a plain QCP"
+
     compared = 0
     for target in [None, 0, 1]:
-        monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "0")
-        Qp, cp, dp = PC._quadratic_coefficients(r, n, target)
-        monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
-        Qs, cs, ds = PC._quadratic_coefficients(r, n, target)
-        np.testing.assert_allclose(PC.dense_Q(Qs), PC.dense_Q(Qp), rtol=0, atol=0)
-        np.testing.assert_allclose(cs, cp, rtol=0, atol=0)
-        assert ds == dp
+        Qw, cw, dw = PC._quadratic_coefficients(r, n, target)
+        Qt, ct, dt = PC._tape_quadratic_coefficients(tape, n, target)
+        np.testing.assert_allclose(PC.dense_Q(Qt), PC.dense_Q(Qw), rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(ct), np.asarray(cw), rtol=1e-12, atol=1e-12)
+        assert dt == pytest.approx(dw, rel=1e-12, abs=1e-12)
         compared += 1
 
     assert compared == 3
     print(f"EXECUTED_COMPARISONS={compared}")
 
 
-def test_quadratic_constraint_extraction_does_not_probe(monkeypatch):
-    """S6 for the QCP twin."""
-    monkeypatch.setenv("DISCOPT_QP_SYMBOLIC", "1")
+def test_quadratic_constraint_extraction_does_not_probe():
+    """CLAUDE.md §6 for the QCP twin."""
     m = dm.Model()
     x = m.continuous("x", lb=-5, ub=5)
     y = m.continuous("y", lb=-5, ub=5)
@@ -285,148 +368,21 @@ def test_quadratic_constraint_extraction_does_not_probe(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The probe budget gate (#1187 / test_912_wall_budget_inventory)
+# The probe budget gate (#1187) is gone with the probe it budgeted.
 # ---------------------------------------------------------------------------
 #
-# The gate that declines an unaffordable probe sweep is denominated in PROBES,
-# not seconds. The first revision priced the sweep by timing the diagonal pass
-# and multiplying by the pair count, which made *which extractor runs* a
-# function of machine speed -- the exact construction #1187 exists to prevent.
-# The two extractors agree to ~1e-16 but not bitwise, so the fast and slow
-# machine could disagree about Q and branch differently at an identical node
-# count under ``deterministic=True``.
+# There were tests here pinning that the gate's decision was a pure function of
+# the model rather than of machine speed, and that a model declined on cost still
+# received an extraction. Both properties were about keeping a wrong algorithm
+# survivable. Budgeting an O(|support|^2) reconstruction of coefficients the arena
+# holds exactly was a band-aid; the fix was to delete it, which makes the gate,
+# its determinism argument and its fallback all unreachable code.
 #
-# These tests pin the property that replaced it: the decision is a pure function
-# of the model, so it is the same on every machine and in every run.
-
-
-def _dense_support_model(n):
-    """A QP whose objective support is all ``n`` variables, fully coupled.
-
-    Every variable carries a square term *and* every pair is present, so the
-    pair count the gate counts is exactly ``n*(n-1)/2`` with nothing to infer.
-
-    The square terms are load-bearing, not decoration. The probe identifies the
-    support from the *diagonal* sweep alone, so a purely bilinear objective
-    (``sum_{i<j} x_i x_j``, no squares) has ``f(e_j) == f(-e_j) == d`` and a zero
-    diagonal for every variable: the support comes back empty, ``Q`` comes back
-    zero, and the #866 verification rejects the whole extraction. That is the
-    probe declining safely rather than answering wrongly -- but it means a
-    bilinear-only model never reaches the budget gate, which is what these tests
-    are about.
-    """
-    m = dm.Model()
-    xs = [m.continuous(f"x{i}", lb=-1.0, ub=1.0) for i in range(n)]
-    obj = 0.0
-    for i in range(n):
-        obj = obj + xs[i] * xs[i]
-        for j in range(i + 1, n):
-            obj = obj + xs[i] * xs[j]
-    m.minimize(obj)
-    return m
-
-
-@pytest.mark.parametrize("n", [6, 9])
-def test_probe_budget_gate_trips_exactly_at_the_pair_count(n):
-    """The gate fires iff ``pairs > budget``, and the boundary is exact.
-
-    Both sides of the boundary are asserted, one probe apart. A gate priced in
-    seconds cannot be tested this way at all -- which is the point.
-    """
-    pairs = n * (n - 1) // 2
-    model = _dense_support_model(n)
-    checks = 0
-
-    # One probe under the pair count: refused, and the message states the count.
-    with pytest.raises(PC._ProbeBudgetExceeded) as exc:
-        PC._extract_qp_data_from_repr(model, probe_budget=pairs - 1)
-    assert f"{pairs:,} probes" in str(exc.value), str(exc.value)
-    checks += 1
-    assert "DISCOPT_QP_PROBE_MAX_PROBES" in str(exc.value), str(exc.value)
-    checks += 1
-
-    # Exactly at the pair count: affordable, so it runs and returns real data.
-    data = PC._extract_qp_data_from_repr(model, probe_budget=pairs)
-    assert data.Q is not None
-    checks += 1
-
-    # ``0`` means "no budget", not "budget of zero" -- the unbudgeted default.
-    data0 = PC._extract_qp_data_from_repr(model, probe_budget=0)
-    assert data0.Q is not None
-    checks += 1
-
-    assert checks == 4
-
-
-def test_probe_budget_decision_is_a_pure_function_of_the_model():
-    """Same model, same budget, same verdict -- with no clock in the loop.
-
-    ``problem_classifier`` no longer imports ``time`` at all, so there is no
-    clock for a slow machine to read differently. Asserting the absence of the
-    import is what keeps a future revision from quietly reintroducing one and
-    restoring the machine-speed dependence; ``test_912_wall_budget_inventory``
-    is the package-wide version of the same guard.
-    """
-    import inspect
-
-    checks = 0
-    src = inspect.getsource(PC)
-    assert "import time" not in src, "a clock read is back in the QP extractor"
-    checks += 1
-
-    model = _dense_support_model(7)
-    budget = 7 * 6 // 2 - 1
-    verdicts = []
-    for _ in range(3):
-        try:
-            PC._extract_qp_data_from_repr(model, probe_budget=budget)
-            verdicts.append("ran")
-        except PC._ProbeBudgetExceeded:
-            verdicts.append("declined")
-    assert verdicts == ["declined"] * 3, verdicts
-    checks += 1
-
-    assert checks == 2
-
-
-def test_a_model_declined_on_cost_still_gets_an_extraction():
-    """Declining is a statement about cost, never a refusal to answer.
-
-    ``extract_qp_data`` routes a declined model to the tape extractor, so the
-    caller gets the same ``Q`` by a cheaper route. If that contract broke, a
-    budget set too low would turn into a solve failure rather than a fallback.
-    """
-    model = _dense_support_model(8)
-    checks = 0
-
-    # Unbudgeted: the probe runs and its answer is the reference.
-    ref = PC.extract_qp_data(model)
-    assert ref.Q is not None
-    checks += 1
-
-    # A budget of one probe declines every non-trivial model, so this exercises
-    # the fallback rather than the happy path.
-    with pytest.raises(PC._ProbeBudgetExceeded):
-        PC._extract_qp_data_from_repr(model, probe_budget=1)
-    checks += 1
-
-    monkey = PC._QP_PROBE_MAX_PROBES
-    try:
-        PC._QP_PROBE_MAX_PROBES = 1
-        got = PC.extract_qp_data(model)
-    finally:
-        PC._QP_PROBE_MAX_PROBES = monkey
-
-    assert got.Q is not None
-    checks += 1
-
-    ref_Q = ref.Q.toarray() if hasattr(ref.Q, "toarray") else np.asarray(ref.Q)
-    got_Q = got.Q.toarray() if hasattr(got.Q, "toarray") else np.asarray(got.Q)
-    assert got_Q.shape == ref_Q.shape, (got_Q.shape, ref_Q.shape)
-    checks += 1
-    np.testing.assert_allclose(got_Q, ref_Q, rtol=0, atol=1e-12)
-    checks += 1
-    np.testing.assert_allclose(np.asarray(got.c), np.asarray(ref.c), rtol=0, atol=1e-12)
-    checks += 1
-
-    assert checks == 6
+# What replaced those guarantees, and where each is now asserted:
+#
+#   * "the decision does not depend on machine speed" -- there is no decision.
+#     ``test_the_symbolic_rung_is_first_and_unconditional`` asserts the flag and
+#     the probe are both absent, so no path can reintroduce one.
+#   * "a declined model still gets an extraction" -- the ladder still has its
+#     lower rungs, and ``test_a_declining_row_refuses_instead_of_projecting``
+#     plus ``test_875_sparse_qcp_extraction.py`` cover declining into the tape.

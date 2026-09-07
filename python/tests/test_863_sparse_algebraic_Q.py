@@ -1,7 +1,7 @@
 """#863: the ALGEBRAIC extractor's Hessian may be sparse, and must agree exactly.
 
-``c525f519`` gated the dense ``Q`` in ``_extract_qp_data_from_repr`` (the numeric
-probe extractor) only. ``_extract_quadratic_coefficients`` — the DAG-walking
+``c525f519`` gated the dense ``Q`` in the repr extractor (a numeric probe at the
+time, since deleted) only. ``_extract_quadratic_coefficients`` — the DAG-walking
 extractor behind ``extract_qp_data_algebraic``, ``extract_qcp_data_algebraic`` and
 ``_extract_qcp_constraints_algebraic``'s per-row Hessians — still opened with
 ``np.zeros((n, n))``. On ``watercontamination0202`` (106,711 variables) that is 91 GB,
@@ -15,7 +15,7 @@ the wrong one. Each test asserts which function produced the value, and every
 forced-sparse arm asserts ``sp.issparse``: without that a raising sparse branch makes
 the dispatcher fall through to a dense extractor and the comparison silently becomes
 dense-against-dense, which is how an earlier "parity confirmed" result on the repr Q
-turned out to be worthless.
+turned out to be worthless (CLAUDE.md §6).
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ def _qp_model(n: int, support: int = 6):
     three ``_qadd`` branches. (``(x - 1) ** 2`` is deliberately avoided: the walk
     refuses a power whose base is not a bare variable reference, so a model built
     that way silently never reaches this extractor — it falls through to the repr
-    probe path, which is the *other* extractor and already covered by
-    test_863_sparse_qpdata.py.)
+    walk, which is the *other* extractor and already covered by
+    test_863_sparse_qp_extraction.py.)
     """
     m = dm.Model(f"algqp{n}")
     xs = [m.continuous(f"x{i}", lb=0.0, ub=10.0) for i in range(n)]
@@ -154,7 +154,7 @@ def test_materialise_Q_of_no_terms_is_an_all_zero_matrix(q_budget):
 
 
 # --------------------------------------------------------------------------
-# extract_qp_data_algebraic  (NOT _extract_qp_data_from_repr)
+# extract_qp_data_algebraic  (NOT the repr walk)
 # --------------------------------------------------------------------------
 
 

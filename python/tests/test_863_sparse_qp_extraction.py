@@ -1,13 +1,21 @@
-"""#863: QP extraction probed every variable pair, ignoring the objective's support.
+"""#863: QP extraction cost must not scale with variables the objective ignores.
 
-``_extract_qp_data_from_repr`` recovers off-diagonal Q entries with one probe per
-variable pair::
+The extractor this file was written against recovered off-diagonal Q entries with
+one model evaluation per variable pair::
 
     Q[i,j] = f(e_i + e_j) - f(e_i) - f(e_j) + d
 
-Sweeping all pairs is O(n^2) probes, each allocating an O(n) probe vector. But a
+Sweeping all pairs is O(n^2) evaluations, each allocating an O(n) probe vector. A
 variable that does not appear in the objective has ``f(e_j) == f(-e_j) == d``, so
 every product involving it is identically zero — probing that pair is pure waste.
+
+That extractor is **gone**: ``extract_qp_data`` now reads the coefficients off the
+expression arena and never evaluates the model. The tests below were written
+against the public dispatcher, not the probe, so they still say exactly what they
+said — and the cost assertion is now satisfied with room to spare, because the
+walk is O(nodes) rather than O(n) in the diagonal too. Keeping them is the
+regression guard that the ladder's *first* rung stays cheap: a silent fall-through
+to a per-variable rung would put the old scaling back.
 
 This bites hard on wide models with a narrow objective. ``watercontamination0202``
 has **106,711 variables whose objective touches only 101 of them** (measured: 101
@@ -31,10 +39,11 @@ n       before     after      speedup
 1600    1.980 s    0.051 s    **39x**
 ======  =========  =========  =======
 
-**This does not by itself close #863.** At n = 106,711 the remaining O(n) diagonal
+That A/B measured the pair-sweep fix alone, which removed the quadratic term from
+the cost but not the linear one: at n = 106,711 the remaining O(n) diagonal
 probing (~213k objective evaluations) and the dense ``(n, n)`` ``Q`` allocation
-(91 GB) are still fatal; those need a sparse ``QPData`` representation or a routing
-change. This removes the quadratic term from the cost, not the linear one.
+(91 GB) were still fatal. Both are since resolved — the sparse ``QPData``
+representation for the second, and deleting the probe outright for the first.
 """
 
 from __future__ import annotations
@@ -79,11 +88,11 @@ def test_cost_does_not_scale_quadratically_with_unrelated_variables():
     """Adding variables the objective never mentions must not blow up extraction.
 
     Pre-fix this was O(n^2) probes: 0.068 s at n=400 rising to 1.98 s at n=1600
-    (~4x per doubling). Post-fix it is 0.005 s -> 0.051 s.
+    (~4x per doubling). With the support restriction it was 0.005 s -> 0.051 s;
+    with the probe deleted the walk does not visit an absent variable at all.
 
     The assertion is a ratio rather than an absolute time so it does not encode this
-    machine's speed; a quadratic sweep cannot come near it even on a slow runner,
-    while the linear-in-n support scan comfortably does.
+    machine's speed; a quadratic sweep cannot come near it even on a slow runner.
     """
     t0 = time.perf_counter()
     extract_qp_data(_wide_model_narrow_objective(400))
