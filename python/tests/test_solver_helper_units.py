@@ -16,13 +16,11 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.callbacks import CutResult
 from discopt.modeling.core import Model
 from discopt.solver import (
     _INFEASIBILITY_SENTINEL,
     _certified_callback_bound,
-    _estimate_alpha_fd,
     _invoke_pre_import_callbacks,
     _model_contains_nonsmooth_node,
     _select_priority_branch_var,
@@ -96,32 +94,6 @@ def test_select_priority_branch_var_prefers_most_fractional_viable():
 
 # ---------------------------------------------------------------------------
 # alphaBB finite-difference alpha estimation
-# ---------------------------------------------------------------------------
-
-
-def test_estimate_alpha_fd_zero_for_convex_objective():
-    m = Model("cvx")
-    x = m.continuous("x", lb=-2.0, ub=2.0)
-    m.minimize(x**2)
-    ev = NLPEvaluator(m)
-    alpha = _estimate_alpha_fd(ev, np.array([-2.0]), np.array([2.0]), n_samples=3)
-    # Convex objective: no negative curvature, alpha stays at the epsilon floor.
-    assert alpha.shape == (1,)
-    assert alpha[0] == pytest.approx(1e-6, rel=1e-3)
-
-
-def test_estimate_alpha_fd_scales_with_negative_curvature():
-    m = Model("ccv")
-    x = m.continuous("x", lb=-2.0, ub=2.0)
-    m.minimize(-(x**2))
-    ev = NLPEvaluator(m)
-    alpha = _estimate_alpha_fd(ev, np.array([-2.0]), np.array([2.0]), n_samples=3)
-    # d2/dx2 of -x^2 is -2 everywhere: alpha = 2/2 * 1.5 + 1e-6.
-    assert alpha[0] == pytest.approx(1.5, rel=1e-2)
-
-
-# ---------------------------------------------------------------------------
-# Non-smooth model detection
 # ---------------------------------------------------------------------------
 
 

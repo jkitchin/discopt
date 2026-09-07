@@ -172,6 +172,65 @@ impl PyModelRepr {
         self.inner.arena.is_bilinear(self.inner.objective)
     }
 
+    /// The objective as an exact sparse quadratic form, or `None` to decline.
+    ///
+    /// Returns `(qi, qj, qd, ci, cd, constant)`: the quadratic coefficients as
+    /// a COO triplet with `qi <= qj`, the linear coefficients as
+    /// `(index, value)` arrays, and the constant -- the same layout
+    /// `set_quadratic_objective` consumes in the other direction. Indices are
+    /// in this repr's flat variable space (`n_vars`).
+    ///
+    /// `qd[k]` is the FULL coefficient of `x[qi[k]] * x[qj[k]]`, not a
+    /// symmetric-matrix half: a caller assembling `Q` under the `0.5 x' Q x`
+    /// convention must double the off-diagonals.
+    ///
+    /// `None` means the walk declined -- the body is not a quadratic form, it
+    /// uses a construct the walk does not represent, or it would need more
+    /// than `max_terms` live coefficients (which is how a would-be dense `Q`
+    /// is refused before it is materialized). It is never an approximation, so
+    /// a caller may use the result directly without a verification pass.
+    ///
+    /// This exists because the Python QP extractor previously recovered these
+    /// coefficients by finite-difference probing at O(|support|^2) model
+    /// evaluations -- 71,330 s over the 150-instance MINLPLib MIQP family,
+    /// 28,288 s on `unitcommit_200_100_1_mod_8` alone, whose objective DAG has
+    /// only 56,299 nodes.
+    #[pyo3(signature = (max_terms = 20_000_000))]
+    #[allow(clippy::type_complexity)]
+    fn objective_quadratic_form(
+        &self,
+        max_terms: usize,
+    ) -> Option<(Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, f64)> {
+        self.inner
+            .arena
+            .quadratic_form(self.inner.objective, max_terms)
+            .map(|q| q.to_coo())
+    }
+
+    /// Constraint `i`'s body as an exact sparse quadratic form, or `None`.
+    ///
+    /// Same layout and same decline semantics as
+    /// [`Self::objective_quadratic_form`].
+    #[pyo3(signature = (i, max_terms = 20_000_000))]
+    #[allow(clippy::type_complexity)]
+    fn constraint_quadratic_form(
+        &self,
+        i: usize,
+        max_terms: usize,
+    ) -> PyResult<Option<(Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, f64)>> {
+        let c = self.inner.constraints.get(i).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "constraint index {i} out of range (model has {})",
+                self.inner.constraints.len()
+            ))
+        })?;
+        Ok(self
+            .inner
+            .arena
+            .quadratic_form(c.body, max_terms)
+            .map(|q| q.to_coo()))
+    }
+
     /// Is constraint i linear?
     fn is_constraint_linear(&self, i: usize) -> bool {
         self.inner.arena.is_linear(self.inner.constraints[i].body)

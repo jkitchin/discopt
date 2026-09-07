@@ -915,6 +915,375 @@ impl ExprArena {
         }
     }
 
+    // ── Symbolic quadratic-form extraction ────────────────────────────────
+    //
+    // `is_quadratic` above walks the entire DAG to decide a *degree*, then
+    // throws away everything it learned and returns a bool. The Python QP
+    // extractor, left with only that bool, recovered the coefficients by
+    // finite-difference PROBING -- one full model evaluation per variable
+    // *pair*, O(|support|^2) (`_relax/problem_classifier.py`,
+    // `_extract_qp_data_from_repr`). Measured over the 150-instance MINLPLib
+    // MIQP family (BQP/IQP/MBQP/MIQP): 29 instances need more than 60 s of
+    // probing before the search can start, 71,330 s in total, worst case
+    // `unitcommit_200_100_1_mod_8` at 28,288 s. That instance's objective DAG
+    // has 56,299 nodes and 330,262,150 variable pairs -- the structure is
+    // ~5,900x smaller than the space the probe searches.
+    //
+    // Worse, the probe is not merely slow. Its off-diagonal identity
+    // `f(e_i + e_j) - f(e_i) - f(e_j) + f(0)` is a difference of nearly-equal
+    // floats, so it loses precision to cancellation: on `chimera_mis-01` the
+    // sweep costs 275 s and then fails its own #866 verification (recovers
+    // -171.42 against a true -174.09), and all 275 s is discarded.
+    //
+    // This walk emits the coefficients the degree walk already sees. Every
+    // output coefficient is a sum of products of literals that appear in the
+    // DAG, so there is no subtractive cancellation and no step size. It is
+    // O(nodes), it is iterative (a `.nl` objective is a left-nested chain --
+    // 18,499 `+` nodes deep on `unitcommit_200_100_1_mod_8` -- which would
+    // blow a recursive walk's stack), and it either succeeds exactly or
+    // DECLINES. It never approximates: any form it cannot represent returns
+    // `None` and the caller falls back to the existing ladder.
+    //
+    // The output is the same sparse COO triplet that `set_quadratic_objective`
+    // (crates/discopt-python/src/expr_bindings.rs) already accepts in the
+    // other direction; this is that function's missing inverse.
+
+    /// Build the flat-offset map for every variable in the arena, in one pass.
+    ///
+    /// Reproduces [`Self::var_offset`] exactly (distinct `index`, sorted,
+    /// prefix-summed `size`), but computes it once instead of re-scanning
+    /// every node per variable occurrence -- which would itself be quadratic
+    /// on a model with many variables.
+    fn var_offset_map(&self) -> std::collections::HashMap<usize, usize> {
+        let mut vars: Vec<(usize, usize)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for node in &self.nodes {
+            if let ExprNode::Variable { index, size, .. } = node {
+                if seen.insert(*index) {
+                    vars.push((*index, *size));
+                }
+            }
+        }
+        vars.sort_by_key(|(idx, _)| *idx);
+        let mut map = std::collections::HashMap::with_capacity(vars.len());
+        let mut off = 0usize;
+        for (idx, sz) in vars {
+            map.insert(idx, off);
+            off += sz;
+        }
+        map
+    }
+
+    /// The direct children of a node, in no particular order.
+    fn quad_children(&self, id: ExprId) -> Vec<ExprId> {
+        match self.get(id) {
+            ExprNode::BinaryOp { left, right, .. } | ExprNode::MatMul { left, right } => {
+                vec![*left, *right]
+            }
+            ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => vec![*operand],
+            ExprNode::FunctionCall { args, .. } => args.clone(),
+            ExprNode::SumOver { terms } => terms.clone(),
+            // `Index` deliberately does NOT descend: the base is consumed
+            // structurally below (only a Variable / ConstantArray / Parameter
+            // base is representable), never as a polynomial value.
+            _ => Vec::new(),
+        }
+    }
+
+    /// Extract the objective/constraint body `id` as an exact sparse quadratic
+    /// form over the arena's flat variable space.
+    ///
+    /// Returns `None` -- decline, never an approximation -- when the
+    /// expression is not a quadratic form, when it uses a construct this walk
+    /// does not represent, or when the accumulated coefficient count would
+    /// exceed `max_terms` *live* coefficients (a dense `Q` on a large model
+    /// is exactly the
+    /// materialization this is meant to avoid; the caller keeps its fallback).
+    ///
+    /// The semantics mirror [`Self::evaluate`] / [`Self::collect_array_values`]
+    /// node for node, including the `Sum { axis: Some(_) }` refusal (#1160) and
+    /// the `abs`-of-a-variable refusal (#739). A caller that wants belt and
+    /// braces can evaluate the returned form against `evaluate` at a random
+    /// point; they agree to machine precision by construction.
+    pub fn quadratic_form(&self, id: ExprId, max_terms: usize) -> Option<QuadForm> {
+        let offsets = self.var_offset_map();
+        let mut memo: std::collections::HashMap<ExprId, Option<std::rc::Rc<Vec<QuadForm>>>> =
+            std::collections::HashMap::new();
+
+        // In-degree over the reachable sub-DAG, counting multiplicity (`x * x`
+        // consumes `x` twice). A memo entry is dropped the moment its last
+        // parent has consumed it, which is what keeps peak memory proportional
+        // to the *live* frontier rather than to the whole DAG: a left-nested
+        // `+` chain accumulating a dense form would otherwise memoize every
+        // prefix, at O(terms^2).
+        let mut indeg: std::collections::HashMap<ExprId, usize> = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(id);
+        let mut walk = vec![id];
+        while let Some(cur) = walk.pop() {
+            for c in self.quad_children(cur) {
+                *indeg.entry(c).or_insert(0) += 1;
+                if seen.insert(c) {
+                    walk.push(c);
+                }
+            }
+        }
+
+        let mut live = 0usize;
+
+        // Iterative post-order: push (node, children_done). A `.nl` objective
+        // is a deeply left-nested chain, so this must not recurse.
+        let mut stack: Vec<(ExprId, bool)> = vec![(id, false)];
+        while let Some((cur, done)) = stack.pop() {
+            if memo.contains_key(&cur) {
+                continue;
+            }
+            if !done {
+                stack.push((cur, true));
+                // Push children in REVERSE so they pop left-to-right. A `.nl`
+                // objective is a left-nested `+` chain, and popping the right
+                // operand first would compute and hold every term on the way
+                // down -- peak live memory O(chain length) instead of O(1).
+                for c in self.quad_children(cur).into_iter().rev() {
+                    if !memo.contains_key(&c) {
+                        stack.push((c, false));
+                    }
+                }
+            } else {
+                let v = self.quad_combine(cur, &offsets, &memo);
+                if let Some(rc) = v.as_ref() {
+                    live += rc.iter().map(|q| q.n_terms()).sum::<usize>();
+                    // Declining here keeps a would-be dense `Q` from ever being
+                    // materialized; the caller keeps its fallback.
+                    if live > max_terms {
+                        return None;
+                    }
+                }
+                memo.insert(cur, v);
+
+                // Release every child whose last parent was this node. The
+                // entry is tombstoned rather than removed so the
+                // `contains_key` guards above stay valid; a stale read would
+                // see `None` and decline, never a wrong answer.
+                for c in self.quad_children(cur) {
+                    if c == id {
+                        continue;
+                    }
+                    if let Some(rem) = indeg.get_mut(&c) {
+                        *rem -= 1;
+                        if *rem == 0 {
+                            if let Some(Some(rc)) = memo.get(&c) {
+                                live -= rc.iter().map(|q| q.n_terms()).sum::<usize>();
+                            }
+                            memo.insert(c, None);
+                        }
+                    }
+                }
+            }
+        }
+
+        let vals = memo.get(&id)?.clone()?;
+        if vals.len() != 1 {
+            // An array-valued objective is not a scalar quadratic form.
+            return None;
+        }
+        let mut out = vals[0].clone();
+        // Drop exact zeros once, at the end. Pruning inside the accumulation
+        // loop would re-scan the whole accumulator per term and reintroduce
+        // the quadratic behaviour this function exists to remove.
+        out.linear.retain(|_, v| *v != 0.0);
+        out.quadratic.retain(|_, v| *v != 0.0);
+
+        // Refuse a non-finite coefficient rather than emit one. `scaled(0.0)`
+        // collapses `0 * x` to the constant 0, which differs from `evaluate`'s
+        // `0 * inf = NaN`; division by an infinite constant is the reachable
+        // route to that divergence. Checking the output once (O(nnz)) is
+        // cheaper and more general than case-analysing every operator, and a
+        // decline costs only the caller's fallback -- never a wrong model.
+        if !out.is_finite() {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// Combine a node's already-computed children into its polynomial value.
+    fn quad_combine(
+        &self,
+        id: ExprId,
+        offsets: &std::collections::HashMap<usize, usize>,
+        memo: &std::collections::HashMap<ExprId, Option<std::rc::Rc<Vec<QuadForm>>>>,
+    ) -> Option<std::rc::Rc<Vec<QuadForm>>> {
+        let child = |c: &ExprId| -> Option<std::rc::Rc<Vec<QuadForm>>> { memo.get(c)?.clone() };
+
+        let vals: Vec<QuadForm> = match self.get(id) {
+            ExprNode::Constant(v) => vec![QuadForm::constant(*v)],
+            ExprNode::ConstantArray(data, _) => {
+                data.iter().map(|v| QuadForm::constant(*v)).collect()
+            }
+            ExprNode::Parameter { value, .. } => {
+                value.iter().map(|v| QuadForm::constant(*v)).collect()
+            }
+            ExprNode::Variable { index, size, .. } => {
+                let off = *offsets.get(index)?;
+                (0..*size).map(|k| QuadForm::variable(off + k)).collect()
+            }
+            ExprNode::BinaryOp { op, left, right } => {
+                let l = child(left)?;
+                let r = child(right)?;
+                match op {
+                    BinOp::Add => broadcast(&l, &r, |a, b| {
+                        let mut o = a.clone();
+                        o.add_assign_scaled(b, 1.0);
+                        Some(o)
+                    })?,
+                    BinOp::Sub => broadcast(&l, &r, |a, b| {
+                        let mut o = a.clone();
+                        o.add_assign_scaled(b, -1.0);
+                        Some(o)
+                    })?,
+                    BinOp::Mul => broadcast(&l, &r, |a, b| a.mul(b))?,
+                    BinOp::Div => broadcast(&l, &r, |a, b| {
+                        // A variable in the denominator is not polynomial;
+                        // a zero denominator is not representable either.
+                        //
+                        // A non-finite denominator is refused for a subtler
+                        // reason: `1.0 / inf` is `0.0`, and scaling by zero
+                        // would report `x / inf` as the exact constant 0 while
+                        // `evaluate` yields 0 only for finite `x` and NaN for
+                        // `inf / inf`. Declining costs the caller its probe
+                        // fallback; collapsing would hand back a coefficient
+                        // the walk cannot stand behind.
+                        if b.degree() != 0 || !b.constant.is_finite() || b.constant == 0.0 {
+                            None
+                        } else {
+                            Some(a.scaled(1.0 / b.constant))
+                        }
+                    })?,
+                    BinOp::Pow => broadcast(&l, &r, |a, e| {
+                        if e.degree() != 0 {
+                            return None; // variable exponent
+                        }
+                        let p = e.constant;
+                        if a.degree() == 0 {
+                            return Some(QuadForm::constant(a.constant.powf(p)));
+                        }
+                        // Non-constant base: only integer powers 0, 1, 2, and
+                        // only when the result stays within degree 2.
+                        let n = p as i64;
+                        if (p - n as f64).abs() != 0.0 || n < 0 {
+                            return None;
+                        }
+                        match n {
+                            0 => Some(QuadForm::constant(1.0)),
+                            1 => Some(a.clone()),
+                            2 => a.mul(a),
+                            _ => None,
+                        }
+                    })?,
+                }
+            }
+            ExprNode::UnaryOp { op, operand } => {
+                let v = child(operand)?;
+                match op {
+                    UnOp::Neg => v.iter().map(|a| a.scaled(-1.0)).collect(),
+                    // `abs` of anything variable-dependent is piecewise, not
+                    // polynomial. Treating it as degree 1 is what certified a
+                    // false optimum in #739; `max_degree` refuses it too.
+                    UnOp::Abs => {
+                        let mut out = Vec::with_capacity(v.len());
+                        for a in v.iter() {
+                            if a.degree() != 0 {
+                                return None;
+                            }
+                            out.push(QuadForm::constant(a.constant.abs()));
+                        }
+                        out
+                    }
+                }
+            }
+            // Every named function is transcendental or piecewise; none is a
+            // quadratic form of its argument.
+            ExprNode::FunctionCall { .. } => return None,
+            ExprNode::Index { base, index } => match self.get(*base) {
+                ExprNode::Variable {
+                    shape,
+                    index: vi,
+                    size,
+                    ..
+                } => {
+                    let off = *offsets.get(vi)?;
+                    let flat = index_spec_collect_flat(index, shape);
+                    let mut out = Vec::with_capacity(flat.len());
+                    for f in flat {
+                        if f >= *size {
+                            return None;
+                        }
+                        out.push(QuadForm::variable(off + f));
+                    }
+                    out
+                }
+                ExprNode::ConstantArray(data, shape) => {
+                    let mut out = Vec::new();
+                    for f in index_spec_collect_flat(index, shape) {
+                        out.push(QuadForm::constant(*data.get(f)?));
+                    }
+                    out
+                }
+                ExprNode::Parameter { value, shape, .. } => {
+                    let mut out = Vec::new();
+                    for f in index_spec_collect_flat(index, shape) {
+                        out.push(QuadForm::constant(*value.get(f)?));
+                    }
+                    out
+                }
+                // Indexing a compound expression needs shape inference the
+                // arena does not carry; `evaluate` returns NaN here.
+                _ => return None,
+            },
+            ExprNode::MatMul { left, right } => {
+                let l = child(left)?;
+                let r = child(right)?;
+                // `evaluate_matmul` contracts the two flat vectors. Equal
+                // lengths only: zipping mismatched lengths would silently
+                // answer a different model.
+                if l.len() != r.len() {
+                    return None;
+                }
+                let mut acc = QuadForm::default();
+                for (a, b) in l.iter().zip(r.iter()) {
+                    acc.add_assign_scaled(&a.mul(b)?, 1.0);
+                }
+                vec![acc]
+            }
+            ExprNode::Sum { operand, axis } => {
+                if axis.is_some() {
+                    // An axis reduction is array-valued; collapsing it to a
+                    // full sum answers a DIFFERENT model (#1160).
+                    return None;
+                }
+                let v = child(operand)?;
+                let mut acc = QuadForm::default();
+                for a in v.iter() {
+                    acc.add_assign_scaled(a, 1.0);
+                }
+                vec![acc]
+            }
+            ExprNode::SumOver { terms } => {
+                let mut acc = QuadForm::default();
+                for t in terms {
+                    let v = child(t)?;
+                    if v.len() != 1 {
+                        return None; // `evaluate` treats each term as scalar
+                    }
+                    acc.add_assign_scaled(&v[0], 1.0);
+                }
+                vec![acc]
+            }
+        };
+
+        Some(std::rc::Rc::new(vals))
+    }
+
     /// Compute the maximum polynomial degree of an expression.
     ///
     /// Returns `usize::MAX` for transcendental functions (exp, log, sin, ...).
@@ -1738,6 +2107,279 @@ impl ModelRepr {
 mod tests {
     use super::*;
 
+    // ── Symbolic quadratic-form extraction ────────────────────────────────
+
+    /// Evaluate a [`QuadForm`] at `x`, for cross-checking against
+    /// [`ExprArena::evaluate`].
+    fn qf_eval(q: &QuadForm, x: &[f64]) -> f64 {
+        let mut v = q.constant;
+        for (i, c) in &q.linear {
+            v += c * x[*i];
+        }
+        for ((i, j), c) in &q.quadratic {
+            v += c * x[*i] * x[*j];
+        }
+        v
+    }
+
+    fn var(arena: &mut ExprArena, name: &str, index: usize, size: usize) -> ExprId {
+        let shape = if size == 1 { vec![] } else { vec![size] };
+        arena.add(ExprNode::Variable {
+            name: name.into(),
+            index,
+            size,
+            shape,
+        })
+    }
+
+    fn bin(arena: &mut ExprArena, op: BinOp, l: ExprId, r: ExprId) -> ExprId {
+        arena.add(ExprNode::BinaryOp {
+            op,
+            left: l,
+            right: r,
+        })
+    }
+
+    #[test]
+    fn test_quadratic_form_declines_non_finite_coefficients() {
+        // x / inf: `scaled` would collapse this to the constant 0, but the
+        // constant term inf/inf is NaN under `evaluate`. The walk must decline
+        // rather than hand a coefficient it cannot stand behind to the caller.
+        let mut a = ExprArena::new();
+        let x = var(&mut a, "x0", 0, 1);
+        let inf = a.add(ExprNode::Constant(f64::INFINITY));
+        let q = bin(&mut a, BinOp::Div, inf, inf);
+        let e = bin(&mut a, BinOp::Add, x, q);
+        assert!(
+            a.quadratic_form(e, 1_000).is_none(),
+            "a non-finite coefficient must be declined, not emitted"
+        );
+
+        // The finite twin still extracts, so the guard is not a blanket refusal.
+        let mut b = ExprArena::new();
+        let x2 = var(&mut b, "x0", 0, 1);
+        let two = b.add(ExprNode::Constant(2.0));
+        let ok = bin(&mut b, BinOp::Div, x2, two);
+        let f = b
+            .quadratic_form(ok, 1_000)
+            .expect("x/2 is a quadratic form");
+        assert_eq!(f.linear.get(&0).copied(), Some(0.5));
+    }
+
+    #[test]
+    fn test_quadratic_form_coefficients() {
+        // 2*x0*x0 + 3*x0*x1 - x1 + 5
+        let mut a = ExprArena::new();
+        let x0 = var(&mut a, "x0", 0, 1);
+        let x1 = var(&mut a, "x1", 1, 1);
+        let c2 = a.add(ExprNode::Constant(2.0));
+        let c3 = a.add(ExprNode::Constant(3.0));
+        let c5 = a.add(ExprNode::Constant(5.0));
+        let sq = bin(&mut a, BinOp::Mul, x0, x0);
+        let t1 = bin(&mut a, BinOp::Mul, c2, sq);
+        let x0x1 = bin(&mut a, BinOp::Mul, x0, x1);
+        let t2 = bin(&mut a, BinOp::Mul, c3, x0x1);
+        let s1 = bin(&mut a, BinOp::Add, t1, t2);
+        let s2 = bin(&mut a, BinOp::Sub, s1, x1);
+        let root = bin(&mut a, BinOp::Add, s2, c5);
+
+        let q = a.quadratic_form(root, 1_000).expect("should extract");
+        assert_eq!(q.constant, 5.0);
+        assert_eq!(q.linear.len(), 1);
+        assert_eq!(q.linear[&1], -1.0);
+        assert_eq!(q.quadratic.len(), 2);
+        assert_eq!(q.quadratic[&(0, 0)], 2.0);
+        assert_eq!(q.quadratic[&(0, 1)], 3.0);
+        // The (i, j) key carries the FULL cross coefficient, not a half.
+        assert!(!q.quadratic.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn test_quadratic_form_matches_evaluate() {
+        // Cross-check the symbolic walk against the arena's own evaluator on a
+        // mix of forms: powers, negation, division by a constant, nested sums.
+        let mut a = ExprArena::new();
+        let x0 = var(&mut a, "x0", 0, 1);
+        let x1 = var(&mut a, "x1", 1, 1);
+        let x2 = var(&mut a, "x2", 2, 1);
+        let two = a.add(ExprNode::Constant(2.0));
+        let seven = a.add(ExprNode::Constant(7.0));
+        let four = a.add(ExprNode::Constant(4.0));
+
+        let p = bin(&mut a, BinOp::Pow, x0, two); // x0^2
+        let neg = a.add(ExprNode::UnaryOp {
+            op: UnOp::Neg,
+            operand: x1,
+        });
+        let prod = bin(&mut a, BinOp::Mul, x1, x2);
+        let div = bin(&mut a, BinOp::Div, prod, four); // x1*x2/4
+        let s = bin(&mut a, BinOp::Add, p, neg);
+        let s = bin(&mut a, BinOp::Add, s, div);
+        let root = bin(&mut a, BinOp::Sub, s, seven);
+
+        let q = a.quadratic_form(root, 1_000).expect("should extract");
+        let mut checked = 0;
+        for pt in [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [-1.5, 0.25, 4.0],
+            [1e3, -1e3, 1e-3],
+        ] {
+            let want = a.evaluate(root, &pt);
+            let got = qf_eval(&q, &pt);
+            assert!(
+                (want - got).abs() <= 1e-9 * want.abs().max(1.0),
+                "point {pt:?}: evaluate={want} quadratic_form={got}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+    }
+
+    #[test]
+    fn test_quadratic_form_declines_non_quadratic() {
+        // Every arm here must DECLINE, not approximate. `is_quadratic` agrees.
+        let mut a = ExprArena::new();
+        let x0 = var(&mut a, "x0", 0, 1);
+        let x1 = var(&mut a, "x1", 1, 1);
+        let three = a.add(ExprNode::Constant(3.0));
+
+        let exp = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Exp,
+            args: vec![x0],
+        });
+        assert!(
+            a.quadratic_form(exp, 1_000).is_none(),
+            "exp(x) is not quadratic"
+        );
+
+        let ratio = bin(&mut a, BinOp::Div, x0, x1);
+        assert!(
+            a.quadratic_form(ratio, 1_000).is_none(),
+            "x0/x1 is not polynomial"
+        );
+
+        // |x| is piecewise, not degree 1 -- treating it as linear certified a
+        // false optimum in #739.
+        let abs = a.add(ExprNode::UnaryOp {
+            op: UnOp::Abs,
+            operand: x0,
+        });
+        assert!(
+            a.quadratic_form(abs, 1_000).is_none(),
+            "abs(x) is not quadratic"
+        );
+        assert!(!a.is_quadratic(abs));
+
+        let cube = bin(&mut a, BinOp::Pow, x0, three);
+        assert!(
+            a.quadratic_form(cube, 1_000).is_none(),
+            "x^3 exceeds degree 2"
+        );
+
+        // Degree 3 as a product of a square and a variable.
+        let sq = bin(&mut a, BinOp::Mul, x0, x0);
+        let cubed = bin(&mut a, BinOp::Mul, sq, x1);
+        assert!(
+            a.quadratic_form(cubed, 1_000).is_none(),
+            "x0^2*x1 exceeds degree 2"
+        );
+
+        // An axis reduction is array-valued; collapsing it answers a different
+        // model (#1160), so it is refused here as it is in `evaluate`.
+        let axis_sum = a.add(ExprNode::Sum {
+            operand: x0,
+            axis: Some(0),
+        });
+        assert!(
+            a.quadratic_form(axis_sum, 1_000).is_none(),
+            "axis sum is refused"
+        );
+    }
+
+    #[test]
+    fn test_quadratic_form_deep_chain_does_not_overflow() {
+        // A `.nl` objective is a left-nested chain -- 18,499 `+` nodes deep on
+        // `unitcommit_200_100_1_mod_8`. A recursive walk blows the stack here.
+        let mut a = ExprArena::new();
+        let n = 100_000usize;
+        let x = var(&mut a, "x", 0, 1);
+        let mut acc = a.add(ExprNode::Constant(0.0));
+        for k in 0..n {
+            let c = a.add(ExprNode::Constant((k % 7) as f64));
+            let t = bin(&mut a, BinOp::Mul, c, x);
+            acc = bin(&mut a, BinOp::Add, acc, t);
+        }
+        // A budget of 16 live coefficients proves the walk holds only the
+        // frontier: the chain has 100,000 terms but never more than a handful
+        // alive at once.
+        let q = a
+            .quadratic_form(acc, 16)
+            .expect("deep chain should extract");
+        let want: f64 = (0..n).map(|k| (k % 7) as f64).sum();
+        assert_eq!(q.linear[&0], want);
+        assert_eq!(q.constant, 0.0);
+    }
+
+    #[test]
+    fn test_quadratic_form_array_matmul() {
+        // x' x for a 3-vector, via MatMul -- the array path.
+        let mut a = ExprArena::new();
+        let x = var(&mut a, "x", 0, 3);
+        let root = a.add(ExprNode::MatMul { left: x, right: x });
+        let q = a.quadratic_form(root, 1_000).expect("should extract");
+        assert_eq!(q.quadratic.len(), 3);
+        for i in 0..3 {
+            assert_eq!(q.quadratic[&(i, i)], 1.0);
+        }
+        let pt = [1.0, -2.0, 3.0];
+        assert_eq!(qf_eval(&q, &pt), a.evaluate(root, &pt));
+    }
+
+    #[test]
+    fn test_quadratic_form_respects_term_budget() {
+        // The budget exists so a would-be dense `Q` is never materialized.
+        // A 200-variable dense form is 20,100 coefficients.
+        let mut a = ExprArena::new();
+        let x = var(&mut a, "x", 0, 200);
+        let root = a.add(ExprNode::MatMul { left: x, right: x });
+        assert!(
+            a.quadratic_form(root, 10).is_none(),
+            "should decline under budget"
+        );
+        assert!(
+            a.quadratic_form(root, 1_000_000).is_some(),
+            "should extract with budget"
+        );
+    }
+
+    #[test]
+    fn test_quadratic_form_coo_is_sorted_and_deterministic() {
+        // COO output must be byte-reproducible: iterating the hash maps
+        // directly would not be.
+        let mut a = ExprArena::new();
+        let x = var(&mut a, "x", 0, 40);
+        let root = a.add(ExprNode::MatMul { left: x, right: x });
+        let q = a.quadratic_form(root, 1_000_000).unwrap();
+        let first = q.to_coo();
+        for _ in 0..5 {
+            let again = a.quadratic_form(root, 1_000_000).unwrap().to_coo();
+            assert_eq!(first, again);
+        }
+        let (qi, qj, _, _, _, _) = &first;
+        let mut keys: Vec<(usize, usize)> = qi.iter().copied().zip(qj.iter().copied()).collect();
+        let sorted = {
+            let mut k = keys.clone();
+            k.sort();
+            k
+        };
+        assert_eq!(keys, sorted, "COO entries must be in ascending key order");
+        keys.dedup();
+        assert_eq!(keys.len(), qi.len(), "no duplicate COO keys");
+        // i <= j for every entry.
+        assert!(qi.iter().zip(qj.iter()).all(|(i, j)| i <= j));
+    }
+
     #[test]
     fn test_arena_add_get() {
         let mut arena = ExprArena::new();
@@ -2355,4 +2997,194 @@ mod tests {
             );
         }
     }
+}
+
+/// An exact sparse quadratic form over an [`ExprArena`]'s flat variable space:
+///
+/// ```text
+/// constant + sum_i linear[i] * x_i + sum_{i <= j} quadratic[(i, j)] * x_i * x_j
+/// ```
+///
+/// `quadratic` is keyed by an ordered pair, so `(i, i)` carries the full
+/// coefficient of `x_i^2` and `(i, j)` with `i < j` the full coefficient of the
+/// cross term -- NOT the symmetric-matrix halves. A caller building a `Q` with
+/// the `0.5 x' Q x` convention must double the off-diagonals; one building the
+/// COO triplet that `set_quadratic_objective` consumes can use these directly.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuadForm {
+    /// The constant term.
+    pub constant: f64,
+    /// Linear coefficients, keyed by flat variable index.
+    pub linear: std::collections::HashMap<usize, f64>,
+    /// Quadratic coefficients, keyed by `(i, j)` with `i <= j`.
+    pub quadratic: std::collections::HashMap<(usize, usize), f64>,
+    /// Structural degree (0, 1 or 2), carried explicitly.
+    ///
+    /// It is tracked incrementally rather than read off the maps for two
+    /// reasons. It keeps [`Self::degree`] O(1): deriving it from map emptiness
+    /// would require pruning cancelled coefficients after every operation,
+    /// which re-scans the whole accumulator per term and restores the
+    /// quadratic cost this module exists to remove. And it keeps the answer
+    /// consistent with [`ExprArena::max_degree`], which likewise counts a term
+    /// whose coefficient happens to cancel to zero.
+    deg: usize,
+}
+
+impl QuadForm {
+    /// A degree-0 form holding a single constant.
+    pub fn constant(v: f64) -> Self {
+        Self {
+            constant: v,
+            ..Default::default()
+        }
+    }
+
+    /// The degree-1 form `x_i`.
+    pub fn variable(i: usize) -> Self {
+        let mut linear = std::collections::HashMap::with_capacity(1);
+        linear.insert(i, 1.0);
+        Self {
+            constant: 0.0,
+            linear,
+            quadratic: std::collections::HashMap::new(),
+            deg: 1,
+        }
+    }
+
+    /// Structural polynomial degree: 0, 1 or 2.
+    pub fn degree(&self) -> usize {
+        self.deg
+    }
+
+    /// Number of stored linear + quadratic coefficients.
+    pub fn n_terms(&self) -> usize {
+        self.linear.len() + self.quadratic.len()
+    }
+
+    /// True when every coefficient of this form is finite.
+    pub fn is_finite(&self) -> bool {
+        self.constant.is_finite()
+            && self.linear.values().all(|v| v.is_finite())
+            && self.quadratic.values().all(|v| v.is_finite())
+    }
+
+    /// This form scaled by a constant.
+    ///
+    /// Scaling by exactly zero collapses the degree: `0 * x` is the constant 0,
+    /// and keeping it at degree 1 would make an otherwise-representable
+    /// product (`(0 * x) * y`) decline for no reason.
+    pub fn scaled(&self, s: f64) -> Self {
+        // `0 * x` is the constant 0 -- but only when the coefficients of `x`
+        // are finite, since `evaluate` gives `0 * inf = NaN`. Short-circuiting
+        // unconditionally would erase a non-finite before the walk's output
+        // check can decline it, so a non-finite operand falls through to the
+        // ordinary multiply and propagates the NaN the caller must see.
+        if s == 0.0 && self.is_finite() {
+            return Self::constant(0.0);
+        }
+        Self {
+            constant: self.constant * s,
+            linear: self.linear.iter().map(|(k, v)| (*k, v * s)).collect(),
+            quadratic: self.quadratic.iter().map(|(k, v)| (*k, v * s)).collect(),
+            deg: self.deg,
+        }
+    }
+
+    /// `self += other * s`, in place.
+    pub fn add_assign_scaled(&mut self, other: &Self, s: f64) {
+        self.constant += other.constant * s;
+        if s == 0.0 {
+            return;
+        }
+        for (k, v) in &other.linear {
+            *self.linear.entry(*k).or_insert(0.0) += v * s;
+        }
+        for (k, v) in &other.quadratic {
+            *self.quadratic.entry(*k).or_insert(0.0) += v * s;
+        }
+        self.deg = self.deg.max(other.deg);
+    }
+
+    /// The product `self * other`, or `None` when it would exceed degree 2.
+    pub fn mul(&self, other: &Self) -> Option<Self> {
+        if self.deg + other.deg > 2 {
+            return None;
+        }
+        let mut out = Self::constant(self.constant * other.constant);
+        out.deg = self.deg + other.deg;
+        // constant x (linear, quadratic), both directions.
+        for (i, a) in &self.linear {
+            *out.linear.entry(*i).or_insert(0.0) += a * other.constant;
+        }
+        for (i, b) in &other.linear {
+            *out.linear.entry(*i).or_insert(0.0) += b * self.constant;
+        }
+        for (k, a) in &self.quadratic {
+            *out.quadratic.entry(*k).or_insert(0.0) += a * other.constant;
+        }
+        for (k, b) in &other.quadratic {
+            *out.quadratic.entry(*k).or_insert(0.0) += b * self.constant;
+        }
+        // linear x linear -> quadratic. Degree 3 and 4 products are excluded
+        // by the guard above, so there is nothing else to form.
+        for (i, a) in &self.linear {
+            for (j, b) in &other.linear {
+                let key = if i <= j { (*i, *j) } else { (*j, *i) };
+                *out.quadratic.entry(key).or_insert(0.0) += a * b;
+            }
+        }
+        Some(out)
+    }
+
+    /// The form as sparse COO plus linear and constant parts, ready for the
+    /// Python boundary: `(qi, qj, qd, ci, cd, constant)`.
+    ///
+    /// Entries are emitted in ascending key order so the output is
+    /// deterministic and byte-reproducible across runs, which iterating the
+    /// hash maps directly would not be.
+    pub fn to_coo(&self) -> QuadFormCoo {
+        let mut q: Vec<((usize, usize), f64)> =
+            self.quadratic.iter().map(|(k, v)| (*k, *v)).collect();
+        q.sort_by_key(|(k, _)| *k);
+        let mut l: Vec<(usize, f64)> = self.linear.iter().map(|(k, v)| (*k, *v)).collect();
+        l.sort_by_key(|(k, _)| *k);
+        (
+            q.iter().map(|((i, _), _)| *i).collect(),
+            q.iter().map(|((_, j), _)| *j).collect(),
+            q.iter().map(|(_, v)| *v).collect(),
+            l.iter().map(|(i, _)| *i).collect(),
+            l.iter().map(|(_, v)| *v).collect(),
+            self.constant,
+        )
+    }
+}
+
+/// The COO payload of [`QuadForm::to_coo`]: `(qi, qj, qd, ci, cd, constant)`,
+/// i.e. the quadratic row/col/value triple, the linear index/value pair, and
+/// the constant term. Named so the tuple stays one thing at every call site
+/// rather than six positional vectors clippy has to read as a type.
+pub type QuadFormCoo = (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, f64);
+
+/// Apply a binary operation elementwise over two flat polynomial arrays,
+/// broadcasting a length-1 operand against a longer one.
+///
+/// Any other length pairing is refused rather than zipped: truncating to the
+/// shorter operand would silently answer a different model.
+fn broadcast<F>(l: &[QuadForm], r: &[QuadForm], f: F) -> Option<Vec<QuadForm>>
+where
+    F: Fn(&QuadForm, &QuadForm) -> Option<QuadForm>,
+{
+    let n = match (l.len(), r.len()) {
+        (a, b) if a == b => a,
+        (1, b) => b,
+        (a, 1) => a,
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let a = if l.len() == 1 { &l[0] } else { &l[k] };
+        let b = if r.len() == 1 { &r[0] } else { &r[k] };
+        out.push(f(a, b)?);
+    }
+    Some(out)
 }

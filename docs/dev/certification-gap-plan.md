@@ -520,6 +520,32 @@ From `scip-gap-closing-plan.md` (all measured):
 
 ### C4 — Structure is lost before the relaxation is ever built (multiplier on C1–C3)
 
+> **CLOSED (2026-09-07). All three items below are stale; C4 is no longer a gap.**
+> Verified against the current tree:
+> (1) *CSE/hash-consing* — `ExprArena` is content-addressed via `StructuralKey`
+> (`expr.rs:299-395`) and interning is **enabled on both production build paths**:
+> the `.nl` parser (`nl_parser.rs:788`) and the Python model → `ModelRepr` bridge
+> (`expr_bindings.rs:1284`). The `expr.rs:266` citation below predates it.
+> (2) *AMPL defined variables* — V segments are **inlined, not discarded**
+> (C-7; `nl_parser.rs:1137,1686,3349`, with regression tests
+> `test_defined_variable_inlined_and_evaluated` / `..._chained_reference`).
+> (3) *Quadratic/structure extraction in the IR* — closed by
+> `ExprArena::quadratic_form` (`expr.rs`), which emits the symbolic
+> constant/linear/quadratic coefficients the `max_degree` walk already computes,
+> in `O(nodes)`, exposed as `objective_quadratic_form` /
+> `constraint_quadratic_form` and consumed by `_relax/problem_classifier.py`.
+> It replaced a finite-difference probe costing one model evaluation per variable
+> *pair*: over the 150-instance MINLPLib MIQP family (BQP/IQP/MBQP/MIQP)
+> extraction goes from **71,330 s to 5.99 s**, with zero declines and worst
+> relative error 6.9e-14 over 750 point checks. It also removes the #866
+> cancellation class at its source — the probe identity
+> `f(e_i+e_j) - f(e_i) - f(e_j) + f(0)` is a difference of nearly-equal floats,
+> and on `min (x-1e10)^2` it returns `Q = 0` and certifies a false optimum.
+> Convexity detection remains Python-side; that is unchanged and is not what
+> C4's "only degree checks" referred to.
+
+*Original text, superseded (kept per §0.4):*
+
 - **No CSE/hash-consing** in the Rust expression arena (`expr.rs:266` — `add` never
   dedups); the `.nl` parser **discards AMPL defined variables** (V segments — AMPL's
   own DAG sharing), so shared subexpressions are duplicated into the DAG, the JAX
@@ -550,10 +576,66 @@ heuristic suite (incumbents are not the problem — the *proof* is).
 | Per-node cheap reduction (FBBT+cutoff, DBBT/marginals) | every node                          | components exist, mostly root-only | **wiring**            |
 | Aggregation / c-MIR cuts                               | workhorse (97–169× nodes)           | absent (current cuts net-negative) | **missing + quality** |
 | Cut pool w/ aging on default path                      | yes                                 | opt-in path only                   | wiring                |
-| CSE / defined-variable sharing                         | preserved & exploited               | discarded                          | **missing**           |
-| Quadratic/structure recognition in core                | yes                                 | Python-side convexity only         | missing               |
+| CSE / defined-variable sharing                          | preserved & exploited               | preserved (interned + V inlined)   | closed (see C4)       |
+| Quadratic/structure recognition in core                | yes                                 | `quadratic_form` in the arena      | closed (see C4)       |
 | Root-gap instrumentation                               | n/a (internal)                      | schema exists, never populated     | missing               |
 | Parallel tree search                                   | partial                             | no                                 | out of scope here     |
+
+---
+
+## 2b. The numerical-probing defect class (audit, 2026-09-07)
+
+An audit prompted by #1193 found that four code paths recovered coefficients the
+model **already holds exactly** by evaluating it numerically at unit vectors.
+This is one defect with four instances, not four defects, and it is worth stating
+as a class because the shape recurs: an extractor written against
+`ModelRepr.evaluate_*` when it should have been written against the expression
+arena.
+
+Two costs, and the second is the one that matters. The probe is O(n) or O(n^2)
+*model evaluations* where the arena answers in O(nodes) — and the probe
+identities are differences of nearly-equal floats, so they lose precision
+catastrophically on badly-scaled data. On `min (x - 1e10)^2` the off-diagonal
+identity returns `Q = 0` and the solver certifies a false optimum (#866).
+Reading the arena is both faster and *exact*.
+
+| | path | fires on | cost | mechanism of the fix | status |
+|---|---|---|---|---|---|
+| **P0** | `_extract_qcp_data_from_repr` (`_relax/problem_classifier.py`) | every QCP/MIQCP model (265 MINLPLib instances) | `m*2n` evaluations for the diagonal sweep **plus** `sum_rows |support|^2/2` pair probes — the O(n^2) probe runs **once per constraint** | `constraint_quadratic_form(i)` reads each row's coefficients off the arena in O(nodes) | **fixed** (#1209) |
+| **P1** | `_extract_lp_data_from_repr` | first path for any model with a `_builder`; the only path for `from_nl` LP/MILP | `m*n` full constraint evaluations + `m*n` dense `(n,)` allocations. Static census over the 415 LP/MILP-family MINLPLib instances: **1.11e11 evaluations**, median 3,996/instance | a row is linear exactly when its quadratic COO is empty, and then its linear map *is* the row | **fixed** (#1209) |
+| **P2** | `_AugmentedEvaluator` (`solver.py`) | `cutting_planes=True` and lazy constraints — **not** the default path (`cutting_planes: bool = False`) | it enumerates its members explicitly and omits `has_sparse_structure`, so every POUNCE derivative callback densifies to `(m,n)`/`(n,n)` and `jacobianstructure` builds an `m*n` meshgrid — even though the tape already returns analytical sparse COO Hessians | implement the sparse protocol: answer `has_sparse_structure` with the wrapped evaluator's answer, and **append the cut block to the COO structure**. Forwarding the flag alone is *unsound*, not merely incomplete — the augmented constraint vector has `n_cuts` rows the wrapped pattern does not describe, so the solver would receive a Jacobian silently missing every cut row | **fixed** (#1210) |
+| **P3** | `_estimate_alpha_fd` (`solver.py`) | never — zero production callers | O(n^2) evaluations + an O(n^3) eigendecomposition, with a `4e-12` divisor | delete it | **fixed** (#1209, deleted) |
+
+Falsified while auditing, and recorded here per §4: the hypothesis that *the
+per-node NLP densifies its Hessian every iteration* is **wrong**.
+`_tape_nlp_evaluator.has_sparse_structure()` returns `True` and
+`nlp_ipopt.py:174` takes the sparse branch, so the default solve path already
+feeds POUNCE analytical sparse Hessians. P2 is the exception, and only because
+one wrapper drops the capability flag — not because the tape lacks it.
+
+**Retraction (§11), 2026-09-07.** The P2 row of this table first said the fix
+was to *forward* `has_sparse_structure`, "as the sibling
+`_BoundOverrideEvaluator` already does via `__getattr__`". That was wrong and
+the row has been corrected. Forwarding the flag alone would have been a
+**soundness** bug: the augmented constraint vector carries `n_cuts` rows beyond
+what the wrapped evaluator's pattern describes, so POUNCE would have been handed
+a Jacobian silently missing every cut row. The shipped fix (#1210) extends the
+COO structure with the cut block, whose pattern is exact and constant because
+the cut pool is snapshotted at construction and a cut `a^T x - b` has gradient
+`a`.
+
+Measured there (structural census, `scratchpad/1193/p2_census.py` — counts, not
+timings, so load-independent), 10 cuts on a root pool: `crudeoil_lee1_09`
+(n=963) Jacobian 2,274,606 -> 12,488 entries and Hessian 464,166 -> 1,397;
+`carton9` 325,080 -> 4,935 and 64,980 -> 400. `elec100` is the counter-case in
+the same output: its Hessian is genuinely dense (45,150 either way) while its
+Jacobian still drops 33,000 -> 350. These are per-callback counts, paid every
+IPM iteration of every cut-augmented node NLP.
+
+Standing rule this class implies: **an extractor that wants coefficients reads
+the arena; only an evaluator evaluates.** A new `evaluate_*` call inside
+`_relax/problem_classifier.py` should be treated as a defect until shown
+otherwise.
 
 ---
 

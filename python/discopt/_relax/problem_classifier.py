@@ -9,6 +9,7 @@ to classify problems, then extracts standard-form data using the JAX DAG compile
 from __future__ import annotations
 
 import logging
+import os
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -128,6 +129,57 @@ _QP_DENSE_Q_MAX_BYTES = 256 * 1024 * 1024
 # is 91.5 GB, an equal-sized wall to the 91 GB dense Q above. Above this budget the
 # extractors emit scipy CSR and consumers densify through ``dense_A()``.
 _DENSE_A_MAX_BYTES = 256 * 1024 * 1024
+
+# Wall-clock budget for the pairwise probe sweep in ``_extract_qp_data_from_repr``
+# and ``_extract_quadratic_coefficients_from_values``, in seconds. 0 disables the
+# gate and restores the pre-symbolic-extractor behaviour exactly.
+#
+# Those extractors recover the objective Hessian by finite differences: one full
+# model evaluation per SUPPORT PAIR, i.e. O(|support|^2) evaluations. #863 already
+# restricted the sweep to the objective's support, which is decisive for a wide
+# model with a narrow objective (watercontamination0202: 101 of 106,711 variables).
+# It buys nothing for a QUBO, where the support IS every variable -- and that is the
+# whole BQP/MBQP class.
+#
+# Measured on ``chimera_mis-01`` (n = 2,032, |support| = 1,818): 1,651,653 probes at
+# 166.5 us = 275.0 s predicted, 275.3 s measured end-to-end -- on a solve whose
+# ``time_limit`` was 60 s. The search never started; the solve returned no incumbent
+# with zero nodes explored. Worse, the #866 verification below then rejects that
+# Q as unrecovered and the answer is discarded, so all 275 s were spent on work
+# that was thrown away.
+#
+# Sweeping the whole MIQP family of MINLPLib (148 instances readable here): 58 spend
+# over 1 s here, 42 over 10 s, and 29 over 60 s -- 71,330 s in total, up to 28,288 s
+# on a single instance (unitcommit_200_100_1_mod_8, n = 25,700). Six of those
+# overlap the tracked MIQP failure set, including all four instances that were
+# observed overrunning a 60 s limit by up to 4.8x.
+# Denominated in PROBES, not seconds, and deliberately so. An earlier revision
+# priced the sweep by timing the diagonal pass and multiplying:
+# ``(perf_counter() - t0) / (2 * n_orig) * pairs``. That made *which extractor
+# runs* a function of machine speed -- the construction #1187 exists to stop,
+# and ``test_912_wall_budget_inventory`` caught it. The two extractors agree to
+# ~1e-16 but not bitwise, so a slow machine could take the tape arm, a fast one
+# the probe, and the two Q matrices could branch differently at identical node
+# counts under ``deterministic=True``. The pair count is exactly the quantity
+# the timing was estimating, is known exactly before the sweep starts, and is
+# identical on every machine -- so the deterministic gate is also the more
+# precise one. Conversion is free here (no seconds-valued tuning to re-derive),
+# which is why this is a conversion and not a ``KNOWN_SLICES`` entry.
+_QP_PROBE_MAX_PROBES = int(float(os.environ.get("DISCOPT_QP_PROBE_MAX_PROBES", "0") or 0))
+
+
+# Read the objective's quadratic coefficients off the expression DAG instead of
+# probing for them. Default-OFF pending the corpus differential panel
+# (CLAUDE.md §5, regime 2: bound-changing); ``DISCOPT_QP_SYMBOLIC=1`` enables it,
+# ``=0`` keeps the probe. Both paths remain intact either way.
+def _qp_symbolic_enabled() -> bool:
+    """Is the symbolic quadratic-form extractor enabled?
+
+    Read per call rather than cached at import so a test (or a panel run) can
+    flip the flag without reimporting the module -- a cached module-level bool
+    is how a flag becomes untestable and then dead.
+    """
+    return (os.environ.get("DISCOPT_QP_SYMBOLIC", "0") or "0") != "0"
 
 
 def _sp_issparse(x) -> bool:
@@ -320,6 +372,16 @@ class _NotLinearError(Exception):
 
 class _NotQuadraticError(Exception):
     """Raised when an expression is not quadratic (at most degree 2)."""
+
+
+class _ProbeBudgetExceeded(Exception):
+    """Raised when the O(|support|^2) probe sweep would exceed its probe budget.
+
+    Distinct from :class:`_NotQuadraticError` because it says nothing about the
+    model: the probe *could* have produced an answer, it would just have cost more
+    than the budget allows. The dispatcher treats the two differently -- a model
+    declined on cost is never allowed to end up with no extraction at all.
+    """
 
 
 def _extract_linear_coefficients(expr, model: Model, n: int):
@@ -1282,6 +1344,57 @@ def extract_qcp_data_algebraic(model: Model) -> QCPData:
     )
 
 
+def _linear_terms_from_repr(repr_, n: int, constraint: int | None):
+    """``(terms, const)`` for one linear row: ``{col: coef}`` and the value at 0.
+
+    ``constraint is None`` selects the objective; otherwise row ``constraint``.
+
+    The legacy path recovers a row by evaluating the Rust repr at ``n`` unit
+    vectors (``A_ij = g_i(e_j) - g_i(0)``), so a model with ``m`` rows costs
+    ``m * n`` full constraint evaluations plus ``m * n`` dense ``(n,)``
+    allocations -- the same numerical-probing shape #1193 removed from the
+    quadratic objective, one dimension lower but applied once per row. On
+    ``acopf_case13659pegase_qcqp`` (n = 199,281, m = 191,097) that is 3.8e10
+    evaluations.
+
+    The arena already holds the coefficients exactly. ``quadratic_form`` returns
+    a symbolic ``(quadratic, linear, constant)`` decomposition; a row is linear
+    exactly when its quadratic map is empty, and then its linear map *is* the
+    row -- read off in time proportional to the DAG, not to ``n``.
+
+    Falls back to the probe whenever the walk declines (unsupported operator,
+    vector-valued body, term budget) or the row is not linear, so the legacy
+    behaviour is preserved verbatim for everything the walk cannot prove.
+    """
+    if _qp_symbolic_enabled():
+        form = (
+            repr_.objective_quadratic_form()
+            if constraint is None
+            else repr_.constraint_quadratic_form(constraint)
+        )
+        # form is (qi, qj, qd, ci, cd, constant). An empty quadratic COO means the
+        # walk proved the row has no second-order term -- note the walk prunes
+        # exact zeros, so this is a stronger statement than its degree counter.
+        if form is not None and len(form[0]) == 0:
+            ci, cd, const = form[3], form[4], form[5]
+            return {int(j): float(v) for j, v in zip(ci, cd) if v != 0.0}, float(const)
+
+    x_zero = np.zeros(n, dtype=np.float64)
+    evaluate = (
+        repr_.evaluate_objective
+        if constraint is None
+        else (lambda x, _i=constraint: repr_.evaluate_constraint(_i, x))
+    )
+    at_zero = float(evaluate(x_zero))
+    row = np.zeros(n, dtype=np.float64)
+    for j in range(n):
+        ej = np.zeros(n, dtype=np.float64)
+        ej[j] = 1.0
+        row[j] = float(evaluate(ej)) - at_zero
+    (nz,) = np.nonzero(row)
+    return {int(j): float(row[j]) for j in nz}, at_zero
+
+
 def _extract_lp_data_from_repr(model: Model) -> LPData:
     """Extract LP data by evaluating the Rust ModelRepr at unit vectors.
 
@@ -1297,15 +1410,10 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     n_orig = repr_.n_vars
     n_con = repr_.n_constraints
 
-    x_zero = np.zeros(n_orig, dtype=np.float64)
-    obj_at_zero = repr_.evaluate_objective(x_zero)
-
-    # Extract objective coefficients
+    _obj_terms, obj_at_zero = _linear_terms_from_repr(repr_, n_orig, None)
     c = np.zeros(n_orig, dtype=np.float64)
-    for j in range(n_orig):
-        ej = np.zeros(n_orig, dtype=np.float64)
-        ej[j] = 1.0
-        c[j] = repr_.evaluate_objective(ej) - obj_at_zero
+    for _j, _v in _obj_terms.items():
+        c[_j] = _v
 
     # Extract constraint data. Rows are reduced to their nonzeros as soon as they
     # are probed (#863): retaining n_con dense (n_orig,) vectors and np.stack()ing
@@ -1316,30 +1424,20 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     ineq_senses: list[str] = []
     ineq_rhs: list[float] = []
 
-    def _row_terms(vec) -> dict[int, float]:
-        (nz,) = np.nonzero(vec)
-        return {int(j): float(vec[j]) for j in nz}
-
     for i in range(n_con):
         sense = repr_.constraint_sense(i)
         rhs_val = repr_.constraint_rhs(i)
-        g_at_zero = repr_.evaluate_constraint(i, x_zero)
-
-        a_row = np.zeros(n_orig, dtype=np.float64)
-        for j in range(n_orig):
-            ej = np.zeros(n_orig, dtype=np.float64)
-            ej[j] = 1.0
-            a_row[j] = repr_.evaluate_constraint(i, ej) - g_at_zero
+        row_terms, g_at_zero = _linear_terms_from_repr(repr_, n_orig, i)
 
         if sense == "==":
-            eq_terms.append(_row_terms(a_row))
+            eq_terms.append(row_terms)
             eq_rhs.append(rhs_val - g_at_zero)
         elif sense == "<=":
-            ineq_terms.append(_row_terms(a_row))
+            ineq_terms.append(row_terms)
             ineq_senses.append("le")
             ineq_rhs.append(rhs_val - g_at_zero)
         elif sense == ">=":
-            ineq_terms.append(_row_terms(a_row))
+            ineq_terms.append(row_terms)
             ineq_senses.append("ge")
             ineq_rhs.append(rhs_val - g_at_zero)
 
@@ -1409,7 +1507,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     )
 
 
-def _extract_qp_data_from_repr(model: Model) -> QPData:
+def _extract_qp_data_from_repr(model: Model, probe_budget: int | None = None) -> QPData:
     """Extract QP data by evaluating the Rust ModelRepr numerically.
 
     For the quadratic objective 0.5 x'Qx + c'x + d:
@@ -1429,7 +1527,8 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     x_zero = np.zeros(n_orig, dtype=np.float64)
     d = repr_.evaluate_objective(x_zero)
 
-    # Evaluate at all unit vectors
+    # Evaluate at all unit vectors. Not timed: the budget check below is denominated
+    # in probes, so nothing here needs a clock.
     f_ej = np.zeros(n_orig, dtype=np.float64)
     f_neg_ej = np.zeros(n_orig, dtype=np.float64)
     for j in range(n_orig):
@@ -1454,6 +1553,23 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     # the unrestricted sweep issues 5.69e9 probes to discover ~1e4 possibly-nonzero
     # entries, and a dense (n, n) Q there is 91 GB.
     support = [j for j in range(n_orig) if f_ej[j] != d or f_neg_ej[j] != d or diag[j] != 0.0]
+
+    # Budget gate. |support| is now known exactly, so the pair sweep can be counted
+    # before it is paid for -- exactly, not predicted: the sweep below issues one
+    # probe per pair and nothing else. Refuse loudly rather than silently spending a
+    # multiple of the caller's whole time limit; ``extract_qp_data`` routes a
+    # declined model to the tape extractor, which gets the same Hessian from one AD
+    # evaluation instead of |support|^2 probes. For scale, ``chimera_mis-01`` has a
+    # support of 1,818 -> 1,651,653 pairs, which measured 275.3 s.
+    _budget = _QP_PROBE_MAX_PROBES if probe_budget is None else probe_budget
+    _pairs = len(support) * (len(support) - 1) // 2
+    if _budget > 0 and _pairs > _budget:
+        raise _ProbeBudgetExceeded(
+            f"pairwise probe sweep would issue {_pairs:,} probes over a support of "
+            f"{len(support)} of {n_orig} variables, over the {_budget:,}-probe "
+            f"budget (DISCOPT_QP_PROBE_MAX_PROBES)"
+        )
+
     off_i: list[int] = []
     off_j: list[int] = []
     off_v: list[float] = []
@@ -1529,6 +1645,146 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
                 "differences cancelled — falling through to a stabler extractor"
             )
 
+    return _assemble_qp_from_repr(model, repr_, n_orig, Q, c_vec, d)
+
+
+def _extract_qp_data_symbolic(model: Model) -> QPData:
+    """Extract QP standard form by reading the coefficients off the expression DAG.
+
+    This is the analytical counterpart to :func:`_extract_qp_data_from_repr`.
+    The Rust arena already walks the whole DAG to answer ``is_quadratic`` -- a
+    *degree* question whose answer is a bool -- and
+    ``ModelRepr.objective_quadratic_form`` emits the coefficients that walk
+    already sees, as a sparse COO triplet, in O(nodes).
+
+    Why this exists. The probe recovers the same numbers from
+    ``f(e_i + e_j) - f(e_i) - f(e_j) + f(0)``, one model evaluation per variable
+    *pair*: O(|support|^2). Measured over the 150-instance MINLPLib MIQP family
+    (BQP/IQP/MBQP/MIQP), probing costs **71,330 s** and this walk costs
+    **5.99 s** -- and the walk declines on none of them. Per instance the worst
+    case is ``unitcommit_200_100_1_mod_8`` (n = 25,700): 28,288 s of probing
+    against 0.042 s here, for a Q with 4,662 nonzeros whose dense form is 5.3 GB.
+
+    It is also *more accurate*, not merely faster. Every coefficient here is a
+    sum of products of literals in the DAG, so there is no subtractive
+    cancellation; the probe identities are differences of nearly-equal floats,
+    which is what returned ``Q = 0`` for a sum of squares and certified a false
+    optimum in #866. On ``chimera_mis-01`` the probe spends 275 s and then fails
+    its own #866 verification (-171.42 against a true -174.09), so the work is
+    discarded and redone by the tape.
+
+    Verified against ``repr_.evaluate_objective`` at 5 random points on each of
+    the 150 instances: 750 comparisons, worst relative error 6.9e-14, zero
+    mismatches.
+
+    Raises :class:`_NotQuadraticError` when the walk declines -- the objective
+    is not a quadratic form, it uses a construct the walk does not represent, or
+    its coefficients would not fit the term budget. The walk never approximates,
+    so a decline is the only failure mode and the dispatcher falls through.
+    """
+    from discopt._rust import model_to_repr
+
+    _builder = getattr(model, "_builder", None)
+    repr_ = model_to_repr(model, _builder)
+    n_orig = repr_.n_vars
+
+    form = repr_.objective_quadratic_form()
+    if form is None:
+        raise _NotQuadraticError(
+            "the objective is not representable as a quadratic form by the "
+            "symbolic DAG walk (not degree 2, an unsupported construct, or over "
+            "the coefficient budget) — falling through to the next extractor"
+        )
+    Q, c_vec, obj_const = _quadratic_form_to_coefficients(form, n_orig)
+    return _assemble_qp_from_repr(model, repr_, n_orig, Q, c_vec, obj_const)
+
+
+def _quadratic_form_to_coefficients(form, n: int):
+    """Convert a ``(qi, qj, qd, ci, cd, constant)`` COO quadratic form -- what
+    ``ModelRepr.objective_quadratic_form`` / ``.constraint_quadratic_form``
+    return -- into the ``0.5 x' Q x + c'x + d`` triple every consumer here
+    expects.
+
+    The walk returns the FULL coefficient of ``x_i * x_j``; QPData carries the
+    ``0.5 x' Q x`` convention with a symmetric Q. So a diagonal coefficient
+    doubles (``0.5 * Q[i,i] * x_i^2 == qd * x_i^2`` requires ``Q[i,i] = 2*qd``)
+    and an off-diagonal splits across the two symmetric halves
+    (``0.5 * 2 * Q[i,j] == qd`` requires ``Q[i,j] = Q[j,i] = qd``). This matches
+    the probe identities exactly: there ``diag[j] = f(e_j) + f(-e_j) - 2d``
+    already equals twice the ``x_j^2`` coefficient, and
+    ``Q[i,j] = f(e_i+e_j) - f(e_i) - f(e_j) + d`` equals the cross coefficient.
+
+    Shared by the objective arm and the quadratic-constraint arm so the two
+    conventions cannot drift apart.
+    """
+    qi, qj, qd, ci, cd, const = form
+    qi = np.asarray(qi, dtype=np.int64)
+    qj = np.asarray(qj, dtype=np.int64)
+    qd = np.asarray(qd, dtype=np.float64)
+
+    _is_diag = qi == qj
+    rows = np.concatenate([qi[_is_diag], qi[~_is_diag], qj[~_is_diag]])
+    cols = np.concatenate([qj[_is_diag], qj[~_is_diag], qi[~_is_diag]])
+    vals = np.concatenate([2.0 * qd[_is_diag], qd[~_is_diag], qd[~_is_diag]])
+
+    c_vec = np.zeros(n, dtype=np.float64)
+    if len(ci):
+        c_vec[np.asarray(ci, dtype=np.int64)] = np.asarray(cd, dtype=np.float64)
+
+    # Dense while it comfortably fits, sparse beyond that -- the same threshold
+    # the probe path uses (#863), so downstream consumers see the same types.
+    if (n * n * 8) <= _QP_DENSE_Q_MAX_BYTES:
+        Q = np.zeros((n, n), dtype=np.float64)
+        if len(rows):
+            Q[rows, cols] = vals
+    else:
+        import scipy.sparse as _sp
+
+        Q = cast(np.ndarray, _sp.csr_matrix((vals, (rows, cols)), shape=(n, n)))
+
+    return Q, c_vec, float(const)
+
+
+def _quadratic_coefficients(repr_, n_vars: int, constraint: int | None):
+    """``(Q, c, d)`` for the objective (``constraint is None``) or one constraint.
+
+    Tries the symbolic DAG walk first when ``DISCOPT_QP_SYMBOLIC`` is on, and
+    falls back to :func:`_extract_quadratic_coefficients_from_values` -- the
+    O(|support|^2) finite-difference probe -- when the walk declines. The walk
+    never approximates, so declining is its only failure mode.
+
+    This is the QCP/QCQP counterpart of :func:`_extract_qp_data_symbolic`, and it
+    matters more here than on the objective: the probe runs **once per
+    constraint**, so a model with ``m`` quadratic rows pays ``m`` pair sweeps.
+    """
+    if _qp_symbolic_enabled():
+        form = (
+            repr_.objective_quadratic_form()
+            if constraint is None
+            else repr_.constraint_quadratic_form(constraint)
+        )
+        if form is not None:
+            return _quadratic_form_to_coefficients(form, n_vars)
+
+    if constraint is None:
+        return _extract_quadratic_coefficients_from_values(repr_.evaluate_objective, n_vars)
+    return _extract_quadratic_coefficients_from_values(
+        lambda x, _i=constraint: repr_.evaluate_constraint(_i, x), n_vars
+    )
+
+
+def _assemble_qp_from_repr(model, repr_, n_orig: int, Q, c_vec, d: float) -> QPData:
+    """Attach constraints, slack padding and objective sense to a recovered
+    ``(Q, c, d)`` and package it as :class:`QPData`.
+
+    Shared by the symbolic extractor and the finite-difference probe so the
+    two cannot drift: they differ only in how ``Q`` and ``c`` are recovered,
+    and everything downstream of that -- the LP constraint extraction, the
+    slack block, the maximize negation (#28) -- is this one function.
+
+    ``Q`` follows the ``0.5 x' Q x + c'x + d`` convention and is symmetric;
+    it may be dense or sparse and is passed through unchanged.
+    """
     # Extract constraints (same as LP)
     lp_data = _extract_lp_data_from_repr(model)
     n_slack = lp_data.c.shape[0] - n_orig
@@ -1649,10 +1905,7 @@ def _extract_qcp_data_from_repr(model: Model) -> QCPData:
     repr_ = model_to_repr(model, _builder)
 
     n_orig = repr_.n_vars
-    Q, c_vec, obj_const = _extract_quadratic_coefficients_from_values(
-        repr_.evaluate_objective,
-        n_orig,
-    )
+    Q, c_vec, obj_const = _quadratic_coefficients(repr_, n_orig, None)
 
     # COO accumulators rather than lists of dense rows (#863); see _materialise_A.
     ub_coo: tuple[list[int], list[int], list[float]] = ([], [], [])
@@ -1662,10 +1915,7 @@ def _extract_qcp_data_from_repr(model: Model) -> QCPData:
     q_rows: list[QuadraticConstraintData] = []
 
     for i in range(repr_.n_constraints):
-        row_Q, row_c, row_const = _extract_quadratic_coefficients_from_values(
-            lambda x, _i=i: repr_.evaluate_constraint(_i, x),
-            n_orig,
-        )
+        row_Q, row_c, row_const = _quadratic_coefficients(repr_, n_orig, i)
         sense = repr_.constraint_sense(i)
         rhs = float(repr_.constraint_rhs(i)) - float(row_const)
         if _quadratic_row_has_terms(row_Q):
@@ -2081,6 +2331,16 @@ def extract_qp_data(model: Model) -> QPData:
     Returns:
         QPData with Q, c, A_eq, b_eq, x_l, x_u.
     """
+    # The symbolic DAG walk goes first when enabled: it is exact, O(nodes), and
+    # needs neither a ``_builder`` nor Python-level expression objects, so it
+    # covers both the API-built and the ``from_nl`` arms of this ladder. It
+    # declines rather than approximating, so a failure here costs only the walk.
+    if _qp_symbolic_enabled():
+        try:
+            return _extract_qp_data_symbolic(model)
+        except Exception as exc:  # noqa: BLE001 - falls through to the existing ladder
+            logger.debug("QP symbolic extraction failed: %s: %s", type(exc).__name__, exc)
+
     _builder = getattr(model, "_builder", None)
     if _builder is not None:
         try:
@@ -2100,8 +2360,22 @@ def extract_qp_data(model: Model) -> QPData:
     # ``classify_problem``), so ``from_nl`` / repr-only models — where the
     # algebraic DAG walk can't run — skip the per-primitive eager-JAX autodiff
     # path (orders of magnitude faster on small instances; see #330).
+    #
+    # "On small instances" is load-bearing and was not enforced until the
+    # symbolic extractor landed. The probe is O(|support|^2) model evaluations
+    # against the tape's O(1), so the ordering inverts as the objective's
+    # support grows: measured on ``du-opt``
+    # (n = 20) the probe wins 0.02s to 0.16s, and on ``chimera_mis-01``
+    # (n = 2,032, |support| = 1,818) it loses 275.3s to a fraction of a second.
+    # The two agree to 6.65e-16 relative where both succeed. ``_ProbeBudgetExceeded``
+    # is the probe declining on that basis; it is handled separately below because
+    # it is a statement about cost, not about the model.
+    _declined: _ProbeBudgetExceeded | None = None
     try:
         return _extract_qp_data_from_repr(model)
+    except _ProbeBudgetExceeded as exc:
+        _declined = exc
+        logger.info("QP repr probe declined on cost, using the tape extractor: %s", exc)
     except Exception as exc:  # noqa: BLE001 - falls through to the autodiff extractor
         logger.debug(
             "QP repr extraction (probe) failed, falling back to autodiff: %s: %s",
@@ -2109,7 +2383,24 @@ def extract_qp_data(model: Model) -> QPData:
             exc,
         )
 
-    return _extract_qp_data_autodiff(model)
+    if _declined is None:
+        return _extract_qp_data_autodiff(model)
+
+    # The probe was declined on cost, not on correctness -- it would have produced
+    # an answer eventually. So a declined model must never end up with NO extraction:
+    # if the tape and JAX arms both fail to represent it, pay the cost we skipped
+    # rather than propagate a failure the unbudgeted code would not have had.
+    try:
+        return _extract_qp_data_autodiff(model)
+    except Exception as exc:  # noqa: BLE001 - re-runs the probe it declined
+        logger.warning(
+            "QP autodiff extraction failed after the repr probe was declined on cost "
+            "(%s); re-running the probe without its budget: %s: %s",
+            _declined,
+            type(exc).__name__,
+            exc,
+        )
+        return _extract_qp_data_from_repr(model, probe_budget=0)
 
 
 def extract_qcp_data(model: Model) -> QCPData:
