@@ -593,3 +593,57 @@ class TestJIT:
         x = _random_interior_point(model, rng)
         result = fn(x)
         assert jnp.all(jnp.isfinite(result)), f"Non-finite JIT result for {name}: {result}"
+
+
+class TestIntegralExponentLowering:
+    """``x ** k`` for a constant integral ``k`` lowers to ``integer_pow`` (#1216).
+
+    ``pow``'s derivative carries a ``log(base)`` term for its exponent argument.
+    At a NEGATIVE base that term is NaN, and any nesting deep enough to
+    materialize the (zero) exponent tangent turns it into ``0 * NaN`` -- poisoning
+    the whole derivative. Values, gradients and Hessians are unaffected, which is
+    why this stayed latent: the failure starts at the third-order forward-mode
+    nesting that an ``argmin``/``implicit`` block's sensitivity rule performs.
+    ``integer_pow`` has no exponent argument and therefore no such term.
+    """
+
+    def test_integral_exponent_lowers_to_integer_pow(self):
+        m = Model("pow")
+        x = m.continuous("x", lb=-5, ub=5)
+        m.minimize((x - 2.0) ** 2)
+        jaxpr = str(jax.make_jaxpr(compile_objective(m))(jnp.array([-1.1])))
+        assert "integer_pow" in jaxpr
+        assert " pow " not in jaxpr
+
+    def test_fractional_exponent_keeps_the_general_pow(self):
+        m = Model("frac")
+        x = m.continuous("x", lb=0.1, ub=5)
+        m.minimize(x**0.5)
+        jaxpr = str(jax.make_jaxpr(compile_objective(m))(jnp.array([2.0])))
+        assert "integer_pow" not in jaxpr
+
+    def test_variable_exponent_keeps_the_general_pow(self):
+        m = Model("varexp")
+        x = m.continuous("x", lb=0.1, ub=5)
+        y = m.continuous("y", lb=1.0, ub=3.0)
+        m.minimize(x**y)
+        jaxpr = str(jax.make_jaxpr(compile_objective(m))(jnp.array([2.0, 2.0])))
+        assert "integer_pow" not in jaxpr
+
+    @pytest.mark.parametrize("x_value", [-1.1, 1.1])
+    def test_integral_exponent_values_and_derivatives_unchanged(self, x_value):
+        m = Model("pow")
+        x = m.continuous("x", lb=-5, ub=5)
+        m.minimize((x - 2.0) ** 3 + x**2)
+        fn = compile_objective(m)
+        f = lambda t: fn(jnp.array([t]))  # noqa: E731
+        assert float(f(jnp.float64(x_value))) == pytest.approx((x_value - 2.0) ** 3 + x_value**2)
+        assert float(jax.grad(f)(jnp.float64(x_value))) == pytest.approx(
+            3 * (x_value - 2.0) ** 2 + 2 * x_value
+        )
+        assert float(jax.jacfwd(jax.grad(f))(jnp.float64(x_value))) == pytest.approx(
+            6 * (x_value - 2.0) + 2
+        )
+        assert float(jax.jacfwd(jax.jacfwd(jax.grad(f)))(jnp.float64(x_value))) == pytest.approx(
+            6.0
+        )

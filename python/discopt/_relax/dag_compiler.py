@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Callable
 
 import jax.numpy as jnp
+import numpy as np
 
 # Import expression types from the modeling API
 from discopt.modeling.core import (
@@ -186,9 +187,25 @@ def _node_kernel(expr: Expression, model: Model, param_index: dict) -> tuple[tup
             def fn(x_flat, params, a):
                 return a[0] / a[1]
         elif op == "**":
+            # A constant integral exponent is emitted as a Python int so JAX
+            # lowers it to ``integer_pow`` rather than ``pow``.  ``pow``'s
+            # derivative carries a ``log(base)`` term for the exponent argument;
+            # at a NEGATIVE base that term is NaN, and once a nesting deep
+            # enough to materialize the (zero) exponent tangent is reached the
+            # ``0 * NaN`` poisons the whole derivative.  Second derivatives are
+            # unaffected -- the failure starts at the third-order forward-mode
+            # nesting that an argmin/implicit block's sensitivity rule needs
+            # (#1216).  ``integer_pow`` has no such term.
+            k_exp = _integral_constant_exponent(expr.right)
+            if k_exp is not None:
 
-            def fn(x_flat, params, a):
-                return a[0] ** a[1]
+                def fn(x_flat, params, a, _k=k_exp):
+                    return a[0] ** _k
+
+            else:
+
+                def fn(x_flat, params, a):
+                    return a[0] ** a[1]
         else:
             raise ValueError(f"Unknown binary operator: {op!r}")
         return (expr.left, expr.right), fn
@@ -356,6 +373,23 @@ def _node_kernel(expr: Expression, model: Model, param_index: dict) -> tuple[tup
         return tuple(expr.terms), fn
 
     raise TypeError(f"Unhandled expression type: {type(expr).__name__}")
+
+
+def _integral_constant_exponent(expr) -> int | None:
+    """``int`` when ``expr`` is a constant scalar exponent with an integral value.
+
+    Returns ``None`` for anything else (a variable exponent, a non-integral one,
+    an array), which keeps the general ``pow`` path.
+    """
+    if not isinstance(expr, Constant):
+        return None
+    val = np.asarray(expr.value)
+    if val.ndim != 0:
+        return None
+    f = float(val)
+    if not np.isfinite(f) or f != int(f):
+        return None
+    return int(f)
 
 
 def _build_param_index(model: Model) -> dict:
