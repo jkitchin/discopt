@@ -6288,3 +6288,93 @@ So the identity-keyed `param_index` is **not** mb-doe's critical path.
 `dag_compiler.compile_expression` is — jitted, `vmap`ped and `jacrev`ed on the
 FIM hot path — which puts it top of the list for the §31 identity audit, above
 the `Parameter` mutability question.
+
+## 33. Construction is not mb-doe's bottleneck; the XLA trace is — and the tape can replace it (2026-09-09)
+
+§31 settled that an arena construction path is worth 7.3×. This section asks the
+different question of whether that is the right *direction* for discopt as the
+modeling foundation for mb-doe, and the answer is **no** — measured.
+
+### Where mb-doe's time actually goes
+
+An mb-doe-shaped workload (N candidate experiments, each a 2-state collocation
+DAE with a nonlinear rate law, 4 unknown parameters as `Variable`s, responses
+differentiated w.r.t. θ for the FIM), replicating `discopt-doe`'s own pattern in
+`doe/model_based.py`. Stage costs, using the better-controlled A/B figures from
+`issue1215_tape_sensitivity.py` for the JAX column:
+
+| N_EXP / NFE | build model | XLA trace | 300 FIM evals | construction share |
+|---|---|---|---|---|
+| 8 / 6 | 7.6 ms | 116 ms | 3.3 ms | **6.0%** |
+| 32 / 8 | 14.0 ms | 187 ms | 14.4 ms | **6.5%** |
+| 64 / 12 | 24.5 ms | 301 ms | 22.2 ms | **7.0%** |
+
+**Construction is ~6–7% and the one-time XLA trace is ~86–91%.** The arena's
+7.3× on construction therefore buys roughly **5–6% end-to-end** on this workload.
+That is not a foundation-level win, and §4 says the measurement wins over the
+plan: *the arena is the right answer to issue #1215 as written (construction
+really is 2.4× slower than Pyomo, and on a 200k-row model that is 3.2 s), and the
+wrong first investment for the mb-doe foundation goal.*
+
+### Retraction: three figures from the first profiling pass
+
+The first pass of this profile reported the 64/12 case as **32,771 µs/eval**,
+making FIM evaluation **91.5%** of total and construction **0.2%**. A second,
+better-controlled measurement of the same quantity puts that evaluation at
+**73.9 µs** — a 440× discrepancy, with the first run showing sd 13,355 µs against
+a median of 32,771. **All three figures (32,771 µs, 91.5%, 0.2%) are retracted**
+and the table above supersedes them. The cause is not established; the first
+probe rebuilt the flat vector from `jnp.zeros` per call with all states at zero
+and stacked 64 separately-compiled closures, and the variance suggests
+recompilation or memory pressure rather than steady-state cost. Per §9, a timing
+claim needs an interleaved control — the first pass had none, the second does.
+
+The direction conclusion is unchanged either way: under the retracted numbers
+construction was 0.2%, under the corrected ones 7.0%. Both say the same thing.
+
+### The tape reproduces `∂y/∂θ` exactly, and skips the trace
+
+The tape already tapes a residual vector as the constraint rows of an auxiliary
+`NlProblem` and reads its `R × n` Jacobian (the Gauss-Newton path, §"What did not
+work" notwithstanding — that trick *did* work). **Responses are residuals under a
+different name**, so the same mechanism yields the FIM sensitivities. Entry
+experiment, stated kill criterion 1e-9 (`issue1215_tape_sensitivity.py`):
+
+| N_EXP / NFE | tape build | jax build | tape eval | jax eval | max rel. err |
+|---|---|---|---|---|---|
+| 8 / 6 | 0.41 ms | 116.18 ms | 5.6 µs | 10.9 µs | **0.000e+00** |
+| 32 / 8 | 0.91 ms | 186.73 ms | 16.7 µs | 47.9 µs | **0.000e+00** |
+| 64 / 12 | 2.40 ms | 300.74 ms | 158.7 µs | 73.9 µs | **0.000e+00** |
+
+Exact agreement — not "within tolerance", bit-identical — at every size. Setup is
+**50–125× cheaper** because there is no XLA trace. Per evaluation the tape wins at
+the two smaller sizes and **loses ~2× at the largest**, with an unexplained sd of
+527 µs; that column is not settled and must not be quoted as a win.
+
+### Why this is the more future-proof direction
+
+1. **It removes the second AD engine.** Today: solve derivatives on the Rust tape,
+   parameter sensitivities on JAX (§32). mb-doe forces JAX back into a project
+   whose stated property is "a default solve imports zero `jax` modules". One
+   engine that differentiates w.r.t. anything in the variable vector is the
+   correct foundation, and this experiment shows the tape already can.
+2. **It attacks 86–91% instead of 6–7%.** The XLA trace is the cost, and the tape
+   has no analogue of it.
+3. **It is additive, not a rewrite.** No change to the modeling API, no change to
+   the expression representation, no identity-semantics risk — the §31 blocker
+   (170 `id(node)` sites) is not on this path at all.
+4. **It does not foreclose the arena.** §31's 7.3× stays available and stays true;
+   it simply is not first.
+
+### Revised ordering
+
+1. **Tape-based parameter sensitivities** for mb-doe (this section). Highest
+   value, lowest risk, no API surface.
+2. **Decide `dm.custom`** (§32): give the arena and the tape an opaque-node
+   variant, or accept permanent JAX exile. This gates whether the arena could
+   *ever* be the single representation, and process modeling — external property
+   packages — is exactly where `dm.custom` lives. Deciding it after building an
+   arena-primary path would be the expensive order.
+3. **Construction**, and then the cheap targeted wins of #1215 (#1–#4) before the
+   full arena, since the arena's remaining value is a 5–6% end-to-end effect on
+   this workload and a real one only on 100k-row models.
