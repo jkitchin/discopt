@@ -6036,3 +6036,119 @@ expression nodes, same per-instance construction model) builds the identical
 200k-instance model in **0.132 s / 41 MB** against discopt's ~4 s / ~196 MB.
 That remaining gap is representational, not a constant factor, and is what the
 template IR would address.
+
+## 31. The arena performs (7.3× measured); the blocker is identity, not speed (2026-09-09)
+
+Entry experiment for issue #1215's "open question worth settling early" —
+whether construction should keep producing an intermediate Python DAG that is
+then converted, or emit arena-shaped data directly. Run **before** any
+representation change, per §4. Instruments, both in-tree:
+`discopt_benchmarks/scripts/bench_model_construction.py` (the standing
+discopt-vs-Pyomo baseline) and
+`discopt_benchmarks/scripts/issue1215_arena_prototype.py` (this experiment,
+with a `--mode verify` soundness gate).
+
+### The full budget, not just the build
+
+The issue measured the build. The cost a solve actually pays is build **plus**
+the lowering to the Rust arena. On the 200k-instance model, one process:
+
+| stage | wall | µs/inst | retained |
+|---|---|---|---|
+| build Python DAG | 2.732 s | 13.66 | 182.3 MB |
+| lower → Rust arena (`model_to_repr`) | 1.427 s | 7.14 | 34.8 MB |
+| **total** | **4.159 s** | **20.80** | **217.1 MB** |
+
+The lowering is **34% of the budget** and was not in the issue's headline.
+
+**The arena is already 6× more compact than the DAG that produces it**:
+245,043 nodes for 200,000 constraints — **1.23 nodes/instance** at 142 B/node,
+against ~6 Python nodes/instance. Hash-consing (`ExprArena::enable_interning`)
+is doing that: the ~45k shared inner nodes (`x[i]`, `y[i]`, `x[i]*y[i]`,
+`exp(x[i])`, …) intern across all 40 forms, leaving one unique `Sub` per row.
+So the representation the solver consumes is *not* the expensive one — the
+intermediate is.
+
+### The arena performs: 7.3× through the public API
+
+Flat arena (parallel `op`/`a`/`b`/`k` lists, integer handles), interleaved
+A/B/A/B in one process, 5 reps, load gate 0.33, 200k rows:
+
+| arm | median | µs/row | retained | B/row | vs current |
+|---|---|---|---|---|---|
+| current (one unslotted object per node) | 2.656 s | 13.28 | 182.2 MB | 911 | 1.0× |
+| **arena + slotted handle per node (public operator API)** | **0.363 s** | **1.81** | **74.9 MB** | 374 | **7.3×** |
+| arena + names + collision check, no handle objects | 0.174 s | 0.87 | 74.3 MB | 372 | 15.3× |
+| arena raw (integer handles, no bookkeeping) | 0.105 s | 0.52 | 51.3 MB | 257 | 25.3× |
+
+Reference on the same model: **Pyomo 6.10.1 = 6.67 µs/row**, **oximo 0.6.0 =
+0.66 µs/row**.
+
+Soundness-gated: `--mode verify` evaluates every prototype row against the
+current path's compiled row on random points — 5,000 comparisons, max abs error
+**7.1e-15**. A fast arena that encodes a different model is worthless, so this
+gate runs before any timing claim is believed.
+
+**The decisive line is `arena-api` → `arena-named`: 1.81 vs 0.87 µs.** That
+factor of 2 is the cost of allocating one Python handle object per node, and
+operator overloading (`x[i] * y[i] <= c` — discopt's public API) makes it
+unavoidable. So:
+
+* an arena-backed discopt would be **~3.7× faster than Pyomo** and land near
+  **1.8 µs/row**;
+* it would **not** reach oximo's 0.66 µs, and the residual 2.7× is the Python
+  object per node, not the representation. "Fast like oximo" is not reachable
+  through a Python operator-overloading API. This is the honest ceiling and
+  should be stated as such rather than re-derived a fourth time.
+
+Treat 7.3× as a **ceiling, not a forecast**: the prototype does no static shape
+inference, no out-of-bounds guard, no builder variable registration, only the
+operators the four forms need, and no hash-consing (565,002 nodes where the
+Rust arena interns to 245,043 — so real memory would be *better*). Restoring
+the guards spends some of the 7.3× back.
+
+### What actually blocks it: identity, not speed
+
+Consumer census over `python/discopt` (`isinstance` and attribute reads that a
+handle-backed node would have to satisfy):
+
+| surface | sites | disposition |
+|---|---|---|
+| `isinstance(n, BinaryOp/Constant/Variable/UnaryOp/IndexExpression/FunctionCall/Parameter/Constraint)` | 1,051 | **solvable** — per-opcode slotted handle subclasses of the existing classes; `arena-api` already prices one typed object per node |
+| `.left` 603, `.right` 644, `.op` 594, `.value` 542, `.operand` 270, `.args` 185, `.base` 180, `.terms` 133, `.index` 86 | ~3,240 | **solvable** — properties reading the flat arrays, returning handles |
+| `type(n).__name__` dispatch | 178 | **solvable** — falls out of per-opcode subclasses |
+| `.body` readers | 63 files | **solvable** — `Constraint.body` returns a handle |
+| `id(node)`-keyed traversal (`_seen`/`visited`/memo sets) | 170 | **the blocker** — see below |
+| Rust `convert_expr` dispatch on Python class name | 4 | moot if construction emits the arena directly |
+
+`Expression.__hash__` is `object.__hash__` (identity) — deliberately, because
+`__eq__` is overloaded to build a `Constraint`, so value equality is
+unavailable. Two consequences, and they are the same risk that candidate #1
+(caching `IndexExpression` per position) carries on its own:
+
+1. **A shared node is visited once, not once per parent.** Cached leaves and
+   hash-consing turn the tree into a DAG; a `seen`-set traversal that today
+   walks `x[i]` twice in `x[i]*y[i]` would walk it once. Any consumer that
+   *counts* or *accumulates* per visit — not merely collects — silently changes
+   its answer.
+2. **Handle identity must be interned too.** If `.left` mints a fresh handle
+   per access, `id()` is unstable and every identity-keyed memo degrades to a
+   cache miss (slow but correct) or a wrong answer (if used as a visited-set).
+   The arena must cache one handle per node id.
+
+Neither is caught by a metaclass or a property. This is where the work is, and
+it is why the arena is a **branch-and-verify** job over those 170 sites rather
+than a representation swap. Nothing here is bound-changing (CLAUDE.md §5:
+construction must leave `node_count`, certified `objective` and status exactly
+unchanged), so the gate is the #1208 pattern — paired LP/MILP/NLP/MINLP solves,
+bit-identical on status, objective and `node_count`.
+
+### Disposition
+
+The arena is **worth building**: 7.3× and 2.4× lighter through the public API,
+soundness-gated, and it also deletes the 34% lowering step rather than merely
+speeding the build. But it is gated on the identity audit, not on further
+performance work — the performance question is now **settled** and should not be
+re-measured. Candidates #1–#4 in the issue are the same identity risk at
+smaller scope; #1 (leaf caching) is the natural first increment because it
+forces the identity audit on the narrowest possible surface.
