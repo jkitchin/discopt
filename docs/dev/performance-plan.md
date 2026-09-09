@@ -6378,3 +6378,123 @@ the two smaller sizes and **loses ~2× at the largest**, with an unexplained sd 
 3. **Construction**, and then the cheap targeted wins of #1215 (#1–#4) before the
    full arena, since the arena's remaining value is a 5–6% end-to-end effect on
    this workload and a real one only on 100k-row models.
+
+## 34. §33 validated on the real path: 73–117× on discopt-doe's own `compute_fim` (2026-09-09)
+
+§33's tape result was measured on a synthetic replica of discopt-doe's
+sensitivity pattern. Per the #727 lesson (synthetic root-gain 0.68, real gain
+0.0) that is not sufficient, so this drives
+`discopt.doe.fim.compute_fim` — the shipped entry point — on real `Experiment`
+subclasses. `discopt-doe`'s own `test_fim.py` + `test_langmuir_batch_reactor.py`
+pass in this tree first (35 passed), so the comparison has a working oracle.
+
+### The real path: construction is 0.1%, JAX autodiff is 98.6%
+
+| case | first call | repeat median | build model | build share |
+|---|---|---|---|---|
+| langmuir n=5 | 546.6 ms | 39.8 ms | 0.04 ms | **0.1%** |
+| langmuir n=50 | 1155.1 ms | 342.1 ms | 0.25 ms | **0.1%** |
+| langmuir n=200 | 3276.7 ms | 1423.1 ms | 1.11 ms | **0.1%** |
+| kinetics n=50 | 952.7 ms | 460.1 ms | 0.32 ms | **0.1%** |
+| kinetics n=200 | 2207.6 ms | 1862.4 ms | 1.38 ms | **0.1%** |
+
+**Construction is 0.1% of a real `compute_fim` call at every size** — §33's
+synthetic estimate of 6–7% was *generous* to the arena. cProfile on
+kinetics n=200, 5 calls, **23.3 M Python function calls**:
+
+```
+19.881s  compute_fim
+19.607s    _compute_jacobian_autodiff          <- 98.6%
+19.543s      jax api.py:834(jacfun)
+14.797s        jax core.py:679(bind)  x 113,110 calls
+12.650s        jax api.py:1638(vjp) -> linearize
+11.542s        _relax/differentiable.py:138(fn)  x 1,000
+```
+
+**And it re-traces on every call** — the repeat median is 1.4–1.9 s, not
+microseconds, so nothing is cached across calls. A design optimizer looping on
+`compute_fim` pays a full O(model-size) Python-level JAX trace per iteration.
+
+That splits the opportunity into two fixes, **neither of which is the arena**:
+
+1. **Cache the traced Jacobian in discopt-doe.** Plugin-side, needs no discopt
+   change. Probably the cheapest large win available anywhere in this analysis.
+2. **Use the tape, which has no trace to pay.**
+
+### The tape reproduces the shipped Jacobian to roundoff, 73–117× faster
+
+`issue1215_real_fim_validation.py`, validated against `FIMResult.jacobian` over
+**1500 Jacobian entries**, kill criterion 1e-9:
+
+| case | doe median | tape build | tape eval | speedup | max rel. err |
+|---|---|---|---|---|---|
+| langmuir n=50 | 362.5 ms | 3.57 ms | 9.5 µs | **101×** | 8.882e-16 |
+| langmuir n=200 | 1409.6 ms | 13.89 ms | 22.9 µs | **101×** | 8.882e-16 |
+| kinetics n=50 | 468.7 ms | 5.41 ms | 14.0 µs | **86×** | 2.528e-16 |
+| kinetics n=200 | 1860.1 ms | 25.50 ms | 38.0 µs | **73×** | 3.767e-16 |
+
+Agreement is float roundoff (~1e-16), not merely inside the bar. The speedup
+column includes the tape build, so it is end-to-end for one FIM evaluation from
+a fresh model.
+
+**What this does not prove:** agreement is against what discopt-doe already
+computes, so it shows the tape reproduces the shipped answer — not that either is
+right in absolute terms. `compute_fim(method="finite_difference")` is the
+independent third leg and has **not** been run.
+
+### `discopt.parametric` is a public contract, so the tape supplements rather than replaces
+
+`compute_fim` imports `compile_expression` from `discopt.parametric`, a **public**
+module (7 names in `__all__`) whose documented contract is exactly this:
+"Parameter values are *not* baked in as constants — they are read from `p_flat`,
+so derivatives with respect to parameters are available via `argnums=1`." The
+two-AD-engine situation of §32 is therefore partly *by design*, not accident. The
+tape can be a faster route used inside `compute_fim`; `discopt.parametric` must
+keep working, and it is a Python-DAG walker, so it stays on the list of things an
+arena change must not break.
+
+### Corrected dependents census (the registry was incomplete)
+
+`.github/dependents.yml` listed five repos and was missing **jax-kipet**
+(`kipetax`), which the release-notification workflow therefore never told about a
+breaking change. Added in this commit. Full census — `isinstance` against node
+classes, node-internal attribute reads, and `id(node)`-keyed traversal:
+
+| repo | .py | LOC | `.body` | isinstance | attr reads | `id(node)` | private imports |
+|---|---|---|---|---|---|---|---|
+| discopt-doe | 62 | 28,674 | 1 | 2 | 38 | 0 | 13 |
+| **discopt-aggregation** | 71 | 14,900 | **34** | **82** | **153** | **8** | **37** |
+| discopt-mkm | 64 | 9,886 | 0 | 4 | 6 | 0 | 11 |
+| discopt-apps | 6 | 687 | 0 | 0 | 0 | 0 | 6 |
+| discopt-course | 5 | 1,155 | 0 | 0 | 1 | 0 | 0 |
+| jax-kipet | 67 | 11,322 | 0 | 1 | 67\* | 0 | 4 |
+| tightrope | 88 | 15,013 | 0 | 0 | 11 | 0 | 0 |
+
+\* jax-kipet's `.left`/`.right`/`.op` reads are on **its own** nodes, not
+discopt's — see below.
+
+**tightrope is not a dependent at all.** Its single "discopt" mention is a comment
+("No hand-written derivative code, and no discopt dependency"). It is a sibling
+project that solves constrained NLPs with its own JAX autodiff and IPM — i.e. it
+independently reimplements capability discopt has. Worth knowing; not a
+compatibility constraint. It was **not** added to the registry.
+
+**discopt-aggregation remains the only expression-walking dependent**, so §31's
+identity audit surface is unchanged by these two additions.
+
+### A real expressiveness gap, found in jax-kipet
+
+`kipetax/model_tools/proxy_vars.py` implements a **shadow expression layer** —
+`KipetProxy`, `PendingBinaryOp`, `PendingUnaryOp` with full operator overloading —
+because "users write ODE right-hand sides using KipetProxy objects, which build
+pending expression trees. At solve time these trees are resolved into real discopt
+expressions via `resolve_expression()`."
+
+discopt's `Expression` requires the `Variable` object to exist before it can be
+referenced, so a downstream project needing **late-bound, name-referenced
+expressions** had to rebuild the operator layer. That is a genuine gap for
+discopt-as-a-foundation, and it is the *same* underlying need as the arena's
+template idea: a structure built once and bound to concrete variables N times.
+If an expression-layer change is undertaken, late binding belongs in scope —
+it would delete a whole shadow layer in a dependent rather than merely speed one
+up.
