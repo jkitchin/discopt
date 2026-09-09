@@ -33,10 +33,29 @@ The release procedure that produces these entries is documented in
   representable, and a KKT point whose reduced Hessian is not PSD is refused.
 
   Scope is the `CustomCall` contract: local NLP path only (`status="feasible"`,
-  `gap_certified=False`, no `.nl` export). For a follower provably convex in its
-  own variables, `discopt.bilevel.BilevelProblem` remains the route that keeps a
-  global certificate. `dm.argmin_layer` exposes the same machinery as a
-  twice-differentiable `phi(p) -> x*` without an outer model.
+  `gap_certified=False`, no `.nl` export). `dm.argmin_layer` exposes the same
+  machinery as a twice-differentiable `phi(p) -> x*` without an outer model.
+
+- **`dm.argmin_kkt` — the lowered arm of the same block** (#1216). The same trade
+  `implicit` / `implicit_full_space` make: instead of hiding the follower behind an
+  opaque node, its variables become real variables of the outer model and its KKT
+  conditions become real constraints, so the Rust tape, FBBT, a **global
+  certificate** and **`.nl` export** all come back. On a convex follower it agrees
+  with `dm.argmin` to 1e-4 and returns `status="optimal"`, `gap_certified=True`
+  where the opaque arm returns `feasible` with no bound; with
+  `method="strong_duality"` (pure algebra — stationarity, primal/dual feasibility,
+  and the single bilinear equality `Σ μ_i g_i == 0`) the model writes a valid `.nl`
+  file, so the identical formulation can be handed to another solver. The `"kkt"`
+  arm's complementarity goes through the GDP/SOS1 encodings, which discopt solves
+  and certifies but which have no `.nl` form.
+
+  KKT conditions characterize a follower's optimum only when the follower is convex
+  in its own variables, so the lowering runs `discopt.bilevel.BilevelProblem`'s
+  convexity certifier and **refuses** anything it cannot prove — including the
+  projection follower above, whose nonlinear equality is exactly what makes the
+  hand-written version unsound. There is no flag to override that: an unprovable
+  follower goes through `dm.argmin`, which solves rather than reformulates and
+  reports its answer as local.
 
 ### Fixed
 

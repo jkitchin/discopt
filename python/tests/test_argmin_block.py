@@ -358,3 +358,176 @@ def test_vector_valued_constraint_body_gives_all_its_rows():
     )
     jac = np.asarray(jax.jacobian(phi)(jnp.array([q_val]))).ravel()
     assert jac == pytest.approx(np.array([1 / 3, -1 / 3, 1 / 3]), abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# The lowered arm: KKT reformulation of a CERTIFIED-CONVEX follower (#1216)
+# ---------------------------------------------------------------------------
+
+
+def _convex_follower(bound: float = 0.5):
+    """``min (y - q)^2 s.t. y <= bound``, y in [-1, 1] -- convex in y, so its KKT
+    conditions characterize its optimum and the lowering is exact."""
+    inner = Model("follower")
+    y = inner.continuous("y", lb=-1.0, ub=1.0)
+    q = inner.parameter("q", value=0.0)
+    inner.minimize((y - q) * (y - q))
+    inner.subject_to(y <= bound)
+    return inner, q
+
+
+def _leader_with(v, p):
+    """Leader: get the follower's answer near 0.3, paying 0.01 p^2 to steer."""
+    return (v[0] - 0.3) ** 2 + 0.01 * p * p
+
+
+@pytest.mark.slow
+def test_lowered_arm_agrees_with_the_opaque_arm_and_certifies():
+    """Same answer as `dm.argmin`, but with a global certificate."""
+    inner_l, q_l = _convex_follower()
+    m_low = Model("leader_lowered")
+    p_low = m_low.continuous("p", lb=-2.0, ub=2.0)
+    v_low = dm.argmin_kkt(m_low, inner_l, bind={q_l: p_low}, multiplier_ub=100.0)
+    m_low.minimize(_leader_with(v_low, p_low))
+    r_low = m_low.solve()
+
+    inner_o, q_o = _convex_follower()
+    m_op = Model("leader_opaque")
+    p_op = m_op.continuous("p", lb=-2.0, ub=2.0)
+    v_op = dm.argmin(inner_o, bind={q_o: p_op})
+    m_op.minimize(_leader_with(v_op, p_op))
+    r_op = m_op.solve()
+
+    p_star_low = float(np.asarray(r_low.value(p_low)).ravel()[0])
+    p_star_op = float(np.asarray(r_op.value(p_op)).ravel()[0])
+    assert p_star_low == pytest.approx(p_star_op, abs=1e-4)
+    # The follower is a projection onto [-1, 0.5]; at the optimum it is interior,
+    # so y* = p and the leader's trade-off puts p* at 0.3/1.01.
+    assert p_star_low == pytest.approx(0.3 / 1.01, abs=1e-4)
+    assert float(np.asarray(r_low.value(v_low[0])).ravel()[0]) == pytest.approx(
+        p_star_low, abs=1e-5
+    )
+
+    # The point of lowering: the certificate the opaque node cannot give.
+    assert r_low.status == "optimal"
+    assert r_low.gap_certified is True
+    assert r_low.bound is not None
+    assert r_op.status == "feasible"
+    assert r_op.gap_certified is False
+
+
+@pytest.mark.slow
+def test_lowered_arm_exports_to_nl():
+    """The whole point of `.nl`: hand the SAME formulation to another solver."""
+    inner, q = _convex_follower()
+    m = Model("leader")
+    p = m.continuous("p", lb=-2.0, ub=2.0)
+    v = dm.argmin_kkt(m, inner, bind={q: p}, method="strong_duality")
+    m.minimize(_leader_with(v, p))
+
+    text = m.to_nl()
+    assert text.startswith("g3")  # AMPL .nl header
+    header = text.splitlines()[1].split()
+    n_vars, n_cons = int(header[0]), int(header[1])
+    # leader p + follower y + one multiplier, and the follower's optimality rows.
+    assert n_vars >= 3
+    assert n_cons >= 3
+
+    r = m.solve()
+    assert float(np.asarray(r.value(p)).ravel()[0]) == pytest.approx(0.3 / 1.01, abs=1e-4)
+
+
+@pytest.mark.slow
+def test_lowered_arm_handles_a_vector_follower_variable():
+    """A 1-D follower variable: components become scalars, `dm.sum` folds."""
+    inner = Model("alloc")
+    w = inner.continuous("w", shape=(2,), lb=0.0, ub=1.0)
+    q = inner.parameter("q", value=0.5)
+    inner.minimize((w[0] - q) * (w[0] - q) + w[1] * w[1])
+    inner.subject_to(dm.sum(w) == 1.0)
+
+    m = Model("leader")
+    p = m.continuous("p", lb=0.0, ub=1.0)
+    v = dm.argmin_kkt(m, inner, bind={q: p}, method="strong_duality")
+    assert v.shape == (2,)
+    m.minimize((v[0] - 0.8) ** 2)
+    r = m.solve()
+    # min (w0-q)^2 + w1^2 s.t. w0 + w1 = 1  ->  w0 = (1+q)/2, so w0 = 0.8 at q = 0.6.
+    assert float(np.asarray(r.value(p)).ravel()[0]) == pytest.approx(0.6, abs=1e-4)
+    assert float(np.asarray(r.value(v[0])).ravel()[0]) == pytest.approx(0.8, abs=1e-4)
+
+
+@pytest.mark.slow
+def test_nonconvex_follower_is_refused_by_the_lowering():
+    """The projection follower: nonlinear equality, so KKT is only necessary.
+
+    This is the failure `test_kkt_block_selects_the_far_side_root` demonstrates.
+    Hand-written, it is emitted silently; through `argmin_kkt` it is refused.
+    """
+    inner, q = _projection_follower()
+    m = Model("leader")
+    p = m.continuous("p", lb=0.05, ub=3.0)
+    with pytest.raises(NotImplementedError, match="affine in the follower variables"):
+        dm.argmin_kkt(m, inner, bind={q: p})
+
+
+@pytest.mark.unit
+def test_lowering_refuses_an_opaque_node_in_the_follower():
+    import jax.numpy as jnp
+
+    inner = Model("opaque_follower")
+    y = inner.continuous("y", lb=-1.0, ub=1.0)
+    q = inner.parameter("q", value=0.0)
+    weird = dm.custom(lambda t: jnp.sinc(t), name="sinc")
+    inner.minimize((y - q) * (y - q) + weird(y))
+
+    m = Model("leader")
+    p = m.continuous("p", lb=-1.0, ub=1.0)
+    with pytest.raises(ValueError, match="opaque node"):
+        dm.argmin_kkt(m, inner, bind={q: p})
+
+
+@pytest.mark.unit
+def test_lowering_refuses_a_multidimensional_follower_variable():
+    inner = Model("matrix_follower")
+    y = inner.continuous("y", shape=(2, 2), lb=-1.0, ub=1.0)
+    q = inner.parameter("q", value=0.0)
+    inner.minimize((y[0, 0] - q) * (y[0, 0] - q))
+
+    m = Model("leader")
+    p = m.continuous("p", lb=-1.0, ub=1.0)
+    with pytest.raises(NotImplementedError, match="shape"):
+        dm.argmin_kkt(m, inner, bind={q: p})
+
+
+@pytest.mark.unit
+def test_lowering_refuses_an_integer_follower_and_an_empty_bind():
+    inner = Model("int_follower")
+    y = inner.continuous("y", lb=0.0, ub=5.0)
+    z = inner.integer("z", lb=0, ub=5)
+    q = inner.parameter("q", value=1.0)
+    inner.minimize((y - q) * (y - q) + z)
+    m = Model("leader")
+    p = m.continuous("p", lb=0.0, ub=1.0)
+    with pytest.raises(ValueError, match="integer/binary"):
+        dm.argmin_kkt(m, inner, bind={q: p})
+    with pytest.raises(ValueError, match="non-empty"):
+        dm.argmin_kkt(m, inner, bind={})
+
+
+@pytest.mark.slow
+def test_unbound_inner_parameters_are_frozen_at_their_value():
+    """Only what `bind` names couples to the leader; the rest are data."""
+    inner = Model("two_params")
+    y = inner.continuous("y", lb=-5.0, ub=5.0)
+    q = inner.parameter("q", value=0.0)
+    scale = inner.parameter("scale", value=3.0)
+    inner.minimize((y - scale * q) * (y - scale * q))
+
+    m = Model("leader")
+    p = m.continuous("p", lb=-1.0, ub=1.0)
+    v = dm.argmin_kkt(m, inner, bind={q: p}, method="strong_duality")
+    m.minimize((v[0] - 1.5) ** 2)
+    r = m.solve()
+    # y* = 3 q, so the leader drives q to 0.5.
+    assert float(np.asarray(r.value(p)).ravel()[0]) == pytest.approx(0.5, abs=1e-4)

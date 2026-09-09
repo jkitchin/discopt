@@ -28,19 +28,36 @@ solver certifies it, because that point really is optimal *for the model as
 stated*.  It is not the projection of anything.  An ``argmin`` block cannot make
 that substitution: only points POUNCE returns as minimizers are representable.
 
-What you get, and what you do not
----------------------------------
+Two arms, and the trade between them
+------------------------------------
 
-``argmin`` is built on :func:`~discopt.modeling.core.custom`, so it inherits the
-``CustomCall`` contract exactly: the outer model is solved on the **local NLP path
-only** -- ``status="feasible"``, ``gap_certified=False``, no ``bound``/``gap``, no
-``.nl`` export, and integer/binary variables in the *outer* model are refused.  The
-forward pass is a *local* solve, so the block is a local argmin; for a nonconvex
-follower a different POUNCE starting point may be a different branch.  That is a
-strictly weaker claim than a global bilevel certificate -- for a follower that is
-provably convex in its own variables, prefer
-:class:`discopt.bilevel.BilevelProblem`, which reformulates to a single-level MPEC
-and keeps the global path.
+The same trade :func:`~discopt.modeling.implicit.implicit` and
+:func:`~discopt.modeling.implicit.implicit_full_space` make, and for the same
+reason -- so it is a choice you make rather than a lowering that changes under you:
+
+``argmin(inner, bind=...)`` -- **solve** the follower.  Built on
+:func:`~discopt.modeling.core.custom`, so it inherits the ``CustomCall`` contract:
+the outer model is solved on the **local NLP path only** (``status="feasible"``,
+``gap_certified=False``, no ``bound``/``gap``, no ``.nl`` export, outer
+integer/binary variables refused).  Takes **any** follower discopt can solve, and
+its answer is a local one -- for a nonconvex follower a different POUNCE start may
+land on a different branch.
+
+``argmin_kkt(model, inner, bind=...)`` -- **lower** the follower.  Its variables
+become real variables of the outer model and its KKT conditions become real
+constraints, so the Rust tape, FBBT, a **global certificate** and ``.nl`` export
+all come back.  The price is that KKT conditions characterize a follower's optimum
+only when the follower is **convex in its own variables**, so the lowering runs
+:class:`discopt.bilevel.BilevelProblem`'s convexity certifier and refuses anything
+it cannot prove -- including the projection follower above, whose nonlinear
+equality is exactly what makes the hand-written version unsound.  There is no flag
+to override that.
+
+For ``.nl`` export specifically, use ``method="strong_duality"``: it emits pure
+algebra (stationarity, primal/dual feasibility, and the single bilinear equality
+``Σ μ_i g_i == 0``).  The ``"kkt"`` arm's complementarity conditions go through the
+GDP/SOS1 encodings, which discopt solves and certifies but which have no ``.nl``
+form.
 
 Soundness gates (all refuse rather than approximate)
 ----------------------------------------------------
@@ -70,16 +87,27 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 
 from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
     Constraint,
+    CustomCall,
     Expression,
+    FunctionCall,
+    IndexExpression,
+    MatMulExpression,
     Model,
     ObjectiveSense,
     Parameter,
+    SumExpression,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
     VarType,
     custom,
 )
+from discopt.modeling.implicit import _unique_name
 
-__all__ = ["argmin", "argmin_layer"]
+__all__ = ["argmin", "argmin_kkt", "argmin_layer"]
 
 #: A constraint body sits on its bound (or a variable on its bound) within this
 #: tolerance -> the row is in the active set.
@@ -134,7 +162,10 @@ def _row_bounds(constraints: Sequence[Constraint]) -> tuple[np.ndarray, np.ndarr
 
 
 def _validate_inner(
-    inner: Model, parameters: Sequence[Parameter], require_min: bool = True
+    inner: Model,
+    parameters: Sequence[Parameter],
+    require_min: bool = True,
+    where: str = "argmin()",
 ) -> None:
     """Refuse the inner models an argmin block cannot soundly represent.
 
@@ -143,10 +174,10 @@ def _validate_inner(
     the block itself must be a minimization or its name would be a lie.
     """
     if inner._objective is None:
-        raise ValueError("argmin(): the inner model has no objective set.")
+        raise ValueError(f"{where}: the inner model has no objective set.")
     if require_min and inner._objective.sense == ObjectiveSense.MAXIMIZE:
         raise ValueError(
-            "argmin(): the inner model maximizes, so this block would be an "
+            f"{where}: the inner model maximizes, so this block would be an "
             "argmax and the KKT sign convention would be inverted. State the "
             "follower as a minimization -- inner.minimize(-expr) -- and negate "
             "in the outer model if you need the value."
@@ -154,7 +185,7 @@ def _validate_inner(
     bad = [v.name for v in inner._variables if v.var_type != VarType.CONTINUOUS]
     if bad:
         raise ValueError(
-            "argmin(): the inner model has integer/binary variables "
+            f"{where}: the inner model has integer/binary variables "
             f"({', '.join(bad)}). The block's derivatives come from KKT "
             "stationarity, which does not characterize an integer optimum. Model "
             "an integer follower with discopt.bilevel or an explicit "
@@ -163,15 +194,15 @@ def _validate_inner(
     for p in parameters:
         if not isinstance(p, Parameter):
             raise TypeError(
-                f"argmin(): bind keys must be inner dm.Parameter objects, got {type(p).__name__}"
+                f"{where}: bind keys must be inner dm.Parameter objects, got {type(p).__name__}"
             )
         if id(p) not in {id(q) for q in inner._parameters}:
             raise ValueError(
-                f"argmin(): parameter {getattr(p, 'name', p)!r} does not belong to the inner model."
+                f"{where}: parameter {getattr(p, 'name', p)!r} does not belong to the inner model."
             )
         if np.asarray(p.value).ndim != 0:
             raise ValueError(
-                f"argmin(): bound parameter {p.name!r} is not scalar "
+                f"{where}: bound parameter {p.name!r} is not scalar "
                 f"(shape {np.shape(p.value)}). Bind one scalar parameter per "
                 "outer expression."
             )
@@ -697,6 +728,11 @@ def argmin(
     >>> m.minimize((v[0] + 0.9) ** 2)                       # doctest: +SKIP
     >>> result = m.solve()                                  # doctest: +SKIP
 
+    See Also
+    --------
+    argmin_kkt : the lowered arm -- a certified, ``.nl``-exportable reformulation
+        for a follower that can be *proved* convex in its own variables.
+
     Notes
     -----
     The outer model is solved on the local NLP path with no global certificate
@@ -721,3 +757,280 @@ def argmin(
     fn.__name__ = name
     node: Expression = custom(fn, name=name)(*outer_exprs)
     return node
+
+
+# ---------------------------------------------------------------------------
+# The lowered arm: the follower's KKT conditions, gated on convexity (#1216)
+# ---------------------------------------------------------------------------
+
+
+def _remap(expr, scalars: dict, arrays: dict, params: dict):
+    """Rebuild ``expr`` against the outer model's variables and expressions.
+
+    ``scalars`` maps ``id(inner scalar Variable)`` to its outer replacement;
+    ``arrays`` maps ``id(inner 1-D Variable)`` to an object ndarray of the outer
+    scalars standing in for its components; ``params`` maps ``id(inner
+    Parameter)`` to the bound outer expression (or its frozen value).
+
+    Every node type is handled explicitly and anything else raises. A rewriter
+    that passes an unrecognized node through unchanged would leave the inner
+    model's own variable in an outer constraint -- a silently wrong model rather
+    than a refusal.
+    """
+    if isinstance(expr, Constant):
+        return expr
+    if isinstance(expr, Parameter):
+        try:
+            return params[id(expr)]
+        except KeyError:
+            raise ValueError(
+                f"argmin_kkt(): parameter {expr.name!r} is not a parameter of the "
+                "inner model, so the lowering has no value for it."
+            ) from None
+    if isinstance(expr, Variable):
+        if id(expr) in scalars:
+            return scalars[id(expr)]
+        if id(expr) in arrays:
+            return arrays[id(expr)]
+        raise ValueError(
+            f"argmin_kkt(): the inner objective/constraints reference {expr.name!r}, "
+            "which is not a variable of the inner model. A follower may only depend "
+            "on its own variables and its parameters."
+        )
+    if isinstance(expr, IndexExpression):
+        base = _remap(expr.base, scalars, arrays, params)
+        if isinstance(base, np.ndarray):
+            return base[expr.index]
+        return IndexExpression(base, expr.index)
+    if isinstance(expr, BinaryOp):
+        return BinaryOp(
+            expr.op,
+            _remap(expr.left, scalars, arrays, params),
+            _remap(expr.right, scalars, arrays, params),
+        )
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, _remap(expr.operand, scalars, arrays, params))
+    if isinstance(expr, FunctionCall):
+        return FunctionCall(
+            expr.func_name, *(_remap(a, scalars, arrays, params) for a in expr.args)
+        )
+    if isinstance(expr, MatMulExpression):
+        left = _remap(expr.left, scalars, arrays, params)
+        right = _remap(expr.right, scalars, arrays, params)
+        if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+            # One side became an object array of scalar expressions, so the matmul
+            # is folded here into ordinary scalar arithmetic rather than left as a
+            # node over a variable that no longer exists.
+            return _as_object_array(left) @ _as_object_array(right)
+        return MatMulExpression(left, right)
+    if isinstance(expr, SumExpression):
+        operand = _remap(expr.operand, scalars, arrays, params)
+        if isinstance(operand, np.ndarray):
+            return _fold_sum(operand, expr.axis)
+        return SumExpression(operand, expr.axis)
+    if isinstance(expr, SumOverExpression):
+        return SumOverExpression([_remap(t, scalars, arrays, params) for t in expr.terms])
+    if isinstance(expr, CustomCall):
+        raise ValueError(
+            f"argmin_kkt(): the follower contains an opaque node ({expr.name!r}). Its "
+            "KKT conditions cannot be written symbolically, which is the whole point "
+            "of the lowering. Use dm.argmin() for this follower."
+        )
+    raise TypeError(
+        f"argmin_kkt(): unhandled expression node {type(expr).__name__}. The lowering "
+        "refuses rather than pass a node through unrewritten, which would leave the "
+        "inner model's own variables in an outer constraint."
+    )
+
+
+def _as_object_array(x):
+    return x if isinstance(x, np.ndarray) else np.asarray(x, dtype=object)
+
+
+def _fold_sum(arr: np.ndarray, axis):
+    """``dm.sum`` over an object array, folded into scalar ``+``."""
+    flat = arr.ravel() if axis is None else arr.sum(axis=axis)
+    if isinstance(flat, np.ndarray) and flat.ndim == 0:
+        return flat.item()
+    if axis is not None:
+        return flat
+    total = flat[0]
+    for term in flat[1:]:
+        total = total + term
+    return total
+
+
+def _lower_variables(model: Model, inner: Model, prefix: str):
+    """Create the follower's variables on the outer model, one scalar per component."""
+    scalars: dict = {}
+    arrays: dict = {}
+    ordered: list[Variable] = []
+    for v in inner._variables:
+        shape = tuple(v.shape or ())
+        if len(shape) > 1:
+            raise NotImplementedError(
+                f"argmin_kkt(): follower variable {v.name!r} has shape {shape}. The "
+                "KKT lowering emits one stationarity row per SCALAR follower variable, "
+                "so multi-dimensional follower variables are not supported yet; "
+                "declare them as 1-D, or use dm.argmin() for the opaque block."
+            )
+        lb = np.broadcast_to(np.asarray(v.lb, dtype=float), shape or ())
+        ub = np.broadcast_to(np.asarray(v.ub, dtype=float), shape or ())
+        if not shape:
+            new = model.continuous(
+                _unique_name(model, f"{prefix}_{v.name}"), lb=float(lb), ub=float(ub)
+            )
+            scalars[id(v)] = new
+            ordered.append(new)
+            continue
+        comps = []
+        for i in range(shape[0]):
+            new = model.continuous(
+                _unique_name(model, f"{prefix}_{v.name}_{i}"),
+                lb=float(lb.reshape(-1)[i]),
+                ub=float(ub.reshape(-1)[i]),
+            )
+            comps.append(new)
+            ordered.append(new)
+        arrays[id(v)] = np.array(comps, dtype=object)
+    return scalars, arrays, ordered
+
+
+def argmin_kkt(
+    model: Model,
+    inner: Model,
+    bind: dict,
+    *,
+    method: str = "kkt",
+    mpec_method: str = "gdp",
+    multiplier_ub: Optional[float] = None,
+    prefix: str = "argmin",
+):
+    """Lower a **convex** follower into ``model`` as its KKT conditions.
+
+    The algebraic counterpart of :func:`argmin`, and the same trade
+    :func:`~discopt.modeling.implicit.implicit_full_space` makes against
+    :func:`~discopt.modeling.implicit.implicit`: instead of hiding the follower
+    behind an opaque node, its variables become real variables of ``model`` and its
+    optimality conditions become real constraints. What that buys is everything the
+    opaque node forecloses -- the Rust tape, FBBT, a **global certificate**, and
+    ``.nl`` export, so the same formulation can be handed to another solver.
+
+    What it costs is generality, and the cost is not negotiable: KKT conditions
+    characterize a follower's optimum only when the follower is **convex in its own
+    variables**. For a nonconvex follower the KKT set contains every stationary
+    point, and lowering it would reproduce exactly the failure #1216 reports -- the
+    leader selecting the follower's *maximizer*. So the lowering runs
+    :class:`discopt.bilevel.BilevelProblem`'s convexity certifier and **refuses**
+    anything it cannot prove convex in ``y`` (LP, convex-QP, and certified
+    convex-NLP followers pass; a nonlinear equality does not). There is no flag to
+    override that: for an unprovable follower, use :func:`argmin`, which solves
+    rather than reformulates and reports its answer as local.
+
+    Parameters
+    ----------
+    model : Model
+        The outer (leader) model. The follower's variables, multipliers, and
+        optimality constraints are added to it **in place**.
+    inner : Model
+        The follower, passed unchanged. Continuous, scalar-or-1-D variables;
+        minimization; no opaque nodes.
+    bind : dict
+        ``{inner_parameter: outer_expression}`` -- the coupling, exactly as in
+        :func:`argmin`. Inner parameters left unbound are frozen at their current
+        ``.value``.
+    method : {"kkt", "strong_duality"}
+        The single-level reduction; see
+        :meth:`discopt.bilevel.BilevelProblem.formulate`.
+    mpec_method : {"gdp", "sos1"}
+        How the complementarity conditions are encoded (``method="kkt"`` only).
+    multiplier_ub : float, optional
+        A valid finite upper bound on the follower's KKT multipliers. The big-M
+        complementarity encodings refuse an unbounded multiplier rather than emit a
+        vacuous big-M, so a follower with inequality rows needs either this or
+        ``method="strong_duality"``.
+    prefix : str
+        Name prefix for the emitted follower variables and multipliers.
+
+    Returns
+    -------
+    numpy.ndarray
+        Object array of the follower's variables on ``model``, in inner variable
+        order (a 1-D inner variable contributes its components). Index it
+        (``v[0]``) exactly like :func:`argmin`'s node; each entry is a real
+        :class:`~discopt.modeling.core.Variable`, so ``result.value(v[0])`` works.
+
+    Raises
+    ------
+    ValueError
+        For the same inner models :func:`argmin` refuses, plus an opaque node or a
+        foreign variable in the follower.
+    NotImplementedError
+        If the convexity certifier cannot prove the follower convex in its own
+        variables, or the follower has a multi-dimensional variable.
+
+    Examples
+    --------
+    >>> v = dm.argmin_kkt(m, inner, bind={q: p}, multiplier_ub=100.0)  # doctest: +SKIP
+    >>> m.minimize((v[0] - 2.0) ** 2)                                  # doctest: +SKIP
+    >>> m.to_nl("leader.nl")   # an ordinary algebraic model            # doctest: +SKIP
+    """
+    from discopt.bilevel import BilevelProblem
+
+    if not isinstance(bind, dict) or not bind:
+        raise ValueError(
+            "argmin_kkt(): bind must be a non-empty {inner_parameter: outer_expression} "
+            "dict. An inner model with nothing bound to the outer model is a constant "
+            "-- solve it once and use the number."
+        )
+    _validate_inner(inner, list(bind.keys()), require_min=True, where="argmin_kkt()")
+
+    upper_vars = list(model._variables)
+    scalars, arrays, ordered = _lower_variables(model, inner, prefix)
+
+    params: dict = {id(p): Constant(np.asarray(p.value, dtype=float)) for p in inner._parameters}
+    for prm, outer_expr in bind.items():
+        params[id(prm)] = outer_expr if isinstance(outer_expr, Expression) else Constant(outer_expr)
+
+    inner_objective = inner._objective
+    if inner_objective is None:  # pragma: no cover - _validate_inner refuses this first
+        raise ValueError("argmin_kkt(): the inner model has no objective set.")
+    objective = _remap(inner_objective.expression, scalars, arrays, params)
+    if isinstance(objective, np.ndarray):
+        raise ValueError("argmin_kkt(): the follower's objective is not scalar.")
+
+    lower_constraints: list[Constraint] = []
+    for i, con in enumerate(inner._constraints):
+        if not isinstance(con, Constraint):
+            raise ValueError(
+                "argmin_kkt(): the follower carries a non-algebraic relation "
+                f"({type(con).__name__}); the KKT lowering handles ordinary "
+                "constraints only."
+            )
+        body = _remap(con.body, scalars, arrays, params)
+        if isinstance(body, np.ndarray):
+            raise NotImplementedError(
+                f"argmin_kkt(): follower constraint {i} is vector-valued. The KKT "
+                "lowering emits one multiplier per SCALAR row; write the rows "
+                "individually, or use dm.argmin() for the opaque block."
+            )
+        # build_kkt takes '<=' and '==' only; '>=' is the same row negated.
+        sense = con.sense
+        if sense == ">=":
+            body, sense = -body, "<="
+        lower_constraints.append(
+            Constraint(body=body, sense=sense, rhs=0.0, name=f"{prefix}_lower_{i}")
+        )
+
+    problem = BilevelProblem(
+        model,
+        upper_vars=upper_vars,
+        lower_vars=ordered,
+        lower_objective=objective,
+        lower_constraints=lower_constraints,
+        lower_sense="min",
+        prefix=prefix,
+        multiplier_ub=multiplier_ub,
+    )
+    problem.formulate(method=method, mpec_method=mpec_method)
+    return np.array(ordered, dtype=object)

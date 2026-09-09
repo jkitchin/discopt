@@ -19,6 +19,7 @@ Examples
 
 from discopt.modeling.argmin import (
     argmin,
+    argmin_kkt,
     argmin_layer,
 )
 from discopt.modeling.core import (
@@ -142,6 +143,7 @@ __all__ = [
     "udf",
     "custom",
     "argmin",
+    "argmin_kkt",
     "argmin_layer",
     "implicit",
     "implicit_full_space",
