@@ -6061,13 +6061,31 @@ the lowering to the Rust arena. On the 200k-instance model, one process:
 
 The lowering is **34% of the budget** and was not in the issue's headline.
 
-**The arena is already 6× more compact than the DAG that produces it**:
-245,043 nodes for 200,000 constraints — **1.23 nodes/instance** at 142 B/node,
-against ~6 Python nodes/instance. Hash-consing (`ExprArena::enable_interning`)
+**The arena is more compact than the DAG that produces it, by a
+model-shape-dependent factor**: on this model, 245,043 nodes for 200,000
+constraints — **1.23 nodes/instance** at 142 B/node against ~6 Python
+nodes/instance, a **4.9×** ratio. Hash-consing (`ExprArena::enable_interning`)
 is doing that: the ~45k shared inner nodes (`x[i]`, `y[i]`, `x[i]*y[i]`,
 `exp(x[i])`, …) intern across all 40 forms, leaving one unique `Sub` per row.
 So the representation the solver consumes is *not* the expensive one — the
 intermediate is.
+
+**Do not quote 4.9× as a general figure** (an earlier draft of this section did,
+as "6×", and it is retracted). The ratio is entirely a function of how much
+structure a model shares. Measured on a process-style model where one nonlinear
+term is reused across N constraints
+(`issue1215_expressiveness_audit.py --mode cse`, N = 1000):
+
+| how the shared term is written | Python nodes/con | arena nodes/con | ratio |
+|---|---|---|---|
+| hoisted, built once | 6.01 | 4.01 | 1.50× |
+| rebuilt inside the loop | 14.00 | 4.01 | **3.49×** |
+
+The second row is the useful property: **hash-consing makes the natural way to
+write it — rebuilding the term in the loop — cost the same as hoisting it.** The
+arena node count is identical (4.01/con) either way, so a shared nonlinear
+subexpression is stored, and differentiated, once regardless of authoring style.
+The honest range across the two shapes measured is **1.5×–4.9×**.
 
 ### The arena performs: 7.3× through the public API
 
@@ -6142,6 +6160,49 @@ than a representation swap. Nothing here is bound-changing (CLAUDE.md §5:
 construction must leave `node_count`, certified `objective` and status exactly
 unchanged), so the gate is the #1208 pattern — paired LP/MILP/NLP/MINLP solves,
 bit-identical on status, objective and `node_count`.
+
+### Disposition
+
+### Expressiveness: 8 of 9 construct families already lower; `CustomCall` does not
+
+An arena-native path makes the arena the *primary* representation, so it must
+carry what the modeling layer can express. Measured with
+`issue1215_expressiveness_audit.py --mode coverage` — build one model per family,
+lower it with `model_to_repr`, assert the arena's constraint count matches the
+model's so an empty lowering cannot pass:
+
+| family | result |
+|---|---|
+| scalar nonlinear (`exp`/`pow`/`log`) | lowers |
+| shaped: `matmul` + `sum` | lowers |
+| shaped: `norm` + elementwise | lowers |
+| `Parameter` (changeable between solves) | lowers |
+| GDP disjunction (`either_or`) | lowers |
+| NN embedding: ReLU big-M | lowers (83 nodes, 18 constraints) |
+| NN embedding: smooth full-space | lowers (55 nodes, 9 constraints) |
+| DAE collocation | lowers |
+| **`dm.custom` (opaque callable)** | **REFUSED** — `TypeError: Unknown expression type: CustomCall` |
+
+`ExprNode` has 11 variants and **no opaque-callable one**, so `convert_expr`
+rejects `CustomCall` outright; `solver.py` already routes such models onto a
+separate AD-only path (`_contains_custom_call` and its admission gates). This is
+the one hard representational boundary, and it is pre-existing — not introduced
+by the arena. An arena-primary design must either add an `Opaque(handle)` variant
+backed by a side table of Python callables, or accept that `dm.custom` models
+keep the object path. Silently falling back would be the bad outcome: a process
+model that calls an external property package would get the slow path with no
+signal.
+
+Two structural notes from the same audit:
+
+* **GDP is authored above the arena.** `either_or` lowered 3 arena nodes and **0
+  constraints** — the disjunction is stored in Python model state and
+  reformulated (bigM/hull) to ordinary algebra later, so the arena only ever
+  sees post-reformulation rows. The reformulation passes are Python-object
+  consumers and need the handle compatibility shims like any other consumer.
+* **The NN and DAE layers are ordinary algebra.** Both lower with no special
+  casing, which means they inherit the arena's win rather than needing a
+  parallel path.
 
 ### Disposition
 
