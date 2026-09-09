@@ -103,9 +103,6 @@ CURVATURE_TOL = -1e-6
 #: walks forward, it does not revisit old iterates.
 _CACHE_SIZE = 16
 
-#: The bound sentinel of the modeling layer (``Model.continuous`` default box).
-_INF = 1e19
-
 
 def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
     """Flat ``(lb, ub)`` over ``model``'s variables, in flat-vector order."""
