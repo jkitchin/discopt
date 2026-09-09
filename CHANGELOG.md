@@ -10,7 +10,73 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **`dm.argmin` — an inner NLP as a block of an outer model** (#1216). The inner
+  problem is passed as a `Model`, unchanged: its forward pass is a POUNCE solve,
+  and its derivatives are the sIPOPT KKT sensitivity wired into the outer solve
+  through `jax.lax.custom_root` rather than returned as arrays. Because that rule
+  is expressed in ordinary differentiable operations, **first and second order
+  both work** — the outer solver's Lagrangian Hessian is a forward-over-reverse
+  pass through the node — and the right-hand side is exact, differentiated off the
+  compiled DAG instead of finite-differenced.
+
+  The alternative was to hand-write the follower's KKT conditions into
+  `dm.implicit_full_space`, which for a nonconvex follower is a *relaxation*: the
+  KKT set contains every stationary point, so the leader may select a maximizer.
+  On the reporter's projection follower (`min ||y-(p,1)||² s.t. ||y||²=1`, leader
+  asking for `y0 = -0.9`) that route returns `y* = (-0.9, -0.436)` — the far-side
+  root, not the projection of anything — and certifies it, because that point
+  really is optimal for the model as stated. The `argmin` block cannot make that
+  substitution and lands on the honest optimum (`p* = 0.05`, objective `0.9024`,
+  matching a 20 001-point brute-force scan). Only minimizers POUNCE returns are
+  representable, and a KKT point whose reduced Hessian is not PSD is refused.
+
+  Scope is the `CustomCall` contract: local NLP path only (`status="feasible"`,
+  `gap_certified=False`, no `.nl` export). For a follower provably convex in its
+  own variables, `discopt.bilevel.BilevelProblem` remains the route that keeps a
+  global certificate. `dm.argmin_layer` exposes the same machinery as a
+  twice-differentiable `phi(p) -> x*` without an outer model.
+
 ### Fixed
+
+- **`pounce_sensitivity` ignored the active set** (#1216). The KKT sensitivity
+  system was assembled over *all* constraint rows, i.e. as though every constraint
+  were an active equality, and variable bounds were not represented at all. On
+  `min (y-q)² s.t. y ≤ 1` at `q = 0.5`, where the bound is slack and `dy*/dq = 1`,
+  it returned `-2e-10`. On the sIPOPT tutorial's own 6-asset portfolio at a slack
+  return target it returned `[8.45, 0.55, -3.85, 4.44, -3.39, -6.20]` where a
+  black-box re-solve gives `0` — four orders of magnitude, published as a
+  measurement.
+
+  Inactive rows are now dropped (their multipliers are 0 and stay 0) and variables
+  on their own bounds are frozen. The active set is identified **against the
+  multipliers**, not by distance: POUNCE is an interior-point method, so a
+  constraint it drives to its bound stops a barrier's width short of it — on that
+  same portfolio at a *binding* target, two weights sit 2.0e-6 and 1.5e-6 off
+  their lower bound while carrying bound multipliers of ~1e-3, and an absolute
+  threshold calls both free. `SensitivityResult` now reports `active` and
+  `at_bound`.
+
+  Two additions ride on the same fix: `order=2` returns `d2x_dp2` (∂²x*/∂p², so an
+  outer solver can use an exact Hessian through the solution map), and the
+  right-hand side `[∂²L/∂x∂p; ∂g/∂p]` is now formed exactly by default —
+  `method="fd"` keeps the central-difference construction as an independent
+  cross-check. `_relax.pounce_layer.make_nlp_layer` moves onto the same engine, so
+  it too is active-set-correct and no longer reverse-mode-only:
+  `jax.hessian(lambda p: layer(p)[0])` used to raise *"can't apply forward-mode
+  autodiff (jvp) to a custom_vjp function"*.
+
+- **`x ** k` broke third-order forward-mode AD at a negative base** (#1216). The
+  DAG compiler emitted `a[0] ** a[1]` with the exponent as an array, which JAX
+  lowers to `pow`, whose derivative carries a `log(base)` term for the exponent
+  argument. At a negative base that term is NaN, and any nesting deep enough to
+  materialize the (zero) exponent tangent turns it into `0 * NaN`. Values,
+  gradients and Hessians were unaffected — which is why it stayed latent — but the
+  sensitivity rule of an `argmin`/`implicit` block differentiates one level deeper
+  and came back all-NaN. A constant integral exponent is now emitted as a Python
+  `int`, which lowers to `integer_pow` and has no such term.
+
 
 - **`deterministic=True` did not hold on the primal path** (#1187). `clay0303hfsg`
   at `deterministic=True, max_nodes=20, time_limit=120` returned three different
