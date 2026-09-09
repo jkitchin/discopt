@@ -6213,3 +6213,78 @@ performance work — the performance question is now **settled** and should not 
 re-measured. Candidates #1–#4 in the issue are the same identity risk at
 smaller scope; #1 (leaf caching) is the natural first increment because it
 forces the identity audit on the narrowest possible surface.
+
+## 32. Differentiability: three AD regimes, all built from the Python DAG (2026-09-09)
+
+Follow-on to §31, prompted by the question of whether an arena-primary
+construction path preserves differentiability — which matters because mb-doe's
+Fisher-information work is a derivative computation, not a solve. Measured with
+`issue1215_expressiveness_audit.py --mode coverage`, which now reports an
+arena column *and* a tape column per construct family and proves the tape
+differentiates (real gradient entry counts) rather than merely builds.
+
+### The boundary is the same one, in both columns
+
+| construct family | arena | differentiable (AD tape) |
+|---|---|---|
+| scalar nonlinear (`exp`/`pow`/`log`) | 13 nodes / 1 con | tape, grad 4 entries |
+| shaped: `matmul` + `sum` | 7 / 1 | tape, grad 3 |
+| shaped: `norm` + elementwise | 6 / 1 | tape, grad 5 |
+| `Parameter` | 9 / 1 | tape, grad 2 |
+| GDP `either_or` | 3 / 0 | tape, grad 2 |
+| NN ReLU big-M | 83 / 18 | tape, grad 14 |
+| NN smooth full-space | 55 / 9 | tape, grad 11 |
+| DAE collocation | 15 / 2 | tape, grad 16 |
+| **`dm.custom`** | **REFUSED** | **no tape (JAX)** |
+
+**8 of 9 arena-representable, 8 of 9 tape-differentiable, and it is the same
+construct failing both.** Opaque callables route to JAX for representation *and*
+for AD, consistently. That coherence is worth stating: there is no family that
+the arena can hold but cannot be differentiated, or vice versa.
+
+### Three regimes, one fan-out point
+
+| regime | engine | built from |
+|---|---|---|
+| solve-time `∇f`, `J`, `∇²L` | POUNCE Rust tape (default since `a2fb90d2`) | Python DAG, via `_nl_expr_compiler` (22 `isinstance` checks) |
+| parameter sensitivity `∂y/∂θ` (FIM) | JAX `jacrev` | Python DAG, via `dag_compiler.compile_expression` |
+| differentiating *through* the solve | JAX | `_relax/differentiable_*.py` |
+
+**All three walk the Python expression DAG. None reads the arena.** The only
+module that reads the arena at all is `_relax/nl_reconstruction.py`, via
+`PyModelRepr.get_node` — so the read API exists, but no derivative path uses it.
+
+This is the load-bearing consequence for §31 and it enlarges the job: the Python
+DAG is not merely an expensive intermediate, it is the **fan-out point for four
+independent lowerings** (tape, JAX compile, `model_to_repr`, plus each consumer's
+own walks). An arena-primary construction path therefore has two coherent shapes:
+
+1. **Handle shims** — the arena is primary and every lowering keeps walking what
+   looks like the old object DAG. Cheapest, and the 7.3× stands, but it keeps
+   four walkers and adds a fifth representation.
+2. **Re-point the lowerings at the arena** — `_nl_expr_compiler` and
+   `dag_compiler` read arena nodes instead of Python objects. Larger, and the
+   architecture the arena actually argues for: the arena's 11 `ExprNode` variants
+   already cover what both lowerings dispatch on, and it deletes the 34% lowering
+   step (§31) rather than duplicating it.
+
+Neither is chosen here. What is settled is that **differentiability is not a
+blocker** — no construct is differentiable today that the arena cannot hold.
+
+### Retraction: mb-doe does not depend on the `Parameter` re-solve path
+
+§31's disposition and a prior session note flagged `dag_compiler`'s
+`param_index[id(expr)]` as "the path mb-doe depends on most". **That is wrong and
+is retracted.** Reading `discopt-doe`'s `model_based.py`: unknown parameters θ are
+model **`Variable`s**, placed in the flat variable vector
+(`x_flat.at[p_idx].set(theta_vec)` over `variable_slices`), and the FIM comes from
+`jax.jacrev(y_one, argnums=1)` on a closure over
+`dag_compiler.compile_expression` — *not* `compile_expression_params`. Model
+`Parameter`s are passed separately as `p_flat_const`, i.e. as constants. The
+comment in that file is explicit: "p_flat for any model Parameters (distinct from
+unknown parameters)."
+
+So the identity-keyed `param_index` is **not** mb-doe's critical path.
+`dag_compiler.compile_expression` is — jitted, `vmap`ped and `jacrev`ed on the
+FIM hot path — which puts it top of the list for the §31 identity audit, above
+the `Parameter` mutability question.

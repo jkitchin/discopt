@@ -153,7 +153,8 @@ def f_dae():
     dae.add_state("A", initial=1.0, bounds=(0.0, 2.0))
     dae.set_ode(lambda t, s, a, c: {"A": -0.7 * s["A"] ** 2})
     dae.discretize()
-    m.minimize(m._variables[0][0])
+    state = m._variables[0]  # t_A, shape (nfe, ncp+1)
+    m.minimize(state[0, 0])
     return m
 
 
@@ -179,35 +180,63 @@ FAMILIES = [
 ]
 
 
+def _tape_status(m) -> str:
+    """Can POUNCE's Rust AD tape represent this model (the default AD path)?
+
+    ``try_build`` returns ``None`` for a representability failure only -- an
+    opaque ``dm.custom`` body, an operator with no tape opcode, a matrix norm --
+    never for a numerical one, so ``None`` is a clean "not differentiable by the
+    tape; falls back to JAX".
+    """
+    from discopt._tape_nlp_evaluator import try_build
+
+    try:
+        ev = try_build(m)
+    except Exception as e:  # noqa: BLE001 - record, do not swallow silently
+        return f"ERROR {type(e).__name__}"
+    if ev is None:
+        return "no tape (JAX)"
+    # Prove the tape actually differentiates rather than merely building (§6):
+    # evaluate the gradient at a feasible-ish interior point.
+    n = sum(int(v.size) for v in m._variables)
+    x = np.full(n, 0.5)
+    try:
+        g = ev.evaluate_gradient(x)
+        return f"tape, grad {np.asarray(g).size} entries"
+    except AttributeError:
+        return "tape (built)"
+    except Exception as e:  # noqa: BLE001
+        return f"tape built, grad failed: {type(e).__name__}"
+
+
 def mode_coverage() -> int:
     print(f"# discopt loaded from: {core.__file__}\n")
     results = []
     for name, fn in FAMILIES:
         try:
             m = fn()
+        except Exception as e:  # noqa: BLE001
+            results.append((name, "BUILD-FAIL", f"{type(e).__name__}: {e}"[:70], "-"))
+            continue
+        try:
             r = model_to_repr(m, getattr(m, "_builder", None))
             n_nodes = _num(r, "arena_len")
             n_cons = _num(r, "n_constraints")
-            results.append(
-                (
-                    name,
-                    "LOWERS",
-                    f"{n_nodes} arena nodes, {n_cons} constraints "
-                    f"({len(m._constraints)} Constraint objs)",
-                )
-            )
+            arena = f"{n_nodes} nodes / {n_cons} cons"
         except Exception as e:  # noqa: BLE001 - recording the boundary is the point
-            msg = f"{type(e).__name__}: {e}".replace("\n", " ")
-            results.append((name, "REFUSED", msg[:110]))
+            arena = f"REFUSED {type(e).__name__}"
+        results.append((name, "", arena, _tape_status(m)))
 
-    w = max(len(n) for n, _, _ in results)
-    for name, status, detail in results:
-        print(f"{name:<{w}}  {status:8s}  {detail}")
+    w = max(len(n) for n, _, _, _ in results)
+    print(f"{'construct family':<{w}}  {'arena':<26s}  differentiable (AD tape)")
+    for name, _, arena, tape in results:
+        print(f"{name:<{w}}  {arena:<26s}  {tape}")
 
-    n_lower = sum(1 for _, s, _ in results if s == "LOWERS")
+    n_arena = sum(1 for _, _, a, _ in results if not a.startswith("REFUSED"))
+    n_tape = sum(1 for _, _, _, t in results if t.startswith("tape"))
     print(
-        f"\n# executed: {len(results)} construct families, {n_lower} lowered, "
-        f"{len(results) - n_lower} refused"
+        f"\n# executed: {len(results)} construct families, "
+        f"{n_arena} arena-representable, {n_tape} tape-differentiable"
     )
     if not results:
         print("FAIL: audit exercised nothing")
