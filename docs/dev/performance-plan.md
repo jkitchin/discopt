@@ -6498,3 +6498,67 @@ template idea: a structure built once and bound to concrete variables N times.
 If an expression-layer change is undertaken, late binding belongs in scope —
 it would delete a whole shadow layer in a dependent rather than merely speed one
 up.
+
+## 35. Bound-neutrality is necessary but not sufficient for downstream consumers (2026-09-10)
+
+Found while fixing a plugin-side perf bug, and it constrains the §31 arena work.
+
+### The plugin bug (fixed, not shipped from here)
+
+§34 recommended "cache the traced Jacobian in discopt-doe" as the cheapest large
+win. **That recommendation was wrong: the cache already existed.**
+`discopt.doe.fim._make_direct_fim_evaluator` builds the model once and
+`jax.jit`s the Jacobian once, and `design.py:494` already uses it for the
+adaptive single-point loop. Recorded so the same recommendation is not made a
+third time.
+
+Looking for it did find a real gap: `_joint_batch`'s scipy objective calls
+`joint_fim_and_pieces`, which loops `compute_fim` over all `n_experiments`
+designs — so a joint batch design pays (iterations × n_experiments) model
+rebuilds and JAX re-traces while the compiled evaluator sat unused in the same
+module. Hoisting it gave **82× end-to-end** on
+`batch_optimal_experiment(strategy="joint")` (28.89 s → 0.35 s; 459–648× on the
+objective alone), suite 428 passed / 4 skipped / 0 failed, identical to baseline.
+The change lives on `perf/joint-batch-reuse-fim-evaluator` in the discopt-doe
+clone; it is that repo's to merge, not this one's.
+
+### The lesson that applies here
+
+The two paths produce **different located designs** — `t = 1.509527` vs
+`1.509528`, a 6.3e-07 relative difference that breached the 1e-10 bar the
+equivalence probe had set. Four predictions, stated before running, resolved it:
+
+| | | bar |
+|---|---|---|
+| P1 per-design FIM, `compute_fim` vs evaluator | 2.114e-16 | 1e-12 |
+| P2 optimized criterion agreement | 2.850e-13 | 1e-9 |
+| P3 each path's criterion at the *other's* designs | same plateau, 2.850e-13 | 1e-9 |
+| P4 objective sensitivity at the optimum | 8.1e-06 per unit `t` | — |
+
+The substitution is faithful (P1); the objective is *stationary* at the optimum
+(P4), so a last-bit difference in the FIM moves where scipy stops at second order
+while the criterion moves 2.9e-13. Evaluating the old, un-jitted path at the new
+designs reproduces the new criterion exactly (P3). **A 1e-10 bar on an argmin over
+a flat objective is the wrong invariant** — that bar belongs on a function value.
+
+Independently: `compute_fim` uses `jax.jacobian` with **no jit** while
+`_make_direct_fim_evaluator` uses `jax.jit(jax.jacobian(...))`, so those two paths
+already disagree in the last bits across existing call sites in the same module.
+
+### Consequence for the arena (§31)
+
+CLAUDE.md §5 gates bound-neutral work on `node_count` and certified `objective`
+being **exactly unchanged**. That gate is necessary and it is **not sufficient**
+for any consumer that *optimizes over* solver output. mb-doe designs are such a
+consumer: a difference far below the certification tolerance relocated a design
+in its 7th digit, because argmin over a stationary objective amplifies last-bit
+noise at second order.
+
+So an arena change needs a **downstream invariant** alongside the solver-level
+one. The workable form, from the evidence above: assert the *objective/criterion*
+value agrees to a stated relative bar, and assert that each arm's criterion
+evaluated at the *other* arm's argmin lands on the same plateau — never assert
+bit-equality of a located optimum. Any panel that gates the arena on
+"designs unchanged" will fail for reasons that have nothing to do with
+correctness, and any panel that omits a downstream check will miss the class of
+regression that actually matters to mb-doe.
