@@ -79,7 +79,7 @@ Deliberately NOT under ``_relax/``: nothing here touches JAX.
 from __future__ import annotations
 
 import math
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import numpy as np
 
@@ -323,6 +323,62 @@ def compile_to_nl_expr(expr: Expression, model: Model) -> Any:
     return arr.reshape(-1)[0]
 
 
+#: Minimum number of leaves before an additive chain is flattened into one n-ary
+#: ``E.sum``. Small chains gain nothing and flattening them only churns the tape
+#: shape, so the threshold keeps `a + b` and `a + b + c` lowering exactly as
+#: before.
+_FLATTEN_MIN_TERMS = 4
+
+
+def _additive_chain(expr: Expression) -> Optional[list[tuple[int, Expression]]]:
+    """Leaves of the maximal ``+``/``-`` chain at *expr*, left-to-right, signed.
+
+    ``sum(terms)`` -- Python's builtin, which is what a user reaching for a
+    least-squares objective or a mass balance writes -- folds left-associatively
+    into a chain of ``BinaryOp`` nodes whose DEPTH is the term count. Each one
+    lowers to a binary tape node, so the tape's depth grows with the model:
+    measured, ``dm.sum`` gives tape depth 3 at any size while builtin ``sum()``
+    gives N+2, and pounce refuses past ``NlExpr.max_depth`` (10 000) with a
+    ``ValueError``.
+
+    That refusal is not a clean degrade. ``try_build`` catches only
+    ``UnsupportedForTape``, so the ``ValueError`` propagates: ``m.solve()``
+    raises outright, and on the paths that survive it the incumbent-verification
+    snapshot fails and **the false-primal guard is disabled for that solve**. A
+    modelling idiom silently turning off a correctness guard is the worst
+    outcome available, so the chain is flattened into one ``E.sum`` instead --
+    depth 2 whatever the term count.
+
+    Returns ``None`` when *expr* is not an additive node or the chain is shorter
+    than :data:`_FLATTEN_MIN_TERMS`, so the caller falls through to the ordinary
+    binary lowering.
+
+    Order and signs are exactly those of the left-to-right fold: ``(a - b) + c``
+    yields ``[(+1, a), (-1, b), (+1, c)]``. IEEE ``a - b`` and ``a + (-b)`` round
+    identically, and ``E.sum`` accumulates in list order, so the flattened tape
+    is bit-identical to the chain -- verified on values AND gradients with
+    coefficients spanning 1e-8..1e8, where summation order matters most.
+    """
+    if not isinstance(expr, BinaryOp) or expr.op not in ("+", "-"):
+        return None
+    out: list[tuple[int, Expression]] = []
+    # Explicit stack, not recursion: the chain being flattened is precisely the
+    # shape deep enough to blow the Python stack.
+    stack: list[tuple[Expression, int]] = [(expr, 1)]
+    while stack:
+        node, sign = stack.pop()
+        if isinstance(node, BinaryOp) and node.op in ("+", "-"):
+            rsign = sign if node.op == "+" else -sign
+            # push right first so the left subtree pops (and so lowers) first
+            stack.append((node.right, rsign))
+            stack.append((node.left, sign))
+        else:
+            out.append((sign, node))
+    if len(out) < _FLATTEN_MIN_TERMS:
+        return None
+    return out
+
+
 def _children(expr: Expression, model: Model) -> tuple[Expression, ...]:
     """The sub-expressions :func:`_lower_uncached` will ``rec()`` into, in order.
 
@@ -337,6 +393,13 @@ def _children(expr: Expression, model: Model) -> tuple[Expression, ...]:
     robustness for that shape, nothing else.
     """
     if isinstance(expr, BinaryOp):
+        chain = _additive_chain(expr)
+        if chain is not None:
+            # Descend straight to the chain's leaves: the intermediate `+`/`-`
+            # nodes must never be lowered, because each one would build a binary
+            # tape node and the depth limit trips on THEM, before the root that
+            # would have flattened them is ever reached.
+            return tuple(leaf for _, leaf in chain)
         return (expr.left, expr.right)
     if isinstance(expr, UnaryOp):
         return (expr.operand,)
@@ -443,6 +506,24 @@ def _lower_uncached(
         return _const_array(expr.value, E, budget)
 
     if isinstance(expr, BinaryOp):
+        chain = _additive_chain(expr)
+        if chain is not None:
+            # `-arr` on a 0-d object array unwraps to the bare element, so each
+            # part is re-wrapped: `_wrap_scalar` builds the 0-d array explicitly
+            # rather than relying on `np.asarray` treating NlExpr as a scalar.
+            parts = []
+            for sign, leaf in chain:
+                part = rec(leaf)
+                if sign < 0:
+                    part = -part
+                parts.append(part if isinstance(part, np.ndarray) else _wrap_scalar(part))
+            shape = np.broadcast_shapes(*(p.shape for p in parts))
+            budget.charge(int(np.prod(shape, dtype=np.int64)) * len(parts), "an additive chain")
+            bparts = [np.broadcast_to(p, shape) for p in parts]
+            out = np.empty(shape, dtype=object)
+            for idx in np.ndindex(*shape) if shape else [()]:
+                out[idx] = E.sum([bp[idx] for bp in bparts])
+            return out
         left, right, op = rec(expr.left), rec(expr.right), expr.op
         # numpy supplies the broadcasting, which is the same rule `jnp` applies to
         # the same two operands on the JAX path.
