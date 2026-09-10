@@ -2194,9 +2194,46 @@ class Parameter(Expression):
 
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
         self.name = name
-        self.value = np.asarray(value, dtype=np.float64)
-        self.shape = self.value.shape
+        self._value = np.asarray(value, dtype=np.float64)
         self.model = model
+
+    @property
+    def value(self) -> np.ndarray:
+        """Current value, always a ``float64`` ndarray (0-d for a scalar)."""
+        return self._value
+
+    @value.setter
+    def value(self, new_value: Union[float, np.ndarray]) -> None:
+        """Re-bind the value, normalising exactly as ``__init__`` does.
+
+        This was a plain attribute, so ``__init__`` established the documented
+        "``value`` is an ndarray" invariant and the very next assignment broke it:
+        ``p.value = 7.0`` -- the ordinary idiom in a parameter-estimation or
+        model-discrimination loop -- left a bare Python float. ``model_to_repr``
+        reads the value as an array to build the arena's ``Parameter`` node and
+        refused such a model with ``TypeError: 'float' object cannot be converted
+        to 'PyArray<T, D>'``, so re-binding a scalar parameter made the model
+        un-lowerable while the same value passed to ``m.parameter(...)`` was fine.
+
+        A shape change is refused rather than accommodated: ``shape`` is baked
+        into every arena node, tape and relaxation already built from this
+        parameter, so silently accepting a new shape would leave those
+        inconsistent with the model. Re-declare the parameter instead.
+        """
+        arr = np.asarray(new_value, dtype=np.float64)
+        if hasattr(self, "_value") and arr.shape != self._value.shape:
+            raise ValueError(
+                f"Parameter {self.name!r} was declared with shape {self._value.shape}; "
+                f"re-binding it to shape {arr.shape} would invalidate every arena "
+                f"node, tape and relaxation already built from it. Declare a "
+                f"separate parameter instead of changing this one's shape."
+            )
+        self._value = arr
+
+    @property
+    def shape(self) -> tuple:
+        """Shape of the value. Tracks :attr:`value`, which cannot change shape."""
+        return self._value.shape
 
     def __repr__(self):
         return f"param({self.name})"
