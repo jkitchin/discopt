@@ -7332,3 +7332,99 @@ is the highest-value item remaining, and it is a modelling-layer job, not a
 performance one.
 
 **Quote §46's 10.5× as a vectorised-model figure or not at all.**
+
+## 48. The cross-tool panel: the action is the IDIOM, not the tool (2026-09-10)
+
+§43 measured oximo on one shape; §46/§47 measured the Rust writer on one shape
+and on the in-repo MINLPLib corpus. Both left the same question open: is
+"vectorised discopt is oximo-class" a property of that one synthetic model? This
+section answers it on a fuller panel — **4 model families × 3 sizes × 4 arms**,
+every arm timed from an empty model to `.nl` text.
+
+### Harness
+
+- `discopt_benchmarks/scripts/issue1215_cross_tool_panel.py` — discopt in both
+  idioms plus Pyomo, streaming a TSV point-per-line.
+- `discopt_benchmarks/scripts/oximo_arm/main.rs` — the oximo arm. oximo is a
+  **Rust** crate (`oximo-rs/oximo` on crates.io; `pip install oximo` finds an
+  unrelated package), so it is built in a scratch crate and merged via
+  `--oximo <tsv>`; `scripts/oximo_arm/README.md` has the four commands.
+
+Families: `linear` (`x + 2y + 3z <= b`), `sep_nl` (`exp(x) + y <= b`),
+`coupled_nl` (`x*y + log(x+1) <= b`), `minlp` (`x*y + z <= b`, `z` binary).
+Sizes 1 000 / 10 000 / 100 000 rows, median of 3, `gc.collect()` between reps.
+
+**The model-identity gate (§6).** Every arm reads the row and variable counts
+back out of the header of the `.nl` it just wrote, and the combiner refuses to
+report a ratio unless every arm that measured a cell agrees with every other on
+both. Without it an arm looks fast by building a smaller model. The gate prints
+its comparison count (36 on this panel) and raises — verified by perturbing one
+arm's variable count by 1 and watching it refuse.
+
+### Result — total µs/row, model to `.nl` text, 100 000 rows
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 3.97 | **3.63** | 40.28 | 38.99 |
+| sep_nl | 2.97 | **3.05** | 25.29 | 35.51 |
+| coupled_nl | 3.47 | **4.42** | 36.99 | 48.14 |
+| minlp | 4.11 | **4.24** | 29.13 | 46.92 |
+
+Ratio to oximo at 100 000 rows:
+
+| family | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|
+| linear | 0.91× | 10.14× | 9.82× |
+| sep_nl | 1.03× | 8.53× | 11.97× |
+| coupled_nl | 1.27× | 10.65× | 13.86× |
+| minlp | 1.03× | 7.09× | 11.43× |
+
+Load 0.05 at start; the Rust and Python arms ran back to back on an otherwise
+idle box.
+
+**Reproduction.** The committed harness was re-run end to end (Python arms
+re-measured, the same oximo TSV merged), also at load 0.05. Every cell moved by
+less than the spread the two runs put on one arm, and no conclusion changed:
+vectorised discopt 0.88-1.15x oximo (vs 0.91-1.27x), per-element discopt
+7.3-10.4x (vs 7.1-10.7x), Pyomo 9.7-13.8x (vs 9.8-13.9x). The largest single
+move was Pyomo's `minlp` cell, 46.92 -> 52.07 µs/row (11%), which is the size of
+the noise floor on this box and the reason the ranges above are quoted to two
+significant figures and not three.
+
+### What it says
+
+1. **Vectorised discopt is at oximo parity at scale** — 0.91–1.27×, and
+   *faster* than oximo on `linear`. This is not a property of the one shape in
+   §46: it holds across a linear family, two nonlinear families with different
+   operator mixes, and a mixed-integer family. The original goal ("memory
+   comparable to oximo, 2–5× slower, notably faster than Pyomo") is met and
+   beaten on the time axis.
+2. **Per-element discopt is within noise of Pyomo** — 7.1–10.7× off oximo where
+   Pyomo is 9.8–13.9×. Slightly ahead, never by an order of magnitude.
+3. **The swing between discopt's own two idioms is 6.9–11.1×, larger than the
+   whole discopt-to-Pyomo gap.** A user's choice of idiom dominates their choice
+   of tool. That is the headline.
+4. The gap **widens with size**: at 1 000 rows vectorised discopt is 4.84 µs/row
+   against Pyomo's 25.19 (5.2×); at 100 000 it is 3.63 against 38.99 (10.7×).
+   Vectorised discopt is the only arm that is flat — it *improves* from 1 000 to
+   10 000 rows as fixed overhead amortises, then holds. Every other arm's µs/row
+   grows from 1 000 to 100 000 rows: per-element discopt +9…29%, Pyomo +40…55%,
+   and oximo +45…71% (from the smallest base, so still fastest in absolute
+   terms). Quote a per-row figure with its size attached.
+
+### Correction to a figure quoted earlier in this session
+
+The vectorised-vs-Pyomo speedup was stated once as "9.8–13.9×". Those are the
+**Pyomo-to-oximo** ratios, not vectorised-discopt-to-Pyomo. The correct range at
+100 000 rows is **10.7–11.6×** (38.99/3.63, 35.51/3.05, 48.14/4.42, 46.92/4.24).
+The conclusion is unchanged; the number was misattributed and is corrected here
+per the §11 rule.
+
+### Consequence
+
+This is the third independent measurement (§41 solve path, §47 export, §48
+cross-tool) pointing at the same work item, and none of them is a solver change:
+**make the vectorised form the idiom discopt actually emits and documents.** The
+NN and GDP emitters still emit one `Constraint` per row, which puts every model
+built through them on the slow side of a 7–11× cliff. Nothing further is owed to
+the writer.
