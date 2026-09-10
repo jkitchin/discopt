@@ -54,7 +54,8 @@ class FullSpaceFormulation:
         if unsupported:
             raise ValueError(
                 f"FullSpaceFormulation does not support activations: "
-                f"{[a.value for a in unsupported]}. Use 'relu_bigm' for ReLU."
+                f"{sorted(getattr(a, 'value', a) for a in unsupported)}. "
+                f"Use 'relu_bigm' for ReLU."
             )
 
     def build(self) -> tuple[Variable, Variable]:
