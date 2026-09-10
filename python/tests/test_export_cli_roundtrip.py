@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import tempfile
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -344,12 +346,37 @@ class TestNLExportRefusals:
         with pytest.raises(ValueError, match="dm.custom"):
             m.to_nl()
 
-    def test_matmul_objective_refused(self):
+    def test_matmul_objective_now_exports_and_is_faithful(self):
+        """A matmul objective used to be refused; it is now expanded.
+
+        The refusal was a writer limitation, not a soundness rule: the objective
+        never went through ``_scalarize``, so an objective that is scalar-VALUED
+        but array-STRUCTURED reached the scalar writer whole. That blocked six of
+        eight array-shaped construct families from `.nl` export (#1215), which is
+        the format SCIP, BARON, Couenne and IPOPT read.
+
+        Asserted on the exported MODEL, not merely on the absence of an
+        exception: the coefficients are distinct and the box is chosen so the
+        optimum depends on both, so a wrong expansion moves the objective.
+        """
         m = dm.Model("mm_obj")
-        x = m.continuous("x", shape=(2,), lb=0.0, ub=1.0)
+        x = m.continuous("x", shape=(2,), lb=-1.0, ub=3.0)
         m.minimize(x @ Constant(np.array([1.0, 2.0])))
-        with pytest.raises(ValueError, match="MatMul"):
-            m.to_nl()
+        m.subject_to(x[0] + x[1] >= 2.0, name="floor")
+
+        text = m.to_nl()
+        with tempfile.NamedTemporaryFile("w", suffix=".nl", delete=False) as fh:
+            fh.write(text)
+            path = fh.name
+        try:
+            reread = dm.from_nl(path)
+            got = reread.solve(time_limit=60)
+        finally:
+            os.unlink(path)
+        # min x0 + 2 x1 s.t. x0 + x1 >= 2, x in [-1, 3]: put the weight on x0,
+        # so x0 = 3, x1 = -1 gives 3 - 2 = 1.
+        assert got.status in ("optimal", "feasible"), got.status
+        assert float(got.objective) == pytest.approx(1.0, abs=1e-6)
 
     @pytest.mark.parametrize("fn_name", ["erf", "sign", "min", "max", "frobnicate"])
     def test_unexportable_functions_refused(self, fn_name):
