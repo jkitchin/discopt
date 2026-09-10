@@ -2881,3 +2881,75 @@ assert `"feasible"` and no bound/gap. The user-facing docstrings for `dm.custom`
 --check` clean; `mypy python/discopt/solver.py` clean. No Rust touched.
 
 **Status:** confirmed → fixed.
+
+## C-NEW (P0, 2026-09-10): a stale builder variable box certifies a FALSE `infeasible`
+
+**Status: open, unfixed. Reproduction in-tree:
+`discopt_benchmarks/scripts/repro_stale_builder_box.py` (exits non-zero while the
+defect is present, so it doubles as the regression check).**
+
+Found while auditing the modeling layer as a foundation for a flowsheet layer
+(issue #1215 discussion), not by a failing test.
+
+`m.solve()` returns `status="infeasible"` with **`gap_certified=True`** on a model
+whose true answer is `optimal`. Measured on `main` @ c052e85:
+
+    route=none                  builder=False blocks=0 -> optimal     (ref optimal)
+    route=fast_family           builder=True  blocks=1 -> optimal     (ref optimal)
+    route=add_linear_objective  builder=True  blocks=0 -> INFEASIBLE  (ref optimal, obj 0.0)
+                                                          gap_certified=True
+
+### Mechanism
+
+Variable bounds enter the Rust builder **once, at declaration**
+(`core.py:_register_variable`; and for every pre-existing variable when the
+builder is lazily created, `core.py:_get_builder`). In builder mode
+`model_to_repr` clones `b.inner.variables` and never re-reads `lb`/`ub` from the
+Python `Variable` objects — the pure-expression arm *does*. Root presolve then
+runs FBBT on the baked box and can declare the root infeasible.
+
+Post-construction bound mutation is **not** misuse: `lb=ub` is the only fixing
+route, and in-tree code already does it — `estimate.py:317-319` (fixing design
+variables), `_relax/presolve_pipeline.py:408-409` and `:503-504`,
+`_relax/node_reduce.py:165-166`, `_relax/root_reduce.py:125-126`, plus
+discopt-doe's `compute_fim` general path.
+
+### Preconditions (bisected, one variable at a time)
+
+1. the Rust builder is active, **and**
+2. it carries **zero** linear blocks, **and**
+3. a variable's bounds were mutated after the builder registered them.
+
+Condition 2 is why this stayed hidden. A builder *with* linear blocks is safe **by
+accident**: the solve path calls `_materialize_builder_linear_rows`
+(`core.py:5702`), which clears the blocks and rebuilds the builder — re-reading
+the current bounds as a side effect. It early-returns when there are no blocks
+(`core.py:5731-5732`). A non-scalar variable also masks it, via the C-40
+`_aligned` guard at `solver.py:15211`.
+
+**No private API is needed.** `Model.add_linear_objective` and
+`add_quadratic_objective` call `_get_builder()` and record
+`_builder_linear_objective` — never `_builder_linear_blocks` — so they create
+exactly the blockless builder that triggers it.
+
+### Note on the first reproduction attempt
+
+An initial probe using a *quadratic* model (`z == u*u`, `min z`) and a fast linear
+family did **not** reproduce, a false negative on two counts: the fast family
+supplied a masking linear block, and the quadratic body took a route that
+re-derives bounds. A genuinely nonlinear body (`sin`) plus a blockless builder is
+required. Recorded so the next person does not conclude from a clean quadratic
+probe that the defect is absent.
+
+### Fix direction (not yet implemented)
+
+The pure-expression arm of `model_to_repr` already re-reads `lb`/`ub`
+(`expr_bindings.rs:1221-1224`) while the builder arm does not
+(`:1161-1166`). Making the builder arm re-read the live Python bounds is the
+narrow root-cause fix, and it removes the accidental dependence on
+`_materialize_builder_linear_rows` for correctness. Bounds are per-solve input,
+not construction-time state, and should be represented that way.
+
+**Consequence for #1215:** an arena-backed construction path that bakes bounds at
+construction makes this class of defect *worse*, not better. Bounds must leave the
+arena's construction-time state before that work proceeds.
