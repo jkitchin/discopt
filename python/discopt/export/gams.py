@@ -612,6 +612,32 @@ class _GamsWriter:
                 idx_str = self._expr_to_gams(expr.index)
             return f"{base}({idx_str})"
 
+        if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+            # Walk the LEFT spine iteratively rather than recursing per term.
+            #
+            # The array scalarizer expands `dm.sum(x)` over `x` of shape `(n,)`
+            # into a left-deep fold `((x[0] + x[1]) + x[2]) + ...` of depth n, so
+            # recursing here raised RecursionError at roughly 1000 terms -- i.e.
+            # `m.minimize(dm.sum(x))`, one of the commonest objectives there is,
+            # could not be exported to GAMS at all. GAMS is the only route to a
+            # full-license BARON, so that also blocked BARON comparison for any
+            # such model.
+            #
+            # The emitted TEXT is unchanged: rebuilding left to right reproduces
+            # the same nesting the recursion produced, `(((a + b) + c) + d)`.
+            # Only the left spine is flattened, which is the shape the scalarizer
+            # builds; a right-deep chain still recurses, and nothing in discopt
+            # emits one.
+            spine: list = []
+            node = expr
+            while isinstance(node, BinaryOp) and node.op in ("+", "-"):
+                spine.append((node.op, node.right))
+                node = node.left
+            out = self._expr_to_gams(node)
+            for op, right_node in reversed(spine):
+                out = f"({out} {op} {self._expr_to_gams(right_node)})"
+            return out
+
         if isinstance(expr, BinaryOp):
             left = self._expr_to_gams(expr.left)
             right = self._expr_to_gams(expr.right)

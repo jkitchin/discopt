@@ -7782,6 +7782,39 @@ something are 18.72 (what a user's `to_nl` actually cost) and 9.4 (writer versus
 writer, which makes the new writer 4.6× rather than 9.2×). Quote whichever the
 claim is about, and say which.
 
+### A regression this introduced, and what the byte-diff suite was missing
+
+`test_export_cli_roundtrip.py::TestNLWriterEdgeCases::test_builder_linear_block_skips_zero_coeff_and_empty_row`
+passed at `7632fb6` and failed from `129bf02` on — verified by checking out the
+parent, rebuilding and running it. The byte-diff suite did not catch it because
+**no shape in it had an explicit zero coefficient.**
+
+The Python writer's `_decompose_builder_blocks` drops a builder row's stored
+zeros (`if coeff == 0.0: continue`), so such a row emits no `J` entry and, when
+the zero was its only entry, an empty row. The arena path faithfully builds a
+`Constant(0.0) * Var` node and reports a zero coefficient, so routing builder
+rows through the Rust writer started emitting `J1 1` where nothing had been
+emitted before.
+
+The asymmetry is real and is now matched rather than regularised: the Python
+writer's *expression* path **keeps** a zero coefficient (an explicit `0.0 * x`
+survives `_collect_linear`); only the builder decomposition drops them. So the
+drop is scoped to builder rows, which `row_source` already identifies.
+Regularising it would change bytes discopt has already written.
+
+Three cases were added to the byte-diff suite — a zero beside a nonzero, a row
+whose only entry is a zero, and an all-zero block — each verified to fail without
+the fix. They build the matrix from explicit `indptr`/`indices`/`data` because
+`scipy.sparse.csr_matrix` prunes zeros on construction, and the test asserts
+`A.nnz == rows * cols` so a future scipy that prunes anyway cannot turn the case
+into a no-op.
+
+Two general points from it. A byte-diff suite is only as good as its shapes, and
+"every operator in the IR" (which the 66-instance corpus does cover) is not the
+same as "every way a coefficient can arrive". And the fast path inherited a
+behaviour it never implemented — the Python decomposition's zero-drop was
+invisible from the arena, which has no notion of which entries were stored.
+
 ### Still Python-only
 
 `lp.py`, `mps.py` and `gams.py`. GAMS matters beyond speed — it is the only route
@@ -7889,3 +7922,69 @@ walk, but the table above shows the writer is 6.22 µs/row of a 36 µs/row
 per-element total once the rows are in the builder — so it cannot pay for a new
 IR node touching every consumer in the core. The remaining #1215 work is the
 NN emitters and the LP/MPS/GAMS writers.
+
+## 54. Item 4's entry experiment found a bug, not a slow writer: `sum()` over 1000+ variables could not be exported at all (2026-09-10)
+
+The plan for item 4 was to port the LP, MPS and GAMS writers to Rust as the `.nl`
+writer was (§52). The entry experiment — just measure what they cost — never got
+a number, because all three **crashed**:
+
+```
+vectorised model, 5000 rows:
+  nl (rust)       2.76 us/row
+  lp           FAILED RecursionError: maximum recursion depth exceeded
+  mps          FAILED RecursionError: maximum recursion depth exceeded
+  gams         FAILED RecursionError: maximum recursion depth exceeded
+```
+
+### The defect
+
+`m.minimize(dm.sum(x))` with `x` of shape `(n,)` raises `RecursionError` from
+`to_lp`, `to_mps` and `to_gams` for **n ≳ 1000**. Same for `dm.sum(x)` inside a
+constraint body. Bisected: 500 works, 1000 fails, against a default recursion
+limit of 1000 — so depth ≈ n.
+
+The array scalarizer expands a reduction into a **left-deep `+` fold** of depth
+n, and three exporters descended it one Python frame per term:
+`_extract_linear_recursive` and `_extract_quad_recursive` in `export/_extract.py`,
+and `GamsWriter._expr_to_gams`.
+
+**Reachability: the default path, on about the commonest objective there is.**
+`min sum(cost)` over a thousand variables is a small model. And GAMS is the only
+route to a full-license BARON — the bundled `/Applications/AMPL/baron` is
+demo-limited to 10 variables — so this silently blocked BARON comparison for any
+model with a sum objective.
+
+### Why it went unnoticed
+
+`.nl` is unaffected, on **both** writers. The format the solve path and the
+benchmark harness use was fine; the three that only matter on the way *out* were
+not. Every in-repo LP/MPS/GAMS test is small enough to stay under the limit.
+
+That is a general lesson about which paths get exercised: the corpus runs through
+`.nl`, so `.nl` is what 66 instances of byte-diffing and a 1392-test smoke suite
+cover. LP, MPS and GAMS had no size-scaling test at all, and the failure mode was
+not a wrong answer but an exception — invisible to anything that never called
+them at scale.
+
+### Fix
+
+The traversal became iterative; the **fold did not change**. Both `.nl` writers
+mirror its exact shape and the emitted bytes depend on it (§46), so flattening
+`((a + b) + c)` into `a + b + c` would have silently changed every exported file.
+`_flatten_additive` walks the `+`/`-` spine onto a worklist carrying each node's
+signed multiplier; the GAMS writer rebuilds its string left to right, reproducing
+the same nesting.
+
+Verified byte-identical against the pre-fix code across 18 emissions — 3 sizes ×
+{linear, quadratic} objective × {LP, MPS, GAMS}, all of which the old code could
+still produce — with the capture asserted free of error strings so the comparison
+means something.
+
+### Item 4's actual status
+
+With the crash fixed there is finally a measurement to take, and the Rust port is
+still unstarted. Note what §53 says about where the remaining cost is: once rows
+are in the builder the writer is 6.22 µs/row of a 36 µs/row per-element total, so
+a port of three more writers should be justified on its own measurement rather
+than by analogy with `.nl`'s 9.2×.
