@@ -49,6 +49,10 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     ValueError
         If the model contains nonlinear (non-quadratic) expressions.
     """
+    from discopt.export._common import reject_unreformulated_gdp
+
+    reject_unreformulated_gdp(model, ".mps")
+
     # Default ``for_solve=True`` is deliberate: unlike the ``.nl`` and GAMS
     # writers, this one does *not* honour ``Constraint.rhs``. The RHS section below
     # is built from ``-const``, recovered from the *body* alone, so a non-zero

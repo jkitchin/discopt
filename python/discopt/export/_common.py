@@ -216,3 +216,41 @@ def iter_all_rows(model: Model) -> tuple[list[Constraint], list[LinearRow]]:
     expr_rows = [c for c in model._constraints if isinstance(c, Constraint)]
     builder_rows = iter_builder_linear_rows(model)
     return expr_rows, builder_rows
+
+
+def reject_unreformulated_gdp(model: Model, fmt: str) -> None:
+    """Refuse a model still carrying GDP rows, naming the fix.
+
+    Disjunctive rows (``either_or`` / ``disjunction`` / indicator / SOS) live in
+    ``model._constraints`` as ``_DisjunctiveConstraint`` objects, which carry no
+    ``.sense``/``.rhs``. Every exporter's row loop assumes an algebraic
+    ``Constraint``, so such a model used to die with
+    ``AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'``
+    from inside the writer -- an internal error, not an answer.
+
+    Reformulating here instead would be wrong: big-M needs an ``M`` and hull adds
+    disaggregated copies, and which to use (and how tight) is a *modelling*
+    decision that changes the relaxation. Silently choosing one would export a
+    different model than the user wrote. So refuse loudly and name the call, the
+    way the ``dm.custom`` refusal does (CLAUDE.md §3).
+    """
+    bad = [
+        c
+        for c in getattr(model, "_constraints", ())
+        if not hasattr(c, "sense") or not hasattr(c, "rhs")
+    ]
+    if not bad:
+        return
+    names = [getattr(c, "name", None) or type(c).__name__ for c in bad[:3]]
+    more = "" if len(bad) <= 3 else f", and {len(bad) - 3} more"
+    raise ValueError(
+        f"Cannot export {len(bad)} disjunctive/GDP row(s) to {fmt}: "
+        f"{', '.join(map(str, names))}{more}. {fmt} has no disjunction concept, "
+        f"so the model must be reformulated to algebraic constraints first:\n"
+        f"    from discopt._relax.gdp_reformulate import reformulate_gdp\n"
+        f'    flat = reformulate_gdp(model, method="big-m")   '
+        f'# or "hull" / "mbigm" / "auto"\n'
+        f"    flat.to_{fmt.lstrip('.')}(path)\n"
+        f"The method is a modelling choice (big-M needs a valid M; hull adds "
+        f"disaggregated variables), so it is not chosen for you."
+    )

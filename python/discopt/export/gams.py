@@ -83,6 +83,10 @@ def to_gams(
     str or None
         The GAMS source if *path* is ``None``, otherwise ``None``.
     """
+    from discopt.export._common import reject_unreformulated_gdp
+
+    reject_unreformulated_gdp(model, ".gms")
+
     # ``for_solve=False``: like the ``.nl`` writer, this one *honours*
     # ``Constraint.rhs`` — it emits it verbatim as the equation's right-hand side
     # (``{body} =g= {c.rhs};``) — so a row the solve path refuses as

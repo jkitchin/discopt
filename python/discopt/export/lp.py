@@ -47,6 +47,10 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
     ValueError
         If the model contains nonlinear (non-quadratic) expressions.
     """
+    from discopt.export._common import reject_unreformulated_gdp
+
+    reject_unreformulated_gdp(model, ".lp")
+
     # Default ``for_solve=True`` is deliberate: unlike the ``.nl`` and GAMS
     # writers, this one does *not* honour ``Constraint.rhs``. The row's right-hand
     # side below is ``-const``, recovered from the *body* alone, so a non-zero

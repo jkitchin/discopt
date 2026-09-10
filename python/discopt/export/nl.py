@@ -40,6 +40,7 @@ from discopt.modeling.core import (
     MatMulExpression,
     Model,
     ObjectiveSense,
+    Parameter,
     SumExpression,
     SumOverExpression,
     UnaryOp,
@@ -67,6 +68,10 @@ def to_nl(
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
+    from discopt.export._common import reject_unreformulated_gdp
+
+    reject_unreformulated_gdp(model, ".nl")
+
     # ``for_solve=False``: this writer *honours* ``Constraint.rhs`` — it folds the
     # body constant into the r-section row bound — so a row the solve path refuses
     # as unrepresentable (#909) is still exported faithfully here. Refusing it
@@ -585,6 +590,12 @@ class _NLWriter:
             if isinstance(node, Variable):
                 if node.shape not in ((), (1,)):
                     return True
+            elif isinstance(node, Parameter):
+                # Shaped parameters expand element-wise in `_scalarize`, so a body
+                # containing one must be routed through it just like a shaped
+                # variable -- otherwise it reaches the scalar writer whole.
+                if np.asarray(node.value).shape not in ((), (1,)):
+                    return True
             elif isinstance(node, (MatMulExpression, SumExpression)):
                 return True
             elif isinstance(node, IndexExpression):
@@ -671,6 +682,21 @@ class _NLWriter:
         """
         if isinstance(expr, Constant):
             v = expr.value
+            if v.ndim == 0:
+                return self._obj0(Constant(float(v)))
+            out = np.empty(v.shape, dtype=object)
+            for idx in np.ndindex(v.shape):
+                out[idx] = Constant(float(v[idx]))
+            return out
+
+        if isinstance(expr, Parameter):
+            # A Parameter holds a value fixed for the solve, so at export time it
+            # is a constant -- expand it element-wise exactly like `Constant`
+            # above. Before this, parameters were the "no known array structure"
+            # case named in the docstring and became opaque 0-d leaves, so `p[i]`
+            # on a shaped parameter raised `IndexError: too many indices` from
+            # `base[expr.index]` below rather than exporting.
+            v = np.asarray(expr.value)
             if v.ndim == 0:
                 return self._obj0(Constant(float(v)))
             out = np.empty(v.shape, dtype=object)
@@ -1115,6 +1141,25 @@ class _NLWriter:
 
             if isinstance(node, Constant):
                 buf.write(f"n{float(node.value)}\n")
+            elif isinstance(node, Parameter):
+                # A Parameter is "a value fixed during a single solve but
+                # changeable between solves" (its class docstring), so at export
+                # time it is simply a constant -- .nl has no parameter concept.
+                # The written file is a SNAPSHOT at the current value; re-export
+                # after changing `p.value` to get a file for the new value.
+                # Refuse a non-scalar Parameter rather than writing its first
+                # element: `_needs_scalarize` routes shaped bodies through
+                # `_scalarize`, so a shaped Parameter reaching here means the
+                # element was not resolved, and silently emitting one number
+                # would produce a wrong model (CLAUDE.md §3).
+                val = np.asarray(node.value)
+                if val.shape not in ((), (1,)):
+                    raise ValueError(
+                        f"Cannot write array parameter {node.name!r} of shape "
+                        f"{val.shape} to .nl without indexing; index it "
+                        f"element-wise (e.g. p[i]) so each use is scalar."
+                    )
+                buf.write(f"n{float(val.reshape(-1)[0])}\n")
             elif isinstance(node, Variable):
                 if node.shape == () or node.shape == (1,):
                     idx = self._var_index.get((node.name, 0))
@@ -1125,6 +1170,29 @@ class _NLWriter:
             elif isinstance(node, IndexExpression):
                 vi = self._resolve_var_index(node)
                 if vi is None:
+                    # An index into a Parameter is a constant at export time.
+                    # Constraint bodies reach `_scalarize`, which expands shaped
+                    # parameters element-wise, but the objective is written
+                    # directly through this path, so `p[i]` in an objective must
+                    # be resolved here too.
+                    if isinstance(node.base, Parameter):
+                        val = np.asarray(node.base.value)
+                        try:
+                            elem = val[node.index]
+                        except (IndexError, TypeError) as exc:
+                            raise ValueError(
+                                f"Cannot resolve parameter index {node}: "
+                                f"{node.base.name!r} has shape {val.shape}."
+                            ) from exc
+                        elem_arr = np.asarray(elem)
+                        if elem_arr.ndim != 0:
+                            raise ValueError(
+                                f"Parameter index {node} selects a non-scalar of "
+                                f"shape {elem_arr.shape}; index it element-wise so "
+                                f"each use is scalar."
+                            )
+                        buf.write(f"n{float(elem_arr)}\n")
+                        continue
                     raise ValueError(f"Cannot resolve indexed expression: {node}")
                 buf.write(f"v{vi}\n")
             elif isinstance(node, BinaryOp):
