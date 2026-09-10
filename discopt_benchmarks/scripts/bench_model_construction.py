@@ -59,17 +59,50 @@ published 18% slowdown that did not exist. When a wall-time change matters,
 bisect it in one container with a marker assertion on the loaded code, and treat
 an unchanged memory figure as evidence that nothing structural moved.
 
-Recorded baseline, 40 x 5,000 = 200,000 instances, 5 reps, 4 cores, 1-minute
-loadavg 0.70, `main` @ c052e85, Pyomo 6.10.1:
+**Two discopt arms, and they are not interchangeable.** ``discopt`` builds the
+model per-element (one ``Constraint`` object per row) -- the idiom Pyomo and
+oximo are limited to, since neither has an array-valued constraint body.
+``discopt-vec`` builds the same model with one array-valued body per form, which
+is discopt's own idiom. Reporting only the first published the slower of the two
+as "discopt's construction cost"; both are default-on now, and a claim about
+"discopt" has to say which it means. See :func:`build_discopt_vectorised`.
 
-======== ========== ========== ========= ========
-arm      median s   us/inst    RSS MB    B/inst
-======== ========== ========== ========= ========
-discopt  3.225      16.12      183.4     917
-pyomo    1.334       6.67       94.3     471
-======== ========== ========== ========= ========
+Opening baseline, 40 x 5,000 = 200,000 instances, 5 reps, 4 cores, 1-minute
+loadavg 0.70, `main` @ c052e85, Pyomo 6.10.1 -- the state issue #1215 was opened
+against:
+
+=========== ========== ========== ========= ========
+arm         median s   us/inst    RSS MB    B/inst
+=========== ========== ========== ========= ========
+discopt     3.225      16.12      183.4     917
+pyomo       1.334       6.67       94.3     471
+=========== ========== ========== ========= ========
 
 -- discopt 2.42x slower and 1.95x heavier at construction.
+
+Same model, same machine, 2026-09-10, loadavg 0.24, with the vectorised arm
+added:
+
+=========== ========== ========== ========= ========
+arm         median s   us/inst    RSS MB    B/inst
+=========== ========== ========== ========= ========
+discopt     0.776       3.88       93.6     468
+discopt-vec 0.0006      0.00304     0.14      0.696
+pyomo       1.299       6.49       94.3     471
+pyomo-gc    0.669       3.34       94.3     471
+=========== ========== ========== ========= ========
+
+-- per-element discopt is now 1.16x pyomo-gc (the like-for-like arm) and at
+memory parity; the vectorised arm is **1275x** cheaper still and retains
+essentially nothing.
+
+**What the vectorised arm's near-zero does and does not mean.** An array-valued
+body defers its per-row work to the writer or the solve, so 0.003 us/inst is a
+real measurement of *construction* and a partial measurement of anything else.
+The end-to-end figure (model to written ``.nl``) is 3.05-4.42 us/row against
+Pyomo's 35.5-48.1 and oximo's 2.97-4.11 -- see
+``discopt_benchmarks/scripts/issue1215_cross_tool_panel.py`` and
+``docs/dev/performance-plan.md`` §48. Quote that one for end-to-end claims.
 """
 
 from __future__ import annotations
@@ -129,6 +162,52 @@ def build_discopt(n_forms: int, n_inst: int):
                 return dm.log(x[i]) + y[i] <= c
 
         built += len(m.constraint(idx, rule, name=f"c{f}"))
+    return m, built
+
+
+def build_discopt_vectorised(n_forms: int, n_inst: int):
+    """The SAME model in discopt's own idiom: one array-valued body per form.
+
+    ``build_discopt`` above is the *per-element* idiom -- one ``Constraint``
+    object per row -- which is what Pyomo and oximo are limited to, because
+    neither has an array-valued constraint body. discopt does, and the cross-tool
+    panel (`docs/dev/performance-plan.md` §48) measured the difference between
+    discopt's two idioms at **6.9-11.1x**: larger than the whole discopt-to-Pyomo
+    gap, and enough to put discopt at oximo parity (0.91-1.27x).
+
+    So the per-element arm alone is not "discopt's construction cost"; it is the
+    cost of the idiom discopt shares with the tools it is being compared to.
+    Reporting only that arm published the slower of two numbers as our result.
+    Both arms are here now, and a claim about "discopt" must say which.
+    """
+    import discopt.modeling as dm
+    from discopt.modeling import Model
+
+    m = Model()
+    x = m.continuous("x", shape=(n_inst,), lb=0.5, ub=4.0)
+    y = m.continuous("y", shape=(n_inst,), lb=0.5, ub=4.0)
+
+    built = 0
+    for f in range(n_forms):
+        kind = KINDS[f % len(KINDS)]
+        c = 4.0 + f
+        if kind == "bilinear":
+            body = x * y
+        elif kind == "exp":
+            body = dm.exp(x) + y
+        elif kind == "square":
+            body = x**2 + y
+        else:
+            body = dm.log(x) + y
+        m.subject_to(body <= c, name=f"c{f}")
+        # §6: count the rows the body actually carries, not the rows intended.
+        # A body that silently collapsed to a scalar would otherwise be counted
+        # as `n_inst` and the arm would report a 200,000-row build of one row.
+        shape = getattr(m._constraints[-1].body, "shape", ())
+        rows = 1
+        for dim in shape:
+            rows *= dim
+        built += rows
     return m, built
 
 
@@ -220,9 +299,15 @@ def build_pyomo_gc_tuned(n_forms: int, n_inst: int):
 
 ARMS = {
     "discopt": (build_discopt, discopt_marker),
+    "discopt-vec": (build_discopt_vectorised, discopt_marker),
     "pyomo": (build_pyomo, pyomo_marker),
     "pyomo-gc": (build_pyomo_gc_tuned, pyomo_marker),
 }
+
+#: Arms run when ``--arms`` is not given. Both discopt idioms are in the default
+#: set: reporting only the per-element one published the slower of the two as
+#: "discopt" (see :func:`build_discopt_vectorised`).
+DEFAULT_ARMS = ("discopt", "discopt-vec", "pyomo", "pyomo-gc")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -362,7 +447,7 @@ def mode_headline(args, arms: list[str]) -> int:
 
     print()
     print(
-        f"{'arm':10s} {'median s':>10s} {'mean s':>10s} {'sd':>8s} "
+        f"{'arm':12s} {'median s':>10s} {'mean s':>10s} {'sd':>8s} "
         f"{'us/inst':>9s} {'RSS MB':>9s} {'B/inst':>9s}"
     )
     results = {}
@@ -382,22 +467,22 @@ def mode_headline(args, arms: list[str]) -> int:
         }
         r = results[a]
         print(
-            f"{a:10s} {med:10.3f} {mean:10.3f} {sd:8.3f} "
-            f"{r['us_per_inst']:9.2f} {r['retained_mb']:9.1f} {r['b_per_inst']:9.0f}"
+            f"{a:12s} {med:10.4f} {mean:10.4f} {sd:8.4f} "
+            f"{r['us_per_inst']:9.3g} {r['retained_mb']:9.2f} {r['b_per_inst']:9.3g}"
         )
 
     if "discopt" in results and "pyomo" in results:
         d, p = results["discopt"], results["pyomo"]
         print()
         print(
-            f"discopt / pyomo (as written):  time {d['median_s'] / p['median_s']:.2f}x   "
-            f"memory {d['retained_mb'] / p['retained_mb']:.2f}x"
+            f"discopt / pyomo (as written):  time {d['median_s'] / p['median_s']:.3g}x   "
+            f"memory {d['retained_mb'] / p['retained_mb']:.3g}x"
         )
         if "pyomo-gc" in results:
             g = results["pyomo-gc"]
             print(
-                f"discopt / pyomo (same GC):    time {d['median_s'] / g['median_s']:.2f}x   "
-                f"memory {d['retained_mb'] / g['retained_mb']:.2f}x"
+                f"discopt / pyomo (same GC):    time {d['median_s'] / g['median_s']:.3g}x   "
+                f"memory {d['retained_mb'] / g['retained_mb']:.3g}x"
             )
             print(
                 "  ^ the LIKE-FOR-LIKE number. The line above credits discopt for "
@@ -405,6 +490,30 @@ def mode_headline(args, arms: list[str]) -> int:
                 "caller (PauseGC); quoting\n    it as a statement about the modelling "
                 "layers would overstate discopt by ~1.6x."
             )
+
+    if "discopt-vec" in results and "pyomo" in results:
+        v, p = results["discopt-vec"], results["pyomo"]
+        print()
+        print(
+            f"discopt-vec / pyomo:          time {v['median_s'] / p['median_s']:.3g}x   "
+            f"memory {v['retained_mb'] / p['retained_mb']:.3g}x"
+        )
+        if "discopt" in results:
+            d = results["discopt"]
+            print(
+                f"discopt-vec / discopt:        time {v['median_s'] / d['median_s']:.3g}x   "
+                f"memory {v['retained_mb'] / d['retained_mb']:.3g}x"
+            )
+        print(
+            "  ^ THE IDIOM GAP. Both discopt rows build the same model; they differ\n"
+            "    only in whether the constraint body is array-valued. Any claim about\n"
+            "    'discopt's construction cost' has to say which of the two it means.\n"
+            "    Note what this mode does NOT measure: an array-valued body defers its\n"
+            "    per-row work to the writer or the solve, so discopt-vec's near-zero\n"
+            "    construction time is real but partial. End to end (model -> .nl text)\n"
+            "    the honest figure is 3.05-4.42 us/row against Pyomo's 35.5-48.1 --\n"
+            "    see issue1215_cross_tool_panel.py and performance-plan.md section 48."
+        )
 
     if args.json_out:
         with open(args.json_out, "w") as fh:
@@ -624,8 +733,9 @@ def main(argv=None) -> int:
     ap.add_argument("--reps", type=int, default=5, help="interleaved timing reps")
     ap.add_argument(
         "--arms",
-        default="discopt,pyomo,pyomo-gc",
-        help="headline mode: arms to run (see build_pyomo_gc_tuned for why pyomo-gc)",
+        default=",".join(DEFAULT_ARMS),
+        help="headline mode: arms to run. Both discopt idioms are default-on "
+        "(see build_discopt_vectorised); see build_pyomo_gc_tuned for pyomo-gc",
     )
     ap.add_argument("--top", type=int, default=12, help="alloc mode: sites to report")
     ap.add_argument("--json-out", default=None, help="headline mode: write results JSON")
