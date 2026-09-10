@@ -420,6 +420,145 @@ impl PyModelRepr {
         self.inner.objective.0
     }
 
+    /// Flat "tape program" for the whole arena, in one call.
+    ///
+    /// Lowering the arena to POUNCE's AD tape was measured at 93-94% of the tape
+    /// build, and that cost is the *reading*, not POUNCE: `get_node` materializes
+    /// a Python dict per node, so a 12 000-row model pays ~470 000 dict
+    /// round-trips. This returns the same information as parallel arrays instead,
+    /// so the caller indexes numpy rather than allocating a dict per node.
+    ///
+    /// POUNCE ships as a Python extension and is not a Rust dependency here, so
+    /// the tape nodes themselves must still be constructed on the Python side;
+    /// what moves into Rust is the arena walk and the variable-slot arithmetic.
+    ///
+    /// Returns `(op, a, b, k, args_flat, args_ptr)`:
+    ///   * `op[i]`   opcode for node `i` (see the OP_* constants below)
+    ///   * `a[i]`,`b[i]`  operand node ids, or -1 when unused
+    ///   * `k[i]`    literal payload: the value for CONST, the **flat variable
+    ///               slot** for VAR (already offset-resolved here, so the caller
+    ///               never redoes block arithmetic and cannot alias a variable)
+    ///   * `args_flat[args_ptr[i]..args_ptr[i+1]]`  operands of n-ary nodes
+    ///
+    /// Nodes this encoding does not cover (constant arrays, matmul, axis sums,
+    /// non-integer indexing) are emitted as `OP_UNSUPPORTED` rather than skipped,
+    /// so a caller that roots a row at one fails loudly instead of building a
+    /// DIFFERENT tape than the Python path.
+    ///
+    /// Opcodes: 0 unsupported, 1 const, 2 var, 3 add, 4 sub, 5 mul, 6 div,
+    /// 7 pow, 8 neg, 9 abs, 10 sumover, 20+ MathFunc in declaration order.
+    #[allow(clippy::type_complexity)]
+    fn tape_program<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<i32>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+    )> {
+        use numpy::PyArray1;
+
+        const OP_UNSUPPORTED: i32 = 0;
+        const OP_CONST: i32 = 1;
+        const OP_VAR: i32 = 2;
+        const OP_SUMOVER: i32 = 10;
+        const OP_FUNC_BASE: i32 = 20;
+
+        // Flat offset of each variable block, matching `ExprArena::add_variable`
+        // (`offset = n_vars`, advanced by the block size).
+        let mut offsets: Vec<usize> = Vec::with_capacity(self.inner.variables.len());
+        let mut run = 0usize;
+        for v in &self.inner.variables {
+            offsets.push(v.offset.max(run.min(v.offset)));
+            run = v.offset + v.size;
+        }
+
+        let n = self.inner.arena.len();
+        let mut op = vec![OP_UNSUPPORTED; n];
+        let mut a = vec![-1i64; n];
+        let mut b = vec![-1i64; n];
+        let mut k = vec![0.0f64; n];
+        let mut args_flat: Vec<i64> = Vec::new();
+        let mut args_ptr: Vec<i64> = Vec::with_capacity(n + 1);
+        // Which variable block a node denotes, so an Index above it resolves.
+        let mut block_of: Vec<i64> = vec![-1; n];
+
+        for i in 0..n {
+            args_ptr.push(args_flat.len() as i64);
+            match self.inner.arena.get(ExprId(i)) {
+                ExprNode::Constant(v) => {
+                    op[i] = OP_CONST;
+                    k[i] = *v;
+                }
+                ExprNode::Parameter { value, .. } if value.len() == 1 => {
+                    op[i] = OP_CONST;
+                    k[i] = value[0];
+                }
+                ExprNode::Variable { index, size, .. } => {
+                    block_of[i] = *index as i64;
+                    if *size == 1 {
+                        op[i] = OP_VAR;
+                        k[i] = offsets[*index] as f64;
+                    }
+                }
+                ExprNode::Index { base, index } => {
+                    let blk = block_of[base.0];
+                    if blk >= 0 {
+                        let vi = &self.inner.variables[blk as usize];
+                        if let Some(flat) = flat_slot(&vi.shape, index) {
+                            if flat < vi.size {
+                                op[i] = OP_VAR;
+                                k[i] = (vi.offset + flat) as f64;
+                            }
+                        }
+                    }
+                }
+                ExprNode::BinaryOp { op: o, left, right } => {
+                    op[i] = match o {
+                        BinOp::Add => 3,
+                        BinOp::Sub => 4,
+                        BinOp::Mul => 5,
+                        BinOp::Div => 6,
+                        BinOp::Pow => 7,
+                    };
+                    a[i] = left.0 as i64;
+                    b[i] = right.0 as i64;
+                }
+                ExprNode::UnaryOp { op: o, operand } => {
+                    op[i] = match o {
+                        UnOp::Neg => 8,
+                        UnOp::Abs => 9,
+                    };
+                    a[i] = operand.0 as i64;
+                }
+                ExprNode::FunctionCall { func, args } if args.len() == 1 => {
+                    op[i] = OP_FUNC_BASE + math_func_code(*func);
+                    a[i] = args[0].0 as i64;
+                }
+                ExprNode::SumOver { terms } => {
+                    op[i] = OP_SUMOVER;
+                    for t in terms {
+                        args_flat.push(t.0 as i64);
+                    }
+                }
+                _ => {}
+            }
+        }
+        args_ptr.push(args_flat.len() as i64);
+
+        Ok((
+            PyArray1::from_vec(py, op),
+            PyArray1::from_vec(py, a),
+            PyArray1::from_vec(py, b),
+            PyArray1::from_vec(py, k),
+            PyArray1::from_vec(py, args_flat),
+            PyArray1::from_vec(py, args_ptr),
+        ))
+    }
+
     /// ExprId (index) of each constraint expression root.
     fn constraint_ids(&self) -> Vec<usize> {
         self.inner.constraints.iter().map(|c| c.body.0).collect()
@@ -1948,4 +2087,59 @@ fn format_slice(start: Option<isize>, stop: Option<isize>, step: Option<isize>) 
     } else {
         format!("{}:{}:{}", s(start), s(stop), s(step))
     }
+}
+
+/// Stable integer code for a `MathFunc`, in declaration order.
+fn math_func_code(f: MathFunc) -> i32 {
+    match f {
+        MathFunc::Exp => 0,
+        MathFunc::Log => 1,
+        MathFunc::Log2 => 2,
+        MathFunc::Log10 => 3,
+        MathFunc::Sqrt => 4,
+        MathFunc::Sin => 5,
+        MathFunc::Cos => 6,
+        MathFunc::Tan => 7,
+        MathFunc::Atan => 8,
+        MathFunc::Sinh => 9,
+        MathFunc::Cosh => 10,
+        MathFunc::Asin => 11,
+        _ => 99,
+    }
+}
+
+/// C-order flat slot for a pure-integer index into `shape`, else `None`.
+///
+/// Returns `None` for slices, ellipsis, negative or out-of-range indices and any
+/// wrong-arity spec, so the caller emits `OP_UNSUPPORTED` rather than guessing a
+/// slot -- a wrong slot silently aliases a different variable.
+fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
+    let idxs: Vec<usize> = match index {
+        IndexSpec::Scalar(i) => vec![*i],
+        IndexSpec::Tuple(v) => v.clone(),
+        IndexSpec::Multi(elems) => {
+            let mut out = Vec::with_capacity(elems.len());
+            for e in elems {
+                match e {
+                    IndexElem::Scalar(i) => out.push(*i),
+                    _ => return None,
+                }
+            }
+            out
+        }
+    };
+    if shape.is_empty() {
+        return if idxs.is_empty() { Some(0) } else { None };
+    }
+    if idxs.len() != shape.len() {
+        return None;
+    }
+    let mut flat = 0usize;
+    for (i, d) in idxs.iter().zip(shape.iter()) {
+        if *i >= *d {
+            return None;
+        }
+        flat = flat * *d + *i;
+    }
+    Some(flat)
 }
