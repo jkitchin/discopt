@@ -6636,3 +6636,102 @@ table suggests. The reproduction script does discriminate on objective.
 
 The **2 xpassed** are being identified — expected-to-fail tests that now pass are
 the signal that the stale box was masking other defects.
+
+## 38. Construction: canonical `x[i]` closes a third of the Pyomo gap; the tape build is 2.25–2.84× cheaper from the arena (2026-09-10)
+
+Two shipped changes on the **modelling** side of #1215 (nothing here touches the
+solver). Headline, `bench_model_construction.py`, 40 forms × 5 000 = 200 000
+rows, 5 interleaved reps, load 0.02–0.26, Pyomo byte-identical at 94.3 MB across
+every run as the environment control:
+
+| | µs/row | B/row | vs Pyomo (time) | vs Pyomo (mem) |
+|---|---:|---:|---:|---:|
+| before | 19.12 | 911 | 2.98× | 1.93× |
+| after  | 11.67 | 725 | **1.88×** | **1.54×** |
+
+Pyomo 6.10.1 is 6.22 µs/row and 471 B/row; oximo 0.6.0 is 0.66 µs/row.
+
+### What worked: canonical element handles
+
+The attribution that mattered was **leaf identity**, not node count:
+
+| | discopt | pyomo | ratio |
+|---|---:|---:|---:|
+| `x[0] is x[0]` | `False` | `True` | — |
+| indexing alone | 1.99 µs | 0.18 µs | **11.3×** |
+
+Every `x[i]` allocated a fresh `IndexExpression`; Pyomo hands back the one
+canonical `VarData`. `Variable.__getitem__` now memoises the node per index, and
+indexing drops to **0.35 µs (2.0× Pyomo)**. Expression-tree construction for one
+row went 4.79 → 1.24 µs, and the expression-node share of a build fell from 96%
+to 45% — the bottleneck has moved *out* of node creation.
+
+The second-order effect is likely the larger one: expressions hash by identity
+(`Expression.__hash__ = object.__hash__`), so the `id()`-keyed memos carried by
+all 47 DAG walkers, the relaxation layer and the tape lowering now **hit across
+rows** that share an element instead of re-walking a structurally identical node
+once per occurrence.
+
+Only an exact `int` (or a tuple of exact ints) is cached, keyed on the raw index.
+Normalising `np.int64(0)`, `0` and `(0,)` together would hand back a node whose
+`.index` has a different *type* than the caller wrote, and consumers branch on
+that (`_resolve_var_index` in the `.nl` writer treats `int` and `tuple`
+differently), so those forms stay uncached rather than aliased.
+
+### What did not work: `__slots__`, *again*
+
+**This was a wasted round, and the record already said so.** §30 (2026-09-07)
+implemented, measured and reverted `__slots__` on the node classes; this session
+did the whole thing over before reading it. Re-measured, the answer is the same
+and slightly worse: 144.9 → 143.1 MB (**1.2%**) with no time change (2.334 s in
+both arms). CPython 3.12 gives same-shape instances a key-sharing dict, so the
+per-instance `__dict__` an intuitive reading blames for ~104 B/node costs almost
+nothing. Reverted, and now pinned by
+`test_expression_nodes_are_not_slotted` so the next attempt fails a test instead
+of spending an afternoon.
+
+Process note: §30 exists precisely to stop this. **Read the falsification record
+for the layer you are about to optimise before forming a hypothesis about it.**
+
+### Arena-lowered AD tape (`_arena_tape`, shipped)
+
+`model_to_repr` already walks the model into a typed Rust arena, so the tape
+build's second walk of the Python DAG is redundant. `PyModelRepr.tape_program()`
+returns the arena as six flat numpy arrays; lowering is one forward scan
+(append-only arena ⇒ every child's id is below its parent's).
+
+| rows | Python walk | arena scan | |
+|---:|---:|---:|---|
+| 1 500 | 76.8 µs/row | 27.0 | 2.84× |
+| 6 000 | 79.4 | 32.6 | 2.43× |
+| 24 000 | 81.5 | 36.3 | 2.25× |
+
+Interleaved arms, 5 reps, load 0.00. Bound-neutral per §5, so the bar was exact
+equality: objective, gradient, constraint values and full Jacobian agree to
+**0.000e+00** across seven model shapes, including a 6 000-term builtin `sum()`
+chain and sub-threshold chains with 1e-8..1e8 coefficients where reassociation
+would show.
+
+### Falsification recorded: "unsupported" is not one exception
+
+The first revision allowlisted `TypeError: Unknown expression type` as the
+"no arena representation" signal. `convert_expr` also raises
+`ValueError: Unknown MathFunc: centropy` for an operator outside the core IR —
+and `centropy` is produced by a *solver rewrite*, not at construction, so it is
+invisible to any probe that lowers the constructed DAG. Four models that used to
+solve became crashes and only the smoke suite caught it. The refusal is now
+structural rather than a substring match.
+
+### Coverage limit, and the next target
+
+The arena tape refuses **array-valued constraint bodies** (`x <= 1.5` on a
+vector, `A @ x`) because one `Constraint` there is many tape rows and the flat
+encoding cannot fan out. Measured across construct families: scalar-bodied
+flowsheet and indexed-sum models lower; vector and matmul bodies fall back. Since
+DAE collocation and vectorised balances are exactly the 100k-scale shapes, **the
+fan-out belongs in `tape_program` next**.
+
+On construction, the remaining gap is no longer in the nodes. Post-fix
+attribution of one row: expression tree 1.24 µs, `Constraint` wrapper +2.4 µs,
+`Model.constraint` bookkeeping +4.4 µs. **The `Constraint` wrapper and the
+indexed-family bookkeeping are now the target**, not `Expression`.

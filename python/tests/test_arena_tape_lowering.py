@@ -203,6 +203,50 @@ def test_builder_rows_are_refused():
     assert try_build_arena_tape(m, pounce.NlExpr) is None
 
 
+@pytest.mark.parametrize(
+    "signal", [TypeError("Unknown expression type: X"), ValueError("Unknown MathFunc: centropy")]
+)
+def test_any_model_to_repr_refusal_falls_back(monkeypatch, signal):
+    """ "No arena representation" arrives as several exception types and wordings.
+
+    ``convert_expr`` reports an opaque callable as ``TypeError: Unknown
+    expression type: CustomCall`` and an operator outside the core IR as
+    ``ValueError: Unknown MathFunc: centropy``, and the set grows with the
+    modelling layer. An earlier revision allowlisted the first wording only, so
+    the second escaped and turned four models that used to solve into crashes --
+    the refusal has to be structural, not a substring match.
+    """
+    import discopt._rust as rust
+    from discopt import _arena_tape
+
+    def boom(*_a, **_k):
+        raise signal
+
+    monkeypatch.setattr(rust, "model_to_repr", boom)
+    assert _arena_tape.try_build_arena_tape(_flowsheet(3), pounce.NlExpr) is None
+
+
+def test_relative_entropy_model_still_solves():
+    """End-to-end guard for the crash above.
+
+    ``x * log(x / y)`` lowers fine as written; the solver later rewrites it to a
+    ``centropy`` node that the core IR does not carry, and the evaluator is built
+    from the *rewritten* model. So this shape is only exercised through a real
+    solve, not by lowering the constructed DAG.
+    """
+    m = dm.Model("relent")
+    x = m.continuous("x", lb=0.1, ub=1.0)
+    y = m.continuous("y", lb=0.1, ub=2.0)
+    m.subject_to(x == 0.5)
+    m.minimize(x * dm.log(x / y) + (y - 1.0) ** 2)
+    res = m.solve(time_limit=90)
+    assert res.status in ("optimal", "feasible"), f"status={res.status}"
+    # Inner optimum over y: d/dy [0.5 log(0.5/y) + (y-1)^2] = 0 -> y = (2+sqrt(8))/4.
+    y_star = (2.0 + np.sqrt(8.0)) / 4.0
+    expected = 0.5 * np.log(0.5 / y_star) + (y_star - 1.0) ** 2
+    assert float(res.objective) == pytest.approx(expected, abs=1e-4)
+
+
 def test_custom_call_is_refused_by_both_paths():
     """``dm.custom`` has no tape equivalent; the arena path must not invent one."""
     from discopt._arena_tape import try_build_arena_tape

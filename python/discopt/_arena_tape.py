@@ -59,6 +59,7 @@ fast-construction path and are cheap to lower on the Python side anyway.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
@@ -97,6 +98,8 @@ _FUNC_METHOD = {
     10: "cosh",
     11: "asin",
 }
+
+_LOG = logging.getLogger(__name__)
 
 _ENV = "DISCOPT_ARENA_TAPE"
 
@@ -334,16 +337,27 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
 
     try:
         repr_ = model_to_repr(model, getattr(model, "_builder", None))
-    except TypeError as exc:
-        # `convert_expr` signals a node with no arena representation -- today only
-        # `CustomCall` (`dm.custom` / `dm.udf` / `dm.implicit`), whose body is an
-        # opaque callable by contract -- as `TypeError: Unknown expression type: X`.
-        # The Python path refuses the same models with `UnsupportedForTape`, so
-        # this is a fallback, not a swallowed error: anything else re-raises, and
-        # if the message is ever reworded the arena path starts RAISING rather
-        # than silently degrading, which is the safe direction to fail (§7).
-        if "Unknown expression type" not in str(exc):
-            raise
+    except Exception as exc:  # noqa: BLE001 -- see below; deliberately broad
+        # "This model has no arena representation" is how `convert_expr` reports
+        # several distinct cases, each with its own exception type and wording:
+        # `TypeError: Unknown expression type: CustomCall` for an opaque callable,
+        # `ValueError: Unknown MathFunc: centropy` for an operator the core IR
+        # does not carry, and more as the modelling layer grows. An allowlist of
+        # message substrings was tried first and was wrong within one test run --
+        # it caught the CustomCall wording and let `centropy` escape, turning a
+        # model that used to solve into a crash.
+        #
+        # This is not a swallowed error (§7). Before this module existed the
+        # evaluator never called `model_to_repr` at all, so a failure here is not
+        # a regression being hidden -- it is new information about a model the
+        # Python walk below still lowers correctly. And nothing is suppressed:
+        # the solve path calls `model_to_repr` again, unguarded, so a genuine
+        # defect in it still surfaces there with its own traceback. What is
+        # caught is only this speculative attempt.
+        #
+        # `Exception`, not `BaseException`: a pyo3 `PanicException` derives from
+        # `BaseException` and must keep propagating.
+        _LOG.debug("arena tape declined; model_to_repr refused: %s: %s", type(exc).__name__, exc)
         return None
     if not _offsets_agree(repr_, model):
         return None

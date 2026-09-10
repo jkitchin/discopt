@@ -618,6 +618,14 @@ class Expression:
     # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
     # ("computed, unknown") is distinguishable. Leaf nodes (Variable/Constant/
     # Parameter) carry their own ``.shape`` and are handled in ``_known_shape``.
+    #
+    # NOT slotted, deliberately. Slotting these classes was measured (#1215) and
+    # is a dead end: retained memory moved 144.9 -> 143.1 MB (1.2%) on the
+    # 200 000-row panel with no time change, because CPython 3.12 already gives
+    # same-shape instances a key-sharing dict, so the per-node ``__dict__`` an
+    # earlier reading blamed for ~104 B/node costs almost nothing. Slots would
+    # buy that 1% at the price of forbidding attribute assignment on any
+    # Expression subclass, including in plugins.
     _shape: Any = _UNSET_SHAPE
 
     def __add__(self, other):
@@ -866,10 +874,47 @@ class Variable(Expression):
         # construction, so cache the product once instead of recomputing
         # ``int(np.prod(shape))`` on every access.
         self._size = int(np.prod(shape)) if shape else 1
+        # Canonical `x[i]` handles -- see `__getitem__`.
+        self._elem_cache: dict = {}
 
     @property
     def size(self) -> int:
         return self._size
+
+    def __getitem__(self, idx):
+        """``x[i]`` -- the SAME node object every time, for a plain-integer index.
+
+        Measured (#1215): indexing alone cost 1.99 us against Pyomo's 0.18 us
+        (11.3x), because every ``x[i]`` allocated a fresh ``IndexExpression``
+        while Pyomo hands back the one canonical ``VarData`` for that element.
+        With expression-node creation at 96% of a model build, and two index
+        nodes in a typical eight-node row, that is a first-order construction
+        cost -- and the duplicates are pure waste: an index node over a variable
+        is immutable and fully determined by ``(variable, index)``.
+
+        Canonicalising also makes the DAG *smaller* rather than merely cheaper.
+        Expressions hash by identity (see ``Expression.__hash__``), so the
+        ``id()``-keyed memos that every walker, relaxation and tape lowering
+        carries now HIT across rows that share an element instead of re-walking
+        a structurally identical node once per occurrence.
+
+        Only an exact ``int`` (or a tuple of exact ints) is cached, and the
+        raw index is the key. A key that normalised ``np.int64(0)``, ``0`` and
+        ``(0,)`` together would hand back a node whose ``.index`` has a different
+        *type* than the caller wrote, and consumers do branch on that
+        (``_resolve_var_index`` treats ``int`` and ``tuple`` differently), so
+        those forms stay uncached rather than aliased. Slices and ellipsis are
+        uncached too: they are rare and not always hashable.
+        """
+        if type(idx) is int or (type(idx) is tuple and all(type(v) is int for v in idx)):
+            node = self._elem_cache.get(idx)
+            if node is None:
+                # Through the base implementation, so the out-of-range guard on
+                # the `[]` operator still runs before anything is cached.
+                node = Expression.__getitem__(self, idx)
+                self._elem_cache[idx] = node
+            return node
+        return Expression.__getitem__(self, idx)
 
     def __hash__(self):
         return id(self)
