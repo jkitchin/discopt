@@ -7786,3 +7786,106 @@ claim is about, and say which.
 
 `lp.py`, `mps.py` and `gams.py`. GAMS matters beyond speed — it is the only route
 to a full-license BARON.
+
+## 53. FALSIFIED: linear fusion cannot rescue the per-element path in Python (2026-09-10)
+
+§49 named eager linear fusion — oximo's `ExprNode::Linear`, built by the `+`/`*`
+overloads so a linear row is one node — as "the largest lever left on the
+per-element path". Building it, that turned out to be wrong, and this records
+the falsification and the code that was reverted.
+
+### Entry experiment: cost is entirely per-term
+
+Per-element linear families, 4 000 rows, bodies of increasing term count:
+
+| terms | nodes/row | construct | write | total µs/row |
+|---:|---:|---:|---:|---:|
+| 1 | 2.00 | 7.82 | 7.20 | 15.01 |
+| 2 | 5.00 | 11.24 | 15.65 | 26.89 |
+| 3 | 8.00 | 15.18 | 23.33 | 38.52 |
+| 5 | 14.00 | 31.38 | 36.36 | 67.74 |
+| 8 | 23.01 | 46.09 | 61.83 | 107.92 |
+
+Fit: `total = 0.22 + 13.42 * terms`. The **fixed per-row cost is essentially
+zero** — the `Constraint` object, its name, the append and the row's own writer
+work together cost 0.22 µs. Everything is per term. Collapsing an n-term body to
+one node predicted 2.97× on a 3-term row, comfortably past the 1.3× kill
+criterion. The hypothesis survived entry.
+
+### Correction: what that experiment's control actually measured
+
+The "fused" arm was `add_linear_constraints`, on the assumption that it is
+discopt's fused representation. **It is not.**
+`ExprArena::add_linear_constraints_csr` builds the same `Constant + Mul +
+SumOver` nodes as the operator path — `nnz * 2 + m` of them. It is fast because
+it builds them **in Rust with no Python objects**, not because it fuses. So the
+measured 3.6–6.1× advantage of that arm is the Python→Rust construction win, and
+says nothing about fusion. Quoting it as evidence for fusion would have been
+wrong; it is corrected here per §11 before anything was built on it.
+
+### What was built, and what it measured
+
+The narrow version of the idea, which needs no new node type: `Model.constraint`
+already has a linear fast path (`_try_fast_linear_family`) that routes an
+eligible family into the builder, but it required every row to be affine in **one
+variable** — so `x[i] + 2*y[i] + 3*z[i]` was ineligible, which is most
+per-element families. Widening it meant:
+
+- `ExprArena::add_linear_constraints_multi_csr` plus its PyO3 binding — bulk rows
+  spanning several variable blocks, concatenated per row;
+- `_Affine` generalised from one variable to many (`terms: id(var) -> (var,
+  {pos: coeff})`), with `.var`/`.coeffs` kept as single-variable views;
+- the builder block record made uniformly `([(A, x), ...], sense, b, name)` so
+  the three decoders (`export/nl.py`, `export/_common.py`,
+  `_num_builder_constraint_rows`) keep one code path rather than two to drift.
+
+It works — the widened path fires, emits 3 CSR blocks for a 3-variable family,
+and writes a **byte-identical** `.nl` to the expression path. And it is worth
+nothing:
+
+| vars | arm | construct | write | total µs/row | |
+|---:|---|---:|---:|---:|---:|
+| 1 | fast path | 9.25 | 2.24 | 11.49 | **0.73×** |
+| 1 | expression | 8.32 | 7.45 | 15.77 | |
+| 3 | fast path | 29.83 | 6.22 | 36.05 | **0.99×** |
+| 3 | expression | 15.53 | 20.99 | 36.52 | |
+
+5 interleaved reps, load 0.65. The widening is a **wash**. It moves cost from the
+writer (20.99 → 6.22) into construction (15.53 → 29.83) and nets nothing.
+
+### Why, and why it generalises
+
+`m.constraint(idx, rule)` **calls the rule once per index**. The Python
+`Expression` objects are built either way; the fast path then walks each body
+with `affine_form` and assembles CSR on top. With one variable that walk is over
+a 2-node body and the writer saving dominates (0.73×, a real win, which is why
+the narrow path shipped). With three, the walk is over an 8-node body and its
+cost scales with terms at exactly the rate the writer saving does.
+
+That is the general shape: **any scheme that recovers structure from Python
+expression objects has already paid for them.** Fusion in the operator overloads
+would move the recovery earlier, not remove it — the `+` overload still runs once
+per term, still allocates, still touches the GC. The 0.22 µs fixed row cost above
+says there is no per-row overhead left to amortise; the 13.42 µs/term says the
+term is the unit of cost, and a Python-level representation cannot make a term
+cheaper than an object.
+
+**You cannot make per-element fast in Python. You can only avoid being
+per-element** — which is §48's conclusion arriving from a third direction, and
+what the array-valued idiom already does at 0.91–1.27× oximo.
+
+### Disposition
+
+Reverted in full — the Rust API, the `_Affine` generalisation, the block-record
+change and both decoders. A neutral change is not free: this one added a public
+Rust entry point, generalised a core data structure, and changed a record format
+consumed by the exporters and the NLP evaluator. That is real risk for a measured
+0.99×, and the `DISCOPT_CUT_INHERIT` rule applies unchanged — sound but
+neutral-or-harmful does not ship.
+
+**Item 3 of the #1215 list is closed as falsified, not deferred.** True
+arena-level fusion (a Rust `ExprNode::Linear`) would still shrink the writer's
+walk, but the table above shows the writer is 6.22 µs/row of a 36 µs/row
+per-element total once the rows are in the builder — so it cannot pay for a new
+IR node touching every consumer in the core. The remaining #1215 work is the
+NN emitters and the LP/MPS/GAMS writers.
