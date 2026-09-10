@@ -6562,3 +6562,77 @@ bit-equality of a located optimum. Any panel that gates the arena on
 "designs unchanged" will fail for reasons that have nothing to do with
 correctness, and any panel that omits a downstream check will miss the class of
 regression that actually matters to mb-doe.
+
+## 36. Time series: the intended idiom is depth-flat; `sum()` is the trap (2026-09-10)
+
+Asked while scoping the modeling layer as a foundation for dynamic modelling and
+for experimentalist parameter estimation.
+
+### What is already right
+
+`discopt.dae` does the hard part. `Trajectory` (`dae/fit.py:28`) takes **arbitrary
+measurement times**, and `DAEBuilder.state_at` evaluates the state via the exact
+collocation polynomial, so observations need not land on collocation nodes
+(`fit.py:149-165`). Per-observation weights, multi-trajectory joint fitting with
+shared parameters, and a data-interpolated warm start (`fit.py:89-106`) are all
+present. Scale is not the constraint: 64 trajectories × 3 states × nfe=60 →
+45,888 rows in 0.66 s build / 1.0 s tape.
+
+### The hypothesis that was wrong
+
+A time-series objective is a sum of N residuals, so it looked like the natural way
+for a user to reach the chain depth at which the recursive GDP interval walker
+`gdp_reformulate._bound_expression` raises `RecursionError`. **It is not** —
+`dm.sum` emits a flat `SumOverExpression`, and depth is constant in N:
+
+| N observations | `dm.sum` | builtin `sum()` | explicit `+=` |
+|---|---|---|---|
+| 500 | **8** | 507 | 506 |
+| 2 000 | **8** | 2 007 | 2 006 |
+| 5 000 | **8** | 5 007 | 5 006 |
+| 12 000 | **8** | — | — |
+
+### The real trap, and why it is nasty
+
+Python's builtin `sum(residuals)` — the obvious move for anyone arriving from
+numpy — builds a depth-N chain. At N = 2 000 and 5 000 such a model **lowers,
+tapes, exports to `.nl`, and solves correctly**; only `str(objective)` raises
+`RecursionError`.
+
+That is the worst shape of failure for the experimentalist audience: the model
+*works*, and then rendering it fails — which takes out `repr` in a notebook, any
+error message that interpolates the expression, and the LLM diagnosis path. The
+GDP interval walker is recursive too, so a builtin-`sum` objective inside a
+superstructure model fails at *reformulation* rather than at print.
+
+Fix directions, neither architectural: make the remaining recursive consumers
+iterative (the Rust lowering, tape builder, term classifier and factorable reform
+already are — measured "ok" at depth 5000), or have `Expression.__add__` flatten
+into `SumOver` when accumulating. Worth doing **before** the layer exists, because
+once tutorials show `sum(...)` the idiom is baked in.
+
+## 37. C-41 verified fixed; PR gate green (2026-09-10)
+
+`ba13190` makes `model_to_repr`'s builder arm read the live Python bounds. Built
+extension asserted to carry the change (§8: the marker string is present in the
+`.so`).
+
+* `repro_stale_builder_box.py` flips from `DEFECT PRESENT` to clean — the
+  `add_linear_objective` route now returns `optimal obj=0.0`, matching its
+  reference, and the script exits 0.
+* The **untested opposite direction** is now covered. A builder box *looser* than
+  the live bounds would have been a silent false `optimal` rather than a loud
+  false `infeasible`; five arms — loose→tight, tight→loose, and a **disjoint
+  shift** (declared `[0,1]`, live `[7,8]`) — all agree with their references and
+  return solutions inside the live box.
+* PR gate: `pytest -m smoke` **1209 passed, 14 skipped, 2 xpassed**; adversarial
+  suite **19 passed**; `cargo test -p discopt-core` **ok**.
+
+Caveat on the loose-direction probe: its blockless arms carry a *zero* linear
+objective, so their objective value is trivially 0 and does not discriminate.
+There the load-bearing assertion is "returned solution lies inside the live
+bounds", which is asserted explicitly; the objective check is weaker than the
+table suggests. The reproduction script does discriminate on objective.
+
+The **2 xpassed** are being identified — expected-to-fail tests that now pass are
+the signal that the stale box was masking other defects.
