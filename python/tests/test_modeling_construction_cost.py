@@ -172,3 +172,151 @@ def test_parameter_shape_change_is_refused():
     with pytest.raises(ValueError, match="shape"):
         p.value = 3.0
     np.testing.assert_array_equal(p.value, np.array([1.0, 2.0]))
+
+
+# ── Interned scalar literals ────────────────────────────────────────────────
+
+
+def test_scalar_literals_are_interned():
+    """``<= 4.0`` across 200 000 rows must build one ``Constant``, not 200 000.
+
+    Measured (#1215) at 0.076 us for a cache hit against 0.461 us to construct,
+    on a path called three times per row.
+    """
+    from discopt.modeling.core import _wrap
+
+    assert _wrap(4.0) is _wrap(4.0)
+    assert _wrap(4) is _wrap(4.0), "int and float literals denote the same node"
+    assert _wrap(4.0) is not _wrap(5.0)
+
+    m = dm.Model("share")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    c1 = x[0] * x[1] <= 4.0
+    c2 = x[1] * x[2] <= 4.0
+    assert c1.body.right is c2.body.right
+
+
+def test_signed_zero_literals_stay_distinct():
+    """``0.0`` and ``-0.0`` are equal and hash equal, so one dict cannot hold both.
+
+    Collapsing them would be a silent numerical change -- ``1 / -0.0`` is
+    ``-inf`` -- so they get separate singletons.
+    """
+    import math
+
+    from discopt.modeling.core import _wrap
+
+    pos, neg = _wrap(0.0), _wrap(-0.0)
+    assert pos is not neg
+    assert math.copysign(1.0, float(pos.value)) == 1.0
+    assert math.copysign(1.0, float(neg.value)) == -1.0
+
+
+def test_literal_cache_releases_unused_entries():
+    """The cache is weak: a literal from a dropped model must not be pinned.
+
+    A strong cache would be an unbounded leak for a data-driven model whose
+    coefficients are all distinct -- a fitting model carrying one literal per
+    measurement, which is exactly the experimentalist workload this layer is for.
+    """
+    import gc
+
+    from discopt.modeling.core import _SCALAR_CONSTS, _wrap
+
+    key = 1234567.875
+    assert key not in _SCALAR_CONSTS, "probe value already interned by another test"
+
+    def make_and_check() -> bool:
+        # A nested scope so the node's only reference dies with the frame, and a
+        # KEY membership test rather than a length: other tests in this file hold
+        # literals alive for indeterminate spans, so the cache's SIZE is not a
+        # stable quantity to assert on.
+        node = _wrap(key)
+        present = key in _SCALAR_CONSTS
+        del node
+        return present
+
+    assert make_and_check(), "literal was not interned at all"
+    gc.collect()
+    assert key not in _SCALAR_CONSTS, "literal pinned after its last use"
+
+
+def test_array_literals_are_not_interned():
+    """Only scalars are shared; an array constant keeps its own node."""
+    from discopt.modeling.core import _wrap
+
+    a, b = _wrap(np.array([1.0, 2.0])), _wrap(np.array([1.0, 2.0]))
+    assert a is not b
+    np.testing.assert_array_equal(a.value, b.value)
+
+
+# ── Static shape inference (M8) survives the inlining ───────────────────────
+
+
+def test_parameter_keeps_its_static_shape():
+    """``Parameter.shape`` shadows ``Expression.shape``, so ``_shape`` needs writing.
+
+    When it was left unset, ``_known_shape(parameter)`` answered "unknown" and the
+    M8 build-time shape check silently stopped firing for every expression
+    containing a parameter.
+    """
+    from discopt.modeling.core import _known_shape
+
+    m = dm.Model("t")
+    p = m.parameter("p", value=np.array([1.0, 2.0, 3.0]))
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    assert _known_shape(p) == (3,)
+    assert (p * x).shape == (3,)
+
+    scalar = m.parameter("s", value=2.0)
+    assert _known_shape(scalar) == ()
+    scalar.value = 5.0
+    assert _known_shape(scalar) == (), "rebinding must keep _shape in step"
+
+
+def test_incompatible_parameter_shape_is_still_refused():
+    m = dm.Model("t")
+    q = m.parameter("q", value=np.array([1.0, 2.0]))
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    with pytest.raises(ValueError, match="broadcast"):
+        q * x
+
+
+@pytest.mark.parametrize(
+    ("left_shape", "right_shape", "expected"),
+    [
+        ((3,), (3,), (3,)),
+        ((3,), (), (3,)),
+        ((), (3,), (3,)),
+        ((), (), ()),
+        ((2, 3), (3,), (2, 3)),
+        ((2, 1), (1, 3), (2, 3)),
+    ],
+)
+def test_inlined_shape_inference_matches_numpy(left_shape, right_shape, expected):
+    """``BinaryOp.__init__`` inlines ``_known_shape``/``_broadcast_shapes``.
+
+    The inlining is a hot-loop optimisation (100 000 calls per 50 000 rows), so
+    its answers are pinned against numpy's own broadcasting rather than trusted.
+    """
+    from discopt.modeling.core import BinaryOp, Constant
+
+    node = BinaryOp("+", Constant(np.ones(left_shape)), Constant(np.ones(right_shape)))
+    assert node.shape == expected
+    assert node.shape == np.broadcast_shapes(left_shape, right_shape)
+
+
+def test_unknown_operand_shape_stays_unknown():
+    """A node whose shape is not statically derivable must report unknown.
+
+    The sentinel matters: ``_shape``'s class default is ``_UNSET_SHAPE``
+    ("not computed"), distinct from a cached ``None`` ("computed, unknown"). An
+    inlining that tested against ``None`` let the sentinel through into
+    ``np.broadcast_shapes``, which raised a ``TypeError`` from inside numpy.
+    """
+    from discopt.modeling.core import BinaryOp, _known_shape
+
+    m = dm.Model("t")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    mat = np.ones((2, 3)) @ x  # MatMulExpression: shape not statically inferred
+    assert _known_shape(BinaryOp("+", mat, mat)) is None

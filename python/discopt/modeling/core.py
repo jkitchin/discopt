@@ -27,8 +27,10 @@ Example::
 from __future__ import annotations
 
 import builtins as _builtins
+import math
 import warnings
 import warnings as _warnings
+import weakref
 from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from enum import Enum
@@ -757,7 +759,11 @@ class Expression:
         # Leaf nodes (Variable/Parameter) store their declared shape here; the
         # getter then surfaces it through the same ``_known_shape`` path used for
         # composite nodes, keeping a single source of truth.
-        self._shape = value
+        #
+        # Normalised to a tuple on the way in (a caller may pass a list), so
+        # every reader can compare ``_shape`` values directly instead of
+        # re-converting. ``BinaryOp.__init__`` relies on that.
+        self._shape = None if value is None else tuple(value)
 
     def __len__(self) -> int:
         """Length along the leading axis (``shape[0]``) for array expressions.
@@ -821,6 +827,12 @@ class Constant(Expression):
     def __init__(self, value: Union[float, int, np.ndarray]):
         if isinstance(value, np.ndarray):
             self.value = value.astype(np.float64)
+        elif type(value) is float:
+            # A Python float is already float64, so the `dtype=` kwarg only makes
+            # numpy re-check it: measured 0.222 -> 0.155 us without it, on a call
+            # made once per row (#1215). Restricted to an exact `float` so nothing
+            # else can slip through with the wrong dtype.
+            self.value = np.asarray(value)
         else:
             self.value = np.asarray(value, dtype=np.float64)
 
@@ -1108,12 +1120,33 @@ class BinaryOp(Expression):
         # shapes are statically known, verify they broadcast and cache the result
         # so compositions stay O(1). If either is unknown, the shape is unknown
         # (``None``) and we do not check — conservative, never a false rejection.
-        s_left = _known_shape(left)
-        s_right = _known_shape(right)
-        if s_left is not None and s_right is not None:
-            self._shape = _broadcast_shapes(op, s_left, s_right)
-        else:
+        #
+        # ``_known_shape`` and ``_broadcast_shapes``' equal/scalar cases are
+        # INLINED here, and only here. This constructor is the inner loop of the
+        # whole modelling layer -- 100 000 calls for 50 000 rows -- and the two
+        # ``_known_shape`` calls per node were 220 000 calls and 13% of a build's
+        # profile (#1215) to do a ``getattr`` and a comparison. The semantics are
+        # unchanged: ``_shape`` is the same single source of truth (normalised to
+        # a tuple by the ``shape`` setter), ``Constant`` is the one leaf that
+        # keeps its shape on ``value`` instead, and anything else is "unknown".
+        # NOTE the sentinel: ``_shape``'s class default is ``_UNSET_SHAPE``
+        # ("not computed"), which is deliberately distinct from a cached ``None``
+        # ("computed, unknown"). Testing against ``None`` instead silently let the
+        # sentinel through into ``np.broadcast_shapes``.
+        sl = getattr(left, "_shape", _UNSET_SHAPE)
+        if sl is _UNSET_SHAPE:
+            sl = left.value.shape if type(left) is Constant else None
+        sr = getattr(right, "_shape", _UNSET_SHAPE)
+        if sr is _UNSET_SHAPE:
+            sr = right.value.shape if type(right) is Constant else None
+        if sl is None or sr is None:
             self._shape = None
+        elif sl == sr or sr == ():
+            self._shape = sl
+        elif sl == ():
+            self._shape = sr
+        else:
+            self._shape = _broadcast_shapes(op, sl, sr)
 
     def __repr__(self):
         return f"({self.left} {self.op} {self.right})"
@@ -1282,10 +1315,51 @@ class SumOverExpression(Expression):
         return f"Σ[{len(self.terms)} terms]"
 
 
+#: Interned scalar :class:`Constant` nodes, keyed by value (see :func:`_wrap`).
+#:
+#: Weak, so a literal that appears only in a model that has since been dropped
+#: does not pin its node forever -- a strong cache here would be an unbounded
+#: leak for a data-driven model whose coefficients are all distinct (a fitting
+#: model carrying one literal per measurement, say).
+_SCALAR_CONSTS: "weakref.WeakValueDictionary[float, Constant]" = weakref.WeakValueDictionary()
+
+#: ``0.0`` and ``-0.0`` are equal and hash equal, so one dict cannot hold both --
+#: and the sign of zero is not cosmetic in IEEE (``1/-0.0`` is ``-inf``). They get
+#: their own strong singletons instead: two objects, held for the process.
+_ZERO_CONST: "Constant" = Constant(0.0)
+_NEG_ZERO_CONST: "Constant" = Constant(-0.0)
+
+
 def _wrap(x) -> Expression:
-    """Convert a Python scalar or numpy array to a Constant expression."""
+    """Convert a Python scalar or numpy array to a Constant expression.
+
+    Scalar literals are **interned**: ``x[i] * y[i] <= 4.0`` written across
+    200 000 rows builds one ``Constant`` for ``4.0``, not 200 000. Measured
+    (#1215) at 0.076 us for a cache hit against 0.461 us to construct, on a path
+    called three times per row -- and the duplicates were pure waste, since a
+    ``Constant`` is immutable by contract and carries no per-use state.
+
+    Like the canonical ``x[i]`` handles, the win is not only the allocation:
+    expressions hash by identity, so sharing the literal lets the ``id()``-keyed
+    memos in the walkers, the relaxation layer and the tape lowering hit across
+    rows.
+
+    ``bool``/``int``/``float`` share one key space on purpose -- ``4``, ``4.0``
+    and ``True``/``1`` all produce a node whose value is the same ``float64`` --
+    so the sharing is sound. ``np.float64`` and other numpy scalars are NOT
+    interned: they are not ``float``, and admitting them would make the key type
+    depend on how the caller spelled the literal for no measured gain.
+    """
     if isinstance(x, Expression):
         return x
+    if type(x) is float or type(x) is int or type(x) is bool:
+        if x == 0:
+            return _ZERO_CONST if math.copysign(1.0, x) > 0 else _NEG_ZERO_CONST
+        node = _SCALAR_CONSTS.get(x)
+        if node is None:
+            node = Constant(x)
+            _SCALAR_CONSTS[x] = node
+        return node
     return Constant(x)
 
 
@@ -2239,7 +2313,9 @@ class Parameter(Expression):
 
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
         self.name = name
-        self._value = np.asarray(value, dtype=np.float64)
+        # Through the setter, so `_shape` is populated by the one path that
+        # maintains it (see the setter).
+        self.value = np.asarray(value, dtype=np.float64)
         self.model = model
 
     @property
@@ -2274,6 +2350,13 @@ class Parameter(Expression):
                 f"separate parameter instead of changing this one's shape."
             )
         self._value = arr
+        # `Expression.shape`'s setter is what populates `_shape`, which is the
+        # single source of truth `_known_shape` reads. Writing `_value` alone
+        # left it unset, so `_known_shape(parameter)` answered "unknown" and the
+        # M8 build-time shape check silently stopped firing for every expression
+        # containing a parameter -- `q * x` with q of shape (2,) against x of
+        # shape (3,) built without complaint. Keep the two in step here.
+        self._shape = arr.shape
 
     @property
     def shape(self) -> tuple:
