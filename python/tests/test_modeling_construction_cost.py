@@ -320,3 +320,72 @@ def test_unknown_operand_shape_stays_unknown():
     x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
     mat = np.ones((2, 3)) @ x  # MatMulExpression: shape not statically inferred
     assert _known_shape(BinaryOp("+", mat, mat)) is None
+
+
+# ── Bulk-construction GC scope ──────────────────────────────────────────────
+
+
+def test_bulk_gc_scope_restores_thresholds():
+    """A library must never leave interpreter state mutated."""
+    import gc
+
+    before = gc.get_threshold()
+    with dm.bulk_construction_gc() as _:
+        raised = gc.get_threshold()
+    assert raised[0] > before[0], "gen-0 threshold was not raised"
+    assert raised[1:] == before[1:], "only gen-0 should move"
+    assert gc.get_threshold() == before
+
+
+def test_bulk_gc_scope_restores_on_exception():
+    import gc
+
+    before = gc.get_threshold()
+    with pytest.raises(RuntimeError):
+        with dm.bulk_construction_gc():
+            raise RuntimeError("boom")
+    assert gc.get_threshold() == before
+
+
+def test_bulk_gc_scope_nests():
+    """Nested scopes must unwind LIFO to the original value."""
+    import gc
+
+    before = gc.get_threshold()
+    with dm.bulk_construction_gc():
+        mid = gc.get_threshold()
+        with dm.bulk_construction_gc():
+            assert gc.get_threshold()[0] > mid[0]
+        assert gc.get_threshold() == mid
+    assert gc.get_threshold() == before
+
+
+def test_constraint_family_leaves_gc_untouched():
+    """``Model.constraint`` tunes GC internally; callers must not notice."""
+    import gc
+
+    before = gc.get_threshold()
+    m = dm.Model("fam")
+    idx = m.set("I", list(range(50)))
+    x = m.continuous("x", shape=(50,), lb=0.0, ub=1.0)
+    fam = m.constraint(idx, lambda i: x[i] * x[i] <= 0.5, name="c")
+    assert len(fam) == 50
+    assert gc.get_threshold() == before
+
+
+def test_gc_scope_does_not_change_the_model():
+    """Raising a threshold may only move WHEN reclamation happens.
+
+    Guards against a future revision reaching for `gc.disable()` or `gc.freeze()`
+    and changing more than the timing.
+    """
+    m = dm.Model("gcsame")
+    idx = m.set("I", list(range(6)))
+    x = m.continuous("x", shape=(6,), lb=0.0, ub=3.0)
+    m.constraint(idx, lambda i: x[i] <= 2.0, name="ub")
+    m.subject_to(dm.sum([x[i] for i in range(6)]) <= 5.0, name="tot")
+    m.maximize(dm.sum([x[i] * float(i + 1) for i in range(6)]))
+    res = m.solve(time_limit=60)
+    assert res.status in ("optimal", "feasible")
+    # Best value goes to the largest coefficient first: x5 = 2, x4 = 2, x3 = 1.
+    assert res.objective == pytest.approx(6 * 2 + 5 * 2 + 4 * 1, abs=1e-5)

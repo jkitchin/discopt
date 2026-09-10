@@ -190,9 +190,38 @@ def pyomo_marker() -> str:
     return os.path.dirname(pyo.__file__)
 
 
+def build_pyomo_gc_tuned(n_forms: int, n_inst: int):
+    """Pyomo, under the SAME GC treatment discopt now applies to itself.
+
+    **This arm exists so the headline cannot lie.** discopt raises CPython's
+    gen-0 GC threshold inside ``Model.constraint`` (see
+    ``modeling.bulk_construction_gc``), and GC turned out to be ~40% of a
+    200 000-row build's wall. Pyomo exposes the same idea as ``PauseGC`` but
+    leaves it to the caller, so comparing tuned-discopt against untuned-Pyomo
+    measures *whose library does it for you*, not which modelling layer is
+    cheaper -- and the two answers differ by a factor of 1.6.
+
+    Both are worth reporting and they mean different things:
+
+    * ``discopt`` vs ``pyomo``    -- what a user gets writing the natural code;
+    * ``discopt`` vs ``pyomo-gc`` -- like-for-like cost of the two layers.
+
+    Never quote the first as though it were the second.
+    """
+    import gc
+
+    old = gc.get_threshold()
+    gc.set_threshold(old[0] * 100, old[1], old[2])
+    try:
+        return build_pyomo(n_forms, n_inst)
+    finally:
+        gc.set_threshold(*old)
+
+
 ARMS = {
     "discopt": (build_discopt, discopt_marker),
     "pyomo": (build_pyomo, pyomo_marker),
+    "pyomo-gc": (build_pyomo_gc_tuned, pyomo_marker),
 }
 
 
@@ -361,9 +390,21 @@ def mode_headline(args, arms: list[str]) -> int:
         d, p = results["discopt"], results["pyomo"]
         print()
         print(
-            f"discopt / pyomo:  time {d['median_s'] / p['median_s']:.2f}x   "
+            f"discopt / pyomo (as written):  time {d['median_s'] / p['median_s']:.2f}x   "
             f"memory {d['retained_mb'] / p['retained_mb']:.2f}x"
         )
+        if "pyomo-gc" in results:
+            g = results["pyomo-gc"]
+            print(
+                f"discopt / pyomo (same GC):    time {d['median_s'] / g['median_s']:.2f}x   "
+                f"memory {d['retained_mb'] / g['retained_mb']:.2f}x"
+            )
+            print(
+                "  ^ the LIKE-FOR-LIKE number. The line above credits discopt for "
+                "tuning GC\n    inside Model.constraint, which Pyomo leaves to the "
+                "caller (PauseGC); quoting\n    it as a statement about the modelling "
+                "layers would overstate discopt by ~1.6x."
+            )
 
     if args.json_out:
         with open(args.json_out, "w") as fh:
@@ -581,7 +622,11 @@ def main(argv=None) -> int:
     ap.add_argument("--forms", type=int, default=40, help="distinct equation forms")
     ap.add_argument("--instances", type=int, default=5000, help="members per form")
     ap.add_argument("--reps", type=int, default=5, help="interleaved timing reps")
-    ap.add_argument("--arms", default="discopt,pyomo", help="headline mode: arms to run")
+    ap.add_argument(
+        "--arms",
+        default="discopt,pyomo,pyomo-gc",
+        help="headline mode: arms to run (see build_pyomo_gc_tuned for why pyomo-gc)",
+    )
     ap.add_argument("--top", type=int, default=12, help="alloc mode: sites to report")
     ap.add_argument("--json-out", default=None, help="headline mode: write results JSON")
     ap.add_argument("--memory-child", default=None, help=argparse.SUPPRESS)

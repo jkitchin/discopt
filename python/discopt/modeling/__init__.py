@@ -49,6 +49,7 @@ from discopt.modeling.core import (
     # Logical functions
     atleast,
     atmost,
+    bulk_construction_gc,
     concatenate,
     cos,
     cosh,
@@ -141,6 +142,7 @@ __all__ = [
     "implicit_full_space",
     "CustomCall",
     "sum",
+    "bulk_construction_gc",
     "prod",
     "norm",
     "concatenate",

@@ -6735,3 +6735,78 @@ On construction, the remaining gap is no longer in the nodes. Post-fix
 attribution of one row: expression tree 1.24 µs, `Constraint` wrapper +2.4 µs,
 `Model.constraint` bookkeeping +4.4 µs. **The `Constraint` wrapper and the
 indexed-family bookkeeping are now the target**, not `Expression`.
+
+## 39. Construction: 40% of a build was garbage collection, and the Pyomo headline was nearly a lie (2026-09-10)
+
+### GC, not node cost, was the largest remaining item
+
+Micro-timing said one row costs ~1.9 µs of actual node construction; the
+200 000-row build measured 8.31 µs/row. The 4.4× was **collection**, not
+per-operation work. A model under construction is ~1.6M live, GC-tracked
+container objects that are *all reachable* — nothing built so far is garbage —
+so every collection triggered by allocating the next row traverses the whole
+model and frees nothing.
+
+Interleaved arms, one process, **with a full `gc.collect()` inside every timed
+region** so postponed traversal is paid for and counted:
+
+| arm | µs/row | |
+|---|---:|---|
+| default thresholds | 6.39 | 1.00× |
+| gen-0 threshold ×100, scoped per `Model.constraint` call | 4.24 | **1.51×** |
+| gen-0 threshold ×100, whole build | 4.33 | 1.48× |
+| GC disabled entirely | 3.66 | 1.73× |
+| `gc.freeze()` | 5.88 | 1.08× |
+
+Two things worth keeping: **per-call scoping costs nothing** against tuning the
+whole build, so the shippable, library-safe form is free; and `gc.freeze()` —
+the intuitively right tool, since the built model is precisely what should stop
+being traversed — is *not* the mechanism.
+
+Shipped as `modeling.bulk_construction_gc()`, applied inside `Model.constraint`
+and exported publicly, because the biggest models are built by user loops that
+never reach it. GC is deliberately **not** disabled: faster still, but it leaves
+an unbounded window for genuine cyclic garbage from a user's rule function.
+
+### The headline was about to overstate discopt by 1.6×
+
+With that shipped the benchmark read **discopt 4.18 µs/row against Pyomo 6.20 —
+0.67×**, i.e. "discopt is 1.5× faster than Pyomo". Pyomo exposes the same idea as
+`PauseGC` and leaves it to the caller, so that number compares a tuned library
+against an untuned one. Measured under identical treatment:
+
+| arm | µs/row |
+|---|---:|
+| discopt, GC scope disabled | 7.16 |
+| discopt (shipped) | 4.46 |
+| pyomo as written | 7.04 |
+| pyomo, same GC treatment | 4.25 |
+
+**Pyomo gains the same ~1.65×.** Like-for-like discopt is **1.24× slower**, not
+1.5× faster. Both numbers are true and they mean different things, so the
+benchmark now carries a permanent `pyomo-gc` arm and prints both lines with the
+like-for-like one labelled — the distinction cannot be quoted away by a future
+reader (this file's §11, applied to a claim before it was published rather than
+after).
+
+### Standing, and why the arena is now the only remaining lever
+
+| | µs/row | B/row |
+|---|---:|---:|
+| oximo 0.6.0 | 0.66 | ~205 |
+| discopt (session start) | 19.12 | 911 |
+| **discopt (now)** | **4.18** | **470** |
+| pyomo as written | 6.20 | 471 |
+| pyomo, same GC | 3.38 | 471 |
+| prototype `arena-api` ceiling (§31) | 1.81 | 374 |
+
+Memory is at parity with Pyomo and within 25% of what the arena prototype itself
+achieved — that prize is nearly spent. Time is not: the irreducible per-row cost
+of the object-per-node representation is ~1.9 µs of node construction plus
+allocation, so **no further micro-optimisation reaches the 1.3–3.3 µs target**.
+The arena's public-API arm measured 1.81 µs/row *with default GC*, so it should
+land inside the target and gain again from the GC scope on top.
+
+Corollary for planning: the four shipped construction changes (canonical `x[i]`,
+interned literals, inlined shape inference, GC scope) took 19.12 → 4.18 µs/row.
+Everything left is representation.

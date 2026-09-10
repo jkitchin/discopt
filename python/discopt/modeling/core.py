@@ -27,6 +27,8 @@ Example::
 from __future__ import annotations
 
 import builtins as _builtins
+import contextlib as _contextlib
+import gc
 import math
 import warnings
 import warnings as _warnings
@@ -1328,6 +1330,58 @@ _SCALAR_CONSTS: "weakref.WeakValueDictionary[float, Constant]" = weakref.WeakVal
 #: their own strong singletons instead: two objects, held for the process.
 _ZERO_CONST: "Constant" = Constant(0.0)
 _NEG_ZERO_CONST: "Constant" = Constant(-0.0)
+
+
+#: Multiplier applied to the gen-0 GC threshold during a bulk build. 100 was
+#: measured against 1000 with no difference (#1215), so the smaller transient is
+#: preferred: it bounds how much cyclic garbage can accumulate before a
+#: collection runs.
+_BULK_GC_MULTIPLIER = 100
+
+
+@_contextlib.contextmanager
+def bulk_construction_gc() -> "Iterator[None]":
+    """Raise CPython's gen-0 GC threshold for the duration of a bulk build.
+
+    Measured (#1215): building 200 000 rows spends **~40% of its wall in garbage
+    collection**, not in constructing anything. A model under construction is
+    ~1.6M live, GC-tracked container objects that are *all reachable* -- nothing
+    built so far is garbage -- so every collection triggered by the allocation of
+    the next row traverses the whole model and frees nothing. Raising the gen-0
+    threshold makes those sweeps proportionally rarer.
+
+    | arm | µs/row | |
+    |---|---:|---|
+    | default thresholds | 6.39 | 1.00× |
+    | raised, scoped per call | 4.24 | **1.51×** |
+    | raised for the whole build | 4.33 | 1.48× |
+    | GC disabled entirely | 3.66 | 1.73× |
+
+    The saving is real rather than deferred: every arm above was timed with a
+    full ``gc.collect()`` *inside* the timed region, so postponed traversal is
+    paid for and counted. ``gc.freeze()`` was also tried and is not the mechanism
+    (1.08×).
+
+    Scoped per call and restored in ``finally``, so a library caller never
+    inherits mutated interpreter state -- and the measurement shows that scoping
+    costs nothing against tuning the whole build. Raising a threshold cannot
+    change behaviour, only the moment reclamation happens; GC is deliberately
+    *not* disabled, which is faster still but leaves an unbounded window in which
+    genuine cyclic garbage from a user's rule function accumulates.
+
+    Public, because the biggest models are built by user loops that never reach
+    :meth:`Model.constraint`::
+
+        with dm.bulk_construction_gc():
+            for i, j in arcs:
+                m.subject_to(flow[i, j] <= cap[i, j], name=f"cap_{i}_{j}")
+    """
+    old = gc.get_threshold()
+    gc.set_threshold(old[0] * _BULK_GC_MULTIPLIER, old[1], old[2])
+    try:
+        yield
+    finally:
+        gc.set_threshold(*old)
 
 
 def _wrap(x) -> Expression:
@@ -3761,17 +3815,22 @@ class Model:
         from discopt.modeling.sets import call_member
 
         generated: list[tuple] = []
-        for member in index_set:
-            c = call_member(rule, member, index_set.dimen)
-            if c is Skip:
-                continue
-            if not isinstance(c, Constraint):
-                raise TypeError(
-                    f"constraint rule for key {member!r} returned {type(c)}, "
-                    "expected a Constraint (from <=, >=, == on expressions) or Skip."
-                )
-            c.name = f"{name}[{key_label(member)}]" if name else None
-            generated.append((member, c))
+        # A family is the bulk path: every row it builds is reachable, so each
+        # collection triggered while building it traverses the whole model and
+        # frees nothing. Measured at ~40% of a 200 000-row build's wall
+        # (see :func:`bulk_construction_gc`).
+        with bulk_construction_gc():
+            for member in index_set:
+                c = call_member(rule, member, index_set.dimen)
+                if c is Skip:
+                    continue
+                if not isinstance(c, Constraint):
+                    raise TypeError(
+                        f"constraint rule for key {member!r} returned {type(c)}, "
+                        "expected a Constraint (from <=, >=, == on expressions) or Skip."
+                    )
+                c.name = f"{name}[{key_label(member)}]" if name else None
+                generated.append((member, c))
 
         members = {m: c for m, c in generated}
         if fast and self._try_fast_linear_family([c for _, c in generated], name):
