@@ -44,4 +44,11 @@ fast by building a smaller model than it claims. The combiner checks that every
 arm agrees on those counts before reporting a ratio, prints the number of
 comparisons it made, and exits non-zero if it reported nothing.
 
-Results and their reading: `docs/dev/performance-plan.md` §48.
+`node_density.rs` is a second probe for the same scratch crate: it reads the
+arena at each construction stage to show *why* oximo's per-element rows are
+cheap (linear fusion in the operator overloads, handles instead of objects).
+Swap it in for `src/main.rs` the same way. Its discopt counterpart is
+`scripts/issue1215_node_density.py`.
+
+Results and their reading: `docs/dev/performance-plan.md` §48 (the panel) and
+§49 (why oximo is fast without being vectorised).

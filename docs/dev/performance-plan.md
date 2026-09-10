@@ -7428,3 +7428,113 @@ cross-tool) pointing at the same work item, and none of them is a solver change:
 NN and GDP emitters still emit one `Constraint` per row, which puts every model
 built through them on the slow side of a 7–11× cliff. Nothing further is owed to
 the writer.
+
+## 49. oximo is NOT vectorised — it makes the element cheap (2026-09-10)
+
+§48 left an obvious reading open: vectorised discopt matches oximo, so perhaps
+oximo is vectorised too and the two are doing the same thing. It is not, and
+they are not. Read from the 0.6.0 sources in the cargo registry, and measured
+with two probes rather than inferred.
+
+### It is a per-element loop
+
+`constraint!(m, c[i in 0..n], <rel>)` expands (oximo-macros
+`constraint.rs::register_family`) to
+`__add_constraints_over(name, &set, |i| <rel>)`, whose body (oximo-core
+`model.rs:574`) is:
+
+```rust
+for key in set {
+    let c = rule(K::from_index_key(&key));
+    self.__add_constraint(format_index_name(name_prefix, &key), c);
+}
+```
+
+One closure call, one `Constraint { name, lhs: ExprId, lower, upper, active }`
+per row. There is no array-valued constraint body anywhere in the API.
+
+### What makes the element cheap
+
+`scripts/oximo_arm/node_density.rs`, arena read at each stage:
+
+```
+declaring 3x1000 variables: arena 0 -> 3000
++1 linear row  (x + 2y + 3z <= c): +6 nodes
++1 linear row  (x + y <= c):       +1 nodes
++1 nonlinear   (exp(x) + y <= c):  +2 nodes
++1 coupled     (x*y + log(x+1)):   +5 nodes
++1 row summing 100 terms:          +1 nodes
+
+final node of the linear row:
+  Linear { coeffs: [(VarId(0), 1.0), (VarId(1000), 2.0), (VarId(2000), 3.0)],
+           constant: 0.0 }
+its bounds: [-inf, 10]
+```
+
+Four mechanisms, in descending order of what they buy:
+
+1. **Linear fusion in the operator overloads.** `ExprNode::Linear { coeffs:
+   Vec<(VarId, f64)>, constant: f64 }` is built by `+`/`*` themselves
+   (oximo-expr `linear.rs::add_into`/`mul_into`), not recovered later by an
+   extraction pass. `x + y` is **one** node, and `sum!(x[i] for i in 0..100)` is
+   **one** node holding 100 coefficients — not a 100-deep `Add` chain. A linear
+   row therefore costs its writer and its backends no DAG walk at all.
+2. **Handles, not objects.** `Expr<'a>` is `{ id: u32, arena: &RefCell<ExprArena> }`
+   — 16 bytes, `Copy`, on the stack. Nodes live in one flat `Vec<ExprNode>`.
+   Declaring a variable pushes one `Var` node; *using* `x[i]` pushes nothing.
+   No allocation per node (bar the `Linear` coefficient vector), no refcount,
+   no GC.
+3. **Canonicalisation at build time.** The RHS is folded into the row's bounds
+   as `[lower, upper]` f64s during `__add_constraint`, so nothing downstream
+   re-derives a sense or a constant.
+4. Small-size optimisations throughout: `SmolStr` names, `SmallVec<[ExprId; 4]>`
+   children, `FxHashMap` for the coefficient accumulator.
+
+### The same measurement for discopt
+
+`scripts/issue1215_node_density.py`, same row shape, 1 000 rows:
+
+| idiom | rows | Python `Expression` objs | /row | arena nodes | /row |
+|---|---:|---:|---:|---:|---:|
+| per-element | 1000 | 8009 | 8.01 | 8013 | 8.01 |
+| vectorised | 1 | 11 | **0.01** | 12 | **0.01** |
+
+oximo's comparable figure is 6 arena nodes per row and **zero** heap objects.
+
+### The conclusion
+
+The two arms reach the same µs/row by opposite routes:
+
+- **oximo**: pay per element, but make the element nearly free — 6 flat enum
+  pushes, no heap object, linear structure fused on the way in.
+- **discopt vectorised**: do not have a per-element cost. One array-valued DAG
+  for the whole family; the per-row work happens once, in Rust, at write time.
+
+The construct/write split from §48's data at 100 000 rows says the same thing:
+
+| arm | construct µs/row | write µs/row |
+|---|---:|---:|
+| oximo (`linear`) | 2.13 | 1.85 |
+| discopt vectorised (`linear`) | **0.01** | 3.62 |
+| discopt per-element (`linear`) | 13.43 | 26.85 |
+| Pyomo (`linear`) | 15.38 | 23.61 |
+
+discopt's vectorised construction is not "fast", it is *absent*; everything it
+spends is the writer expanding arrays into scalar rows. oximo splits its time
+roughly evenly between the two.
+
+### What is adoptable, and what is not
+
+**Adoptable: eager linear fusion.** discopt recovers linear structure at write
+time (`_collect_linear`, mirrored in `nl_writer.rs::split`) by walking the DAG.
+Fusing in the operator overloads instead would make a linear row one node rather
+than eight, which is the single largest lever available to the *per-element*
+path — the path the NN and GDP emitters put every user on today.
+
+**Not adoptable: the rest.** Mechanisms 2-4 are Rust-vs-Python facts. Eight
+Python `Expression` objects per row cost ~30-40 µs/row no matter what runs
+downstream (§41, §47), and no amount of Rust behind them changes that.
+
+So this does not displace §48's conclusion, it sharpens it: the per-element path
+has one real optimisation left (fusion), and the vectorised path already has the
+answer.
