@@ -220,6 +220,21 @@ def scalarize(expr: Expression) -> np.ndarray:
 
     if isinstance(expr, IndexExpression):
         base = scalarize(expr.base)
+        if base.ndim == 0:
+            # A shape-`(1,)` leaf scalarizes to a 0-d array (see the `Variable`
+            # branch above, which treats `(1,)` as scalar-like), so there is
+            # nothing left for `x[0]` to index and `base[0]` raised
+            # "too many indices for array: array is 0-dimensional". Index 0 --
+            # the only valid index into a length-1 axis -- selects that element.
+            flat = expr.index
+            if isinstance(flat, tuple):
+                flat = flat[0] if len(flat) == 1 else None
+            if flat == 0:
+                return base
+            raise ValueError(
+                f"index {expr.index!r} is out of range for "
+                f"'{getattr(expr.base, 'name', expr.base)}', which has one element"
+            )
         sub = base[expr.index]
         return sub if isinstance(sub, np.ndarray) else obj0(sub)
 
@@ -301,6 +316,24 @@ def needs_scalarize(
                 return True
         elif isinstance(node, Parameter):
             if np.asarray(node.value).shape not in ((), (1,)):
+                return True
+        elif isinstance(node, Constant):
+            # A non-scalar `Constant` is array-structured and must be expanded --
+            # every downstream consumer does `float(node.value)` on it, which
+            # raises for anything but a 0-d array.
+            #
+            # Note the threshold differs from `Variable`/`Parameter` above, which
+            # treat shape `(1,)` as scalar-like: `scalarize` maps a `(1,)`
+            # Variable to a 0-d leaf, so nothing downstream ever sees its shape,
+            # while a `(1,)` Constant keeps its array and reaches `float()`. So
+            # `ndim != 0` here rather than `shape not in ((), (1,))`.
+            #
+            # Missed, this made a body of only shape-(1,) leaves -- e.g.
+            # `out == prev * y_factor + y_offset` for a single-output embedded
+            # network with output scaling -- skip expansion entirely and fail in
+            # `_collect_linear` with "only 0-dimensional arrays can be converted
+            # to Python scalars" (#1215).
+            if np.asarray(node.value).ndim != 0:
                 return True
         elif isinstance(node, (MatMulExpression, SumExpression)):
             return True

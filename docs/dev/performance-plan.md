@@ -7988,3 +7988,91 @@ still unstarted. Note what §53 says about where the remaining cost is: once row
 are in the builder the writer is 6.22 µs/row of a 36 µs/row per-element total, so
 a port of three more writers should be justified on its own measurement rather
 than by analogy with `.nl`'s 9.2×.
+
+## 55. The NN emitter is vectorised — and the obvious way to do it silently lost the certificate (2026-09-10)
+
+§48's consequence named the NN emitters as the remaining work: all four emit one
+`m.subject_to(...)` per unit inside a `for`, putting every embedded-network model
+on the slow side of the idiom cliff. `full_space.py` is done here.
+
+### Result
+
+Four loops become four array-valued bodies: input scaling, the layer affine map,
+the activation, output scaling. Interleaved A/B, both arms at load ≈1.05, back to
+back:
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 139 | 67.8 | 121.6 | 1.79× |
+| 20-64-64-1 | 277 | 109.6 | 199.5 | 1.82× |
+| 20-128-128-1 | 533 | 191.0 | 347.0 | 1.82× |
+| 40-256-256-1 | 1065 | **380.0** | 769.8 | **2.03×** |
+
+**Construction is essentially eliminated** — 0.222 s → 0.001 s on the largest net,
+about 222×. The writer is now the entire cost, and it improved 1.48×, so the
+end-to-end figure is 1.8–2.0× rather than the ~6.7× §47 projected from export
+alone. Quote 1.8–2.0×.
+
+The emitted model is **byte-identical** across 60 emissions — 6 architectures ×
+4 activations × scaled/unscaled, in `.nl` and (for linear nets, which is all LP
+can represent) LP.
+
+### The obvious formulation was wrong, and the tests caught it
+
+`zhat == W.T @ prev_z + b` is the natural way to write a layer's affine map. It
+produces a byte-identical `.nl` — and it **loses the certificate**, because the
+solve path reads the arena, not the `.nl`. On the 1×1×1 sigmoid net in
+`test_nn_equivalence`, same incumbent to 1e-16:
+
+| formulation | arena nodes | status | B&B nodes |
+|---|---:|---|---:|
+| per-element `W[0,0] * x[0]` | 22 | optimal | 1 |
+| matmul `W.T @ x` | 20 | **feasible** | **121** |
+| reduction `dm.sum(W.T * x, axis=1)` | 22 | optimal | 1 |
+
+`MatMulExpression` relaxes more weakly than the equivalent expanded sum. Same
+mathematics, weaker bound — exactly the bound-changing effect §5 says must not
+ship by accident, and in the wrong direction. The emitter uses the reduction
+form, which is equally vectorised, has the same arena node count as the loop, and
+certifies identically.
+
+**Byte-identical export is not evidence of solver neutrality.** The `.nl` and the
+arena are different lowerings of the same model, and this change was identical in
+one and materially worse in the other. Any future emitter change needs a solve
+comparison, not just a diff.
+
+The underlying defect is filed separately: a user writing the natural `A @ x`
+gets a worse dual bound than one writing `dm.sum(A * x, axis=1)`, with no
+indication why. Sidestepping it here does not fix it.
+
+### Two pre-existing scalarizer bugs this surfaced
+
+Both are in `export/_arrays.py`, both reachable only once a body is array-valued,
+and both were fixed rather than worked around:
+
+1. **`needs_scalarize` never checked a `Constant`'s shape.** `Variable` and
+   `Parameter` are shape-checked; `Constant` fell through to "fine". A body of
+   only shape-`(1,)` leaves — `out == prev * y_factor + y_offset` for a
+   single-output network with output scaling — therefore skipped expansion
+   entirely and failed in `_collect_linear` with "only 0-dimensional arrays can
+   be converted to Python scalars". The threshold differs from the others on
+   purpose: `scalarize` maps a `(1,)` Variable to a 0-d leaf so nothing sees its
+   shape, while a `(1,)` Constant keeps its array and reaches `float()`.
+2. **`x[0]` on a shape-`(1,)` variable raised `IndexError`.** The same 0-d
+   collapse leaves nothing to index, so `base[0]` failed. Index 0 now selects
+   that element; anything else is refused with a message naming the variable.
+
+### One more thing the loops were doing
+
+A family of *n* rows named `c` is written `c_0 … c_{n-1}`, so passing the bare
+prefix reproduces the loop's names — except for a **single-row** family, which
+the writers emit under the bare family name. Left alone that silently renamed
+`pred_affine_2_0` to `pred_affine_2` in LP/MPS/GAMS for every single-output
+layer. `_family_name` appends the index in that case. `.nl` carries no row names
+and would never have shown it.
+
+### Remaining
+
+`reduced_space.py`, `relu_bigm.py` and `tree_ensemble.py` are unchanged and still
+per-element. They should follow the same recipe — reduction form, not matmul;
+`_family_name` for single-row families; byte-diff **and** a solve comparison.

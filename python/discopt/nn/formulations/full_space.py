@@ -23,6 +23,21 @@ _ACTIVATION_FN = {
 }
 
 
+def _family_name(prefix: str, n_rows: int) -> str:
+    """Family name that expands to the SAME row names the per-element loop wrote.
+
+    A family of `n` rows named `c` is written as `c_0 ... c_{n-1}`, so passing the
+    bare prefix reproduces the loop's names exactly -- except when the family has
+    a single row, which the writers emit under the family name unsuffixed. That
+    would silently rename `pred_affine_2_0` to `pred_affine_2` in LP/MPS/GAMS for
+    any single-output layer, so the index is appended explicitly in that case.
+
+    `.nl` carries no row names and is unaffected either way; this exists so the
+    three formats that DO carry them keep byte-identical output (#1215 §55).
+    """
+    return f"{prefix}_0" if n_rows == 1 else prefix
+
+
 class FullSpaceFormulation:
     """Full-space formulation with explicit pre/post-activation variables.
 
@@ -92,11 +107,14 @@ class FullSpaceFormulation:
                 layer_bounds = propagate_bounds(net, input_bounds=(s_lo, s_hi))
             else:
                 scaled_in = m.continuous(f"{pfx}_scaled_input", shape=(net.input_size,))
-            for j in range(net.input_size):
-                m.subject_to(
-                    scaled_in[j] == (inputs[j] - sc.x_offset[j]) / sc.x_factor[j],
-                    name=f"{pfx}_scale_in_{j}",
-                )
+            # One array-valued body for the whole family, not one Constraint per
+            # unit (#1215). The family name expands to the same per-row names the
+            # loop wrote (`{pfx}_scale_in_0`, `_1`, ...), so LP/MPS/GAMS output is
+            # unchanged and `.nl` -- which carries no names -- is byte-identical.
+            m.subject_to(
+                scaled_in == (inputs - sc.x_offset) / sc.x_factor,
+                name=_family_name(f"{pfx}_scale_in", net.input_size),
+            )
             prev_z = scaled_in
         else:
             if net.input_bounds is not None:
@@ -130,12 +148,24 @@ class FullSpaceFormulation:
             # Affine constraints: zhat = W^T @ prev_z + b
             W_const = np.asarray(W, dtype=np.float64)
             b_const = np.asarray(b, dtype=np.float64)
-            for j in range(n_out):
-                lhs = dm.sum(
-                    lambda i, _j=j, _W=W_const: _W[i, _j] * prev_z[i],
-                    over=range(layer.n_inputs),
-                )
-                m.subject_to(zhat[j] == lhs + b_const[j], name=f"{pfx}_affine_{k}_{j}")
+            # The layer's affine map as ONE array-valued body. The loop this
+            # replaces built `n_out * n_inputs` Python expression objects per
+            # layer, which is why a 128-wide layer cost 77 us/row to build and
+            # 274 to write (#1215 §55).
+            #
+            # Written as a broadcast product reduced along the input axis rather
+            # than as `W_const.T @ prev_z`, which is the same mathematics and
+            # LOSES THE CERTIFICATE: a `MatMulExpression` relaxes more weakly than
+            # the equivalent expanded sum, so the 1x1x1 sigmoid net in
+            # `test_nn_equivalence` went from `optimal` in 1 node to `feasible` in
+            # 121 with an identical incumbent. Same objective, weaker bound --
+            # exactly the bound-changing effect CLAUDE.md §5 says must not ship by
+            # accident. This form gives the same arena node count as the
+            # per-element loop and certifies identically.
+            m.subject_to(
+                zhat == dm.sum(W_const.T * prev_z, axis=1) + b_const,
+                name=_family_name(f"{pfx}_affine_{k}", n_out),
+            )
 
             # Post-activation variables and constraints
             if layer.activation == Activation.LINEAR:
@@ -149,11 +179,9 @@ class FullSpaceFormulation:
                     ub=z_ub if z_ub is not None else 1e20,
                 )
                 act_fn = _ACTIVATION_FN[layer.activation]
-                for j in range(n_out):
-                    m.subject_to(
-                        z[j] == act_fn(zhat[j]),
-                        name=f"{pfx}_act_{k}_{j}",
-                    )
+                # Every activation in `_ACTIVATION_FN` is elementwise over an
+                # array body, so the whole layer is one constraint.
+                m.subject_to(z == act_fn(zhat), name=_family_name(f"{pfx}_act_{k}", n_out))
 
             prev_z = z
 
@@ -166,11 +194,10 @@ class FullSpaceFormulation:
                 layer_bounds, sc.y_offset, sc.y_factor, net.output_size
             )
             outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,), lb=out_lb, ub=out_ub)
-            for j in range(net.output_size):
-                m.subject_to(
-                    outputs[j] == prev_z[j] * sc.y_factor[j] + sc.y_offset[j],
-                    name=f"{pfx}_scale_out_{j}",
-                )
+            m.subject_to(
+                outputs == prev_z * sc.y_factor + sc.y_offset,
+                name=_family_name(f"{pfx}_scale_out", net.output_size),
+            )
         else:
             outputs = prev_z
 
