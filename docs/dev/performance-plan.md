@@ -6810,3 +6810,79 @@ land inside the target and gain again from the GC scope on top.
 Corollary for planning: the four shipped construction changes (canonical `x[i]`,
 interned literals, inlined shape inference, GC scope) took 19.12 → 4.18 µs/row.
 Everything left is representation.
+
+## 40. The arena is not the lever; bulk construction is — and it already beats oximo (2026-09-10)
+
+### Retraction: §31's 7.3× was not the representation
+
+§31 measured a flat-arena prototype at 1.81 µs/row against the then-current
+13.28 and concluded the arena was worth 7.3×. **That conclusion is withdrawn.**
+The current path now measures **3.85 µs/row through the same object-per-node
+representation** — the gap was almost entirely shape inference, `_wrap` call
+chains, naming, family bookkeeping and GC, all since removed by other means.
+What the representation itself is worth was never isolated. Measured directly,
+per node:
+
+| storage | time | memory |
+|---|---:|---:|
+| Python object (today) | 0.134 µs | 136 B |
+| list-backed arena | 0.123 µs | 64 B |
+| `array.array` arena, append | 0.258 µs | **21 B** |
+| `array.array` arena, preallocated assign | 0.094 µs | 21 B |
+| tuple-per-node arena | 0.621 µs | 112 B |
+
+So an oximo-shaped arena is **1.42× cheaper to write and 6.5× lighter per node**
+— real, but node storage is only ~0.5 µs of a 3.85 µs row. Projected over a full
+port: **memory 468 → ~230 B/row (meets the target), time 3.85 → ~3.7 (≈4%)**, in
+exchange for rewriting 47 DAG walkers and 93 `id()`-keyed memo sites. The memo
+rewrite is not optional busywork: with children materialised on demand, a freed
+handle's `id()` can be reused and produce a *false* memo hit, i.e. a silently
+wrong tape.
+
+Two further measurements killed the handle design outright: overriding
+`__class__` so `isinstance` still works costs **5.3×** per `isinstance`
+(1.2M calls per build), and materialising a child handle on `.left` costs
+**17× an attribute read** — a tax every walker pays on every traversal.
+
+### What actually reaches oximo's numbers
+
+Same 200 000 rows, three construction routes, interleaved:
+
+| route | µs/row | retained |
+|---|---:|---:|
+| per-element operators, nonlinear body | 2.82 | — |
+| per-element operators, affine body (auto fast path) | 8.57 | **+0.0 MB** |
+| per-element operators, affine body, `fast=False` | 2.89 | +70.2 MB |
+| **`add_linear_constraints` (bulk matrix)** | **0.31** | **+0.0 MB** |
+
+**The bulk path is 0.31 µs/row — below oximo's 0.66 — and retains nothing**,
+because no Python object is created per row at all. That is 9× the per-element
+path and ~20× Pyomo, and it needs no representation change: it already exists.
+
+This reframes the whole question. Per-element operator overloading costs ~30
+Python function calls per row, and *that count* is the floor — not the size or
+layout of the node. oximo is fast for the same reason this arm is: its per-row
+work is not interpreted. Compilation is downstream of that, not the cause; a
+pure-Python bulk path already beats it.
+
+### The trade the auto fast path makes, and how it is wasteful
+
+`_try_fast_linear_family` is not a pessimisation — it buys **all** of the
+retained memory (70.2 MB → 0.0) for 3× the construction time. At 100k scale that
+is the right trade. But it reaches it wastefully: it runs the rule per element to
+materialise 200 000 Python `Constraint` objects, walks each body with
+`affine_form`, builds the CSR, and discards them. The direct bulk call gets the
+same result at 0.31 µs/row. The waste is the per-row Python round trip, not the
+matrix assembly.
+
+### Direction
+
+1. **A template/bulk construction API is the lever**, not a per-node arena: one
+   symbolic form instantiated N times below the Python line (what JuMP's macros
+   and oximo do). `add_linear_constraints` proves the ceiling at 0.31 µs/row;
+   the missing piece is the nonlinear analogue.
+2. **The arena remains worth doing for memory alone** (468 → ~230 B/row), but it
+   is a memory project, not a speed project, and it must carry the `node_key`
+   rewrite of all 93 identity sites. Do not re-scope it as a speed win.
+3. Per-element construction is now 3.85 µs/row and 468 B/row against Pyomo's
+   3.24 and 471 like-for-like. Further micro-optimisation there has little left.
