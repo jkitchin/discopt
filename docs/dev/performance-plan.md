@@ -7008,3 +7008,50 @@ this work.** Every oximo figure quoted in §31, §40 and §41 (0.66 µs/row,
 here, and is *construction only* — so comparing it against discopt's solve-ready
 numbers, as §41 did, compares different amounts of work. Treat the oximo column
 as unverified until it is installed and benchmarked to a common finish line.
+
+## 43. oximo measured at last: the modelling layer already beats it; the `.nl` WRITER is 18.8× behind (2026-09-10)
+
+§42 recorded that oximo had never been measured in this work and that its quoted
+figures were inherited. It is now installed (`oximo = "0.6.0"` from crates.io —
+it is a **Rust** library, not a Python package, which is why `pip install oximo`
+finds nothing) and benchmarked on the identical model: 40 × 500 = 20 000 rows of
+`exp(x_i) + y_i <= b_i` over 1 000 variables, timed to a written `.nl`.
+
+| tool | construct | write `.nl` | total | µs/row | vs oximo |
+|---|---:|---:|---:|---:|---:|
+| **oximo 0.6.0 (Rust)** | 0.26 | 0.86 | 0.0224 s | **1.12** | 1.0× |
+| discopt vectorised | **0.03** | 16.17 | 0.3242 s | 16.21 | 14.5× |
+| discopt per-element | 3.54 | 15.23 | 0.3755 s | 18.78 | 16.8× |
+| Pyomo 6.10.1 | — | — | 0.352 s | 17.58 | 15.7× |
+
+(µs/row for the construct and write columns; row counts verified from each
+file's own `.nl` header, and the emitted files are 0.82–0.9 MB across all tools.)
+
+### Two corrections
+
+**§42's "the ~17.6 µs/row `.nl` cost is structural, both tools pay it" is
+withdrawn.** It was inferred from discopt and Pyomo agreeing, without a third
+data point. oximo writes the same file in **0.86 µs/row**. The cost is not
+inherent to a row-oriented format — it is Python. discopt's writer is **18.8×**
+oximo's and accounts for **99.8%** of discopt's total.
+
+**The modelling layer is no longer the problem, and is already ahead of oximo.**
+Vectorised construction is **0.03 µs/row against oximo's 0.26** — 8.7× faster,
+because an array body makes construction O(families) while oximo still builds
+per-row. Every construction change in §38–§40 (19.12 → 3.85 µs/row) optimised a
+term worth 3.54 of 18.78 on the per-element path and 0.03 of 16.21 on the
+vectorised one.
+
+### The lever
+
+**Write `.nl` from the Rust arena.** `crates/discopt-core/src/nl_parser.rs`
+already *reads* `.nl` in Rust; the writer is the symmetric operation and does not
+exist — `export/nl.py` builds the whole file in Python, and its profile is 33%
+`scalarize`, 17% `_collect_linear`, 12% bare `isinstance`. Closing most of the
+18.8× would put discopt at roughly 1–2 µs/row end to end: **~10× faster than
+Pyomo and within ~1.5–2× of oximo**, from one bounded component.
+
+This supersedes §41's roadmap ordering. Vectorising the NN and GDP emitters and
+making the vectorised idiom the default still pay — on discopt's own solve path
+(1.65 µs/row to tape-ready) and on memory — but they move the 0.03, not the
+16.17, and must not be sold as the route to external-solver performance.
