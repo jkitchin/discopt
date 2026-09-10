@@ -7132,3 +7132,66 @@ detail of the second.
 
 Expected: write 16.17 → ~1 µs/row, total 16.21 → ~1–2 — **~10× Pyomo and within
 ~1.5–2× of oximo**, from one bounded component.
+
+## 45. The Rust array fan-out is right for the writer and WRONG for the tape (2026-09-10)
+
+§44 said the array fan-out was "one piece of Rust work unblocking both" the `.nl`
+writer and the AD tape, and made it the first task on that basis. **The tape half
+is falsified.** The fan-out is built, verified and kept — for the writer.
+
+`discopt_core::expand` turns an array-valued `ConstraintRepr` into N scalar rows
+in Rust: shape inference over the arena, then a flat instruction program in the
+same opcode encoding `tape_program` uses, plus one root per row and the
+per-constraint row counts a caller needs to attribute duals. It is **bit-identical
+to the Python DAG walk** — objective, gradient, every constraint value and the
+full Jacobian, 128 comparisons over 8 model shapes (elementwise, matmul, both
+axis sums, `(n,1)`-against-`(n,m)` broadcasting, `norm2`/`prod` reductions,
+row and column slices, a 6 000-term chain), all `0.000e+00`, with row ORDER
+compared element-wise so a right-values/wrong-order fan-out could not pass.
+
+### Measured on the tape: 1.77× SLOWER
+
+| arm | µs/row | |
+|---|---:|---|
+| Python DAG walk (`_nl_expr_compiler`) | 4.60 | 1.00× |
+| Rust expansion + Python lowering | 8.13 | **0.57×** |
+
+40 × 500 = 20 000 rows, 7 reps after warm-up, sd 0.006/0.022.
+
+The profiles say why, and it is not the Rust:
+
+* **Python-walk arm**: `_lower_uncached` is called **242 times for 20 000 rows** —
+  once per *array node*, not per row — and `np.frompyfunc` creates the 40 500
+  per-element POUNCE nodes in C (0.008 s). The Python-level lowering is ~0.025 s
+  of a 0.092 s build; `build_nl_problem` (C) is the other 0.067.
+* **Rust-expand arm**: the expanded program is ~100 000 scalar instructions and
+  the consumer must touch every one **from Python** — `lower` 0.062 s plus
+  `_chain_leaves` 0.085 s, on top of the same 0.061 s `build_nl_problem`.
+
+**The existing path already does the fan-out — at numpy's C level.** Expanding in
+Rust replaces a C loop with a Python one. The bottleneck was never the fan-out;
+it was constructing N POUNCE nodes, and `frompyfunc` already does that as well as
+anything can from Python.
+
+A precheck to skip provably-pointless chain walks was tried and reverted: it does
+not fire on these shapes (a row roots at `SUB(ADD(..), const)`, whose left
+operand *is* additive) and showed no measured benefit.
+
+### Why it is still the right substrate for the writer
+
+The writer's consumer is **Rust**. `ModelRepr → expand → .nl text` never crosses
+into Python, so the per-instruction cost that sinks the tape route does not
+arise — and the writer genuinely needs the fan-out, because `.nl` is row-oriented
+and `scalarize` is 33% of the current Python writer's profile.
+
+So `expand.rs` and `PyModelRepr.tape_program_expanded()` stay, and
+`_arena_tape.try_build_expanded_tape` stays as their **verification harness** —
+explicitly documented as not a production path, since correctness of the Rust
+fan-out has to be provable from Python before the writer is built on it.
+
+### Correction to §44's ordering
+
+The fan-out is a prerequisite of the writer, not a shared win. Sequence the work
+as: fan-out (done) → `ModelRepr → .nl` in Rust → measure against the 16.17 µs/row
+the Python writer costs. The tape keeps the Python array-at-a-time path, which is
+already near its floor.

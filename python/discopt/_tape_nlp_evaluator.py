@@ -332,6 +332,14 @@ class TapeNLPEvaluator:
                 )
             # Every arena row is scalar by construction -- the path refuses any
             # body that fans out -- so each constraint contributes exactly one.
+            #
+            # It deliberately does NOT use `try_build_expanded_tape`, which CAN
+            # fan array bodies out (in Rust). Measured, that is 1.77x SLOWER
+            # here: the Python walk below lowers array-at-a-time -- 242
+            # `_lower_uncached` calls for 20 000 rows -- and lets numpy's
+            # `frompyfunc` build the per-element POUNCE nodes in C, while an
+            # expanded program has to be consumed one scalar instruction at a
+            # time from Python. See performance-plan.md §45.
             return obj, cons, [1] * len(cons)
 
         obj = compile_to_nl_expr(model._objective.expression, model)

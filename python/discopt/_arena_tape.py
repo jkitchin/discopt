@@ -122,12 +122,18 @@ def _num(obj: Any, attr: str) -> Any:
 
 
 class _Program:
-    """The six flat arrays of ``tape_program()``, with n-ary operands sliced out."""
+    """The six flat arrays of the arena's tape encoding, n-ary operands sliced out.
+
+    Built either from ``tape_program()`` (one slot per arena node; refuses array
+    bodies) or from ``tape_program_expanded()`` (fully scalar, array bodies fanned
+    out in Rust). Both emit the same opcodes and the same
+    operands-have-lower-indices invariant, so :func:`lower` serves both.
+    """
 
     __slots__ = ("op", "a", "b", "k", "_args_flat", "_args_ptr", "n")
 
-    def __init__(self, repr_: Any) -> None:
-        op, a, b, k, args_flat, args_ptr = repr_.tape_program()
+    def __init__(self, arrays: Any) -> None:
+        op, a, b, k, args_flat, args_ptr = arrays
         self.op = np.asarray(op)
         self.a = np.asarray(a)
         self.b = np.asarray(b)
@@ -374,7 +380,7 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
         return None
 
     obj_id = int(_num(repr_, "objective_id"))
-    prog = _Program(repr_)
+    prog = _Program(repr_.tape_program())
     if obj_id < 0 or obj_id >= prog.n:
         return None
 
@@ -386,3 +392,71 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
     if any(c is None for c in cons):
         return None
     return obj, cons
+
+
+def try_build_expanded_tape(model: Any, E: Any) -> Optional[tuple[Any, list, list[int]]]:
+    r"""``(objective, constraint rows, rows-per-constraint)`` from ``expand``, or ``None``.
+
+    **This is the verification harness for** ``discopt_core::expand``\ **, not a
+    production lowering path.** Nothing in the solve path calls it, deliberately.
+
+    It exists because `expand` -- the Rust fan-out of an array-valued body into N
+    scalar rows -- is written for the ``.nl`` writer, whose consumer is Rust, and
+    its correctness has to be provable from Python. Lowering its output to POUNCE
+    nodes here lets `issue1215_expanded_tape_differential.py` compare objective,
+    gradient, every constraint value and the full Jacobian against the Python DAG
+    walk, and pin the ROW ORDER, which a tolerance check on values alone would
+    not catch.
+
+    It is not used for the tape because it is **1.77x slower** there, measured:
+    ``_nl_expr_compiler`` lowers array-at-a-time -- 242 ``_lower_uncached`` calls
+    for 20 000 rows -- and lets numpy's ``frompyfunc`` create the per-element
+    POUNCE nodes in C, whereas an expanded program must be consumed one scalar
+    instruction at a time from Python. Routing the tape through here replaces a C
+    loop with a Python one. See ``docs/dev/performance-plan.md`` §45.
+
+    ``rows_per_constraint`` is returned rather than assumed: it is what would
+    drive ``_constraint_flat_sizes``, which attributes duals, the row map and
+    feasibility reports back to the ``Constraint`` each row came from.
+    """
+    if not arena_tape_enabled():
+        return None
+    if model._builder_linear_constraints():
+        return None
+    if getattr(model, "_objective", None) is None:
+        return None
+    from discopt.export._common import builder_objective
+
+    if builder_objective(model) is not None:
+        return None
+
+    from discopt._rust import model_to_repr
+
+    try:
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+    except Exception as exc:  # noqa: BLE001 -- see try_build_arena_tape
+        _LOG.debug("expanded tape declined; model_to_repr refused: %s", exc)
+        return None
+    if not _offsets_agree(repr_, model):
+        return None
+
+    try:
+        (op, a, b, k, args_flat, args_ptr, obj_root, row_roots, rows_per) = (
+            repr_.tape_program_expanded()
+        )
+    except ValueError as exc:
+        # `expand` refuses rather than guessing -- an inexact fan-out is a
+        # different model. Fall back to the Python walk, which is unchanged.
+        _LOG.debug("expanded tape declined: %s", exc)
+        return None
+
+    prog = _Program((op, a, b, k, args_flat, args_ptr))
+    roots = [int(obj_root), *(int(r) for r in row_roots)]
+    cache = lower(prog, roots, E)
+    obj = cache[int(obj_root)]
+    if obj is None:
+        return None
+    cons = [cache[int(r)] for r in row_roots]
+    if any(c is None for c in cons):
+        return None
+    return obj, cons, [int(v) for v in rows_per]

@@ -559,6 +559,59 @@ impl PyModelRepr {
         ))
     }
 
+    /// The whole model as a fully SCALAR program, with array bodies fanned out.
+    ///
+    /// `tape_program` refuses an array-valued body -- one `Constraint`, many
+    /// rows -- because its encoding has one slot per arena node and cannot
+    /// expand. That refusal sent every vectorised model back to the Python DAG
+    /// walk, which is the shape that reaches solve-ready 36x faster
+    /// (`docs/dev/performance-plan.md` §41), so the fast models were paying the
+    /// slow path. This does the fan-out in Rust instead.
+    ///
+    /// Returns `(op, a, b, k, args_flat, args_ptr, objective_root, row_roots,
+    /// rows_per_constraint)` in the same opcode encoding `tape_program` uses.
+    /// `row_roots` is one instruction index per constraint ROW, in constraint
+    /// order; `rows_per_constraint` says how many rows each source constraint
+    /// produced, which is what a caller needs to attribute duals, row maps and
+    /// feasibility reports back to the `Constraint` they came from.
+    ///
+    /// Raises rather than returning a partial program: an expansion that cannot
+    /// be done exactly is a different model, and unlike a refusal it would not
+    /// announce itself.
+    #[allow(clippy::type_complexity)]
+    fn tape_program_expanded<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<i32>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        i64,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+    )> {
+        use numpy::PyArray1;
+
+        let prog = discopt_core::expand::expand(&self.inner).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("cannot expand model: {e}"))
+        })?;
+        let rows: Vec<i64> = prog.rows_per_constraint.iter().map(|v| *v as i64).collect();
+        Ok((
+            PyArray1::from_vec(py, prog.op),
+            PyArray1::from_vec(py, prog.a),
+            PyArray1::from_vec(py, prog.b),
+            PyArray1::from_vec(py, prog.k),
+            PyArray1::from_vec(py, prog.args_flat),
+            PyArray1::from_vec(py, prog.args_ptr),
+            prog.objective_root,
+            PyArray1::from_vec(py, prog.row_roots),
+            PyArray1::from_vec(py, rows),
+        ))
+    }
+
     /// ExprId (index) of each constraint expression root.
     fn constraint_ids(&self) -> Vec<usize> {
         self.inner.constraints.iter().map(|c| c.body.0).collect()
