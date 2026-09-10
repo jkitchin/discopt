@@ -401,6 +401,31 @@ pub fn write_nl(
         )));
     }
 
+    // A builder row's EXPLICIT ZERO coefficients are dropped, because the Python
+    // writer's `_decompose_builder_blocks` drops them (`if coeff == 0.0:
+    // continue`) before they ever reach its linear map. A stored zero therefore
+    // produces no `J` entry there and, if it was the row's only entry, an empty
+    // row -- while the arena path faithfully builds a `Constant(0.0) * Var` node
+    // and reports a zero coefficient.
+    //
+    // This is a real asymmetry in the Python writer, not a tidy rule: its
+    // EXPRESSION path keeps a zero coefficient (an explicit `0.0 * x` term
+    // survives `_collect_linear`). So the drop is scoped to builder rows, which
+    // is exactly what `row_source` identifies. Matching the existing output is
+    // the requirement; regularising the asymmetry would change bytes discopt has
+    // already written.
+    //
+    // Missing this cost a regression: 129bf02 routed builder rows through this
+    // writer and `test_builder_linear_block_skips_zero_coeff_and_empty_row`
+    // started failing, because no shape in the byte-diff suite had a stored zero.
+    if n_builder_constraints > 0 {
+        for (r, &ci) in row_source.iter().enumerate() {
+            if ci < n_builder_constraints {
+                rows[r].linear.retain(|_, coeff| *coeff != 0.0);
+            }
+        }
+    }
+
     // Builder rows lead the arena and trail every Python writer's output; put
     // them back where the Python writers put them (see this function's docs).
     if n_builder_constraints > 0 {

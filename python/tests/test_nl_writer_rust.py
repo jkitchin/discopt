@@ -275,6 +275,50 @@ def test_the_reorder_boundary_is_the_builder_row_count():
     assert names[n] == "nl"
 
 
+@pytest.mark.parametrize(
+    "label,matrix",
+    [
+        # A stored zero alongside a real coefficient: the zero must vanish.
+        ("zero beside a nonzero", [[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]]),
+        # A row whose ONLY stored entry is zero: no J section at all for it.
+        ("row of only a zero", [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]),
+        # Every row empty.
+        ("all zeros", [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+    ],
+)
+def test_explicit_zero_coefficients_in_builder_rows(label, matrix):
+    """The Python writer DROPS a builder row's stored zeros; this must match.
+
+    `_decompose_builder_blocks` does `if coeff == 0.0: continue`, so a stored
+    zero produces no `J` entry and, if it was the row's only entry, an empty row.
+    The arena path faithfully builds a `Constant(0.0) * Var` node instead, so
+    without an explicit drop the two writers diverge.
+
+    They diverged: 129bf02 routed builder rows through the Rust writer and
+    `test_export_cli_roundtrip.py::TestNLWriterEdgeCases::
+    test_builder_linear_block_skips_zero_coeff_and_empty_row` began failing,
+    because no shape here had a stored zero. `scipy.sparse.csr_matrix` prunes
+    zeros on construction, so the matrix is built with explicit `indptr`/`indices`
+    /`data` to keep them stored -- a dense array would not reproduce the bug.
+    """
+    import scipy.sparse as sp
+
+    dense = np.array(matrix, dtype=np.float64)
+    n_rows, n_cols = dense.shape
+    # Store EVERY entry, zeros included.
+    data = dense.reshape(-1)
+    indices = np.tile(np.arange(n_cols, dtype=np.int64), n_rows)
+    indptr = np.arange(0, n_rows * n_cols + 1, n_cols, dtype=np.int64)
+    A = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols))
+    assert A.nnz == n_rows * n_cols, "scipy pruned the zeros; the shape is not exercised"
+
+    m = dm.Model("zeros")
+    x = m.continuous("x", shape=(n_cols,), lb=0.0, ub=5.0)
+    m.add_linear_constraints(A, x, "<=", np.full(n_rows, 4.0), name="z")
+    m.minimize(x[0])
+    _assert_identical(m, label)
+
+
 def test_a_model_with_no_builder_rows_reports_a_zero_boundary():
     """Zero must mean "no reorder", which is what every non-builder path passes."""
     from discopt._rust import model_to_repr
