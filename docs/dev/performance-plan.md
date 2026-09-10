@@ -6956,3 +6956,55 @@ vectorised form the documented idiom, with the benchmark carrying a vectorised
 arm so the two are never confused again. On the numbers above the vectorised path
 already exceeds the stated target (oximo-comparable memory, 2-5x oximo speed) on
 both axes; the work is to make it usable end to end, not to make it faster.
+
+## 42. To a written `.nl`, discopt and Pyomo are at PARITY — the vectorised win is internal only (2026-09-10)
+
+§41 reported the vectorised path at 1.65 µs/row against 59.5 for the per-element
+idiom, and compared that to Pyomo's 6.20 and oximo's 0.66. **That comparison was
+invalid**: discopt's figure is *build + arena + AD tape* (solve-ready), while the
+Pyomo and oximo figures are *construction only*. Measured to the same finish
+line — a written `.nl` file, which is what actually feeds an external solver —
+40 × 500 = 20 000 rows, files verified identical in size and row count:
+
+| arm | µs/row | vs Pyomo |
+|---|---:|---:|
+| discopt per-element | 19.89 | 0.88× |
+| discopt vectorised | 17.69 | 0.99× |
+| Pyomo 6.10.1 | 17.58 | 1.00× |
+
+**Parity, not 36×.** `.nl` writing costs ~17.6 µs/row for both tools and swamps
+every upstream difference.
+
+### Why this is structural, not a missing optimisation
+
+`.nl` is a **row-oriented** format: every scalar row must be materialised and
+serialised. Writing one therefore *forces* exactly the fan-out that vectorisation
+exists to avoid — `scalarize` is 33% of the write profile. The vectorised
+advantage cannot survive the file boundary, by construction.
+
+So the win splits cleanly, and the two halves must never be quoted as one:
+
+* **discopt's own solver** (build → arena → tape): vectorised is 36× the
+  per-element idiom, 1.65 µs/row and 17.5 B/row. Pyomo has no comparable path;
+  this is the vertical-integration advantage and it is real.
+* **External solvers via `.nl`**: ~17.6 µs/row for everyone. discopt is at
+  parity with Pyomo and the modelling layer is not the bottleneck.
+
+### Consequence for the roadmap
+
+Vectorising the NN and GDP emitters (§41) still pays — on the internal solve path
+and on memory — but it will **not** make external-solver export faster than
+Pyomo. If "notably faster than Pyomo" is meant to include feeding SCIP / BARON /
+IPOPT, the target is the **`.nl` writer**: 0.95 MB in 0.35 s is 2.7 MB/s, with
+33% in `scalarize`, 17% in `_collect_linear` and 12% in bare `isinstance`. That
+is a separate project from the modelling layer, and Pyomo pays similar costs, so
+it is a fair fight rather than a free win.
+
+### The oximo baseline is unverified
+
+**oximo is not installed in this environment and has not been measured in any of
+this work.** Every oximo figure quoted in §31, §40 and §41 (0.66 µs/row,
+~205 B/row) is inherited from an earlier measurement, on a model not described
+here, and is *construction only* — so comparing it against discopt's solve-ready
+numbers, as §41 did, compares different amounts of work. Treat the oximo column
+as unverified until it is installed and benchmarked to a common finish line.
