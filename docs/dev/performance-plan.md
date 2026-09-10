@@ -7538,3 +7538,88 @@ downstream (§41, §47), and no amount of Rust behind them changes that.
 So this does not displace §48's conclusion, it sharpens it: the per-element path
 has one real optimisation left (fusion), and the vectorised path already has the
 answer.
+
+## 50. Memory, measured against oximo at last: vectorised discopt is 40–60× leaner (2026-09-10)
+
+The #1215 goal had two halves — "memory comparable to oximo, 2–5× slower". §48
+settled the time half and left the memory half **with no evidence at all**: §42
+retracted the inherited "oximo ~205 B/row" figure as unverified, and nothing
+replaced it. The panel timed only. This closes that.
+
+### Method
+
+`issue1215_cross_tool_panel.py --memory` and `oximo_arm/main.rs --memory`, the
+same four families and three sizes as §48. Both arms:
+
+- run **one fresh process per point** — an allocator pools what a previous model
+  freed, so a second measurement in the same process reads low;
+- warm up on a tiny model of the same shape and discard it, so the first build's
+  imports and allocator reservations land in the baseline, not in the model;
+- read `VmRSS` from `/proc/self/status` before and after construction, **with the
+  model held alive** across the second reading;
+- then write the `.nl` and take the row/variable counts from its header, so the
+  same model-identity gate as §48 applies (36 comparisons, verified firing).
+
+RSS rather than `tracemalloc` is what makes the arms comparable: it counts the
+Rust arena behind discopt's PyO3 handles and oximo's `Vec<ExprNode>` alike, which
+no Python-level counter would. It also counts allocator slack, so read a
+difference under ~10% as noise.
+
+### Result — retained B/row at 100 000 rows
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 1072 | **17** | 1301 | 1311 |
+| sep_nl | 615 | **17** | 942 | 984 |
+| coupled_nl | 684 | **17** | 1135 | 1225 |
+| minlp | 853 | **17** | 1108 | 1150 |
+
+Ratio to oximo:
+
+| family | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|
+| linear | 0.02× | 1.21× | 1.22× |
+| sep_nl | 0.03× | 1.53× | 1.60× |
+| coupled_nl | 0.02× | 1.66× | 1.79× |
+| minlp | 0.02× | 1.30× | 1.35× |
+
+Load 0.24. At 1 000 rows the vectorised arm's model is smaller than a single
+1 kB `VmRSS` reading, so its cells there print `0`; the report prints the
+resolution floor under any table containing one, because "0" would otherwise
+read as *free* rather than *unmeasurable*.
+
+### What it says
+
+1. **The goal is beaten, not merely met.** "Memory comparable to oximo" was the
+   target; vectorised discopt is **0.02–0.03×** — 40 to 60 times leaner. It
+   retains barely more than the numpy data the user handed it, because there is
+   no per-row object to retain: §49 measured 11 Python `Expression` objects and
+   12 arena nodes for a whole 1 000-row family. The raw figure is 1.658–1.663 MB
+   at 100 000 rows — **the same to within one page across all four families**,
+   which is the tell: what is retained is the caller's own RHS array (a 100 000
+   -element `np.arange(n) % k`, ~0.8 MB, plus its intermediate), not anything
+   proportional to the model's structure. Hand it a scalar bound instead and
+   there is almost nothing left to measure.
+2. **Per-element discopt is 1.21–1.66× oximo**, and Pyomo 1.22–1.79×. On this
+   axis too the two per-element arms are near each other and both somewhat
+   heavier than oximo — the same ordering §48 found on time, with a much smaller
+   spread.
+3. **Memory separates the idioms harder than time does.** The time gap between
+   discopt's two idioms is 6.9–11.1× (§48); the memory gap is **55–77×**. A
+   per-row Python object costs ~1 kB retained and ~30 µs to build; dropping it
+   saves proportionally far more memory than wall.
+4. oximo is not especially lean in absolute terms — 615–1072 B/row for a flat
+   `Vec<ExprNode>` plus a `Constraint` and a `SmolStr` name per row. Being
+   per-element has a floor, and it is a kilobyte-scale floor in Rust too.
+
+### Status of the original goal
+
+| criterion | target | measured (vectorised) |
+|---|---|---|
+| memory vs oximo | comparable | **0.02–0.03×** (§50) |
+| time vs oximo | 2–5× slower | **0.91–1.27×** (§48) |
+| time vs Pyomo | notably faster | **10.7–11.6×** (§48) |
+
+All three are met on the vectorised path. What remains is not a performance
+problem but a routing one: the emitters, the defaults and the docs still put
+users on the per-element path (§48's consequence, unchanged).

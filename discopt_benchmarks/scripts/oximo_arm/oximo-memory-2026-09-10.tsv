@@ -1,0 +1,14 @@
+tool	family	idiom	rows	vars	retained_b
+oximo	linear	per-element	1000	3000	1187840
+oximo	linear	per-element	10000	30000	11280384
+oximo	linear	per-element	100000	300000	107241472
+oximo	sep_nl	per-element	1000	2000	819200
+oximo	sep_nl	per-element	10000	20000	6639616
+oximo	sep_nl	per-element	100000	200000	61456384
+oximo	coupled_nl	per-element	1000	2000	868352
+oximo	coupled_nl	per-element	10000	20000	7352320
+oximo	coupled_nl	per-element	100000	200000	68423680
+oximo	minlp	per-element	1000	3000	864256
+oximo	minlp	per-element	10000	30000	9240576
+oximo	minlp	per-element	100000	300000	85307392
+# executed: 12 (family, size) memory points, row counts verified

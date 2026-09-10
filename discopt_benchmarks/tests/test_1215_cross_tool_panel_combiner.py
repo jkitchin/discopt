@@ -117,3 +117,84 @@ def test_parse_tsv_rejects_a_file_with_no_measurements(tmp_path):
     p.write_text("\t".join(panel.COLS) + "\n")
     with pytest.raises(ValueError, match="no data rows"):
         panel._parse_tsv(p)
+
+
+# ── memory mode ─────────────────────────────────────────────────────────────
+#
+# The memory mode shares the identity gate and the table machinery with the
+# timing mode, so what is tested here is what differs: the column set, the
+# per-row divisor, and the RSS-resolution note. Without that note a model too
+# small to register against a 1 kB VmRSS reading prints "0", which reads as
+# "free" rather than "unmeasurable".
+
+
+def _mem_row(tool, idiom, family, rows, vars_, retained_b):
+    return {
+        "tool": tool,
+        "family": family,
+        "idiom": idiom,
+        "rows": rows,
+        "vars": vars_,
+        "retained_b": retained_b,
+    }
+
+
+def _mem_panel():
+    return [
+        _mem_row("discopt", "vectorised", "linear", 100000, 300000, 1_700_000),
+        _mem_row("discopt", "per-element", "linear", 100000, 300000, 130_100_000),
+        _mem_row("oximo", "per-element", "linear", 100000, 300000, 107_200_000),
+    ]
+
+
+def test_memory_mode_reports_bytes_per_row(capsys):
+    cells = panel._report(_mem_panel(), mode="memory")
+    assert cells == 3
+    out = capsys.readouterr().out
+    assert "retained B/row" in out
+    assert "17" in out  # 1_700_000 / 100_000
+    assert "1072" in out  # oximo
+
+
+def test_memory_mode_ratio_is_relative_to_oximo(capsys):
+    panel._report(_mem_panel(), mode="memory")
+    out = capsys.readouterr().out
+    assert "0.02x" in out  # vectorised discopt against oximo
+    assert "1.21x" in out  # per-element discopt against oximo
+
+
+def test_memory_mode_flags_a_cell_below_rss_resolution(capsys):
+    rows = [
+        _mem_row("discopt", "vectorised", "linear", 1000, 3000, 0),
+        _mem_row("oximo", "per-element", "linear", 1000, 3000, 1_188_000),
+    ]
+    panel._report(rows, mode="memory")
+    out = capsys.readouterr().out
+    assert "under the 1024 B RSS resolution" in out
+    assert "not as zero" in out
+
+
+def test_memory_mode_identity_gate_still_fires():
+    rows = _mem_panel()
+    rows[-1]["vars"] = 299999
+    with pytest.raises(AssertionError, match="not the same model"):
+        panel._report(rows, mode="memory")
+
+
+def test_memory_tsv_round_trips(tmp_path):
+    p = tmp_path / "mem.tsv"
+    p.write_text(
+        "\t".join(panel.MEM_COLS) + "\noximo\tlinear\tper-element\t100000\t300000\t107241472\n"
+    )
+    (row,) = panel._parse_tsv(p, panel.MEM_COLS)
+    assert row["retained_b"] == 107241472
+
+
+def test_memory_tsv_rejects_a_timing_tsv(tmp_path):
+    """The two modes' TSVs must not be silently interchangeable."""
+    p = tmp_path / "time.tsv"
+    p.write_text(
+        "\t".join(panel.COLS) + "\noximo\tlinear\tper-element\t1000\t3000\t0.001441\t0.001303\n"
+    )
+    with pytest.raises(ValueError, match="header is"):
+        panel._parse_tsv(p, panel.MEM_COLS)
