@@ -7274,3 +7274,61 @@ Construction was never the problem — discopt's vectorised construction is
 0.03 µs/row against oximo's 0.26 (§43). The whole gap was one Python component,
 and it is now Rust. What remains between discopt and oximo is 0.6 µs/row spread
 across `model_to_repr` and the writer, with no single hotspot identified.
+
+## 47. The `.nl` writer's 10.5× is a VECTORISED-model number; per-element is ~1.3× (2026-09-10)
+
+§46 reported 10.5× Pyomo from one synthetic panel (20 000 rows of
+`exp(x)+y <= b`). Two follow-up measurements say that number does not generalise
+the way a reader would assume, so both are recorded before it gets quoted.
+
+### On real instances the win is 1.35×, not 10.5×
+
+Re-exporting all 66 in-repo MINLPLib instances with each writer, best of 3 each:
+
+| stat | speedup | Python µs/row | Rust µs/row |
+|---|---:|---:|---:|
+| min | 0.95× | 18.7 | 15.4 |
+| median | 1.35× | 51.0 | 42.6 |
+| mean | 1.37× | 89.6 | 63.8 |
+| max | 2.27× | 623.1 | 455.7 |
+
+One instance (`st_miqp5`, 13 rows) is marginally **slower**. These average ~56
+rows, and instances read through `from_nl` are per-element by construction — one
+`Constraint` per row.
+
+### The curve: it is the idiom, and then the size
+
+Same model shape at every size, both idioms:
+
+| rows | vec Python | vec Rust | | elem Python | elem Rust | |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 34.94 | 9.07 | 3.85× | 26.22 | 29.98 | **0.87×** |
+| 100 | 18.13 | 3.74 | 4.85× | 16.17 | 13.17 | 1.23× |
+| 1 000 | 14.73 | 1.99 | 7.38× | 13.58 | 11.87 | 1.14× |
+| 5 000 | 13.89 | 1.70 | 8.18× | 13.56 | 12.54 | 1.08× |
+| 20 000 | 15.39 | 1.58 | 9.73× | 14.32 | 10.52 | 1.36× |
+| 100 000 | 16.97 | 1.73 | 9.79× | 15.04 | 11.32 | 1.33× |
+
+(µs/row; Python writer forced with `DISCOPT_RUST_NL=0`.)
+
+**Vectorised: ~10×, stable from 1 000 to 100 000 rows, at 1.6–1.7 µs/row.**
+**Per-element: ~1.3× at best, and a small loss on tiny models** — 0.87× at 10
+rows, which is 38 µs absolute and not worth a size heuristic to avoid, but it is
+a regression and should not be discovered by surprise.
+
+The per-element ceiling is `model_to_repr`: converting 200 000 Python DAG nodes
+to the arena costs about what the Rust writer saves. Which is the same finding
+as §41 from the other side — the cost is one Python object per node, and no
+downstream component can undo it.
+
+### Consequence
+
+The writer **widens** the gap between the two idioms rather than closing it:
+vectorised + Rust is 1.58 µs/row where per-element + Rust is 10.52. Making the
+vectorised form the default idiom is now worth ~6.7× on export alone, on top of
+the 36× it was already worth on discopt's own solve path (§41). That work — the
+NN and GDP emitters, the docs, a vectorised arm in the construction benchmark —
+is the highest-value item remaining, and it is a modelling-layer job, not a
+performance one.
+
+**Quote §46's 10.5× as a vectorised-model figure or not at all.**
