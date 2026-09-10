@@ -7623,3 +7623,76 @@ read as *free* rather than *unmeasurable*.
 All three are met on the vectorised path. What remains is not a performance
 problem but a routing one: the emitters, the defaults and the docs still put
 users on the per-element path (§48's consequence, unchanged).
+
+## 51. Retraction: the GDP emitter was already idiom-preserving — and checking it found a false optimum (2026-09-10)
+
+§48's consequence named "the NN and GDP emitters still emit one `Constraint` per
+row" as the remaining work. Half of that is wrong and is retracted here per the
+§11 rule.
+
+### The GDP half is retracted
+
+`_relax/gdp_reformulate.py` does **not** loop over rows. Its loops run over
+*disjuncts* and over *input constraint objects*: `_reformulate_indicator_constraint`
+takes one `Constraint` and returns one (or two, for `==`), transforming whatever
+body it was handed. Give it an array-valued body and it returns an array-valued
+body. Measured, 8-row disjunct constraints:
+
+| shape | per-element objects | vectorised objects | rows |
+|---|---:|---:|---:|
+| `if_then` | 9 | **2** | 9 |
+| `either_or` | 18 | **4** | 18 |
+| `==` inside a disjunct | 17 | **3** | 17 |
+
+Same rows, a fraction of the objects, across `big-m`, `hull` and `mbigm`. A GDP
+model written in the vectorised idiom is already on the fast path. The claim was
+made from reading `append` calls in the file without checking what they were
+appending — the §"look up an API before calling it" rule applied to reading, not
+just to calling.
+
+`test_1215_gdp_idiom_preservation.py` pins it now, including that the vectorised
+object count does not grow with the family size.
+
+### Checking it found C-43, a certified false optimum
+
+Verifying "the two idioms produce the same model" is what surfaced it. Comparing
+row multisets across the idioms, one cell disagreed — and following that
+disagreement down produced this, on the default `hull` path:
+
+    reference (no disjunction): optimal   objective = 20.0
+    big-m                     : optimal   objective = 20.0
+    hull                      : optimal   objective = 2.0    <-- WRONG
+    mbigm                     : optimal   objective = 20.0
+
+`_extract_disjunct_bounds` keys bounds by variable *name*, so they apply to every
+component of an array variable — but it reached through an `IndexExpression` to
+its `.base`, so a bound on `x[0]` capped all of `x`, and hull's disaggregated
+bound rows cut the components nobody constrained. Full write-up and fix in
+`docs/dev/correctness-issues.md` **C-43**.
+
+Two things are worth carrying forward from how it hid:
+
+1. **The same pattern was implemented asymmetrically.** The `>=` direction
+   required a bare `Variable` and so declined an `IndexExpression` (sound); the
+   `<=` direction dug out `.base` (the leak). Half the obvious test cases pass
+   either way.
+2. **A unit test asserted the defective behaviour** —
+   `test_extract_disjunct_bounds_patterns` pinned `{"wv": (0.0, 3.0)}` from
+   `wv[0] <= 3`. A test pinning a defect is worse than no test: it turns the fix
+   into a regression, and it is why an audit of this function would have
+   concluded it was covered.
+
+### What survives of §48's consequence
+
+The NN half stands: `nn/formulations/{full_space,reduced_space,relu_bigm,tree_ensemble}.py`
+all emit `m.subject_to(...)` inside a `for` over units, verified by grep. That
+remains the work item.
+
+### And a note on cross-idiom comparison as an instrument
+
+Comparing two ways of writing the same model is a cheap, general soundness
+probe: it needs no oracle, no reference solver and no known optimum, and it
+found a P0 in a path with 645 passing tests. `hull` is the one method where the
+idioms legitimately differ — an array body covering the whole variable licenses
+a tightening that per-element bodies do not — so the assertion there is row
+*count* and *optimum*, not row text. Worth pointing at other layers.

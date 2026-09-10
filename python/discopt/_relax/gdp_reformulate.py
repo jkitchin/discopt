@@ -1755,6 +1755,39 @@ def _substitute_vars(
     return expr
 
 
+def _whole_variable(expr) -> "Variable | None":
+    """The `Variable` this expression denotes *in its entirety*, else ``None``.
+
+    The bounds this module extracts are keyed by variable **name**, so they apply
+    to every component of an array variable. A constraint on a *slice* of that
+    array therefore must not produce one: in the hull reformulation the extracted
+    bound caps every disaggregated component, so a bound taken from ``x[0]`` and
+    applied to all of ``x`` cuts feasible points.
+
+    That was a live false-optimum bug, not a hypothetical. With ``x`` of shape
+    ``(3,)`` in ``[0, 10]``::
+
+        m.either_or([[x[0] <= 1.0], [x[0] >= 9.0]])
+        m.subject_to(x[0] <= 1.0)      # pin the first disjunct
+        m.maximize(x[1] + x[2])        # true optimum 20.0
+
+    the hull reformulation capped ``x[1]`` and ``x[2]`` at 1 as well and returned
+    ``status=optimal, objective=2.0`` -- a wrong certificate. (``big-m`` and
+    ``mbigm`` were unaffected; they do not use these bounds this way.)
+
+    So: accept a bare `Variable`, and accept an `IndexExpression` only when it
+    selects the whole variable (its shape equals the base's). Anything narrower
+    yields ``None`` and the caller falls back to the variable's global bounds --
+    a weaker relaxation, and a valid one.
+    """
+    if isinstance(expr, Variable):
+        return expr
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        if tuple(getattr(expr, "shape", ())) == tuple(getattr(expr.base, "shape", ())):
+            return expr.base
+    return None
+
+
 def _extract_disjunct_bounds(
     disjunct: list[Constraint],
     model: Model,
@@ -1789,25 +1822,20 @@ def _extract_disjunct_bounds(
         var: Variable | None = None
         offset = 0.0  # effective constraint: var (sense) rhs - offset
 
-        if isinstance(body, Variable):
-            var = body
-        elif isinstance(body, IndexExpression) and isinstance(body.base, Variable):
-            var = body.base
+        if (whole := _whole_variable(body)) is not None:
+            var = whole
         elif isinstance(body, BinaryOp) and body.op == "-":
             # Pattern: var - const <= 0  =>  var <= const
-            if isinstance(body.left, Variable) and isinstance(body.right, Constant):
-                var = body.left
+            if (lvar := _whole_variable(body.left)) is not None and isinstance(
+                body.right, Constant
+            ):
+                var = lvar
                 offset = -float(body.right.value)
-            elif isinstance(body.left, (Variable, IndexExpression)):
-                lvar = body.left if isinstance(body.left, Variable) else None
-                if lvar is None and isinstance(body.left, IndexExpression):
-                    lvar = body.left.base if isinstance(body.left.base, Variable) else None
-                if lvar is not None and isinstance(body.right, Constant):
-                    var = lvar
-                    offset = -float(body.right.value)
             # Pattern: const - var <= 0  =>  var >= const
-            elif isinstance(body.left, Constant) and isinstance(body.right, Variable):
-                var = body.right
+            elif isinstance(body.left, Constant) and (
+                (rvar := _whole_variable(body.right)) is not None
+            ):
+                var = rvar
                 # const - var (sense) 0  =>  -var (sense) -const  =>  var (flip) const
                 # We handle this by negating and flipping sense below
                 offset = float(body.left.value)
@@ -1827,8 +1855,10 @@ def _extract_disjunct_bounds(
                 continue
         elif isinstance(body, BinaryOp) and body.op == "+":
             # Pattern: var + const <= 0  =>  var <= -const
-            if isinstance(body.left, Variable) and isinstance(body.right, Constant):
-                var = body.left
+            if (lvar := _whole_variable(body.left)) is not None and isinstance(
+                body.right, Constant
+            ):
+                var = lvar
                 offset = float(body.right.value)
 
         if var is None:
