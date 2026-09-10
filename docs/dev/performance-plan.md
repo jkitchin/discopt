@@ -7195,3 +7195,82 @@ The fan-out is a prerequisite of the writer, not a shared win. Sequence the work
 as: fan-out (done) → `ModelRepr → .nl` in Rust → measure against the 16.17 µs/row
 the Python writer costs. The tape keeps the Python array-at-a-time path, which is
 already near its floor.
+
+## 46. The Rust `.nl` writer lands: 10.5× Pyomo, 1.57× oximo (2026-09-10)
+
+§44 decided the writer goes in `discopt-core` over `ModelRepr`; §45 built the
+array fan-out it needs. This is the writer, and it closes the gap §43 opened.
+
+Measured in ONE run on ONE machine, same 40 × 500 = 20 000-row model, every arm
+timed from an empty model to a written `.nl` on disk, row counts verified from
+each file's own header:
+
+| tool | µs/row | vs discopt |
+|---|---:|---:|
+| oximo 0.6.0 (Rust) | 1.06 | 0.64× |
+| **discopt, Rust writer** | **1.66** | 1.00× |
+| discopt, Python writer | 16.21 | 9.8× |
+| Pyomo 6.10.1 | 17.42 | 10.5× |
+
+**10.5× faster than Pyomo and 1.57× oximo** — inside the 2–5×-of-oximo target,
+and past the "notably faster than Pyomo" one. The writer alone went 16.05 → 1.72
+µs/row (9.33×) on the vectorised shape; on a per-element model it is only 1.64×,
+because `model_to_repr` then has 200 000 Python DAG nodes to convert, which is
+one more reason the vectorised idiom is the one to teach (§41).
+
+### Byte-identity as the correctness bar
+
+The writer is a *replacement*, so it is diffed **byte-for-byte** against the
+Python one rather than checked for "solves to the same answer". That is the
+strongest available check and the cheapest to act on — a divergence localises
+itself in the diff, where a round-trip test reports the same optimum while hiding
+a wrong header census that only some solvers read.
+
+**All 66 MINLPLib instances** in `python/tests/data/minlplib_nl` are byte-identical
+after `from_nl` → re-export, plus hand-written shapes covering MINLP integrality,
+matmul, vectorised bodies, equalities and free/fixed bounds. The differential is
+the test suite (`test_nl_writer_rust.py`, 76 cases), forcing the Python writer
+with `DISCOPT_RUST_NL=0` so it keeps working as a differential even if the Rust
+path later becomes unconditional.
+
+### Three defects the byte-diff caught that a round-trip would not have
+
+* **The objective's constant was dropped.** A constraint carries its split-out
+  constant in the `r`-section bound; an objective has no bound to carry it, so it
+  must go back into the body (`_attach_const`). The first draft split it out and
+  never re-emitted it — `nvs06`'s `(0.1 * …) + 1.2` exported as though the
+  `+ 1.2` were absent, and an objective that is *only* a constant lost its body
+  and its nonlinear-objective count. Silent; invisible to status or row counts.
+* **The `r` section was written per CONSTRAINT, not per ROW.** An array body is
+  one `ConstraintRepr` and many rows, so the section was truncated to the
+  constraint count.
+* **Synthesised sums were emitted as the n-ary opcode 54 where Python folds with
+  `+` (opcode 0).** `export/_arrays.py` builds a matmul row, an axis reduction
+  and the squares inside `norm2` with `sum_terms`, a `+` fold; only a `SumOver`
+  the *user* wrote is emitted n-ary — and one that fans out is rebuilt as a fold
+  too. The 66-instance corpus missed this entirely, because there those sums land
+  in linear parts that never reach an expression body; it took a `norm2` body to
+  expose it.
+
+And one the *existing* suite caught, which byte-identity alone would not have:
+`test_matrix_norm_is_refused_loudly`. The Rust expansion applied its `norm2`
+reduction rule at any rank, so a 2-D norm expanded **entrywise** — the Frobenius
+norm, where the modelling layer means the induced/spectral one. It produced a
+valid file with one row and the wrong mathematics: the same silent substitution
+the Python `_scalarize` had earlier the same day (§41), faithfully reproduced in
+Rust. Both writers now refuse.
+
+### What it refuses, and why
+
+**Builder-resident rows.** They sit ahead of the expression rows in the arena and
+after them in `model._constraints`, so the two writers would emit the same model
+with its rows **permuted**. Row order is how a solver's `.sol` duals map back to
+constraints, so the Rust path refuses and the Python writer handles them.
+`dm.custom` likewise falls through to the Python writer's existing loud refusal.
+
+### Standing against the original goal
+
+Construction was never the problem — discopt's vectorised construction is
+0.03 µs/row against oximo's 0.26 (§43). The whole gap was one Python component,
+and it is now Rust. What remains between discopt and oximo is 0.6 µs/row spread
+across `model_to_repr` and the writer, with no single hotspot identified.

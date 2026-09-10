@@ -273,7 +273,24 @@ fn shapes_of(arena: &ExprArena) -> Result<Vec<Vec<usize>>, ExpandError> {
                 // Reductions, NOT element-wise: folding them element-wise would
                 // turn `norm2(x)` on a 3-vector into three rows of `norm2(x[i])`,
                 // which is a different model (see `export/_arrays.py`).
-                MathFunc::Prod | MathFunc::Norm2 => Vec::new(),
+                MathFunc::Prod | MathFunc::Norm2 => {
+                    if args.len() != 1 {
+                        return err(format!("{func:?} takes one argument"));
+                    }
+                    let rank = shapes[args[0].0].len();
+                    // `norm2` of a MATRIX is the induced (spectral) norm, which
+                    // is not a fold over elements -- expanding it entrywise
+                    // computes the Frobenius norm instead and exports different
+                    // mathematics, silently. Refused, as `_lower_norm` and
+                    // `export/_arrays.py::scalarize_reduction` both do. A 0-d
+                    // argument is not a vector reduction either.
+                    if rank != 1 {
+                        return err(format!(
+                            "{func:?} of a {rank}-D argument is not a vector reduction"
+                        ));
+                    }
+                    Vec::new()
+                }
                 _ => {
                     let mut acc: Vec<usize> = Vec::new();
                     for arg in args {
@@ -392,13 +409,36 @@ impl Emitter {
         (self.op.len() - 1) as i64
     }
 
-    /// A sum of `parts`, matching `_nl_expr_compiler`'s degenerate-arity rules:
-    /// no terms is the constant 0, one term is that term.
+    /// An n-ary sum, for a genuine `SumOver` node. Degenerate arities match
+    /// `_nl_expr_compiler`: no terms is the constant 0, one term is that term.
     fn sum(&mut self, parts: &[i64]) -> i64 {
         match parts.len() {
             0 => self.push(OP_CONST, -1, -1, 0.0),
             1 => parts[0],
             _ => self.push_nary(OP_SUMOVER, parts),
+        }
+    }
+
+    /// A left-folded `+` chain, for a sum this module SYNTHESISES -- a matmul
+    /// row, an axis reduction, the squares inside `norm2`.
+    ///
+    /// Not interchangeable with [`Self::sum`]: `export/_arrays.py` builds these
+    /// with `sum_terms`, which folds with `+`, while a `SumOver` the user wrote
+    /// is emitted by the writer as the n-ary `.nl` opcode 54. Emitting `o54`
+    /// here instead put `o54` where the Python writer puts `o0`, which the
+    /// byte-diff caught on a `norm2` body -- the corpus missed it because there
+    /// these sums land in linear parts that never reach an expression body.
+    fn fold_add(&mut self, parts: &[i64]) -> i64 {
+        match parts.len() {
+            0 => self.push(OP_CONST, -1, -1, 0.0),
+            1 => parts[0],
+            _ => {
+                let mut acc = parts[0];
+                for t in &parts[1..] {
+                    acc = self.push(OP_ADD, acc, *t, 0.0);
+                }
+                acc
+            }
         }
     }
 }
@@ -468,8 +508,8 @@ fn expand_node(
     shapes: &[Vec<usize>],
     offsets: &[usize],
     em: &mut Emitter,
-    slots: &mut Vec<Vec<i64>>,
-    done: &mut Vec<bool>,
+    slots: &mut [Vec<i64>],
+    done: &mut [bool],
 ) -> Result<(), ExpandError> {
     if done[i] {
         return Ok(());
@@ -551,8 +591,11 @@ fn expand_node(
                 UnOp::Neg => OP_NEG,
                 UnOp::Abs => OP_ABS,
             };
-            for pos in 0..count {
-                out.push(em.push(code, slots[operand.0][pos], -1, 0.0));
+            // Element-wise and shape-preserving, so operand element k is
+            // output element k -- no broadcast map needed.
+            let operands: Vec<i64> = slots[operand.0][..count].to_vec();
+            for slot in operands {
+                out.push(em.push(code, slot, -1, 0.0));
             }
         }
         ExprNode::FunctionCall { func, args } => match func {
@@ -574,7 +617,7 @@ fn expand_node(
                 }
                 let squares: Vec<i64> =
                     terms.iter().map(|t| em.push(OP_MUL, *t, *t, 0.0)).collect();
-                let total = em.sum(&squares);
+                let total = em.fold_add(&squares);
                 let sqrt = OP_FUNC_BASE + func_code(MathFunc::Sqrt).unwrap();
                 out.push(em.push(sqrt, total, -1, 0.0));
             }
@@ -600,7 +643,17 @@ fn expand_node(
                     .iter()
                     .map(|t| slots[t.0][broadcast_flat(&idx, &shapes[t.0])])
                     .collect();
-                out.push(em.sum(&parts));
+                // A SumOver that stays scalar is written by the `.nl` writer as
+                // the n-ary opcode 54, which is what the Python writer emits for
+                // an unexpanded `SumOverExpression`. One that FANS OUT is rebuilt
+                // per element, and `export/_arrays.py::scalarize` rebuilds it
+                // with `sum_terms` -- a `+` fold. Matching both is what keeps the
+                // two writers byte-identical either way.
+                out.push(if count == 1 {
+                    em.sum(&parts)
+                } else {
+                    em.fold_add(&parts)
+                });
             }
         }
         ExprNode::Sum { operand, axis } => {
@@ -608,7 +661,7 @@ fn expand_node(
             match axis {
                 None => {
                     let parts: Vec<i64> = slots[operand.0].clone();
-                    out.push(em.sum(&parts));
+                    out.push(em.fold_add(&parts));
                 }
                 Some(ax) => {
                     for pos in 0..count {
@@ -626,7 +679,7 @@ fn expand_node(
                             }
                             parts.push(slots[operand.0][flat_of(&full, os)]);
                         }
-                        out.push(em.sum(&parts));
+                        out.push(em.fold_add(&parts));
                     }
                 }
             }
@@ -657,7 +710,7 @@ fn expand_node(
                         };
                         parts.push(em.push(OP_MUL, slots[left.0][lf], slots[right.0][rf], 0.0));
                     }
-                    out.push(em.sum(&parts));
+                    out.push(em.fold_add(&parts));
                 }
             }
         }

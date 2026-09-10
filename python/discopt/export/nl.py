@@ -24,9 +24,11 @@ Inspired by Pyomo's NLv2Writer (pyomo/repn/plugins/nl_writer.py).
 from __future__ import annotations
 
 import io
+import logging
 import math
+import os
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 
@@ -79,12 +81,65 @@ def to_nl(
     # would block a correct export over a defect that only affects solving.
     # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
     model.validate(for_solve=False)
-    writer = _NLWriter(model)
-    text = writer.write()
+    text = _rust_nl_text(model)
+    if text is None:
+        writer = _NLWriter(model)
+        text = writer.write()
     if path is not None:
         Path(path).write_text(text)
         return None
     return text
+
+
+_RUST_NL_ENV = "DISCOPT_RUST_NL"
+
+_RUST_NL_LOG = logging.getLogger(__name__)
+
+
+def _rust_nl_text(model: Model) -> Optional[str]:
+    """``.nl`` text from the Rust writer, or ``None`` to use the Python writer.
+
+    Writing ``.nl`` was the entire remaining external-solver performance gap:
+    the Python writer below costs **16.05 µs/row of a 16.21 µs/row**
+    model-to-file pipeline, against oximo's 0.86 for the same work
+    (``docs/dev/performance-plan.md`` §43). ``discopt_core::nl_writer`` is the
+    replacement, and it is **9.3x faster** on a vectorised model (16.05 -> 1.72
+    µs/row), which puts discopt at 1.66 µs/row end to end: **10.5x Pyomo and
+    1.57x oximo**, measured in one run on one machine (§46).
+
+    It is not a reimplementation with its own opinions: it is diffed
+    **byte-for-byte** against the Python writer, and agrees on all 66 MINLPLib
+    instances in ``python/tests/data/minlplib_nl`` plus a hand-written set
+    covering MINLP integrality, matmul, vectorised bodies, equalities and
+    free/fixed bounds. The Python writer stays as the fallback for anything the
+    arena cannot represent (``dm.custom``), and ``DISCOPT_RUST_NL=0`` forces it,
+    so a suspected regression can be isolated without a rebuild.
+    """
+    if os.environ.get(_RUST_NL_ENV, "1") in ("0", "false", "False"):
+        return None
+    try:
+        from discopt._rust import model_to_repr
+    except ImportError:  # pragma: no cover - extension always present in-tree
+        return None
+    # Builder-resident rows (`add_linear_constraints` / the `Model.constraint`
+    # fast path) sit AHEAD of the expression rows in the arena and AFTER them in
+    # `model._constraints`, so the two writers would emit the same model with its
+    # rows PERMUTED. Row order is not cosmetic in `.nl` -- it is how a solver's
+    # `.sol` duals map back to constraints -- so refuse rather than reorder, and
+    # let the Python writer (which enumerates both in its own order) handle it.
+    if model._builder_linear_constraints():
+        return None
+    try:
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        return repr_.write_nl(model.name)
+    except Exception as exc:  # noqa: BLE001
+        # "This model has no arena representation" arrives as several exception
+        # types (`TypeError: Unknown expression type`, `ValueError: Unknown
+        # MathFunc`, and the writer's own refusals), and the Python writer below
+        # handles every one of them correctly. Nothing is suppressed: this is a
+        # speculative fast path, and the model is written either way.
+        _RUST_NL_LOG.debug("Rust .nl writer declined: %s: %s", type(exc).__name__, exc)
+        return None
 
 
 # ── Expression opcodes (AMPL .nl format) ────────────────────────

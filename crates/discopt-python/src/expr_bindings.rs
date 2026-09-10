@@ -612,6 +612,21 @@ impl PyModelRepr {
         ))
     }
 
+    /// The model as AMPL `.nl` text, written in Rust.
+    ///
+    /// The inverse of `nl_parser`, and the counterpart of `export/nl.py`, which
+    /// it is diffed byte-for-byte against. It exists because writing `.nl` was
+    /// the whole remaining external-solver performance gap: the Python writer
+    /// costs 16.17 us/row of a 16.21 us/row model-to-file pipeline against
+    /// oximo's 0.86 (`docs/dev/performance-plan.md` §43).
+    ///
+    /// Raises rather than returning partial text for any model the arena cannot
+    /// expand; the Python writer stays as the fallback for those.
+    fn write_nl(&self, model_name: &str) -> PyResult<String> {
+        discopt_core::nl_writer::write_nl(&self.inner, model_name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
+    }
+
     /// ExprId (index) of each constraint expression root.
     fn constraint_ids(&self) -> Vec<usize> {
         self.inner.constraints.iter().map(|c| c.body.0).collect()
