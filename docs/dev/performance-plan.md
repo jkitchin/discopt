@@ -6886,3 +6886,59 @@ matrix assembly.
    rewrite of all 93 identity sites. Do not re-scope it as a speed win.
 3. Per-element construction is now 3.85 µs/row and 468 B/row against Pyomo's
    3.24 and 471 like-for-like. Further micro-optimisation there has little left.
+
+## 41. discopt already has the oximo-class path — it is vectorised bodies, and it has holes (2026-09-10)
+
+§40 concluded the lever is bulk construction rather than a per-node arena. It is
+better than that: **the bulk path already exists for nonlinear models** and is
+not linear-only. An array-valued constraint body — `dm.exp(x) + y <= b` on shaped
+variables — is ONE `Constraint` that fans out to N rows.
+
+Measured through to **solve-ready** (build + `model_to_repr` + AD tape), 40 × 1000
+= 40 000 rows, identical mathematics, three reps, row counts verified per arm:
+
+| arm | build | lower | tape | total | µs/row | peak MB |
+|---|---:|---:|---:|---:|---:|---:|
+| per-element (`m.constraint` + rule) | 0.426 | 0.908 | 9.045 | 10.379 | 259.5 | 19.7 |
+| **vectorised** | 0.004 | 0.002 | 0.569 | **0.575** | **14.4** | **0.7** |
+
+**18× end to end, 28× less peak memory.** The arena lowering alone is 450×
+cheaper, because the vectorised model holds 40 array nodes where the per-element
+one holds 200 000 scalar ones.
+
+**Measure the whole pipeline, not construction.** A build-only probe put the
+vectorised arm at 0.005 µs/row — an apparent 800× — because an array body is
+*lazy*: construction is O(families) and the per-row work moves to lowering. Row
+counts do not catch this; both arms genuinely encode 40 000 rows. Only timing
+through to solve-ready shows the real 18×.
+
+### Consequence for this whole workstream
+
+`bench_model_construction.py` measures the *per-element* idiom, so every
+construction change this session (§38–§40, 19.12 → 3.85 µs/row) optimised the
+slow path. Those changes are real and worth keeping, but they are not the route
+to the target — the route is to make the vectorised path the idiom and to close
+its gaps.
+
+### The gaps, which are exactly where the work is
+
+1. **The AD tape is now 99% of the vectorised pipeline** (0.569 s of 0.575 s).
+   `tape_program` (§38) *refuses* array-valued bodies — one `Constraint`, many
+   tape rows, and the flat encoding cannot fan out — so the fastest models fall
+   back to the Python DAG walk. Fanning out in Rust is the highest-value task.
+2. **`.nl` export fails on array bodies.** Measured earlier today: of eight
+   array-shaped construct families, six refuse with
+   `Cannot write array variable x without indexing`; the objective path never
+   reaches `_scalarize` at all, and `norm2` has no writer entry. So the fast
+   idiom cannot be exported to the external solvers the layer must serve.
+3. `_scalarize`'s `FunctionCall` branch broadcasts element-wise, which is wrong
+   for a *reduction*: `norm(x)` on a 3-vector expands to three rows of
+   `norm2(x[i])` rather than one. It only fails loudly today because `norm2` has
+   no `.nl` opcode; give it one and the export becomes silently wrong.
+
+### Direction
+
+Stop optimising per-element construction. The order is: (1) array fan-out in
+`tape_program`; (2) the `.nl` array-body and reduction gaps; (3) make the
+vectorised form the documented idiom, with the benchmark carrying a vectorised
+arm so the two are never confused again.
