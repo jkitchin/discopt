@@ -253,7 +253,7 @@ Key differences from discopt:
 
 - **You need access to 80+ solver backends.** JuMP has the largest solver ecosystem, including BARON, Gurobi, CPLEX, HiGHS, Ipopt, SCIP, and many specialized solvers.
 
-- **Performance of the modeling layer matters.** Julia's compiled execution means model construction is faster than Python-based alternatives for very large models (100K+ variables).
+- **Performance of the modeling layer matters and your model is written row by row.** A compiled language builds a per-row model object far more cheaply than CPython can. Note the qualifier: in discopt the per-row object is avoidable. An array-valued constraint body (`m.subject_to(dm.exp(x) + y <= b)` with `x` of shape `(n,)`) is one Python object for the whole family, and at 100,000 rows that measures at parity with a compiled Rust modelling layer -- 0.91-1.27x, model to written `.nl`, and 40-60x leaner in retained memory (`docs/dev/performance-plan.md` §48, §50). The gap a compiled language closes is the gap between *per-element* idioms.
 
 ### Use BARON when:
 
