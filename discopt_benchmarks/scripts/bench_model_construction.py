@@ -45,6 +45,20 @@ Usage (from repo root, extension built, venv active)::
     python -u discopt_benchmarks/scripts/bench_model_construction.py \
         --forms 4 --instances 200 --reps 2
 
+**The recorded numbers below are container-relative: compare arms WITHIN one
+run, never across sessions.** The absolute discopt figure drifted 3.225 s ->
+3.776 s over a few hours in one container, on *identical* code -- verified by
+checking `python/discopt/` back out to the baseline commit (marker
+`_additive_chain` count 0 vs 3) and re-running: 3.776 s for the old Python
+against 3.823 s for the current, a 1.2% difference inside the spread, while the
+gap to the session's own opening measurement was 17%. Retained RSS, by contrast,
+is deterministic (183.4 -> 182.2 MB here, Pyomo identical to the byte at 94.3),
+so **memory is the reliable cross-session control and wall time is not**. Reading
+the drift as a regression is the trap: it nearly cost this instrument's author a
+published 18% slowdown that did not exist. When a wall-time change matters,
+bisect it in one container with a marker assertion on the loaded code, and treat
+an unchanged memory figure as evidence that nothing structural moved.
+
 Recorded baseline, 40 x 5,000 = 200,000 instances, 5 reps, 4 cores, 1-minute
 loadavg 0.70, `main` @ c052e85, Pyomo 6.10.1:
 
