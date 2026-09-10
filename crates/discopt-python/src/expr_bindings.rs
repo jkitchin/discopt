@@ -1199,6 +1199,49 @@ pub fn model_to_repr(
                     if bidx < builder_var_expr_ids.len() {
                         var_expr_ids.insert(py_id, builder_var_expr_ids[bidx]);
                     }
+                    // Refresh the variable box from the LIVE Python bounds
+                    // (correctness issue C-41). The builder records lb/ub once, at
+                    // registration — `Model._register_variable`, and for every
+                    // pre-existing variable when the builder is lazily created in
+                    // `Model._get_builder`. Cloning `b.inner.variables` above
+                    // therefore carries a box that is stale the moment any caller
+                    // mutates `var.lb` / `var.ub`, which is not misuse: `lb = ub` is
+                    // the only fixing route and in-tree code relies on it
+                    // (`estimate.py` fixing design variables, and the presolve /
+                    // node-reduce / root-reduce passes restoring boxes). Root
+                    // presolve then ran FBBT on the stale box and could return a
+                    // *certified* `infeasible` for a model whose true answer is
+                    // `optimal`.
+                    //
+                    // The pure-expression arm below has always read the live bounds;
+                    // this makes the two arms agree. It also removes an accidental
+                    // dependence on `_materialize_builder_linear_rows`, which masked
+                    // the defect for any model carrying a linear block by rebuilding
+                    // the builder (and so re-reading bounds) as a side effect.
+                    //
+                    // A length mismatch means the Python variable's shape no longer
+                    // matches its registration, which is a real inconsistency rather
+                    // than something to paper over, so it is refused loudly.
+                    if bidx < variables.len() {
+                        let expected = variables[bidx].size;
+                        let lb_obj = py_var.getattr("lb")?;
+                        let lb = extract_flat_f64(&lb_obj)?;
+                        let ub_obj = py_var.getattr("ub")?;
+                        let ub = extract_flat_f64(&ub_obj)?;
+                        if lb.len() != expected || ub.len() != expected {
+                            let name = &variables[bidx].name;
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Variable '{name}' was registered with size \
+                                     {expected} but its bounds now have lengths \
+                                     ({}, {}); a variable's shape must not change \
+                                     after it is added to the model.",
+                                lb.len(),
+                                ub.len()
+                            )));
+                        }
+                        variables[bidx].lb = lb;
+                        variables[bidx].ub = ub;
+                    }
                 }
             }
         }
