@@ -66,6 +66,7 @@ from typing import Any, Optional
 import numpy as np
 
 from discopt._nl_expr_compiler import _FLATTEN_MIN_TERMS
+from discopt.export._common import has_builder_only_constraint_rows
 
 # Opcodes -- must track `crates/discopt-python/src/expr_bindings.rs::tape_program`.
 OP_UNSUPPORTED = 0
@@ -326,7 +327,13 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
         return None
     # Builder rows would land ahead of the expression rows in the arena while the
     # evaluator enumerates them after -- refuse rather than reorder.
-    if model._builder_linear_constraints():
+    #
+    # Asked in O(1) off `_builder_linear_blocks`. The obvious spelling,
+    # `if model._builder_linear_constraints():`, MATERIALISES ONE `Constraint`
+    # OBJECT PER ROW to answer a yes/no question; the same line in the `.nl`
+    # writer's refusal measured at 7.12 us/row on a 20 000-row model, against 9.4
+    # for the writer it was guarding (performance-plan.md §52).
+    if has_builder_only_constraint_rows(model):
         return None
     if getattr(model, "_objective", None) is None:
         return None
@@ -421,7 +428,8 @@ def try_build_expanded_tape(model: Any, E: Any) -> Optional[tuple[Any, list, lis
     """
     if not arena_tape_enabled():
         return None
-    if model._builder_linear_constraints():
+    # O(1), for the reason given in `try_build_arena_tape` above.
+    if has_builder_only_constraint_rows(model):
         return None
     if getattr(model, "_objective", None) is None:
         return None

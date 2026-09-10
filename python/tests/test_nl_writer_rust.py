@@ -26,6 +26,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt.export import to_nl
+from discopt.export.nl import _rust_nl_text
 
 pytestmark = pytest.mark.smoke
 
@@ -183,20 +184,107 @@ def test_constant_only_objective_still_round_trips():
 # ── refusals fall back rather than diverge ──────────────────────────────────
 
 
-def test_builder_rows_fall_back_to_the_python_writer():
-    """Builder rows are ordered differently in the arena, so the Rust path refuses.
+# ── builder-resident rows ───────────────────────────────────────────────────
+#
+# These used to be a refusal: builder rows lead the arena and trail every Python
+# writer, so emitting the arena's order would have written the same model with
+# its rows PERMUTED, and row order is how a solver's `.sol` duals map back to
+# constraints. Refusing paired the FASTEST construction path with the SLOWEST
+# writer -- a 20 000-row bulk model built in 0.31 us/row and exported at 22.83.
+#
+# `nl_writer::write_nl` now takes the builder-row boundary from the repr and
+# reorders to the Python writers' order, so the fast path is available and the
+# bytes are unchanged from what discopt has always written.
 
-    They sit AHEAD of the expression rows there and AFTER them in
-    ``model._constraints``. Emitting the arena's order would write the same model
-    with its rows PERMUTED -- and row order is how a solver's ``.sol`` duals map
-    back to constraints, so it is not cosmetic.
-    """
-    m = dm.Model("blk")
-    x = m.continuous("x", shape=(3,), lb=0.0, ub=2.0)
-    m.subject_to(x[0] * dm.exp(x[1]) <= 4.0, name="nl")
-    m.add_linear_constraints(np.array([[1.0, 1.0, 1.0]]), x, "<=", np.array([2.0]))
+
+def _builder_model(order: str, n: int = 12):
+    """A model mixing builder rows with an expression row, in either order."""
+    m = dm.Model(f"blk_{order}")
+    x = m.continuous("x", shape=(n,), lb=0.1, ub=2.0)
+    A = np.eye(n)
+    b = 2.0 + np.arange(n) % 3
+    if order == "expr_first":
+        m.subject_to(x[0] * dm.exp(x[1]) <= 4.0, name="nl")
+        m.add_linear_constraints(A, x, "<=", b, name="bulk")
+    else:
+        m.add_linear_constraints(A, x, "<=", b, name="bulk")
+        m.subject_to(x[0] * dm.exp(x[1]) <= 4.0, name="nl")
     m.minimize(-x[0])
-    _assert_identical(m, "builder rows")
+    return m
+
+
+@pytest.mark.parametrize("order", ("expr_first", "bulk_first"))
+def test_builder_rows_are_served_by_the_rust_writer(order):
+    m = _builder_model(order)
+    assert _rust_nl_text(m) is not None, "the Rust writer declined a builder model"
+    _assert_identical(m, f"builder rows, {order}")
+
+
+def test_builder_rows_with_an_array_valued_expression_row():
+    """Fan-out and reordering at once: one array body is many rows."""
+    n = 12
+    m = dm.Model("blk_arr")
+    x = m.continuous("x", shape=(n,), lb=0.1, ub=2.0)
+    y = m.continuous("y", shape=(n,), lb=0.1, ub=2.0)
+    m.subject_to(dm.exp(x) + y <= 4.0, name="arr")
+    m.add_linear_constraints(np.eye(n), x, "<=", np.full(n, 2.0), name="bulk")
+    m.minimize(-x[0])
+    text = _assert_identical(m, "builder + array body")
+    assert int(text.split("\n")[1].split()[1]) == 2 * n
+
+
+def test_the_fast_constraint_family_path_is_served_too():
+    """`Model.constraint`'s linear fast path is builder-resident as well."""
+    n = 12
+    m = dm.Model("fam")
+    idx = m.set("I", list(range(n)))
+    x = m.continuous("x", shape=(n,), lb=0.0, ub=10.0)
+    m.constraint(idx, lambda i: x[i] <= 2.0 + i % 3, name="fam")
+    m.minimize(dm.sum(x))
+    assert _rust_nl_text(m) is not None
+    _assert_identical(m, "fast family")
+
+
+@pytest.mark.parametrize("sense", ("<=", ">=", "=="))
+def test_every_builder_sense_agrees(sense):
+    n = 8
+    m = dm.Model(f"sense_{sense}")
+    x = m.continuous("x", shape=(n,), lb=0.0, ub=10.0)
+    m.add_linear_constraints(np.eye(n), x, sense, np.full(n, 2.0), name="s")
+    m.subject_to(dm.log(x[0] + 1.0) <= 5.0, name="expr")
+    m.minimize(dm.sum(x))
+    _assert_identical(m, f"builder sense {sense}")
+
+
+def test_the_reorder_boundary_is_the_builder_row_count():
+    """The count travels with the repr, so it cannot disagree with the rows.
+
+    Asserting it directly means a change to how `model_to_repr` assembles
+    `constraints` shows up here rather than as a silent permutation.
+    """
+    from discopt._rust import model_to_repr
+
+    n = 12
+    m = _builder_model("expr_first", n)
+    rep = model_to_repr(m, getattr(m, "_builder", None))
+    assert rep.n_builder_constraints == n
+    assert rep.n_constraints == n + 1
+    # Builder rows really do lead the arena -- the premise the reorder undoes.
+    names = [rep.constraint_name(i) for i in range(rep.n_constraints)]
+    assert names[:n] == [f"bulk_{i}" for i in range(n)]
+    assert names[n] == "nl"
+
+
+def test_a_model_with_no_builder_rows_reports_a_zero_boundary():
+    """Zero must mean "no reorder", which is what every non-builder path passes."""
+    from discopt._rust import model_to_repr
+
+    m = dm.Model("pure")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=2.0)
+    m.subject_to(dm.exp(x[0]) <= 4.0, name="nl")
+    m.minimize(-x[0])
+    rep = model_to_repr(m, getattr(m, "_builder", None))
+    assert rep.n_builder_constraints == 0
 
 
 def test_custom_call_still_refuses_loudly():

@@ -22,6 +22,14 @@ pub struct PyModelRepr {
     /// Complementarity relations recovered from a `.nl` file (empty for models
     /// built any other way). Their `body` ids reference `inner.arena` (#658).
     complementarities: Vec<ComplementarityRepr>,
+    /// How many LEADING entries of `inner.constraints` came from the Rust model
+    /// builder. `model_to_repr` clones the builder's constraints first and
+    /// appends the expression rows after, so builder rows lead the arena while
+    /// every Python writer emits them last; `write_nl` needs the boundary to put
+    /// the rows back in the writers' order. Zero everywhere else, which makes
+    /// that reordering the identity — the right default for a repr that came
+    /// from a `.nl` parse or from a pass that rebuilt the constraint list.
+    n_builder_constraints: usize,
 }
 
 impl PyModelRepr {
@@ -34,6 +42,8 @@ impl PyModelRepr {
         Self {
             inner: model,
             complementarities,
+            // A repr recovered from a `.nl` parse has no builder rows.
+            n_builder_constraints: 0,
         }
     }
 }
@@ -623,8 +633,20 @@ impl PyModelRepr {
     /// Raises rather than returning partial text for any model the arena cannot
     /// expand; the Python writer stays as the fallback for those.
     fn write_nl(&self, model_name: &str) -> PyResult<String> {
-        discopt_core::nl_writer::write_nl(&self.inner, model_name)
+        // The builder-row boundary travels with the repr rather than being
+        // passed in, so a caller cannot supply a count that does not match the
+        // constraint list it is describing.
+        discopt_core::nl_writer::write_nl(&self.inner, model_name, self.n_builder_constraints)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
+    }
+
+    /// How many leading constraints came from the Rust model builder.
+    ///
+    /// Exposed so a test can assert the boundary the `.nl` writer reorders on,
+    /// rather than inferring it from row names.
+    #[getter]
+    fn n_builder_constraints(&self) -> usize {
+        self.n_builder_constraints
     }
 
     /// ExprId (index) of each constraint expression root.
@@ -737,6 +759,7 @@ impl PyModelRepr {
         dict.set_item("candidates_examined", stats.candidates_examined)?;
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
             },
@@ -766,6 +789,7 @@ impl PyModelRepr {
         dict.set_item("aux_bounds_derived", stats.aux_bounds_derived)?;
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
             },
@@ -1157,6 +1181,7 @@ impl PyModelRepr {
 
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: result.model,
                 complementarities: Vec::new(),
             },
@@ -1181,6 +1206,7 @@ impl PyModelRepr {
         if !self.complementarities.is_empty() {
             return Ok((
                 PyModelRepr {
+                    n_builder_constraints: 0,
                     inner: self.inner.clone(),
                     complementarities: self.complementarities.clone(),
                 },
@@ -1196,6 +1222,7 @@ impl PyModelRepr {
         let reduced = models.last().expect("seeded with the input model").clone();
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: reduced,
                 complementarities: Vec::new(),
             },
@@ -1370,6 +1397,9 @@ pub fn model_to_repr(
         let a = b.inner.arena.clone();
         let v = b.inner.variables.clone();
         let c = b.inner.constraints.clone();
+        // Remember where the builder's rows end: they lead `constraints`, and the
+        // expression rows are appended after. `write_nl` reorders on this
+        // boundary so its output matches the Python writers'.
         let obj = b.inner.objective;
         let sense = b.inner.objective_sense;
         let nv = b.inner.n_vars;
@@ -1386,6 +1416,12 @@ pub fn model_to_repr(
             Vec::new(),
         )
     };
+
+    // Where the builder's rows end. They lead `constraints`; the expression rows
+    // are appended below. `write_nl` reorders on this boundary so the Rust
+    // writer's row order matches every Python writer's (expression rows first,
+    // builder rows after) -- row order is how a solver's `.sol` duals map back.
+    let n_builder_constraints = constraints.len();
 
     // Build variable info from model._variables for the expression path.
     let py_vars = model.getattr("_variables")?;
@@ -1631,6 +1667,7 @@ pub fn model_to_repr(
     Ok(PyModelRepr {
         inner,
         complementarities: Vec::new(),
+        n_builder_constraints,
     })
 }
 

@@ -110,6 +110,7 @@ struct FlatVar {
 /// — which discopt normalises to `x + y - 3 <= 0` — be written as a genuinely
 /// *linear* row with an `n0` body, which the ASL convention requires (nonlinear
 /// rows must be the first `n_nl_cons` and carry the only non-`n0` bodies).
+#[derive(Clone)]
 struct Split {
     linear: BTreeMap<usize, f64>,
     nonlinear: Option<i64>,
@@ -307,7 +308,30 @@ fn write_expr(prog: &ScalarProgram, root: i64, remap: &[usize], out: &mut String
 }
 
 /// Write `repr` as AMPL `.nl` text.
-pub fn write_nl(repr: &ModelRepr, model_name: &str) -> Result<String, ExpandError> {
+///
+/// `n_builder_constraints` is how many of the LEADING entries of
+/// `repr.constraints` came from the Rust model builder (`add_linear_constraints`
+/// and the `Model.constraint` linear fast path). `model_to_repr` clones the
+/// builder's constraints first and appends the expression rows after, so those
+/// rows lead the arena — while every Python writer (`export/nl.py`, `lp.py`,
+/// `mps.py`, `gams.py`) emits `model._constraints` first and the builder rows
+/// after. Left alone the two would write the same model with its rows
+/// **permuted**, and row order is not cosmetic: it is how a solver's `.sol`
+/// duals map back to constraints.
+///
+/// So the rows are reordered here to the Python writers' order rather than the
+/// Python writers being changed to the arena's. Four writers share that order
+/// and every `.nl`/`.lp`/`.mps`/`.gms` discopt has already emitted uses it;
+/// changing it would silently redefine what a stored file means. Reordering
+/// here costs one `O(rows)` index permutation over data already materialised.
+///
+/// Pass `0` for a model with no builder rows (every arena constraint is then an
+/// expression row and the permutation is the identity).
+pub fn write_nl(
+    repr: &ModelRepr,
+    model_name: &str,
+    n_builder_constraints: usize,
+) -> Result<String, ExpandError> {
     let mut prog = expand(repr)?;
     prog.unseal();
 
@@ -360,6 +384,55 @@ pub fn write_nl(repr: &ModelRepr, model_name: &str) -> Result<String, ExpandErro
     let mut rows: Vec<Split> = Vec::with_capacity(row_roots.len());
     for r in &row_roots {
         rows.push(split(&mut prog, *r));
+    }
+
+    // `row_source[r]` is the index in `repr.constraints` that scalar row `r` came
+    // from. An array-valued body is ONE constraint and many rows, so this is not
+    // a one-to-one zip -- `rows_per_constraint` carries the fan-out.
+    let mut row_source: Vec<usize> = Vec::with_capacity(rows.len());
+    for (ci, n) in prog.rows_per_constraint.iter().enumerate() {
+        row_source.extend(std::iter::repeat(ci).take(*n));
+    }
+    if row_source.len() != rows.len() {
+        return Err(ExpandError(format!(
+            "row map covers {} rows but {} were expanded",
+            row_source.len(),
+            rows.len()
+        )));
+    }
+
+    // Builder rows lead the arena and trail every Python writer's output; put
+    // them back where the Python writers put them (see this function's docs).
+    if n_builder_constraints > 0 {
+        if n_builder_constraints > repr.constraints.len() {
+            return Err(ExpandError(format!(
+                "n_builder_constraints is {} but the model has {} constraints",
+                n_builder_constraints,
+                repr.constraints.len()
+            )));
+        }
+        // Stable within each group, so the relative order of the expression rows
+        // and of the builder rows is untouched.
+        let mut order: Vec<usize> = Vec::with_capacity(rows.len());
+        for (r, &ci) in row_source.iter().enumerate() {
+            if ci >= n_builder_constraints {
+                order.push(r);
+            }
+        }
+        for (r, &ci) in row_source.iter().enumerate() {
+            if ci < n_builder_constraints {
+                order.push(r);
+            }
+        }
+        debug_assert_eq!(order.len(), rows.len());
+        let mut permuted_rows: Vec<Split> = Vec::with_capacity(rows.len());
+        let mut permuted_source: Vec<usize> = Vec::with_capacity(rows.len());
+        for &r in &order {
+            permuted_rows.push(rows[r].clone());
+            permuted_source.push(row_source[r]);
+        }
+        rows = permuted_rows;
+        row_source = permuted_source;
     }
 
     // ── canonical variable order (see the module docs; issue #210)
@@ -515,21 +588,11 @@ pub fn write_nl(repr: &ModelRepr, model_name: &str) -> Result<String, ExpandErro
 
     // ── r: constraint bounds, with the split-out constant folded in
     if !rows.is_empty() {
-        // One line per ROW. An array-valued body is one `ConstraintRepr` and
-        // many rows, all sharing its sense and rhs, so the source constraint is
-        // looked up through the row map rather than zipped one-to-one -- which
-        // silently truncated the section to the constraint count.
-        let mut row_source: Vec<usize> = Vec::with_capacity(rows.len());
-        for (ci, n) in prog.rows_per_constraint.iter().enumerate() {
-            row_source.extend(std::iter::repeat(ci).take(*n));
-        }
-        if row_source.len() != rows.len() {
-            return Err(ExpandError(format!(
-                "row map covers {} rows but {} were expanded",
-                row_source.len(),
-                rows.len()
-            )));
-        }
+        // One line per ROW, looked up through `row_source` (built above, and
+        // permuted with `rows`) rather than zipped one-to-one against
+        // `repr.constraints` -- an array-valued body is one constraint and many
+        // rows, and zipping silently truncated this section to the constraint
+        // count.
         out.push_str("r\n");
         for (row, &ci) in rows.iter().zip(&row_source) {
             let c = &repr.constraints[ci];

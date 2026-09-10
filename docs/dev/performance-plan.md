@@ -7696,3 +7696,93 @@ found a P0 in a path with 645 passing tests. `hull` is the one method where the
 idioms legitimately differ — an array body covering the whole variable licenses
 a tightening that per-element bodies do not — so the assertion there is row
 *count* and *optimum*, not row text. Worth pointing at other layers.
+
+## 52. The bulk API reaches the Rust `.nl` writer — and the refusal was itself the bigger tax (2026-09-10)
+
+`add_linear_constraints` (the bulk matrix API) builds at **0.31 µs/row**, the
+fastest construction path in the repo, and `_rust_nl_text` refused it — pairing
+the fastest construction with the slowest writer. This lifts the refusal.
+
+### Why it was there, and what was done instead
+
+`model_to_repr` clones the builder's constraints first and appends the expression
+rows after, so builder rows **lead the arena**. Every Python writer — `nl.py`,
+`lp.py`, `mps.py`, `gams.py` — emits `model._constraints` first and the builder
+rows after. Emitting the arena's order would have written the same model with its
+rows permuted, and row order is how a solver's `.sol` duals map back to
+constraints.
+
+Two ways to reconcile that, and the choice matters:
+
+- **Change the four Python writers to the arena's order.** Makes writer order
+  equal solver order, one invariant everywhere — but silently redefines what
+  every `.nl`/`.lp`/`.mps`/`.gms` discopt has already written for a builder model
+  means.
+- **Reorder inside the Rust writer.** Taken. `ScalarProgram` already carries
+  `rows_per_constraint` ("how many rows each source constraint expanded to"), so
+  the arena-constraint → scalar-row map needed no new plumbing, and the reorder is
+  one `O(rows)` stable partition over data already materialised. The boundary
+  (`n_builder_constraints`) travels **on the repr**, set where the builder's
+  constraints are cloned, so a caller cannot pass a count that disagrees with the
+  rows it describes.
+
+The second is both the smaller change and the safer one; the fragile part of it
+(deriving the row map) turned out to already exist and already be checked.
+
+### Result
+
+| | µs/row, 20 000-row bulk model |
+|---|---:|
+| old `to_nl` (refusal check + Python writer) | 18.72 (sd 1.12) |
+| new `to_nl` (Rust writer) | **2.04** (sd 0.12) |
+| speedup | **9.2×** |
+
+7 interleaved reps, load 0.59. Byte-identical output on every builder shape
+tried — bulk-only, expression-row-first, bulk-first, bulk plus an array-valued
+body (fan-out and reorder at once), the `Model.constraint` fast family, and all
+three senses — plus the standing 66-instance MINLPLib corpus diff, unchanged.
+
+### The refusal was itself 39% of the cost
+
+This is the part worth carrying forward. The old check was:
+
+```python
+if model._builder_linear_constraints():
+    return None
+```
+
+`_builder_linear_constraints()` **materialises one `Constraint` object per row**
+to answer a yes/no question, and it ran inside the timed `to_nl` call. Measured
+at 20 000 rows: 7.12 µs/row for the check against 9.4 for the Python writer that
+followed it. So a builder model paid ~39% of its export cost on the decision *not
+to* use the fast path — the guard cost nearly as much as the work it was
+guarding.
+
+A predicate that answers "are there any?" by building all of them is the general
+shape of that bug. `has_builder_only_constraint_rows()` already exists in
+`export/_common.py` and answers it in O(1) off `model._builder_linear_blocks`;
+the refusal simply did not use it.
+
+Grepping for the pattern found **two more** instances, both in `_arena_tape.py`
+(`try_build_arena_tape` and `try_build_expanded_tape`), refusing builder models
+the same way. Both now use the O(1) predicate. They sit behind
+`arena_tape_enabled()` so the cost only landed with that flag on, and the two
+predicates are equivalent on every shape tested (no builder, bulk rows, and a
+builder objective with no constraint blocks); the one divergence they could have
+— a registered block carrying zero rows — makes the O(1) form refuse where the
+old one proceeded, which is the safe direction.
+
+### Correction to a figure quoted earlier in this session
+
+The Python-writer cost on this model was first reported as **22.83 µs/row** from
+a single un-replicated call. The replicated median is **18.72 (sd 1.12)** for the
+same old path, and **9.4** for the Python writer alone once the refusal check is
+separated out. The 22.83 figure is retracted per §11; the two numbers that mean
+something are 18.72 (what a user's `to_nl` actually cost) and 9.4 (writer versus
+writer, which makes the new writer 4.6× rather than 9.2×). Quote whichever the
+claim is about, and say which.
+
+### Still Python-only
+
+`lp.py`, `mps.py` and `gams.py`. GAMS matters beyond speed — it is the only route
+to a full-license BARON.
