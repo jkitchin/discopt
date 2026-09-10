@@ -59,7 +59,22 @@ def teardown_module(module):  # noqa: ANN001, ANN201 - pytest hook
 
 
 def _solve(model):
-    return model.solve(time_limit=120.0, gap_tolerance=1e-6, max_nodes=200_000)
+    # 30 s, not 120. ``test_axis_sum_with_an_equality_sense`` is a concave
+    # minimization that never closes its gap -- it spends whatever budget it is
+    # given (measured: 383 nodes at 5 s, 5297 at 120 s, 9101 at 300 s) -- so a
+    # 120 s budget under the fast-correctness lane's ``--timeout=120`` made the
+    # per-test *watchdog*, not the assertions, decide the test: it passed at CI
+    # run 2794 and timed out at 2795 on identical library code. ci.yml already
+    # states the principle for the slow lane ("the per-test timeout must not be
+    # what decides a test"); this restores it here.
+    #
+    # Nothing is given up. The returned incumbent (-4) and dual bound (-6) are
+    # bit-identical at 1, 2, 5, 10, 20, 40, 120 and 300 s, and the first budget
+    # that reaches them at all is 1 s (0.5 s returns ``time_limit`` with no
+    # objective, which this file's assertions would catch). 30 s is a ~30x margin
+    # on that and a 4x margin under the watchdog. A shorter budget can only make
+    # these assertions harder to satisfy, never easier.
+    return model.solve(time_limit=30.0, gap_tolerance=1e-6, max_nodes=200_000)
 
 
 def _assert_min_certificate(model, true_opt: float, witness: np.ndarray, name: str) -> None:
