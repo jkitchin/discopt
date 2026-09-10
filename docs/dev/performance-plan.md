@@ -7055,3 +7055,80 @@ This supersedes §41's roadmap ordering. Vectorising the NN and GDP emitters and
 making the vectorised idiom the default still pay — on discopt's own solve path
 (1.65 µs/row to tape-ready) and on memory — but they move the 0.03, not the
 16.17, and must not be sold as the route to external-solver performance.
+
+## 44. Decision: the `.nl` writer goes in discopt-core over `ModelRepr` (2026-09-10)
+
+§43 identified the `.nl` writer as the whole remaining gap (16.17 of discopt's
+16.21 µs/row; 18.8× oximo's). Three substrates were considered. Recorded here
+because two of them are attractive and wrong, and the reasons are not obvious
+from the outside.
+
+### Rejected: reuse a writer from pounce
+
+`jkitchin/pounce` has **no `.nl` writer**. It has a `.nl` *reader*
+(`pounce-nl/src/nl_reader.rs`) and a `.sol` *writer*
+(`pounce-nl/src/sol_writer.rs`) — and `pounce-cli` re-exports the latter as
+`pounce_nl::sol_writer as nl_writer`, "under its historical name to keep
+`nl_writer::…` call sites resolving". **The module you reach as `nl_writer`
+writes `.sol`, the solution file, not `.nl`, the model.** Every `"g3 1 1 0"` in
+that repo is a test fixture feeding the reader; `render_expression` renders
+human-readable algebra for diagnostics, not postfix opcodes. Expect to
+rediscover this; the alias is convincing.
+
+### Rejected: build the writer over pounce's `NlProblem`
+
+`NlProblem` is a complete NLP model (bodies, linear parts, bounds, x0, suffixes,
+names) and discopt already constructs one on every solve via `build_nl_problem`,
+so this looks nearly free. It is not:
+
+* **No integrality.** No `var_type`, no integer flag anywhere, and `NlCounts`
+  carries only the nonlinearity census (`nlc/nlo/nlvc/nlvo/nlvb`) — not the
+  integer-block counts (`nbv/niv/nlvbi/nlvci/nlvoi`). Correct for a solver that
+  cannot branch; fatal for export, because a MINLP written through it becomes a
+  **silent continuous relaxation of the user's model**.
+* **No linear/nonlinear split on the in-memory path.** `NlProblemParts` is all
+  `Expr` trees by design, so `.nl`'s `J`/`G` segments and header census would
+  have to be re-derived, and its own docs note a genuinely linear row built that
+  way reports `NonLinear`.
+
+### Rejected (as stated): delete discopt's reader, use pounce's
+
+pounce's reader *is* more sophisticated where an NLP solver needs it — CSE /
+`V`-segments (150 mentions vs 6), suffixes (75 vs 5), imported/external
+functions (35 vs **0**, so discopt likely cannot read IDAES-style `.nl` with
+compiled C functions at all). But it has no integrality and **hard-errors on
+complementarity** (`5 => "complementarity (kind 5) bounds are not supported"`),
+while discopt's parser handles both (positional `nlvbi/nlvci/nlvoi` block logic;
+`parse_nl_with_complementarity`, #658). A wholesale swap makes every MINLPLib
+instance read back as a relaxation, silently. The consolidation instinct is
+sound — two `.nl` readers in one ecosystem is a real smell — but the price is
+wrong. Prefer porting pounce's CSE/suffix/external-function handling *into*
+discopt's reader; that gap is worth closing on its own merits.
+
+### Decision
+
+**The writer goes in `discopt-core`, over `ModelRepr`.** That structure is
+already a strict superset of `NlProblem` for export: `VarInfo` carries
+`var_type` (the integrality `NlProblem` lacks), `name`, `offset`, `size`,
+`shape`, `lb`, `ub`; `ConstraintRepr` carries body / sense / rhs / name; the
+arena retains full structure so the linear/nonlinear split is derivable
+(`is_constraint_linear`, `constraint_quadratic_form` already exist); and
+`ComplementarityRepr` is alongside. No new type, no new dependency, and the job
+is the exact inverse of `nl_parser.rs`, sharing its opcode table.
+
+Every format decision is already encoded in `export/nl.py` — canonical
+nonlinear-vars-first reordering, the header census, the linear/nonlinear split,
+the `J`/`G`/`r`/`b`/`k` segments — so this is a port against a known-good
+reference (~1 200–1 800 lines of Rust against 1 484 of Python), with the Python
+writer retained as the fallback for what the arena cannot hold (`dm.custom`).
+
+### Build the array fan-out first
+
+`ConstraintRepr.body` may be an array-valued node (matmul, axis sum), so the
+Rust writer must fan out to scalar rows — which is exactly the fan-out
+`tape_program` refuses today, and the tape is 97% of the vectorised pipeline
+(§41). **One piece of Rust work unblocks both**, so it is the first task, not a
+detail of the second.
+
+Expected: write 16.17 → ~1 µs/row, total 16.21 → ~1–2 — **~10× Pyomo and within
+~1.5–2× of oximo**, from one bounded component.
