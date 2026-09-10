@@ -632,35 +632,43 @@ class Expression:
     # Expression subclass, including in plugins.
     _shape: Any = _UNSET_SHAPE
 
+    # Each operator inlines ``_wrap``'s Expression check rather than calling it.
+    # Measured (#1215): ``_wrap`` was 750 000 calls on a 200 000-row build, and in
+    # the common ``x[i] * y[i]`` shape the operand is *already* an Expression, so
+    # the call did nothing but an ``isinstance``. A Python-level call is the
+    # expensive part; ``isinstance`` is a C call. Construction is 35 function
+    # calls per row and that count is the budget, so the duplication is worth it
+    # here -- and only here.
+
     def __add__(self, other):
-        return BinaryOp("+", self, _wrap(other))
+        return BinaryOp("+", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __radd__(self, other):
-        return BinaryOp("+", _wrap(other), self)
+        return BinaryOp("+", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __sub__(self, other):
-        return BinaryOp("-", self, _wrap(other))
+        return BinaryOp("-", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rsub__(self, other):
-        return BinaryOp("-", _wrap(other), self)
+        return BinaryOp("-", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __mul__(self, other):
-        return BinaryOp("*", self, _wrap(other))
+        return BinaryOp("*", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rmul__(self, other):
-        return BinaryOp("*", _wrap(other), self)
+        return BinaryOp("*", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __truediv__(self, other):
-        return BinaryOp("/", self, _wrap(other))
+        return BinaryOp("/", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rtruediv__(self, other):
-        return BinaryOp("/", _wrap(other), self)
+        return BinaryOp("/", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __pow__(self, other):
-        return BinaryOp("**", self, _wrap(other))
+        return BinaryOp("**", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rpow__(self, other):
-        return BinaryOp("**", _wrap(other), self)
+        return BinaryOp("**", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __neg__(self):
         return UnaryOp("neg", self)
@@ -670,14 +678,24 @@ class Expression:
 
     # ── Comparison operators produce Constraints, not booleans ──
 
+    # ``self - _wrap(other)`` routed through ``__sub__``, which called ``_wrap``
+    # a SECOND time on an operand it had just wrapped. Building the ``BinaryOp``
+    # here removes both calls per comparison -- 150 000 ``__sub__`` and 150 000
+    # redundant ``_wrap`` calls on a 200 000-row build. The node built is
+    # identical, which is what the normalisation contract on ``Constraint``
+    # depends on: body ``sense`` 0.
+
     def __le__(self, other):
-        return Constraint(self - _wrap(other), sense="<=", rhs=0.0)
+        rhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", self, rhs), sense="<=", rhs=0.0)
 
     def __ge__(self, other):
-        return Constraint(_wrap(other) - self, sense="<=", rhs=0.0)
+        lhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", lhs, self), sense="<=", rhs=0.0)
 
     def __eq__(self, other):
-        return Constraint(self - _wrap(other), sense="==", rhs=0.0)
+        rhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", self, rhs), sense="==", rhs=0.0)
 
     def __ne__(self, other):
         # ``!=`` is not a valid optimization-constraint operator. Because
@@ -3814,11 +3832,18 @@ class Model:
         from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
         from discopt.modeling.sets import call_member
 
-        generated: list[tuple] = []
         # A family is the bulk path: every row it builds is reachable, so each
         # collection triggered while building it traverses the whole model and
         # frees nothing. Measured at ~40% of a 200 000-row build's wall
         # (see :func:`bulk_construction_gc`).
+        #
+        # ``members`` and ``rows`` are filled in ONE pass. This used to build a
+        # list of ``(member, constraint)`` tuples and then walk it three more
+        # times -- a dict comprehension, a list comprehension for the fast-linear
+        # probe, and the append loop -- which on a 5 000-member family is 15 000
+        # extra iterations and 5 000 throwaway tuples per family.
+        members: dict = {}
+        rows: list = []
         with bulk_construction_gc():
             for member in index_set:
                 c = call_member(rule, member, index_set.dimen)
@@ -3829,11 +3854,18 @@ class Model:
                         f"constraint rule for key {member!r} returned {type(c)}, "
                         "expected a Constraint (from <=, >=, == on expressions) or Skip."
                     )
-                c.name = f"{name}[{key_label(member)}]" if name else None
-                generated.append((member, c))
+                # `key_label`'s tuple branch is the rare one; a plain member goes
+                # straight to `str` here rather than through a call that only
+                # does an `isinstance` first (200 000 calls per 200 000 rows).
+                if name:
+                    label = key_label(member) if type(member) is tuple else str(member)
+                    c.name = f"{name}[{label}]"
+                else:
+                    c.name = None
+                members[member] = c
+                rows.append(c)
 
-        members = {m: c for m, c in generated}
-        if fast and self._try_fast_linear_family([c for _, c in generated], name):
+        if fast and self._try_fast_linear_family(rows, name):
             # Rows were emitted into the Rust builder (recorded on
             # ``_builder_linear_blocks``), NOT appended to ``_constraints`` — that would
             # double-count them in the native solve. The NLPEvaluator / feasibility check
@@ -3841,8 +3873,7 @@ class Model:
             # ``_builder_linear_constraints()`` (#840), so their view stays complete
             # without a separate mirror. Introspection view still returned.
             return IndexedConstraint(name, index_set, members, fast=True)
-        for _, c in generated:
-            self._constraints.append(c)
+        self._constraints.extend(rows)
         return IndexedConstraint(name, index_set, members, fast=False)
 
     def _try_fast_linear_family(self, constraints: list, name: Optional[str]) -> bool:
