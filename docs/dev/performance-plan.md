@@ -6897,20 +6897,32 @@ variables — is ONE `Constraint` that fans out to N rows.
 Measured through to **solve-ready** (build + `model_to_repr` + AD tape), 40 × 1000
 = 40 000 rows, identical mathematics, three reps, row counts verified per arm:
 
-| arm | build | lower | tape | total | µs/row | peak MB |
-|---|---:|---:|---:|---:|---:|---:|
-| per-element (`m.constraint` + rule) | 0.426 | 0.908 | 9.045 | 10.379 | 259.5 | 19.7 |
-| **vectorised** | 0.004 | 0.002 | 0.569 | **0.575** | **14.4** | **0.7** |
+| arm | build | lower | tape | total | µs/row |
+|---|---:|---:|---:|---:|---:|
+| per-element (`m.constraint` + rule) | 0.136 | 0.274 | 1.969 | 2.380 | 59.5 |
+| **vectorised** | 0.001 | 0.001 | 0.064 | **0.066** | **1.65** |
 
-**18× end to end, 28× less peak memory.** The arena lowering alone is 450×
-cheaper, because the vectorised model holds 40 array nodes where the per-element
-one holds 200 000 scalar ones.
+Peak allocation, measured in a *separate* pass: per-element 19.7 MB, vectorised
+0.7 MB — **36× end to end and 28× less memory**, and the vectorised arm reaches
+**solve-ready at 1.65 µs/row and 17.5 B/row**. For scale, oximo's 0.66 µs/row and
+~205 B/row are *construction only*; this column includes the Rust arena and the
+AD tape as well.
 
-**Measure the whole pipeline, not construction.** A build-only probe put the
-vectorised arm at 0.005 µs/row — an apparent 800× — because an array body is
-*lazy*: construction is O(families) and the per-row work moves to lowering. Row
-counts do not catch this; both arms genuinely encode 40 000 rows. Only timing
-through to solve-ready shows the real 18×.
+**Two instrument corrections, both of which changed the answer.**
+
+*The build-only probe lied by 800×.* It put the vectorised arm at 0.005 µs/row,
+because an array body is *lazy*: construction is O(families) and the per-row work
+moves to lowering. Row counts do not catch this — both arms genuinely encode
+40 000 rows. Only timing through to solve-ready shows the real figure.
+
+*The first solve-ready probe lied by 2×, in the other direction.* It ran
+`tracemalloc.start()` around the timed region and reported 259.5 µs/row against
+14.4, i.e. 18×. tracemalloc taxes every allocation and the per-element arm
+allocates far more, so it inflated that arm disproportionately — the isolated
+vectorised tape measures 2.4 µs/row where the instrumented run said 14.2. With
+memory moved to its own untimed pass the true figures are those above.
+**Never measure time with an allocation tracer running**; take memory in a
+separate pass.
 
 ### Consequence for this whole workstream
 
@@ -6922,7 +6934,7 @@ its gaps.
 
 ### The gaps, which are exactly where the work is
 
-1. **The AD tape is now 99% of the vectorised pipeline** (0.569 s of 0.575 s).
+1. **The AD tape is 97% of the vectorised pipeline** (0.064 s of 0.066 s).
    `tape_program` (§38) *refuses* array-valued bodies — one `Constraint`, many
    tape rows, and the flat encoding cannot fan out — so the fastest models fall
    back to the Python DAG walk. Fanning out in Rust is the highest-value task.
@@ -6941,4 +6953,6 @@ its gaps.
 Stop optimising per-element construction. The order is: (1) array fan-out in
 `tape_program`; (2) the `.nl` array-body and reduction gaps; (3) make the
 vectorised form the documented idiom, with the benchmark carrying a vectorised
-arm so the two are never confused again.
+arm so the two are never confused again. On the numbers above the vectorised path
+already exceeds the stated target (oximo-comparable memory, 2-5x oximo speed) on
+both axes; the work is to make it usable end to end, not to make it faster.
