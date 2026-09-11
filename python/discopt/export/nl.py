@@ -132,7 +132,11 @@ def _rust_nl_text(model: Model) -> Optional[str]:
     # written.
     try:
         repr_ = model_to_repr(model, getattr(model, "_builder", None))
-        return repr_.write_nl(model.name)
+        # Through a typed local: `write_nl` comes from the PyO3 extension, whose
+        # bindings are untyped, so returning it directly returns `Any` from a
+        # function declared to return `str | None`.
+        text: str = repr_.write_nl(model.name)
+        return text
     except Exception as exc:  # noqa: BLE001
         # "This model has no arena representation" arrives as several exception
         # types (`TypeError: Unknown expression type`, `ValueError: Unknown

@@ -323,10 +323,13 @@ class TapeNLPEvaluator:
         if arena_tape_enabled():
             built = try_build_arena_tape(model, self._pounce.NlExpr)
         if built is not None:
-            obj, cons = built
-            if len(cons) != len(self._source_constraints):
+            # Named apart from the `cons` the Python walk below builds: that one
+            # is annotated `list[Any]`, and re-using one name for both makes the
+            # second binding a redefinition.
+            arena_obj, arena_cons = built
+            if len(arena_cons) != len(self._source_constraints):
                 raise AssertionError(
-                    f"arena tape produced {len(cons)} rows for "
+                    f"arena tape produced {len(arena_cons)} rows for "
                     f"{len(self._source_constraints)} constraints; row attribution "
                     f"(duals, row map, feasibility) would be wrong"
                 )
@@ -340,8 +343,10 @@ class TapeNLPEvaluator:
             # `frompyfunc` build the per-element POUNCE nodes in C, while an
             # expanded program has to be consumed one scalar instruction at a
             # time from Python. See performance-plan.md §45.
-            return obj, cons, [1] * len(cons)
+            return arena_obj, arena_cons, [1] * len(arena_cons)
 
+        if model._objective is None:
+            raise ValueError("Model has no objective set.")
         obj = compile_to_nl_expr(model._objective.expression, model)
         # A body may be ARRAY-valued -- `x <= 1` on a 3-vector is ONE Constraint
         # and THREE rows -- so fan each one out. `reshape(-1)` is C order, which is

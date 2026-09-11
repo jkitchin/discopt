@@ -69,7 +69,7 @@ class FullSpaceFormulation:
         if unsupported:
             raise ValueError(
                 f"FullSpaceFormulation does not support activations: "
-                f"{sorted(getattr(a, 'value', a) for a in unsupported)}. "
+                f"{sorted(str(getattr(a, 'value', a)) for a in unsupported)}. "
                 f"Use 'relu_bigm' for ReLU."
             )
 

@@ -653,7 +653,9 @@ class _GamsWriter:
             # builds; a right-deep chain still recurses, and nothing in discopt
             # emits one.
             spine: list = []
-            node = expr
+            # Annotated: the loop narrows `node` to `BinaryOp`, and `node.left`
+            # is an `Expression`, so an unannotated `node` cannot be re-bound.
+            node: Expression = expr
             while isinstance(node, BinaryOp) and node.op in ("+", "-"):
                 spine.append((node.op, node.right))
                 node = node.left

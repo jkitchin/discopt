@@ -30,6 +30,7 @@ different model.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Callable, Optional, cast
 
 import numpy as np
@@ -67,8 +68,13 @@ def obj0(x) -> np.ndarray:
     return out
 
 
-def sum_terms(terms: list[Expression]) -> Expression:
-    """Left-fold a list of scalar expressions into a sum (``+``)."""
+def sum_terms(terms: Sequence[Expression]) -> Expression:
+    """Left-fold a sequence of scalar expressions into a sum (``+``).
+
+    ``Sequence``, not ``list``: this only reads the terms, and ``list`` is
+    invariant, so a ``list[BinaryOp]`` built by a caller would not be accepted
+    as a ``list[Expression]``.
+    """
     if not terms:
         return Constant(0.0)
     result: Expression = terms[0]

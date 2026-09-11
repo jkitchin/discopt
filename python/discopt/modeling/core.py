@@ -2383,6 +2383,11 @@ class Parameter(Expression):
     >>> result = m.solve()
     """
 
+    # Declared so the ``value`` property's return type is inferable: the getter
+    # returns ``self._value`` and the setter assigns to it, which without an
+    # annotation is a cycle mypy resolves to "cannot determine type".
+    _value: np.ndarray
+
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
         self.name = name
         # Through the setter, so `_shape` is populated by the one path that
@@ -2430,10 +2435,10 @@ class Parameter(Expression):
         # shape (3,) built without complaint. Keep the two in step here.
         self._shape = arr.shape
 
-    @property
-    def shape(self) -> tuple:
-        """Shape of the value. Tracks :attr:`value`, which cannot change shape."""
-        return self._value.shape
+    # No `shape` property here on purpose. `Expression.shape` is read-write and
+    # already answers for a Parameter: the `value` setter writes `_shape`, which
+    # is what `_known_shape` -- and so `Expression.shape` -- reads. A read-only
+    # override would narrow the base property for no gain.
 
     def __repr__(self):
         return f"param({self.name})"
