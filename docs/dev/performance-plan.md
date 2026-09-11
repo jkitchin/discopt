@@ -8076,3 +8076,82 @@ and would never have shown it.
 `reduced_space.py`, `relu_bigm.py` and `tree_ensemble.py` are unchanged and still
 per-element. They should follow the same recipe — reduction form, not matmul;
 `_family_name` for single-row families; byte-diff **and** a solve comparison.
+
+## 56. The NN verification harness, and why `reduced_space` was reverted (2026-09-11)
+
+§55 vectorised `full_space`. Continuing to the other three emitters produced one
+committed artifact, one confirmation, one revert, and one filed defect.
+
+### The harness: `scripts/issue1215_nn_verify.py`
+
+§55's verification used `.nl` + LP only. That is not enough, and this exists
+because the gap showed up immediately on the next emitter. Four arms, each
+covering something the others cannot:
+
+| arm | covers | blind to |
+|---|---|---|
+| NL | the solver-facing format | row **names** — it carries none |
+| LP | names | any nonlinear activation — cannot represent one |
+| GAMS | names **and** nonlinear bodies | — |
+| EVAL | the **arena**'s objective at fixed points | — |
+
+GAMS is the only arm that can show a row-name change on a nonlinear net. EVAL
+exists because §55 established that byte-identical export is not evidence of
+solver neutrality. One known-weak column is left in deliberately: `maxcon` and
+`maxbnd` come back NaN on these models in *both* arms, so only `obj` is the
+equivalence check — kept rather than deleted so a reader does not mistake the NaN
+for a finding.
+
+Expected refusals are correct behaviour, not failures (LP cannot take a nonlinear
+activation; `.nl` refuses `max()`, i.e. RELU in `reduced_space`, as needing DNLP).
+The harness reports per-arm identical/differing counts so a refusal appearing on
+*both* sides reads as zero coverage rather than as a pass.
+
+### `full_space` confirmed on GAMS too
+
+Re-verified with the fuller harness: **160/160 captures identical across all four
+arms**, GAMS included. §55's byte-identity claim holds and was not resting on the
+missing arm.
+
+### `reduced_space`: vectorised, then reverted
+
+The change worked and is mathematically sound — the arena objective matches to 12
+decimals at every sampled point, and the constraint-object count falls 8 → 3 for
+a 3-layer net. It also changed the emitted output in two ways, and it is reverted
+because neither is explained:
+
+1. **GAMS row names shift by one.** `pred_layer_0_0 … _4` becomes
+   `pred_layer_0_1 … _5`. GAMS expands a family 1-based (its set labels are
+   1-based — `pred_input('1')`), and `reduced_space`'s loop wrote 0-based names.
+2. **`.nl` sum encoding changes** from `o54 n` (n-ary sum) to nested `o0` binary
+   adds, on 30 of 40 NL captures — the same fold-vs-n-ary distinction §46 pinned.
+
+The unexplained part is why `full_space` shows **neither**, with the same
+`_family_name` helper and the same `dm.sum(..., axis=1)` construction: its GAMS
+rows come out `pred_affine_0_1 … _5` both before *and* after. So family expansion
+is not uniformly 1-based, and until that is understood a rename cannot be
+distinguished from a bug. Shipping an unexplained output change in a formulation
+layer is not worth an unmeasured speedup, so this follows §53's disposition:
+reverted, recorded, not deferred as a half-change.
+
+### A defect the harness found
+
+`to_gams()` raises `TypeError: only 0-dimensional arrays can be converted to
+Python scalars` for **every single-output `reduced_space` embedding** — 16 of 40
+cases, all and only output size 1, on the *unmodified* emitter. The GAMS writer
+has its own expression walker and does not go through
+`needs_scalarize`/`scalarize`, so §55's two `_arrays.py` fixes did not reach it.
+
+That is the fourth instance of one family in this work: shape-`(1,)` handling is
+systematically weak — `needs_scalarize` ignoring a `Constant`'s shape, `x[0]` on a
+shape-`(1,)` variable, a single-row family losing its name index, and now the GAMS
+walker. Filed separately; the likely fix is routing GAMS bodies through
+`_arrays.scalarize_body` as the other three writers do.
+
+### Remaining
+
+`reduced_space` (pending the naming question), `relu_bigm` and `tree_ensemble` are
+**not started**. `relu_bigm` additionally needs care its siblings do not: it
+creates one binary per mixed unit (`pred_q_0_3`), so vectorising changes variable
+names and column order, which is `.sol` mapping. Gather and mask indexing on array
+bodies was verified to work and export, so nothing there is structurally blocked.
