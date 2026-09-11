@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
+from discopt._arena_tape import arena_tape_enabled, try_build_arena_tape
 from discopt._nl_expr_compiler import (
     UnsupportedForTape,
     compile_to_nl_array,
@@ -268,23 +269,18 @@ class TapeNLPEvaluator:
         model = self._model
         objective = model._objective
         assert objective is not None  # refused in __init__
-        obj = compile_to_nl_expr(objective.expression, model)
+
+        # Prefer lowering the Rust arena, which `model_to_repr` has already built
+        # from the same structure, over a second walk of the Python DAG: measured
+        # at foundation scale the tape build is 59% of the build -> solve-ready
+        # pipeline and 93-94% of THAT is this walk (#1215). `_arena_tape` returns
+        # `None` -- never a partial tape -- for anything it cannot reproduce
+        # exactly, and its output is verified bit-identical to the walk below
+        # (`issue1215_arena_tape_differential.py`), so this is a marshaling
+        # change, not a numerical one.
+        obj, cons, sizes = self._build_tape_nodes(model)
         if self._negate:
             obj = -obj
-
-        # A body may be ARRAY-valued -- `x <= 1` on a 3-vector is ONE Constraint
-        # and THREE rows -- so fan each one out. `reshape(-1)` is C order, which is
-        # exactly what the JAX evaluator concatenates
-        # (`jnp.reshape(fn(x, params), (-1,))`), so row k here is row k there and
-        # the two backends' duals, row maps and feasibility reports line up. An
-        # earlier revision could assert one row per constraint because the
-        # compiler refused every array form; it no longer does.
-        cons: list[Any] = []
-        sizes: list[int] = []
-        for c in self._source_constraints:
-            rows = compile_to_nl_array(c.body, model).reshape(-1)
-            sizes.append(int(rows.size))
-            cons.extend(rows.tolist())
         self._constraint_flat_sizes = np.asarray(sizes, dtype=np.intp)
         self._n_constraints = len(cons)
 
@@ -307,6 +303,65 @@ class TapeNLPEvaluator:
         self._jac_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._hess_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._gn_base_map: Optional[np.ndarray] = None
+
+    def _build_tape_nodes(self, model: "Model") -> tuple[Any, list, list[int]]:
+        """``(objective, constraint rows, rows-per-constraint)``, arena path first.
+
+        The arena lowering covers scalar-bodied expression-path models, which is
+        the shape the NLP path actually meets; everything else -- array-valued
+        bodies, builder-resident rows, ``dm.custom`` -- comes back as ``None``
+        and falls through to the Python DAG walk unchanged.
+
+        The row-count assertion is not defensive noise. ``_constraint_flat_sizes``
+        maps solver rows back to ``Constraint`` objects for duals, the row map and
+        feasibility reporting, so a lowering that returned a different number of
+        rows than the evaluator enumerated would mis-attribute every one of them
+        silently. The arena path already refuses on a count mismatch; this catches
+        a future divergence between what it counts and what the evaluator does.
+        """
+        built = None
+        if arena_tape_enabled():
+            built = try_build_arena_tape(model, self._pounce.NlExpr)
+        if built is not None:
+            # Named apart from the `cons` the Python walk below builds: that one
+            # is annotated `list[Any]`, and re-using one name for both makes the
+            # second binding a redefinition.
+            arena_obj, arena_cons = built
+            if len(arena_cons) != len(self._source_constraints):
+                raise AssertionError(
+                    f"arena tape produced {len(arena_cons)} rows for "
+                    f"{len(self._source_constraints)} constraints; row attribution "
+                    f"(duals, row map, feasibility) would be wrong"
+                )
+            # Every arena row is scalar by construction -- the path refuses any
+            # body that fans out -- so each constraint contributes exactly one.
+            #
+            # It deliberately does NOT use `try_build_expanded_tape`, which CAN
+            # fan array bodies out (in Rust). Measured, that is 1.77x SLOWER
+            # here: the Python walk below lowers array-at-a-time -- 242
+            # `_lower_uncached` calls for 20 000 rows -- and lets numpy's
+            # `frompyfunc` build the per-element POUNCE nodes in C, while an
+            # expanded program has to be consumed one scalar instruction at a
+            # time from Python. See performance-plan.md §45.
+            return arena_obj, arena_cons, [1] * len(arena_cons)
+
+        if model._objective is None:
+            raise ValueError("Model has no objective set.")
+        obj = compile_to_nl_expr(model._objective.expression, model)
+        # A body may be ARRAY-valued -- `x <= 1` on a 3-vector is ONE Constraint
+        # and THREE rows -- so fan each one out. `reshape(-1)` is C order, which is
+        # exactly what the JAX evaluator concatenates
+        # (`jnp.reshape(fn(x, params), (-1,))`), so row k here is row k there and
+        # the two backends' duals, row maps and feasibility reports line up. An
+        # earlier revision could assert one row per constraint because the
+        # compiler refused every array form; it no longer does.
+        cons: list[Any] = []
+        sizes: list[int] = []
+        for c in self._source_constraints:
+            rows = compile_to_nl_array(c.body, model).reshape(-1)
+            sizes.append(int(rows.size))
+            cons.extend(rows.tolist())
+        return obj, cons, sizes
 
     def _build_residual_exprs(self) -> Optional[list]:
         """Residual tapes ``r_i`` for Gauss-Newton, or ``None`` to use the exact Hessian.

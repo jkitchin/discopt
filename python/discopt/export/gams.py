@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from discopt.export import _arrays
 from discopt.export._common import refuse_non_algebraic_relations
 from discopt.modeling.core import (
     BinaryOp,
@@ -209,8 +210,16 @@ class _GamsWriter:
             lb_arr = np.asarray(var.lb)
             ub_arr = np.asarray(var.ub)
             if var.shape == () or var.shape == (1,):
-                lb_val = float(lb_arr)
-                ub_val = float(ub_arr)
+                # `float()` of a length-1 (not 0-d) array raises
+                # "only 0-dimensional arrays can be converted to Python scalars"
+                # on numpy >= 2, so a shape-(1,) variable -- which this branch
+                # deliberately treats as a scalar -- could not be exported at all.
+                # `to_gams()` failed outright for EVERY single-output embedded
+                # network (16 of 40 cases in the #1215 NN harness, all and only
+                # output size 1), and GAMS is the only route to a full-licence
+                # BARON. `ravel()[0]` reads the single element for both shapes.
+                lb_val = float(np.ravel(lb_arr)[0])
+                ub_val = float(np.ravel(ub_arr)[0])
                 if lb_val > -1e18:
                     lines.append(f"{var.name}.lo = {lb_val};")
                 if ub_val < 1e18:
@@ -289,11 +298,49 @@ class _GamsWriter:
         # them the GAMS export would emit an empty model.
         builder_rows = iter_builder_linear_rows(self.model)
 
+        # Expand array-structured bodies ONCE, up front. One `Constraint` with an
+        # array body (`A @ x <= b`, `dm.exp(x) <= b`) is many GAMS equations, and
+        # the declaration loop and the definition loop below must agree on how
+        # many and what they are called -- so they are both driven from this one
+        # list rather than each re-deriving it from `constraints`.
+        #
+        # Before this, `gams.py` had no expansion at all: `_expr_to_gams` walked
+        # straight into an array `Constant` and died with `TypeError: only
+        # 0-dimensional arrays can be converted to Python scalars`. That refused
+        # the vectorised form of a model, which is the one that reaches
+        # solve-ready 36x faster than the per-element idiom (perf-plan §41), and
+        # GAMS is the only route to a full-licence BARON.
+        rows: list[tuple[str, Expression, str, float]] = []
+        for i, c in enumerate(constraints):
+            base = c.name or f"c{i + 1}"
+            bodies = _arrays.scalarize_body(c.body, self._resolve_var_index)
+            if len(bodies) == 1:
+                rows.append((self._sanitize_eq_name(base) or base, bodies[0], c.sense, c.rhs))
+            else:
+                # Row `k` of a family is `{base}_{k}`, ZERO-based -- the same rule
+                # `lp.py`, `mps.py` and the Rust builder row naming all use. This
+                # numbered from 1, making GAMS the only one of the four formats
+                # where row k of family `c` was not called `c_k`, so the same
+                # model exported to `.lp` and to `.gms` disagreed on every
+                # expanded row's name.
+                #
+                # It also meant that vectorising an emitter -- replacing N
+                # per-element constraints named `c_0 … c_{N-1}` with one family
+                # named `c` -- silently SHIFTED every GAMS row name by one, while
+                # leaving `.nl` and LP byte-identical. That is exactly what #1215's
+                # NN-emitter work hit, and it is invisible to any check that does
+                # not diff GAMS (perf-plan §56/§57).
+                #
+                # GAMS's own set labels are 1-based (`x('1')`), which is presumably
+                # where the +1 came from, but an equation NAME is not a set label.
+                for k, body in enumerate(bodies):
+                    nm = self._sanitize_eq_name(f"{base}_{k}") or f"c{i + 1}_{k}"
+                    rows.append((nm, body, c.sense, c.rhs))
+
         # Declare equations
         eq_names = ["obj_eq"]
-        for i, c in enumerate(constraints):
-            name = c.name or f"c{i + 1}"
-            eq_names.append(name)
+        for nm, _, _, _ in rows:
+            eq_names.append(nm)
         for j, brow in enumerate(builder_rows):
             eq_names.append(self._sanitize_eq_name(brow.name) or f"blk{j + 1}")
         lines.append(f"Equations {', '.join(eq_names)};")
@@ -311,20 +358,20 @@ class _GamsWriter:
             lines.append(f"obj_eq.. obj_var =e= {obj_str};")
             lines.append("")
         elif obj is not None:
-            obj_expr_str = self._expr_to_gams(obj.expression)
+            # Scalar-VALUED but array-STRUCTURED objectives (`-dm.sum(x)`,
+            # `dm.sum(A @ x)`) need the same expansion; a vector-valued one is
+            # refused rather than truncated to element zero.
+            obj_body = _arrays.scalarize_objective(obj.expression, self._resolve_var_index)
+            obj_expr_str = self._expr_to_gams(obj_body)
             lines.append(f"obj_eq.. obj_var =e= {obj_expr_str};")
             lines.append("")
 
         # Constraint equations
-        for i, c in enumerate(constraints):
-            name = c.name or f"c{i + 1}"
-            body_str = self._expr_to_gams(c.body)
-            if c.sense == "<=":
-                lines.append(f"{name}.. {body_str} =l= {c.rhs};")
-            elif c.sense == ">=":
-                lines.append(f"{name}.. {body_str} =g= {c.rhs};")
-            elif c.sense == "==":
-                lines.append(f"{name}.. {body_str} =e= {c.rhs};")
+        gams_sense = {"<=": "=l=", ">=": "=g=", "==": "=e="}
+        for name, body, sense, rhs in rows:
+            op = gams_sense.get(sense)
+            if op is not None:
+                lines.append(f"{name}.. {self._expr_to_gams(body)} {op} {rhs};")
 
         # Builder-resident linear equations, emitted with variable names + 1-based
         # element references (matching the GAMS index convention above).
@@ -335,6 +382,35 @@ class _GamsWriter:
             lines.append(f"{name}.. {lhs} {gams_op[brow.sense]} {self._fmt_num(brow.rhs)};")
 
         lines.append("")
+
+    def _resolve_var_index(self, expr: IndexExpression) -> int | None:
+        """Flat slot for ``x[i]`` / ``x[i, j]``, or ``None`` when not resolvable.
+
+        Only used by :func:`_arrays.needs_scalarize` to decide whether a body is
+        already scalar and can skip the recursive expansion pass -- which is what
+        keeps a deep ``sum()`` chain off the recursion limit. The value itself is
+        never used here, so any non-``None`` answer means "this index is a single
+        scalar element".
+        """
+        if not isinstance(expr.base, Variable):
+            return None
+        idx = expr.index
+        if isinstance(idx, int):
+            return idx if 0 <= idx < expr.base.size else None
+        if isinstance(idx, tuple) and all(isinstance(i, int) for i in idx):
+            shape = expr.base.shape
+            if len(idx) != len(shape):
+                return None
+            flat = 0
+            for dim, i in enumerate(idx):
+                if not 0 <= i < shape[dim]:
+                    return None
+                stride = 1
+                for d2 in range(dim + 1, len(shape)):
+                    stride *= shape[d2]
+                flat += i * stride
+            return flat
+        return None
 
     def _flat_index_ref(self, gidx: int) -> str:
         """Render flat variable index ``gidx`` as a GAMS variable/element reference.
@@ -560,6 +636,34 @@ class _GamsWriter:
             else:
                 idx_str = self._expr_to_gams(expr.index)
             return f"{base}({idx_str})"
+
+        if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+            # Walk the LEFT spine iteratively rather than recursing per term.
+            #
+            # The array scalarizer expands `dm.sum(x)` over `x` of shape `(n,)`
+            # into a left-deep fold `((x[0] + x[1]) + x[2]) + ...` of depth n, so
+            # recursing here raised RecursionError at roughly 1000 terms -- i.e.
+            # `m.minimize(dm.sum(x))`, one of the commonest objectives there is,
+            # could not be exported to GAMS at all. GAMS is the only route to a
+            # full-license BARON, so that also blocked BARON comparison for any
+            # such model.
+            #
+            # The emitted TEXT is unchanged: rebuilding left to right reproduces
+            # the same nesting the recursion produced, `(((a + b) + c) + d)`.
+            # Only the left spine is flattened, which is the shape the scalarizer
+            # builds; a right-deep chain still recurses, and nothing in discopt
+            # emits one.
+            spine: list = []
+            # Annotated: the loop narrows `node` to `BinaryOp`, and `node.left`
+            # is an `Expression`, so an unannotated `node` cannot be re-bound.
+            node: Expression = expr
+            while isinstance(node, BinaryOp) and node.op in ("+", "-"):
+                spine.append((node.op, node.right))
+                node = node.left
+            out = self._expr_to_gams(node)
+            for op, right_node in reversed(spine):
+                out = f"({out} {op} {self._expr_to_gams(right_node)})"
+            return out
 
         if isinstance(expr, BinaryOp):
             left = self._expr_to_gams(expr.left)

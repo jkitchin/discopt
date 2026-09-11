@@ -191,13 +191,14 @@ class TestGDPoptLOASolves:
         assert r.objective is None
         assert r.gap_certified is False
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="#756: BUG: _add_no_good_cut uses the binary-only exclusion form for "
-        "general integer variables; the cut for config (0,1) (-y + z <= 0) also "
-        "cuts the feasible (1,2), so LOA certifies a FALSE 'infeasible' on "
-        "min y+z s.t. y*z>=2 (optimum 3 at y=1,z=2).",
-    )
+    # #756 (fixed by PR #762, merged 2026-07-18): `_add_no_good_cut` used the
+    # binary-only exclusion form for general integers, so the cut for config
+    # (0,1) also cut off the feasible (1,2) and LOA certified a FALSE
+    # 'infeasible'. This was an `xfail(strict=False)` probe that the issue
+    # described as flipping to passing once fixed; the marker outlived the fix,
+    # and while it stood a regression would have xfailed SILENTLY rather than
+    # failing. A false-infeasible certificate is hard-gate territory
+    # (CLAUDE.md §1), so this must fail loudly if it ever comes back.
     def test_general_integer_no_good_cut_soundness(self):
         """y binary, z integer in [0,3], y*z >= 2: optimum is 3 at (1, 2)."""
         m = dm.Model("loa_nogood_int")
@@ -211,13 +212,11 @@ class TestGDPoptLOASolves:
         )
         assert r.objective == pytest.approx(3.0, abs=1e-5)
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="#756: BUG: solve_gdpopt_loa returns status='infeasible' (default "
-        "gap_certified=True) when the LOA loop exits on the time limit with no "
-        "iteration run — a timeout is not an infeasibility proof; the correct "
-        "status is 'unknown' (or an uncertified result).",
-    )
+    # #756 (fixed by PR #762, merged 2026-07-18): `solve_gdpopt_loa` returned
+    # status='infeasible' with the default gap_certified=True when the LOA loop
+    # exited on the time limit with no iteration run -- a timeout is not an
+    # infeasibility proof. Same stale-marker story as above: kept as a plain
+    # test so a regression fails rather than xfailing silently.
     def test_time_limit_exhausted_is_not_infeasible(self):
         m = dm.Model("loa_tl0")
         x = m.continuous("x", lb=0, ub=10)

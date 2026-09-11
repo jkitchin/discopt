@@ -93,6 +93,8 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-38 | P0 | bounding/QCP | `kall_circles_c8a` certified `optimal` obj=3.6142 (bound=3.6142, 3 nodes) when the true optimum is 2.5409 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; surfaced by the G1.3 graduation gate (2026-07-07) | **fixed** (`docs/dev/c38-fix-2026-07-07.md`): McCormick-LP `infeasible` now fathoms only on a verified Farkas ray; uncertified false-infeasible no longer prunes the optimum-containing node |
 | C-40 | P0 | presolve/cutoff-FBBT | `util` (MBQCP) certified `optimal` obj=1072.96 (bound=1072.96, 3 nodes) when the true optimum is 999.58 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; distinct mechanism from C-38 (Farkas fix already present) | **fixed** (`docs/dev/c40-fix-2026-07-07.md`): the incumbent-cutoff FBBT bound-map mis-indexed a `_model_repr` that returned 144 intervals for a 145-column flat model, wrote a **crossed** `lb>ub` global box in place, and swallowed the resulting OOB — the corrupted global box then emptied the optimum-containing child at the cutoff clamp (`solver.py:5527`) and fathomed it. Fix: apply cutoff-FBBT only on a provably 1:1-aligned repr (len==n_vars ∧ all-scalar blocks) and commit only a crossing-free intersection; a misaligned repr forgoes the optional tightening (valid, looser box) |
 | C-41 | P1 | node/root cutoff-FBBT | audit of the C-40 block↔flat class found the same unguarded pattern in `node_reduce._fbbt_on_node` and `root_reduce._stage_fbbt_with_cutoff` (flag-gated paths `DISCOPT_NODE_REDUCE` / `DISCOPT_ROOT_FIXPOINT`, default OFF): `fbbt_lbs[bi]`(block) → `lb[flat]`(flat) with only an OOB skip, no 1:1-alignment guard, wrapped in a swallowing bare `except`. A synthetic misaligned repr writes a **crossed `lb>ub` box → false `infeasible` fathom** (repro: `NodeReduceResult(lb=[1e9,0], ub=[-1e9,0.5], infeasible=True)`). Not reproducible on the default path (flags OFF) nor on the current corpus's *fresh* repr, but structurally the same C-40 hazard for the divergence C-40 proved live (persistent repr 144 vs 145). | **fixed** (`docs/dev/c41-index-audit-2026-07-07.md`): added the `len(fbbt_lbs)==len(model._variables)` 1:1-alignment guard (mirrors `solver.py:7443` / `solvers/_root_presolve.py:43`) so a misaligned repr forgoes the optional tightening (valid, looser box); surfaced the swallowing `except` to a debug log. Full audit of all block↔flat sites in both layers: every other site SAFE (guarded or running-offset). Regression tests in `test_r2_branch_and_reduce.py`, fail-before/pass-after. |
+| C-44 | P0 | model_to_repr/builder | the builder recorded `lb`/`ub` once at registration and `model_to_repr`'s builder arm cloned that box without re-reading, so any post-construction bound mutation (`lb = ub` is the only fixing route, and in-tree code relies on it) left root presolve running FBBT on a stale box — `m.solve()` returned `status="infeasible"` with `gap_certified=True` on a model whose true answer is `optimal`. Masked for any model carrying a linear block, which rebuilt the builder as a side effect | **fixed** (`ba13190`): the builder arm refreshes the box from the live Python bounds, matching the pure-expression arm; a shape change after registration is refused loudly. Repro: `discopt_benchmarks/scripts/repro_stale_builder_box.py` |
+| C-43 | P0 | gdp_reformulate/hull | `_extract_disjunct_bounds` reached through an `IndexExpression` to its `.base`, so a bound on `x[0]` was keyed to the whole array and capped every disaggregated component; `hull` certified `optimal` obj=2.0 where the true optimum is 20.0 (`big-m`/`mbigm` unaffected). Found 2026-09-10 while checking a #1215 premise; the module's own unit test asserted the defective behaviour | **fixed**: new `_whole_variable()` accepts only a bare `Variable` or a full slice, so a narrower body forgoes the tightening and falls back to global bounds; regression tests in `test_1215_hull_element_bound_leak.py` |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | fixed |
@@ -2881,3 +2883,304 @@ assert `"feasible"` and no bound/gap. The user-facing docstrings for `dm.custom`
 --check` clean; `mypy python/discopt/solver.py` clean. No Rust touched.
 
 **Status:** confirmed → fixed.
+
+## C-44 (P0, FIXED, 2026-09-10): a stale builder variable box certifies a FALSE `infeasible`
+
+**Status: FIXED (commit `ba13190`). Reproduction in-tree:
+`discopt_benchmarks/scripts/repro_stale_builder_box.py` (exits non-zero while the
+defect is present, so it doubles as the regression check); it now passes:**
+
+    route=none                  builder=False blocks=0 -> optimal  (ref optimal)
+    route=fast_family           builder=True  blocks=1 -> optimal  (ref optimal)
+    route=add_linear_objective  builder=True  blocks=0 -> optimal  (ref optimal)
+    # executed assertions: 3
+    No disagreement: the stale-box defect appears fixed.
+
+*(Filed as `C-NEW` and renumbered to C-44 on 2026-09-10 — the fixing commit's
+subject reused the ID `C-41`, which is a different and already-fixed issue. The
+entry sat marked "open, unfixed" after the fix landed, which is how the same
+work gets done twice; re-read this section before starting anything it names.)*
+
+Found while auditing the modeling layer as a foundation for a flowsheet layer
+(issue #1215 discussion), not by a failing test.
+
+`m.solve()` returns `status="infeasible"` with **`gap_certified=True`** on a model
+whose true answer is `optimal`. Measured on `main` @ c052e85:
+
+    route=none                  builder=False blocks=0 -> optimal     (ref optimal)
+    route=fast_family           builder=True  blocks=1 -> optimal     (ref optimal)
+    route=add_linear_objective  builder=True  blocks=0 -> INFEASIBLE  (ref optimal, obj 0.0)
+                                                          gap_certified=True
+
+### Mechanism
+
+Variable bounds enter the Rust builder **once, at declaration**
+(`core.py:_register_variable`; and for every pre-existing variable when the
+builder is lazily created, `core.py:_get_builder`). In builder mode
+`model_to_repr` clones `b.inner.variables` and never re-reads `lb`/`ub` from the
+Python `Variable` objects — the pure-expression arm *does*. Root presolve then
+runs FBBT on the baked box and can declare the root infeasible.
+
+Post-construction bound mutation is **not** misuse: `lb=ub` is the only fixing
+route, and in-tree code already does it — `estimate.py:317-319` (fixing design
+variables), `_relax/presolve_pipeline.py:408-409` and `:503-504`,
+`_relax/node_reduce.py:165-166`, `_relax/root_reduce.py:125-126`, plus
+discopt-doe's `compute_fim` general path.
+
+### Preconditions (bisected, one variable at a time)
+
+1. the Rust builder is active, **and**
+2. it carries **zero** linear blocks, **and**
+3. a variable's bounds were mutated after the builder registered them.
+
+Condition 2 is why this stayed hidden. A builder *with* linear blocks is safe **by
+accident**: the solve path calls `_materialize_builder_linear_rows`
+(`core.py:5702`), which clears the blocks and rebuilds the builder — re-reading
+the current bounds as a side effect. It early-returns when there are no blocks
+(`core.py:5731-5732`). A non-scalar variable also masks it, via the C-40
+`_aligned` guard at `solver.py:15211`.
+
+**No private API is needed.** `Model.add_linear_objective` and
+`add_quadratic_objective` call `_get_builder()` and record
+`_builder_linear_objective` — never `_builder_linear_blocks` — so they create
+exactly the blockless builder that triggers it.
+
+### Note on the first reproduction attempt
+
+An initial probe using a *quadratic* model (`z == u*u`, `min z`) and a fast linear
+family did **not** reproduce, a false negative on two counts: the fast family
+supplied a masking linear block, and the quadratic body took a route that
+re-derives bounds. A genuinely nonlinear body (`sin`) plus a blockless builder is
+required. Recorded so the next person does not conclude from a clean quadratic
+probe that the defect is absent.
+
+### Fix (implemented in `ba13190`)
+
+The pure-expression arm of `model_to_repr` already re-read `lb`/`ub` while the
+builder arm did not. The builder arm now refreshes `variables[bidx].lb/.ub` from
+the live Python `Variable` objects after cloning `b.inner.variables`, so the two
+arms agree; a length mismatch (a variable whose shape changed after
+registration) is a real inconsistency and is refused loudly rather than papered
+over. This also removes the accidental dependence on
+`_materialize_builder_linear_rows` for correctness — that function masked the
+defect for any model carrying a linear block by rebuilding the builder, and so
+re-reading bounds, as a side effect. Bounds are per-solve input, not
+construction-time state, and are now represented that way.
+
+**Consequence for #1215:** an arena-backed construction path that bakes bounds at
+construction makes this class of defect *worse*, not better. Bounds must leave the
+arena's construction-time state before that work proceeds — which is now the
+case, so the #1215 builder work (routing builder-resident rows through the Rust
+`.nl` writer) is unblocked.
+
+## C-43 (P0, FIXED, 2026-09-10) — hull GDP: a bound on ONE element of an array variable caps the WHOLE array → certified false optimum
+
+**Status: fixed. Regression tests: `python/tests/test_1215_hull_element_bound_leak.py`
+(fail-before / pass-after, verified by stashing the fix).**
+
+Found while checking a premise about the GDP emitter's construction idiom
+(issue #1215), not by a failing test — the module's own unit test *asserted the
+defective behaviour* (see "Why it survived").
+
+**Area:** `python/discopt/_relax/gdp_reformulate.py::_extract_disjunct_bounds`.
+
+**Reachability:** default path for `reformulate_gdp(model, method="hull")` on any
+model whose disjunct constrains a *slice* of an array variable. `big-m` and
+`mbigm` are unaffected — they do not use these bounds this way.
+
+### Mechanism
+
+`_extract_disjunct_bounds` returns `{variable_name: (lb, ub)}`, keyed by **name**,
+so anything it returns applies to *every component* of an array variable. Its
+body patterns nevertheless reached through an `IndexExpression` to its `.base`:
+
+```python
+elif isinstance(body.left, (Variable, IndexExpression)):
+    lvar = body.left if isinstance(body.left, Variable) else None
+    if lvar is None and isinstance(body.left, IndexExpression):
+        lvar = body.left.base if isinstance(body.left.base, Variable) else None
+```
+
+so `x[0] <= 1` yielded `{"x": (0.0, 1.0)}`. `_reformulate_hull` then emits
+`v_{j,k} <= dub * y_k` for **every component** of the disaggregated variable, and
+the components the disjunct never mentioned were capped as well — cutting
+feasible points from the hull relaxation of that disjunct.
+
+### Reproduction (measured on `main` before the fix)
+
+```python
+m = Model("leak")
+x = m.continuous("x", shape=(3,), lb=0.0, ub=10.0)
+m.either_or([[x[0] <= 1.0], [x[0] >= 9.0]], name="d")
+m.subject_to(x[0] <= 1.0, name="pin")     # force the first disjunct
+m.maximize(x[1] + x[2])                    # true optimum 20.0
+```
+
+    reference (no disjunction): optimal   objective = 20.0
+    big-m                     : optimal   objective = 20.0
+    hull                      : optimal   objective = 2.0    <-- WRONG
+    mbigm                     : optimal   objective = 20.0
+
+`status="optimal"` on a value that is not the optimum: a wrong certificate, the
+class CLAUDE.md §1 treats as a hard stop.
+
+### Why it survived
+
+The same pattern was implemented **asymmetrically**, and the sound half hid the
+unsound half:
+
+- `const - var` (the `>=` direction) required `isinstance(body.right, Variable)`,
+  so an `IndexExpression` fell through and produced `{}` — no tightening, sound.
+- `var - const` (the `<=` direction) explicitly dug out `.base` — the leak.
+
+So `x[0] >= 9` behaved correctly and `x[0] <= 1` did not. Half the obvious test
+cases pass either way.
+
+And `test_reform_modules_units.py::test_extract_disjunct_bounds_patterns`
+asserted, with `wv` of shape `(2,)`:
+
+```python
+db = G._extract_disjunct_bounds([Constraint(body=wv[0], sense="<=", rhs=3.0)], m)
+assert db == {"wv": (0.0, 3.0)}          # <- pinned the bug
+```
+
+A test pinning the defect is worse than no test: it converts a fix into a
+regression. That assertion is now `== {}`, with a comment saying why, plus a
+companion asserting the whole-array case still tightens.
+
+### Fix
+
+A new `_whole_variable(expr)` helper returns the `Variable` an expression denotes
+**in its entirety**, and `None` otherwise: a bare `Variable`, or an
+`IndexExpression` whose shape equals its base's (a full slice). Every pattern in
+`_extract_disjunct_bounds` goes through it. A narrower expression yields `None`
+and the caller falls back to the variable's global bounds — a weaker relaxation,
+and a valid one.
+
+Measured after the fix:
+
+| body | extracted |
+|---|---|
+| `x[0] <= 1` (element) | `{}` |
+| `x[0:2] <= 1` (partial slice) | `{}` |
+| `x <= 1` (whole variable) | `{"x": (0.0, 1.0)}` |
+| `x[0:3] <= 1` (full slice) | `{"x": (0.0, 1.0)}` |
+
+and all three methods return 20.0 on the reproduction.
+
+### Done criteria
+
+- [x] The reproduction returns 20.0 under `big-m`, `hull` and `mbigm`.
+- [x] Element and partial-slice bodies extract nothing; whole-variable and
+      full-slice bodies still tighten (the fix does not over-correct).
+- [x] Fail-before / pass-after verified by stashing the fix (4 of 10 tests fail
+      without it).
+- [x] The unit test that pinned the defect corrected, with the reason recorded.
+- [x] 645 GDP/hull/disjunction/reformulation tests pass; standing gates green.
+
+## C-45 (P1, FIXED, 2026-09-11) — arena tape named a POUNCE method that does not exist, disabling the false-primal guard for `log2` models
+
+**Status: FIXED. Regression test:
+`python/tests/test_1215_arena_tape_func_table.py` (5 cases; 4 of them fail before
+the fix and pass after).**
+
+Introduced by the `#1215` arena-tape lowering, not pre-existing. Caught by CI's
+PR-fast lane, not by the smoke or adversarial gate:
+
+    test_relaxation_coverage.py::test_operator_has_valid_tight_bound[log2]
+    AttributeError: 'pounce.NlExpr' object has no attribute 'log2'
+
+### Mechanism
+
+`_arena_tape` lowers a unary `FunctionCall` by calling
+`getattr(nl_expr, _FUNC_METHOD[idx])()`. The table mapped `MathFunc::Log2` to the
+string `"log2"`. `pounce.NlExpr` defines `log` and `log10` but **no `log2`** — the
+name was assumed rather than looked up, which is the failure mode the Workflow
+rule "look up an API before calling it" exists for.
+
+### Why this is a correctness entry and not just a crash
+
+On the path the failing test takes, the `AttributeError` propagates. On the
+*solve* path it does not: it is caught upstream and downgraded to
+
+    RuntimeWarning: incumbent-verification snapshot failed
+    (AttributeError: 'pounce.NlExpr' object has no attribute 'log2');
+    the false-primal guard is disabled for this solve
+
+So every model containing `log2` solved with its **false-primal guard silently
+off**. No false certificate has been observed from it — the guard is a check, not
+the bound itself — but a soundness check that turns itself off on an operator
+name is exactly the class this file tracks.
+
+### Fix
+
+`Log2` is removed from the method table and lowered in the scan as the Python
+compiler already lowers it, `log(a) * (1/ln 2)`, so the two paths build the same
+tape. Indices with no entry fall back to the Python DAG path as before.
+
+The regression test checks the **class**, not the instance: it asserts every name
+in `_FUNC_METHOD` is a real no-argument method on the live `pounce.NlExpr`, so the
+next wrong string is caught by the table check rather than by whichever model
+happens to use that operator.
+
+## C-46 (P1, FIXED, 2026-09-11) — the Rust `.nl` writer PANICKED on `log2`, and the panic bypassed its own fallback
+
+**Status: FIXED. Regression test:
+`python/tests/test_1220_nl_writer_func_coverage.py` (96 cases; 8 fail before the
+fix and pass after, verified by reverting the Rust change and rebuilding).**
+
+Found by the owner's review of PR #1220, not by CI or by the corpus sweep.
+Introduced by this branch's writer port. **Same class as C-45, a different
+table** — which is the point of recording it separately.
+
+### Mechanism
+
+Two independently-maintained opcode tables drifted:
+
+| table | `MathFunc::Log2` |
+|---|---|
+| `expand.rs::func_code` | admits it, as code `2` |
+| `nl_writer.rs::nl_func_opcode` | no arm for `2` |
+
+so the emit site's `.expect("mapped function")` fired, and **any** model
+containing `log2` raised `pyo3_runtime.PanicException` from `to_nl()` — where
+`main` wrote the file correctly.
+
+### Why the fallback did not save it
+
+`export/nl.py::_rust_nl_text` ends in `except Exception: return None`, and
+
+```python
+issubclass(pyo3_runtime.PanicException, Exception)      # False
+issubclass(pyo3_runtime.PanicException, BaseException)  # True
+```
+
+so the clause never saw it. A writer that is *designed* to degrade to a slow path
+crashed instead. That is the more serious half of this entry: the same shape of
+bug in any future opcode gap would have done the same.
+
+### Fix, at three levels
+
+1. **This gap.** `Log2` is rewritten at the emit site as `log(x) / ln 2`, the
+   exact form `export/nl.py` uses, so the two writers stay byte-identical:
+   `o3 o43 <arg> n0.6931471805599453`.
+2. **The class.** `write_expr` is now fallible. An unmapped function code is a
+   **refusal** (`ExpandError`), which the Python writer picks up, never a panic.
+   A Rust test, `nl_func_opcode_covers_every_expanded_func`, matches
+   exhaustively on `MathFunc` with **no wildcard arm** — a new variant fails to
+   compile until it is classified — and asserts every code `func_code` admits is
+   either mapped or explicitly rewritten.
+3. **The blast radius.** `_rust_nl_text` gained an `except BaseException` clause
+   that logs at **WARNING** ("this is a writer bug") and falls back.
+   `KeyboardInterrupt` and `SystemExit` are re-raised. A panic is now loud but
+   survivable rather than silent-and-fatal.
+
+### A second divergence found by the same sweep
+
+`tan` was **not** byte-identical: the Rust writer emitted the native `.nl` opcode
+`o38`, while `export/nl.py` has always written `sin(x) / cos(x)` — one of its
+deliberate rewrites, alongside `log2`, `log1p`, `sigmoid` and `softplus`. No
+corpus instance uses `tan`, so the 1610-instance sweep structurally could not see
+it. The Rust writer now rewrites too. Native `o38` is arguably better output, but
+changing what discopt writes for `tan` is a user-visible change that needs its
+own justification — it is not a side effect of a port.

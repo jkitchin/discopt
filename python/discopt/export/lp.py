@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
     builder_objective,
     iter_builder_linear_rows,
@@ -82,7 +83,10 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
         obj_quad = obj_quad_map or {}
         is_min = not str(builder_sense).lower().startswith("max")
     else:
-        obj_expr = model._objective.expression
+        # Scalar-VALUED but array-STRUCTURED objectives (`-dm.sum(x)`,
+        # `dm.sum(A @ x)`) need expanding before the extractor can walk them;
+        # a vector-valued one is refused rather than truncated to element zero.
+        obj_expr = scalarize_objective(model._objective.expression)
         obj_quad, obj_linear, obj_const = extract_quadratic_terms(
             obj_expr, flat_vars, model_vars=mvars
         )
@@ -126,9 +130,16 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
     lines.append("Subject To")
     rows: list[tuple[str, dict[int, float], str, float]] = []
     for i, con in enumerate(model._constraints):
-        con_name = (con.name if con.name else f"c{i}").replace(" ", "_").replace("-", "_")
-        lin, const = extract_linear_terms(con.body, flat_vars, model_vars=mvars)
-        rows.append((con_name, lin, con.sense, -const))
+        base = (con.name if con.name else f"c{i}").replace(" ", "_").replace("-", "_")
+        # An array-valued body is many LP rows. Without this expansion the
+        # extractor walked straight into an unindexed shaped variable and
+        # refused the whole model -- which locked the vectorised form of a
+        # model out of LP entirely (performance-plan §41).
+        bodies = scalarize_body(con.body)
+        for k, body in enumerate(bodies):
+            con_name = base if len(bodies) == 1 else f"{base}_{k}"
+            lin, const = extract_linear_terms(body, flat_vars, model_vars=mvars)
+            rows.append((con_name, lin, con.sense, -const))
     for j, brow in enumerate(iter_builder_linear_rows(model)):
         con_name = (brow.name if brow.name else f"b{j}").replace(" ", "_").replace("-", "_")
         rows.append((con_name, dict(brow.coeffs), brow.sense, brow.rhs))

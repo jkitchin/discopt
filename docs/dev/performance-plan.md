@@ -6036,3 +6036,2611 @@ expression nodes, same per-instance construction model) builds the identical
 200k-instance model in **0.132 s / 41 MB** against discopt's ~4 s / ~196 MB.
 That remaining gap is representational, not a constant factor, and is what the
 template IR would address.
+
+## 31. The arena performs (7.3× measured); the blocker is identity, not speed (2026-09-09)
+
+Entry experiment for issue #1215's "open question worth settling early" —
+whether construction should keep producing an intermediate Python DAG that is
+then converted, or emit arena-shaped data directly. Run **before** any
+representation change, per §4. Instruments, both in-tree:
+`discopt_benchmarks/scripts/bench_model_construction.py` (the standing
+discopt-vs-Pyomo baseline) and
+`discopt_benchmarks/scripts/issue1215_arena_prototype.py` (this experiment,
+with a `--mode verify` soundness gate).
+
+### The full budget, not just the build
+
+The issue measured the build. The cost a solve actually pays is build **plus**
+the lowering to the Rust arena. On the 200k-instance model, one process:
+
+| stage | wall | µs/inst | retained |
+|---|---|---|---|
+| build Python DAG | 2.732 s | 13.66 | 182.3 MB |
+| lower → Rust arena (`model_to_repr`) | 1.427 s | 7.14 | 34.8 MB |
+| **total** | **4.159 s** | **20.80** | **217.1 MB** |
+
+The lowering is **34% of the budget** and was not in the issue's headline.
+
+**The arena is more compact than the DAG that produces it, by a
+model-shape-dependent factor**: on this model, 245,043 nodes for 200,000
+constraints — **1.23 nodes/instance** at 142 B/node against ~6 Python
+nodes/instance, a **4.9×** ratio. Hash-consing (`ExprArena::enable_interning`)
+is doing that: the ~45k shared inner nodes (`x[i]`, `y[i]`, `x[i]*y[i]`,
+`exp(x[i])`, …) intern across all 40 forms, leaving one unique `Sub` per row.
+So the representation the solver consumes is *not* the expensive one — the
+intermediate is.
+
+**Do not quote 4.9× as a general figure** (an earlier draft of this section did,
+as "6×", and it is retracted). The ratio is entirely a function of how much
+structure a model shares. Measured on a process-style model where one nonlinear
+term is reused across N constraints
+(`issue1215_expressiveness_audit.py --mode cse`, N = 1000):
+
+| how the shared term is written | Python nodes/con | arena nodes/con | ratio |
+|---|---|---|---|
+| hoisted, built once | 6.01 | 4.01 | 1.50× |
+| rebuilt inside the loop | 14.00 | 4.01 | **3.49×** |
+
+The second row is the useful property: **hash-consing makes the natural way to
+write it — rebuilding the term in the loop — cost the same as hoisting it.** The
+arena node count is identical (4.01/con) either way, so a shared nonlinear
+subexpression is stored, and differentiated, once regardless of authoring style.
+The honest range across the two shapes measured is **1.5×–4.9×**.
+
+### The arena performs: 7.3× through the public API
+
+Flat arena (parallel `op`/`a`/`b`/`k` lists, integer handles), interleaved
+A/B/A/B in one process, 5 reps, load gate 0.33, 200k rows:
+
+| arm | median | µs/row | retained | B/row | vs current |
+|---|---|---|---|---|---|
+| current (one unslotted object per node) | 2.656 s | 13.28 | 182.2 MB | 911 | 1.0× |
+| **arena + slotted handle per node (public operator API)** | **0.363 s** | **1.81** | **74.9 MB** | 374 | **7.3×** |
+| arena + names + collision check, no handle objects | 0.174 s | 0.87 | 74.3 MB | 372 | 15.3× |
+| arena raw (integer handles, no bookkeeping) | 0.105 s | 0.52 | 51.3 MB | 257 | 25.3× |
+
+Reference on the same model: **Pyomo 6.10.1 = 6.67 µs/row**, **oximo 0.6.0 =
+0.66 µs/row**.
+
+Soundness-gated: `--mode verify` evaluates every prototype row against the
+current path's compiled row on random points — 5,000 comparisons, max abs error
+**7.1e-15**. A fast arena that encodes a different model is worthless, so this
+gate runs before any timing claim is believed.
+
+**The decisive line is `arena-api` → `arena-named`: 1.81 vs 0.87 µs.** That
+factor of 2 is the cost of allocating one Python handle object per node, and
+operator overloading (`x[i] * y[i] <= c` — discopt's public API) makes it
+unavoidable. So:
+
+* an arena-backed discopt would be **~3.7× faster than Pyomo** and land near
+  **1.8 µs/row**;
+* it would **not** reach oximo's 0.66 µs, and the residual 2.7× is the Python
+  object per node, not the representation. "Fast like oximo" is not reachable
+  through a Python operator-overloading API. This is the honest ceiling and
+  should be stated as such rather than re-derived a fourth time.
+
+Treat 7.3× as a **ceiling, not a forecast**: the prototype does no static shape
+inference, no out-of-bounds guard, no builder variable registration, only the
+operators the four forms need, and no hash-consing (565,002 nodes where the
+Rust arena interns to 245,043 — so real memory would be *better*). Restoring
+the guards spends some of the 7.3× back.
+
+### What actually blocks it: identity, not speed
+
+Consumer census over `python/discopt` (`isinstance` and attribute reads that a
+handle-backed node would have to satisfy):
+
+| surface | sites | disposition |
+|---|---|---|
+| `isinstance(n, BinaryOp/Constant/Variable/UnaryOp/IndexExpression/FunctionCall/Parameter/Constraint)` | 1,051 | **solvable** — per-opcode slotted handle subclasses of the existing classes; `arena-api` already prices one typed object per node |
+| `.left` 603, `.right` 644, `.op` 594, `.value` 542, `.operand` 270, `.args` 185, `.base` 180, `.terms` 133, `.index` 86 | ~3,240 | **solvable** — properties reading the flat arrays, returning handles |
+| `type(n).__name__` dispatch | 178 | **solvable** — falls out of per-opcode subclasses |
+| `.body` readers | 63 files | **solvable** — `Constraint.body` returns a handle |
+| `id(node)`-keyed traversal (`_seen`/`visited`/memo sets) | 170 | **the blocker** — see below |
+| Rust `convert_expr` dispatch on Python class name | 4 | moot if construction emits the arena directly |
+
+`Expression.__hash__` is `object.__hash__` (identity) — deliberately, because
+`__eq__` is overloaded to build a `Constraint`, so value equality is
+unavailable. Two consequences, and they are the same risk that candidate #1
+(caching `IndexExpression` per position) carries on its own:
+
+1. **A shared node is visited once, not once per parent.** Cached leaves and
+   hash-consing turn the tree into a DAG; a `seen`-set traversal that today
+   walks `x[i]` twice in `x[i]*y[i]` would walk it once. Any consumer that
+   *counts* or *accumulates* per visit — not merely collects — silently changes
+   its answer.
+2. **Handle identity must be interned too.** If `.left` mints a fresh handle
+   per access, `id()` is unstable and every identity-keyed memo degrades to a
+   cache miss (slow but correct) or a wrong answer (if used as a visited-set).
+   The arena must cache one handle per node id.
+
+Neither is caught by a metaclass or a property. This is where the work is, and
+it is why the arena is a **branch-and-verify** job over those 170 sites rather
+than a representation swap. Nothing here is bound-changing (CLAUDE.md §5:
+construction must leave `node_count`, certified `objective` and status exactly
+unchanged), so the gate is the #1208 pattern — paired LP/MILP/NLP/MINLP solves,
+bit-identical on status, objective and `node_count`.
+
+### Disposition
+
+### Expressiveness: 8 of 9 construct families already lower; `CustomCall` does not
+
+An arena-native path makes the arena the *primary* representation, so it must
+carry what the modeling layer can express. Measured with
+`issue1215_expressiveness_audit.py --mode coverage` — build one model per family,
+lower it with `model_to_repr`, assert the arena's constraint count matches the
+model's so an empty lowering cannot pass:
+
+| family | result |
+|---|---|
+| scalar nonlinear (`exp`/`pow`/`log`) | lowers |
+| shaped: `matmul` + `sum` | lowers |
+| shaped: `norm` + elementwise | lowers |
+| `Parameter` (changeable between solves) | lowers |
+| GDP disjunction (`either_or`) | lowers |
+| NN embedding: ReLU big-M | lowers (83 nodes, 18 constraints) |
+| NN embedding: smooth full-space | lowers (55 nodes, 9 constraints) |
+| DAE collocation | lowers |
+| **`dm.custom` (opaque callable)** | **REFUSED** — `TypeError: Unknown expression type: CustomCall` |
+
+`ExprNode` has 11 variants and **no opaque-callable one**, so `convert_expr`
+rejects `CustomCall` outright; `solver.py` already routes such models onto a
+separate AD-only path (`_contains_custom_call` and its admission gates). This is
+the one hard representational boundary, and it is pre-existing — not introduced
+by the arena. An arena-primary design must either add an `Opaque(handle)` variant
+backed by a side table of Python callables, or accept that `dm.custom` models
+keep the object path. Silently falling back would be the bad outcome: a process
+model that calls an external property package would get the slow path with no
+signal.
+
+Two structural notes from the same audit:
+
+* **GDP is authored above the arena.** `either_or` lowered 3 arena nodes and **0
+  constraints** — the disjunction is stored in Python model state and
+  reformulated (bigM/hull) to ordinary algebra later, so the arena only ever
+  sees post-reformulation rows. The reformulation passes are Python-object
+  consumers and need the handle compatibility shims like any other consumer.
+* **The NN and DAE layers are ordinary algebra.** Both lower with no special
+  casing, which means they inherit the arena's win rather than needing a
+  parallel path.
+
+### Disposition
+
+The arena is **worth building**: 7.3× and 2.4× lighter through the public API,
+soundness-gated, and it also deletes the 34% lowering step rather than merely
+speeding the build. But it is gated on the identity audit, not on further
+performance work — the performance question is now **settled** and should not be
+re-measured. Candidates #1–#4 in the issue are the same identity risk at
+smaller scope; #1 (leaf caching) is the natural first increment because it
+forces the identity audit on the narrowest possible surface.
+
+## 32. Differentiability: three AD regimes, all built from the Python DAG (2026-09-09)
+
+Follow-on to §31, prompted by the question of whether an arena-primary
+construction path preserves differentiability — which matters because mb-doe's
+Fisher-information work is a derivative computation, not a solve. Measured with
+`issue1215_expressiveness_audit.py --mode coverage`, which now reports an
+arena column *and* a tape column per construct family and proves the tape
+differentiates (real gradient entry counts) rather than merely builds.
+
+### The boundary is the same one, in both columns
+
+| construct family | arena | differentiable (AD tape) |
+|---|---|---|
+| scalar nonlinear (`exp`/`pow`/`log`) | 13 nodes / 1 con | tape, grad 4 entries |
+| shaped: `matmul` + `sum` | 7 / 1 | tape, grad 3 |
+| shaped: `norm` + elementwise | 6 / 1 | tape, grad 5 |
+| `Parameter` | 9 / 1 | tape, grad 2 |
+| GDP `either_or` | 3 / 0 | tape, grad 2 |
+| NN ReLU big-M | 83 / 18 | tape, grad 14 |
+| NN smooth full-space | 55 / 9 | tape, grad 11 |
+| DAE collocation | 15 / 2 | tape, grad 16 |
+| **`dm.custom`** | **REFUSED** | **no tape (JAX)** |
+
+**8 of 9 arena-representable, 8 of 9 tape-differentiable, and it is the same
+construct failing both.** Opaque callables route to JAX for representation *and*
+for AD, consistently. That coherence is worth stating: there is no family that
+the arena can hold but cannot be differentiated, or vice versa.
+
+### Three regimes, one fan-out point
+
+| regime | engine | built from |
+|---|---|---|
+| solve-time `∇f`, `J`, `∇²L` | POUNCE Rust tape (default since `a2fb90d2`) | Python DAG, via `_nl_expr_compiler` (22 `isinstance` checks) |
+| parameter sensitivity `∂y/∂θ` (FIM) | JAX `jacrev` | Python DAG, via `dag_compiler.compile_expression` |
+| differentiating *through* the solve | JAX | `_relax/differentiable_*.py` |
+
+**All three walk the Python expression DAG. None reads the arena.** The only
+module that reads the arena at all is `_relax/nl_reconstruction.py`, via
+`PyModelRepr.get_node` — so the read API exists, but no derivative path uses it.
+
+This is the load-bearing consequence for §31 and it enlarges the job: the Python
+DAG is not merely an expensive intermediate, it is the **fan-out point for four
+independent lowerings** (tape, JAX compile, `model_to_repr`, plus each consumer's
+own walks). An arena-primary construction path therefore has two coherent shapes:
+
+1. **Handle shims** — the arena is primary and every lowering keeps walking what
+   looks like the old object DAG. Cheapest, and the 7.3× stands, but it keeps
+   four walkers and adds a fifth representation.
+2. **Re-point the lowerings at the arena** — `_nl_expr_compiler` and
+   `dag_compiler` read arena nodes instead of Python objects. Larger, and the
+   architecture the arena actually argues for: the arena's 11 `ExprNode` variants
+   already cover what both lowerings dispatch on, and it deletes the 34% lowering
+   step (§31) rather than duplicating it.
+
+Neither is chosen here. What is settled is that **differentiability is not a
+blocker** — no construct is differentiable today that the arena cannot hold.
+
+### Retraction: mb-doe does not depend on the `Parameter` re-solve path
+
+§31's disposition and a prior session note flagged `dag_compiler`'s
+`param_index[id(expr)]` as "the path mb-doe depends on most". **That is wrong and
+is retracted.** Reading `discopt-doe`'s `model_based.py`: unknown parameters θ are
+model **`Variable`s**, placed in the flat variable vector
+(`x_flat.at[p_idx].set(theta_vec)` over `variable_slices`), and the FIM comes from
+`jax.jacrev(y_one, argnums=1)` on a closure over
+`dag_compiler.compile_expression` — *not* `compile_expression_params`. Model
+`Parameter`s are passed separately as `p_flat_const`, i.e. as constants. The
+comment in that file is explicit: "p_flat for any model Parameters (distinct from
+unknown parameters)."
+
+So the identity-keyed `param_index` is **not** mb-doe's critical path.
+`dag_compiler.compile_expression` is — jitted, `vmap`ped and `jacrev`ed on the
+FIM hot path — which puts it top of the list for the §31 identity audit, above
+the `Parameter` mutability question.
+
+## 33. Construction is not mb-doe's bottleneck; the XLA trace is — and the tape can replace it (2026-09-09)
+
+§31 settled that an arena construction path is worth 7.3×. This section asks the
+different question of whether that is the right *direction* for discopt as the
+modeling foundation for mb-doe, and the answer is **no** — measured.
+
+### Where mb-doe's time actually goes
+
+An mb-doe-shaped workload (N candidate experiments, each a 2-state collocation
+DAE with a nonlinear rate law, 4 unknown parameters as `Variable`s, responses
+differentiated w.r.t. θ for the FIM), replicating `discopt-doe`'s own pattern in
+`doe/model_based.py`. Stage costs, using the better-controlled A/B figures from
+`issue1215_tape_sensitivity.py` for the JAX column:
+
+| N_EXP / NFE | build model | XLA trace | 300 FIM evals | construction share |
+|---|---|---|---|---|
+| 8 / 6 | 7.6 ms | 116 ms | 3.3 ms | **6.0%** |
+| 32 / 8 | 14.0 ms | 187 ms | 14.4 ms | **6.5%** |
+| 64 / 12 | 24.5 ms | 301 ms | 22.2 ms | **7.0%** |
+
+**Construction is ~6–7% and the one-time XLA trace is ~86–91%.** The arena's
+7.3× on construction therefore buys roughly **5–6% end-to-end** on this workload.
+That is not a foundation-level win, and §4 says the measurement wins over the
+plan: *the arena is the right answer to issue #1215 as written (construction
+really is 2.4× slower than Pyomo, and on a 200k-row model that is 3.2 s), and the
+wrong first investment for the mb-doe foundation goal.*
+
+### Retraction: three figures from the first profiling pass
+
+The first pass of this profile reported the 64/12 case as **32,771 µs/eval**,
+making FIM evaluation **91.5%** of total and construction **0.2%**. A second,
+better-controlled measurement of the same quantity puts that evaluation at
+**73.9 µs** — a 440× discrepancy, with the first run showing sd 13,355 µs against
+a median of 32,771. **All three figures (32,771 µs, 91.5%, 0.2%) are retracted**
+and the table above supersedes them. The cause is not established; the first
+probe rebuilt the flat vector from `jnp.zeros` per call with all states at zero
+and stacked 64 separately-compiled closures, and the variance suggests
+recompilation or memory pressure rather than steady-state cost. Per §9, a timing
+claim needs an interleaved control — the first pass had none, the second does.
+
+The direction conclusion is unchanged either way: under the retracted numbers
+construction was 0.2%, under the corrected ones 7.0%. Both say the same thing.
+
+### The tape reproduces `∂y/∂θ` exactly, and skips the trace
+
+The tape already tapes a residual vector as the constraint rows of an auxiliary
+`NlProblem` and reads its `R × n` Jacobian (the Gauss-Newton path, §"What did not
+work" notwithstanding — that trick *did* work). **Responses are residuals under a
+different name**, so the same mechanism yields the FIM sensitivities. Entry
+experiment, stated kill criterion 1e-9 (`issue1215_tape_sensitivity.py`):
+
+| N_EXP / NFE | tape build | jax build | tape eval | jax eval | max rel. err |
+|---|---|---|---|---|---|
+| 8 / 6 | 0.41 ms | 116.18 ms | 5.6 µs | 10.9 µs | **0.000e+00** |
+| 32 / 8 | 0.91 ms | 186.73 ms | 16.7 µs | 47.9 µs | **0.000e+00** |
+| 64 / 12 | 2.40 ms | 300.74 ms | 158.7 µs | 73.9 µs | **0.000e+00** |
+
+Exact agreement — not "within tolerance", bit-identical — at every size. Setup is
+**50–125× cheaper** because there is no XLA trace. Per evaluation the tape wins at
+the two smaller sizes and **loses ~2× at the largest**, with an unexplained sd of
+527 µs; that column is not settled and must not be quoted as a win.
+
+### Why this is the more future-proof direction
+
+1. **It removes the second AD engine.** Today: solve derivatives on the Rust tape,
+   parameter sensitivities on JAX (§32). mb-doe forces JAX back into a project
+   whose stated property is "a default solve imports zero `jax` modules". One
+   engine that differentiates w.r.t. anything in the variable vector is the
+   correct foundation, and this experiment shows the tape already can.
+2. **It attacks 86–91% instead of 6–7%.** The XLA trace is the cost, and the tape
+   has no analogue of it.
+3. **It is additive, not a rewrite.** No change to the modeling API, no change to
+   the expression representation, no identity-semantics risk — the §31 blocker
+   (170 `id(node)` sites) is not on this path at all.
+4. **It does not foreclose the arena.** §31's 7.3× stays available and stays true;
+   it simply is not first.
+
+### Revised ordering
+
+1. **Tape-based parameter sensitivities** for mb-doe (this section). Highest
+   value, lowest risk, no API surface.
+2. **Decide `dm.custom`** (§32): give the arena and the tape an opaque-node
+   variant, or accept permanent JAX exile. This gates whether the arena could
+   *ever* be the single representation, and process modeling — external property
+   packages — is exactly where `dm.custom` lives. Deciding it after building an
+   arena-primary path would be the expensive order.
+3. **Construction**, and then the cheap targeted wins of #1215 (#1–#4) before the
+   full arena, since the arena's remaining value is a 5–6% end-to-end effect on
+   this workload and a real one only on 100k-row models.
+
+## 34. §33 validated on the real path: 73–117× on discopt-doe's own `compute_fim` (2026-09-09)
+
+§33's tape result was measured on a synthetic replica of discopt-doe's
+sensitivity pattern. Per the #727 lesson (synthetic root-gain 0.68, real gain
+0.0) that is not sufficient, so this drives
+`discopt.doe.fim.compute_fim` — the shipped entry point — on real `Experiment`
+subclasses. `discopt-doe`'s own `test_fim.py` + `test_langmuir_batch_reactor.py`
+pass in this tree first (35 passed), so the comparison has a working oracle.
+
+### The real path: construction is 0.1%, JAX autodiff is 98.6%
+
+| case | first call | repeat median | build model | build share |
+|---|---|---|---|---|
+| langmuir n=5 | 546.6 ms | 39.8 ms | 0.04 ms | **0.1%** |
+| langmuir n=50 | 1155.1 ms | 342.1 ms | 0.25 ms | **0.1%** |
+| langmuir n=200 | 3276.7 ms | 1423.1 ms | 1.11 ms | **0.1%** |
+| kinetics n=50 | 952.7 ms | 460.1 ms | 0.32 ms | **0.1%** |
+| kinetics n=200 | 2207.6 ms | 1862.4 ms | 1.38 ms | **0.1%** |
+
+**Construction is 0.1% of a real `compute_fim` call at every size** — §33's
+synthetic estimate of 6–7% was *generous* to the arena. cProfile on
+kinetics n=200, 5 calls, **23.3 M Python function calls**:
+
+```
+19.881s  compute_fim
+19.607s    _compute_jacobian_autodiff          <- 98.6%
+19.543s      jax api.py:834(jacfun)
+14.797s        jax core.py:679(bind)  x 113,110 calls
+12.650s        jax api.py:1638(vjp) -> linearize
+11.542s        _relax/differentiable.py:138(fn)  x 1,000
+```
+
+**And it re-traces on every call** — the repeat median is 1.4–1.9 s, not
+microseconds, so nothing is cached across calls. A design optimizer looping on
+`compute_fim` pays a full O(model-size) Python-level JAX trace per iteration.
+
+That splits the opportunity into two fixes, **neither of which is the arena**:
+
+1. **Cache the traced Jacobian in discopt-doe.** Plugin-side, needs no discopt
+   change. Probably the cheapest large win available anywhere in this analysis.
+2. **Use the tape, which has no trace to pay.**
+
+### The tape reproduces the shipped Jacobian to roundoff, 73–117× faster
+
+`issue1215_real_fim_validation.py`, validated against `FIMResult.jacobian` over
+**1500 Jacobian entries**, kill criterion 1e-9:
+
+| case | doe median | tape build | tape eval | speedup | max rel. err |
+|---|---|---|---|---|---|
+| langmuir n=50 | 362.5 ms | 3.57 ms | 9.5 µs | **101×** | 8.882e-16 |
+| langmuir n=200 | 1409.6 ms | 13.89 ms | 22.9 µs | **101×** | 8.882e-16 |
+| kinetics n=50 | 468.7 ms | 5.41 ms | 14.0 µs | **86×** | 2.528e-16 |
+| kinetics n=200 | 1860.1 ms | 25.50 ms | 38.0 µs | **73×** | 3.767e-16 |
+
+Agreement is float roundoff (~1e-16), not merely inside the bar. The speedup
+column includes the tape build, so it is end-to-end for one FIM evaluation from
+a fresh model.
+
+**What this does not prove:** agreement is against what discopt-doe already
+computes, so it shows the tape reproduces the shipped answer — not that either is
+right in absolute terms. `compute_fim(method="finite_difference")` is the
+independent third leg and has **not** been run.
+
+### `discopt.parametric` is a public contract, so the tape supplements rather than replaces
+
+`compute_fim` imports `compile_expression` from `discopt.parametric`, a **public**
+module (7 names in `__all__`) whose documented contract is exactly this:
+"Parameter values are *not* baked in as constants — they are read from `p_flat`,
+so derivatives with respect to parameters are available via `argnums=1`." The
+two-AD-engine situation of §32 is therefore partly *by design*, not accident. The
+tape can be a faster route used inside `compute_fim`; `discopt.parametric` must
+keep working, and it is a Python-DAG walker, so it stays on the list of things an
+arena change must not break.
+
+### Corrected dependents census (the registry was incomplete)
+
+`.github/dependents.yml` listed five repos and was missing **jax-kipet**
+(`kipetax`), which the release-notification workflow therefore never told about a
+breaking change. Added in this commit. Full census — `isinstance` against node
+classes, node-internal attribute reads, and `id(node)`-keyed traversal:
+
+| repo | .py | LOC | `.body` | isinstance | attr reads | `id(node)` | private imports |
+|---|---|---|---|---|---|---|---|
+| discopt-doe | 62 | 28,674 | 1 | 2 | 38 | 0 | 13 |
+| **discopt-aggregation** | 71 | 14,900 | **34** | **82** | **153** | **8** | **37** |
+| discopt-mkm | 64 | 9,886 | 0 | 4 | 6 | 0 | 11 |
+| discopt-apps | 6 | 687 | 0 | 0 | 0 | 0 | 6 |
+| discopt-course | 5 | 1,155 | 0 | 0 | 1 | 0 | 0 |
+| jax-kipet | 67 | 11,322 | 0 | 1 | 67\* | 0 | 4 |
+| tightrope | 88 | 15,013 | 0 | 0 | 11 | 0 | 0 |
+
+\* jax-kipet's `.left`/`.right`/`.op` reads are on **its own** nodes, not
+discopt's — see below.
+
+**tightrope is not a dependent at all.** Its single "discopt" mention is a comment
+("No hand-written derivative code, and no discopt dependency"). It is a sibling
+project that solves constrained NLPs with its own JAX autodiff and IPM — i.e. it
+independently reimplements capability discopt has. Worth knowing; not a
+compatibility constraint. It was **not** added to the registry.
+
+**discopt-aggregation remains the only expression-walking dependent**, so §31's
+identity audit surface is unchanged by these two additions.
+
+### A real expressiveness gap, found in jax-kipet
+
+`kipetax/model_tools/proxy_vars.py` implements a **shadow expression layer** —
+`KipetProxy`, `PendingBinaryOp`, `PendingUnaryOp` with full operator overloading —
+because "users write ODE right-hand sides using KipetProxy objects, which build
+pending expression trees. At solve time these trees are resolved into real discopt
+expressions via `resolve_expression()`."
+
+discopt's `Expression` requires the `Variable` object to exist before it can be
+referenced, so a downstream project needing **late-bound, name-referenced
+expressions** had to rebuild the operator layer. That is a genuine gap for
+discopt-as-a-foundation, and it is the *same* underlying need as the arena's
+template idea: a structure built once and bound to concrete variables N times.
+If an expression-layer change is undertaken, late binding belongs in scope —
+it would delete a whole shadow layer in a dependent rather than merely speed one
+up.
+
+## 35. Bound-neutrality is necessary but not sufficient for downstream consumers (2026-09-10)
+
+Found while fixing a plugin-side perf bug, and it constrains the §31 arena work.
+
+### The plugin bug (fixed, not shipped from here)
+
+§34 recommended "cache the traced Jacobian in discopt-doe" as the cheapest large
+win. **That recommendation was wrong: the cache already existed.**
+`discopt.doe.fim._make_direct_fim_evaluator` builds the model once and
+`jax.jit`s the Jacobian once, and `design.py:494` already uses it for the
+adaptive single-point loop. Recorded so the same recommendation is not made a
+third time.
+
+Looking for it did find a real gap: `_joint_batch`'s scipy objective calls
+`joint_fim_and_pieces`, which loops `compute_fim` over all `n_experiments`
+designs — so a joint batch design pays (iterations × n_experiments) model
+rebuilds and JAX re-traces while the compiled evaluator sat unused in the same
+module. Hoisting it gave **82× end-to-end** on
+`batch_optimal_experiment(strategy="joint")` (28.89 s → 0.35 s; 459–648× on the
+objective alone), suite 428 passed / 4 skipped / 0 failed, identical to baseline.
+The change lives on `perf/joint-batch-reuse-fim-evaluator` in the discopt-doe
+clone; it is that repo's to merge, not this one's.
+
+### The lesson that applies here
+
+The two paths produce **different located designs** — `t = 1.509527` vs
+`1.509528`, a 6.3e-07 relative difference that breached the 1e-10 bar the
+equivalence probe had set. Four predictions, stated before running, resolved it:
+
+| | | bar |
+|---|---|---|
+| P1 per-design FIM, `compute_fim` vs evaluator | 2.114e-16 | 1e-12 |
+| P2 optimized criterion agreement | 2.850e-13 | 1e-9 |
+| P3 each path's criterion at the *other's* designs | same plateau, 2.850e-13 | 1e-9 |
+| P4 objective sensitivity at the optimum | 8.1e-06 per unit `t` | — |
+
+The substitution is faithful (P1); the objective is *stationary* at the optimum
+(P4), so a last-bit difference in the FIM moves where scipy stops at second order
+while the criterion moves 2.9e-13. Evaluating the old, un-jitted path at the new
+designs reproduces the new criterion exactly (P3). **A 1e-10 bar on an argmin over
+a flat objective is the wrong invariant** — that bar belongs on a function value.
+
+Independently: `compute_fim` uses `jax.jacobian` with **no jit** while
+`_make_direct_fim_evaluator` uses `jax.jit(jax.jacobian(...))`, so those two paths
+already disagree in the last bits across existing call sites in the same module.
+
+### Consequence for the arena (§31)
+
+CLAUDE.md §5 gates bound-neutral work on `node_count` and certified `objective`
+being **exactly unchanged**. That gate is necessary and it is **not sufficient**
+for any consumer that *optimizes over* solver output. mb-doe designs are such a
+consumer: a difference far below the certification tolerance relocated a design
+in its 7th digit, because argmin over a stationary objective amplifies last-bit
+noise at second order.
+
+So an arena change needs a **downstream invariant** alongside the solver-level
+one. The workable form, from the evidence above: assert the *objective/criterion*
+value agrees to a stated relative bar, and assert that each arm's criterion
+evaluated at the *other* arm's argmin lands on the same plateau — never assert
+bit-equality of a located optimum. Any panel that gates the arena on
+"designs unchanged" will fail for reasons that have nothing to do with
+correctness, and any panel that omits a downstream check will miss the class of
+regression that actually matters to mb-doe.
+
+## 36. Time series: the intended idiom is depth-flat; `sum()` is the trap (2026-09-10)
+
+Asked while scoping the modeling layer as a foundation for dynamic modelling and
+for experimentalist parameter estimation.
+
+### What is already right
+
+`discopt.dae` does the hard part. `Trajectory` (`dae/fit.py:28`) takes **arbitrary
+measurement times**, and `DAEBuilder.state_at` evaluates the state via the exact
+collocation polynomial, so observations need not land on collocation nodes
+(`fit.py:149-165`). Per-observation weights, multi-trajectory joint fitting with
+shared parameters, and a data-interpolated warm start (`fit.py:89-106`) are all
+present. Scale is not the constraint: 64 trajectories × 3 states × nfe=60 →
+45,888 rows in 0.66 s build / 1.0 s tape.
+
+### The hypothesis that was wrong
+
+A time-series objective is a sum of N residuals, so it looked like the natural way
+for a user to reach the chain depth at which the recursive GDP interval walker
+`gdp_reformulate._bound_expression` raises `RecursionError`. **It is not** —
+`dm.sum` emits a flat `SumOverExpression`, and depth is constant in N:
+
+| N observations | `dm.sum` | builtin `sum()` | explicit `+=` |
+|---|---|---|---|
+| 500 | **8** | 507 | 506 |
+| 2 000 | **8** | 2 007 | 2 006 |
+| 5 000 | **8** | 5 007 | 5 006 |
+| 12 000 | **8** | — | — |
+
+### The real trap, and why it is nasty
+
+Python's builtin `sum(residuals)` — the obvious move for anyone arriving from
+numpy — builds a depth-N chain. At N = 2 000 and 5 000 such a model **lowers,
+tapes, exports to `.nl`, and solves correctly**; only `str(objective)` raises
+`RecursionError`.
+
+That is the worst shape of failure for the experimentalist audience: the model
+*works*, and then rendering it fails — which takes out `repr` in a notebook, any
+error message that interpolates the expression, and the LLM diagnosis path. The
+GDP interval walker is recursive too, so a builtin-`sum` objective inside a
+superstructure model fails at *reformulation* rather than at print.
+
+Fix directions, neither architectural: make the remaining recursive consumers
+iterative (the Rust lowering, tape builder, term classifier and factorable reform
+already are — measured "ok" at depth 5000), or have `Expression.__add__` flatten
+into `SumOver` when accumulating. Worth doing **before** the layer exists, because
+once tutorials show `sum(...)` the idiom is baked in.
+
+## 37. C-41 verified fixed; PR gate green (2026-09-10)
+
+`ba13190` makes `model_to_repr`'s builder arm read the live Python bounds. Built
+extension asserted to carry the change (§8: the marker string is present in the
+`.so`).
+
+* `repro_stale_builder_box.py` flips from `DEFECT PRESENT` to clean — the
+  `add_linear_objective` route now returns `optimal obj=0.0`, matching its
+  reference, and the script exits 0.
+* The **untested opposite direction** is now covered. A builder box *looser* than
+  the live bounds would have been a silent false `optimal` rather than a loud
+  false `infeasible`; five arms — loose→tight, tight→loose, and a **disjoint
+  shift** (declared `[0,1]`, live `[7,8]`) — all agree with their references and
+  return solutions inside the live box.
+* PR gate: `pytest -m smoke` **1209 passed, 14 skipped, 2 xpassed**; adversarial
+  suite **19 passed**; `cargo test -p discopt-core` **ok**.
+
+Caveat on the loose-direction probe: its blockless arms carry a *zero* linear
+objective, so their objective value is trivially 0 and does not discriminate.
+There the load-bearing assertion is "returned solution lies inside the live
+bounds", which is asserted explicitly; the objective check is weaker than the
+table suggests. The reproduction script does discriminate on objective.
+
+The **2 xpassed** are being identified — expected-to-fail tests that now pass are
+the signal that the stale box was masking other defects.
+
+## 38. Construction: canonical `x[i]` closes a third of the Pyomo gap; the tape build is 2.25–2.84× cheaper from the arena (2026-09-10)
+
+Two shipped changes on the **modelling** side of #1215 (nothing here touches the
+solver). Headline, `bench_model_construction.py`, 40 forms × 5 000 = 200 000
+rows, 5 interleaved reps, load 0.02–0.26, Pyomo byte-identical at 94.3 MB across
+every run as the environment control:
+
+| | µs/row | B/row | vs Pyomo (time) | vs Pyomo (mem) |
+|---|---:|---:|---:|---:|
+| before | 19.12 | 911 | 2.98× | 1.93× |
+| after  | 11.67 | 725 | **1.88×** | **1.54×** |
+
+Pyomo 6.10.1 is 6.22 µs/row and 471 B/row; oximo 0.6.0 is 0.66 µs/row.
+
+### What worked: canonical element handles
+
+The attribution that mattered was **leaf identity**, not node count:
+
+| | discopt | pyomo | ratio |
+|---|---:|---:|---:|
+| `x[0] is x[0]` | `False` | `True` | — |
+| indexing alone | 1.99 µs | 0.18 µs | **11.3×** |
+
+Every `x[i]` allocated a fresh `IndexExpression`; Pyomo hands back the one
+canonical `VarData`. `Variable.__getitem__` now memoises the node per index, and
+indexing drops to **0.35 µs (2.0× Pyomo)**. Expression-tree construction for one
+row went 4.79 → 1.24 µs, and the expression-node share of a build fell from 96%
+to 45% — the bottleneck has moved *out* of node creation.
+
+The second-order effect is likely the larger one: expressions hash by identity
+(`Expression.__hash__ = object.__hash__`), so the `id()`-keyed memos carried by
+all 47 DAG walkers, the relaxation layer and the tape lowering now **hit across
+rows** that share an element instead of re-walking a structurally identical node
+once per occurrence.
+
+Only an exact `int` (or a tuple of exact ints) is cached, keyed on the raw index.
+Normalising `np.int64(0)`, `0` and `(0,)` together would hand back a node whose
+`.index` has a different *type* than the caller wrote, and consumers branch on
+that (`_resolve_var_index` in the `.nl` writer treats `int` and `tuple`
+differently), so those forms stay uncached rather than aliased.
+
+### What did not work: `__slots__`, *again*
+
+**This was a wasted round, and the record already said so.** §30 (2026-09-07)
+implemented, measured and reverted `__slots__` on the node classes; this session
+did the whole thing over before reading it. Re-measured, the answer is the same
+and slightly worse: 144.9 → 143.1 MB (**1.2%**) with no time change (2.334 s in
+both arms). CPython 3.12 gives same-shape instances a key-sharing dict, so the
+per-instance `__dict__` an intuitive reading blames for ~104 B/node costs almost
+nothing. Reverted, and now pinned by
+`test_expression_nodes_are_not_slotted` so the next attempt fails a test instead
+of spending an afternoon.
+
+Process note: §30 exists precisely to stop this. **Read the falsification record
+for the layer you are about to optimise before forming a hypothesis about it.**
+
+### Arena-lowered AD tape (`_arena_tape`, shipped)
+
+`model_to_repr` already walks the model into a typed Rust arena, so the tape
+build's second walk of the Python DAG is redundant. `PyModelRepr.tape_program()`
+returns the arena as six flat numpy arrays; lowering is one forward scan
+(append-only arena ⇒ every child's id is below its parent's).
+
+| rows | Python walk | arena scan | |
+|---:|---:|---:|---|
+| 1 500 | 76.8 µs/row | 27.0 | 2.84× |
+| 6 000 | 79.4 | 32.6 | 2.43× |
+| 24 000 | 81.5 | 36.3 | 2.25× |
+
+Interleaved arms, 5 reps, load 0.00. Bound-neutral per §5, so the bar was exact
+equality: objective, gradient, constraint values and full Jacobian agree to
+**0.000e+00** across seven model shapes, including a 6 000-term builtin `sum()`
+chain and sub-threshold chains with 1e-8..1e8 coefficients where reassociation
+would show.
+
+### Falsification recorded: "unsupported" is not one exception
+
+The first revision allowlisted `TypeError: Unknown expression type` as the
+"no arena representation" signal. `convert_expr` also raises
+`ValueError: Unknown MathFunc: centropy` for an operator outside the core IR —
+and `centropy` is produced by a *solver rewrite*, not at construction, so it is
+invisible to any probe that lowers the constructed DAG. Four models that used to
+solve became crashes and only the smoke suite caught it. The refusal is now
+structural rather than a substring match.
+
+### Coverage limit, and the next target
+
+The arena tape refuses **array-valued constraint bodies** (`x <= 1.5` on a
+vector, `A @ x`) because one `Constraint` there is many tape rows and the flat
+encoding cannot fan out. Measured across construct families: scalar-bodied
+flowsheet and indexed-sum models lower; vector and matmul bodies fall back. Since
+DAE collocation and vectorised balances are exactly the 100k-scale shapes, **the
+fan-out belongs in `tape_program` next**.
+
+On construction, the remaining gap is no longer in the nodes. Post-fix
+attribution of one row: expression tree 1.24 µs, `Constraint` wrapper +2.4 µs,
+`Model.constraint` bookkeeping +4.4 µs. **The `Constraint` wrapper and the
+indexed-family bookkeeping are now the target**, not `Expression`.
+
+## 39. Construction: 40% of a build was garbage collection, and the Pyomo headline was nearly a lie (2026-09-10)
+
+### GC, not node cost, was the largest remaining item
+
+Micro-timing said one row costs ~1.9 µs of actual node construction; the
+200 000-row build measured 8.31 µs/row. The 4.4× was **collection**, not
+per-operation work. A model under construction is ~1.6M live, GC-tracked
+container objects that are *all reachable* — nothing built so far is garbage —
+so every collection triggered by allocating the next row traverses the whole
+model and frees nothing.
+
+Interleaved arms, one process, **with a full `gc.collect()` inside every timed
+region** so postponed traversal is paid for and counted:
+
+| arm | µs/row | |
+|---|---:|---|
+| default thresholds | 6.39 | 1.00× |
+| gen-0 threshold ×100, scoped per `Model.constraint` call | 4.24 | **1.51×** |
+| gen-0 threshold ×100, whole build | 4.33 | 1.48× |
+| GC disabled entirely | 3.66 | 1.73× |
+| `gc.freeze()` | 5.88 | 1.08× |
+
+Two things worth keeping: **per-call scoping costs nothing** against tuning the
+whole build, so the shippable, library-safe form is free; and `gc.freeze()` —
+the intuitively right tool, since the built model is precisely what should stop
+being traversed — is *not* the mechanism.
+
+Shipped as `modeling.bulk_construction_gc()`, applied inside `Model.constraint`
+and exported publicly, because the biggest models are built by user loops that
+never reach it. GC is deliberately **not** disabled: faster still, but it leaves
+an unbounded window for genuine cyclic garbage from a user's rule function.
+
+### The headline was about to overstate discopt by 1.6×
+
+With that shipped the benchmark read **discopt 4.18 µs/row against Pyomo 6.20 —
+0.67×**, i.e. "discopt is 1.5× faster than Pyomo". Pyomo exposes the same idea as
+`PauseGC` and leaves it to the caller, so that number compares a tuned library
+against an untuned one. Measured under identical treatment:
+
+| arm | µs/row |
+|---|---:|
+| discopt, GC scope disabled | 7.16 |
+| discopt (shipped) | 4.46 |
+| pyomo as written | 7.04 |
+| pyomo, same GC treatment | 4.25 |
+
+**Pyomo gains the same ~1.65×.** Like-for-like discopt is **1.24× slower**, not
+1.5× faster. Both numbers are true and they mean different things, so the
+benchmark now carries a permanent `pyomo-gc` arm and prints both lines with the
+like-for-like one labelled — the distinction cannot be quoted away by a future
+reader (this file's §11, applied to a claim before it was published rather than
+after).
+
+### Standing, and why the arena is now the only remaining lever
+
+| | µs/row | B/row |
+|---|---:|---:|
+| oximo 0.6.0 | 0.66 | ~205 |
+| discopt (session start) | 19.12 | 911 |
+| **discopt (now)** | **4.18** | **470** |
+| pyomo as written | 6.20 | 471 |
+| pyomo, same GC | 3.38 | 471 |
+| prototype `arena-api` ceiling (§31) | 1.81 | 374 |
+
+Memory is at parity with Pyomo and within 25% of what the arena prototype itself
+achieved — that prize is nearly spent. Time is not: the irreducible per-row cost
+of the object-per-node representation is ~1.9 µs of node construction plus
+allocation, so **no further micro-optimisation reaches the 1.3–3.3 µs target**.
+The arena's public-API arm measured 1.81 µs/row *with default GC*, so it should
+land inside the target and gain again from the GC scope on top.
+
+Corollary for planning: the four shipped construction changes (canonical `x[i]`,
+interned literals, inlined shape inference, GC scope) took 19.12 → 4.18 µs/row.
+Everything left is representation.
+
+## 40. The arena is not the lever; bulk construction is — and it already beats oximo (2026-09-10)
+
+### Retraction: §31's 7.3× was not the representation
+
+§31 measured a flat-arena prototype at 1.81 µs/row against the then-current
+13.28 and concluded the arena was worth 7.3×. **That conclusion is withdrawn.**
+The current path now measures **3.85 µs/row through the same object-per-node
+representation** — the gap was almost entirely shape inference, `_wrap` call
+chains, naming, family bookkeeping and GC, all since removed by other means.
+What the representation itself is worth was never isolated. Measured directly,
+per node:
+
+| storage | time | memory |
+|---|---:|---:|
+| Python object (today) | 0.134 µs | 136 B |
+| list-backed arena | 0.123 µs | 64 B |
+| `array.array` arena, append | 0.258 µs | **21 B** |
+| `array.array` arena, preallocated assign | 0.094 µs | 21 B |
+| tuple-per-node arena | 0.621 µs | 112 B |
+
+So an oximo-shaped arena is **1.42× cheaper to write and 6.5× lighter per node**
+— real, but node storage is only ~0.5 µs of a 3.85 µs row. Projected over a full
+port: **memory 468 → ~230 B/row (meets the target), time 3.85 → ~3.7 (≈4%)**, in
+exchange for rewriting 47 DAG walkers and 93 `id()`-keyed memo sites. The memo
+rewrite is not optional busywork: with children materialised on demand, a freed
+handle's `id()` can be reused and produce a *false* memo hit, i.e. a silently
+wrong tape.
+
+Two further measurements killed the handle design outright: overriding
+`__class__` so `isinstance` still works costs **5.3×** per `isinstance`
+(1.2M calls per build), and materialising a child handle on `.left` costs
+**17× an attribute read** — a tax every walker pays on every traversal.
+
+### What actually reaches oximo's numbers
+
+Same 200 000 rows, three construction routes, interleaved:
+
+| route | µs/row | retained |
+|---|---:|---:|
+| per-element operators, nonlinear body | 2.82 | — |
+| per-element operators, affine body (auto fast path) | 8.57 | **+0.0 MB** |
+| per-element operators, affine body, `fast=False` | 2.89 | +70.2 MB |
+| **`add_linear_constraints` (bulk matrix)** | **0.31** | **+0.0 MB** |
+
+**The bulk path is 0.31 µs/row — below oximo's 0.66 — and retains nothing**,
+because no Python object is created per row at all. That is 9× the per-element
+path and ~20× Pyomo, and it needs no representation change: it already exists.
+
+This reframes the whole question. Per-element operator overloading costs ~30
+Python function calls per row, and *that count* is the floor — not the size or
+layout of the node. oximo is fast for the same reason this arm is: its per-row
+work is not interpreted. Compilation is downstream of that, not the cause; a
+pure-Python bulk path already beats it.
+
+### The trade the auto fast path makes, and how it is wasteful
+
+`_try_fast_linear_family` is not a pessimisation — it buys **all** of the
+retained memory (70.2 MB → 0.0) for 3× the construction time. At 100k scale that
+is the right trade. But it reaches it wastefully: it runs the rule per element to
+materialise 200 000 Python `Constraint` objects, walks each body with
+`affine_form`, builds the CSR, and discards them. The direct bulk call gets the
+same result at 0.31 µs/row. The waste is the per-row Python round trip, not the
+matrix assembly.
+
+### Direction
+
+1. **A template/bulk construction API is the lever**, not a per-node arena: one
+   symbolic form instantiated N times below the Python line (what JuMP's macros
+   and oximo do). `add_linear_constraints` proves the ceiling at 0.31 µs/row;
+   the missing piece is the nonlinear analogue.
+2. **The arena remains worth doing for memory alone** (468 → ~230 B/row), but it
+   is a memory project, not a speed project, and it must carry the `node_key`
+   rewrite of all 93 identity sites. Do not re-scope it as a speed win.
+3. Per-element construction is now 3.85 µs/row and 468 B/row against Pyomo's
+   3.24 and 471 like-for-like. Further micro-optimisation there has little left.
+
+## 41. discopt already has the oximo-class path — it is vectorised bodies, and it has holes (2026-09-10)
+
+§40 concluded the lever is bulk construction rather than a per-node arena. It is
+better than that: **the bulk path already exists for nonlinear models** and is
+not linear-only. An array-valued constraint body — `dm.exp(x) + y <= b` on shaped
+variables — is ONE `Constraint` that fans out to N rows.
+
+Measured through to **solve-ready** (build + `model_to_repr` + AD tape), 40 × 1000
+= 40 000 rows, identical mathematics, three reps, row counts verified per arm:
+
+| arm | build | lower | tape | total | µs/row |
+|---|---:|---:|---:|---:|---:|
+| per-element (`m.constraint` + rule) | 0.136 | 0.274 | 1.969 | 2.380 | 59.5 |
+| **vectorised** | 0.001 | 0.001 | 0.064 | **0.066** | **1.65** |
+
+Peak allocation, measured in a *separate* pass: per-element 19.7 MB, vectorised
+0.7 MB — **36× end to end and 28× less memory**, and the vectorised arm reaches
+**solve-ready at 1.65 µs/row and 17.5 B/row**. For scale, oximo's 0.66 µs/row and
+~205 B/row are *construction only*; this column includes the Rust arena and the
+AD tape as well.
+
+**Two instrument corrections, both of which changed the answer.**
+
+*The build-only probe lied by 800×.* It put the vectorised arm at 0.005 µs/row,
+because an array body is *lazy*: construction is O(families) and the per-row work
+moves to lowering. Row counts do not catch this — both arms genuinely encode
+40 000 rows. Only timing through to solve-ready shows the real figure.
+
+*The first solve-ready probe lied by 2×, in the other direction.* It ran
+`tracemalloc.start()` around the timed region and reported 259.5 µs/row against
+14.4, i.e. 18×. tracemalloc taxes every allocation and the per-element arm
+allocates far more, so it inflated that arm disproportionately — the isolated
+vectorised tape measures 2.4 µs/row where the instrumented run said 14.2. With
+memory moved to its own untimed pass the true figures are those above.
+**Never measure time with an allocation tracer running**; take memory in a
+separate pass.
+
+### Consequence for this whole workstream
+
+`bench_model_construction.py` measures the *per-element* idiom, so every
+construction change this session (§38–§40, 19.12 → 3.85 µs/row) optimised the
+slow path. Those changes are real and worth keeping, but they are not the route
+to the target — the route is to make the vectorised path the idiom and to close
+its gaps.
+
+### The gaps, which are exactly where the work is
+
+1. **The AD tape is 97% of the vectorised pipeline** (0.064 s of 0.066 s).
+   `tape_program` (§38) *refuses* array-valued bodies — one `Constraint`, many
+   tape rows, and the flat encoding cannot fan out — so the fastest models fall
+   back to the Python DAG walk. Fanning out in Rust is the highest-value task.
+2. **`.nl` export fails on array bodies.** Measured earlier today: of eight
+   array-shaped construct families, six refuse with
+   `Cannot write array variable x without indexing`; the objective path never
+   reaches `_scalarize` at all, and `norm2` has no writer entry. So the fast
+   idiom cannot be exported to the external solvers the layer must serve.
+3. `_scalarize`'s `FunctionCall` branch broadcasts element-wise, which is wrong
+   for a *reduction*: `norm(x)` on a 3-vector expands to three rows of
+   `norm2(x[i])` rather than one. It only fails loudly today because `norm2` has
+   no `.nl` opcode; give it one and the export becomes silently wrong.
+
+### Direction
+
+Stop optimising per-element construction. The order is: (1) array fan-out in
+`tape_program`; (2) the `.nl` array-body and reduction gaps; (3) make the
+vectorised form the documented idiom, with the benchmark carrying a vectorised
+arm so the two are never confused again. On the numbers above the vectorised path
+already exceeds the stated target (oximo-comparable memory, 2-5x oximo speed) on
+both axes; the work is to make it usable end to end, not to make it faster.
+
+## 42. To a written `.nl`, discopt and Pyomo are at PARITY — the vectorised win is internal only (2026-09-10)
+
+§41 reported the vectorised path at 1.65 µs/row against 59.5 for the per-element
+idiom, and compared that to Pyomo's 6.20 and oximo's 0.66. **That comparison was
+invalid**: discopt's figure is *build + arena + AD tape* (solve-ready), while the
+Pyomo and oximo figures are *construction only*. Measured to the same finish
+line — a written `.nl` file, which is what actually feeds an external solver —
+40 × 500 = 20 000 rows, files verified identical in size and row count:
+
+| arm | µs/row | vs Pyomo |
+|---|---:|---:|
+| discopt per-element | 19.89 | 0.88× |
+| discopt vectorised | 17.69 | 0.99× |
+| Pyomo 6.10.1 | 17.58 | 1.00× |
+
+**Parity, not 36×.** `.nl` writing costs ~17.6 µs/row for both tools and swamps
+every upstream difference.
+
+### Why this is structural, not a missing optimisation
+
+`.nl` is a **row-oriented** format: every scalar row must be materialised and
+serialised. Writing one therefore *forces* exactly the fan-out that vectorisation
+exists to avoid — `scalarize` is 33% of the write profile. The vectorised
+advantage cannot survive the file boundary, by construction.
+
+So the win splits cleanly, and the two halves must never be quoted as one:
+
+* **discopt's own solver** (build → arena → tape): vectorised is 36× the
+  per-element idiom, 1.65 µs/row and 17.5 B/row. Pyomo has no comparable path;
+  this is the vertical-integration advantage and it is real.
+* **External solvers via `.nl`**: ~17.6 µs/row for everyone. discopt is at
+  parity with Pyomo and the modelling layer is not the bottleneck.
+
+### Consequence for the roadmap
+
+Vectorising the NN and GDP emitters (§41) still pays — on the internal solve path
+and on memory — but it will **not** make external-solver export faster than
+Pyomo. If "notably faster than Pyomo" is meant to include feeding SCIP / BARON /
+IPOPT, the target is the **`.nl` writer**: 0.95 MB in 0.35 s is 2.7 MB/s, with
+33% in `scalarize`, 17% in `_collect_linear` and 12% in bare `isinstance`. That
+is a separate project from the modelling layer, and Pyomo pays similar costs, so
+it is a fair fight rather than a free win.
+
+### The oximo baseline is unverified
+
+**oximo is not installed in this environment and has not been measured in any of
+this work.** Every oximo figure quoted in §31, §40 and §41 (0.66 µs/row,
+~205 B/row) is inherited from an earlier measurement, on a model not described
+here, and is *construction only* — so comparing it against discopt's solve-ready
+numbers, as §41 did, compares different amounts of work. Treat the oximo column
+as unverified until it is installed and benchmarked to a common finish line.
+
+## 43. oximo measured at last: the modelling layer already beats it; the `.nl` WRITER is 18.8× behind (2026-09-10)
+
+§42 recorded that oximo had never been measured in this work and that its quoted
+figures were inherited. It is now installed (`oximo = "0.6.0"` from crates.io —
+it is a **Rust** library, not a Python package, which is why `pip install oximo`
+finds nothing) and benchmarked on the identical model: 40 × 500 = 20 000 rows of
+`exp(x_i) + y_i <= b_i` over 1 000 variables, timed to a written `.nl`.
+
+| tool | construct | write `.nl` | total | µs/row | vs oximo |
+|---|---:|---:|---:|---:|---:|
+| **oximo 0.6.0 (Rust)** | 0.26 | 0.86 | 0.0224 s | **1.12** | 1.0× |
+| discopt vectorised | **0.03** | 16.17 | 0.3242 s | 16.21 | 14.5× |
+| discopt per-element | 3.54 | 15.23 | 0.3755 s | 18.78 | 16.8× |
+| Pyomo 6.10.1 | — | — | 0.352 s | 17.58 | 15.7× |
+
+(µs/row for the construct and write columns; row counts verified from each
+file's own `.nl` header, and the emitted files are 0.82–0.9 MB across all tools.)
+
+### Two corrections
+
+**§42's "the ~17.6 µs/row `.nl` cost is structural, both tools pay it" is
+withdrawn.** It was inferred from discopt and Pyomo agreeing, without a third
+data point. oximo writes the same file in **0.86 µs/row**. The cost is not
+inherent to a row-oriented format — it is Python. discopt's writer is **18.8×**
+oximo's and accounts for **99.8%** of discopt's total.
+
+**The modelling layer is no longer the problem, and is already ahead of oximo.**
+Vectorised construction is **0.03 µs/row against oximo's 0.26** — 8.7× faster,
+because an array body makes construction O(families) while oximo still builds
+per-row. Every construction change in §38–§40 (19.12 → 3.85 µs/row) optimised a
+term worth 3.54 of 18.78 on the per-element path and 0.03 of 16.21 on the
+vectorised one.
+
+### The lever
+
+**Write `.nl` from the Rust arena.** `crates/discopt-core/src/nl_parser.rs`
+already *reads* `.nl` in Rust; the writer is the symmetric operation and does not
+exist — `export/nl.py` builds the whole file in Python, and its profile is 33%
+`scalarize`, 17% `_collect_linear`, 12% bare `isinstance`. Closing most of the
+18.8× would put discopt at roughly 1–2 µs/row end to end: **~10× faster than
+Pyomo and within ~1.5–2× of oximo**, from one bounded component.
+
+This supersedes §41's roadmap ordering. Vectorising the NN and GDP emitters and
+making the vectorised idiom the default still pay — on discopt's own solve path
+(1.65 µs/row to tape-ready) and on memory — but they move the 0.03, not the
+16.17, and must not be sold as the route to external-solver performance.
+
+## 44. Decision: the `.nl` writer goes in discopt-core over `ModelRepr` (2026-09-10)
+
+§43 identified the `.nl` writer as the whole remaining gap (16.17 of discopt's
+16.21 µs/row; 18.8× oximo's). Three substrates were considered. Recorded here
+because two of them are attractive and wrong, and the reasons are not obvious
+from the outside.
+
+### Rejected: reuse a writer from pounce
+
+`jkitchin/pounce` has **no `.nl` writer**. It has a `.nl` *reader*
+(`pounce-nl/src/nl_reader.rs`) and a `.sol` *writer*
+(`pounce-nl/src/sol_writer.rs`) — and `pounce-cli` re-exports the latter as
+`pounce_nl::sol_writer as nl_writer`, "under its historical name to keep
+`nl_writer::…` call sites resolving". **The module you reach as `nl_writer`
+writes `.sol`, the solution file, not `.nl`, the model.** Every `"g3 1 1 0"` in
+that repo is a test fixture feeding the reader; `render_expression` renders
+human-readable algebra for diagnostics, not postfix opcodes. Expect to
+rediscover this; the alias is convincing.
+
+### Rejected: build the writer over pounce's `NlProblem`
+
+`NlProblem` is a complete NLP model (bodies, linear parts, bounds, x0, suffixes,
+names) and discopt already constructs one on every solve via `build_nl_problem`,
+so this looks nearly free. It is not:
+
+* **No integrality.** No `var_type`, no integer flag anywhere, and `NlCounts`
+  carries only the nonlinearity census (`nlc/nlo/nlvc/nlvo/nlvb`) — not the
+  integer-block counts (`nbv/niv/nlvbi/nlvci/nlvoi`). Correct for a solver that
+  cannot branch; fatal for export, because a MINLP written through it becomes a
+  **silent continuous relaxation of the user's model**.
+* **No linear/nonlinear split on the in-memory path.** `NlProblemParts` is all
+  `Expr` trees by design, so `.nl`'s `J`/`G` segments and header census would
+  have to be re-derived, and its own docs note a genuinely linear row built that
+  way reports `NonLinear`.
+
+### Rejected (as stated): delete discopt's reader, use pounce's
+
+pounce's reader *is* more sophisticated where an NLP solver needs it — CSE /
+`V`-segments (150 mentions vs 6), suffixes (75 vs 5), imported/external
+functions (35 vs **0**, so discopt likely cannot read IDAES-style `.nl` with
+compiled C functions at all). But it has no integrality and **hard-errors on
+complementarity** (`5 => "complementarity (kind 5) bounds are not supported"`),
+while discopt's parser handles both (positional `nlvbi/nlvci/nlvoi` block logic;
+`parse_nl_with_complementarity`, #658). A wholesale swap makes every MINLPLib
+instance read back as a relaxation, silently. The consolidation instinct is
+sound — two `.nl` readers in one ecosystem is a real smell — but the price is
+wrong. Prefer porting pounce's CSE/suffix/external-function handling *into*
+discopt's reader; that gap is worth closing on its own merits.
+
+### Decision
+
+**The writer goes in `discopt-core`, over `ModelRepr`.** That structure is
+already a strict superset of `NlProblem` for export: `VarInfo` carries
+`var_type` (the integrality `NlProblem` lacks), `name`, `offset`, `size`,
+`shape`, `lb`, `ub`; `ConstraintRepr` carries body / sense / rhs / name; the
+arena retains full structure so the linear/nonlinear split is derivable
+(`is_constraint_linear`, `constraint_quadratic_form` already exist); and
+`ComplementarityRepr` is alongside. No new type, no new dependency, and the job
+is the exact inverse of `nl_parser.rs`, sharing its opcode table.
+
+Every format decision is already encoded in `export/nl.py` — canonical
+nonlinear-vars-first reordering, the header census, the linear/nonlinear split,
+the `J`/`G`/`r`/`b`/`k` segments — so this is a port against a known-good
+reference (~1 200–1 800 lines of Rust against 1 484 of Python), with the Python
+writer retained as the fallback for what the arena cannot hold (`dm.custom`).
+
+### Build the array fan-out first
+
+`ConstraintRepr.body` may be an array-valued node (matmul, axis sum), so the
+Rust writer must fan out to scalar rows — which is exactly the fan-out
+`tape_program` refuses today, and the tape is 97% of the vectorised pipeline
+(§41). **One piece of Rust work unblocks both**, so it is the first task, not a
+detail of the second.
+
+Expected: write 16.17 → ~1 µs/row, total 16.21 → ~1–2 — **~10× Pyomo and within
+~1.5–2× of oximo**, from one bounded component.
+
+## 45. The Rust array fan-out is right for the writer and WRONG for the tape (2026-09-10)
+
+§44 said the array fan-out was "one piece of Rust work unblocking both" the `.nl`
+writer and the AD tape, and made it the first task on that basis. **The tape half
+is falsified.** The fan-out is built, verified and kept — for the writer.
+
+`discopt_core::expand` turns an array-valued `ConstraintRepr` into N scalar rows
+in Rust: shape inference over the arena, then a flat instruction program in the
+same opcode encoding `tape_program` uses, plus one root per row and the
+per-constraint row counts a caller needs to attribute duals. It is **bit-identical
+to the Python DAG walk** — objective, gradient, every constraint value and the
+full Jacobian, 128 comparisons over 8 model shapes (elementwise, matmul, both
+axis sums, `(n,1)`-against-`(n,m)` broadcasting, `norm2`/`prod` reductions,
+row and column slices, a 6 000-term chain), all `0.000e+00`, with row ORDER
+compared element-wise so a right-values/wrong-order fan-out could not pass.
+
+### Measured on the tape: 1.77× SLOWER
+
+| arm | µs/row | |
+|---|---:|---|
+| Python DAG walk (`_nl_expr_compiler`) | 4.60 | 1.00× |
+| Rust expansion + Python lowering | 8.13 | **0.57×** |
+
+40 × 500 = 20 000 rows, 7 reps after warm-up, sd 0.006/0.022.
+
+The profiles say why, and it is not the Rust:
+
+* **Python-walk arm**: `_lower_uncached` is called **242 times for 20 000 rows** —
+  once per *array node*, not per row — and `np.frompyfunc` creates the 40 500
+  per-element POUNCE nodes in C (0.008 s). The Python-level lowering is ~0.025 s
+  of a 0.092 s build; `build_nl_problem` (C) is the other 0.067.
+* **Rust-expand arm**: the expanded program is ~100 000 scalar instructions and
+  the consumer must touch every one **from Python** — `lower` 0.062 s plus
+  `_chain_leaves` 0.085 s, on top of the same 0.061 s `build_nl_problem`.
+
+**The existing path already does the fan-out — at numpy's C level.** Expanding in
+Rust replaces a C loop with a Python one. The bottleneck was never the fan-out;
+it was constructing N POUNCE nodes, and `frompyfunc` already does that as well as
+anything can from Python.
+
+A precheck to skip provably-pointless chain walks was tried and reverted: it does
+not fire on these shapes (a row roots at `SUB(ADD(..), const)`, whose left
+operand *is* additive) and showed no measured benefit.
+
+### Why it is still the right substrate for the writer
+
+The writer's consumer is **Rust**. `ModelRepr → expand → .nl text` never crosses
+into Python, so the per-instruction cost that sinks the tape route does not
+arise — and the writer genuinely needs the fan-out, because `.nl` is row-oriented
+and `scalarize` is 33% of the current Python writer's profile.
+
+So `expand.rs` and `PyModelRepr.tape_program_expanded()` stay, and
+`_arena_tape.try_build_expanded_tape` stays as their **verification harness** —
+explicitly documented as not a production path, since correctness of the Rust
+fan-out has to be provable from Python before the writer is built on it.
+
+### Correction to §44's ordering
+
+The fan-out is a prerequisite of the writer, not a shared win. Sequence the work
+as: fan-out (done) → `ModelRepr → .nl` in Rust → measure against the 16.17 µs/row
+the Python writer costs. The tape keeps the Python array-at-a-time path, which is
+already near its floor.
+
+## 46. The Rust `.nl` writer lands: 10.5× Pyomo, 1.57× oximo (2026-09-10)
+
+§44 decided the writer goes in `discopt-core` over `ModelRepr`; §45 built the
+array fan-out it needs. This is the writer, and it closes the gap §43 opened.
+
+Measured in ONE run on ONE machine, same 40 × 500 = 20 000-row model, every arm
+timed from an empty model to a written `.nl` on disk, row counts verified from
+each file's own header:
+
+| tool | µs/row | vs discopt |
+|---|---:|---:|
+| oximo 0.6.0 (Rust) | 1.06 | 0.64× |
+| **discopt, Rust writer** | **1.66** | 1.00× |
+| discopt, Python writer | 16.21 | 9.8× |
+| Pyomo 6.10.1 | 17.42 | 10.5× |
+
+**10.5× faster than Pyomo and 1.57× oximo** — inside the 2–5×-of-oximo target,
+and past the "notably faster than Pyomo" one. The writer alone went 16.05 → 1.72
+µs/row (9.33×) on the vectorised shape; on a per-element model it is only 1.64×,
+because `model_to_repr` then has 200 000 Python DAG nodes to convert, which is
+one more reason the vectorised idiom is the one to teach (§41).
+
+### Byte-identity as the correctness bar
+
+The writer is a *replacement*, so it is diffed **byte-for-byte** against the
+Python one rather than checked for "solves to the same answer". That is the
+strongest available check and the cheapest to act on — a divergence localises
+itself in the diff, where a round-trip test reports the same optimum while hiding
+a wrong header census that only some solvers read.
+
+**All 66 MINLPLib instances** in `python/tests/data/minlplib_nl` are byte-identical
+after `from_nl` → re-export, plus hand-written shapes covering MINLP integrality,
+matmul, vectorised bodies, equalities and free/fixed bounds. The differential is
+the test suite (`test_nl_writer_rust.py`, 76 cases), forcing the Python writer
+with `DISCOPT_RUST_NL=0` so it keeps working as a differential even if the Rust
+path later becomes unconditional.
+
+### Three defects the byte-diff caught that a round-trip would not have
+
+* **The objective's constant was dropped.** A constraint carries its split-out
+  constant in the `r`-section bound; an objective has no bound to carry it, so it
+  must go back into the body (`_attach_const`). The first draft split it out and
+  never re-emitted it — `nvs06`'s `(0.1 * …) + 1.2` exported as though the
+  `+ 1.2` were absent, and an objective that is *only* a constant lost its body
+  and its nonlinear-objective count. Silent; invisible to status or row counts.
+* **The `r` section was written per CONSTRAINT, not per ROW.** An array body is
+  one `ConstraintRepr` and many rows, so the section was truncated to the
+  constraint count.
+* **Synthesised sums were emitted as the n-ary opcode 54 where Python folds with
+  `+` (opcode 0).** `export/_arrays.py` builds a matmul row, an axis reduction
+  and the squares inside `norm2` with `sum_terms`, a `+` fold; only a `SumOver`
+  the *user* wrote is emitted n-ary — and one that fans out is rebuilt as a fold
+  too. The 66-instance corpus missed this entirely, because there those sums land
+  in linear parts that never reach an expression body; it took a `norm2` body to
+  expose it.
+
+And one the *existing* suite caught, which byte-identity alone would not have:
+`test_matrix_norm_is_refused_loudly`. The Rust expansion applied its `norm2`
+reduction rule at any rank, so a 2-D norm expanded **entrywise** — the Frobenius
+norm, where the modelling layer means the induced/spectral one. It produced a
+valid file with one row and the wrong mathematics: the same silent substitution
+the Python `_scalarize` had earlier the same day (§41), faithfully reproduced in
+Rust. Both writers now refuse.
+
+### What it refuses, and why
+
+**Builder-resident rows.** They sit ahead of the expression rows in the arena and
+after them in `model._constraints`, so the two writers would emit the same model
+with its rows **permuted**. Row order is how a solver's `.sol` duals map back to
+constraints, so the Rust path refuses and the Python writer handles them.
+`dm.custom` likewise falls through to the Python writer's existing loud refusal.
+
+### Standing against the original goal
+
+Construction was never the problem — discopt's vectorised construction is
+0.03 µs/row against oximo's 0.26 (§43). The whole gap was one Python component,
+and it is now Rust. What remains between discopt and oximo is 0.6 µs/row spread
+across `model_to_repr` and the writer, with no single hotspot identified.
+
+## 47. The `.nl` writer's 10.5× is a VECTORISED-model number; per-element is ~1.3× (2026-09-10)
+
+§46 reported 10.5× Pyomo from one synthetic panel (20 000 rows of
+`exp(x)+y <= b`). Two follow-up measurements say that number does not generalise
+the way a reader would assume, so both are recorded before it gets quoted.
+
+### On real instances the win is 1.35×, not 10.5×
+
+Re-exporting all 66 in-repo MINLPLib instances with each writer, best of 3 each:
+
+| stat | speedup | Python µs/row | Rust µs/row |
+|---|---:|---:|---:|
+| min | 0.95× | 18.7 | 15.4 |
+| median | 1.35× | 51.0 | 42.6 |
+| mean | 1.37× | 89.6 | 63.8 |
+| max | 2.27× | 623.1 | 455.7 |
+
+One instance (`st_miqp5`, 13 rows) is marginally **slower**. These average ~56
+rows, and instances read through `from_nl` are per-element by construction — one
+`Constraint` per row.
+
+### The curve: it is the idiom, and then the size
+
+Same model shape at every size, both idioms:
+
+| rows | vec Python | vec Rust | | elem Python | elem Rust | |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 34.94 | 9.07 | 3.85× | 26.22 | 29.98 | **0.87×** |
+| 100 | 18.13 | 3.74 | 4.85× | 16.17 | 13.17 | 1.23× |
+| 1 000 | 14.73 | 1.99 | 7.38× | 13.58 | 11.87 | 1.14× |
+| 5 000 | 13.89 | 1.70 | 8.18× | 13.56 | 12.54 | 1.08× |
+| 20 000 | 15.39 | 1.58 | 9.73× | 14.32 | 10.52 | 1.36× |
+| 100 000 | 16.97 | 1.73 | 9.79× | 15.04 | 11.32 | 1.33× |
+
+(µs/row; Python writer forced with `DISCOPT_RUST_NL=0`.)
+
+**Vectorised: ~10×, stable from 1 000 to 100 000 rows, at 1.6–1.7 µs/row.**
+**Per-element: ~1.3× at best, and a small loss on tiny models** — 0.87× at 10
+rows, which is 38 µs absolute and not worth a size heuristic to avoid, but it is
+a regression and should not be discovered by surprise.
+
+The per-element ceiling is `model_to_repr`: converting 200 000 Python DAG nodes
+to the arena costs about what the Rust writer saves. Which is the same finding
+as §41 from the other side — the cost is one Python object per node, and no
+downstream component can undo it.
+
+### Consequence
+
+The writer **widens** the gap between the two idioms rather than closing it:
+vectorised + Rust is 1.58 µs/row where per-element + Rust is 10.52. Making the
+vectorised form the default idiom is now worth ~6.7× on export alone, on top of
+the 36× it was already worth on discopt's own solve path (§41). That work — the
+NN and GDP emitters, the docs, a vectorised arm in the construction benchmark —
+is the highest-value item remaining, and it is a modelling-layer job, not a
+performance one.
+
+**Quote §46's 10.5× as a vectorised-model figure or not at all.**
+
+## 48. The cross-tool panel: the action is the IDIOM, not the tool (2026-09-10)
+
+§43 measured oximo on one shape; §46/§47 measured the Rust writer on one shape
+and on the in-repo MINLPLib corpus. Both left the same question open: is
+"vectorised discopt is oximo-class" a property of that one synthetic model? This
+section answers it on a fuller panel — **4 model families × 3 sizes × 4 arms**,
+every arm timed from an empty model to `.nl` text.
+
+### Harness
+
+- `discopt_benchmarks/scripts/issue1215_cross_tool_panel.py` — discopt in both
+  idioms plus Pyomo, streaming a TSV point-per-line.
+- `discopt_benchmarks/scripts/oximo_arm/main.rs` — the oximo arm. oximo is a
+  **Rust** crate (`oximo-rs/oximo` on crates.io; `pip install oximo` finds an
+  unrelated package), so it is built in a scratch crate and merged via
+  `--oximo <tsv>`; `scripts/oximo_arm/README.md` has the four commands.
+
+Families: `linear` (`x + 2y + 3z <= b`), `sep_nl` (`exp(x) + y <= b`),
+`coupled_nl` (`x*y + log(x+1) <= b`), `minlp` (`x*y + z <= b`, `z` binary).
+Sizes 1 000 / 10 000 / 100 000 rows, median of 3, `gc.collect()` between reps.
+
+**The model-identity gate (§6).** Every arm reads the row and variable counts
+back out of the header of the `.nl` it just wrote, and the combiner refuses to
+report a ratio unless every arm that measured a cell agrees with every other on
+both. Without it an arm looks fast by building a smaller model. The gate prints
+its comparison count (36 on this panel) and raises — verified by perturbing one
+arm's variable count by 1 and watching it refuse.
+
+### Result — total µs/row, model to `.nl` text, 100 000 rows
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 3.97 | **3.63** | 40.28 | 38.99 |
+| sep_nl | 2.97 | **3.05** | 25.29 | 35.51 |
+| coupled_nl | 3.47 | **4.42** | 36.99 | 48.14 |
+| minlp | 4.11 | **4.24** | 29.13 | 46.92 |
+
+Ratio to oximo at 100 000 rows:
+
+| family | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|
+| linear | 0.91× | 10.14× | 9.82× |
+| sep_nl | 1.03× | 8.53× | 11.97× |
+| coupled_nl | 1.27× | 10.65× | 13.86× |
+| minlp | 1.03× | 7.09× | 11.43× |
+
+Load 0.05 at start; the Rust and Python arms ran back to back on an otherwise
+idle box.
+
+**Reproduction.** The committed harness was re-run end to end (Python arms
+re-measured, the same oximo TSV merged), also at load 0.05. Every cell moved by
+less than the spread the two runs put on one arm, and no conclusion changed:
+vectorised discopt 0.88-1.15x oximo (vs 0.91-1.27x), per-element discopt
+7.3-10.4x (vs 7.1-10.7x), Pyomo 9.7-13.8x (vs 9.8-13.9x). The largest single
+move was Pyomo's `minlp` cell, 46.92 -> 52.07 µs/row (11%), which is the size of
+the noise floor on this box and the reason the ranges above are quoted to two
+significant figures and not three.
+
+### What it says
+
+1. **Vectorised discopt is at oximo parity at scale** — 0.91–1.27×, and
+   *faster* than oximo on `linear`. This is not a property of the one shape in
+   §46: it holds across a linear family, two nonlinear families with different
+   operator mixes, and a mixed-integer family. The original goal ("memory
+   comparable to oximo, 2–5× slower, notably faster than Pyomo") is met and
+   beaten on the time axis.
+2. **Per-element discopt is within noise of Pyomo** — 7.1–10.7× off oximo where
+   Pyomo is 9.8–13.9×. Slightly ahead, never by an order of magnitude.
+3. **The swing between discopt's own two idioms is 6.9–11.1×, larger than the
+   whole discopt-to-Pyomo gap.** A user's choice of idiom dominates their choice
+   of tool. That is the headline.
+4. The gap **widens with size**: at 1 000 rows vectorised discopt is 4.84 µs/row
+   against Pyomo's 25.19 (5.2×); at 100 000 it is 3.63 against 38.99 (10.7×).
+   Vectorised discopt is the only arm that is flat — it *improves* from 1 000 to
+   10 000 rows as fixed overhead amortises, then holds. Every other arm's µs/row
+   grows from 1 000 to 100 000 rows: per-element discopt +9…29%, Pyomo +40…55%,
+   and oximo +45…71% (from the smallest base, so still fastest in absolute
+   terms). Quote a per-row figure with its size attached.
+
+### Correction to a figure quoted earlier in this session
+
+The vectorised-vs-Pyomo speedup was stated once as "9.8–13.9×". Those are the
+**Pyomo-to-oximo** ratios, not vectorised-discopt-to-Pyomo. The correct range at
+100 000 rows is **10.7–11.6×** (38.99/3.63, 35.51/3.05, 48.14/4.42, 46.92/4.24).
+The conclusion is unchanged; the number was misattributed and is corrected here
+per the §11 rule.
+
+### Consequence
+
+This is the third independent measurement (§41 solve path, §47 export, §48
+cross-tool) pointing at the same work item, and none of them is a solver change:
+**make the vectorised form the idiom discopt actually emits and documents.** The
+NN and GDP emitters still emit one `Constraint` per row, which puts every model
+built through them on the slow side of a 7–11× cliff. Nothing further is owed to
+the writer.
+
+## 49. oximo is NOT vectorised — it makes the element cheap (2026-09-10)
+
+§48 left an obvious reading open: vectorised discopt matches oximo, so perhaps
+oximo is vectorised too and the two are doing the same thing. It is not, and
+they are not. Read from the 0.6.0 sources in the cargo registry, and measured
+with two probes rather than inferred.
+
+### It is a per-element loop
+
+`constraint!(m, c[i in 0..n], <rel>)` expands (oximo-macros
+`constraint.rs::register_family`) to
+`__add_constraints_over(name, &set, |i| <rel>)`, whose body (oximo-core
+`model.rs:574`) is:
+
+```rust
+for key in set {
+    let c = rule(K::from_index_key(&key));
+    self.__add_constraint(format_index_name(name_prefix, &key), c);
+}
+```
+
+One closure call, one `Constraint { name, lhs: ExprId, lower, upper, active }`
+per row. There is no array-valued constraint body anywhere in the API.
+
+### What makes the element cheap
+
+`scripts/oximo_arm/node_density.rs`, arena read at each stage:
+
+```
+declaring 3x1000 variables: arena 0 -> 3000
++1 linear row  (x + 2y + 3z <= c): +6 nodes
++1 linear row  (x + y <= c):       +1 nodes
++1 nonlinear   (exp(x) + y <= c):  +2 nodes
++1 coupled     (x*y + log(x+1)):   +5 nodes
++1 row summing 100 terms:          +1 nodes
+
+final node of the linear row:
+  Linear { coeffs: [(VarId(0), 1.0), (VarId(1000), 2.0), (VarId(2000), 3.0)],
+           constant: 0.0 }
+its bounds: [-inf, 10]
+```
+
+Four mechanisms, in descending order of what they buy:
+
+1. **Linear fusion in the operator overloads.** `ExprNode::Linear { coeffs:
+   Vec<(VarId, f64)>, constant: f64 }` is built by `+`/`*` themselves
+   (oximo-expr `linear.rs::add_into`/`mul_into`), not recovered later by an
+   extraction pass. `x + y` is **one** node, and `sum!(x[i] for i in 0..100)` is
+   **one** node holding 100 coefficients — not a 100-deep `Add` chain. A linear
+   row therefore costs its writer and its backends no DAG walk at all.
+2. **Handles, not objects.** `Expr<'a>` is `{ id: u32, arena: &RefCell<ExprArena> }`
+   — 16 bytes, `Copy`, on the stack. Nodes live in one flat `Vec<ExprNode>`.
+   Declaring a variable pushes one `Var` node; *using* `x[i]` pushes nothing.
+   No allocation per node (bar the `Linear` coefficient vector), no refcount,
+   no GC.
+3. **Canonicalisation at build time.** The RHS is folded into the row's bounds
+   as `[lower, upper]` f64s during `__add_constraint`, so nothing downstream
+   re-derives a sense or a constant.
+4. Small-size optimisations throughout: `SmolStr` names, `SmallVec<[ExprId; 4]>`
+   children, `FxHashMap` for the coefficient accumulator.
+
+### The same measurement for discopt
+
+`scripts/issue1215_node_density.py`, same row shape, 1 000 rows:
+
+| idiom | rows | Python `Expression` objs | /row | arena nodes | /row |
+|---|---:|---:|---:|---:|---:|
+| per-element | 1000 | 8009 | 8.01 | 8013 | 8.01 |
+| vectorised | 1 | 11 | **0.01** | 12 | **0.01** |
+
+oximo's comparable figure is 6 arena nodes per row and **zero** heap objects.
+
+### The conclusion
+
+The two arms reach the same µs/row by opposite routes:
+
+- **oximo**: pay per element, but make the element nearly free — 6 flat enum
+  pushes, no heap object, linear structure fused on the way in.
+- **discopt vectorised**: do not have a per-element cost. One array-valued DAG
+  for the whole family; the per-row work happens once, in Rust, at write time.
+
+The construct/write split from §48's data at 100 000 rows says the same thing:
+
+| arm | construct µs/row | write µs/row |
+|---|---:|---:|
+| oximo (`linear`) | 2.13 | 1.85 |
+| discopt vectorised (`linear`) | **0.01** | 3.62 |
+| discopt per-element (`linear`) | 13.43 | 26.85 |
+| Pyomo (`linear`) | 15.38 | 23.61 |
+
+discopt's vectorised construction is not "fast", it is *absent*; everything it
+spends is the writer expanding arrays into scalar rows. oximo splits its time
+roughly evenly between the two.
+
+### What is adoptable, and what is not
+
+**Adoptable: eager linear fusion.** discopt recovers linear structure at write
+time (`_collect_linear`, mirrored in `nl_writer.rs::split`) by walking the DAG.
+Fusing in the operator overloads instead would make a linear row one node rather
+than eight, which is the single largest lever available to the *per-element*
+path — the path the NN and GDP emitters put every user on today.
+
+**Not adoptable: the rest.** Mechanisms 2-4 are Rust-vs-Python facts. Eight
+Python `Expression` objects per row cost ~30-40 µs/row no matter what runs
+downstream (§41, §47), and no amount of Rust behind them changes that.
+
+So this does not displace §48's conclusion, it sharpens it: the per-element path
+has one real optimisation left (fusion), and the vectorised path already has the
+answer.
+
+## 50. Memory, measured against oximo at last: vectorised discopt is 40–60× leaner (2026-09-10)
+
+The #1215 goal had two halves — "memory comparable to oximo, 2–5× slower". §48
+settled the time half and left the memory half **with no evidence at all**: §42
+retracted the inherited "oximo ~205 B/row" figure as unverified, and nothing
+replaced it. The panel timed only. This closes that.
+
+### Method
+
+`issue1215_cross_tool_panel.py --memory` and `oximo_arm/main.rs --memory`, the
+same four families and three sizes as §48. Both arms:
+
+- run **one fresh process per point** — an allocator pools what a previous model
+  freed, so a second measurement in the same process reads low;
+- warm up on a tiny model of the same shape and discard it, so the first build's
+  imports and allocator reservations land in the baseline, not in the model;
+- read `VmRSS` from `/proc/self/status` before and after construction, **with the
+  model held alive** across the second reading;
+- then write the `.nl` and take the row/variable counts from its header, so the
+  same model-identity gate as §48 applies (36 comparisons, verified firing).
+
+RSS rather than `tracemalloc` is what makes the arms comparable: it counts the
+Rust arena behind discopt's PyO3 handles and oximo's `Vec<ExprNode>` alike, which
+no Python-level counter would. It also counts allocator slack, so read a
+difference under ~10% as noise.
+
+### Result — retained B/row at 100 000 rows
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 1072 | **17** | 1301 | 1311 |
+| sep_nl | 615 | **17** | 942 | 984 |
+| coupled_nl | 684 | **17** | 1135 | 1225 |
+| minlp | 853 | **17** | 1108 | 1150 |
+
+Ratio to oximo:
+
+| family | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|
+| linear | 0.02× | 1.21× | 1.22× |
+| sep_nl | 0.03× | 1.53× | 1.60× |
+| coupled_nl | 0.02× | 1.66× | 1.79× |
+| minlp | 0.02× | 1.30× | 1.35× |
+
+Load 0.24. At 1 000 rows the vectorised arm's model is smaller than a single
+1 kB `VmRSS` reading, so its cells there print `0`; the report prints the
+resolution floor under any table containing one, because "0" would otherwise
+read as *free* rather than *unmeasurable*.
+
+### What it says
+
+1. **The goal is beaten, not merely met.** "Memory comparable to oximo" was the
+   target; vectorised discopt is **0.02–0.03×** — 40 to 60 times leaner. It
+   retains barely more than the numpy data the user handed it, because there is
+   no per-row object to retain: §49 measured 11 Python `Expression` objects and
+   12 arena nodes for a whole 1 000-row family. The raw figure is 1.658–1.663 MB
+   at 100 000 rows — **the same to within one page across all four families**,
+   which is the tell: what is retained is the caller's own RHS array (a 100 000
+   -element `np.arange(n) % k`, ~0.8 MB, plus its intermediate), not anything
+   proportional to the model's structure. Hand it a scalar bound instead and
+   there is almost nothing left to measure.
+2. **Per-element discopt is 1.21–1.66× oximo**, and Pyomo 1.22–1.79×. On this
+   axis too the two per-element arms are near each other and both somewhat
+   heavier than oximo — the same ordering §48 found on time, with a much smaller
+   spread.
+3. **Memory separates the idioms harder than time does.** The time gap between
+   discopt's two idioms is 6.9–11.1× (§48); the memory gap is **55–77×**. A
+   per-row Python object costs ~1 kB retained and ~30 µs to build; dropping it
+   saves proportionally far more memory than wall.
+4. oximo is not especially lean in absolute terms — 615–1072 B/row for a flat
+   `Vec<ExprNode>` plus a `Constraint` and a `SmolStr` name per row. Being
+   per-element has a floor, and it is a kilobyte-scale floor in Rust too.
+
+### Status of the original goal
+
+| criterion | target | measured (vectorised) |
+|---|---|---|
+| memory vs oximo | comparable | **0.02–0.03×** (§50) |
+| time vs oximo | 2–5× slower | **0.91–1.27×** (§48) |
+| time vs Pyomo | notably faster | **10.7–11.6×** (§48) |
+
+All three are met on the vectorised path. What remains is not a performance
+problem but a routing one: the emitters, the defaults and the docs still put
+users on the per-element path (§48's consequence, unchanged).
+
+## 51. Retraction: the GDP emitter was already idiom-preserving — and checking it found a false optimum (2026-09-10)
+
+§48's consequence named "the NN and GDP emitters still emit one `Constraint` per
+row" as the remaining work. Half of that is wrong and is retracted here per the
+§11 rule.
+
+### The GDP half is retracted
+
+`_relax/gdp_reformulate.py` does **not** loop over rows. Its loops run over
+*disjuncts* and over *input constraint objects*: `_reformulate_indicator_constraint`
+takes one `Constraint` and returns one (or two, for `==`), transforming whatever
+body it was handed. Give it an array-valued body and it returns an array-valued
+body. Measured, 8-row disjunct constraints:
+
+| shape | per-element objects | vectorised objects | rows |
+|---|---:|---:|---:|
+| `if_then` | 9 | **2** | 9 |
+| `either_or` | 18 | **4** | 18 |
+| `==` inside a disjunct | 17 | **3** | 17 |
+
+Same rows, a fraction of the objects, across `big-m`, `hull` and `mbigm`. A GDP
+model written in the vectorised idiom is already on the fast path. The claim was
+made from reading `append` calls in the file without checking what they were
+appending — the §"look up an API before calling it" rule applied to reading, not
+just to calling.
+
+`test_1215_gdp_idiom_preservation.py` pins it now, including that the vectorised
+object count does not grow with the family size.
+
+### Checking it found C-43, a certified false optimum
+
+Verifying "the two idioms produce the same model" is what surfaced it. Comparing
+row multisets across the idioms, one cell disagreed — and following that
+disagreement down produced this, on the default `hull` path:
+
+    reference (no disjunction): optimal   objective = 20.0
+    big-m                     : optimal   objective = 20.0
+    hull                      : optimal   objective = 2.0    <-- WRONG
+    mbigm                     : optimal   objective = 20.0
+
+`_extract_disjunct_bounds` keys bounds by variable *name*, so they apply to every
+component of an array variable — but it reached through an `IndexExpression` to
+its `.base`, so a bound on `x[0]` capped all of `x`, and hull's disaggregated
+bound rows cut the components nobody constrained. Full write-up and fix in
+`docs/dev/correctness-issues.md` **C-43**.
+
+Two things are worth carrying forward from how it hid:
+
+1. **The same pattern was implemented asymmetrically.** The `>=` direction
+   required a bare `Variable` and so declined an `IndexExpression` (sound); the
+   `<=` direction dug out `.base` (the leak). Half the obvious test cases pass
+   either way.
+2. **A unit test asserted the defective behaviour** —
+   `test_extract_disjunct_bounds_patterns` pinned `{"wv": (0.0, 3.0)}` from
+   `wv[0] <= 3`. A test pinning a defect is worse than no test: it turns the fix
+   into a regression, and it is why an audit of this function would have
+   concluded it was covered.
+
+### What survives of §48's consequence
+
+The NN half stands: `nn/formulations/{full_space,reduced_space,relu_bigm,tree_ensemble}.py`
+all emit `m.subject_to(...)` inside a `for` over units, verified by grep. That
+remains the work item.
+
+### And a note on cross-idiom comparison as an instrument
+
+Comparing two ways of writing the same model is a cheap, general soundness
+probe: it needs no oracle, no reference solver and no known optimum, and it
+found a P0 in a path with 645 passing tests. `hull` is the one method where the
+idioms legitimately differ — an array body covering the whole variable licenses
+a tightening that per-element bodies do not — so the assertion there is row
+*count* and *optimum*, not row text. Worth pointing at other layers.
+
+## 52. The bulk API reaches the Rust `.nl` writer — and the refusal was itself the bigger tax (2026-09-10)
+
+`add_linear_constraints` (the bulk matrix API) builds at **0.31 µs/row**, the
+fastest construction path in the repo, and `_rust_nl_text` refused it — pairing
+the fastest construction with the slowest writer. This lifts the refusal.
+
+### Why it was there, and what was done instead
+
+`model_to_repr` clones the builder's constraints first and appends the expression
+rows after, so builder rows **lead the arena**. Every Python writer — `nl.py`,
+`lp.py`, `mps.py`, `gams.py` — emits `model._constraints` first and the builder
+rows after. Emitting the arena's order would have written the same model with its
+rows permuted, and row order is how a solver's `.sol` duals map back to
+constraints.
+
+Two ways to reconcile that, and the choice matters:
+
+- **Change the four Python writers to the arena's order.** Makes writer order
+  equal solver order, one invariant everywhere — but silently redefines what
+  every `.nl`/`.lp`/`.mps`/`.gms` discopt has already written for a builder model
+  means.
+- **Reorder inside the Rust writer.** Taken. `ScalarProgram` already carries
+  `rows_per_constraint` ("how many rows each source constraint expanded to"), so
+  the arena-constraint → scalar-row map needed no new plumbing, and the reorder is
+  one `O(rows)` stable partition over data already materialised. The boundary
+  (`n_builder_constraints`) travels **on the repr**, set where the builder's
+  constraints are cloned, so a caller cannot pass a count that disagrees with the
+  rows it describes.
+
+The second is both the smaller change and the safer one; the fragile part of it
+(deriving the row map) turned out to already exist and already be checked.
+
+### Result
+
+| | µs/row, 20 000-row bulk model |
+|---|---:|
+| old `to_nl` (refusal check + Python writer) | 18.72 (sd 1.12) |
+| new `to_nl` (Rust writer) | **2.04** (sd 0.12) |
+| speedup | **9.2×** |
+
+7 interleaved reps, load 0.59. Byte-identical output on every builder shape
+tried — bulk-only, expression-row-first, bulk-first, bulk plus an array-valued
+body (fan-out and reorder at once), the `Model.constraint` fast family, and all
+three senses — plus the standing 66-instance MINLPLib corpus diff, unchanged.
+
+### The refusal was itself 39% of the cost
+
+This is the part worth carrying forward. The old check was:
+
+```python
+if model._builder_linear_constraints():
+    return None
+```
+
+`_builder_linear_constraints()` **materialises one `Constraint` object per row**
+to answer a yes/no question, and it ran inside the timed `to_nl` call. Measured
+at 20 000 rows: 7.12 µs/row for the check against 9.4 for the Python writer that
+followed it. So a builder model paid ~39% of its export cost on the decision *not
+to* use the fast path — the guard cost nearly as much as the work it was
+guarding.
+
+A predicate that answers "are there any?" by building all of them is the general
+shape of that bug. `has_builder_only_constraint_rows()` already exists in
+`export/_common.py` and answers it in O(1) off `model._builder_linear_blocks`;
+the refusal simply did not use it.
+
+Grepping for the pattern found **two more** instances, both in `_arena_tape.py`
+(`try_build_arena_tape` and `try_build_expanded_tape`), refusing builder models
+the same way. Both now use the O(1) predicate. They sit behind
+`arena_tape_enabled()` so the cost only landed with that flag on, and the two
+predicates are equivalent on every shape tested (no builder, bulk rows, and a
+builder objective with no constraint blocks); the one divergence they could have
+— a registered block carrying zero rows — makes the O(1) form refuse where the
+old one proceeded, which is the safe direction.
+
+### Correction to a figure quoted earlier in this session
+
+The Python-writer cost on this model was first reported as **22.83 µs/row** from
+a single un-replicated call. The replicated median is **18.72 (sd 1.12)** for the
+same old path, and **9.4** for the Python writer alone once the refusal check is
+separated out. The 22.83 figure is retracted per §11; the two numbers that mean
+something are 18.72 (what a user's `to_nl` actually cost) and 9.4 (writer versus
+writer, which makes the new writer 4.6× rather than 9.2×). Quote whichever the
+claim is about, and say which.
+
+### A regression this introduced, and what the byte-diff suite was missing
+
+`test_export_cli_roundtrip.py::TestNLWriterEdgeCases::test_builder_linear_block_skips_zero_coeff_and_empty_row`
+passed at `7632fb6` and failed from `129bf02` on — verified by checking out the
+parent, rebuilding and running it. The byte-diff suite did not catch it because
+**no shape in it had an explicit zero coefficient.**
+
+The Python writer's `_decompose_builder_blocks` drops a builder row's stored
+zeros (`if coeff == 0.0: continue`), so such a row emits no `J` entry and, when
+the zero was its only entry, an empty row. The arena path faithfully builds a
+`Constant(0.0) * Var` node and reports a zero coefficient, so routing builder
+rows through the Rust writer started emitting `J1 1` where nothing had been
+emitted before.
+
+The asymmetry is real and is now matched rather than regularised: the Python
+writer's *expression* path **keeps** a zero coefficient (an explicit `0.0 * x`
+survives `_collect_linear`); only the builder decomposition drops them. So the
+drop is scoped to builder rows, which `row_source` already identifies.
+Regularising it would change bytes discopt has already written.
+
+Three cases were added to the byte-diff suite — a zero beside a nonzero, a row
+whose only entry is a zero, and an all-zero block — each verified to fail without
+the fix. They build the matrix from explicit `indptr`/`indices`/`data` because
+`scipy.sparse.csr_matrix` prunes zeros on construction, and the test asserts
+`A.nnz == rows * cols` so a future scipy that prunes anyway cannot turn the case
+into a no-op.
+
+Two general points from it. A byte-diff suite is only as good as its shapes, and
+"every operator in the IR" (which the 66-instance corpus does cover) is not the
+same as "every way a coefficient can arrive". And the fast path inherited a
+behaviour it never implemented — the Python decomposition's zero-drop was
+invisible from the arena, which has no notion of which entries were stored.
+
+### Still Python-only
+
+`lp.py`, `mps.py` and `gams.py`. GAMS matters beyond speed — it is the only route
+to a full-license BARON.
+
+## 53. FALSIFIED: linear fusion cannot rescue the per-element path in Python (2026-09-10)
+
+§49 named eager linear fusion — oximo's `ExprNode::Linear`, built by the `+`/`*`
+overloads so a linear row is one node — as "the largest lever left on the
+per-element path". Building it, that turned out to be wrong, and this records
+the falsification and the code that was reverted.
+
+### Entry experiment: cost is entirely per-term
+
+Per-element linear families, 4 000 rows, bodies of increasing term count:
+
+| terms | nodes/row | construct | write | total µs/row |
+|---:|---:|---:|---:|---:|
+| 1 | 2.00 | 7.82 | 7.20 | 15.01 |
+| 2 | 5.00 | 11.24 | 15.65 | 26.89 |
+| 3 | 8.00 | 15.18 | 23.33 | 38.52 |
+| 5 | 14.00 | 31.38 | 36.36 | 67.74 |
+| 8 | 23.01 | 46.09 | 61.83 | 107.92 |
+
+Fit: `total = 0.22 + 13.42 * terms`. The **fixed per-row cost is essentially
+zero** — the `Constraint` object, its name, the append and the row's own writer
+work together cost 0.22 µs. Everything is per term. Collapsing an n-term body to
+one node predicted 2.97× on a 3-term row, comfortably past the 1.3× kill
+criterion. The hypothesis survived entry.
+
+### Correction: what that experiment's control actually measured
+
+The "fused" arm was `add_linear_constraints`, on the assumption that it is
+discopt's fused representation. **It is not.**
+`ExprArena::add_linear_constraints_csr` builds the same `Constant + Mul +
+SumOver` nodes as the operator path — `nnz * 2 + m` of them. It is fast because
+it builds them **in Rust with no Python objects**, not because it fuses. So the
+measured 3.6–6.1× advantage of that arm is the Python→Rust construction win, and
+says nothing about fusion. Quoting it as evidence for fusion would have been
+wrong; it is corrected here per §11 before anything was built on it.
+
+### What was built, and what it measured
+
+The narrow version of the idea, which needs no new node type: `Model.constraint`
+already has a linear fast path (`_try_fast_linear_family`) that routes an
+eligible family into the builder, but it required every row to be affine in **one
+variable** — so `x[i] + 2*y[i] + 3*z[i]` was ineligible, which is most
+per-element families. Widening it meant:
+
+- `ExprArena::add_linear_constraints_multi_csr` plus its PyO3 binding — bulk rows
+  spanning several variable blocks, concatenated per row;
+- `_Affine` generalised from one variable to many (`terms: id(var) -> (var,
+  {pos: coeff})`), with `.var`/`.coeffs` kept as single-variable views;
+- the builder block record made uniformly `([(A, x), ...], sense, b, name)` so
+  the three decoders (`export/nl.py`, `export/_common.py`,
+  `_num_builder_constraint_rows`) keep one code path rather than two to drift.
+
+It works — the widened path fires, emits 3 CSR blocks for a 3-variable family,
+and writes a **byte-identical** `.nl` to the expression path. And it is worth
+nothing:
+
+| vars | arm | construct | write | total µs/row | |
+|---:|---|---:|---:|---:|---:|
+| 1 | fast path | 9.25 | 2.24 | 11.49 | **0.73×** |
+| 1 | expression | 8.32 | 7.45 | 15.77 | |
+| 3 | fast path | 29.83 | 6.22 | 36.05 | **0.99×** |
+| 3 | expression | 15.53 | 20.99 | 36.52 | |
+
+5 interleaved reps, load 0.65. The widening is a **wash**. It moves cost from the
+writer (20.99 → 6.22) into construction (15.53 → 29.83) and nets nothing.
+
+### Why, and why it generalises
+
+`m.constraint(idx, rule)` **calls the rule once per index**. The Python
+`Expression` objects are built either way; the fast path then walks each body
+with `affine_form` and assembles CSR on top. With one variable that walk is over
+a 2-node body and the writer saving dominates (0.73×, a real win, which is why
+the narrow path shipped). With three, the walk is over an 8-node body and its
+cost scales with terms at exactly the rate the writer saving does.
+
+That is the general shape: **any scheme that recovers structure from Python
+expression objects has already paid for them.** Fusion in the operator overloads
+would move the recovery earlier, not remove it — the `+` overload still runs once
+per term, still allocates, still touches the GC. The 0.22 µs fixed row cost above
+says there is no per-row overhead left to amortise; the 13.42 µs/term says the
+term is the unit of cost, and a Python-level representation cannot make a term
+cheaper than an object.
+
+**You cannot make per-element fast in Python. You can only avoid being
+per-element** — which is §48's conclusion arriving from a third direction, and
+what the array-valued idiom already does at 0.91–1.27× oximo.
+
+### Disposition
+
+Reverted in full — the Rust API, the `_Affine` generalisation, the block-record
+change and both decoders. A neutral change is not free: this one added a public
+Rust entry point, generalised a core data structure, and changed a record format
+consumed by the exporters and the NLP evaluator. That is real risk for a measured
+0.99×, and the `DISCOPT_CUT_INHERIT` rule applies unchanged — sound but
+neutral-or-harmful does not ship.
+
+**Item 3 of the #1215 list is closed as falsified, not deferred.** True
+arena-level fusion (a Rust `ExprNode::Linear`) would still shrink the writer's
+walk, but the table above shows the writer is 6.22 µs/row of a 36 µs/row
+per-element total once the rows are in the builder — so it cannot pay for a new
+IR node touching every consumer in the core. The remaining #1215 work is the
+NN emitters and the LP/MPS/GAMS writers.
+
+## 54. Item 4's entry experiment found a bug, not a slow writer: `sum()` over 1000+ variables could not be exported at all (2026-09-10)
+
+The plan for item 4 was to port the LP, MPS and GAMS writers to Rust as the `.nl`
+writer was (§52). The entry experiment — just measure what they cost — never got
+a number, because all three **crashed**:
+
+```
+vectorised model, 5000 rows:
+  nl (rust)       2.76 us/row
+  lp           FAILED RecursionError: maximum recursion depth exceeded
+  mps          FAILED RecursionError: maximum recursion depth exceeded
+  gams         FAILED RecursionError: maximum recursion depth exceeded
+```
+
+### The defect
+
+`m.minimize(dm.sum(x))` with `x` of shape `(n,)` raises `RecursionError` from
+`to_lp`, `to_mps` and `to_gams` for **n ≳ 1000**. Same for `dm.sum(x)` inside a
+constraint body. Bisected: 500 works, 1000 fails, against a default recursion
+limit of 1000 — so depth ≈ n.
+
+The array scalarizer expands a reduction into a **left-deep `+` fold** of depth
+n, and three exporters descended it one Python frame per term:
+`_extract_linear_recursive` and `_extract_quad_recursive` in `export/_extract.py`,
+and `GamsWriter._expr_to_gams`.
+
+**Reachability: the default path, on about the commonest objective there is.**
+`min sum(cost)` over a thousand variables is a small model. And GAMS is the only
+route to a full-license BARON — the bundled `/Applications/AMPL/baron` is
+demo-limited to 10 variables — so this silently blocked BARON comparison for any
+model with a sum objective.
+
+### Why it went unnoticed
+
+`.nl` is unaffected, on **both** writers. The format the solve path and the
+benchmark harness use was fine; the three that only matter on the way *out* were
+not. Every in-repo LP/MPS/GAMS test is small enough to stay under the limit.
+
+That is a general lesson about which paths get exercised: the corpus runs through
+`.nl`, so `.nl` is what 66 instances of byte-diffing and a 1392-test smoke suite
+cover. LP, MPS and GAMS had no size-scaling test at all, and the failure mode was
+not a wrong answer but an exception — invisible to anything that never called
+them at scale.
+
+### Fix
+
+The traversal became iterative; the **fold did not change**. Both `.nl` writers
+mirror its exact shape and the emitted bytes depend on it (§46), so flattening
+`((a + b) + c)` into `a + b + c` would have silently changed every exported file.
+`_flatten_additive` walks the `+`/`-` spine onto a worklist carrying each node's
+signed multiplier; the GAMS writer rebuilds its string left to right, reproducing
+the same nesting.
+
+Verified byte-identical against the pre-fix code across 18 emissions — 3 sizes ×
+{linear, quadratic} objective × {LP, MPS, GAMS}, all of which the old code could
+still produce — with the capture asserted free of error strings so the comparison
+means something.
+
+### Item 4's actual status
+
+With the crash fixed there is finally a measurement to take, and the Rust port is
+still unstarted. Note what §53 says about where the remaining cost is: once rows
+are in the builder the writer is 6.22 µs/row of a 36 µs/row per-element total, so
+a port of three more writers should be justified on its own measurement rather
+than by analogy with `.nl`'s 9.2×.
+
+## 55. The NN emitter is vectorised — and the obvious way to do it silently lost the certificate (2026-09-10)
+
+§48's consequence named the NN emitters as the remaining work: all four emit one
+`m.subject_to(...)` per unit inside a `for`, putting every embedded-network model
+on the slow side of the idiom cliff. `full_space.py` is done here.
+
+### Result
+
+Four loops become four array-valued bodies: input scaling, the layer affine map,
+the activation, output scaling. Interleaved A/B, both arms at load ≈1.05, back to
+back:
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 139 | 67.8 | 121.6 | 1.79× |
+| 20-64-64-1 | 277 | 109.6 | 199.5 | 1.82× |
+| 20-128-128-1 | 533 | 191.0 | 347.0 | 1.82× |
+| 40-256-256-1 | 1065 | **380.0** | 769.8 | **2.03×** |
+
+**Construction is essentially eliminated** — 0.222 s → 0.001 s on the largest net,
+about 222×. The writer is now the entire cost, and it improved 1.48×, so the
+end-to-end figure is 1.8–2.0× rather than the ~6.7× §47 projected from export
+alone. Quote 1.8–2.0×.
+
+The emitted model is **byte-identical** across 60 emissions — 6 architectures ×
+4 activations × scaled/unscaled, in `.nl` and (for linear nets, which is all LP
+can represent) LP.
+
+### The obvious formulation was wrong, and the tests caught it
+
+`zhat == W.T @ prev_z + b` is the natural way to write a layer's affine map. It
+produces a byte-identical `.nl` — and it **loses the certificate**, because the
+solve path reads the arena, not the `.nl`. On the 1×1×1 sigmoid net in
+`test_nn_equivalence`, same incumbent to 1e-16:
+
+| formulation | arena nodes | status | B&B nodes |
+|---|---:|---|---:|
+| per-element `W[0,0] * x[0]` | 22 | optimal | 1 |
+| matmul `W.T @ x` | 20 | **feasible** | **121** |
+| reduction `dm.sum(W.T * x, axis=1)` | 22 | optimal | 1 |
+
+`MatMulExpression` relaxes more weakly than the equivalent expanded sum. Same
+mathematics, weaker bound — exactly the bound-changing effect §5 says must not
+ship by accident, and in the wrong direction. The emitter uses the reduction
+form, which is equally vectorised, has the same arena node count as the loop, and
+certifies identically.
+
+**Byte-identical export is not evidence of solver neutrality.** The `.nl` and the
+arena are different lowerings of the same model, and this change was identical in
+one and materially worse in the other. Any future emitter change needs a solve
+comparison, not just a diff.
+
+The underlying defect is filed separately: a user writing the natural `A @ x`
+gets a worse dual bound than one writing `dm.sum(A * x, axis=1)`, with no
+indication why. Sidestepping it here does not fix it.
+
+### Two pre-existing scalarizer bugs this surfaced
+
+Both are in `export/_arrays.py`, both reachable only once a body is array-valued,
+and both were fixed rather than worked around:
+
+1. **`needs_scalarize` never checked a `Constant`'s shape.** `Variable` and
+   `Parameter` are shape-checked; `Constant` fell through to "fine". A body of
+   only shape-`(1,)` leaves — `out == prev * y_factor + y_offset` for a
+   single-output network with output scaling — therefore skipped expansion
+   entirely and failed in `_collect_linear` with "only 0-dimensional arrays can
+   be converted to Python scalars". The threshold differs from the others on
+   purpose: `scalarize` maps a `(1,)` Variable to a 0-d leaf so nothing sees its
+   shape, while a `(1,)` Constant keeps its array and reaches `float()`.
+2. **`x[0]` on a shape-`(1,)` variable raised `IndexError`.** The same 0-d
+   collapse leaves nothing to index, so `base[0]` failed. Index 0 now selects
+   that element; anything else is refused with a message naming the variable.
+
+### One more thing the loops were doing
+
+A family of *n* rows named `c` is written `c_0 … c_{n-1}`, so passing the bare
+prefix reproduces the loop's names — except for a **single-row** family, which
+the writers emit under the bare family name. Left alone that silently renamed
+`pred_affine_2_0` to `pred_affine_2` in LP/MPS/GAMS for every single-output
+layer. `_family_name` appends the index in that case. `.nl` carries no row names
+and would never have shown it.
+
+### Remaining
+
+`reduced_space.py`, `relu_bigm.py` and `tree_ensemble.py` are unchanged and still
+per-element. They should follow the same recipe — reduction form, not matmul;
+`_family_name` for single-row families; byte-diff **and** a solve comparison.
+
+## 56. The NN verification harness, and why `reduced_space` was reverted (2026-09-11)
+
+§55 vectorised `full_space`. Continuing to the other three emitters produced one
+committed artifact, one confirmation, one revert, and one filed defect.
+
+### The harness: `scripts/issue1215_nn_verify.py`
+
+§55's verification used `.nl` + LP only. That is not enough, and this exists
+because the gap showed up immediately on the next emitter. Four arms, each
+covering something the others cannot:
+
+| arm | covers | blind to |
+|---|---|---|
+| NL | the solver-facing format | row **names** — it carries none |
+| LP | names | any nonlinear activation — cannot represent one |
+| GAMS | names **and** nonlinear bodies | — |
+| EVAL | the **arena**'s objective at fixed points | — |
+
+GAMS is the only arm that can show a row-name change on a nonlinear net. EVAL
+exists because §55 established that byte-identical export is not evidence of
+solver neutrality. One known-weak column is left in deliberately: `maxcon` and
+`maxbnd` come back NaN on these models in *both* arms, so only `obj` is the
+equivalence check — kept rather than deleted so a reader does not mistake the NaN
+for a finding.
+
+Expected refusals are correct behaviour, not failures (LP cannot take a nonlinear
+activation; `.nl` refuses `max()`, i.e. RELU in `reduced_space`, as needing DNLP).
+The harness reports per-arm identical/differing counts so a refusal appearing on
+*both* sides reads as zero coverage rather than as a pass.
+
+### `full_space` confirmed on GAMS too
+
+Re-verified with the fuller harness: **160/160 captures identical across all four
+arms**, GAMS included. §55's byte-identity claim holds and was not resting on the
+missing arm.
+
+### `reduced_space`: vectorised, then reverted
+
+The change worked and is mathematically sound — the arena objective matches to 12
+decimals at every sampled point, and the constraint-object count falls 8 → 3 for
+a 3-layer net. It also changed the emitted output in two ways, and it is reverted
+because neither is explained:
+
+1. **GAMS row names shift by one.** `pred_layer_0_0 … _4` becomes
+   `pred_layer_0_1 … _5`. GAMS expands a family 1-based (its set labels are
+   1-based — `pred_input('1')`), and `reduced_space`'s loop wrote 0-based names.
+2. **`.nl` sum encoding changes** from `o54 n` (n-ary sum) to nested `o0` binary
+   adds, on 30 of 40 NL captures — the same fold-vs-n-ary distinction §46 pinned.
+
+The unexplained part is why `full_space` shows **neither**, with the same
+`_family_name` helper and the same `dm.sum(..., axis=1)` construction: its GAMS
+rows come out `pred_affine_0_1 … _5` both before *and* after. So family expansion
+is not uniformly 1-based, and until that is understood a rename cannot be
+distinguished from a bug. Shipping an unexplained output change in a formulation
+layer is not worth an unmeasured speedup, so this follows §53's disposition:
+reverted, recorded, not deferred as a half-change.
+
+### A defect the harness found
+
+`to_gams()` raises `TypeError: only 0-dimensional arrays can be converted to
+Python scalars` for **every single-output `reduced_space` embedding** — 16 of 40
+cases, all and only output size 1, on the *unmodified* emitter. The GAMS writer
+has its own expression walker and does not go through
+`needs_scalarize`/`scalarize`, so §55's two `_arrays.py` fixes did not reach it.
+
+That is the fourth instance of one family in this work: shape-`(1,)` handling is
+systematically weak — `needs_scalarize` ignoring a `Constant`'s shape, `x[0]` on a
+shape-`(1,)` variable, a single-row family losing its name index, and now the GAMS
+walker. Filed separately; the likely fix is routing GAMS bodies through
+`_arrays.scalarize_body` as the other three writers do.
+
+### Remaining
+
+`reduced_space` (pending the naming question), `relu_bigm` and `tree_ensemble` are
+**not started**. `relu_bigm` additionally needs care its siblings do not: it
+creates one binary per mixed unit (`pred_q_0_3`), so vectorising changes variable
+names and column order, which is `.sol` mapping. Gather and mask indexing on array
+bodies was verified to work and export, so nothing there is structurally blocked.
+
+## 57. Retraction, and the GAMS writer's two naming/shape defects (2026-09-11)
+
+### Retraction: §55's byte-identity claim did not cover GAMS
+
+§55 reported the `full_space` vectorisation as "byte-identical across 60
+emissions". §56 then reported it re-verified at "160/160 identical across all
+four arms, GAMS included". **The second claim was false and is retracted.**
+
+`full_space.py` was already committed at that point, so the `git stash push` used
+to capture the baseline stashed **nothing**, and the comparison was the vectorised
+emitter against itself. Captured properly — by writing `65cfb6e~1`'s file content
+into the tree, asserting the marker string absent, and re-running:
+
+| arm | identical | differing |
+|---|---:|---:|
+| NL | 40 | 0 |
+| LP | 40 | 0 |
+| GAMS | 16 | **24** |
+| EVAL | 0 | 40 (object count; objectives identical) |
+
+So §55's original claim — `.nl` and LP byte-identical — **holds**. The GAMS claim
+added in §56 does not: the vectorisation *did* change GAMS output. This is the
+third time in this work that a comparison silently measured a thing against
+itself or against stale data, which is why the harness now truncates up front and
+prints byte sizes, and why a baseline must be taken from committed content rather
+than from a stash that may be empty.
+
+### Defect 1: GAMS numbered family rows from 1, alone among four writers
+
+`lp.py`, `mps.py` and the Rust builder row naming all name row *k* of a family
+`{base}_{k}`. `gams.py` used `{base}_{k + 1}`. Two consequences:
+
+- the same model exported to `.lp` and to `.gms` disagreed on every expanded
+  row's name;
+- vectorising an emitter — replacing N per-element constraints `c_0 … c_{N-1}`
+  with one family `c` — silently shifted every GAMS row name by one, while
+  leaving `.nl` and LP byte-identical. Invisible to any check that does not diff
+  GAMS, which is exactly how it shipped.
+
+Now 0-based. 163 existing GAMS tests pass unchanged — none asserted the 1-based
+form. GAMS's own set labels are 1-based (`x('1')`), which is presumably where the
+`+1` came from, but an equation *name* is not a set label.
+
+### Defect 2: `to_gams()` failed on every shape-`(1,)` variable
+
+`_write_variables` treats `shape == (1,)` as scalar and did `float(lb_arr)` on the
+length-1 (not 0-d) bound array. `float()` of such an array raises on numpy ≥ 2, so
+**`to_gams()` failed outright** for every model carrying a single-element
+variable — 16 of 40 cases in the NN harness, all and only output size 1, on the
+*unmodified* emitter. `np.ravel(...)[0]` reads the element for both shapes.
+
+This was filed as "the GAMS writer doesn't go through `_arrays.scalarize_body`".
+That diagnosis was wrong: `gams.py` *does* use the shared scalarizer for
+constraint bodies. The failure was in the variable-bound writer, which the
+harness's error text (identical to the `_arrays.py` one) made look like the same
+root cause. Both GAMS arms now emit all 40 captures.
+
+That makes **five** instances of one family in this work — shape-`(1,)` handled as
+scalar in one place and as an array in another: `needs_scalarize` ignoring a
+`Constant`'s shape, `x[0]` on a shape-`(1,)` variable, a single-row family losing
+its name index, this bound writer, and the GAMS numbering base. The pattern is
+worth a dedicated audit rather than another one-off fix.
+
+### What remains of the residual difference
+
+With GAMS 0-based, the `full_space` GAMS diff is no longer names but **expression
+nesting**: the per-element loop's `dm.sum(lambda i: …, over=…)` is an n-ary
+`SumOverExpression`, written `(a + b + c)`, while `dm.sum(array, axis=1)` expands
+to a binary fold, written `((a + b) + c)`. `.nl` and LP flatten linear terms into
+a coefficient map so both are byte-identical there; GAMS writes the tree
+textually, so it shows.
+
+Same mathematics, and reassociated floating-point addition can differ in the last
+bits of a written model. That is an understood and accepted difference rather than
+an unexplained one — which is the bar §56 said `reduced_space` had to clear before
+it could ship.
+
+## 58. `reduced_space` vectorised, once §57 cleared the bar (2026-09-11)
+
+§56 reverted this change because it altered emitted output in two ways that were
+not explained. §57 explained and fixed one of them (GAMS numbered family rows
+1-based, alone among four writers) and accounted for the other (an array
+reduction expands to a binary `+` fold where `dm.sum(lambda …)` was an n-ary
+`SumOverExpression`). With that, the change ships.
+
+### Verification
+
+Four regimes, re-captured against the loop version:
+
+| arm | identical | differing | reading |
+|---|---:|---:|---|
+| NL | 10 | 30 | sum opcode `o54 n` → nested `o0`; numbers unchanged |
+| LP | 40 | 0 | all refusals both sides — no coverage, no regression |
+| GAMS | 0 | 40 | **row names identical**; parenthesisation differs |
+| EVAL | 0 | 40 | **objectives identical**; only the object count moved |
+
+The two checks that matter both come back clean: **GAMS row names differ in 0 of
+40**, and **arena objectives differ in 0 of 40** at every sampled point. Every
+remaining difference is the fold-vs-n-ary encoding, which §57 accepted as
+understood: same mathematics, and reassociated floating-point addition can differ
+in a written model's last bits.
+
+### Result
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 75 | 164.7 | 242.0 | 1.47× |
+| 20-64-64-1 | 149 | 295.6 | 434.2 | 1.47× |
+| 20-128-128-1 | 277 | 527.8 | 809.1 | 1.53× |
+| 40-256-256-1 | 553 | **1090.9** | 1846.4 | **1.69×** |
+
+Load 0.05/0.12, back to back. Construction again goes to essentially nothing —
+0.220 s → 0.001 s on the largest net, ~220×.
+
+**1.47–1.69×, below `full_space`'s 1.8–2.0×**, and for a structural reason worth
+recording: `reduced_space` fuses each layer's affine map *and* activation into one
+body, so it emits about half the rows for the same network but each is a much
+larger expression. The writer therefore dominates more completely, and the writer
+is the part vectorising does least for. Its absolute µs/row is also ~3× worse than
+`full_space` at the same architecture — the fused form trades rows for expression
+size, and the `.nl` writer is priced per node, not per row.
+
+### Remaining
+
+`relu_bigm` and `tree_ensemble`. `relu_bigm` still carries the wrinkle its
+siblings do not: it creates one binary per *mixed* unit, so vectorising changes
+variable names and column order, which is `.sol` mapping — and §57's lesson is
+that a name change in one format can hide while another stays byte-identical, so
+that one needs the GAMS and LP arms read explicitly, not just `.nl`.
+
+## 59. `relu_bigm` vectorised — 2.1× rising to 7.9×, by vectorising only what scales (2026-09-11)
+
+The third emitter, and the cleanest verification of the three. Its four `build()`
+loops — input scaling, the layer affine map, smooth activations, output scaling —
+now emit one array-valued body each. **`_add_relu_constraints` is deliberately
+left per-unit**, for two reasons that happen to point the same way.
+
+### Why the big-M block stays per-unit
+
+**It is the part that cannot be vectorised safely.** It creates one binary per
+*mixed* unit (`pred_q_0_3`); making those an array variable would change their
+names *and* the model's **column order**, which is how a solver's `.sol` maps
+values back to variables. Nothing about the array form is worth that.
+
+**It is also the part that does not cost anything.** Its rows carry 2–3 terms
+each, against `n_inputs` terms for every affine row. Row *counts* make the big-M
+block look dominant — 1024 rows against 257 affine for a 20-128-128-1 net — but
+cost follows terms, not rows.
+
+The measurement confirms the split was the right one: the speedup **rises with
+layer width**, because the loops that were vectorised are exactly the ones whose
+cost grows with it.
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 331 | 24.6 | 51.7 | 2.10× |
+| 20-64-64-1 | 661 | 23.4 | 73.7 | 3.15× |
+| 20-128-128-1 | 1301 | 33.2 | 122.4 | 3.69× |
+| 40-256-256-1 | 2601 | **42.8** | 336.4 | **7.86×** |
+
+Load 0.25, back to back. Build 0.278 s → 0.022 s (12.6×), write 0.597 s → 0.089 s
+(6.7×) on the largest net.
+
+### Verification — the cleanest of the three
+
+| arm | identical | differing |
+|---|---:|---:|
+| NL | 10 | **0** |
+| LP | 10 | **0** |
+| GAMS | 0 | 10 (parenthesisation; **row names identical**) |
+| EVAL | 0 | 10 (object count; **`n_vars` and objectives identical**) |
+
+`.nl` **and** LP byte-identical, which neither of the other two emitters managed.
+The reason is worth recording because it explains the whole family: `.nl` and LP
+flatten linear terms into a coefficient map, so an affine row's tree shape is lost
+and the fold-vs-n-ary difference cannot show. In `reduced_space` the affine map
+sits *inside* a nonlinear activation, so it cannot be flattened and the difference
+surfaces (§58); here and in `full_space` the affine rows are linear and it does
+not. GAMS writes the tree textually in every case, which is why it is the arm that
+always differs.
+
+`n_vars` unchanged is the check that matters for the deliberate omission: the
+binaries, and therefore the column order, are untouched.
+
+### Status of the #1215 NN work
+
+Three of four emitters vectorised: `full_space` 1.8–2.0× (§55), `reduced_space`
+1.47–1.69× (§58), `relu_bigm` 2.1–7.9×. Construction is essentially eliminated in
+all three. `tree_ensemble` remains — its split rows each reference a *different*
+feature index, so it needs a gather (`inputs[j_array]`) with per-row thresholds and
+big-Ms as arrays; gather and mask indexing on array bodies were verified to work
+and export.
+
+## 60. `tree_ensemble` cannot be vectorised without reordering rows (2026-09-11)
+
+The fourth emitter, and the one that stops on a structural constraint rather than
+on a measurement. Recording why, because the reasoning is not obvious from the
+code and the next person will otherwise re-derive it.
+
+### The cost is entirely in the split rows
+
+| ensemble | build | constraint objects | of which split rows |
+|---|---:|---:|---:|
+| 10 trees, depth 3, 5 feats | 0.005 s | 251 | 240 |
+| 50 trees, depth 4, 8 feats | 0.049 s | 3 251 | 3 200 |
+| 100 trees, depth 5, 10 feats | 0.334 s | 16 101 | **16 000 (99.4%)** |
+
+So vectorising only the cheap parts — the one-leaf-per-tree constraint and the
+tree-output sum — buys essentially nothing. The split rows are the whole job.
+
+### Why they cannot be vectorised
+
+Each split row is `inputs[j] ≤ thr + M·(1 − z[l])` (left) or
+`inputs[j] ≥ thr + ε − M·(1 − z[l])` (right). Two facts combine:
+
+1. **Left rows are `≤` and right rows are `≥`.** A `Constraint` carries ONE
+   sense, so left and right rows cannot share an array-valued body — they must go
+   into at least two separate constraints.
+2. **The loop emits them interleaved.** Walking each leaf's ancestors produces a
+   direction sequence like `LLLLLRLRLLRRRLLRLRRRLRRR` — 11 sense changes across 24
+   rows for a depth-3 tree.
+
+Separating by sense therefore **reorders the rows**, and row order is how a
+solver's `.sol` maps duals back to constraints (§52). That is a stronger
+constraint than the row-*name* changes accepted in §58 and §59: a renamed row is
+a diagnostics regression, a reordered row silently misattributes a dual.
+
+Grouping by `(node, direction)` instead is attractive — the leaves under each node
+turn out to be contiguous, so the family is a clean slice `z[a:a+k]` with `j`,
+`thr` and `M` all scalar — but it reorders for the same reason.
+
+### Disposition
+
+**Not vectorised.** The change is available and large if a row reorder is
+acceptable, but that is a decision for whoever owns the `.sol` contract, not one
+to take silently for a speedup. Two things would unblock it:
+
+- a deliberate decision that `tree_ensemble`'s row order may change (it is a
+  generated order that no user chose), or
+- support for a constraint family carrying per-row senses, which would let the
+  interleaved order be preserved exactly.
+
+### #1215 NN emitter work, final state
+
+| emitter | status | speedup |
+|---|---|---|
+| `full_space` | vectorised (§55) | 1.8–2.0× |
+| `reduced_space` | vectorised (§58) | 1.47–1.69× |
+| `relu_bigm` | vectorised (§59) | 2.1–7.9× |
+| `tree_ensemble` | **blocked on row order** | — |
+
+Construction is essentially eliminated in all three that landed.
+
+## 61. Pre-PR confirmation: panel replicated, corpus clean (2026-09-11)
+
+Re-measurement of the #1215 claims at branch HEAD, on a quiet box, before the
+work goes up for review. Nothing here is new work; it exists so the PR's numbers
+are a *measurement taken at the tip*, not a transcription of numbers taken 30
+commits earlier.
+
+### Cross-tool panel, re-run at HEAD (load 0.21)
+
+Total µs/row, model to `.nl` text, 100 000 rows. §48's figures in brackets.
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 3.97 [3.97] | 3.58 [3.63] | 35.92 [40.28] | 36.07 [38.99] |
+| sep_nl | 2.97 [2.97] | 2.86 [3.05] | 24.08 [25.29] | 34.50 [35.51] |
+| coupled_nl | 3.47 [3.47] | 4.01 [4.42] | 33.17 [36.99] | 45.17 [48.14] |
+| minlp | 4.11 [4.11] | 3.95 [4.24] | 28.87 [29.13] | 45.18 [46.92] |
+
+Vectorised discopt is **0.90–1.15× oximo** (§48 recorded 0.91–1.27×) and
+**10.1–12.1× faster than Pyomo** (§48: 10.7–11.6×). Per-element discopt is
+within noise of Pyomo on three families and 1.20× faster on `sep_nl`. 48 points
+executed, 36 model-identity comparisons passed.
+
+Retained B/row at 100 000 rows, `--memory`, §50's figures in brackets:
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 1072 [1072] | 17 [17] | 1301 [1301] | 1310 [1311] |
+| sep_nl | 615 [615] | 17 [17] | 943 [942] | 984 [984] |
+| coupled_nl | 684 [684] | 17 [17] | 1135 [1135] | 1225 [1225] |
+| minlp | 853 [853] | 17 [17] | 1108 [1108] | 1150 [1150] |
+
+**0.02–0.03× oximo**, unchanged. 48 points, 36 identity comparisons.
+
+### Real-instance corpus: export parity and certificates
+
+The panel families are synthetic by construction (§4's warning about synthetic
+proxies), so both claims were re-checked against real `.nl` instances.
+
+`python/tests/data/minlplib_nl/`, all 66 instances:
+
+- **66 byte-identical** between the Rust and Python `.nl` writers, 0 disagreeing,
+  0 declined by the Rust writer;
+- **66/66 semantic round-trip** (write → re-parse → same rows, columns, bounds);
+- `.nl` export **median 36.00 µs/row (rust) vs 45.75 (python)**, speedup
+  **median 1.35×, min 1.03×, max 1.92×** — matching §47's recorded 1.35× median.
+  This is the per-element number: real MINPLib instances arrive one row at a
+  time, so they do not see the vectorised path at all. §48's 10× is a number for
+  models *written* in the vectorised idiom, and this row is the honest figure for
+  everything else.
+
+16 of those instances have a reference optimum in
+`python/tests/data/known_optima.toml`; solved end to end:
+**`incorrect_count = 0`, uncertified = 0, errors = 0**, all 16 `optimal` and
+matching the reference. 16 certificate comparisons executed.
+
+### Gates at HEAD
+
+`pytest -m smoke` 1395 passed / 14 skipped; adversarial suite 19 passed;
+`cargo test -p discopt-core` 735 passed / 0 failed across 14 binaries;
+`ruff check` + `ruff format --check` clean over 1001 files.
+
+### What this run could NOT check
+
+The full MINLPLib snapshot (`~/Dropbox/projects/discopt-minlp-benchmark/`,
+~4 800 instances plus `minlplib.solu`) is **not present in this container**, and
+neither is QPLIB. The corpus evidence above is therefore the 66 in-repo
+instances, not the 4 800-instance sweep. A broader run on a machine that has the
+snapshot is the outstanding validation for this work — see the PR.
+
+## 62. RETRACTED — the #1220 headline multipliers are large-n asymptotes, and the oximo one reverses (2026-09-11)
+
+Owner review of PR #1220 re-ran this branch's **own builders**, unmodified, at
+MINLPLib's row-count percentiles instead of at 1 000 / 10 000 / 100 000, with the
+arms **interleaved** and a spread reported. 728 executed points plus a 336-point
+confirmation run at lower load. Its numbers replace §48's and §61's. Per §4 the
+measurement wins; per §11 the retraction is recorded before anything is built on
+top of it.
+
+### What was wrong with the panel, not just the numbers
+
+1. **The sizes are off the distribution.** MINLPLib row counts are p25=9,
+   **p50=111**, p75=945, p90=4009, p99=68072. The panel's headline size of
+   100 000 rows is past the corpus p99. Independently confirmed on the 66
+   in-repo instances, which are smaller still: **p50=6**, p90=151, max 718 —
+   *no in-repo instance reaches even 1 000 rows*, the panel's smallest size.
+2. **Arm-major, not interleaved**, in direct violation of §9 — which this file
+   itself records as the cause of two earlier retracted claims.
+3. **Median of 3 with no spread reported**, also §9.
+4. **The memory half cannot run off Linux** (both arms read `/proc/self/status`),
+   and B/row cannot distinguish O(1) from small-per-row: one 16 KiB page over
+   68 072 rows prints as 0.
+
+### The corrected figures, at real problem sizes
+
+| claim | §48/§61 said | measured at corpus sizes | verdict |
+|---|---|---|---|
+| vs Pyomo, vectorised | 10.1–12.1× | **median 5.89×** | TRUE, margin overstated ~2× |
+| vs Pyomo, per-element | "within noise" | median 1.12×, **Pyomo wins 3 of 16 cells** | idiom-dependent |
+| vs oximo, vectorised | 0.90–1.15× (parity) | **oximo faster in all 16 cells**, median 1.55×, worst 3.16× | **REVERSED** |
+| retained memory | 0.02–0.03× oximo | 0.0000–0.025× | TRUE, understated |
+
+**The oximo claim is the one that changes direction and it is the important
+one.** The gap closes monotonically with size (≈3.0× at p50 → ≈1.4× at p99), so
+parity is an asymptote users will not see: even at p99 = 68 072 rows — close to
+the panel's own 100 000 — the measured ratio is 1.23–1.59×, not 0.90–1.15×.
+**discopt's vectorised path is not at oximo parity at the sizes that occur.**
+
+### Two things the panel understated rather than overstated
+
+- **vs discopt-before-this-branch**, which the PR never quantified: vectorised
+  **median 4.75×** (2.02× at p50 → 7.80× at p99), per-element **median 1.21×**.
+- **The memory win is not this branch's.** Construction memory was already O(1)
+  on the merge base; the base column is identical. What this branch adds is that
+  such a model can now be *written* — on the base,
+  `m.minimize(dm.sum(x))` raises `ValueError: Cannot write array variable x
+  without indexing`. For the vectorised idiom end to end, "much faster" is
+  really "newly possible".
+
+### Binding consequence
+
+A modelling-layer figure quoted without its row count is not a measurement. Any
+future panel in this file must (a) sample the corpus row-count distribution
+rather than round numbers, (b) interleave arms, (c) report a spread, and (d) say
+which idiom it measured. §48's tables stay in the file as the record of what was
+claimed; they are superseded by this section.
+
+## 63. #1215's remaining candidates, and where the per-element path ended up (2026-09-11)
+
+§62 left the per-element path at **1.37× Pyomo like-for-like** with two of
+#1215's five candidates untouched. This section closes them and records the
+final position. All figures from the standing benchmark
+(`bench_model_construction.py --mode headline --reps 5`) on #1215's own model —
+40 forms × 5 000 = 200 000 constraint instances — arms interleaved, spread
+reported, load 0.89.
+
+### What the entry experiment found: the bottleneck had moved
+
+Before building anything, `--mode attribution` and `--mode alloc` were re-run
+against #1215's own numbers. Both had shifted:
+
+- #1215 measured **89% of construction inside expression-node creation** and 11%
+  in indexed-family bookkeeping. Re-measured: expression nodes are **37%**, and
+  the family-bookkeeping side is 63%.
+- #1215's top allocation site, `Constant.value = np.asarray(...)` at 182
+  B/instance, is **no longer in the table at all** — the linear-fusion work
+  removed the per-row `Constant` from linear bodies rather than changing how a
+  `Constant` stores its value.
+
+So the two candidates aimed at node creation were no longer where the money was.
+Profiling one family put **68% of its build in the indexing chain**, and
+profiling the headline model put `indexed.py::__getitem__` + `Set.ordinal` +
+`_normalize_member` + `Variable.__getitem__` at **25% of the whole build**.
+
+### Candidate 1 was only half-done
+
+#1215 names it "cache the `IndexExpression` per position on `IndexedVar`". The
+cache had been put on the flat `Variable` (`_elem_cache`, keyed by position), so
+`x[i]` was canonical — but `IndexedVar[key]` still reached it through
+`Set.ordinal(key)` (`_normalize_member`, a membership test, a dict read) and then
+through `Variable.__getitem__`'s own type test and dict read, on every access.
+A set's members are fixed at construction, so `key -> node` is a fixed mapping;
+`IndexedVar._key_cache` memoises it.
+
+This is why the first fast path below barely moved the headline: that model
+shares **one** index set across all 40 forms, so 39 of 40 index operations
+already hit the flat cache. The per-family measurement (9.175 → 5.657
+µs/instance) and the headline measurement disagreed for a *structural* reason,
+not a measurement-error one — worth remembering the next time a large win
+evaporates at the panel.
+
+### Candidate 4: the 1-D integer index
+
+A plain `int` into a 1-D variable — every `x[i]` in an indexed family — was
+re-deriving an answer fixed by the shape: `_known_shape` twice (a tuple copy
+each), `_pure_integer_index`, `_index_result_shape`, `_integer_index_out_of_range`.
+`Variable.__getitem__` now does the bounds test itself and passes the result
+shape to `IndexExpression` through `shape_hint=`. The accepted range and the
+`IndexError` text are `_integer_index_out_of_range`'s verbatim, and `()` is what
+`_index_result_shape` returns for `base_shape[1:]`.
+
+### Candidate 3: constraint names are lazy
+
+Formatting one `"family[label]"` string per row at build time, for metadata the
+solve path never reads. Timed on its own: **+0.497 µs/instance** (median of 15
+reps with warm-up discarded and a `gc.collect()` per build; +0.510 on the
+minima), ~9% of the then-current 5.29 µs. `Model.constraint` now records the two
+objects the name is made of — the family string (one object, shared by every
+row) and the member (about to become a key of the family's `members` dict) — so
+the store allocates nothing, and `Constraint.name` formats on first read.
+
+`name` had to become a property, which a `@dataclass` field cannot also be; it
+is installed after the class body. The generated `__init__` captured its own
+default, so the constructor signature, `dataclasses.fields()` and
+`dataclasses.replace()` are unaffected.
+
+### Result
+
+| | #1215 (`c052e85`) | §62 (`fdca93a`) | now |
+|---|---:|---:|---:|
+| discopt build | 3.278 s · 16.1 µs/inst | 1.152 s · 5.76 | **0.944 s · 4.72** |
+| discopt retained | 203.3 MB · 1017 B/inst | 93.6 MB · 468 | **86.9 MB · 435** |
+| vs Pyomo, time, **like-for-like** | **2.1×** | 1.37× | **1.09×** |
+| vs Pyomo, time, as written | — | 0.741× | 0.534× |
+| vs Pyomo, retained | **1.9×** | 0.992× | **0.922×** |
+
+Spreads, 5 interleaved reps: discopt sd 0.0328 s, pyomo-gc sd 0.0130 s. The
+remaining 0.080 s gap is **2.3 pooled sd** — small, but not noise. Quote the
+like-for-like row: the as-written row credits discopt for tuning GC inside
+`Model.constraint` where Pyomo leaves that to the caller (`PauseGC`).
+
+**Bound-neutral, verified rather than argued** (CLAUDE.md §5). All 16 in-repo
+corpus instances with a reference optimum, solved on this tree and on a
+`fdca93a` worktree, comparing `(status, objective, bound, node_count)` as exact
+strings: **64 comparisons, 0 drift**. Each arm asserts the three markers unique
+to the change are present (new) or absent (old) before solving anything, so a
+run against the wrong tree cannot read as a pass (§8).
+
+### What is left, and why it is not being taken
+
+- **Candidate 2 (stop wrapping scalar constants in numpy arrays)** — #1215
+  measured it at 182 B/instance, 19% of retained memory. It is *no longer a top
+  allocation site*: the linear-fusion work removed the per-row `Constant` from
+  linear bodies, and memory is now **below** Pyomo's. `Constant.value` is still
+  an `ndarray`, and the issue's own note stands — consumers read `.value`
+  expecting one, so it needs its own scoping. There is no longer a measurement
+  justifying it.
+- **Candidate 5 (a flat/arena construction path)** — #1215 lists it "for
+  completeness, not proposed here". The vectorised idiom answers the same
+  question from the other side at 0.00465 µs/instance.
+- **The top allocation site is now the `<=` normalization itself** —
+  `Constraint(BinaryOp("-", self, rhs), sense="<=", rhs=0.0)`, 216 B/instance.
+  #1215 already diagnosed this as "a real trade, not an oversight": 26 modules
+  read `.body` and never `.rhs`. Changing it is a normalized-body contract
+  change, not a construction optimisation.

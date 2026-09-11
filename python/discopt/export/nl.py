@@ -24,13 +24,16 @@ Inspired by Pyomo's NLv2Writer (pyomo/repn/plugins/nl_writer.py).
 from __future__ import annotations
 
 import io
+import logging
 import math
+import os
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 
-from discopt.export._common import refuse_non_algebraic_relations
+from discopt.export import _arrays
+from discopt.export._common import refuse_non_algebraic_relations, variable_flat_offsets
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -41,6 +44,7 @@ from discopt.modeling.core import (
     MatMulExpression,
     Model,
     ObjectiveSense,
+    Parameter,
     SumExpression,
     SumOverExpression,
     UnaryOp,
@@ -83,18 +87,134 @@ def to_nl(
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
+    # Ahead of the Rust fast path on purpose. `_NLWriter.write()` makes this same
+    # call (#1218), but `to_nl` only reaches that writer when `_rust_nl_text`
+    # declines -- so relying on it would make the refusal depend on whether the
+    # fast path happened to choke on a disjunctive row, rather than on the model.
+    refuse_non_algebraic_relations(model, ".nl")
+
     # ``for_solve=False``: this writer *honours* ``Constraint.rhs`` — it folds the
     # body constant into the r-section row bound — so a row the solve path refuses
     # as unrepresentable (#909) is still exported faithfully here. Refusing it
     # would block a correct export over a defect that only affects solving.
     # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
     model.validate(for_solve=False)
-    writer = _NLWriter(model, initial_point=initial_point)
-    text = writer.write()
+    text = _rust_nl_text(model, initial_point)
+    if text is None:
+        writer = _NLWriter(model, initial_point=initial_point)
+        text = writer.write()
     if path is not None:
         Path(path).write_text(text)
         return None
     return text
+
+
+_RUST_NL_ENV = "DISCOPT_RUST_NL"
+
+_RUST_NL_LOG = logging.getLogger(__name__)
+
+
+def _rust_nl_text(model: Model, initial_point: Union[dict, None] = None) -> Optional[str]:
+    """``.nl`` text from the Rust writer, or ``None`` to use the Python writer.
+
+    Writing ``.nl`` was the entire remaining external-solver performance gap:
+    the Python writer below costs **16.05 µs/row of a 16.21 µs/row**
+    model-to-file pipeline, against oximo's 0.86 for the same work
+    (``docs/dev/performance-plan.md`` §43). ``discopt_core::nl_writer`` is the
+    replacement, and it is **9.3x faster** on a vectorised model (16.05 -> 1.72
+    µs/row), which puts discopt at 1.66 µs/row end to end: **10.5x Pyomo and
+    1.57x oximo**, measured in one run on one machine (§46).
+
+    It is not a reimplementation with its own opinions: it is diffed
+    **byte-for-byte** against the Python writer, and agrees on all 66 MINLPLib
+    instances in ``python/tests/data/minlplib_nl`` plus a hand-written set
+    covering MINLP integrality, matmul, vectorised bodies, equalities and
+    free/fixed bounds. The Python writer stays as the fallback for anything the
+    arena cannot represent (``dm.custom``), and ``DISCOPT_RUST_NL=0`` forces it,
+    so a suspected regression can be isolated without a rebuild.
+    """
+    if os.environ.get(_RUST_NL_ENV, "1") in ("0", "false", "False"):
+        return None
+    try:
+        from discopt._rust import model_to_repr
+    except ImportError:  # pragma: no cover - extension always present in-tree
+        return None
+    # Builder-resident rows (`add_linear_constraints` / the `Model.constraint`
+    # fast path) sit AHEAD of the expression rows in the arena and AFTER them in
+    # `model._constraints`. That used to be a refusal here, which paired the
+    # FASTEST construction path with the SLOWEST writer: a 20 000-row bulk model
+    # built in 0.31 us/row and then exported at 22.83. `nl_writer::write_nl` now
+    # takes the builder-row boundary from the repr and reorders to this order, so
+    # the two writers agree byte for byte and row order -- how a solver's `.sol`
+    # duals map back to constraints -- is unchanged from what discopt has always
+    # written.
+    # The starting point lives on the Model, keyed by `(name, element)`; the
+    # writer wants repr COLUMNS. Resolving here rather than in Rust keeps the
+    # `(name, element)` convention in the one layer that owns it. A key naming a
+    # variable the model does not have is a caller bug, not something to write
+    # around -- refuse the fast path so the Python writer raises its own, clearer
+    # error rather than this one silently dropping an entry.
+    #
+    # This section is why the Rust writer used to have to decline entirely: it
+    # emitted no `x` block, so 52 of the 66 corpus instances silently lost their
+    # starting point on a read/write round-trip (#1224/#1225/#1226).
+    # Same three-way contract as `_NLWriter.__init__`, so the two writers cannot
+    # disagree about WHICH point to write: `None` falls back to the point
+    # attached to the model, a non-empty dict wins, and an explicit `{}`
+    # suppresses the section even for a model that carries one. Getting this
+    # wrong is silent -- an `x` block the caller asked to drop still parses.
+    entries: list[tuple[int, float]] = []
+    if initial_point is None:
+        point = dict(getattr(model, "_initial_point", None) or {})
+    elif initial_point:
+        point = _keyed_initial_point(model, initial_point)
+    else:
+        point = {}
+    if point:
+        offsets = variable_flat_offsets(model)
+        by_name = {v.name: v for v in model._variables}
+        for (name, elem), value in point.items():
+            var = by_name.get(name)
+            if var is None:
+                _RUST_NL_LOG.debug("Rust .nl writer declined: unknown variable %r", name)
+                return None
+            entries.append((offsets[id(var)] + elem, float(value)))
+    try:
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        # Through a typed local: `write_nl` comes from the PyO3 extension, whose
+        # bindings are untyped, so returning it directly returns `Any` from a
+        # function declared to return `str | None`.
+        text: str = repr_.write_nl(model.name, entries)
+        return text
+    except Exception as exc:  # noqa: BLE001
+        # "This model has no arena representation" arrives as several exception
+        # types (`TypeError: Unknown expression type`, `ValueError: Unknown
+        # MathFunc`, and the writer's own refusals), and the Python writer below
+        # handles every one of them correctly. Nothing is suppressed: this is a
+        # speculative fast path, and the model is written either way.
+        _RUST_NL_LOG.debug("Rust .nl writer declined: %s: %s", type(exc).__name__, exc)
+        return None
+    except BaseException as exc:  # noqa: BLE001
+        # PyO3 raises `pyo3_runtime.PanicException`, which derives from
+        # `BaseException` and NOT from `Exception` -- so the clause above cannot
+        # see it, and a Rust panic reached the user as a crash even though the
+        # Python writer below handles the model correctly. That is exactly what
+        # `log2` did: `expand.rs::func_code` admitted it, `nl_writer.rs` had no
+        # opcode for it, and `.expect("mapped function")` fired.
+        #
+        # A panic is a BUG in the writer, not a decline, so unlike the clause
+        # above this logs at WARNING: the file still gets written, but the defect
+        # is not silent. KeyboardInterrupt and SystemExit are re-raised -- they
+        # are control flow, never a writer result.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        _RUST_NL_LOG.warning(
+            "Rust .nl writer PANICKED (%s: %s); falling back to the Python writer. "
+            "This is a writer bug -- please report it.",
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 # ── Expression opcodes (AMPL .nl format) ────────────────────────
@@ -480,9 +600,17 @@ class _NLWriter:
         """Split objective and constraints into linear and nonlinear parts."""
         obj = self.model._objective
         if obj is not None:
+            # The objective goes through the SAME array expansion as a constraint
+            # body. It did not, and that was the single reason six of eight
+            # array-shaped construct families could not be exported: an objective
+            # like `-dm.sum(x)` or `dm.sum(A @ x)` is scalar-VALUED but
+            # array-STRUCTURED, so it reached the scalar writer whole and died
+            # with `Cannot write array variable x without indexing`. Array
+            # *constraints* had worked all along.
+            body = _arrays.scalarize_objective(obj.expression, self._resolve_var_index)
             # Objectives have no r-section rhs, so the constant offset stays in
             # the O body (re-attached as an additive node).
-            linear, nonlinear, const_offset = self._split_expr(obj.expression)
+            linear, nonlinear, const_offset = self._split_expr(body)
             self._obj_linear = linear
             self._obj_nonlinear = self._attach_const(nonlinear, const_offset)
         self._decompose_builder_objective()
@@ -658,189 +786,31 @@ class _NLWriter:
                 self._con_bounds.append(bnd)
 
     def _scalarize_body(self, expr: Expression) -> list[Expression]:
-        """Return the scalar constraint bodies a (possibly array) body expands to.
-
-        A scalar body yields a single-element list; an array body yields one
-        scalar expression per element in row-major order.
-
-        A purely scalar body (the common case, including deep ``sum()`` chains)
-        skips the recursive :meth:`_scalarize` pass entirely — the downstream
-        linear/nonlinear split and writer already traverse scalar nodes
-        iteratively, so this avoids a recursion-limit overflow on deep DAGs.
-        Only genuinely array-structured bodies (matrix products, axis
-        reductions, unindexed array variables) need expansion.
-        """
-        if not self._needs_scalarize(expr):
-            return [expr]
-        arr = self._scalarize(expr)
-        if arr.ndim == 0:
-            return [cast(Expression, arr[()])]
-        return list(arr.ravel())
+        """The scalar constraint bodies a (possibly array) body expands to."""
+        return _arrays.scalarize_body(expr, self._resolve_var_index)
 
     def _needs_scalarize(self, expr: Expression) -> bool:
-        """True if ``expr`` has array structure requiring element expansion.
-
-        Walks the DAG iteratively (no recursion). Returns ``True`` on the first
-        node that introduces array shape — an unindexed array ``Variable``, a
-        ``MatMulExpression``, an axis-reducing ``SumExpression``, or an
-        ``IndexExpression`` that does not resolve to a single scalar variable.
-        Scalar-only bodies return ``False`` and bypass :meth:`_scalarize`.
-        """
-        stack: list[Expression] = [expr]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, Variable):
-                if node.shape not in ((), (1,)):
-                    return True
-            elif isinstance(node, (MatMulExpression, SumExpression)):
-                return True
-            elif isinstance(node, IndexExpression):
-                if self._resolve_var_index(node) is None:
-                    return True
-            elif isinstance(node, BinaryOp):
-                stack.append(node.left)
-                stack.append(node.right)
-            elif isinstance(node, UnaryOp):
-                stack.append(node.operand)
-            elif isinstance(node, FunctionCall):
-                stack.extend(node.args)
-            elif isinstance(node, SumOverExpression):
-                stack.extend(node.terms)
-            # Constant, scalar Variable, resolved IndexExpression, opaque leaves: fine
-        return False
+        """True if ``expr`` has array structure requiring element expansion."""
+        return _arrays.needs_scalarize(expr, self._resolve_var_index)
 
     @staticmethod
     def _obj0(x) -> np.ndarray:
-        """Wrap a single expression in a 0-d object array."""
-        out = np.empty((), dtype=object)
-        out[()] = x
-        return out
+        return _arrays.obj0(x)
 
     def _sum_terms(self, terms: list[Expression]) -> Expression:
-        """Left-fold a list of scalar expressions into a sum (``+``)."""
-        if not terms:
-            return Constant(0.0)
-        result: Expression = terms[0]
-        for t in terms[1:]:
-            result = BinaryOp("+", result, t)
-        return result
+        return _arrays.sum_terms(terms)
 
     def _matmul_scalar(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
-        """Symbolic matmul of two object arrays of scalar expressions."""
-        if left.ndim == 1 and right.ndim == 1:
-            (k,) = left.shape
-            return self._obj0(self._sum_terms([BinaryOp("*", left[i], right[i]) for i in range(k)]))
-        if left.ndim == 2 and right.ndim == 1:
-            m, k = left.shape
-            out = np.empty((m,), dtype=object)
-            for i in range(m):
-                out[i] = self._sum_terms([BinaryOp("*", left[i, p], right[p]) for p in range(k)])
-            return out
-        if left.ndim == 1 and right.ndim == 2:
-            k, n = right.shape
-            out = np.empty((n,), dtype=object)
-            for j in range(n):
-                out[j] = self._sum_terms([BinaryOp("*", left[p], right[p, j]) for p in range(k)])
-            return out
-        if left.ndim == 2 and right.ndim == 2:
-            m, k = left.shape
-            _, n = right.shape
-            out = np.empty((m, n), dtype=object)
-            for i in range(m):
-                for j in range(n):
-                    out[i, j] = self._sum_terms(
-                        [BinaryOp("*", left[i, p], right[p, j]) for p in range(k)]
-                    )
-            return out
-        raise ValueError(f"Unsupported matmul of shapes {left.shape} @ {right.shape}")
+        return _arrays.matmul_scalar(left, right)
 
     def _sum_axis(self, arr: np.ndarray, axis: int | None) -> np.ndarray:
-        """Symbolic reduction (``+``) of an object array along ``axis``."""
-        if axis is None:
-            return self._obj0(self._sum_terms([_elem(arr, idx) for idx in np.ndindex(arr.shape)]))
-        moved = np.moveaxis(arr, axis, 0)
-        out_shape = moved.shape[1:]
-        out = np.empty(out_shape, dtype=object)
-        for idx in np.ndindex(out_shape):
-            out[idx] = self._sum_terms([moved[(p, *idx)] for p in range(moved.shape[0])])
-        if out.ndim == 0:
-            return self._obj0(out[()])
-        return out
+        return _arrays.sum_axis(arr, axis)
+
+    def _scalarize_reduction(self, expr: FunctionCall) -> Expression:
+        return _arrays.scalarize_reduction(expr)
 
     def _scalarize(self, expr: Expression) -> np.ndarray:
-        """Expand an expression into an object ndarray of scalar expressions.
-
-        Indexing, broadcasting, and matrix products are pushed through the DAG
-        so each output element becomes a plain scalar expression that the rest
-        of the (scalar-oriented) writer can decompose. Scalars are returned as
-        0-d object arrays. Node types without a known array structure (e.g.
-        parameters) are treated as opaque scalar leaves.
-        """
-        if isinstance(expr, Constant):
-            v = expr.value
-            if v.ndim == 0:
-                return self._obj0(Constant(float(v)))
-            out = np.empty(v.shape, dtype=object)
-            for idx in np.ndindex(v.shape):
-                out[idx] = Constant(float(v[idx]))
-            return out
-
-        if isinstance(expr, Variable):
-            if expr.shape == () or expr.shape == (1,):
-                return self._obj0(expr)
-            out = np.empty(expr.shape, dtype=object)
-            ndim = len(expr.shape)
-            for idx in np.ndindex(expr.shape):
-                out[idx] = IndexExpression(expr, idx if ndim > 1 else idx[0])
-            return out
-
-        if isinstance(expr, IndexExpression):
-            base = self._scalarize(expr.base)
-            sub = base[expr.index]
-            return sub if isinstance(sub, np.ndarray) else self._obj0(sub)
-
-        if isinstance(expr, UnaryOp):
-            operand = self._scalarize(expr.operand)
-            out = np.empty(operand.shape, dtype=object)
-            for idx in np.ndindex(operand.shape):
-                out[idx] = UnaryOp(expr.op, _elem(operand, idx))
-            return out
-
-        if isinstance(expr, BinaryOp):
-            left, right = np.broadcast_arrays(
-                self._scalarize(expr.left), self._scalarize(expr.right)
-            )
-            out = np.empty(left.shape, dtype=object)
-            for idx in np.ndindex(left.shape):
-                out[idx] = BinaryOp(expr.op, _elem(left, idx), _elem(right, idx))
-            return out
-
-        if isinstance(expr, FunctionCall):
-            args = [self._scalarize(a) for a in expr.args]
-            bargs = list(np.broadcast_arrays(*args)) if len(args) > 1 else args
-            shape = bargs[0].shape
-            out = np.empty(shape, dtype=object)
-            for idx in np.ndindex(shape):
-                out[idx] = FunctionCall(expr.func_name, *[_elem(b, idx) for b in bargs])
-            return out
-
-        if isinstance(expr, MatMulExpression):
-            return self._matmul_scalar(self._scalarize(expr.left), self._scalarize(expr.right))
-
-        if isinstance(expr, SumExpression):
-            return self._sum_axis(self._scalarize(expr.operand), expr.axis)
-
-        if isinstance(expr, SumOverExpression):
-            terms = [self._scalarize(t) for t in expr.terms]
-            bterms = list(np.broadcast_arrays(*terms)) if len(terms) > 1 else terms
-            shape = bterms[0].shape
-            out = np.empty(shape, dtype=object)
-            for idx in np.ndindex(shape):
-                out[idx] = self._sum_terms([_elem(b, idx) for b in bterms])
-            return out
-
-        # Opaque scalar leaf (e.g. Parameter): leave intact.
-        return self._obj0(expr)
+        return _arrays.scalarize(expr)
 
     def _split_expr(self, expr: Expression) -> tuple[dict[int, float], Expression | None, float]:
         """Split an expression into linear, variable-referencing nonlinear, and constant.
@@ -1248,6 +1218,25 @@ class _NLWriter:
 
             if isinstance(node, Constant):
                 buf.write(f"n{float(node.value)}\n")
+            elif isinstance(node, Parameter):
+                # A Parameter is "a value fixed during a single solve but
+                # changeable between solves" (its class docstring), so at export
+                # time it is simply a constant -- .nl has no parameter concept.
+                # The written file is a SNAPSHOT at the current value; re-export
+                # after changing `p.value` to get a file for the new value.
+                # Refuse a non-scalar Parameter rather than writing its first
+                # element: `_needs_scalarize` routes shaped bodies through
+                # `_scalarize`, so a shaped Parameter reaching here means the
+                # element was not resolved, and silently emitting one number
+                # would produce a wrong model (CLAUDE.md §3).
+                val = np.asarray(node.value)
+                if val.shape not in ((), (1,)):
+                    raise ValueError(
+                        f"Cannot write array parameter {node.name!r} of shape "
+                        f"{val.shape} to .nl without indexing; index it "
+                        f"element-wise (e.g. p[i]) so each use is scalar."
+                    )
+                buf.write(f"n{float(val.reshape(-1)[0])}\n")
             elif isinstance(node, Variable):
                 if node.shape == () or node.shape == (1,):
                     idx = self._var_index.get((node.name, 0))
@@ -1258,6 +1247,29 @@ class _NLWriter:
             elif isinstance(node, IndexExpression):
                 vi = self._resolve_var_index(node)
                 if vi is None:
+                    # An index into a Parameter is a constant at export time.
+                    # Constraint bodies reach `_scalarize`, which expands shaped
+                    # parameters element-wise, but the objective is written
+                    # directly through this path, so `p[i]` in an objective must
+                    # be resolved here too.
+                    if isinstance(node.base, Parameter):
+                        val = np.asarray(node.base.value)
+                        try:
+                            elem = val[node.index]
+                        except (IndexError, TypeError) as exc:
+                            raise ValueError(
+                                f"Cannot resolve parameter index {node}: "
+                                f"{node.base.name!r} has shape {val.shape}."
+                            ) from exc
+                        elem_arr = np.asarray(elem)
+                        if elem_arr.ndim != 0:
+                            raise ValueError(
+                                f"Parameter index {node} selects a non-scalar of "
+                                f"shape {elem_arr.shape}; index it element-wise so "
+                                f"each use is scalar."
+                            )
+                        buf.write(f"n{float(elem_arr)}\n")
+                        continue
                     raise ValueError(f"Cannot resolve indexed expression: {node}")
                 buf.write(f"v{vi}\n")
             elif isinstance(node, BinaryOp):

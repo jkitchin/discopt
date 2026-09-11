@@ -22,6 +22,14 @@ pub struct PyModelRepr {
     /// Complementarity relations recovered from a `.nl` file (empty for models
     /// built any other way). Their `body` ids reference `inner.arena` (#658).
     complementarities: Vec<ComplementarityRepr>,
+    /// How many LEADING entries of `inner.constraints` came from the Rust model
+    /// builder. `model_to_repr` clones the builder's constraints first and
+    /// appends the expression rows after, so builder rows lead the arena while
+    /// every Python writer emits them last; `write_nl` needs the boundary to put
+    /// the rows back in the writers' order. Zero everywhere else, which makes
+    /// that reordering the identity — the right default for a repr that came
+    /// from a `.nl` parse or from a pass that rebuilt the constraint list.
+    n_builder_constraints: usize,
     /// `(column, value)` starting-point entries from a `.nl` file's `x` segment
     /// (empty for models built any other way, and for every model a transform
     /// below produces). Indexed **by column**, which is why it sits out here
@@ -39,6 +47,8 @@ impl PyModelRepr {
             inner: parsed.model,
             complementarities: parsed.complementarities,
             initial_point: parsed.initial_point,
+            // A repr recovered from a `.nl` parse has no builder rows.
+            n_builder_constraints: 0,
         }
     }
 }
@@ -438,6 +448,236 @@ impl PyModelRepr {
         self.inner.objective.0
     }
 
+    /// Flat "tape program" for the whole arena, in one call.
+    ///
+    /// Lowering the arena to POUNCE's AD tape was measured at 93-94% of the tape
+    /// build, and that cost is the *reading*, not POUNCE: `get_node` materializes
+    /// a Python dict per node, so a 12 000-row model pays ~470 000 dict
+    /// round-trips. This returns the same information as parallel arrays instead,
+    /// so the caller indexes numpy rather than allocating a dict per node.
+    ///
+    /// POUNCE ships as a Python extension and is not a Rust dependency here, so
+    /// the tape nodes themselves must still be constructed on the Python side;
+    /// what moves into Rust is the arena walk and the variable-slot arithmetic.
+    ///
+    /// Returns `(op, a, b, k, args_flat, args_ptr)`:
+    ///   * `op[i]`   opcode for node `i` (see the OP_* constants below)
+    ///   * `a[i]`,`b[i]`  operand node ids, or -1 when unused
+    ///   * `k[i]`    literal payload: the value for CONST, the **flat variable
+    ///               slot** for VAR (already offset-resolved here, so the caller
+    ///               never redoes block arithmetic and cannot alias a variable)
+    ///   * `args_flat[args_ptr[i]..args_ptr[i+1]]`  operands of n-ary nodes
+    ///
+    /// Nodes this encoding does not cover (constant arrays, matmul, axis sums,
+    /// non-integer indexing) are emitted as `OP_UNSUPPORTED` rather than skipped,
+    /// so a caller that roots a row at one fails loudly instead of building a
+    /// DIFFERENT tape than the Python path.
+    ///
+    /// Opcodes: 0 unsupported, 1 const, 2 var, 3 add, 4 sub, 5 mul, 6 div,
+    /// 7 pow, 8 neg, 9 abs, 10 sumover, 20+ MathFunc in declaration order.
+    #[allow(clippy::type_complexity)]
+    fn tape_program<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<i32>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+    )> {
+        use numpy::PyArray1;
+
+        const OP_UNSUPPORTED: i32 = 0;
+        const OP_CONST: i32 = 1;
+        const OP_VAR: i32 = 2;
+        const OP_SUMOVER: i32 = 10;
+        const OP_FUNC_BASE: i32 = 20;
+
+        // Flat offset of each variable block, matching `ExprArena::add_variable`
+        // (`offset = n_vars`, advanced by the block size).
+        let mut offsets: Vec<usize> = Vec::with_capacity(self.inner.variables.len());
+        let mut run = 0usize;
+        for v in &self.inner.variables {
+            offsets.push(v.offset.max(run.min(v.offset)));
+            run = v.offset + v.size;
+        }
+
+        let n = self.inner.arena.len();
+        let mut op = vec![OP_UNSUPPORTED; n];
+        let mut a = vec![-1i64; n];
+        let mut b = vec![-1i64; n];
+        let mut k = vec![0.0f64; n];
+        let mut args_flat: Vec<i64> = Vec::new();
+        let mut args_ptr: Vec<i64> = Vec::with_capacity(n + 1);
+        // Which variable block a node denotes, so an Index above it resolves.
+        let mut block_of: Vec<i64> = vec![-1; n];
+
+        for i in 0..n {
+            args_ptr.push(args_flat.len() as i64);
+            match self.inner.arena.get(ExprId(i)) {
+                ExprNode::Constant(v) => {
+                    op[i] = OP_CONST;
+                    k[i] = *v;
+                }
+                ExprNode::Parameter { value, .. } if value.len() == 1 => {
+                    op[i] = OP_CONST;
+                    k[i] = value[0];
+                }
+                ExprNode::Variable { index, size, .. } => {
+                    block_of[i] = *index as i64;
+                    if *size == 1 {
+                        op[i] = OP_VAR;
+                        k[i] = offsets[*index] as f64;
+                    }
+                }
+                ExprNode::Index { base, index } => {
+                    let blk = block_of[base.0];
+                    if blk >= 0 {
+                        let vi = &self.inner.variables[blk as usize];
+                        if let Some(flat) = flat_slot(&vi.shape, index) {
+                            if flat < vi.size {
+                                op[i] = OP_VAR;
+                                k[i] = (vi.offset + flat) as f64;
+                            }
+                        }
+                    }
+                }
+                ExprNode::BinaryOp { op: o, left, right } => {
+                    op[i] = match o {
+                        BinOp::Add => 3,
+                        BinOp::Sub => 4,
+                        BinOp::Mul => 5,
+                        BinOp::Div => 6,
+                        BinOp::Pow => 7,
+                    };
+                    a[i] = left.0 as i64;
+                    b[i] = right.0 as i64;
+                }
+                ExprNode::UnaryOp { op: o, operand } => {
+                    op[i] = match o {
+                        UnOp::Neg => 8,
+                        UnOp::Abs => 9,
+                    };
+                    a[i] = operand.0 as i64;
+                }
+                ExprNode::FunctionCall { func, args } if args.len() == 1 => {
+                    op[i] = OP_FUNC_BASE + math_func_code(*func);
+                    a[i] = args[0].0 as i64;
+                }
+                ExprNode::SumOver { terms } => {
+                    op[i] = OP_SUMOVER;
+                    for t in terms {
+                        args_flat.push(t.0 as i64);
+                    }
+                }
+                _ => {}
+            }
+        }
+        args_ptr.push(args_flat.len() as i64);
+
+        Ok((
+            PyArray1::from_vec(py, op),
+            PyArray1::from_vec(py, a),
+            PyArray1::from_vec(py, b),
+            PyArray1::from_vec(py, k),
+            PyArray1::from_vec(py, args_flat),
+            PyArray1::from_vec(py, args_ptr),
+        ))
+    }
+
+    /// The whole model as a fully SCALAR program, with array bodies fanned out.
+    ///
+    /// `tape_program` refuses an array-valued body -- one `Constraint`, many
+    /// rows -- because its encoding has one slot per arena node and cannot
+    /// expand. That refusal sent every vectorised model back to the Python DAG
+    /// walk, which is the shape that reaches solve-ready 36x faster
+    /// (`docs/dev/performance-plan.md` §41), so the fast models were paying the
+    /// slow path. This does the fan-out in Rust instead.
+    ///
+    /// Returns `(op, a, b, k, args_flat, args_ptr, objective_root, row_roots,
+    /// rows_per_constraint)` in the same opcode encoding `tape_program` uses.
+    /// `row_roots` is one instruction index per constraint ROW, in constraint
+    /// order; `rows_per_constraint` says how many rows each source constraint
+    /// produced, which is what a caller needs to attribute duals, row maps and
+    /// feasibility reports back to the `Constraint` they came from.
+    ///
+    /// Raises rather than returning a partial program: an expansion that cannot
+    /// be done exactly is a different model, and unlike a refusal it would not
+    /// announce itself.
+    #[allow(clippy::type_complexity)]
+    fn tape_program_expanded<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<i32>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+        i64,
+        Bound<'py, numpy::PyArray1<i64>>,
+        Bound<'py, numpy::PyArray1<i64>>,
+    )> {
+        use numpy::PyArray1;
+
+        let prog = discopt_core::expand::expand(&self.inner).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("cannot expand model: {e}"))
+        })?;
+        let rows: Vec<i64> = prog.rows_per_constraint.iter().map(|v| *v as i64).collect();
+        Ok((
+            PyArray1::from_vec(py, prog.op),
+            PyArray1::from_vec(py, prog.a),
+            PyArray1::from_vec(py, prog.b),
+            PyArray1::from_vec(py, prog.k),
+            PyArray1::from_vec(py, prog.args_flat),
+            PyArray1::from_vec(py, prog.args_ptr),
+            prog.objective_root,
+            PyArray1::from_vec(py, prog.row_roots),
+            PyArray1::from_vec(py, rows),
+        ))
+    }
+
+    /// The model as AMPL `.nl` text, written in Rust.
+    ///
+    /// The inverse of `nl_parser`, and the counterpart of `export/nl.py`, which
+    /// it is diffed byte-for-byte against. It exists because writing `.nl` was
+    /// the whole remaining external-solver performance gap: the Python writer
+    /// costs 16.17 us/row of a 16.21 us/row model-to-file pipeline against
+    /// oximo's 0.86 (`docs/dev/performance-plan.md` §43).
+    ///
+    /// Raises rather than returning partial text for any model the arena cannot
+    /// expand; the Python writer stays as the fallback for those.
+    /// `initial_point` is `(column, value)` in THIS repr's column numbering.
+    /// Passed in rather than read off `self.initial_point`, because that field
+    /// is only populated for a repr parsed from a `.nl` file -- a repr built
+    /// from a Python `Model` carries the point on the Model, and the caller is
+    /// the one that can resolve its `(name, element)` keys to columns.
+    #[pyo3(signature = (model_name, initial_point=Vec::new()))]
+    fn write_nl(&self, model_name: &str, initial_point: Vec<(usize, f64)>) -> PyResult<String> {
+        // The builder-row boundary travels with the repr rather than being
+        // passed in, so a caller cannot supply a count that does not match the
+        // constraint list it is describing.
+        discopt_core::nl_writer::write_nl(
+            &self.inner,
+            model_name,
+            self.n_builder_constraints,
+            &initial_point,
+        )
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
+    }
+
+    /// How many leading constraints came from the Rust model builder.
+    ///
+    /// Exposed so a test can assert the boundary the `.nl` writer reorders on,
+    /// rather than inferring it from row names.
+    #[getter]
+    fn n_builder_constraints(&self) -> usize {
+        self.n_builder_constraints
+    }
+
     /// ExprId (index) of each constraint expression root.
     fn constraint_ids(&self) -> Vec<usize> {
         self.inner.constraints.iter().map(|c| c.body.0).collect()
@@ -548,6 +788,7 @@ impl PyModelRepr {
         dict.set_item("candidates_examined", stats.candidates_examined)?;
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
@@ -578,6 +819,7 @@ impl PyModelRepr {
         dict.set_item("aux_bounds_derived", stats.aux_bounds_derived)?;
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
@@ -970,6 +1212,7 @@ impl PyModelRepr {
 
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: result.model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
@@ -997,6 +1240,9 @@ impl PyModelRepr {
                 PyModelRepr {
                     // Refusal path: the model is returned unchanged, columns and
                     // all, so the starting point is still valid and is kept.
+                    // The builder-row boundary does not survive a repr rebuilt
+                    // here, so it stays 0 as everywhere off `model_to_repr`.
+                    n_builder_constraints: 0,
                     inner: self.inner.clone(),
                     complementarities: self.complementarities.clone(),
                     initial_point: self.initial_point.clone(),
@@ -1013,6 +1259,7 @@ impl PyModelRepr {
         let reduced = models.last().expect("seeded with the input model").clone();
         Ok((
             PyModelRepr {
+                n_builder_constraints: 0,
                 inner: reduced,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
@@ -1188,6 +1435,9 @@ pub fn model_to_repr(
         let a = b.inner.arena.clone();
         let v = b.inner.variables.clone();
         let c = b.inner.constraints.clone();
+        // Remember where the builder's rows end: they lead `constraints`, and the
+        // expression rows are appended after. `write_nl` reorders on this
+        // boundary so its output matches the Python writers'.
         let obj = b.inner.objective;
         let sense = b.inner.objective_sense;
         let nv = b.inner.n_vars;
@@ -1204,6 +1454,12 @@ pub fn model_to_repr(
             Vec::new(),
         )
     };
+
+    // Where the builder's rows end. They lead `constraints`; the expression rows
+    // are appended below. `write_nl` reorders on this boundary so the Rust
+    // writer's row order matches every Python writer's (expression rows first,
+    // builder rows after) -- row order is how a solver's `.sol` duals map back.
+    let n_builder_constraints = constraints.len();
 
     // Build variable info from model._variables for the expression path.
     let py_vars = model.getattr("_variables")?;
@@ -1223,6 +1479,49 @@ pub fn model_to_repr(
                 if let Ok(bidx) = idx.extract::<usize>() {
                     if bidx < builder_var_expr_ids.len() {
                         var_expr_ids.insert(py_id, builder_var_expr_ids[bidx]);
+                    }
+                    // Refresh the variable box from the LIVE Python bounds
+                    // (correctness issue C-41). The builder records lb/ub once, at
+                    // registration — `Model._register_variable`, and for every
+                    // pre-existing variable when the builder is lazily created in
+                    // `Model._get_builder`. Cloning `b.inner.variables` above
+                    // therefore carries a box that is stale the moment any caller
+                    // mutates `var.lb` / `var.ub`, which is not misuse: `lb = ub` is
+                    // the only fixing route and in-tree code relies on it
+                    // (`estimate.py` fixing design variables, and the presolve /
+                    // node-reduce / root-reduce passes restoring boxes). Root
+                    // presolve then ran FBBT on the stale box and could return a
+                    // *certified* `infeasible` for a model whose true answer is
+                    // `optimal`.
+                    //
+                    // The pure-expression arm below has always read the live bounds;
+                    // this makes the two arms agree. It also removes an accidental
+                    // dependence on `_materialize_builder_linear_rows`, which masked
+                    // the defect for any model carrying a linear block by rebuilding
+                    // the builder (and so re-reading bounds) as a side effect.
+                    //
+                    // A length mismatch means the Python variable's shape no longer
+                    // matches its registration, which is a real inconsistency rather
+                    // than something to paper over, so it is refused loudly.
+                    if bidx < variables.len() {
+                        let expected = variables[bidx].size;
+                        let lb_obj = py_var.getattr("lb")?;
+                        let lb = extract_flat_f64(&lb_obj)?;
+                        let ub_obj = py_var.getattr("ub")?;
+                        let ub = extract_flat_f64(&ub_obj)?;
+                        if lb.len() != expected || ub.len() != expected {
+                            let name = &variables[bidx].name;
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Variable '{name}' was registered with size \
+                                     {expected} but its bounds now have lengths \
+                                     ({}, {}); a variable's shape must not change \
+                                     after it is added to the model.",
+                                lb.len(),
+                                ub.len()
+                            )));
+                        }
+                        variables[bidx].lb = lb;
+                        variables[bidx].ub = ub;
                     }
                 }
             }
@@ -1406,6 +1705,8 @@ pub fn model_to_repr(
     Ok(PyModelRepr {
         inner,
         complementarities: Vec::new(),
+        n_builder_constraints,
+        // Built from a Python Model, not parsed from a `.nl` file: no `x` segment.
         initial_point: Vec::new(),
     })
 }
@@ -1931,4 +2232,69 @@ fn format_slice(start: Option<isize>, stop: Option<isize>, step: Option<isize>) 
     } else {
         format!("{}:{}:{}", s(start), s(stop), s(step))
     }
+}
+
+/// Stable integer code for a `MathFunc`, in declaration order.
+fn math_func_code(f: MathFunc) -> i32 {
+    match f {
+        MathFunc::Exp => 0,
+        MathFunc::Log => 1,
+        MathFunc::Log2 => 2,
+        MathFunc::Log10 => 3,
+        MathFunc::Sqrt => 4,
+        MathFunc::Sin => 5,
+        MathFunc::Cos => 6,
+        MathFunc::Tan => 7,
+        MathFunc::Atan => 8,
+        MathFunc::Sinh => 9,
+        MathFunc::Cosh => 10,
+        MathFunc::Asin => 11,
+        // 12-17: everything `.nl` can express that is NOT a plain
+        // opcode-per-call. `Acos`/`Tanh`/`Abs` have opcodes (53/37/15);
+        // `Log1p`/`Sigmoid`/`Softplus` are rewritten from existing ones,
+        // exactly as `export/nl.py::_function_call_sequence` does.
+        MathFunc::Acos => 12,
+        MathFunc::Tanh => 13,
+        MathFunc::Abs => 14,
+        MathFunc::Log1p => 15,
+        MathFunc::Sigmoid => 16,
+        MathFunc::Softplus => 17,
+        _ => 99,
+    }
+}
+
+/// C-order flat slot for a pure-integer index into `shape`, else `None`.
+///
+/// Returns `None` for slices, ellipsis, negative or out-of-range indices and any
+/// wrong-arity spec, so the caller emits `OP_UNSUPPORTED` rather than guessing a
+/// slot -- a wrong slot silently aliases a different variable.
+fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
+    let idxs: Vec<usize> = match index {
+        IndexSpec::Scalar(i) => vec![*i],
+        IndexSpec::Tuple(v) => v.clone(),
+        IndexSpec::Multi(elems) => {
+            let mut out = Vec::with_capacity(elems.len());
+            for e in elems {
+                match e {
+                    IndexElem::Scalar(i) => out.push(*i),
+                    _ => return None,
+                }
+            }
+            out
+        }
+    };
+    if shape.is_empty() {
+        return if idxs.is_empty() { Some(0) } else { None };
+    }
+    if idxs.len() != shape.len() {
+        return None;
+    }
+    let mut flat = 0usize;
+    for (i, d) in idxs.iter().zip(shape.iter()) {
+        if *i >= *d {
+            return None;
+        }
+        flat = flat * *d + *i;
+    }
+    Some(flat)
 }

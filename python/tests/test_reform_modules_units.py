@@ -1000,8 +1000,20 @@ def test_extract_disjunct_bounds_patterns():
     assert G._extract_disjunct_bounds([w == 3], m) == {"w": (3.0, 3.0)}
     # var - const pattern from the operator overloads.
     assert G._extract_disjunct_bounds([w <= 5], m) == {"w": (-10.0, 5.0)}
-    # Indexed-variable body with explicit rhs.
+    # An indexed body must NOT produce a bound on the whole array.
+    #
+    # This assertion used to read `== {"wv": (0.0, 3.0)}`, and that expectation
+    # was the bug: bounds here are keyed by variable NAME, so a bound taken from
+    # `wv[0]` was applied to every component of `wv`. The hull reformulation caps
+    # each disaggregated component with it, which cut feasible points and
+    # returned `status=optimal` on a non-optimal value. See
+    # `test_1215_hull_element_bound_leak.py` for the reproduction. Declining is
+    # sound: the caller falls back to the variable's global bounds.
     db = G._extract_disjunct_bounds([Constraint(body=wv[0], sense="<=", rhs=3.0)], m)
+    assert db == {}
+    # The whole array still tightens -- the guard is about coverage, not about
+    # refusing array variables.
+    db = G._extract_disjunct_bounds([Constraint(body=wv, sense="<=", rhs=3.0)], m)
     assert db == {"wv": (0.0, 3.0)}
 
 

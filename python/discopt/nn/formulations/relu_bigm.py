@@ -8,6 +8,7 @@ import numpy as np
 
 import discopt.modeling as dm
 from discopt.nn.bounds import propagate_bounds, scaled_output_bounds
+from discopt.nn.formulations.full_space import _family_name
 from discopt.nn.network import Activation, NetworkDefinition
 from discopt.nn.scaling import OffsetScaling
 
@@ -87,11 +88,10 @@ class ReluBigMFormulation:
             scaled_in = m.continuous(
                 f"{pfx}_scaled_input", shape=(net.input_size,), lb=s_lo, ub=s_hi
             )
-            for j in range(net.input_size):
-                m.subject_to(
-                    scaled_in[j] == (inputs[j] - sc.x_offset[j]) / sc.x_factor[j],
-                    name=f"{pfx}_scale_in_{j}",
-                )
+            m.subject_to(
+                scaled_in == (inputs - sc.x_offset) / sc.x_factor,
+                name=_family_name(f"{pfx}_scale_in", net.input_size),
+            )
             prev_z = scaled_in
         else:
             layer_bounds = propagate_bounds(net)
@@ -111,13 +111,16 @@ class ReluBigMFormulation:
                 ub=bounds.pre_ub,
             )
 
-            # Affine constraints: zhat = W^T @ prev_z + b
-            for j in range(n_out):
-                lhs = dm.sum(
-                    lambda i, _j=j, _W=W: _W[i, _j] * prev_z[i],
-                    over=range(layer.n_inputs),
-                )
-                m.subject_to(zhat[j] == lhs + b[j], name=f"{pfx}_affine_{k}_{j}")
+            # Affine constraints: zhat = W^T @ prev_z + b, as ONE array body.
+            #
+            # `dm.sum(W.T * prev_z, axis=1)` and NOT `W.T @ prev_z`: same
+            # mathematics, and the matmul form relaxes more weakly -- on
+            # `full_space` it turned a certified optimum into an uncertified
+            # feasible point (#1215 §55).
+            m.subject_to(
+                zhat == dm.sum(W.T * prev_z, axis=1) + b,
+                name=_family_name(f"{pfx}_affine_{k}", n_out),
+            )
 
             if layer.activation == Activation.RELU:
                 z = self._add_relu_constraints(m, zhat, bounds.pre_lb, bounds.pre_ub, k, n_out, pfx)
@@ -132,11 +135,7 @@ class ReluBigMFormulation:
                     ub=bounds.post_ub,
                 )
                 act_fn = _SMOOTH_FN[layer.activation]
-                for j in range(n_out):
-                    m.subject_to(
-                        z[j] == act_fn(zhat[j]),
-                        name=f"{pfx}_act_{k}_{j}",
-                    )
+                m.subject_to(z == act_fn(zhat), name=_family_name(f"{pfx}_act_{k}", n_out))
 
             prev_z = z
 
@@ -148,11 +147,10 @@ class ReluBigMFormulation:
                 layer_bounds, sc.y_offset, sc.y_factor, net.output_size
             )
             outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,), lb=out_lb, ub=out_ub)
-            for j in range(net.output_size):
-                m.subject_to(
-                    outputs[j] == prev_z[j] * sc.y_factor[j] + sc.y_offset[j],
-                    name=f"{pfx}_scale_out_{j}",
-                )
+            m.subject_to(
+                outputs == prev_z * sc.y_factor + sc.y_offset,
+                name=_family_name(f"{pfx}_scale_out", net.output_size),
+            )
         else:
             outputs = prev_z
 

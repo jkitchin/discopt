@@ -28,8 +28,9 @@ class DenseLayer:
         Weight matrix of shape ``(n_in, n_out)``.
     biases : np.ndarray
         Bias vector of shape ``(n_out,)``.
-    activation : Activation
-        Activation function applied after the affine transform.
+    activation : Activation or str
+        Activation function applied after the affine transform. A plain string
+        (``"tanh"``, ``"relu"``, ...) is accepted and normalised to the enum.
     """
 
     weights: np.ndarray
@@ -37,6 +38,23 @@ class DenseLayer:
     activation: Activation
 
     def __post_init__(self) -> None:
+        # Normalise a string activation to the enum. Without this,
+        # `DenseLayer(..., activation="tanh")` -- the form the readers and the
+        # docstring use -- stored the bare string, and every downstream
+        # membership test against a set of `Activation` members then reported the
+        # layer as UNSUPPORTED. `FullSpaceFormulation` did exactly that and then
+        # crashed formatting its own error (`a.value` on a `str`), so a valid
+        # smooth network was refused with an `AttributeError` instead of being
+        # built.
+        if not isinstance(self.activation, Activation):
+            try:
+                self.activation = Activation(self.activation)
+            except ValueError:
+                valid = ", ".join(repr(a.value) for a in Activation)
+                raise ValueError(
+                    f"Unknown activation {self.activation!r}; expected one of {valid} "
+                    f"or an Activation member."
+                ) from None
         if self.weights.ndim != 2:
             raise ValueError(f"weights must be 2-D, got shape {self.weights.shape}")
         if self.biases.ndim != 1:

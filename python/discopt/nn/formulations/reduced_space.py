@@ -8,6 +8,7 @@ import numpy as np
 
 import discopt.modeling as dm
 from discopt.nn.bounds import propagate_bounds, scaled_output_bounds
+from discopt.nn.formulations.full_space import _family_name
 from discopt.nn.network import Activation, NetworkDefinition
 from discopt.nn.scaling import OffsetScaling
 
@@ -91,11 +92,10 @@ class ReducedSpaceFormulation:
                 layer_bounds = propagate_bounds(net, input_bounds=(s_lo, s_hi))
             else:
                 scaled_in = m.continuous(f"{pfx}_scaled_input", shape=(net.input_size,))
-            for j in range(net.input_size):
-                m.subject_to(
-                    scaled_in[j] == (inputs[j] - sc.x_offset[j]) / sc.x_factor[j],
-                    name=f"{pfx}_scale_in_{j}",
-                )
+            m.subject_to(
+                scaled_in == (inputs - sc.x_offset) / sc.x_factor,
+                name=_family_name(f"{pfx}_scale_in", net.input_size),
+            )
             prev = scaled_in
         else:
             if net.input_bounds is not None:
@@ -106,35 +106,30 @@ class ReducedSpaceFormulation:
         # layer's expressions are emitted directly into the output constraints
         # (skipping a redundant final z var).
         n_layers = len(net.layers)
-        last_exprs: list = []
+        last_expr = None
         for k, layer in enumerate(net.layers):
             W = np.asarray(layer.weights, dtype=np.float64)
             b = np.asarray(layer.biases, dtype=np.float64)
             n_out = layer.n_outputs
 
-            # Compute affine + activation as expressions
-            new_exprs = []
-            for j in range(n_out):
-                # zhat_j = sum(W[i,j] * prev[i]) + b[j]
-                zhat_j = (
-                    dm.sum(
-                        lambda i, _j=j, _W=W: _W[i, _j] * prev[i],
-                        over=range(layer.n_inputs),
-                    )
-                    + b[j]
-                )
-
-                # Apply activation
-                if layer.activation == Activation.RELU:
-                    new_exprs.append(dm.maximum(zhat_j, 0))
-                elif layer.activation in _ACTIVATION_FN:
-                    new_exprs.append(_ACTIVATION_FN[layer.activation](zhat_j))
-                else:
-                    raise ValueError(f"Unsupported activation: {layer.activation}")
+            # The whole layer's fused affine+activation as ONE array-valued
+            # expression rather than one per unit (#1215 §58).
+            #
+            # `dm.sum(W.T * prev, axis=1)` and NOT `W.T @ prev`: same mathematics,
+            # and the matmul form relaxes more weakly -- on `full_space` it turned
+            # a certified optimum into an uncertified feasible point (§55). Same
+            # choice here for the same reason.
+            zhat = dm.sum(W.T * prev, axis=1) + b
+            if layer.activation == Activation.RELU:
+                new_expr = dm.maximum(zhat, 0)
+            elif layer.activation in _ACTIVATION_FN:
+                new_expr = _ACTIVATION_FN[layer.activation](zhat)
+            else:
+                raise ValueError(f"Unsupported activation: {layer.activation}")
 
             if k == n_layers - 1:
                 # Defer the last layer to the output constraints below.
-                last_exprs = new_exprs
+                last_expr = new_expr
                 break
 
             # Intermediate layer: one bounded variable per neuron.
@@ -144,8 +139,7 @@ class ReducedSpaceFormulation:
                 z = m.continuous(f"{pfx}_z_{k}", shape=(n_out,), lb=z_lb, ub=z_ub)
             else:
                 z = m.continuous(f"{pfx}_z_{k}", shape=(n_out,))
-            for j in range(n_out):
-                m.subject_to(z[j] == new_exprs[j], name=f"{pfx}_layer_{k}_{j}")
+            m.subject_to(z == new_expr, name=_family_name(f"{pfx}_layer_{k}", n_out))
 
             prev = z
 
@@ -157,11 +151,10 @@ class ReducedSpaceFormulation:
                 layer_bounds, sc.y_offset, sc.y_factor, net.output_size
             )
             outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,), lb=out_lb, ub=out_ub)
-            for j in range(net.output_size):
-                m.subject_to(
-                    outputs[j] == last_exprs[j] * sc.y_factor[j] + sc.y_offset[j],
-                    name=f"{pfx}_scale_out_{j}",
-                )
+            m.subject_to(
+                outputs == last_expr * sc.y_factor + sc.y_offset,
+                name=_family_name(f"{pfx}_scale_out", net.output_size),
+            )
         else:
             if layer_bounds is not None:
                 out_lb = layer_bounds[-1].post_lb
@@ -171,7 +164,8 @@ class ReducedSpaceFormulation:
                 )
             else:
                 outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,))
-            for j in range(net.output_size):
-                m.subject_to(outputs[j] == last_exprs[j], name=f"{pfx}_layer_out_{j}")
+            m.subject_to(
+                outputs == last_expr, name=_family_name(f"{pfx}_layer_out", net.output_size)
+            )
 
         return inputs, outputs

@@ -27,8 +27,12 @@ Example::
 from __future__ import annotations
 
 import builtins as _builtins
+import contextlib as _contextlib
+import gc
+import math
 import warnings
 import warnings as _warnings
+import weakref
 from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from enum import Enum
@@ -40,6 +44,7 @@ from typing import (
     Optional,
     Sequence,
     Union,
+    cast,
     overload,
 )
 
@@ -618,37 +623,53 @@ class Expression:
     # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
     # ("computed, unknown") is distinguishable. Leaf nodes (Variable/Constant/
     # Parameter) carry their own ``.shape`` and are handled in ``_known_shape``.
+    #
+    # NOT slotted, deliberately. Slotting these classes was measured (#1215) and
+    # is a dead end: retained memory moved 144.9 -> 143.1 MB (1.2%) on the
+    # 200 000-row panel with no time change, because CPython 3.12 already gives
+    # same-shape instances a key-sharing dict, so the per-node ``__dict__`` an
+    # earlier reading blamed for ~104 B/node costs almost nothing. Slots would
+    # buy that 1% at the price of forbidding attribute assignment on any
+    # Expression subclass, including in plugins.
     _shape: Any = _UNSET_SHAPE
 
+    # Each operator inlines ``_wrap``'s Expression check rather than calling it.
+    # Measured (#1215): ``_wrap`` was 750 000 calls on a 200 000-row build, and in
+    # the common ``x[i] * y[i]`` shape the operand is *already* an Expression, so
+    # the call did nothing but an ``isinstance``. A Python-level call is the
+    # expensive part; ``isinstance`` is a C call. Construction is 35 function
+    # calls per row and that count is the budget, so the duplication is worth it
+    # here -- and only here.
+
     def __add__(self, other):
-        return BinaryOp("+", self, _wrap(other))
+        return BinaryOp("+", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __radd__(self, other):
-        return BinaryOp("+", _wrap(other), self)
+        return BinaryOp("+", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __sub__(self, other):
-        return BinaryOp("-", self, _wrap(other))
+        return BinaryOp("-", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rsub__(self, other):
-        return BinaryOp("-", _wrap(other), self)
+        return BinaryOp("-", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __mul__(self, other):
-        return BinaryOp("*", self, _wrap(other))
+        return BinaryOp("*", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rmul__(self, other):
-        return BinaryOp("*", _wrap(other), self)
+        return BinaryOp("*", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __truediv__(self, other):
-        return BinaryOp("/", self, _wrap(other))
+        return BinaryOp("/", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rtruediv__(self, other):
-        return BinaryOp("/", _wrap(other), self)
+        return BinaryOp("/", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __pow__(self, other):
-        return BinaryOp("**", self, _wrap(other))
+        return BinaryOp("**", self, other if isinstance(other, Expression) else _wrap(other))
 
     def __rpow__(self, other):
-        return BinaryOp("**", _wrap(other), self)
+        return BinaryOp("**", other if isinstance(other, Expression) else _wrap(other), self)
 
     def __neg__(self):
         return UnaryOp("neg", self)
@@ -658,14 +679,24 @@ class Expression:
 
     # ── Comparison operators produce Constraints, not booleans ──
 
+    # ``self - _wrap(other)`` routed through ``__sub__``, which called ``_wrap``
+    # a SECOND time on an operand it had just wrapped. Building the ``BinaryOp``
+    # here removes both calls per comparison -- 150 000 ``__sub__`` and 150 000
+    # redundant ``_wrap`` calls on a 200 000-row build. The node built is
+    # identical, which is what the normalisation contract on ``Constraint``
+    # depends on: body ``sense`` 0.
+
     def __le__(self, other):
-        return Constraint(self - _wrap(other), sense="<=", rhs=0.0)
+        rhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", self, rhs), sense="<=", rhs=0.0)
 
     def __ge__(self, other):
-        return Constraint(_wrap(other) - self, sense="<=", rhs=0.0)
+        lhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", lhs, self), sense="<=", rhs=0.0)
 
     def __eq__(self, other):
-        return Constraint(self - _wrap(other), sense="==", rhs=0.0)
+        rhs = other if isinstance(other, Expression) else _wrap(other)
+        return Constraint(BinaryOp("-", self, rhs), sense="==", rhs=0.0)
 
     def __ne__(self, other):
         # ``!=`` is not a valid optimization-constraint operator. Because
@@ -749,7 +780,11 @@ class Expression:
         # Leaf nodes (Variable/Parameter) store their declared shape here; the
         # getter then surfaces it through the same ``_known_shape`` path used for
         # composite nodes, keeping a single source of truth.
-        self._shape = value
+        #
+        # Normalised to a tuple on the way in (a caller may pass a list), so
+        # every reader can compare ``_shape`` values directly instead of
+        # re-converting. ``BinaryOp.__init__`` relies on that.
+        self._shape = None if value is None else tuple(value)
 
     def __len__(self) -> int:
         """Length along the leading axis (``shape[0]``) for array expressions.
@@ -813,6 +848,12 @@ class Constant(Expression):
     def __init__(self, value: Union[float, int, np.ndarray]):
         if isinstance(value, np.ndarray):
             self.value = value.astype(np.float64)
+        elif type(value) is float:
+            # A Python float is already float64, so the `dtype=` kwarg only makes
+            # numpy re-check it: measured 0.222 -> 0.155 us without it, on a call
+            # made once per row (#1215). Restricted to an exact `float` so nothing
+            # else can slip through with the wrong dtype.
+            self.value = np.asarray(value)
         else:
             self.value = np.asarray(value, dtype=np.float64)
 
@@ -866,10 +907,68 @@ class Variable(Expression):
         # construction, so cache the product once instead of recomputing
         # ``int(np.prod(shape))`` on every access.
         self._size = int(np.prod(shape)) if shape else 1
+        # Canonical `x[i]` handles -- see `__getitem__`.
+        self._elem_cache: dict = {}
 
     @property
     def size(self) -> int:
         return self._size
+
+    def __getitem__(self, idx):
+        """``x[i]`` -- the SAME node object every time, for a plain-integer index.
+
+        Measured (#1215): indexing alone cost 1.99 us against Pyomo's 0.18 us
+        (11.3x), because every ``x[i]`` allocated a fresh ``IndexExpression``
+        while Pyomo hands back the one canonical ``VarData`` for that element.
+        With expression-node creation at 96% of a model build, and two index
+        nodes in a typical eight-node row, that is a first-order construction
+        cost -- and the duplicates are pure waste: an index node over a variable
+        is immutable and fully determined by ``(variable, index)``.
+
+        Canonicalising also makes the DAG *smaller* rather than merely cheaper.
+        Expressions hash by identity (see ``Expression.__hash__``), so the
+        ``id()``-keyed memos that every walker, relaxation and tape lowering
+        carries now HIT across rows that share an element instead of re-walking
+        a structurally identical node once per occurrence.
+
+        Only an exact ``int`` (or a tuple of exact ints) is cached, and the
+        raw index is the key. A key that normalised ``np.int64(0)``, ``0`` and
+        ``(0,)`` together would hand back a node whose ``.index`` has a different
+        *type* than the caller wrote, and consumers do branch on that
+        (``_resolve_var_index`` treats ``int`` and ``tuple`` differently), so
+        those forms stay uncached rather than aliased. Slices and ellipsis are
+        uncached too: they are rare and not always hashable.
+        """
+        if type(idx) is int or (type(idx) is tuple and all(type(v) is int for v in idx)):
+            node = self._elem_cache.get(idx)
+            if node is not None:
+                return node
+            shape = self._shape
+            if type(idx) is int and type(shape) is tuple and len(shape) == 1:
+                # THE construction hot path: a plain int into a 1-D variable,
+                # which is what every `x[i]` in an indexed family is. The general
+                # route below re-derives an answer that is fixed for this shape --
+                # `_known_shape` twice (a tuple copy each), `_pure_integer_index`,
+                # `_index_result_shape` and `_integer_index_out_of_range`, ~40% of
+                # a family build's wall (#1215). Here the result shape is `()` for
+                # every in-range index, and the only real work is the bounds test.
+                #
+                # Identical to the general path by construction, not by luck:
+                # the range accepted (`-n <= i < n`) and the IndexError message
+                # are `_integer_index_out_of_range`'s verbatim, and `()` is what
+                # `_index_result_shape` returns for `base_shape[1:]`.
+                # `test_1215_index_fast_path_equivalence.py` asserts the grid.
+                n = shape[0]
+                if idx < -n or idx >= n:
+                    raise IndexError(f"index {idx} is out of bounds for axis 0 with size {n}")
+                node = IndexExpression(self, idx, shape_hint=())
+            else:
+                # Through the base implementation, so the out-of-range guard on
+                # the `[]` operator still runs before anything is cached.
+                node = Expression.__getitem__(self, idx)
+            self._elem_cache[idx] = node
+            return node
+        return Expression.__getitem__(self, idx)
 
     def __hash__(self):
         return id(self)
@@ -972,9 +1071,20 @@ def _integer_index_out_of_range(base_shape: tuple[int, ...], idx):
 class IndexExpression(Expression):
     """Result of indexing into an array variable: x[i] or x[0, 1]."""
 
-    def __init__(self, base: Expression, index):
+    def __init__(self, base: Expression, index, *, shape_hint=_UNSET_SHAPE):
         self.base = base
         self.index = index
+        # `shape_hint` is the construction fast path (#1215 candidate 4): a
+        # caller that has already established the result shape passes it here
+        # instead of making this constructor re-derive it. `Variable.__getitem__`
+        # is the only user -- for a plain `int` into a 1-D variable the answer is
+        # always `()`, and deriving it cost TWO `_known_shape` calls (each
+        # copying a tuple), `_pure_integer_index`, and a range scan that
+        # `__getitem__` had just run. Everything else still goes through the
+        # inference below, unchanged.
+        if shape_hint is not _UNSET_SHAPE:
+            self._shape = shape_hint
+            return
         # Best-effort static shape inference only (issue #816). Construction is
         # intentionally non-raising: the out-of-bounds guard lives on the ``[]``
         # operator (:meth:`Expression.__getitem__`) so that direct
@@ -1063,12 +1173,33 @@ class BinaryOp(Expression):
         # shapes are statically known, verify they broadcast and cache the result
         # so compositions stay O(1). If either is unknown, the shape is unknown
         # (``None``) and we do not check — conservative, never a false rejection.
-        s_left = _known_shape(left)
-        s_right = _known_shape(right)
-        if s_left is not None and s_right is not None:
-            self._shape = _broadcast_shapes(op, s_left, s_right)
-        else:
+        #
+        # ``_known_shape`` and ``_broadcast_shapes``' equal/scalar cases are
+        # INLINED here, and only here. This constructor is the inner loop of the
+        # whole modelling layer -- 100 000 calls for 50 000 rows -- and the two
+        # ``_known_shape`` calls per node were 220 000 calls and 13% of a build's
+        # profile (#1215) to do a ``getattr`` and a comparison. The semantics are
+        # unchanged: ``_shape`` is the same single source of truth (normalised to
+        # a tuple by the ``shape`` setter), ``Constant`` is the one leaf that
+        # keeps its shape on ``value`` instead, and anything else is "unknown".
+        # NOTE the sentinel: ``_shape``'s class default is ``_UNSET_SHAPE``
+        # ("not computed"), which is deliberately distinct from a cached ``None``
+        # ("computed, unknown"). Testing against ``None`` instead silently let the
+        # sentinel through into ``np.broadcast_shapes``.
+        sl = getattr(left, "_shape", _UNSET_SHAPE)
+        if sl is _UNSET_SHAPE:
+            sl = left.value.shape if type(left) is Constant else None
+        sr = getattr(right, "_shape", _UNSET_SHAPE)
+        if sr is _UNSET_SHAPE:
+            sr = right.value.shape if type(right) is Constant else None
+        if sl is None or sr is None:
             self._shape = None
+        elif sl == sr or sr == ():
+            self._shape = sl
+        elif sl == ():
+            self._shape = sr
+        else:
+            self._shape = _broadcast_shapes(op, sl, sr)
 
     def __repr__(self):
         return f"({self.left} {self.op} {self.right})"
@@ -1237,10 +1368,103 @@ class SumOverExpression(Expression):
         return f"Σ[{len(self.terms)} terms]"
 
 
+#: Interned scalar :class:`Constant` nodes, keyed by value (see :func:`_wrap`).
+#:
+#: Weak, so a literal that appears only in a model that has since been dropped
+#: does not pin its node forever -- a strong cache here would be an unbounded
+#: leak for a data-driven model whose coefficients are all distinct (a fitting
+#: model carrying one literal per measurement, say).
+_SCALAR_CONSTS: "weakref.WeakValueDictionary[float, Constant]" = weakref.WeakValueDictionary()
+
+#: ``0.0`` and ``-0.0`` are equal and hash equal, so one dict cannot hold both --
+#: and the sign of zero is not cosmetic in IEEE (``1/-0.0`` is ``-inf``). They get
+#: their own strong singletons instead: two objects, held for the process.
+_ZERO_CONST: "Constant" = Constant(0.0)
+_NEG_ZERO_CONST: "Constant" = Constant(-0.0)
+
+
+#: Multiplier applied to the gen-0 GC threshold during a bulk build. 100 was
+#: measured against 1000 with no difference (#1215), so the smaller transient is
+#: preferred: it bounds how much cyclic garbage can accumulate before a
+#: collection runs.
+_BULK_GC_MULTIPLIER = 100
+
+
+@_contextlib.contextmanager
+def bulk_construction_gc() -> "Iterator[None]":
+    """Raise CPython's gen-0 GC threshold for the duration of a bulk build.
+
+    Measured (#1215): building 200 000 rows spends **~40% of its wall in garbage
+    collection**, not in constructing anything. A model under construction is
+    ~1.6M live, GC-tracked container objects that are *all reachable* -- nothing
+    built so far is garbage -- so every collection triggered by the allocation of
+    the next row traverses the whole model and frees nothing. Raising the gen-0
+    threshold makes those sweeps proportionally rarer.
+
+    | arm | µs/row | |
+    |---|---:|---|
+    | default thresholds | 6.39 | 1.00× |
+    | raised, scoped per call | 4.24 | **1.51×** |
+    | raised for the whole build | 4.33 | 1.48× |
+    | GC disabled entirely | 3.66 | 1.73× |
+
+    The saving is real rather than deferred: every arm above was timed with a
+    full ``gc.collect()`` *inside* the timed region, so postponed traversal is
+    paid for and counted. ``gc.freeze()`` was also tried and is not the mechanism
+    (1.08×).
+
+    Scoped per call and restored in ``finally``, so a library caller never
+    inherits mutated interpreter state -- and the measurement shows that scoping
+    costs nothing against tuning the whole build. Raising a threshold cannot
+    change behaviour, only the moment reclamation happens; GC is deliberately
+    *not* disabled, which is faster still but leaves an unbounded window in which
+    genuine cyclic garbage from a user's rule function accumulates.
+
+    Public, because the biggest models are built by user loops that never reach
+    :meth:`Model.constraint`::
+
+        with dm.bulk_construction_gc():
+            for i, j in arcs:
+                m.subject_to(flow[i, j] <= cap[i, j], name=f"cap_{i}_{j}")
+    """
+    old = gc.get_threshold()
+    gc.set_threshold(old[0] * _BULK_GC_MULTIPLIER, old[1], old[2])
+    try:
+        yield
+    finally:
+        gc.set_threshold(*old)
+
+
 def _wrap(x) -> Expression:
-    """Convert a Python scalar or numpy array to a Constant expression."""
+    """Convert a Python scalar or numpy array to a Constant expression.
+
+    Scalar literals are **interned**: ``x[i] * y[i] <= 4.0`` written across
+    200 000 rows builds one ``Constant`` for ``4.0``, not 200 000. Measured
+    (#1215) at 0.076 us for a cache hit against 0.461 us to construct, on a path
+    called three times per row -- and the duplicates were pure waste, since a
+    ``Constant`` is immutable by contract and carries no per-use state.
+
+    Like the canonical ``x[i]`` handles, the win is not only the allocation:
+    expressions hash by identity, so sharing the literal lets the ``id()``-keyed
+    memos in the walkers, the relaxation layer and the tape lowering hit across
+    rows.
+
+    ``bool``/``int``/``float`` share one key space on purpose -- ``4``, ``4.0``
+    and ``True``/``1`` all produce a node whose value is the same ``float64`` --
+    so the sharing is sound. ``np.float64`` and other numpy scalars are NOT
+    interned: they are not ``float``, and admitting them would make the key type
+    depend on how the caller spelled the literal for no measured gain.
+    """
     if isinstance(x, Expression):
         return x
+    if type(x) is float or type(x) is int or type(x) is bool:
+        if x == 0:
+            return _ZERO_CONST if math.copysign(1.0, x) > 0 else _NEG_ZERO_CONST
+        node = _SCALAR_CONSTS.get(x)
+        if node is None:
+            node = Constant(x)
+            _SCALAR_CONSTS[x] = node
+        return node
     return Constant(x)
 
 
@@ -2037,7 +2261,9 @@ class Constraint:
         ``Model.validate`` rather than silently ignored (#909). Build rows with
         the comparison operators, which fold the offset into ``body`` for you.
     name : str or None
-        Optional name for debugging and explanation.
+        Optional name for debugging and explanation. Read and written as an
+        ordinary attribute; a row built by :meth:`Model.constraint` computes it
+        lazily on first read (see ``_constraint_name_get``).
     """
 
     body: Expression
@@ -2063,6 +2289,58 @@ class Constraint:
             "almost always a mistake. Add it with m.subject_to(...); to test an "
             "expression's identity use 'is' or a set/dict keyed by the object."
         )
+
+
+# ── Constraint.name: materialized on first read (issue #1215, candidate 3) ──
+#
+# A named indexed family formats one `"family[label]"` string per row at BUILD
+# time, for metadata nothing on the solve path reads: the issue measures it at
+# 49 B/instance retained (200 000 strings on its headline model) and, timed
+# on its own, 0.497 us/instance of the 5.29 us build -- ~9%.
+#
+# `Model.constraint` therefore records the two *already-live* objects the name
+# is made of (the family name string, shared by every row; the member, already
+# a key of the family's `members` dict) and lets the getter below do the
+# formatting if and when someone asks. Nothing is allocated until then.
+#
+# The property is installed after the class because a `@dataclass` field and a
+# `property` cannot both be spelled in the class body: the generated `__init__`
+# captured `name=None` in its own defaults, so replacing the class attribute
+# here leaves the signature, `dataclasses.fields()` and `dataclasses.replace()`
+# untouched -- `replace()` reads the name back through this getter.
+#
+# Class-level `None`s keep an unnamed row's instance dict free of all three.
+Constraint._name = None
+Constraint._name_family = None
+Constraint._name_key = None
+
+
+def _constraint_name_get(self) -> Optional[str]:
+    family = self._name_family
+    if family is not None:
+        from discopt.modeling.indexed import key_label
+
+        key = self._name_key
+        label = key_label(key) if type(key) is tuple else str(key)
+        self._name = f"{family}[{label}]"
+        # Clear the pending marker so the format runs once, not once per read.
+        self._name_family = None
+    # `_name` is only ever written by this function or `_constraint_name_set`,
+    # both of which write `Optional[str]`; the class-level default is `None`.
+    # The cast is needed because the three defaults are installed on the class
+    # after the `@dataclass` body, so mypy sees them as untyped.
+    return cast(Optional[str], self._name)
+
+
+def _constraint_name_set(self, value: Optional[str]) -> None:
+    self._name = value
+    # An explicit assignment always wins over a pending family name. Guarded so
+    # the common case (nothing pending) adds no instance-dict entry.
+    if self._name_family is not None:
+        self._name_family = None
+
+
+Constraint.name = property(_constraint_name_get, _constraint_name_set)  # type: ignore[assignment]
 
 
 def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int = -1) -> None:
@@ -2192,11 +2470,62 @@ class Parameter(Expression):
     >>> result = m.solve()
     """
 
+    # Declared so the ``value`` property's return type is inferable: the getter
+    # returns ``self._value`` and the setter assigns to it, which without an
+    # annotation is a cycle mypy resolves to "cannot determine type".
+    _value: np.ndarray
+
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
         self.name = name
+        # Through the setter, so `_shape` is populated by the one path that
+        # maintains it (see the setter).
         self.value = np.asarray(value, dtype=np.float64)
-        self.shape = self.value.shape
         self.model = model
+
+    @property
+    def value(self) -> np.ndarray:
+        """Current value, always a ``float64`` ndarray (0-d for a scalar)."""
+        return self._value
+
+    @value.setter
+    def value(self, new_value: Union[float, np.ndarray]) -> None:
+        """Re-bind the value, normalising exactly as ``__init__`` does.
+
+        This was a plain attribute, so ``__init__`` established the documented
+        "``value`` is an ndarray" invariant and the very next assignment broke it:
+        ``p.value = 7.0`` -- the ordinary idiom in a parameter-estimation or
+        model-discrimination loop -- left a bare Python float. ``model_to_repr``
+        reads the value as an array to build the arena's ``Parameter`` node and
+        refused such a model with ``TypeError: 'float' object cannot be converted
+        to 'PyArray<T, D>'``, so re-binding a scalar parameter made the model
+        un-lowerable while the same value passed to ``m.parameter(...)`` was fine.
+
+        A shape change is refused rather than accommodated: ``shape`` is baked
+        into every arena node, tape and relaxation already built from this
+        parameter, so silently accepting a new shape would leave those
+        inconsistent with the model. Re-declare the parameter instead.
+        """
+        arr = np.asarray(new_value, dtype=np.float64)
+        if hasattr(self, "_value") and arr.shape != self._value.shape:
+            raise ValueError(
+                f"Parameter {self.name!r} was declared with shape {self._value.shape}; "
+                f"re-binding it to shape {arr.shape} would invalidate every arena "
+                f"node, tape and relaxation already built from it. Declare a "
+                f"separate parameter instead of changing this one's shape."
+            )
+        self._value = arr
+        # `Expression.shape`'s setter is what populates `_shape`, which is the
+        # single source of truth `_known_shape` reads. Writing `_value` alone
+        # left it unset, so `_known_shape(parameter)` answered "unknown" and the
+        # M8 build-time shape check silently stopped firing for every expression
+        # containing a parameter -- `q * x` with q of shape (2,) against x of
+        # shape (3,) built without complaint. Keep the two in step here.
+        self._shape = arr.shape
+
+    # No `shape` property here on purpose. `Expression.shape` is read-write and
+    # already answers for a Parameter: the `value` setter writes `_shape`, which
+    # is what `_known_shape` -- and so `Expression.shape` -- reads. A read-only
+    # override would narrow the base property for no gain.
 
     def __repr__(self):
         return f"param({self.name})"
@@ -3660,24 +3989,45 @@ class Model:
         --------
         >>> m.constraint(plants, lambda p: ship_out(p) <= cap[p], name="capacity")
         """
-        from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
+        from discopt.modeling.indexed import IndexedConstraint, Skip
         from discopt.modeling.sets import call_member
 
-        generated: list[tuple] = []
-        for member in index_set:
-            c = call_member(rule, member, index_set.dimen)
-            if c is Skip:
-                continue
-            if not isinstance(c, Constraint):
-                raise TypeError(
-                    f"constraint rule for key {member!r} returned {type(c)}, "
-                    "expected a Constraint (from <=, >=, == on expressions) or Skip."
-                )
-            c.name = f"{name}[{key_label(member)}]" if name else None
-            generated.append((member, c))
+        # A family is the bulk path: every row it builds is reachable, so each
+        # collection triggered while building it traverses the whole model and
+        # frees nothing. Measured at ~40% of a 200 000-row build's wall
+        # (see :func:`bulk_construction_gc`).
+        #
+        # ``members`` and ``rows`` are filled in ONE pass. This used to build a
+        # list of ``(member, constraint)`` tuples and then walk it three more
+        # times -- a dict comprehension, a list comprehension for the fast-linear
+        # probe, and the append loop -- which on a 5 000-member family is 15 000
+        # extra iterations and 5 000 throwaway tuples per family.
+        members: dict = {}
+        rows: list = []
+        with bulk_construction_gc():
+            for member in index_set:
+                c = call_member(rule, member, index_set.dimen)
+                if c is Skip:
+                    continue
+                if not isinstance(c, Constraint):
+                    raise TypeError(
+                        f"constraint rule for key {member!r} returned {type(c)}, "
+                        "expected a Constraint (from <=, >=, == on expressions) or Skip."
+                    )
+                # The name is recorded, not formatted: both objects are already
+                # alive (``name`` is one string shared by the whole family,
+                # ``member`` is about to become a key of ``members``), so this
+                # costs two stores and no allocation. ``Constraint.name``
+                # formats on first read -- see ``_constraint_name_get``.
+                if name:
+                    c._name_family = name
+                    c._name_key = member
+                else:
+                    c.name = None
+                members[member] = c
+                rows.append(c)
 
-        members = {m: c for m, c in generated}
-        if fast and self._try_fast_linear_family([c for _, c in generated], name):
+        if fast and self._try_fast_linear_family(rows, name):
             # Rows were emitted into the Rust builder (recorded on
             # ``_builder_linear_blocks``), NOT appended to ``_constraints`` — that would
             # double-count them in the native solve. The NLPEvaluator / feasibility check
@@ -3685,8 +4035,7 @@ class Model:
             # ``_builder_linear_constraints()`` (#840), so their view stays complete
             # without a separate mirror. Introspection view still returned.
             return IndexedConstraint(name, index_set, members, fast=True)
-        for _, c in generated:
-            self._constraints.append(c)
+        self._constraints.extend(rows)
         return IndexedConstraint(name, index_set, members, fast=False)
 
     def _try_fast_linear_family(self, constraints: list, name: Optional[str]) -> bool:

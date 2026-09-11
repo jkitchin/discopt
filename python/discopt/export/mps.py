@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
     builder_objective,
     iter_builder_linear_rows,
@@ -86,11 +87,15 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     con_data: list[tuple[dict[int, float], float]] = []
     constraint_row_names = []
     for i, con in enumerate(model._constraints):
-        row_name = _sanitize_name(con.name if con.name else f"C{i}")
-        lin, const = extract_linear_terms(con.body, flat_vars, model_vars=mvars)
-        constraint_row_names.append(row_name)
-        row_senses.append(con.sense)
-        con_data.append((lin, -const))
+        base = con.name if con.name else f"C{i}"
+        # See the same expansion in `lp.py`: one array-valued body is many rows.
+        bodies = scalarize_body(con.body)
+        for k, body in enumerate(bodies):
+            row_name = _sanitize_name(base if len(bodies) == 1 else f"{base}_{k}")
+            lin, const = extract_linear_terms(body, flat_vars, model_vars=mvars)
+            constraint_row_names.append(row_name)
+            row_senses.append(con.sense)
+            con_data.append((lin, -const))
     for j, brow in enumerate(iter_builder_linear_rows(model)):
         row_name = _sanitize_name(brow.name if brow.name else f"B{j}")
         constraint_row_names.append(row_name)
@@ -120,7 +125,10 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
         obj_linear, obj_quad_map, obj_const, _obj_sense = builder_obj
         obj_quad = obj_quad_map or {}
     else:
-        obj_expr = model._objective.expression
+        # Scalar-VALUED but array-STRUCTURED objectives (`-dm.sum(x)`,
+        # `dm.sum(A @ x)`) need expanding before the extractor can walk them;
+        # a vector-valued one is refused rather than truncated to element zero.
+        obj_expr = scalarize_objective(model._objective.expression)
         obj_quad, obj_linear, obj_const = extract_quadratic_terms(
             obj_expr, flat_vars, model_vars=mvars
         )

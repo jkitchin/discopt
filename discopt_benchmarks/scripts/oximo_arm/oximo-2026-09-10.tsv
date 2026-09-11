@@ -1,0 +1,14 @@
+tool	family	idiom	rows	vars	construct_s	write_s
+oximo	linear	per-element	1000	3000	0.001441	0.001303
+oximo	linear	per-element	10000	30000	0.016135	0.014588
+oximo	linear	per-element	100000	300000	0.212590	0.184591
+oximo	sep_nl	per-element	1000	2000	0.000550	0.001315
+oximo	sep_nl	per-element	10000	20000	0.006351	0.013854
+oximo	sep_nl	per-element	100000	200000	0.107992	0.188622
+oximo	coupled_nl	per-element	1000	2000	0.000662	0.001546
+oximo	coupled_nl	per-element	10000	20000	0.007625	0.017190
+oximo	coupled_nl	per-element	100000	200000	0.133705	0.213552
+oximo	minlp	per-element	1000	3000	0.000745	0.001667
+oximo	minlp	per-element	10000	30000	0.008629	0.018109
+oximo	minlp	per-element	100000	300000	0.167592	0.242995
+# executed: 12 (family, size) points, row counts verified

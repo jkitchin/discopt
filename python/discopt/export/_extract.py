@@ -213,6 +213,43 @@ def _eval_constant_array(expr: Expression) -> np.ndarray:
     return result
 
 
+# ── additive-spine flattening ───────────────────────────────────────────────
+#
+# The array scalarizer expands a reduction such as `dm.sum(x)` over `x` of shape
+# `(n,)` into a LEFT-DEEP `+` fold: `((x[0] + x[1]) + x[2]) + ...`, depth `n`.
+# Descending that one Python frame per term hit the default recursion limit at
+# roughly 1000 terms, so `m.minimize(dm.sum(x))` -- one of the commonest
+# objectives there is -- raised `RecursionError` from `to_lp`, `to_mps` and
+# `to_gams` for any model with ~1000 variables. `.nl` was unaffected, which is
+# why it went unnoticed.
+#
+# The fold is NOT changed here: both `.nl` writers mirror its exact shape and the
+# emitted bytes depend on it (`docs/dev/performance-plan.md` §46). Only the
+# TRAVERSAL becomes iterative -- the spine of `+`/`-` nodes is flattened onto a
+# worklist, and every other node type still goes through the ordinary recursive
+# handler at its own (shallow) depth.
+
+
+def _flatten_additive(expr: Expression, multiplier: float) -> list:
+    """Flatten a `+`/`-` spine into `[(leaf, signed multiplier), ...]`.
+
+    Leaves are returned in left-to-right order, so a caller that accumulates into
+    a dict sees terms in the same sequence the recursive version did.
+    """
+    out: list = []
+    stack: list = [(expr, multiplier)]
+    while stack:
+        node, mult = stack.pop()
+        if isinstance(node, BinaryOp) and node.op in ("+", "-"):
+            right_mult = mult if node.op == "+" else -mult
+            # Pushed right-then-left so the left operand pops first.
+            stack.append((node.right, right_mult))
+            stack.append((node.left, mult))
+            continue
+        out.append((node, mult))
+    return out
+
+
 def _extract_linear_recursive(
     expr: Expression,
     coeffs: dict[int, float],
@@ -220,7 +257,17 @@ def _extract_linear_recursive(
     flat_vars: list,
     model_vars: list[Variable],
 ) -> float:
-    """Recursively extract linear terms. Returns the constant contribution."""
+    """Extract linear terms. Returns the constant contribution.
+
+    The `+`/`-` spine is walked iteratively (see :func:`_flatten_additive`); every
+    other node type recurses as before.
+    """
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        total = 0.0
+        for leaf, mult in _flatten_additive(expr, multiplier):
+            total += _extract_linear_recursive(leaf, coeffs, mult, flat_vars, model_vars)
+        return total
+
     if isinstance(expr, Constant):
         return multiplier * _scalar_constant(expr.value, "constant term")
 
@@ -358,7 +405,17 @@ def _extract_quad_recursive(
     flat_vars: list,
     model_vars: list[Variable],
 ) -> float:
-    """Recursively extract quadratic and linear terms."""
+    """Extract quadratic and linear terms. Returns the constant contribution.
+
+    The `+`/`-` spine is walked iteratively (see :func:`_flatten_additive`); every
+    other node type recurses as before.
+    """
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        total = 0.0
+        for leaf, mult in _flatten_additive(expr, multiplier):
+            total += _extract_quad_recursive(leaf, quad, linear, mult, flat_vars, model_vars)
+        return total
+
     if isinstance(expr, Constant):
         return multiplier * _scalar_constant(expr.value, "constant term")
 
