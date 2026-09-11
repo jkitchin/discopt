@@ -57,6 +57,45 @@ The release procedure that produces these entries is documented in
   follower goes through `dm.argmin`, which solves rather than reformulates and
   reports its answer as local.
 
+- **`from_nl` keeps a `.nl` file's initial point, so a round-trip preserves it**
+  (#1225). #1222's writer half shipped in #1224; this is the reader half. The
+  Rust parser filled a dense `vec![0.0; n_vars]` named `_x0` that nothing ever
+  read, so all 202 corpus instances carrying an `x` block lost it on
+  `to_nl(from_nl(f))`. `from_nl` now attaches the segment to the `Model` and
+  `to_nl()` writes it back with no argument: **51/51** of the in-repo corpus's
+  text-format files with an `x` block round-trip, both the values (against the
+  AMPL original) and the column each value lands on (against the writer's own
+  canonical reorder). The binary (`b3`) encoding comes along for free — the
+  transcoder already carried the segment.
+
+  The point rides **alongside** `ModelRepr`, not inside it — a new
+  `ParsedNl { model, complementarities, initial_point }` from the parser and a
+  field on `PyModelRepr`, following the route `complementarities` already takes.
+  That is the design point, not a convenience: an initial point is indexed *by
+  column*, and every presolve transform may remove, fix or renumber columns, so
+  a field on `ModelRepr` would have to be remapped correctly by each of ~20
+  transforms or be silently stale. Out here a transform's output starts from an
+  empty point by construction (tested for `substitute`, `eliminate_variables`
+  and `reformulate_polynomial`), and the 172 `ModelRepr` construction sites stay
+  untouched.
+
+  New API: `Model.set_initial_point({Variable: value})` attaches one explicitly
+  (validated, bound-clamped and integrality-rounded like
+  `solve(initial_solution=...)`), and `Model.initial_point` reads it back as
+  `{Variable: {element: value}}` — element-keyed because the segment is a
+  *partial* map and "this element has no guess" has no array encoding that is not
+  a sentinel. A point read from a file is attached **verbatim**, unclamped, so
+  the export reproduces its source; only the setter validates, because only the
+  setter takes user input. `to_nl(initial_point=...)` still wins over the
+  attached point, and `initial_point={}` suppresses the section entirely.
+
+  **The solve path deliberately does not read it.** Warm starting stays
+  `solve(initial_solution=...)`: wiring a file's `x` segment into it would change
+  how every `.nl`-read model is solved, which is a measured decision of its own,
+  not a side effect of fixing the reader. Verified rather than asserted — a
+  20-instance corpus panel is bit-identical across the change: same status, same
+  objective bits, same `node_count` on 20/20.
+
 - **`.nl` export writes the `x` (initial primal guess) section** (#1222). The
   writer never emitted one — the module docstring listed the section, no code
   wrote it, and on round-trip 202 of 202 corpus instances that carried an `x`
