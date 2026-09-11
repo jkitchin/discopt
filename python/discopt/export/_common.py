@@ -21,7 +21,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from discopt.modeling.core import Constraint, Model, Variable
+from discopt.modeling.core import (
+    Constraint,
+    Model,
+    Variable,
+    _DisjunctiveConstraint,
+    _IndicatorConstraint,
+    _LogicalConstraint,
+    _SOSConstraint,
+)
 
 
 def has_builder_only_rows(model: Model) -> bool:
@@ -216,3 +224,79 @@ def iter_all_rows(model: Model) -> tuple[list[Constraint], list[LinearRow]]:
     expr_rows = [c for c in model._constraints if isinstance(c, Constraint)]
     builder_rows = iter_builder_linear_rows(model)
     return expr_rows, builder_rows
+
+
+# ── Relations no exporter here can carry (#1218) ─────────────────────────────
+#
+# Every writer in this package emits ordinary algebraic rows: a body, a sense and
+# a right-hand side, plus variable bounds. A disjunction, an indicator, an SOS
+# set and a propositional clause are *structure* -- none of them is such a row,
+# and none of the writers emits the SOS/indicator sections some of these formats
+# define. Each of them nevertheless walked ``model._constraints`` assuming
+# ``Constraint``, so a GDP or MPEC model died inside the writer on
+# ``AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'``
+# (``.body`` for LP/MPS/GAMS) -- an internal error where the real answer is that
+# the model needs a further lowering first. The table maps each IR type to how it
+# reads in the model and to that lowering, so the refusal names both.
+_GDP_REMEDY = (
+    "Lower it to algebra first and export the lowered model:\n"
+    "    from discopt._relax.gdp_reformulate import reformulate_gdp\n"
+    "    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n"
+    "(the lowering adds selector binaries and needs finite bounds on the "
+    "variables of each disjunct)."
+)
+
+_UNREPRESENTABLE_RELATIONS: dict[type, tuple[str, str]] = {
+    _DisjunctiveConstraint: (
+        "a disjunctive constraint (Model.either_or / Model.if_else, GDP)",
+        _GDP_REMEDY,
+    ),
+    _IndicatorConstraint: (
+        "an indicator constraint (Model.if_then)",
+        _GDP_REMEDY,
+    ),
+    _SOSConstraint: (
+        "an SOS constraint (Model.sos1 / Model.sos2)",
+        "No SOS section is emitted by this writer. " + _GDP_REMEDY,
+    ),
+    _LogicalConstraint: (
+        "a propositional-logic constraint over BooleanVars",
+        _GDP_REMEDY,
+    ),
+}
+
+
+def refuse_non_algebraic_relations(model: Model, fmt: str) -> None:
+    """Refuse a relation the writer cannot carry, by name, before writing a row.
+
+    Parameters
+    ----------
+    model : Model
+        The model about to be exported.
+    fmt : str
+        The target format, as it appears at the head of the error message
+        (``".nl"``, ``"LP"``, ``"MPS"``, ``"GAMS"``).
+
+    Raises
+    ------
+    ValueError
+        On the first non-``Constraint`` relation in ``model._constraints``,
+        naming what it is and the lowering that makes the model exportable.
+    """
+    for con in model._constraints:
+        if isinstance(con, Constraint):
+            continue
+        what, remedy = _UNREPRESENTABLE_RELATIONS.get(
+            type(con),
+            (
+                f"a non-algebraic relation ({type(con).__name__})",
+                "Reformulate it into ordinary algebraic constraints before exporting.",
+            ),
+        )
+        name = getattr(con, "name", None)
+        where = f" named {name!r}" if name else ""
+        raise ValueError(
+            f"{fmt} export: the model carries {what}{where}. This writer emits "
+            "ordinary algebraic rows and variable bounds only, so there is "
+            f"nothing faithful to write. {remedy}"
+        )

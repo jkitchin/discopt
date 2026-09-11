@@ -531,3 +531,200 @@ def test_unbound_inner_parameters_are_frozen_at_their_value():
     r = m.solve()
     # y* = 3 q, so the leader drives q to 0.5.
     assert float(np.asarray(r.value(p)).ravel()[0]) == pytest.approx(0.5, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups from the #1216 verification pass (#1218)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_value_of_the_opaque_node_explains_itself_and_names_the_recovery():
+    """`result.value(v)` on an `argmin` node is refused, not a bare KeyError.
+
+    The node is a `CustomCall`, so the follower's y* is genuinely not a column
+    of the outer model -- but the failure used to be `KeyError: 'argmin'` from
+    the name lookup (#1218). It now says what the node is and how to get y*,
+    and this test runs that recovery route so the advice cannot rot.
+    """
+    import jax.numpy as jnp
+
+    inner, q = _convex_follower()
+    m = Model("leader")
+    p = m.continuous("p", lb=-2.0, ub=2.0)
+    v = dm.argmin(inner, bind={q: p})
+    m.minimize(_leader_with(v, p))
+    r = m.solve()
+
+    with pytest.raises(TypeError) as exc:
+        r.value(v)
+    message = str(exc.value)
+    assert "argmin" in message
+    assert "argmin_layer" in message and "argmin_kkt" in message
+
+    # The leader's own variables are unaffected, and the documented recovery
+    # returns the follower's minimizer at the leader's answer.
+    p_star = float(np.asarray(r.value(p)).ravel()[0])
+    y_star = np.asarray(dm.argmin_layer(inner, [q])(jnp.array([p_star])))
+    assert y_star[0] == pytest.approx(p_star, abs=1e-5)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("mpec_method", ["gdp", "sos1"])
+def test_kkt_default_refuses_nl_export_by_name(mpec_method):
+    """`method="kkt"` encodes complementarity as rows `.nl` has no form for.
+
+    The docstring's `.nl` promise is scoped to `method="strong_duality"`
+    (`test_lowered_arm_exports_to_nl` is the positive case). The default arm
+    used to die inside the writer with `AttributeError: '_DisjunctiveConstraint'
+    object has no attribute 'rhs'` (#1218); it now refuses by name.
+    """
+    inner, q = _convex_follower()
+    m = Model("leader")
+    p = m.continuous("p", lb=-2.0, ub=2.0)
+    v = dm.argmin_kkt(m, inner, bind={q: p}, mpec_method=mpec_method, multiplier_ub=100.0)
+    m.minimize(_leader_with(v, p))
+
+    with pytest.raises(ValueError, match="nl export"):
+        m.to_nl()
+
+
+# ---------------------------------------------------------------------------
+# The soundness gates, driven at points a solver could return (#1218 item 3)
+#
+# POUNCE is an interior-point method: it stops a barrier's width from a bound,
+# so a returned point that is EXACTLY degenerate, or that is a stationary point
+# with indefinite reduced curvature, is not reachable by asking it nicely. The
+# gates still have to hold there -- that is the whole claim of the block over
+# the hand-written-KKT route -- so the inner solve is replaced by one returning
+# a chosen point, and the gates are run against the REAL evaluator of a real
+# inner model at that point.
+# ---------------------------------------------------------------------------
+
+
+def _stub_inner_solve(monkeypatch, point, multipliers=None):
+    """Make the inner NLP solve return ``point`` (a function of the parameter).
+
+    Returns a one-element list holding the call count, so a test can assert the
+    stub actually ran rather than pass vacuously.
+    """
+    import discopt.solvers.nlp_pounce as nlp_pounce
+    from discopt.solvers import NLPResult, SolveStatus
+
+    calls = [0]
+
+    def fake_solve_nlp(ev, x0, options=None):
+        calls[0] += 1
+        x = np.asarray(point(), dtype=float)
+        mult = None if multipliers is None else np.asarray(multipliers(), dtype=float)
+        return NLPResult(
+            status=SolveStatus.OPTIMAL,
+            x=x,
+            objective=float(ev.evaluate_objective(x)),
+            multipliers=mult,
+            iterations=1,
+        )
+
+    monkeypatch.setattr(nlp_pounce, "solve_nlp", fake_solve_nlp)
+    return calls
+
+
+def _concave_inner() -> tuple[Model, dm.Parameter]:
+    """``min -(y - q)^2``: ``y = q`` is stationary, and is the MAXIMIZER."""
+    inner = Model("concave")
+    y = inner.continuous("y", lb=-5.0, ub=5.0)
+    q = inner.parameter("q", value=0.0)
+    inner.minimize(-(y - q) * (y - q))
+    return inner, q
+
+
+@pytest.mark.unit
+def test_verify_minimizer_refuses_a_stationary_point_that_is_not_a_minimizer():
+    """Gate 3: a KKT point with indefinite reduced curvature evaluates to NaN.
+
+    This is exactly the failure the hand-written-KKT route suffers -- a
+    stationary point served as if it were an argmin -- so the block refuses it
+    rather than differentiate it.
+    """
+    import jax.numpy as jnp
+
+    mp = pytest.MonkeyPatch()
+    try:
+        calls = _stub_inner_solve(mp, point=lambda: [0.3])
+        inner, q = _concave_inner()
+        phi = dm.argmin_layer(inner, [q], verify_minimizer=True)
+        with pytest.warns(RuntimeWarning, match="positive semidefinite"):
+            out = np.asarray(phi(jnp.array([0.3])))
+    finally:
+        mp.undo()
+
+    assert calls[0] == 1, "the stubbed inner solve never ran"
+    assert not np.isfinite(out).all()
+
+
+@pytest.mark.unit
+def test_verify_minimizer_off_returns_the_same_point_the_gate_refuses():
+    """The pair of the test above: the gate, not the arithmetic, is the refusal.
+
+    Without it the block would return the maximizer as though it were an argmin,
+    which is what makes ``_reduced_hessian_psd`` a correctness guard rather than
+    a diagnostic. If it ever returned ``True`` unconditionally, the test above
+    would report this value instead of NaN.
+    """
+    import jax.numpy as jnp
+
+    mp = pytest.MonkeyPatch()
+    try:
+        calls = _stub_inner_solve(mp, point=lambda: [0.3])
+        inner, q = _concave_inner()
+        phi = dm.argmin_layer(inner, [q], verify_minimizer=False)
+        out = np.asarray(phi(jnp.array([0.3])))
+    finally:
+        mp.undo()
+
+    assert calls[0] == 1, "the stubbed inner solve never ran"
+    assert out[0] == pytest.approx(0.3, abs=1e-12)
+
+
+@pytest.mark.unit
+def test_degenerate_active_set_warns_once_and_still_returns_the_point():
+    """Gate 2: an active row with a ~zero multiplier is warned, not hidden.
+
+    ``min (y - q)^2 s.t. y <= q`` is degenerate for EVERY ``q``: the constraint
+    passes through the unconstrained optimum, so it is active with multiplier
+    zero and ``dx*/dp`` is one-sided there. The block still returns the point --
+    the sensitivity is a subgradient, not a wrong number -- and warns once per
+    block, so a second parameter value does not re-warn.
+    """
+    import jax.numpy as jnp
+
+    p_values = [0.5, 1.5]
+    current = {"p": p_values[0]}
+
+    mp = pytest.MonkeyPatch()
+    try:
+        calls = _stub_inner_solve(mp, point=lambda: [current["p"]], multipliers=lambda: [0.0])
+        inner = Model("degenerate")
+        y = inner.continuous("y", lb=-5.0, ub=5.0)
+        q = inner.parameter("q", value=p_values[0])
+        inner.minimize((y - q) * (y - q))
+        inner.subject_to(y <= q)
+        phi = dm.argmin_layer(inner, [q])
+
+        with pytest.warns(RuntimeWarning, match="degenerate active set"):
+            first = np.asarray(phi(jnp.array([p_values[0]])))
+
+        import warnings as _warnings
+
+        current["p"] = p_values[1]
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            second = np.asarray(phi(jnp.array([p_values[1]])))
+        repeats = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    finally:
+        mp.undo()
+
+    assert calls[0] == 2, f"expected two stubbed inner solves, ran {calls[0]}"
+    assert first[0] == pytest.approx(p_values[0], abs=1e-12)
+    assert second[0] == pytest.approx(p_values[1], abs=1e-12)
+    assert repeats == [], "the degeneracy warning repeated; it is warn-once per block"
