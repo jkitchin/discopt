@@ -8285,3 +8285,66 @@ siblings do not: it creates one binary per *mixed* unit, so vectorising changes
 variable names and column order, which is `.sol` mapping — and §57's lesson is
 that a name change in one format can hide while another stays byte-identical, so
 that one needs the GAMS and LP arms read explicitly, not just `.nl`.
+
+## 59. `relu_bigm` vectorised — 2.1× rising to 7.9×, by vectorising only what scales (2026-09-11)
+
+The third emitter, and the cleanest verification of the three. Its four `build()`
+loops — input scaling, the layer affine map, smooth activations, output scaling —
+now emit one array-valued body each. **`_add_relu_constraints` is deliberately
+left per-unit**, for two reasons that happen to point the same way.
+
+### Why the big-M block stays per-unit
+
+**It is the part that cannot be vectorised safely.** It creates one binary per
+*mixed* unit (`pred_q_0_3`); making those an array variable would change their
+names *and* the model's **column order**, which is how a solver's `.sol` maps
+values back to variables. Nothing about the array form is worth that.
+
+**It is also the part that does not cost anything.** Its rows carry 2–3 terms
+each, against `n_inputs` terms for every affine row. Row *counts* make the big-M
+block look dominant — 1024 rows against 257 affine for a 20-128-128-1 net — but
+cost follows terms, not rows.
+
+The measurement confirms the split was the right one: the speedup **rises with
+layer width**, because the loops that were vectorised are exactly the ones whose
+cost grows with it.
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 331 | 24.6 | 51.7 | 2.10× |
+| 20-64-64-1 | 661 | 23.4 | 73.7 | 3.15× |
+| 20-128-128-1 | 1301 | 33.2 | 122.4 | 3.69× |
+| 40-256-256-1 | 2601 | **42.8** | 336.4 | **7.86×** |
+
+Load 0.25, back to back. Build 0.278 s → 0.022 s (12.6×), write 0.597 s → 0.089 s
+(6.7×) on the largest net.
+
+### Verification — the cleanest of the three
+
+| arm | identical | differing |
+|---|---:|---:|
+| NL | 10 | **0** |
+| LP | 10 | **0** |
+| GAMS | 0 | 10 (parenthesisation; **row names identical**) |
+| EVAL | 0 | 10 (object count; **`n_vars` and objectives identical**) |
+
+`.nl` **and** LP byte-identical, which neither of the other two emitters managed.
+The reason is worth recording because it explains the whole family: `.nl` and LP
+flatten linear terms into a coefficient map, so an affine row's tree shape is lost
+and the fold-vs-n-ary difference cannot show. In `reduced_space` the affine map
+sits *inside* a nonlinear activation, so it cannot be flattened and the difference
+surfaces (§58); here and in `full_space` the affine rows are linear and it does
+not. GAMS writes the tree textually in every case, which is why it is the arm that
+always differs.
+
+`n_vars` unchanged is the check that matters for the deliberate omission: the
+binaries, and therefore the column order, are untouched.
+
+### Status of the #1215 NN work
+
+Three of four emitters vectorised: `full_space` 1.8–2.0× (§55), `reduced_space`
+1.47–1.69× (§58), `relu_bigm` 2.1–7.9×. Construction is essentially eliminated in
+all three. `tree_ensemble` remains — its split rows each reference a *different*
+feature index, so it needs a gather (`inputs[j_array]`) with per-row thresholds and
+big-Ms as arrays; gather and mask indexing on array bodies were verified to work
+and export.
