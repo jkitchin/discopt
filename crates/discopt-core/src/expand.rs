@@ -348,8 +348,13 @@ fn matmul_shape(l: &[usize], r: &[usize]) -> Result<Vec<usize>, ExpandError> {
     }
 }
 
-/// [`MathFunc`] opcode offset. Must match `expr_bindings.rs::math_func_code`.
-fn func_code(f: MathFunc) -> Option<i32> {
+/// [`MathFunc`] opcode offset. Must match `expr_bindings.rs::math_func_code`
+/// AND `nl_writer.rs::nl_func_opcode`, which turns these codes into `.nl`
+/// opcodes -- a code admitted here that the writer does not cover is a bug
+/// the writer cannot see. `nl_writer`'s
+/// `nl_func_opcode_covers_every_expanded_func` asserts the two agree, which is
+/// why this is `pub(crate)`.
+pub(crate) fn func_code(f: MathFunc) -> Option<i32> {
     Some(match f {
         MathFunc::Exp => 0,
         MathFunc::Log => 1,

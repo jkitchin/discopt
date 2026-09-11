@@ -3122,3 +3122,65 @@ The regression test checks the **class**, not the instance: it asserts every nam
 in `_FUNC_METHOD` is a real no-argument method on the live `pounce.NlExpr`, so the
 next wrong string is caught by the table check rather than by whichever model
 happens to use that operator.
+
+## C-46 (P1, FIXED, 2026-09-11) — the Rust `.nl` writer PANICKED on `log2`, and the panic bypassed its own fallback
+
+**Status: FIXED. Regression test:
+`python/tests/test_1220_nl_writer_func_coverage.py` (96 cases; 8 fail before the
+fix and pass after, verified by reverting the Rust change and rebuilding).**
+
+Found by the owner's review of PR #1220, not by CI or by the corpus sweep.
+Introduced by this branch's writer port. **Same class as C-45, a different
+table** — which is the point of recording it separately.
+
+### Mechanism
+
+Two independently-maintained opcode tables drifted:
+
+| table | `MathFunc::Log2` |
+|---|---|
+| `expand.rs::func_code` | admits it, as code `2` |
+| `nl_writer.rs::nl_func_opcode` | no arm for `2` |
+
+so the emit site's `.expect("mapped function")` fired, and **any** model
+containing `log2` raised `pyo3_runtime.PanicException` from `to_nl()` — where
+`main` wrote the file correctly.
+
+### Why the fallback did not save it
+
+`export/nl.py::_rust_nl_text` ends in `except Exception: return None`, and
+
+```python
+issubclass(pyo3_runtime.PanicException, Exception)      # False
+issubclass(pyo3_runtime.PanicException, BaseException)  # True
+```
+
+so the clause never saw it. A writer that is *designed* to degrade to a slow path
+crashed instead. That is the more serious half of this entry: the same shape of
+bug in any future opcode gap would have done the same.
+
+### Fix, at three levels
+
+1. **This gap.** `Log2` is rewritten at the emit site as `log(x) / ln 2`, the
+   exact form `export/nl.py` uses, so the two writers stay byte-identical:
+   `o3 o43 <arg> n0.6931471805599453`.
+2. **The class.** `write_expr` is now fallible. An unmapped function code is a
+   **refusal** (`ExpandError`), which the Python writer picks up, never a panic.
+   A Rust test, `nl_func_opcode_covers_every_expanded_func`, matches
+   exhaustively on `MathFunc` with **no wildcard arm** — a new variant fails to
+   compile until it is classified — and asserts every code `func_code` admits is
+   either mapped or explicitly rewritten.
+3. **The blast radius.** `_rust_nl_text` gained an `except BaseException` clause
+   that logs at **WARNING** ("this is a writer bug") and falls back.
+   `KeyboardInterrupt` and `SystemExit` are re-raised. A panic is now loud but
+   survivable rather than silent-and-fatal.
+
+### A second divergence found by the same sweep
+
+`tan` was **not** byte-identical: the Rust writer emitted the native `.nl` opcode
+`o38`, while `export/nl.py` has always written `sin(x) / cos(x)` — one of its
+deliberate rewrites, alongside `log2`, `log1p`, `sigmoid` and `softplus`. No
+corpus instance uses `tan`, so the 1610-instance sweep structurally could not see
+it. The Rust writer now rewrites too. Native `o38` is arguably better output, but
+changing what discopt writes for `tan` is a user-visible change that needs its
+own justification — it is not a side effect of a port.

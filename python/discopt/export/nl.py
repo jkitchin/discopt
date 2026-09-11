@@ -145,6 +145,27 @@ def _rust_nl_text(model: Model) -> Optional[str]:
         # speculative fast path, and the model is written either way.
         _RUST_NL_LOG.debug("Rust .nl writer declined: %s: %s", type(exc).__name__, exc)
         return None
+    except BaseException as exc:  # noqa: BLE001
+        # PyO3 raises `pyo3_runtime.PanicException`, which derives from
+        # `BaseException` and NOT from `Exception` -- so the clause above cannot
+        # see it, and a Rust panic reached the user as a crash even though the
+        # Python writer below handles the model correctly. That is exactly what
+        # `log2` did: `expand.rs::func_code` admitted it, `nl_writer.rs` had no
+        # opcode for it, and `.expect("mapped function")` fired.
+        #
+        # A panic is a BUG in the writer, not a decline, so unlike the clause
+        # above this logs at WARNING: the file still gets written, but the defect
+        # is not silent. KeyboardInterrupt and SystemExit are re-raised -- they
+        # are control flow, never a writer result.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        _RUST_NL_LOG.warning(
+            "Rust .nl writer PANICKED (%s: %s); falling back to the Python writer. "
+            "This is a writer bug -- please report it.",
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 # ── Expression opcodes (AMPL .nl format) ────────────────────────

@@ -47,6 +47,40 @@ const NL_NEG: i32 = 16;
 const NL_SUMLIST: i32 = 54;
 
 /// `.nl` opcode for a [`crate::expand`] `OP_FUNC_BASE + code` function.
+/// `expand.rs::func_code`'s value for `MathFunc::Log2`.
+///
+/// `.nl` has no base-2 log opcode, so this one is not in the table below: it is
+/// rewritten at the emit site as `log(x) / ln 2`, exactly as `export/nl.py`
+/// writes it. Named rather than spelled `2` inline so the two places that care
+/// are greppable together.
+const FUNC_LOG2: i32 = 2;
+
+/// `expand.rs::func_code`'s value for `MathFunc::Log`, used by the `log2` rewrite.
+const FUNC_LOG: i32 = 1;
+
+/// `expand.rs::func_code`'s value for `MathFunc::Tan`.
+///
+/// `.nl` HAS a tan opcode (`o38`), but `export/nl.py` has always written
+/// `sin(x) / cos(x)` instead -- one of its deliberate rewrites, alongside
+/// `log2`, `log1p`, `sigmoid` and `softplus`. This writer's whole safety
+/// argument is that it is byte-identical to that one, so it rewrites too rather
+/// than emitting the native opcode. Changing what discopt writes for `tan` is a
+/// user-visible output change and belongs to whoever measures it, not here.
+const FUNC_TAN: i32 = 7;
+
+/// `expand.rs::func_code` values for the functions the rewrites above call.
+const FUNC_SIN: i32 = 5;
+const FUNC_COS: i32 = 6;
+
+/// `expand.rs::func_code` value -> `.nl` opcode.
+///
+/// MUST stay in step with `expand.rs::func_code`, which decides what reaches
+/// this writer at all: a code that `func_code` admits and this table omits used
+/// to hit `.expect("mapped function")` and **panic**, and a `PanicException`
+/// derives from `BaseException`, so `export/nl.py`'s `except Exception` fallback
+/// could not catch it and the panic reached the user. That is how `log2` shipped
+/// broken. Returning `None` now refuses instead, which the Python writer picks
+/// up. `nl_func_opcode_covers_every_expanded_func` asserts the two agree.
 fn nl_func_opcode(code: i32) -> Option<i32> {
     Some(match code {
         0 => 44,  // exp
@@ -55,7 +89,6 @@ fn nl_func_opcode(code: i32) -> Option<i32> {
         4 => 39,  // sqrt
         5 => 41,  // sin
         6 => 46,  // cos
-        7 => 38,  // tan
         8 => 49,  // atan
         9 => 40,  // sinh
         10 => 45, // cosh
@@ -256,12 +289,34 @@ fn vars_under(prog: &ScalarProgram, root: i64, out: &mut BTreeSet<usize>) {
     }
 }
 
+/// One pending item in [`write_expr`]'s stack: a subtree still to emit, or a
+/// ready-made token to emit once whatever was pushed above it has drained.
+enum Emit {
+    Node(i64),
+    Text(String),
+}
+
 /// Emit one expression tree in `.nl` prefix notation.
-fn write_expr(prog: &ScalarProgram, root: i64, remap: &[usize], out: &mut String) {
+///
+/// Fallible: a function code this writer has no opcode for is a **refusal**, so
+/// `export/nl.py` falls back to the Python writer, which handles it.
+fn write_expr(
+    prog: &ScalarProgram,
+    root: i64,
+    remap: &[usize],
+    out: &mut String,
+) -> Result<(), ExpandError> {
     // Explicit stack, children pushed reversed so they pop in prefix order:
     // a `sum()` body is deep enough that recursion is not safe here.
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
+    let mut stack = vec![Emit::Node(root)];
+    while let Some(item) = stack.pop() {
+        let node = match item {
+            Emit::Text(t) => {
+                out.push_str(&t);
+                continue;
+            }
+            Emit::Node(n) => n,
+        };
         let i = node as usize;
         let op = prog.op[i];
         match op {
@@ -276,35 +331,69 @@ fn write_expr(prog: &ScalarProgram, root: i64, remap: &[usize], out: &mut String
                     _ => NL_POW,
                 };
                 out.push_str(&format!("o{code}\n"));
-                stack.push(prog.b[i]);
-                stack.push(prog.a[i]);
+                stack.push(Emit::Node(prog.b[i]));
+                stack.push(Emit::Node(prog.a[i]));
             }
             OP_NEG | OP_ABS => {
                 let code = if op == OP_NEG { NL_NEG } else { NL_ABS };
                 out.push_str(&format!("o{code}\n"));
-                stack.push(prog.a[i]);
+                stack.push(Emit::Node(prog.a[i]));
             }
             OP_SUMOVER => {
                 let args = prog.args_of(i);
                 match args.len() {
                     0 => out.push_str("n0\n"),
-                    1 => stack.push(args[0]),
+                    1 => stack.push(Emit::Node(args[0])),
                     n => {
                         out.push_str(&format!("o{NL_SUMLIST}\n{n}\n"));
                         for t in args.iter().rev() {
-                            stack.push(*t);
+                            stack.push(Emit::Node(*t));
                         }
                     }
                 }
             }
+            c if c >= OP_FUNC_BASE && c - OP_FUNC_BASE == FUNC_TAN => {
+                // `export/nl.py`: `o3 o41 <arg> o46 <arg>` -- sin(arg)/cos(arg),
+                // with the argument subtree emitted twice, exactly as it does.
+                out.push_str(&format!("o{NL_DIV}\n"));
+                out.push_str(&format!("o{}\n", nl_func_opcode(FUNC_SIN).expect("sin")));
+                stack.push(Emit::Node(prog.a[i]));
+                stack.push(Emit::Text(format!(
+                    "o{}\n",
+                    nl_func_opcode(FUNC_COS).expect("cos")
+                )));
+                stack.push(Emit::Node(prog.a[i]));
+            }
+            c if c >= OP_FUNC_BASE && c - OP_FUNC_BASE == FUNC_LOG2 => {
+                // `.nl` has no base-2 log. `export/nl.py` writes
+                // `o3 o43 <arg> n0.6931471805599453` -- log(arg) / ln 2 -- and
+                // this must match it byte for byte, so the divisor is emitted
+                // AFTER the argument subtree drains, via a text item.
+                out.push_str(&format!("o{NL_DIV}\n"));
+                out.push_str(&format!("o{}\n", nl_func_opcode(FUNC_LOG).expect("log")));
+                stack.push(Emit::Text(format!(
+                    "n{}\n",
+                    py_float(std::f64::consts::LN_2)
+                )));
+                stack.push(Emit::Node(prog.a[i]));
+            }
             c if c >= OP_FUNC_BASE => {
-                let code = nl_func_opcode(c - OP_FUNC_BASE).expect("mapped function");
+                let fc = c - OP_FUNC_BASE;
+                // Refusal, not a panic: `export/nl.py` falls back to the Python
+                // writer, which covers everything this table does not.
+                let code = nl_func_opcode(fc).ok_or_else(|| {
+                    ExpandError(format!(
+                        "nl_writer has no .nl opcode for expanded function code {fc}; \
+                         falling back to the Python writer"
+                    ))
+                })?;
                 out.push_str(&format!("o{code}\n"));
-                stack.push(prog.a[i]);
+                stack.push(Emit::Node(prog.a[i]));
             }
             _ => unreachable!("unsupported opcode {op} reached the writer"),
         }
     }
+    Ok(())
 }
 
 /// Write `repr` as AMPL `.nl` text.
@@ -595,7 +684,7 @@ pub fn write_nl(
     for (i, row) in rows.iter().enumerate() {
         out.push_str(&format!("C{i}\n"));
         match row.nonlinear {
-            Some(nl) => write_expr(&prog, nl, &remap, &mut out),
+            Some(nl) => write_expr(&prog, nl, &remap, &mut out)?,
             None => out.push_str("n0\n"),
         }
     }
@@ -607,7 +696,7 @@ pub fn write_nl(
     };
     out.push_str(&format!("O0 {sense}\n"));
     match obj_split.nonlinear {
-        Some(nl) => write_expr(&prog, nl, &remap, &mut out),
+        Some(nl) => write_expr(&prog, nl, &remap, &mut out)?,
         None => out.push_str("n0\n"),
     }
 
@@ -689,4 +778,132 @@ pub fn write_nl(
 
     prog.seal();
     Ok(out)
+}
+
+#[cfg(test)]
+mod func_table_tests {
+    use super::*;
+    use crate::expand::func_code;
+    use crate::expr::MathFunc;
+
+    /// Whether this writer can emit the function at all -- by opcode, or by the
+    /// `log2` rewrite.
+    ///
+    /// No wildcard arm on purpose: adding a `MathFunc` variant fails to compile
+    /// here until it is classified. That is the guard that was missing when
+    /// `expand.rs::func_code` admitted `Log2` and `nl_func_opcode` did not map
+    /// it, which made `to_nl()` PANIC -- and a `PanicException` derives from
+    /// `BaseException`, so `export/nl.py`'s fallback could not catch it.
+    fn writer_handles(f: MathFunc) -> bool {
+        match f {
+            MathFunc::Exp
+            | MathFunc::Log
+            | MathFunc::Log2
+            | MathFunc::Log10
+            | MathFunc::Sqrt
+            | MathFunc::Sin
+            | MathFunc::Cos
+            | MathFunc::Tan
+            | MathFunc::Atan
+            | MathFunc::Sinh
+            | MathFunc::Cosh
+            | MathFunc::Asin => true,
+            MathFunc::Acos
+            | MathFunc::Tanh
+            | MathFunc::Abs
+            | MathFunc::Sign
+            | MathFunc::Min
+            | MathFunc::Max
+            | MathFunc::Prod
+            | MathFunc::Norm2
+            | MathFunc::Asinh
+            | MathFunc::Acosh
+            | MathFunc::Atanh
+            | MathFunc::Erf
+            | MathFunc::Log1p
+            | MathFunc::Sigmoid
+            | MathFunc::Softplus
+            | MathFunc::Norm1
+            | MathFunc::NormInf
+            | MathFunc::NormP(_) => false,
+        }
+    }
+
+    const ALL: &[MathFunc] = &[
+        MathFunc::Exp,
+        MathFunc::Log,
+        MathFunc::Log2,
+        MathFunc::Log10,
+        MathFunc::Sqrt,
+        MathFunc::Sin,
+        MathFunc::Cos,
+        MathFunc::Tan,
+        MathFunc::Atan,
+        MathFunc::Sinh,
+        MathFunc::Cosh,
+        MathFunc::Asin,
+        MathFunc::Acos,
+        MathFunc::Tanh,
+        MathFunc::Abs,
+        MathFunc::Sign,
+        MathFunc::Min,
+        MathFunc::Max,
+        MathFunc::Prod,
+        MathFunc::Norm2,
+        MathFunc::Asinh,
+        MathFunc::Acosh,
+        MathFunc::Atanh,
+        MathFunc::Erf,
+        MathFunc::Log1p,
+        MathFunc::Sigmoid,
+        MathFunc::Softplus,
+        MathFunc::Norm1,
+        MathFunc::NormInf,
+        MathFunc::NormP(3),
+    ];
+
+    #[test]
+    fn nl_func_opcode_covers_every_expanded_func() {
+        let mut admitted = 0;
+        for &f in ALL {
+            match func_code(f) {
+                // Not expanded -> never reaches this writer. Nothing to check
+                // beyond the classification staying honest.
+                None => assert!(
+                    !writer_handles(f),
+                    "{f:?} is classified writable but func_code refuses it"
+                ),
+                Some(c) => {
+                    admitted += 1;
+                    assert!(
+                        writer_handles(f),
+                        "{f:?} is expanded but classified unwritable"
+                    );
+                    assert!(
+                        nl_func_opcode(c).is_some() || c == FUNC_LOG2 || c == FUNC_TAN,
+                        "{f:?} (code {c}) reaches the writer with no .nl opcode \
+                         and no rewrite -- this is the log2 panic all over again"
+                    );
+                }
+            }
+        }
+        // Prove the loop ran: an empty ALL would pass every assertion above.
+        assert_eq!(admitted, 12, "expected 12 expanded functions, saw {admitted}");
+    }
+
+    #[test]
+    fn log2_is_rewritten_not_mapped() {
+        assert!(
+            nl_func_opcode(FUNC_LOG2).is_none(),
+            "log2 must have no direct opcode -- .nl has no base-2 log"
+        );
+        assert_eq!(nl_func_opcode(FUNC_LOG), Some(43));
+        // tan is rewritten as sin/cos too -- see FUNC_TAN's comment.
+        assert!(nl_func_opcode(FUNC_TAN).is_none());
+        assert_eq!(nl_func_opcode(FUNC_SIN), Some(41));
+        assert_eq!(nl_func_opcode(FUNC_COS), Some(46));
+        // The divisor the rewrite emits must render exactly as Python's
+        // `repr(math.log(2))`, or the two writers stop being byte-identical.
+        assert_eq!(py_float(std::f64::consts::LN_2), "0.6931471805599453");
+    }
 }
