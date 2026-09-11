@@ -8348,3 +8348,63 @@ all three. `tree_ensemble` remains — its split rows each reference a *differen
 feature index, so it needs a gather (`inputs[j_array]`) with per-row thresholds and
 big-Ms as arrays; gather and mask indexing on array bodies were verified to work
 and export.
+
+## 60. `tree_ensemble` cannot be vectorised without reordering rows (2026-09-11)
+
+The fourth emitter, and the one that stops on a structural constraint rather than
+on a measurement. Recording why, because the reasoning is not obvious from the
+code and the next person will otherwise re-derive it.
+
+### The cost is entirely in the split rows
+
+| ensemble | build | constraint objects | of which split rows |
+|---|---:|---:|---:|
+| 10 trees, depth 3, 5 feats | 0.005 s | 251 | 240 |
+| 50 trees, depth 4, 8 feats | 0.049 s | 3 251 | 3 200 |
+| 100 trees, depth 5, 10 feats | 0.334 s | 16 101 | **16 000 (99.4%)** |
+
+So vectorising only the cheap parts — the one-leaf-per-tree constraint and the
+tree-output sum — buys essentially nothing. The split rows are the whole job.
+
+### Why they cannot be vectorised
+
+Each split row is `inputs[j] ≤ thr + M·(1 − z[l])` (left) or
+`inputs[j] ≥ thr + ε − M·(1 − z[l])` (right). Two facts combine:
+
+1. **Left rows are `≤` and right rows are `≥`.** A `Constraint` carries ONE
+   sense, so left and right rows cannot share an array-valued body — they must go
+   into at least two separate constraints.
+2. **The loop emits them interleaved.** Walking each leaf's ancestors produces a
+   direction sequence like `LLLLLRLRLLRRRLLRLRRRLRRR` — 11 sense changes across 24
+   rows for a depth-3 tree.
+
+Separating by sense therefore **reorders the rows**, and row order is how a
+solver's `.sol` maps duals back to constraints (§52). That is a stronger
+constraint than the row-*name* changes accepted in §58 and §59: a renamed row is
+a diagnostics regression, a reordered row silently misattributes a dual.
+
+Grouping by `(node, direction)` instead is attractive — the leaves under each node
+turn out to be contiguous, so the family is a clean slice `z[a:a+k]` with `j`,
+`thr` and `M` all scalar — but it reorders for the same reason.
+
+### Disposition
+
+**Not vectorised.** The change is available and large if a row reorder is
+acceptable, but that is a decision for whoever owns the `.sol` contract, not one
+to take silently for a speedup. Two things would unblock it:
+
+- a deliberate decision that `tree_ensemble`'s row order may change (it is a
+  generated order that no user chose), or
+- support for a constraint family carrying per-row senses, which would let the
+  interleaved order be preserved exactly.
+
+### #1215 NN emitter work, final state
+
+| emitter | status | speedup |
+|---|---|---|
+| `full_space` | vectorised (§55) | 1.8–2.0× |
+| `reduced_space` | vectorised (§58) | 1.47–1.69× |
+| `relu_bigm` | vectorised (§59) | 2.1–7.9× |
+| `tree_ensemble` | **blocked on row order** | — |
+
+Construction is essentially eliminated in all three that landed.
