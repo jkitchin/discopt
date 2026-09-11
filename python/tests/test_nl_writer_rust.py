@@ -159,15 +159,10 @@ def test_writers_agree_on_the_minlplib_corpus(path):
     Every operator in the IR, integrality mixes, free/fixed bounds, equality and
     range rows, and objectives that are pure constants.
     """
-    model = dm.from_nl(path)
-    # The `x` (starting point) section is the one thing the Rust writer cannot
-    # emit, and since #1226 `from_nl` attaches a starting point to most corpus
-    # models -- 52 of these 66. Clearing it keeps this differential testing the
-    # writers on every other section of all 66 files; the section itself, and
-    # the fact that carrying one routes to the Python writer, are covered by
-    # `test_a_starting_point_routes_to_the_python_writer` below.
-    model._initial_point = {}
-    _assert_identical(model, os.path.basename(path))
+    # NOT cleared: since #1226 `from_nl` attaches a starting point to 52 of these
+    # 66, and the Rust writer emits the `x` section for them too. Clearing it
+    # would hide the one section the two writers most recently disagreed on.
+    _assert_identical(dm.from_nl(path), os.path.basename(path))
 
 
 # ── the objective constant: a real bug this differential caught ─────────────
@@ -402,34 +397,41 @@ def test_vector_norm_still_expands_and_agrees():
 # ── the `x` section: the one divergence between the two writers ─────────────
 
 
-def test_a_starting_point_routes_to_the_python_writer():
-    """A model carrying a starting point must NOT take the Rust fast path.
+def test_the_rust_writer_emits_the_x_section():
+    """The Rust writer must write the starting point, not drop or refuse it.
 
-    The Rust writer emits no `x` section (#1224/#1225). Taking it would silently
-    drop the starting point -- and for a `.nl` read/write round-trip that is a
-    regression against what #1226 made work. Measured when the guard was
-    missing: 52 of the 66 corpus instances lost their `x` section.
+    #1224/#1225/#1226 taught the PYTHON writer to emit the `x` segment. The Rust
+    writer is the default path, so until it was taught too, a `.nl` read/write
+    round-trip silently lost the starting point on **52 of these 66 instances**
+    -- the initial guess every NLP solver starts from, gone with the file still
+    parsing and the shape still right.
     """
-    corpus = _CORPUS
-    with_point = [p for p in corpus if dm.from_nl(p)._initial_point]
+    with_point = [p for p in _CORPUS if dm.from_nl(p)._initial_point]
     assert with_point, "no corpus instance carries a starting point -- probe is vacuous"
 
-    path = with_point[0]
-    model = dm.from_nl(path)
-    # The writer itself declines...
-    assert _rust_nl_text(model) is None, "Rust cannot write an x section; it must decline"
-    # ...and `to_nl` still produces one, via the Python writer.
-    text = to_nl(model)
-    xs = [ln for ln in text.splitlines() if ln.startswith("x") and ln[1:].isdigit()]
-    assert xs, f"{os.path.basename(path)}: to_nl dropped the x section"
-    assert int(xs[0][1:]) == len(model._initial_point)
+    checked = 0
+    for path in with_point:
+        model = dm.from_nl(path)
+        rust = _rust_nl_text(model)
+        assert rust is not None, f"{os.path.basename(path)}: Rust declined a start point"
+        xs = [ln for ln in rust.splitlines() if ln.startswith("x") and ln[1:].isdigit()]
+        assert xs, f"{os.path.basename(path)}: the Rust writer dropped the x section"
+        assert int(xs[0][1:]) == len(model._initial_point), os.path.basename(path)
+        checked += 1
+    assert checked >= 40, f"only {checked} instances carried a start point"
 
 
-def test_a_model_without_a_starting_point_still_takes_the_rust_path():
-    """Guard the guard: it must not send everything to the Python writer."""
+def test_a_model_with_no_starting_point_writes_no_x_section():
+    """Absent is absent: an empty point must not become `x0`.
+
+    A dense or zero-length section would be a different file, and would tell an
+    ASL reader "starts at 0.0" where the truth is "no starting value given".
+    """
     m = dm.Model("plain")
     x = m.continuous("x", lb=0.0, ub=2.0)
     m.subject_to(x * x <= 1.0, name="c")
     m.minimize(x)
-    assert not getattr(m, "_initial_point", None)
-    assert _rust_nl_text(m) is not None, "the Rust writer must still serve plain models"
+    rust = _rust_nl_text(m)
+    assert rust is not None
+    assert not [ln for ln in rust.splitlines() if ln.startswith("x") and ln[1:].isdigit()]
+    assert rust == _python_nl(m)

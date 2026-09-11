@@ -33,7 +33,7 @@ from typing import Any, Optional, Union, cast
 import numpy as np
 
 from discopt.export import _arrays
-from discopt.export._common import refuse_non_algebraic_relations
+from discopt.export._common import refuse_non_algebraic_relations, variable_flat_offsets
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -99,12 +99,7 @@ def to_nl(
     # would block a correct export over a defect that only affects solving.
     # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
     model.validate(for_solve=False)
-    # An explicit starting point has to go down the Python path: the Rust writer
-    # emits no `x` section and does not see this argument at all. A point carried
-    # BY THE MODEL is handled inside `_rust_nl_text`, which is where that
-    # capability check belongs -- every caller of the Rust writer needs it, not
-    # just this one.
-    text = None if initial_point else _rust_nl_text(model)
+    text = _rust_nl_text(model, initial_point)
     if text is None:
         writer = _NLWriter(model, initial_point=initial_point)
         text = writer.write()
@@ -119,7 +114,7 @@ _RUST_NL_ENV = "DISCOPT_RUST_NL"
 _RUST_NL_LOG = logging.getLogger(__name__)
 
 
-def _rust_nl_text(model: Model) -> Optional[str]:
+def _rust_nl_text(model: Model, initial_point: Union[dict, None] = None) -> Optional[str]:
     """``.nl`` text from the Rust writer, or ``None`` to use the Python writer.
 
     Writing ``.nl`` was the entire remaining external-solver performance gap:
@@ -153,23 +148,43 @@ def _rust_nl_text(model: Model) -> Optional[str]:
     # the two writers agree byte for byte and row order -- how a solver's `.sol`
     # duals map back to constraints -- is unchanged from what discopt has always
     # written.
-    # The Rust writer emits no `x` section (#1224/#1225), so it cannot represent a
-    # model that carries a starting point -- one `from_nl` read out of a source
-    # file, or one `set_initial_point` attached. Refusing here rather than in
-    # `to_nl` keeps the capability check with the writer: a caller that reaches
-    # for this function directly would otherwise get text that SILENTLY dropped
-    # the point. Measured when this was missing: 52 of the 66 corpus instances
-    # lost their `x` section on a read/write round-trip -- a regression against
-    # what #1226 made work.
-    if getattr(model, "_initial_point", None):
-        _RUST_NL_LOG.debug("Rust .nl writer declined: model carries a starting point")
-        return None
+    # The starting point lives on the Model, keyed by `(name, element)`; the
+    # writer wants repr COLUMNS. Resolving here rather than in Rust keeps the
+    # `(name, element)` convention in the one layer that owns it. A key naming a
+    # variable the model does not have is a caller bug, not something to write
+    # around -- refuse the fast path so the Python writer raises its own, clearer
+    # error rather than this one silently dropping an entry.
+    #
+    # This section is why the Rust writer used to have to decline entirely: it
+    # emitted no `x` block, so 52 of the 66 corpus instances silently lost their
+    # starting point on a read/write round-trip (#1224/#1225/#1226).
+    # Same three-way contract as `_NLWriter.__init__`, so the two writers cannot
+    # disagree about WHICH point to write: `None` falls back to the point
+    # attached to the model, a non-empty dict wins, and an explicit `{}`
+    # suppresses the section even for a model that carries one. Getting this
+    # wrong is silent -- an `x` block the caller asked to drop still parses.
+    entries: list[tuple[int, float]] = []
+    if initial_point is None:
+        point = dict(getattr(model, "_initial_point", None) or {})
+    elif initial_point:
+        point = _keyed_initial_point(model, initial_point)
+    else:
+        point = {}
+    if point:
+        offsets = variable_flat_offsets(model)
+        by_name = {v.name: v for v in model._variables}
+        for (name, elem), value in point.items():
+            var = by_name.get(name)
+            if var is None:
+                _RUST_NL_LOG.debug("Rust .nl writer declined: unknown variable %r", name)
+                return None
+            entries.append((offsets[id(var)] + elem, float(value)))
     try:
         repr_ = model_to_repr(model, getattr(model, "_builder", None))
         # Through a typed local: `write_nl` comes from the PyO3 extension, whose
         # bindings are untyped, so returning it directly returns `Any` from a
         # function declared to return `str | None`.
-        text: str = repr_.write_nl(model.name)
+        text: str = repr_.write_nl(model.name, entries)
         return text
     except Exception as exc:  # noqa: BLE001
         # "This model has no arena representation" arrives as several exception

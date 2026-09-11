@@ -650,11 +650,22 @@ impl PyModelRepr {
     ///
     /// Raises rather than returning partial text for any model the arena cannot
     /// expand; the Python writer stays as the fallback for those.
-    fn write_nl(&self, model_name: &str) -> PyResult<String> {
+    /// `initial_point` is `(column, value)` in THIS repr's column numbering.
+    /// Passed in rather than read off `self.initial_point`, because that field
+    /// is only populated for a repr parsed from a `.nl` file -- a repr built
+    /// from a Python `Model` carries the point on the Model, and the caller is
+    /// the one that can resolve its `(name, element)` keys to columns.
+    #[pyo3(signature = (model_name, initial_point=Vec::new()))]
+    fn write_nl(&self, model_name: &str, initial_point: Vec<(usize, f64)>) -> PyResult<String> {
         // The builder-row boundary travels with the repr rather than being
         // passed in, so a caller cannot supply a count that does not match the
         // constraint list it is describing.
-        discopt_core::nl_writer::write_nl(&self.inner, model_name, self.n_builder_constraints)
+        discopt_core::nl_writer::write_nl(
+            &self.inner,
+            model_name,
+            self.n_builder_constraints,
+            &initial_point,
+        )
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
     }
 

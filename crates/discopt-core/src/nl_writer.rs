@@ -451,6 +451,10 @@ pub fn write_nl(
     repr: &ModelRepr,
     model_name: &str,
     n_builder_constraints: usize,
+    // `(column, value)` starting-point entries in the repr's own column
+    // numbering, remapped below to `.nl` columns. Empty writes no `x` section,
+    // which is what every model that did not come from a `.nl` file wants.
+    initial_point: &[(usize, f64)],
 ) -> Result<String, ExpandError> {
     let mut prog = expand(repr)?;
     prog.unseal();
@@ -790,6 +794,25 @@ pub fn write_nl(
             out.push_str(&format!("1 {}\n", py_float(v.ub)));
         } else {
             out.push_str("3\n");
+        }
+    }
+
+    // ── x: initial primal guess, between `b` and `k` exactly as
+    // `export/nl.py::write` orders its sections. Entries arrive in the repr's
+    // column numbering and are remapped to `.nl` columns here, then sorted --
+    // the Python writer sorts on the remapped index too, and the two are diffed
+    // byte for byte. A partial section is correct and is what AMPL writes: the
+    // segment names only the columns that have a starting value, and a dense
+    // vector could not tell "starts at 0.0" from "no starting value" (#1225).
+    if !initial_point.is_empty() {
+        let mut entries: Vec<(usize, f64)> = initial_point
+            .iter()
+            .map(|&(col, v)| (remap[col], v))
+            .collect();
+        entries.sort_by_key(|&(idx, _)| idx);
+        out.push_str(&format!("x{}\n", entries.len()));
+        for (idx, value) in entries {
+            out.push_str(&format!("{idx} {}\n", py_float(value)));
         }
     }
 
