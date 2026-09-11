@@ -15,7 +15,7 @@ opcodes. Key sections:
   k section:          Jacobian column counts (cumulative)
   J sections:         linear terms in constraints (Jacobian)
   G sections:         linear terms in objective (gradient)
-  x section:          initial point (optional)
+  x section:          initial point (written when one is supplied)
 
 Reference: Gay, D.M. "Hooking Your Solver to AMPL" (2003).
 Inspired by Pyomo's NLv2Writer (pyomo/repn/plugins/nl_writer.py).
@@ -56,6 +56,8 @@ from discopt.modeling.core import (
 def to_nl(
     model: Model,
     path: Union[str, Path, None] = None,
+    *,
+    initial_point: Union[dict, None] = None,
 ) -> Union[str, None]:
     """Export a discopt Model to AMPL .nl text format.
 
@@ -66,6 +68,14 @@ def to_nl(
     path : str or Path, optional
         If provided, write the .nl string to this file and return ``None``.
         Otherwise return the .nl string.
+    initial_point : dict, optional
+        ``{Variable: value}`` starting guess, in the same form
+        :meth:`Model.solve`'s ``initial_solution`` takes. Written as the ``.nl``
+        ``x`` section so the reading solver starts from it; variables left out
+        of the dict are left out of the section (no guess is invented for them).
+        Values are validated, bound-clamped and integrality-rounded by
+        :func:`discopt.warm_start.validate_initial_solution` first. Omitted (or
+        ``{}``) writes no ``x`` section at all.
 
     Returns
     -------
@@ -84,9 +94,12 @@ def to_nl(
     # would block a correct export over a defect that only affects solving.
     # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
     model.validate(for_solve=False)
-    text = _rust_nl_text(model)
+    # The Rust writer emits no `x` section (#1224), so an explicit initial point
+    # has to go down the Python path -- taking the fast path would SILENTLY drop
+    # the guess the caller asked for.
+    text = None if initial_point is not None else _rust_nl_text(model)
     if text is None:
-        writer = _NLWriter(model)
+        writer = _NLWriter(model, initial_point=initial_point)
         text = writer.write()
     if path is not None:
         Path(path).write_text(text)
@@ -233,9 +246,41 @@ def _elem(arr: np.ndarray, idx: Any) -> Expression:
     return cast(Expression, arr[idx])
 
 
+def _keyed_initial_point(model: Model, initial_point: dict) -> dict[tuple[str, int], float]:
+    """Validate a ``{Variable: value}`` guess and key it by ``(name, element)``.
+
+    :func:`~discopt.warm_start.validate_initial_solution` returns one flat
+    vector in ``model._variables`` declaration order, filling *every* slot —
+    unprovided variables get the bound midpoint. That default is right for a
+    warm start and wrong for an ``x`` section, where an entry is a statement
+    about a variable the caller actually chose: only the columns whose variable
+    appears in *initial_point* are carried over, so the export never invents a
+    guess. Re-keying by ``(name, element)`` lets the writer translate to final
+    ``.nl`` column indices after :meth:`_NLWriter._reorder_vars_canonical` has
+    permuted them.
+    """
+    from discopt.warm_start import validate_initial_solution
+
+    x_flat = validate_initial_solution(model, initial_point)
+    keyed: dict[tuple[str, int], float] = {}
+    offset = 0
+    for var in model._variables:
+        if var in initial_point:
+            for elem in range(var.size):
+                keyed[(var.name, elem)] = float(x_flat[offset + elem])
+        offset += var.size
+    return keyed
+
+
 class _NLWriter:
-    def __init__(self, model: Model):
+    def __init__(self, model: Model, initial_point: Union[dict, None] = None):
         self.model = model
+        # (name, element) -> initial value, for the optional x section. Empty
+        # when the caller supplied no guess, in which case no x section is
+        # written (the pre-#1222 behaviour, which was the only behaviour).
+        self._initial_point: dict[tuple[str, int], float] = (
+            _keyed_initial_point(model, initial_point) if initial_point else {}
+        )
         # Flatten all variables to a single indexed list
         # .nl format: continuous first, then binary, then integer (at end)
         self._flat_vars: list[tuple[Variable, int]] = []  # (var, element_idx)
@@ -275,6 +320,7 @@ class _NLWriter:
         self._write_O_section(buf)
         self._write_r_section(buf)
         self._write_b_section(buf)
+        self._write_x_section(buf)
         self._write_k_section(buf)
         self._write_J_sections(buf)
         self._write_G_section(buf)
@@ -417,13 +463,48 @@ class _NLWriter:
 
         # Stash header counts (line 4: nlvc/nlvo totals + nlvb; line 6: discrete).
         self._nlvc_total = len(nl_cons)
-        self._nlvo_total = len(nl_objs)
+        self._nlvo_total = self._nlvo_prefix_bound(nl_cons, nl_objs, nl_both)
         self._nlvb = len(nl_both)
         self._nlvbi = len(both_disc)
         self._nlvci = len(cons_disc)
         self._nlvoi = len(objs_disc)
         self._nbv = len(lin_bin)
         self._niv = len(lin_int)
+
+    @staticmethod
+    def _nlvo_prefix_bound(nl_cons: set[int], nl_objs: set[int], nl_both: set[int]) -> int:
+        """Header ``nlvo``: the ASL **prefix bound**, not the raw objective count.
+
+        ASL sizes its nonlinear-column prefix as ``max(nlvc, nlvo)`` and reads
+        the objective-only nonlinear block as the columns in ``[nlvc, nlvo)``.
+        The canonical variable order this writer emits is
+        ``[both | cons-only | objs-only | linear]`` (see
+        :meth:`_reorder_vars_canonical`), so when an objective-only nonlinear
+        variable exists that block starts at ``nlvc`` and ``nlvo`` has to be
+        ``nlvc + |objs-only|`` — i.e. the *end* of the block, counted from
+        column 0. Writing the raw ``len(nl_objs)`` instead under-declares the
+        prefix whenever there are also cons-only nonlinear variables, ASL
+        truncates it, and every column past the truncation is mis-assigned:
+        the reader silently solves a different problem (issue #1222; Ipopt
+        reported ``Optimal Solution Found.`` with objective 7269.45 instead of
+        8457.69 on ``fuel``).
+
+        When there is *no* objective-only nonlinear variable the two readings
+        coincide at ``len(nl_objs)`` (``== |both|``, and ``0`` for a model with
+        a linear objective) and ``nlvo`` must **not** be inflated to ``nlvc`` —
+        the unconditional ``len(nl_cons) + len(nl_objs) - len(nl_both)``
+        proposed in #1222 gets that case wrong. Measured by round-tripping the
+        AMPL-written corpus in ``python/tests/data/minlplib_nl`` and comparing
+        header line 4 against AMPL's own: this conditional form reproduces AMPL
+        on 66/66 instances, the raw count on 61/66, the unconditional form on
+        37/66 (it breaks all 29 linear-objective instances).
+
+        Reference: Gay, D.M. "Writing .nl Files" (2005), §"Variable ordering".
+        """
+        objs_only = len(nl_objs) - len(nl_both)
+        if objs_only:
+            return len(nl_cons) + objs_only
+        return len(nl_objs)
 
     # ── Jacobian sparsity (union of linear + nonlinear vars per constraint) ──
 
@@ -996,6 +1077,32 @@ class _NLWriter:
                 buf.write(f"1 {ub}\n")  # ub only
             else:
                 buf.write("3\n")  # free
+
+    # ── x section (initial primal guess) ──
+
+    def _write_x_section(self, buf: io.StringIO):
+        """Initial primal guess: ``x<count>`` then one ``<column> <value>`` line.
+
+        Optional in the format and written only when the caller supplied an
+        initial point — a model with no guess emits no section, as before. The
+        section is a partial map: AMPL itself writes only the variables that
+        have a starting value (``ex1221.nl`` declares 5 variables and an ``x2``
+        block), so an absent column simply means "no guess for this one".
+
+        Columns are the *final* ``.nl`` indices, resolved through
+        ``_var_index`` after :meth:`_reorder_vars_canonical` — indexing is
+        direct rather than ``.get(...)``: every key came from
+        ``model._variables``, so a miss is a writer bug and must surface as a
+        ``KeyError`` instead of silently dropping a starting value.
+        """
+        if not self._initial_point:
+            return
+        entries = sorted(
+            (self._var_index[key], value) for key, value in self._initial_point.items()
+        )
+        buf.write(f"x{len(entries)}\n")
+        for idx, value in entries:
+            buf.write(f"{idx} {value}\n")
 
     # ── k section (Jacobian column counts) ──
 

@@ -6176,7 +6176,11 @@ class Model:
 
         return to_gams(self, path, model_type)
 
-    def to_nl(self, path: Union[str, None] = None) -> Union[str, None]:
+    def to_nl(
+        self,
+        path: Union[str, None] = None,
+        initial_point: Optional[dict] = None,
+    ) -> Union[str, None]:
         """Export the model to AMPL .nl text format.
 
         Supports all model types including MINLP with nonlinear expressions.
@@ -6187,6 +6191,11 @@ class Model:
         ----------
         path : str, optional
             File path to write. If ``None``, return the .nl string.
+        initial_point : dict, optional
+            ``{Variable: value}`` starting guess (same form as
+            :meth:`solve`'s ``initial_solution``), written as the ``.nl`` ``x``
+            section. Variables omitted from the dict get no entry. Without it
+            no ``x`` section is written.
 
         Returns
         -------
@@ -6195,7 +6204,7 @@ class Model:
         """
         from discopt.export.nl import to_nl
 
-        return to_nl(self, path)
+        return to_nl(self, path, initial_point=initial_point)
 
     def _check_name(self, name: str):
         """Ensure a variable/parameter name is unique and not compiler-reserved.

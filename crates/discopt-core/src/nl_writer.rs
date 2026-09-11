@@ -659,10 +659,33 @@ pub fn write_nl(
         " {n_nl_cons} {n_nl_objs}\t# nonlinear constraints, objectives\n"
     ));
     out.push_str(" 0 0\t# network constraints\n");
+    // `nlvo` is ASL's PREFIX BOUND, not the raw objective count. ASL sizes its
+    // nonlinear-column prefix as `max(nlvc, nlvo)` and reads the objective-only
+    // nonlinear block as the columns in `[nlvc, nlvo)`. The canonical order
+    // emitted above is `[both | cons-only | objs-only | linear]`, so when an
+    // objective-only nonlinear variable exists that block ENDS at
+    // `nlvc + |objs-only|`, which is what must be declared. The raw count
+    // under-declares the prefix whenever there are also cons-only nonlinear
+    // variables; ASL truncates, every column past the truncation is
+    // mis-assigned, and the reader silently solves a different problem --
+    // issue #1222, where Ipopt reported "Optimal Solution Found." with 7269.45
+    // instead of 8457.69 on `fuel`.
+    //
+    // Conditional, NOT the unconditional `nlvc + nlvo - nlvb`: with no
+    // objective-only nonlinear variable the two readings coincide at
+    // `len(nl_objs)` (0 for a linear objective) and `nlvo` must not be inflated
+    // to `nlvc`. Mirrors `export/nl.py::_NLWriter._nlvo_prefix_bound` exactly --
+    // the two writers are diffed byte for byte, so a divergence here is a
+    // silent wrong header on whichever path the model happens to take.
+    let nlvo = if objs_only.is_empty() {
+        nl_objs.len()
+    } else {
+        nl_cons.len() + objs_only.len()
+    };
     out.push_str(&format!(
         " {} {} {}\t# nonlinear vars in cons, objs, both\n",
         nl_cons.len(),
-        nl_objs.len(),
+        nlvo,
         nl_both.len()
     ));
     out.push_str(" 0 0 0 1 0\t# flags\n");
