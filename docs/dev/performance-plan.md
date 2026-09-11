@@ -8408,3 +8408,73 @@ to take silently for a speedup. Two things would unblock it:
 | `tree_ensemble` | **blocked on row order** | — |
 
 Construction is essentially eliminated in all three that landed.
+
+## 61. Pre-PR confirmation: panel replicated, corpus clean (2026-09-11)
+
+Re-measurement of the #1215 claims at branch HEAD, on a quiet box, before the
+work goes up for review. Nothing here is new work; it exists so the PR's numbers
+are a *measurement taken at the tip*, not a transcription of numbers taken 30
+commits earlier.
+
+### Cross-tool panel, re-run at HEAD (load 0.21)
+
+Total µs/row, model to `.nl` text, 100 000 rows. §48's figures in brackets.
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 3.97 [3.97] | 3.58 [3.63] | 35.92 [40.28] | 36.07 [38.99] |
+| sep_nl | 2.97 [2.97] | 2.86 [3.05] | 24.08 [25.29] | 34.50 [35.51] |
+| coupled_nl | 3.47 [3.47] | 4.01 [4.42] | 33.17 [36.99] | 45.17 [48.14] |
+| minlp | 4.11 [4.11] | 3.95 [4.24] | 28.87 [29.13] | 45.18 [46.92] |
+
+Vectorised discopt is **0.90–1.15× oximo** (§48 recorded 0.91–1.27×) and
+**10.1–12.1× faster than Pyomo** (§48: 10.7–11.6×). Per-element discopt is
+within noise of Pyomo on three families and 1.20× faster on `sep_nl`. 48 points
+executed, 36 model-identity comparisons passed.
+
+Retained B/row at 100 000 rows, `--memory`, §50's figures in brackets:
+
+| family | oximo | discopt vec | discopt elem | pyomo |
+|---|---:|---:|---:|---:|
+| linear | 1072 [1072] | 17 [17] | 1301 [1301] | 1310 [1311] |
+| sep_nl | 615 [615] | 17 [17] | 943 [942] | 984 [984] |
+| coupled_nl | 684 [684] | 17 [17] | 1135 [1135] | 1225 [1225] |
+| minlp | 853 [853] | 17 [17] | 1108 [1108] | 1150 [1150] |
+
+**0.02–0.03× oximo**, unchanged. 48 points, 36 identity comparisons.
+
+### Real-instance corpus: export parity and certificates
+
+The panel families are synthetic by construction (§4's warning about synthetic
+proxies), so both claims were re-checked against real `.nl` instances.
+
+`python/tests/data/minlplib_nl/`, all 66 instances:
+
+- **66 byte-identical** between the Rust and Python `.nl` writers, 0 disagreeing,
+  0 declined by the Rust writer;
+- **66/66 semantic round-trip** (write → re-parse → same rows, columns, bounds);
+- `.nl` export **median 36.00 µs/row (rust) vs 45.75 (python)**, speedup
+  **median 1.35×, min 1.03×, max 1.92×** — matching §47's recorded 1.35× median.
+  This is the per-element number: real MINPLib instances arrive one row at a
+  time, so they do not see the vectorised path at all. §48's 10× is a number for
+  models *written* in the vectorised idiom, and this row is the honest figure for
+  everything else.
+
+16 of those instances have a reference optimum in
+`python/tests/data/known_optima.toml`; solved end to end:
+**`incorrect_count = 0`, uncertified = 0, errors = 0**, all 16 `optimal` and
+matching the reference. 16 certificate comparisons executed.
+
+### Gates at HEAD
+
+`pytest -m smoke` 1395 passed / 14 skipped; adversarial suite 19 passed;
+`cargo test -p discopt-core` 735 passed / 0 failed across 14 binaries;
+`ruff check` + `ruff format --check` clean over 1001 files.
+
+### What this run could NOT check
+
+The full MINLPLib snapshot (`~/Dropbox/projects/discopt-minlp-benchmark/`,
+~4 800 instances plus `minlplib.solu`) is **not present in this container**, and
+neither is QPLIB. The corpus evidence above is therefore the 66 in-repo
+instances, not the 4 800-instance sweep. A broader run on a machine that has the
+snapshot is the outstanding validation for this work — see the PR.
