@@ -368,6 +368,16 @@ pub(crate) fn func_code(f: MathFunc) -> Option<i32> {
         MathFunc::Sinh => 9,
         MathFunc::Cosh => 10,
         MathFunc::Asin => 11,
+        // 12-17: everything `.nl` can express that is NOT a plain
+        // opcode-per-call. `Acos`/`Tanh`/`Abs` have opcodes (53/37/15);
+        // `Log1p`/`Sigmoid`/`Softplus` are rewritten from existing ones,
+        // exactly as `export/nl.py::_function_call_sequence` does.
+        MathFunc::Acos => 12,
+        MathFunc::Tanh => 13,
+        MathFunc::Abs => 14,
+        MathFunc::Log1p => 15,
+        MathFunc::Sigmoid => 16,
+        MathFunc::Softplus => 17,
         _ => return None,
     })
 }

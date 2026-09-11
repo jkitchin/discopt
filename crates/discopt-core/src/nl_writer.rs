@@ -72,6 +72,15 @@ const FUNC_TAN: i32 = 7;
 const FUNC_SIN: i32 = 5;
 const FUNC_COS: i32 = 6;
 
+/// Rewritten rather than mapped, like `log2` and `tan`: `.nl` has no opcode for
+/// any of these, but each is a short composition of opcodes it does have. The
+/// token sequences below are `export/nl.py::_function_call_sequence`'s, byte for
+/// byte -- including the bare `n1` constants, which that writer emits literally
+/// and NOT through float formatting (`py_float(1.0)` would give `n1.0`).
+const FUNC_LOG1P: i32 = 15;
+const FUNC_SIGMOID: i32 = 16;
+const FUNC_SOFTPLUS: i32 = 17;
+
 /// `expand.rs::func_code` value -> `.nl` opcode.
 ///
 /// MUST stay in step with `expand.rs::func_code`, which decides what reaches
@@ -93,6 +102,9 @@ fn nl_func_opcode(code: i32) -> Option<i32> {
         9 => 40,  // sinh
         10 => 45, // cosh
         11 => 51, // asin
+        12 => 53, // acos
+        13 => 37, // tanh
+        14 => 15, // abs (as a FunctionCall; OP_ABS covers the operator form)
         _ => return None,
     })
 }
@@ -351,6 +363,25 @@ fn write_expr(
                         }
                     }
                 }
+            }
+            c if c >= OP_FUNC_BASE
+                && matches!(
+                    c - OP_FUNC_BASE,
+                    FUNC_LOG1P | FUNC_SIGMOID | FUNC_SOFTPLUS
+                ) =>
+            {
+                // Each is prefix tokens followed by the single argument, so the
+                // argument subtree is simply pushed last -- no trailing text.
+                let prefix = match c - OP_FUNC_BASE {
+                    // log1p(x) = log(1 + x)
+                    FUNC_LOG1P => "o43\no0\nn1\n",
+                    // sigmoid(x) = 1 / (1 + exp(-x))
+                    FUNC_SIGMOID => "o3\nn1\no0\nn1\no44\no16\n",
+                    // softplus(x) = log(1 + exp(x))
+                    _ => "o43\no0\nn1\no44\n",
+                };
+                out.push_str(prefix);
+                stack.push(Emit::Node(prog.a[i]));
             }
             c if c >= OP_FUNC_BASE && c - OP_FUNC_BASE == FUNC_TAN => {
                 // `export/nl.py`: `o3 o41 <arg> o46 <arg>` -- sin(arg)/cos(arg),
@@ -830,11 +861,14 @@ mod func_table_tests {
             | MathFunc::Atan
             | MathFunc::Sinh
             | MathFunc::Cosh
-            | MathFunc::Asin => true,
-            MathFunc::Acos
+            | MathFunc::Asin
+            | MathFunc::Acos
             | MathFunc::Tanh
             | MathFunc::Abs
-            | MathFunc::Sign
+            | MathFunc::Log1p
+            | MathFunc::Sigmoid
+            | MathFunc::Softplus => true,
+            MathFunc::Sign
             | MathFunc::Min
             | MathFunc::Max
             | MathFunc::Prod
@@ -843,9 +877,6 @@ mod func_table_tests {
             | MathFunc::Acosh
             | MathFunc::Atanh
             | MathFunc::Erf
-            | MathFunc::Log1p
-            | MathFunc::Sigmoid
-            | MathFunc::Softplus
             | MathFunc::Norm1
             | MathFunc::NormInf
             | MathFunc::NormP(_) => false,
@@ -903,7 +934,11 @@ mod func_table_tests {
                         "{f:?} is expanded but classified unwritable"
                     );
                     assert!(
-                        nl_func_opcode(c).is_some() || c == FUNC_LOG2 || c == FUNC_TAN,
+                        nl_func_opcode(c).is_some()
+                            || matches!(
+                                c,
+                                FUNC_LOG2 | FUNC_TAN | FUNC_LOG1P | FUNC_SIGMOID | FUNC_SOFTPLUS
+                            ),
                         "{f:?} (code {c}) reaches the writer with no .nl opcode \
                          and no rewrite -- this is the log2 panic all over again"
                     );
@@ -911,7 +946,7 @@ mod func_table_tests {
             }
         }
         // Prove the loop ran: an empty ALL would pass every assertion above.
-        assert_eq!(admitted, 12, "expected 12 expanded functions, saw {admitted}");
+        assert_eq!(admitted, 18, "expected 18 expanded functions, saw {admitted}");
     }
 
     #[test]

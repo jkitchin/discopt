@@ -117,8 +117,18 @@ def test_rust_matches_python_or_declines(fname, array, monkeypatch):
         return
 
     assert python.startswith("g3 ")
-    if rust is None:
-        pytest.skip(f"{fname}: Rust writer declines (Python fallback covers it)")
+    # No skip-on-decline any more. Every function with a `.nl` form is now
+    # written by BOTH writers: `acos`/`tanh`/`abs` map to opcodes 53/37/15, and
+    # `log1p`/`sigmoid`/`softplus` are rewritten from existing opcodes exactly as
+    # `_function_call_sequence` rewrites them. Before that, six functions were
+    # "byte-identical" only because Rust declined and Python did the work --
+    # 2.0% of real instances (32/1602), the whole `gastrans*` family among them,
+    # silently on the slow path.
+    assert rust is not None, (
+        f"{fname}: Rust declines a function Python can write. Every `.nl`-"
+        f"expressible function must reach the Rust writer -- either an opcode "
+        f"in nl_func_opcode, or a rewrite at the emit site."
+    )
     assert rust == python, f"{fname}: Rust and Python .nl differ"
 
 
@@ -182,3 +192,28 @@ def test_tan_is_written_as_sin_over_cos_by_both_writers():
     assert lines[i : i + 2] == ["o3", "o41"], lines[i : i + 5]
     assert "o46" in lines, "cos leg missing"
     assert "o38" not in lines, "native tan opcode: diverges from the Python writer"
+
+
+@pytest.mark.unit
+def test_no_function_falls_back_to_the_python_writer():
+    """The set of functions only Python can write must be EMPTY.
+
+    Stated as its own test so the gap is a single visible failure rather than
+    one failure per function, and so the count is pinned: 18 functions have a
+    `.nl` form and all 18 must reach the Rust writer.
+    """
+    writable, python_only, no_nl_form = [], [], []
+    for fname in FUNCS:
+        model = _model(fname, array=False)
+        rust = _rust_nl_text(model)
+        try:
+            to_nl(_model(fname, array=False))
+        except ValueError:
+            no_nl_form.append(fname)
+            assert rust is None, f"{fname}: Rust wrote what has no .nl form"
+            continue
+        (writable if rust is not None else python_only).append(fname)
+
+    assert not python_only, f"only the Python writer can write: {python_only}"
+    assert len(writable) == 18, f"expected 18 writable functions, got {len(writable)}"
+    assert sorted(no_nl_form) == ["acosh", "asinh", "atanh", "erf", "sign"], no_nl_form
