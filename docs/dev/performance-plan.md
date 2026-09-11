@@ -8478,3 +8478,60 @@ The full MINLPLib snapshot (`~/Dropbox/projects/discopt-minlp-benchmark/`,
 neither is QPLIB. The corpus evidence above is therefore the 66 in-repo
 instances, not the 4 800-instance sweep. A broader run on a machine that has the
 snapshot is the outstanding validation for this work — see the PR.
+
+## 62. RETRACTED — the #1220 headline multipliers are large-n asymptotes, and the oximo one reverses (2026-09-11)
+
+Owner review of PR #1220 re-ran this branch's **own builders**, unmodified, at
+MINLPLib's row-count percentiles instead of at 1 000 / 10 000 / 100 000, with the
+arms **interleaved** and a spread reported. 728 executed points plus a 336-point
+confirmation run at lower load. Its numbers replace §48's and §61's. Per §4 the
+measurement wins; per §11 the retraction is recorded before anything is built on
+top of it.
+
+### What was wrong with the panel, not just the numbers
+
+1. **The sizes are off the distribution.** MINLPLib row counts are p25=9,
+   **p50=111**, p75=945, p90=4009, p99=68072. The panel's headline size of
+   100 000 rows is past the corpus p99. Independently confirmed on the 66
+   in-repo instances, which are smaller still: **p50=6**, p90=151, max 718 —
+   *no in-repo instance reaches even 1 000 rows*, the panel's smallest size.
+2. **Arm-major, not interleaved**, in direct violation of §9 — which this file
+   itself records as the cause of two earlier retracted claims.
+3. **Median of 3 with no spread reported**, also §9.
+4. **The memory half cannot run off Linux** (both arms read `/proc/self/status`),
+   and B/row cannot distinguish O(1) from small-per-row: one 16 KiB page over
+   68 072 rows prints as 0.
+
+### The corrected figures, at real problem sizes
+
+| claim | §48/§61 said | measured at corpus sizes | verdict |
+|---|---|---|---|
+| vs Pyomo, vectorised | 10.1–12.1× | **median 5.89×** | TRUE, margin overstated ~2× |
+| vs Pyomo, per-element | "within noise" | median 1.12×, **Pyomo wins 3 of 16 cells** | idiom-dependent |
+| vs oximo, vectorised | 0.90–1.15× (parity) | **oximo faster in all 16 cells**, median 1.55×, worst 3.16× | **REVERSED** |
+| retained memory | 0.02–0.03× oximo | 0.0000–0.025× | TRUE, understated |
+
+**The oximo claim is the one that changes direction and it is the important
+one.** The gap closes monotonically with size (≈3.0× at p50 → ≈1.4× at p99), so
+parity is an asymptote users will not see: even at p99 = 68 072 rows — close to
+the panel's own 100 000 — the measured ratio is 1.23–1.59×, not 0.90–1.15×.
+**discopt's vectorised path is not at oximo parity at the sizes that occur.**
+
+### Two things the panel understated rather than overstated
+
+- **vs discopt-before-this-branch**, which the PR never quantified: vectorised
+  **median 4.75×** (2.02× at p50 → 7.80× at p99), per-element **median 1.21×**.
+- **The memory win is not this branch's.** Construction memory was already O(1)
+  on the merge base; the base column is identical. What this branch adds is that
+  such a model can now be *written* — on the base,
+  `m.minimize(dm.sum(x))` raises `ValueError: Cannot write array variable x
+  without indexing`. For the vectorised idiom end to end, "much faster" is
+  really "newly possible".
+
+### Binding consequence
+
+A modelling-layer figure quoted without its row count is not a measurement. Any
+future panel in this file must (a) sample the corpus row-count distribution
+rather than round numbers, (b) interleave arms, (c) report a spread, and (d) say
+which idiom it measured. §48's tables stay in the file as the record of what was
+claimed; they are superseded by this section.
