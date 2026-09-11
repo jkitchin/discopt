@@ -57,7 +57,48 @@ The release procedure that produces these entries is documented in
   follower goes through `dm.argmin`, which solves rather than reformulates and
   reports its answer as local.
 
+- **`.nl` export writes the `x` (initial primal guess) section** (#1222). The
+  writer never emitted one — the module docstring listed the section, no code
+  wrote it, and on round-trip 202 of 202 corpus instances that carried an `x`
+  block lost it. `m.to_nl(path, initial_point={x: 2.5, z: [...]})` (and
+  `discopt.export.nl.to_nl(..., initial_point=...)`) now writes it. The guess
+  takes the same `{Variable: value}` form as `solve(initial_solution=...)` and
+  goes through `validate_initial_solution`, so values are bound-clamped and
+  integrality-rounded with a warning rather than written as given. Only
+  variables the caller actually supplied get an entry — a partial section is
+  what AMPL itself writes (`ex1221.nl` declares 5 variables and an `x2` block)
+  — so no starting value is invented for the rest. Without the argument no
+  section is written, exactly as before.
+
 ### Fixed
+
+- **`.nl` header under-declared `nlvo`, so an ASL solver silently answered a
+  different problem** (#1222). Header line 4 is `nlvc nlvo nlvb`, and the
+  writer put the *raw* count of variables appearing nonlinearly in objectives
+  in the `nlvo` field. ASL sizes its nonlinear-column prefix as
+  `max(nlvc, nlvo)` and reads the objective-only nonlinear block as the columns
+  in `[nlvc, nlvo)`, so `nlvo` is a **prefix bound**: with the canonical
+  `[both | cons-only | objs-only | linear]` column order this writer already
+  emits, it has to be `nlvc + |objs-only|` whenever an objective-only nonlinear
+  variable exists. The raw count truncated that prefix on any model with both
+  cons-only and objs-only nonlinear variables, and every column past the
+  truncation was mis-assigned — with no error and no warning. On `fuel` (AMPL
+  writes `3 6 0`, discopt wrote `3 3 0`) Ipopt reported
+  `Optimal Solution Found.` with objective 7269.45 instead of 8457.69; patching
+  only that one field made the two files agree bit-for-bit.
+
+  The correction is conditional, *not* the unconditional
+  `nlvc + nlvo - nlvb` — a model with a linear objective must keep `nlvo = 0`
+  however large `nlvc` is, which is the common case. Measured by round-tripping
+  the AMPL-written corpus in `python/tests/data/minlplib_nl` and comparing
+  header line 4 against AMPL's own: the new conditional form reproduces AMPL on
+  **66/66** instances (0 differ), the old raw count on 61/66, and the
+  unconditional form on 37/66 — it breaks all 29 linear-objective instances.
+
+  In-repo benchmark numbers are unaffected — the runner hands external solvers
+  the original corpus `.nl`, never a rewrite — and discopt's own reader took
+  `max(nlvc, nlvo)` the same way the writer wrote it, which is why the defect
+  was invisible from inside.
 
 - **`pounce_sensitivity` ignored the active set** (#1216). The KKT sensitivity
   system was assembled over *all* constraint rows, i.e. as though every constraint
