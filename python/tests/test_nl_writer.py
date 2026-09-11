@@ -783,3 +783,81 @@ class TestNLWriterDeepNesting:
         lin_part = sum(coeff * x[idx] for idx, coeff in writer._obj_linear.items())
         expected = float(compile_expression(m._objective.expression, m)(x))
         np.testing.assert_allclose(lin_part + nl_part, expected, atol=1e-9)
+
+
+class TestNLWriterRefusesNonAlgebraicRelations:
+    """A relation the format has no row for is refused by name (#1218).
+
+    ``.nl`` is algebra plus variable/row bounds: a disjunction, an indicator, an
+    SOS set and a propositional clause are structure, and this writer emits no
+    suffixes. Before #1218 such a model reached ``_decompose_expressions`` and
+    died on ``float(con.rhs)`` with ``AttributeError: '_DisjunctiveConstraint'
+    object has no attribute 'rhs'`` -- an internal error where the honest answer
+    is that the model needs a further lowering first.
+    """
+
+    @staticmethod
+    def _base() -> tuple:
+        m = dm.Model("gdp")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        return m, x
+
+    def test_disjunction_is_refused_by_name(self):
+        m, x = self._base()
+        m.either_or([[x <= 3], [x >= 7]], name="operating_mode")
+        with pytest.raises(ValueError, match="disjunctive constraint") as exc:
+            m.to_nl()
+        message = str(exc.value)
+        assert "operating_mode" in message  # which relation
+        assert "reformulate_gdp" in message  # and what to do about it
+
+    def test_indicator_is_refused_by_name(self):
+        m, x = self._base()
+        y = m.binary("y")
+        m.if_then(y, [x >= 4], name="unit_on")
+        with pytest.raises(ValueError, match="indicator constraint"):
+            m.to_nl()
+
+    def test_sos_is_refused_by_name(self):
+        m, x = self._base()
+        z = m.continuous("z", lb=0, ub=10)
+        m.sos1([x, z], name="pick_one")
+        with pytest.raises(ValueError, match="SOS constraint"):
+            m.to_nl()
+
+    def test_logical_constraint_is_refused_by_name(self):
+        m, _x = self._base()
+        y = m.boolean("choice", shape=(2,))
+        m.logical(y[0].implies(y[1]))
+        with pytest.raises(ValueError, match="propositional-logic constraint"):
+            m.to_nl()
+
+    @pytest.mark.parametrize("fmt", ["to_nl", "to_lp", "to_mps", "to_gams"])
+    def test_every_writer_in_the_package_refuses_the_same_way(self, fmt):
+        """The LP/MPS/GAMS writers walk ``model._constraints`` the same way.
+
+        They died on ``con.body`` rather than ``con.rhs``, but it is the same
+        defect and the same answer, so the refusal is shared (#1218).
+        """
+        m, x = self._base()
+        m.either_or([[x <= 3], [x >= 7]], name="operating_mode")
+        with pytest.raises(ValueError, match="disjunctive constraint"):
+            getattr(m, fmt)()
+
+    def test_the_refusal_names_a_remedy_that_works(self):
+        """The lowering the message points at produces an exportable model.
+
+        An error that names a fix nobody verified is a worse error. This runs
+        the message's own advice and exports the result.
+        """
+        from discopt._relax.gdp_reformulate import reformulate_gdp
+
+        m, x = self._base()
+        m.either_or([[x <= 3], [x >= 7]], name="operating_mode")
+        nl = reformulate_gdp(m, method="big-m").to_nl()
+        assert nl.startswith("g3")
+        # The lowering introduced selector binaries, so the exported model is a
+        # MILP over more columns than the source model's single x.
+        n_vars = int(nl.split("\n")[1].split()[0])
+        assert n_vars > len(m._variables)

@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from discopt.export import _arrays
+from discopt.export._common import refuse_non_algebraic_relations
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -84,10 +85,6 @@ def to_gams(
     str or None
         The GAMS source if *path* is ``None``, otherwise ``None``.
     """
-    from discopt.export._common import reject_unreformulated_gdp
-
-    reject_unreformulated_gdp(model, ".gms")
-
     # ``for_solve=False``: like the ``.nl`` writer, this one *honours*
     # ``Constraint.rhs`` — it emits it verbatim as the equation's right-hand side
     # (``{body} =g= {c.rhs};``) — so a row the solve path refuses as
@@ -96,6 +93,10 @@ def to_gams(
     # NOTE: the LP and MPS writers deliberately do *not* do this — see the comment
     # on their ``model.validate()`` calls.
     model.validate(for_solve=False)
+    # A disjunction/indicator/SOS/logic row is not an algebraic row; refuse it
+    # by name rather than die on ``con.body`` in the equation writer (#1218).
+    # This writer emits plain GAMS equations, not an EMP/JAMS disjunctive model.
+    refuse_non_algebraic_relations(model, "GAMS")
     writer = _GamsWriter(model, model_type)
     text = writer.write()
     if path is not None:

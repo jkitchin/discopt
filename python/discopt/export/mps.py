@@ -15,7 +15,11 @@ from pathlib import Path
 import numpy as np
 
 from discopt.export._arrays import scalarize_body, scalarize_objective
-from discopt.export._common import builder_objective, iter_builder_linear_rows
+from discopt.export._common import (
+    builder_objective,
+    iter_builder_linear_rows,
+    refuse_non_algebraic_relations,
+)
 from discopt.export._extract import (
     extract_linear_terms,
     extract_quadratic_terms,
@@ -50,10 +54,6 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     ValueError
         If the model contains nonlinear (non-quadratic) expressions.
     """
-    from discopt.export._common import reject_unreformulated_gdp
-
-    reject_unreformulated_gdp(model, ".mps")
-
     # Default ``for_solve=True`` is deliberate: unlike the ``.nl`` and GAMS
     # writers, this one does *not* honour ``Constraint.rhs``. The RHS section below
     # is built from ``-const``, recovered from the *body* alone, so a non-zero
@@ -62,6 +62,9 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     # refusal turns that into a loud error; do not relax it without teaching the
     # row builder below to fold ``con.rhs`` in.
     model.validate()
+    # A disjunction/indicator/SOS/logic row is not an algebraic row; refuse it
+    # by name rather than die on ``con.body`` in the row loop below (#1218).
+    refuse_non_algebraic_relations(model, "MPS")
     flat_vars = flatten_variables(model)
     var_names = [name for name, _, _, _, _ in flat_vars]
 

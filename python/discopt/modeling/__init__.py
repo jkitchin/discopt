@@ -17,6 +17,11 @@ Examples
 >>> result = m.solve()
 """
 
+from discopt.modeling.argmin import (
+    argmin,
+    argmin_kkt,
+    argmin_layer,
+)
 from discopt.modeling.core import (
     BooleanVar,
     BooleanVarArray,
@@ -138,6 +143,9 @@ __all__ = [
     "if_else",
     "udf",
     "custom",
+    "argmin",
+    "argmin_kkt",
+    "argmin_layer",
     "implicit",
     "implicit_full_space",
     "CustomCall",

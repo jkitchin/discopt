@@ -33,6 +33,7 @@ from typing import Any, Optional, Union, cast
 import numpy as np
 
 from discopt.export import _arrays
+from discopt.export._common import refuse_non_algebraic_relations
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -71,9 +72,11 @@ def to_nl(
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
-    from discopt.export._common import reject_unreformulated_gdp
-
-    reject_unreformulated_gdp(model, ".nl")
+    # Ahead of the Rust fast path on purpose. `_NLWriter.write()` makes this same
+    # call (#1218), but `to_nl` only reaches that writer when `_rust_nl_text`
+    # declines -- so relying on it would make the refusal depend on whether the
+    # fast path happened to choke on a disjunctive row, rather than on the model.
+    refuse_non_algebraic_relations(model, ".nl")
 
     # ``for_solve=False``: this writer *honours* ``Constraint.rhs`` — it folds the
     # body constant into the r-section row bound — so a row the solve path refuses
@@ -261,6 +264,7 @@ class _NLWriter:
         self._niv = 0  # linear integer vars
 
     def write(self) -> str:
+        self._refuse_unrepresentable_relations()
         self._build_var_map()
         self._decompose_expressions()
         self._reorder_vars_canonical()
@@ -275,6 +279,21 @@ class _NLWriter:
         self._write_J_sections(buf)
         self._write_G_section(buf)
         return buf.getvalue()
+
+    # ── Refuse relations the format cannot carry ──
+
+    def _refuse_unrepresentable_relations(self):
+        """Refuse a non-algebraic relation by name, before any row is written.
+
+        Without this the disjunctive/SOS rows a GDP or an MPEC complementarity
+        encoding leaves on the model reached ``_decompose_expressions`` and died
+        on ``float(con.rhs)`` with ``AttributeError: '_DisjunctiveConstraint'
+        object has no attribute 'rhs'`` (#1218) -- an internal error from deep
+        inside the writer, where the real answer is that ``.nl`` has no such row
+        and the model needs a further lowering first. Shared with the LP/MPS/GAMS
+        writers, which walk ``model._constraints`` the same way.
+        """
+        refuse_non_algebraic_relations(self.model, ".nl")
 
     # ── Build flat variable map ──
 
