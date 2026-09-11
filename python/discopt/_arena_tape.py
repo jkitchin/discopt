@@ -60,6 +60,7 @@ fast-construction path and are cheap to lower on the Python side anyway.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any, Optional
 
@@ -85,10 +86,21 @@ OP_FUNC_BASE = 20
 #: ``math_func_code`` order in ``expr_bindings.rs``. Code 99 is that function's
 #: catch-all for a ``MathFunc`` it does not map; it is deliberately absent here so
 #: it resolves to "unsupported" rather than to some neighbouring function.
+# MathFunc index -> the NlExpr method of the same meaning. Every name here must
+# be a REAL method on `pounce.NlExpr`: the scan calls it through `getattr`, so a
+# name that does not exist raises `AttributeError` mid-solve instead of falling
+# back. `test_1215_arena_tape_func_table.py` asserts the whole table against the
+# live class, which is how the `log2` entry below was caught.
+#
+# `Log2` (index 2) is deliberately absent: NlExpr has `log` and `log10` but no
+# `log2`, so it is lowered in the scan the same way the Python compiler lowers
+# it. Indices past the end (Acos, Tanh, Erf, ...) are simply not lowered here --
+# `.get()` returns None and the model falls back to the Python DAG path.
+_FUNC_LOG2 = 2
+
 _FUNC_METHOD = {
     0: "exp",
     1: "log",
-    2: "log2",
     3: "log10",
     4: "sqrt",
     5: "sin",
@@ -231,14 +243,18 @@ def lower(prog: _Program, roots: list[int], E: Any) -> list:
 
         ch = chains.get(i)
         if ch is not None:
-            parts = []
+            # A separate flag rather than re-using `parts` as its own "dropped"
+            # sentinel: one unsupported leaf drops the whole chain, and a list
+            # that is sometimes `None` is both harder to read and untypeable.
+            parts: list[Any] = []
+            complete = True
             for sign, leaf in ch:
                 p = cache[leaf]
                 if p is None:
-                    parts = None
+                    complete = False
                     break
                 parts.append(p if sign > 0 else -p)
-            if parts is not None:
+            if complete:
                 cache[i] = E.sum(parts)
             continue
 
@@ -264,9 +280,17 @@ def lower(prog: _Program, roots: list[int], E: Any) -> list:
             continue
 
         if o >= OP_FUNC_BASE:
-            method = _FUNC_METHOD.get(o - OP_FUNC_BASE)
+            fidx = o - OP_FUNC_BASE
             arg = cache[a[i]]
-            if method is None or arg is None:
+            if arg is None:
+                continue
+            if fidx == _FUNC_LOG2:
+                # Exactly the form `_nl_expr_compiler` uses, because the two
+                # paths must build the same tape: `log(a) * (1/ln 2)`.
+                cache[i] = E.log(arg) * E.const_(1.0 / math.log(2.0))
+                continue
+            method = _FUNC_METHOD.get(fidx)
+            if method is None:
                 continue
             cache[i] = getattr(arg, method)()
             continue

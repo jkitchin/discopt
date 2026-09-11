@@ -3077,3 +3077,48 @@ and all three methods return 20.0 on the reproduction.
       without it).
 - [x] The unit test that pinned the defect corrected, with the reason recorded.
 - [x] 645 GDP/hull/disjunction/reformulation tests pass; standing gates green.
+
+## C-45 (P1, FIXED, 2026-09-11) — arena tape named a POUNCE method that does not exist, disabling the false-primal guard for `log2` models
+
+**Status: FIXED. Regression test:
+`python/tests/test_1215_arena_tape_func_table.py` (5 cases; 4 of them fail before
+the fix and pass after).**
+
+Introduced by the `#1215` arena-tape lowering, not pre-existing. Caught by CI's
+PR-fast lane, not by the smoke or adversarial gate:
+
+    test_relaxation_coverage.py::test_operator_has_valid_tight_bound[log2]
+    AttributeError: 'pounce.NlExpr' object has no attribute 'log2'
+
+### Mechanism
+
+`_arena_tape` lowers a unary `FunctionCall` by calling
+`getattr(nl_expr, _FUNC_METHOD[idx])()`. The table mapped `MathFunc::Log2` to the
+string `"log2"`. `pounce.NlExpr` defines `log` and `log10` but **no `log2`** — the
+name was assumed rather than looked up, which is the failure mode the Workflow
+rule "look up an API before calling it" exists for.
+
+### Why this is a correctness entry and not just a crash
+
+On the path the failing test takes, the `AttributeError` propagates. On the
+*solve* path it does not: it is caught upstream and downgraded to
+
+    RuntimeWarning: incumbent-verification snapshot failed
+    (AttributeError: 'pounce.NlExpr' object has no attribute 'log2');
+    the false-primal guard is disabled for this solve
+
+So every model containing `log2` solved with its **false-primal guard silently
+off**. No false certificate has been observed from it — the guard is a check, not
+the bound itself — but a soundness check that turns itself off on an operator
+name is exactly the class this file tracks.
+
+### Fix
+
+`Log2` is removed from the method table and lowered in the scan as the Python
+compiler already lowers it, `log(a) * (1/ln 2)`, so the two paths build the same
+tape. Indices with no entry fall back to the Python DAG path as before.
+
+The regression test checks the **class**, not the instance: it asserts every name
+in `_FUNC_METHOD` is a real no-argument method on the live `pounce.NlExpr`, so the
+next wrong string is caught by the table check rather than by whichever model
+happens to use that operator.
