@@ -70,8 +70,13 @@ def to_nl(
         ``x`` section so the reading solver starts from it; variables left out
         of the dict are left out of the section (no guess is invented for them).
         Values are validated, bound-clamped and integrality-rounded by
-        :func:`discopt.warm_start.validate_initial_solution` first. Omitted (or
-        ``{}``) writes no ``x`` section at all.
+        :func:`discopt.warm_start.validate_initial_solution` first.
+
+        ``None`` (the default) writes the point **attached to the model** —
+        ``from_nl`` attaches a source file's ``x`` segment (#1225), and
+        :meth:`Model.set_initial_point` attaches one explicitly — or no section
+        at all when the model carries none. Passing ``{}`` writes no section
+        even when the model does carry one; an explicit argument always wins.
 
     Returns
     -------
@@ -184,11 +189,18 @@ class _NLWriter:
     def __init__(self, model: Model, initial_point: Union[dict, None] = None):
         self.model = model
         # (name, element) -> initial value, for the optional x section. Empty
-        # when the caller supplied no guess, in which case no x section is
-        # written (the pre-#1222 behaviour, which was the only behaviour).
-        self._initial_point: dict[tuple[str, int], float] = (
-            _keyed_initial_point(model, initial_point) if initial_point else {}
-        )
+        # means no x section is written (the pre-#1222 behaviour, which was the
+        # only behaviour). ``None`` falls back to the point attached to the
+        # model -- what ``from_nl`` read out of a source file, or what
+        # ``set_initial_point`` put there -- so a read/write round-trip keeps it
+        # (#1225); an explicit argument wins, and an explicit ``{}`` suppresses
+        # the section even for a model that carries a point.
+        if initial_point is None:
+            self._initial_point: dict[tuple[str, int], float] = dict(model._initial_point)
+        elif initial_point:
+            self._initial_point = _keyed_initial_point(model, initial_point)
+        else:
+            self._initial_point = {}
         # Flatten all variables to a single indexed list
         # .nl format: continuous first, then binary, then integer (at end)
         self._flat_vars: list[tuple[Variable, int]] = []  # (var, element_idx)

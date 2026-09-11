@@ -737,7 +737,30 @@ fn parse_opcode(
 /// Complementarity (type-5) rows are recovered but discarded here; use
 /// [`parse_nl_with_complementarity`] to also receive the recovered pairs.
 pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
-    parse_nl_with_complementarity(content).map(|(model, _compl)| model)
+    parse_nl_full(content).map(|parsed| parsed.model)
+}
+
+/// Everything a text-mode `.nl` file carries, including the parts that are
+/// deliberately **not** fields of [`ModelRepr`].
+///
+/// `ModelRepr` is the input to every presolve transform, and those transforms
+/// remove, fix and reindex columns. Data indexed *by column* — the `x` segment's
+/// starting point — would therefore be silently invalidated by any of them, so
+/// it rides alongside the model rather than inside it and cannot be carried
+/// through a transform by accident (the same reason `complementarities` lives
+/// out here; see `ModelRepr`'s own note).
+pub struct ParsedNl {
+    /// The model itself.
+    pub model: ModelRepr,
+    /// Complementarity (type-5) relations recovered from the `r` segment. Their
+    /// `body` ids reference `model.arena`.
+    pub complementarities: Vec<ComplementarityRepr>,
+    /// `(column, value)` pairs from the `x` segment, sorted by column with one
+    /// entry per column. Sparse on purpose: the segment is a *partial* map (AMPL
+    /// writes `x2` for a 5-column problem in `ex1221.nl`), and a dense vector
+    /// cannot tell "starting value 0.0" from "no starting value". Empty when the
+    /// file has no `x` segment.
+    pub initial_point: Vec<(usize, f64)>,
 }
 
 /// Parse a text-mode .nl file, returning the model together with any
@@ -750,6 +773,12 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
 pub fn parse_nl_with_complementarity(
     content: &str,
 ) -> Result<(ModelRepr, Vec<ComplementarityRepr>), NlParseError> {
+    parse_nl_full(content).map(|parsed| (parsed.model, parsed.complementarities))
+}
+
+/// Parse a text-mode .nl file into a [`ParsedNl`] — the model plus the
+/// column-indexed and relation data that does not belong inside `ModelRepr`.
+pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
     let mut reader = LineReader::new(content);
     let header = parse_header(&mut reader)?;
 
@@ -831,7 +860,11 @@ pub fn parse_nl_with_complementarity(
     let mut g_terms: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_objectives.max(1)];
 
     // Initial point
-    let mut _x0: Vec<f64> = vec![0.0; n_vars];
+    // `x` segment entries, sparse `(column, value)`: see `ParsedNl::initial_point`
+    // for why this is not a dense `vec![0.0; n_vars]` (which is what it used to be,
+    // discarded under a leading underscore — the initial point never left the
+    // parser, so a round-trip dropped it; #1225).
+    let mut initial_point: Vec<(usize, f64)> = Vec::new();
 
     // Determine variable types from header counts.
     // In .nl format the variables are ordered:
@@ -969,8 +1002,11 @@ pub fn parse_nl_with_complementarity(
                     if pts.len() >= 2 {
                         let vi = parse_usize(pts[0])?;
                         let val = parse_f64(pts[1])?;
+                        // An out-of-range column cannot be represented; ASL
+                        // ignores it too. Keeping the guard preserves the
+                        // existing tolerance for such a file.
                         if vi < n_vars {
-                            _x0[vi] = val;
+                            initial_point.push((vi, val));
                         }
                     }
                 }
@@ -1459,7 +1495,23 @@ pub fn parse_nl_with_complementarity(
         variables,
         n_vars,
     };
-    Ok((model, complementarities))
+    // One entry per column, ordered. The segment is a write sequence, so a
+    // repeated column takes its LAST value; `sort_by_key` is stable, which keeps
+    // the duplicates in file order for the fold below.
+    initial_point.sort_by_key(|&(vi, _)| vi);
+    let mut unique: Vec<(usize, f64)> = Vec::with_capacity(initial_point.len());
+    for entry in initial_point {
+        match unique.last_mut() {
+            Some(last) if last.0 == entry.0 => *last = entry,
+            _ => unique.push(entry),
+        }
+    }
+
+    Ok(ParsedNl {
+        model,
+        complementarities,
+        initial_point: unique,
+    })
 }
 
 /// Check if an ExprId is a zero constant.
@@ -1881,7 +1933,7 @@ fn transcode_binary_nl(bytes: &[u8]) -> Result<String, NlParseError> {
 /// than a confusing UTF-8 decode error, since binary bodies embed raw IEEE-754
 /// doubles that are not valid UTF-8).
 pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
-    parse_nl_file_with_complementarity(path).map(|(model, _compl)| model)
+    parse_nl_file_full(path).map(|parsed| parsed.model)
 }
 
 /// Parse a .nl file, returning the model together with any complementarity
@@ -1890,6 +1942,13 @@ pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
 pub fn parse_nl_file_with_complementarity(
     path: &str,
 ) -> Result<(ModelRepr, Vec<ComplementarityRepr>), NlParseError> {
+    parse_nl_file_full(path).map(|parsed| (parsed.model, parsed.complementarities))
+}
+
+/// Parse a `.nl` file (text or binary) into a [`ParsedNl`]. Binary input is
+/// transcoded to text first, so both encodings yield the same `ParsedNl` —
+/// including the `x` segment, which the transcoder already carries over.
+pub fn parse_nl_file_full(path: &str) -> Result<ParsedNl, NlParseError> {
     let bytes = std::fs::read(path)
         .map_err(|e| NlParseError::Parse(format!("failed to read file '{path}': {e}")))?;
 
@@ -1899,7 +1958,7 @@ pub fn parse_nl_file_with_complementarity(
     // two encodings of one model build byte-identical `ModelRepr`s.
     if let Some(b'b') = bytes.iter().find(|b| !b.is_ascii_whitespace()) {
         let text = transcode_binary_nl(&bytes)?;
-        return parse_nl_with_complementarity(&text);
+        return parse_nl_full(&text);
     }
 
     let content = std::str::from_utf8(&bytes).map_err(|e| {
@@ -1907,7 +1966,7 @@ pub fn parse_nl_file_with_complementarity(
             "failed to read file '{path}': not valid UTF-8 text .nl ({e})"
         ))
     })?;
-    parse_nl_with_complementarity(content)
+    parse_nl_full(content)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2314,6 +2373,47 @@ mod tests {
     }
 
     // ─── Test: header parsing ─────────────────────────────
+
+    // ─── Tests: the `x` segment (initial point), #1225 ────
+
+    #[test]
+    fn test_initial_point_is_captured_sparsely() {
+        // linear_nl()'s x segment gives BOTH columns the value 0.0 — the case a
+        // dense `vec![0.0; n_vars]` could not tell from "no starting value".
+        let parsed = parse_nl_full(&linear_nl()).unwrap();
+        assert_eq!(parsed.initial_point, vec![(0, 0.0), (1, 0.0)]);
+    }
+
+    #[test]
+    fn test_initial_point_empty_when_segment_absent() {
+        let nl = linear_nl().replace("x2\n0 0\n1 0\n", "");
+        assert!(!nl.contains("x2"), "fixture still carries an x segment");
+        let parsed = parse_nl_full(&nl).unwrap();
+        assert!(parsed.initial_point.is_empty());
+    }
+
+    #[test]
+    fn test_initial_point_partial_segment_names_only_its_columns() {
+        let nl = linear_nl().replace("x2\n0 0\n1 0\n", "x1\n1 2.5\n");
+        let parsed = parse_nl_full(&nl).unwrap();
+        assert_eq!(parsed.initial_point, vec![(1, 2.5)]);
+    }
+
+    #[test]
+    fn test_initial_point_repeated_column_takes_the_last_value() {
+        // The segment is a write sequence, so a later line wins.
+        let nl = linear_nl().replace("x2\n0 0\n1 0\n", "x3\n1 1\n0 7\n1 9\n");
+        let parsed = parse_nl_full(&nl).unwrap();
+        assert_eq!(parsed.initial_point, vec![(0, 7.0), (1, 9.0)]);
+    }
+
+    #[test]
+    fn test_initial_point_out_of_range_column_dropped() {
+        // Column 5 does not exist in a 2-variable problem; ASL ignores it too.
+        let nl = linear_nl().replace("x2\n0 0\n1 0\n", "x2\n5 3\n1 4\n");
+        let parsed = parse_nl_full(&nl).unwrap();
+        assert_eq!(parsed.initial_point, vec![(1, 4.0)]);
+    }
 
     #[test]
     fn test_parse_linear_header() {
