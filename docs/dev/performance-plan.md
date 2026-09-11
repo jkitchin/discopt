@@ -8155,3 +8155,80 @@ walker. Filed separately; the likely fix is routing GAMS bodies through
 creates one binary per mixed unit (`pred_q_0_3`), so vectorising changes variable
 names and column order, which is `.sol` mapping. Gather and mask indexing on array
 bodies was verified to work and export, so nothing there is structurally blocked.
+
+## 57. Retraction, and the GAMS writer's two naming/shape defects (2026-09-11)
+
+### Retraction: §55's byte-identity claim did not cover GAMS
+
+§55 reported the `full_space` vectorisation as "byte-identical across 60
+emissions". §56 then reported it re-verified at "160/160 identical across all
+four arms, GAMS included". **The second claim was false and is retracted.**
+
+`full_space.py` was already committed at that point, so the `git stash push` used
+to capture the baseline stashed **nothing**, and the comparison was the vectorised
+emitter against itself. Captured properly — by writing `65cfb6e~1`'s file content
+into the tree, asserting the marker string absent, and re-running:
+
+| arm | identical | differing |
+|---|---:|---:|
+| NL | 40 | 0 |
+| LP | 40 | 0 |
+| GAMS | 16 | **24** |
+| EVAL | 0 | 40 (object count; objectives identical) |
+
+So §55's original claim — `.nl` and LP byte-identical — **holds**. The GAMS claim
+added in §56 does not: the vectorisation *did* change GAMS output. This is the
+third time in this work that a comparison silently measured a thing against
+itself or against stale data, which is why the harness now truncates up front and
+prints byte sizes, and why a baseline must be taken from committed content rather
+than from a stash that may be empty.
+
+### Defect 1: GAMS numbered family rows from 1, alone among four writers
+
+`lp.py`, `mps.py` and the Rust builder row naming all name row *k* of a family
+`{base}_{k}`. `gams.py` used `{base}_{k + 1}`. Two consequences:
+
+- the same model exported to `.lp` and to `.gms` disagreed on every expanded
+  row's name;
+- vectorising an emitter — replacing N per-element constraints `c_0 … c_{N-1}`
+  with one family `c` — silently shifted every GAMS row name by one, while
+  leaving `.nl` and LP byte-identical. Invisible to any check that does not diff
+  GAMS, which is exactly how it shipped.
+
+Now 0-based. 163 existing GAMS tests pass unchanged — none asserted the 1-based
+form. GAMS's own set labels are 1-based (`x('1')`), which is presumably where the
+`+1` came from, but an equation *name* is not a set label.
+
+### Defect 2: `to_gams()` failed on every shape-`(1,)` variable
+
+`_write_variables` treats `shape == (1,)` as scalar and did `float(lb_arr)` on the
+length-1 (not 0-d) bound array. `float()` of such an array raises on numpy ≥ 2, so
+**`to_gams()` failed outright** for every model carrying a single-element
+variable — 16 of 40 cases in the NN harness, all and only output size 1, on the
+*unmodified* emitter. `np.ravel(...)[0]` reads the element for both shapes.
+
+This was filed as "the GAMS writer doesn't go through `_arrays.scalarize_body`".
+That diagnosis was wrong: `gams.py` *does* use the shared scalarizer for
+constraint bodies. The failure was in the variable-bound writer, which the
+harness's error text (identical to the `_arrays.py` one) made look like the same
+root cause. Both GAMS arms now emit all 40 captures.
+
+That makes **five** instances of one family in this work — shape-`(1,)` handled as
+scalar in one place and as an array in another: `needs_scalarize` ignoring a
+`Constant`'s shape, `x[0]` on a shape-`(1,)` variable, a single-row family losing
+its name index, this bound writer, and the GAMS numbering base. The pattern is
+worth a dedicated audit rather than another one-off fix.
+
+### What remains of the residual difference
+
+With GAMS 0-based, the `full_space` GAMS diff is no longer names but **expression
+nesting**: the per-element loop's `dm.sum(lambda i: …, over=…)` is an n-ary
+`SumOverExpression`, written `(a + b + c)`, while `dm.sum(array, axis=1)` expands
+to a binary fold, written `((a + b) + c)`. `.nl` and LP flatten linear terms into
+a coefficient map so both are byte-identical there; GAMS writes the tree
+textually, so it shows.
+
+Same mathematics, and reassociated floating-point addition can differ in the last
+bits of a written model. That is an understood and accepted difference rather than
+an unexplained one — which is the bar §56 said `reduced_space` had to clear before
+it could ship.

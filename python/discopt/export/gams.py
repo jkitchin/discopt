@@ -209,8 +209,16 @@ class _GamsWriter:
             lb_arr = np.asarray(var.lb)
             ub_arr = np.asarray(var.ub)
             if var.shape == () or var.shape == (1,):
-                lb_val = float(lb_arr)
-                ub_val = float(ub_arr)
+                # `float()` of a length-1 (not 0-d) array raises
+                # "only 0-dimensional arrays can be converted to Python scalars"
+                # on numpy >= 2, so a shape-(1,) variable -- which this branch
+                # deliberately treats as a scalar -- could not be exported at all.
+                # `to_gams()` failed outright for EVERY single-output embedded
+                # network (16 of 40 cases in the #1215 NN harness, all and only
+                # output size 1), and GAMS is the only route to a full-licence
+                # BARON. `ravel()[0]` reads the single element for both shapes.
+                lb_val = float(np.ravel(lb_arr)[0])
+                ub_val = float(np.ravel(ub_arr)[0])
                 if lb_val > -1e18:
                     lines.append(f"{var.name}.lo = {lb_val};")
                 if ub_val < 1e18:
@@ -308,8 +316,24 @@ class _GamsWriter:
             if len(bodies) == 1:
                 rows.append((self._sanitize_eq_name(base) or base, bodies[0], c.sense, c.rhs))
             else:
+                # Row `k` of a family is `{base}_{k}`, ZERO-based -- the same rule
+                # `lp.py`, `mps.py` and the Rust builder row naming all use. This
+                # numbered from 1, making GAMS the only one of the four formats
+                # where row k of family `c` was not called `c_k`, so the same
+                # model exported to `.lp` and to `.gms` disagreed on every
+                # expanded row's name.
+                #
+                # It also meant that vectorising an emitter -- replacing N
+                # per-element constraints named `c_0 … c_{N-1}` with one family
+                # named `c` -- silently SHIFTED every GAMS row name by one, while
+                # leaving `.nl` and LP byte-identical. That is exactly what #1215's
+                # NN-emitter work hit, and it is invisible to any check that does
+                # not diff GAMS (perf-plan §56/§57).
+                #
+                # GAMS's own set labels are 1-based (`x('1')`), which is presumably
+                # where the +1 came from, but an equation NAME is not a set label.
                 for k, body in enumerate(bodies):
-                    nm = self._sanitize_eq_name(f"{base}_{k + 1}") or f"c{i + 1}_{k + 1}"
+                    nm = self._sanitize_eq_name(f"{base}_{k}") or f"c{i + 1}_{k}"
                     rows.append((nm, body, c.sense, c.rhs))
 
         # Declare equations
