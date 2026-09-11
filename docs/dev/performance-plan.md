@@ -8232,3 +8232,56 @@ Same mathematics, and reassociated floating-point addition can differ in the las
 bits of a written model. That is an understood and accepted difference rather than
 an unexplained one — which is the bar §56 said `reduced_space` had to clear before
 it could ship.
+
+## 58. `reduced_space` vectorised, once §57 cleared the bar (2026-09-11)
+
+§56 reverted this change because it altered emitted output in two ways that were
+not explained. §57 explained and fixed one of them (GAMS numbered family rows
+1-based, alone among four writers) and accounted for the other (an array
+reduction expands to a binary `+` fold where `dm.sum(lambda …)` was an n-ary
+`SumOverExpression`). With that, the change ships.
+
+### Verification
+
+Four regimes, re-captured against the loop version:
+
+| arm | identical | differing | reading |
+|---|---:|---:|---|
+| NL | 10 | 30 | sum opcode `o54 n` → nested `o0`; numbers unchanged |
+| LP | 40 | 0 | all refusals both sides — no coverage, no regression |
+| GAMS | 0 | 40 | **row names identical**; parenthesisation differs |
+| EVAL | 0 | 40 | **objectives identical**; only the object count moved |
+
+The two checks that matter both come back clean: **GAMS row names differ in 0 of
+40**, and **arena objectives differ in 0 of 40** at every sampled point. Every
+remaining difference is the fold-vs-n-ary encoding, which §57 accepted as
+understood: same mathematics, and reassociated floating-point addition can differ
+in a written model's last bits.
+
+### Result
+
+| architecture | rows | vectorised µs/row | per-element µs/row | |
+|---|---:|---:|---:|---:|
+| 10-32-32-1 | 75 | 164.7 | 242.0 | 1.47× |
+| 20-64-64-1 | 149 | 295.6 | 434.2 | 1.47× |
+| 20-128-128-1 | 277 | 527.8 | 809.1 | 1.53× |
+| 40-256-256-1 | 553 | **1090.9** | 1846.4 | **1.69×** |
+
+Load 0.05/0.12, back to back. Construction again goes to essentially nothing —
+0.220 s → 0.001 s on the largest net, ~220×.
+
+**1.47–1.69×, below `full_space`'s 1.8–2.0×**, and for a structural reason worth
+recording: `reduced_space` fuses each layer's affine map *and* activation into one
+body, so it emits about half the rows for the same network but each is a much
+larger expression. The writer therefore dominates more completely, and the writer
+is the part vectorising does least for. Its absolute µs/row is also ~3× worse than
+`full_space` at the same architecture — the fused form trades rows for expression
+size, and the `.nl` writer is priced per node, not per row.
+
+### Remaining
+
+`relu_bigm` and `tree_ensemble`. `relu_bigm` still carries the wrinkle its
+siblings do not: it creates one binary per *mixed* unit, so vectorising changes
+variable names and column order, which is `.sol` mapping — and §57's lesson is
+that a name change in one format can hide while another stays byte-identical, so
+that one needs the GAMS and LP arms read explicitly, not just `.nl`.
