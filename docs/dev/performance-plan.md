@@ -8535,3 +8535,112 @@ future panel in this file must (a) sample the corpus row-count distribution
 rather than round numbers, (b) interleave arms, (c) report a spread, and (d) say
 which idiom it measured. §48's tables stay in the file as the record of what was
 claimed; they are superseded by this section.
+
+## 63. #1215's remaining candidates, and where the per-element path ended up (2026-09-11)
+
+§62 left the per-element path at **1.37× Pyomo like-for-like** with two of
+#1215's five candidates untouched. This section closes them and records the
+final position. All figures from the standing benchmark
+(`bench_model_construction.py --mode headline --reps 5`) on #1215's own model —
+40 forms × 5 000 = 200 000 constraint instances — arms interleaved, spread
+reported, load 0.89.
+
+### What the entry experiment found: the bottleneck had moved
+
+Before building anything, `--mode attribution` and `--mode alloc` were re-run
+against #1215's own numbers. Both had shifted:
+
+- #1215 measured **89% of construction inside expression-node creation** and 11%
+  in indexed-family bookkeeping. Re-measured: expression nodes are **37%**, and
+  the family-bookkeeping side is 63%.
+- #1215's top allocation site, `Constant.value = np.asarray(...)` at 182
+  B/instance, is **no longer in the table at all** — the linear-fusion work
+  removed the per-row `Constant` from linear bodies rather than changing how a
+  `Constant` stores its value.
+
+So the two candidates aimed at node creation were no longer where the money was.
+Profiling one family put **68% of its build in the indexing chain**, and
+profiling the headline model put `indexed.py::__getitem__` + `Set.ordinal` +
+`_normalize_member` + `Variable.__getitem__` at **25% of the whole build**.
+
+### Candidate 1 was only half-done
+
+#1215 names it "cache the `IndexExpression` per position on `IndexedVar`". The
+cache had been put on the flat `Variable` (`_elem_cache`, keyed by position), so
+`x[i]` was canonical — but `IndexedVar[key]` still reached it through
+`Set.ordinal(key)` (`_normalize_member`, a membership test, a dict read) and then
+through `Variable.__getitem__`'s own type test and dict read, on every access.
+A set's members are fixed at construction, so `key -> node` is a fixed mapping;
+`IndexedVar._key_cache` memoises it.
+
+This is why the first fast path below barely moved the headline: that model
+shares **one** index set across all 40 forms, so 39 of 40 index operations
+already hit the flat cache. The per-family measurement (9.175 → 5.657
+µs/instance) and the headline measurement disagreed for a *structural* reason,
+not a measurement-error one — worth remembering the next time a large win
+evaporates at the panel.
+
+### Candidate 4: the 1-D integer index
+
+A plain `int` into a 1-D variable — every `x[i]` in an indexed family — was
+re-deriving an answer fixed by the shape: `_known_shape` twice (a tuple copy
+each), `_pure_integer_index`, `_index_result_shape`, `_integer_index_out_of_range`.
+`Variable.__getitem__` now does the bounds test itself and passes the result
+shape to `IndexExpression` through `shape_hint=`. The accepted range and the
+`IndexError` text are `_integer_index_out_of_range`'s verbatim, and `()` is what
+`_index_result_shape` returns for `base_shape[1:]`.
+
+### Candidate 3: constraint names are lazy
+
+Formatting one `"family[label]"` string per row at build time, for metadata the
+solve path never reads. Timed on its own: **+0.497 µs/instance** (median of 15
+reps with warm-up discarded and a `gc.collect()` per build; +0.510 on the
+minima), ~9% of the then-current 5.29 µs. `Model.constraint` now records the two
+objects the name is made of — the family string (one object, shared by every
+row) and the member (about to become a key of the family's `members` dict) — so
+the store allocates nothing, and `Constraint.name` formats on first read.
+
+`name` had to become a property, which a `@dataclass` field cannot also be; it
+is installed after the class body. The generated `__init__` captured its own
+default, so the constructor signature, `dataclasses.fields()` and
+`dataclasses.replace()` are unaffected.
+
+### Result
+
+| | #1215 (`c052e85`) | §62 (`fdca93a`) | now |
+|---|---:|---:|---:|
+| discopt build | 3.278 s · 16.1 µs/inst | 1.152 s · 5.76 | **0.944 s · 4.72** |
+| discopt retained | 203.3 MB · 1017 B/inst | 93.6 MB · 468 | **86.9 MB · 435** |
+| vs Pyomo, time, **like-for-like** | **2.1×** | 1.37× | **1.09×** |
+| vs Pyomo, time, as written | — | 0.741× | 0.534× |
+| vs Pyomo, retained | **1.9×** | 0.992× | **0.922×** |
+
+Spreads, 5 interleaved reps: discopt sd 0.0328 s, pyomo-gc sd 0.0130 s. The
+remaining 0.080 s gap is **2.3 pooled sd** — small, but not noise. Quote the
+like-for-like row: the as-written row credits discopt for tuning GC inside
+`Model.constraint` where Pyomo leaves that to the caller (`PauseGC`).
+
+**Bound-neutral, verified rather than argued** (CLAUDE.md §5). All 16 in-repo
+corpus instances with a reference optimum, solved on this tree and on a
+`fdca93a` worktree, comparing `(status, objective, bound, node_count)` as exact
+strings: **64 comparisons, 0 drift**. Each arm asserts the three markers unique
+to the change are present (new) or absent (old) before solving anything, so a
+run against the wrong tree cannot read as a pass (§8).
+
+### What is left, and why it is not being taken
+
+- **Candidate 2 (stop wrapping scalar constants in numpy arrays)** — #1215
+  measured it at 182 B/instance, 19% of retained memory. It is *no longer a top
+  allocation site*: the linear-fusion work removed the per-row `Constant` from
+  linear bodies, and memory is now **below** Pyomo's. `Constant.value` is still
+  an `ndarray`, and the issue's own note stands — consumers read `.value`
+  expecting one, so it needs its own scoping. There is no longer a measurement
+  justifying it.
+- **Candidate 5 (a flat/arena construction path)** — #1215 lists it "for
+  completeness, not proposed here". The vectorised idiom answers the same
+  question from the other side at 0.00465 µs/instance.
+- **The top allocation site is now the `<=` normalization itself** —
+  `Constraint(BinaryOp("-", self, rhs), sense="<=", rhs=0.0)`, 216 B/instance.
+  #1215 already diagnosed this as "a real trade, not an oversight": 26 modules
+  read `.body` and never `.rhs`. Changing it is a normalized-body contract
+  change, not a construction optimisation.
