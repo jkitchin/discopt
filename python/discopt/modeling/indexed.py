@@ -79,10 +79,46 @@ class IndexedVar:
         self.flat = flat
         self.index_set = index_set
         self.name = flat.name
+        #: `key` -> the canonical `IndexExpression` for that member. See
+        #: `__getitem__`.
+        self._key_cache: dict = {}
 
     def __getitem__(self, key: Hashable) -> "IndexExpression":
-        pos = self.index_set.ordinal(key)
-        return cast("IndexExpression", self.flat[pos])
+        """``x[key]`` -- the SAME node object every time, keyed by the member.
+
+        `Variable.__getitem__` already canonicalises by flat POSITION, but every
+        `x[key]` still had to reach it through `Set.ordinal(key)` --
+        `_normalize_member`, a membership test and a dict read -- and then
+        through `Variable.__getitem__`'s own type test and dict read. Measured on
+        the #1215 headline model (40 forms x 5 000 over one shared set, so 80 000
+        of these per 40 000 rows), that chain was **25% of the whole build**,
+        spent re-deriving a position that cannot change: a set's members are
+        fixed at construction, so `(key -> node)` is a fixed mapping.
+        Issue #1215 names this as candidate 1, "cache the IndexExpression per
+        position on IndexedVar"; caching on the flat `Variable` alone left this
+        layer paying full price.
+
+        A miss falls through to exactly the old path, so an unknown key still
+        raises `ordinal`'s `KeyError` naming the set. An *unhashable* key -- a
+        list, which `_normalize_member` coerces to a tuple and which therefore
+        indexed fine before this cache existed -- cannot be a dict key at all,
+        so it takes the uncached path rather than becoming a new `TypeError`;
+        `Set.ordinal` still raises for a list that is not a member.
+
+        Keys that a dict considers equal (`0` / `False` / `0.0`) share a cache
+        entry, which is the pre-existing behaviour: `Set._index` is a dict too,
+        so `ordinal` already collapsed them onto one position.
+        """
+        try:
+            node = self._key_cache.get(key)
+        except TypeError:
+            # Unhashable key (a list). Not an error -- see the docstring.
+            return cast("IndexExpression", self.flat[self.index_set.ordinal(key)])
+        if node is None:
+            pos = self.index_set.ordinal(key)
+            node = cast("IndexExpression", self.flat[pos])
+            self._key_cache[key] = node
+        return node
 
     def __iter__(self):
         return iter(self.index_set)

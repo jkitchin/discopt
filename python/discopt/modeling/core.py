@@ -940,11 +940,32 @@ class Variable(Expression):
         """
         if type(idx) is int or (type(idx) is tuple and all(type(v) is int for v in idx)):
             node = self._elem_cache.get(idx)
-            if node is None:
+            if node is not None:
+                return node
+            shape = self._shape
+            if type(idx) is int and type(shape) is tuple and len(shape) == 1:
+                # THE construction hot path: a plain int into a 1-D variable,
+                # which is what every `x[i]` in an indexed family is. The general
+                # route below re-derives an answer that is fixed for this shape --
+                # `_known_shape` twice (a tuple copy each), `_pure_integer_index`,
+                # `_index_result_shape` and `_integer_index_out_of_range`, ~40% of
+                # a family build's wall (#1215). Here the result shape is `()` for
+                # every in-range index, and the only real work is the bounds test.
+                #
+                # Identical to the general path by construction, not by luck:
+                # the range accepted (`-n <= i < n`) and the IndexError message
+                # are `_integer_index_out_of_range`'s verbatim, and `()` is what
+                # `_index_result_shape` returns for `base_shape[1:]`.
+                # `test_1215_index_fast_path_equivalence.py` asserts the grid.
+                n = shape[0]
+                if idx < -n or idx >= n:
+                    raise IndexError(f"index {idx} is out of bounds for axis 0 with size {n}")
+                node = IndexExpression(self, idx, shape_hint=())
+            else:
                 # Through the base implementation, so the out-of-range guard on
                 # the `[]` operator still runs before anything is cached.
                 node = Expression.__getitem__(self, idx)
-                self._elem_cache[idx] = node
+            self._elem_cache[idx] = node
             return node
         return Expression.__getitem__(self, idx)
 
@@ -1049,9 +1070,20 @@ def _integer_index_out_of_range(base_shape: tuple[int, ...], idx):
 class IndexExpression(Expression):
     """Result of indexing into an array variable: x[i] or x[0, 1]."""
 
-    def __init__(self, base: Expression, index):
+    def __init__(self, base: Expression, index, *, shape_hint=_UNSET_SHAPE):
         self.base = base
         self.index = index
+        # `shape_hint` is the construction fast path (#1215 candidate 4): a
+        # caller that has already established the result shape passes it here
+        # instead of making this constructor re-derive it. `Variable.__getitem__`
+        # is the only user -- for a plain `int` into a 1-D variable the answer is
+        # always `()`, and deriving it cost TWO `_known_shape` calls (each
+        # copying a tuple), `_pure_integer_index`, and a range scan that
+        # `__getitem__` had just run. Everything else still goes through the
+        # inference below, unchanged.
+        if shape_hint is not _UNSET_SHAPE:
+            self._shape = shape_hint
+            return
         # Best-effort static shape inference only (issue #816). Construction is
         # intentionally non-raising: the out-of-bounds guard lives on the ``[]``
         # operator (:meth:`Expression.__getitem__`) so that direct
@@ -2228,7 +2260,9 @@ class Constraint:
         ``Model.validate`` rather than silently ignored (#909). Build rows with
         the comparison operators, which fold the offset into ``body`` for you.
     name : str or None
-        Optional name for debugging and explanation.
+        Optional name for debugging and explanation. Read and written as an
+        ordinary attribute; a row built by :meth:`Model.constraint` computes it
+        lazily on first read (see ``_constraint_name_get``).
     """
 
     body: Expression
@@ -2254,6 +2288,54 @@ class Constraint:
             "almost always a mistake. Add it with m.subject_to(...); to test an "
             "expression's identity use 'is' or a set/dict keyed by the object."
         )
+
+
+# ── Constraint.name: materialized on first read (issue #1215, candidate 3) ──
+#
+# A named indexed family formats one `"family[label]"` string per row at BUILD
+# time, for metadata nothing on the solve path reads: the issue measures it at
+# 49 B/instance retained (200 000 strings on its headline model) and, timed
+# on its own, 0.497 us/instance of the 5.29 us build -- ~9%.
+#
+# `Model.constraint` therefore records the two *already-live* objects the name
+# is made of (the family name string, shared by every row; the member, already
+# a key of the family's `members` dict) and lets the getter below do the
+# formatting if and when someone asks. Nothing is allocated until then.
+#
+# The property is installed after the class because a `@dataclass` field and a
+# `property` cannot both be spelled in the class body: the generated `__init__`
+# captured `name=None` in its own defaults, so replacing the class attribute
+# here leaves the signature, `dataclasses.fields()` and `dataclasses.replace()`
+# untouched -- `replace()` reads the name back through this getter.
+#
+# Class-level `None`s keep an unnamed row's instance dict free of all three.
+Constraint._name = None
+Constraint._name_family = None
+Constraint._name_key = None
+
+
+def _constraint_name_get(self) -> Optional[str]:
+    family = self._name_family
+    if family is not None:
+        from discopt.modeling.indexed import key_label
+
+        key = self._name_key
+        label = key_label(key) if type(key) is tuple else str(key)
+        self._name = f"{family}[{label}]"
+        # Clear the pending marker so the format runs once, not once per read.
+        self._name_family = None
+    return self._name
+
+
+def _constraint_name_set(self, value: Optional[str]) -> None:
+    self._name = value
+    # An explicit assignment always wins over a pending family name. Guarded so
+    # the common case (nothing pending) adds no instance-dict entry.
+    if self._name_family is not None:
+        self._name_family = None
+
+
+Constraint.name = property(_constraint_name_get, _constraint_name_set)  # type: ignore[assignment]
 
 
 def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int = -1) -> None:
@@ -3902,7 +3984,7 @@ class Model:
         --------
         >>> m.constraint(plants, lambda p: ship_out(p) <= cap[p], name="capacity")
         """
-        from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
+        from discopt.modeling.indexed import IndexedConstraint, Skip
         from discopt.modeling.sets import call_member
 
         # A family is the bulk path: every row it builds is reachable, so each
@@ -3927,12 +4009,14 @@ class Model:
                         f"constraint rule for key {member!r} returned {type(c)}, "
                         "expected a Constraint (from <=, >=, == on expressions) or Skip."
                     )
-                # `key_label`'s tuple branch is the rare one; a plain member goes
-                # straight to `str` here rather than through a call that only
-                # does an `isinstance` first (200 000 calls per 200 000 rows).
+                # The name is recorded, not formatted: both objects are already
+                # alive (``name`` is one string shared by the whole family,
+                # ``member`` is about to become a key of ``members``), so this
+                # costs two stores and no allocation. ``Constraint.name``
+                # formats on first read -- see ``_constraint_name_get``.
                 if name:
-                    label = key_label(member) if type(member) is tuple else str(member)
-                    c.name = f"{name}[{label}]"
+                    c._name_family = name
+                    c._name_key = member
                 else:
                     c.name = None
                 members[member] = c
