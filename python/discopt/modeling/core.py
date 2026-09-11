@@ -44,6 +44,7 @@ from typing import (
     Optional,
     Sequence,
     Union,
+    cast,
     overload,
 )
 
@@ -2324,7 +2325,11 @@ def _constraint_name_get(self) -> Optional[str]:
         self._name = f"{family}[{label}]"
         # Clear the pending marker so the format runs once, not once per read.
         self._name_family = None
-    return self._name
+    # `_name` is only ever written by this function or `_constraint_name_set`,
+    # both of which write `Optional[str]`; the class-level default is `None`.
+    # The cast is needed because the three defaults are installed on the class
+    # after the `@dataclass` body, so mypy sees them as untyped.
+    return cast(Optional[str], self._name)
 
 
 def _constraint_name_set(self, value: Optional[str]) -> None:
