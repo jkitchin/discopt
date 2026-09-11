@@ -74,8 +74,13 @@ def to_nl(
         ``x`` section so the reading solver starts from it; variables left out
         of the dict are left out of the section (no guess is invented for them).
         Values are validated, bound-clamped and integrality-rounded by
-        :func:`discopt.warm_start.validate_initial_solution` first. Omitted (or
-        ``{}``) writes no ``x`` section at all.
+        :func:`discopt.warm_start.validate_initial_solution` first.
+
+        ``None`` (the default) writes the point **attached to the model** —
+        ``from_nl`` attaches a source file's ``x`` segment (#1225), and
+        :meth:`Model.set_initial_point` attaches one explicitly — or no section
+        at all when the model carries none. Passing ``{}`` writes no section
+        even when the model does carry one; an explicit argument always wins.
 
     Returns
     -------
@@ -94,10 +99,12 @@ def to_nl(
     # would block a correct export over a defect that only affects solving.
     # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
     model.validate(for_solve=False)
-    # The Rust writer emits no `x` section (#1224), so an explicit initial point
-    # has to go down the Python path -- taking the fast path would SILENTLY drop
-    # the guess the caller asked for.
-    text = None if initial_point is not None else _rust_nl_text(model)
+    # An explicit starting point has to go down the Python path: the Rust writer
+    # emits no `x` section and does not see this argument at all. A point carried
+    # BY THE MODEL is handled inside `_rust_nl_text`, which is where that
+    # capability check belongs -- every caller of the Rust writer needs it, not
+    # just this one.
+    text = None if initial_point else _rust_nl_text(model)
     if text is None:
         writer = _NLWriter(model, initial_point=initial_point)
         text = writer.write()
@@ -146,6 +153,17 @@ def _rust_nl_text(model: Model) -> Optional[str]:
     # the two writers agree byte for byte and row order -- how a solver's `.sol`
     # duals map back to constraints -- is unchanged from what discopt has always
     # written.
+    # The Rust writer emits no `x` section (#1224/#1225), so it cannot represent a
+    # model that carries a starting point -- one `from_nl` read out of a source
+    # file, or one `set_initial_point` attached. Refusing here rather than in
+    # `to_nl` keeps the capability check with the writer: a caller that reaches
+    # for this function directly would otherwise get text that SILENTLY dropped
+    # the point. Measured when this was missing: 52 of the 66 corpus instances
+    # lost their `x` section on a read/write round-trip -- a regression against
+    # what #1226 made work.
+    if getattr(model, "_initial_point", None):
+        _RUST_NL_LOG.debug("Rust .nl writer declined: model carries a starting point")
+        return None
     try:
         repr_ = model_to_repr(model, getattr(model, "_builder", None))
         # Through a typed local: `write_nl` comes from the PyO3 extension, whose
@@ -276,11 +294,18 @@ class _NLWriter:
     def __init__(self, model: Model, initial_point: Union[dict, None] = None):
         self.model = model
         # (name, element) -> initial value, for the optional x section. Empty
-        # when the caller supplied no guess, in which case no x section is
-        # written (the pre-#1222 behaviour, which was the only behaviour).
-        self._initial_point: dict[tuple[str, int], float] = (
-            _keyed_initial_point(model, initial_point) if initial_point else {}
-        )
+        # means no x section is written (the pre-#1222 behaviour, which was the
+        # only behaviour). ``None`` falls back to the point attached to the
+        # model -- what ``from_nl`` read out of a source file, or what
+        # ``set_initial_point`` put there -- so a read/write round-trip keeps it
+        # (#1225); an explicit argument wins, and an explicit ``{}`` suppresses
+        # the section even for a model that carries a point.
+        if initial_point is None:
+            self._initial_point: dict[tuple[str, int], float] = dict(model._initial_point)
+        elif initial_point:
+            self._initial_point = _keyed_initial_point(model, initial_point)
+        else:
+            self._initial_point = {}
         # Flatten all variables to a single indexed list
         # .nl format: continuous first, then binary, then integer (at end)
         self._flat_vars: list[tuple[Variable, int]] = []  # (var, element_idx)

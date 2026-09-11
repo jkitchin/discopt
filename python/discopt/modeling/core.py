@@ -3171,6 +3171,14 @@ class Model:
         # default, so it never changes behaviour with the flag off.
         self._zero_spanning_factor_auxes: set[str] = set()
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
+        # Starting point for the model's variables, keyed ``(var name, element)``
+        # -> value (#1225). A *partial* map: only elements someone actually gave
+        # a value for appear, so an absent key means "no guess" rather than
+        # "guess 0.0". Populated by ``from_nl`` from a ``.nl`` file's ``x``
+        # segment and by ``set_initial_point``; read back by ``to_nl`` when no
+        # explicit ``initial_point=`` is passed. It is a hint for an exporter,
+        # not solver input — nothing on the solve path reads it.
+        self._initial_point: dict[tuple[str, int], float] = {}
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
         # Complementarity conditions added via ``complementarity()``/``mcp()``;
         # recorded for introspection and bound tightening (see ``discopt.mpec``),
@@ -6176,6 +6184,55 @@ class Model:
 
         return to_gams(self, path, model_type)
 
+    def set_initial_point(self, mapping: dict) -> None:
+        """Attach a starting point to the model, for export.
+
+        Parameters
+        ----------
+        mapping : dict
+            ``{Variable: value}`` in the same form :meth:`solve`'s
+            ``initial_solution`` and :meth:`to_nl`'s ``initial_point`` take
+            (scalars, lists or arrays, matching each variable's shape). Values
+            are validated, bound-clamped and integrality-rounded by
+            :func:`discopt.warm_start.validate_initial_solution`, each with a
+            warning. Replaces any point already attached; ``{}`` clears it.
+
+        Notes
+        -----
+        The point is a hint carried to the exporters -- :meth:`to_nl` writes it
+        as the ``.nl`` ``x`` segment. Nothing on the solve path reads it; warm
+        starting is still ``solve(initial_solution=...)``, deliberately, so that
+        reading a model from a file does not silently change how it is solved
+        (#1225).
+
+        A point attached by :func:`from_nl` instead carries the source file's
+        values **verbatim**, unclamped, so a round-trip reproduces the file; only
+        this setter validates, because only this setter takes user input.
+        """
+        from discopt.export.nl import _keyed_initial_point
+
+        self._initial_point = _keyed_initial_point(self, mapping) if mapping else {}
+
+    @property
+    def initial_point(self) -> dict:
+        """The attached starting point as ``{Variable: {element: value}}``.
+
+        Element-keyed rather than array-valued because the point is a *partial*
+        map: a ``.nl`` ``x`` segment names only the columns it has a value for
+        (AMPL writes an ``x2`` block for the 5-variable ``ex1221``), and there is
+        no array encoding of "this element has no guess" that is not a sentinel.
+        A scalar variable reads as ``{var: {0: value}}``. Empty when no point is
+        attached. The returned dict is a fresh copy; mutate it and nothing
+        happens -- use :meth:`set_initial_point`.
+        """
+        by_var: dict = {}
+        for var in self._variables:
+            for elem in range(var.size):
+                value = self._initial_point.get((var.name, elem))
+                if value is not None:
+                    by_var.setdefault(var, {})[elem] = value
+        return by_var
+
     def to_nl(
         self,
         path: Union[str, None] = None,
@@ -6194,8 +6251,10 @@ class Model:
         initial_point : dict, optional
             ``{Variable: value}`` starting guess (same form as
             :meth:`solve`'s ``initial_solution``), written as the ``.nl`` ``x``
-            section. Variables omitted from the dict get no entry. Without it
-            no ``x`` section is written.
+            section. Variables omitted from the dict get no entry. Leave it
+            ``None`` to write the point attached to the model (by
+            :func:`from_nl` or :meth:`set_initial_point`), or pass ``{}`` to
+            write no ``x`` section even when one is attached.
 
         Returns
         -------
@@ -6655,6 +6714,13 @@ def model_from_repr(rep, name: str) -> Model:
 
     Complementarity relations are **not** reconstructed here — they live
     outside ``ModelRepr`` and are threaded separately by :func:`from_nl`.
+
+    The ``x``-segment starting point *is* attached here (#1225). It lives
+    outside ``ModelRepr`` for the same reason as the complementarities, and for
+    a *reduced* ``rep`` it is empty by construction — the Rust side gives every
+    transform's output an empty point rather than letting it inherit column
+    indices the transform renumbered — so this is uniform without being wrong
+    for the presolve caller.
     """
     from discopt._relax.nl_reconstruction import reconstruct_dag
 
@@ -6708,7 +6774,50 @@ def model_from_repr(rep, name: str) -> Model:
         elif sense == "==":
             m.subject_to(body_expr == rhs)
 
+    _attach_repr_initial_point(m, rep)
+
     return m
+
+
+def _attach_repr_initial_point(m: Model, rep) -> None:
+    """Attach ``rep``'s column-indexed starting point to ``m``'s variables.
+
+    ``rep.initial_point()`` is ``[(column, value), …]`` over the *flat* scalar
+    column space. Variables were created above in block order, so that space is
+    the model's own flat variable vector (the contract stated in
+    :func:`model_from_repr`'s docstring) and a running offset resolves each
+    column to its ``(variable, element)``.
+
+    Values are carried **verbatim** — no bound clamping, no integrality
+    rounding. They are a faithful copy of what the source file said, and
+    re-exporting them has to reproduce it; the clamping belongs to
+    :meth:`Model.set_initial_point`, which takes user input instead.
+
+    A column outside the model's variables would mean the parser and this
+    builder disagree about the column space, so it raises rather than being
+    skipped: silently dropping it would attach a starting point that is quietly
+    missing entries.
+    """
+    entries = rep.initial_point()
+    if not entries:
+        return
+
+    # Flat column -> (variable, element), built once.
+    columns: list[tuple[str, int]] = []
+    for var in m._variables:
+        for elem in range(var.size):
+            columns.append((var.name, elem))
+
+    keyed: dict[tuple[str, int], float] = {}
+    for column, value in entries:
+        if not 0 <= column < len(columns):
+            raise ValueError(
+                f"initial-point column {column} is outside the model's "
+                f"{len(columns)} scalar variables; the .nl parser and the model "
+                "builder disagree about the column space"
+            )
+        keyed[columns[column]] = float(value)
+    m._initial_point = keyed
 
 
 def from_nl(path: str) -> Model:

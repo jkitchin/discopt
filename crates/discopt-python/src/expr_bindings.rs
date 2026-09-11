@@ -30,18 +30,23 @@ pub struct PyModelRepr {
     /// that reordering the identity — the right default for a repr that came
     /// from a `.nl` parse or from a pass that rebuilt the constraint list.
     n_builder_constraints: usize,
+    /// `(column, value)` starting-point entries from a `.nl` file's `x` segment
+    /// (empty for models built any other way, and for every model a transform
+    /// below produces). Indexed **by column**, which is why it sits out here
+    /// rather than in `ModelRepr`: every presolve transform may remove, fix or
+    /// renumber columns, so a transform's output must start from empty instead
+    /// of inheriting indices that no longer mean anything (#1225).
+    initial_point: Vec<(usize, f64)>,
 }
 
 impl PyModelRepr {
-    /// Create a PyModelRepr carrying complementarity relations recovered from a
-    /// `.nl` parse (crate-internal). Pass an empty vector for models with none.
-    pub(crate) fn from_model_repr_with_complementarity(
-        model: ModelRepr,
-        complementarities: Vec<ComplementarityRepr>,
-    ) -> Self {
+    /// Create a PyModelRepr from a `.nl` parse, carrying the recovered
+    /// complementarity relations and `x`-segment starting point (crate-internal).
+    pub(crate) fn from_parsed_nl(parsed: discopt_core::nl_parser::ParsedNl) -> Self {
         Self {
-            inner: model,
-            complementarities,
+            inner: parsed.model,
+            complementarities: parsed.complementarities,
+            initial_point: parsed.initial_point,
             // A repr recovered from a `.nl` parse has no builder rows.
             n_builder_constraints: 0,
         }
@@ -122,6 +127,19 @@ impl PyModelRepr {
     /// Variable upper bounds (flat).
     fn var_ub(&self, index: usize) -> Vec<f64> {
         self.inner.variables[index].ub.clone()
+    }
+
+    /// `.nl` `x`-segment starting point as `[(column, value), ...]`, sorted by
+    /// column, one entry per column.
+    ///
+    /// A *partial* map, deliberately: the segment names only the columns the
+    /// file gave a starting value for, and a dense vector could not tell
+    /// "starting value 0.0" from "no starting value". Empty for a model that
+    /// did not come from a `.nl` file and for every model a transform on this
+    /// class produces — those renumber columns, so inheriting the entries would
+    /// mean inheriting stale indices (#1225).
+    fn initial_point(&self) -> Vec<(usize, f64)> {
+        self.initial_point.clone()
     }
 
     /// Tighten variable block `block_idx`'s element-wise bounds by
@@ -762,6 +780,7 @@ impl PyModelRepr {
                 n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
+                initial_point: Vec::new(),
             },
             dict.into(),
         ))
@@ -792,6 +811,7 @@ impl PyModelRepr {
                 n_builder_constraints: 0,
                 inner: new_model,
                 complementarities: Vec::new(),
+                initial_point: Vec::new(),
             },
             dict.into(),
         ))
@@ -1184,6 +1204,7 @@ impl PyModelRepr {
                 n_builder_constraints: 0,
                 inner: result.model,
                 complementarities: Vec::new(),
+                initial_point: Vec::new(),
             },
             stats.into(),
         ))
@@ -1206,9 +1227,14 @@ impl PyModelRepr {
         if !self.complementarities.is_empty() {
             return Ok((
                 PyModelRepr {
+                    // Refusal path: the model is returned unchanged, columns and
+                    // all, so the starting point is still valid and is kept.
+                    // The builder-row boundary does not survive a repr rebuilt
+                    // here, so it stays 0 as everywhere off `model_to_repr`.
                     n_builder_constraints: 0,
                     inner: self.inner.clone(),
                     complementarities: self.complementarities.clone(),
+                    initial_point: self.initial_point.clone(),
                 },
                 PySubstitutionChain {
                     models: vec![self.inner.clone()],
@@ -1225,6 +1251,7 @@ impl PyModelRepr {
                 n_builder_constraints: 0,
                 inner: reduced,
                 complementarities: Vec::new(),
+                initial_point: Vec::new(),
             },
             PySubstitutionChain {
                 models,
@@ -1668,6 +1695,8 @@ pub fn model_to_repr(
         inner,
         complementarities: Vec::new(),
         n_builder_constraints,
+        // Built from a Python Model, not parsed from a `.nl` file: no `x` segment.
+        initial_point: Vec::new(),
     })
 }
 
