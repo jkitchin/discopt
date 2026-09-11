@@ -82,6 +82,20 @@ import pyomo.environ as pyo
 from discopt.export import to_nl
 from discopt.modeling import Model
 
+#: Default sizes, kept at the values the recorded oximo TSVs in
+#: ``scripts/oximo_arm/`` were measured at so a stored arm still combines.
+#: They are ROUND NUMBERS, not corpus row counts, and ``performance-plan.md``
+#: §62 retracted the headline multipliers measured at them: MINLPLib's row
+#: distribution is p25=9, p50=111, p75=945, p90=4009, p99=68072, so 100 000 is
+#: past the corpus p99 and no in-repo instance reaches even 1 000. §62's binding
+#: rule is that a panel must sample that distribution -- pass ``--sizes`` (and
+#: the oximo arm's matching ``--sizes``) to do so:
+#:
+#:     --sizes 9,111,945,4009,68072
+#:
+#: The default is left alone rather than changed in place because both arms
+#: hardcode it and the combiner joins on ``rows``: moving it here alone would
+#: make every recorded oximo TSV uncombinable.
 SIZES = (1_000, 10_000, 100_000)
 REPS = 3
 INF = 1e20
@@ -442,14 +456,14 @@ def _nl_shape(tool, model):
     return int(header[1]), int(header[0])
 
 
-def _measure(emit):
+def _measure(emit, sizes=SIZES):
     """Run the Python arms, calling ``emit(row)`` per point as it completes."""
     import tempfile
 
     rows_out = []
     for (tool, idiom), fams in ARMS.items():
         for fam, build in fams.items():
-            for n in SIZES:
+            for n in sizes:
                 cons, writes = [], []
                 rows = vars_ = 0
                 for _ in range(REPS):
@@ -550,12 +564,12 @@ def _memory_child(tool, idiom, family, n):
     )
 
 
-def _measure_memory(emit):
+def _measure_memory(emit, sizes=SIZES):
     """Spawn one child per point; a shared process would pool freed memory."""
     rows_out = []
     for (tool, idiom), fams in ARMS.items():
         for fam in fams:
-            for n in SIZES:
+            for n in sizes:
                 proc = subprocess.run(
                     [sys.executable, "-u", __file__, "--memory-child", tool, idiom, fam, str(n)],
                     capture_output=True,
@@ -596,6 +610,15 @@ def main(argv=None) -> int:
         metavar=("TOOL", "IDIOM", "FAMILY", "ROWS"),
         help=argparse.SUPPRESS,  # internal: one measurement, one fresh process
     )
+    ap.add_argument(
+        "--sizes",
+        metavar="N,N,...",
+        help="row counts to measure, comma-separated (default: "
+        f"{','.join(str(n) for n in SIZES)}). Per performance-plan.md §62 a panel "
+        "must sample the corpus row-count distribution -- 9,111,945,4009,68072 are "
+        "MINLPLib's p25/p50/p75/p90/p99. The oximo arm must be run at the same "
+        "sizes for the arms to combine.",
+    )
     args = ap.parse_args(argv)
 
     if args.memory_child:
@@ -605,7 +628,13 @@ def main(argv=None) -> int:
 
     mode = "memory" if args.memory else "time"
     cols = _MODES[mode]["cols"]
-    print(f"# load: {os.getloadavg()[0]:.2f}", file=sys.stderr)
+    if args.sizes:
+        sizes = tuple(int(t) for t in args.sizes.split(","))
+        if not sizes or any(n < 1 for n in sizes):
+            raise ValueError(f"--sizes must be positive row counts, got {args.sizes!r}")
+    else:
+        sizes = SIZES
+    print(f"# load: {os.getloadavg()[0]:.2f}  sizes: {list(sizes)}", file=sys.stderr)
 
     rows = []
     if args.from_tsv:
@@ -613,7 +642,8 @@ def main(argv=None) -> int:
             rows += _parse_tsv(path, cols)
     else:
         print("\t".join(cols))
-        rows = (_measure_memory if args.memory else _measure)(lambda r: _emit_tsv(r, cols))
+        measure = _measure_memory if args.memory else _measure
+        rows = measure(lambda r: _emit_tsv(r, cols), sizes)
 
     if args.oximo:
         rows += _parse_tsv(args.oximo, cols)
