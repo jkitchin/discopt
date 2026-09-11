@@ -30,6 +30,7 @@ from typing import Any, Union, cast
 
 import numpy as np
 
+from discopt.export._common import refuse_non_algebraic_relations
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -174,6 +175,7 @@ class _NLWriter:
         self._niv = 0  # linear integer vars
 
     def write(self) -> str:
+        self._refuse_unrepresentable_relations()
         self._build_var_map()
         self._decompose_expressions()
         self._reorder_vars_canonical()
@@ -188,6 +190,21 @@ class _NLWriter:
         self._write_J_sections(buf)
         self._write_G_section(buf)
         return buf.getvalue()
+
+    # ── Refuse relations the format cannot carry ──
+
+    def _refuse_unrepresentable_relations(self):
+        """Refuse a non-algebraic relation by name, before any row is written.
+
+        Without this the disjunctive/SOS rows a GDP or an MPEC complementarity
+        encoding leaves on the model reached ``_decompose_expressions`` and died
+        on ``float(con.rhs)`` with ``AttributeError: '_DisjunctiveConstraint'
+        object has no attribute 'rhs'`` (#1218) -- an internal error from deep
+        inside the writer, where the real answer is that ``.nl`` has no such row
+        and the model needs a further lowering first. Shared with the LP/MPS/GAMS
+        writers, which walk ``model._constraints`` the same way.
+        """
+        refuse_non_algebraic_relations(self.model, ".nl")
 
     # ── Build flat variable map ──
 

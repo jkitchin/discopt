@@ -45,9 +45,10 @@ land on a different branch.
 
 ``argmin_kkt(model, inner, bind=...)`` -- **lower** the follower.  Its variables
 become real variables of the outer model and its KKT conditions become real
-constraints, so the Rust tape, FBBT, a **global certificate** and ``.nl`` export
-all come back.  The price is that KKT conditions characterize a follower's optimum
-only when the follower is **convex in its own variables**, so the lowering runs
+constraints, so the Rust tape, FBBT, a **global certificate** and (on the
+``method="strong_duality"`` arm) ``.nl`` export all come back.  The price is that
+KKT conditions characterize a follower's optimum only when the follower is
+**convex in its own variables**, so the lowering runs
 :class:`discopt.bilevel.BilevelProblem`'s convexity certifier and refuses anything
 it cannot prove -- including the projection follower above, whose nonlinear
 equality is exactly what makes the hand-written version unsound.  There is no flag
@@ -57,7 +58,7 @@ For ``.nl`` export specifically, use ``method="strong_duality"``: it emits pure
 algebra (stationarity, primal/dual feasibility, and the single bilinear equality
 ``Σ μ_i g_i == 0``).  The ``"kkt"`` arm's complementarity conditions go through the
 GDP/SOS1 encodings, which discopt solves and certifies but which have no ``.nl``
-form.
+form -- exporting such a model is refused by name (#1218), never approximated.
 
 Soundness gates (all refuse rather than approximate)
 ----------------------------------------------------
@@ -708,6 +709,14 @@ def argmin(
         variable order (a vector inner variable contributes its elements in
         ``ravel`` order).  Use it anywhere an expression is allowed.
 
+        It is an **expression, not a variable**: the follower is solved inside
+        the node, so ``y*`` is not a column of the outer model and
+        ``result.value(v)`` refuses it (#1218).  Recover it by calling the layer
+        at the solution -- ``dm.argmin_layer(inner, [q])(jnp.array([p_star]))``,
+        which re-solves the follower at that parameter value -- or use
+        :func:`argmin_kkt`, whose follower variables are real variables of the
+        outer model and which ``result.value(v[0])`` reads directly.
+
     Raises
     ------
     ValueError
@@ -728,10 +737,18 @@ def argmin(
     >>> m.minimize((v[0] + 0.9) ** 2)                       # doctest: +SKIP
     >>> result = m.solve()                                  # doctest: +SKIP
 
+    The leader's own variables are read as usual; the follower's solution is not
+    a variable, so it is recovered by evaluating the layer at the answer:
+
+    >>> import jax.numpy as jnp                             # doctest: +SKIP
+    >>> p_star = float(result.value(p))                     # doctest: +SKIP
+    >>> y_star = dm.argmin_layer(inner, [q])(jnp.array([p_star]))  # doctest: +SKIP
+
     See Also
     --------
-    argmin_kkt : the lowered arm -- a certified, ``.nl``-exportable reformulation
-        for a follower that can be *proved* convex in its own variables.
+    argmin_kkt : the lowered arm -- a certified reformulation (``.nl``-exportable
+        on its ``method="strong_duality"`` arm) for a follower that can be
+        *proved* convex in its own variables.
 
     Notes
     -----
@@ -914,7 +931,16 @@ def argmin_kkt(
     behind an opaque node, its variables become real variables of ``model`` and its
     optimality conditions become real constraints. What that buys is everything the
     opaque node forecloses -- the Rust tape, FBBT, a **global certificate**, and
-    ``.nl`` export, so the same formulation can be handed to another solver.
+    (with ``method="strong_duality"``) ``.nl`` export, so the same formulation can
+    be handed to another solver.
+
+    ``.nl`` export is scoped to ``method="strong_duality"`` because that arm emits
+    pure algebra. The default ``method="kkt"`` encodes complementarity as
+    disjunctive (``mpec_method="gdp"``) or SOS1 rows, which discopt solves and
+    certifies but which the ``.nl`` format has no row for -- exporting such a model
+    is refused by name (#1218), not silently approximated. Lowering it with
+    :func:`discopt._relax.gdp_reformulate.reformulate_gdp` first also produces an
+    exportable model, at the price of big-M selector binaries.
 
     What it costs is generality, and the cost is not negotiable: KKT conditions
     characterize a follower's optimum only when the follower is **convex in its own
@@ -973,7 +999,14 @@ def argmin_kkt(
     --------
     >>> v = dm.argmin_kkt(m, inner, bind={q: p}, multiplier_ub=100.0)  # doctest: +SKIP
     >>> m.minimize((v[0] - 2.0) ** 2)                                  # doctest: +SKIP
-    >>> m.to_nl("leader.nl")   # an ordinary algebraic model            # doctest: +SKIP
+    >>> result = m.solve()          # certified, and v[0] is a Variable  # doctest: +SKIP
+
+    For ``.nl`` export, take the strong-duality arm -- the ``"kkt"`` default's
+    complementarity rows are disjunctive/SOS1 and have no ``.nl`` form:
+
+    >>> v = dm.argmin_kkt(m, inner, bind={q: p}, method="strong_duality")  # doctest: +SKIP
+    >>> m.minimize((v[0] - 2.0) ** 2)                                      # doctest: +SKIP
+    >>> m.to_nl("leader.nl")   # an ordinary algebraic model               # doctest: +SKIP
     """
     from discopt.bilevel import BilevelProblem
 

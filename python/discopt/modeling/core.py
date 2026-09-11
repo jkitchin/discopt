@@ -2221,6 +2221,42 @@ _NON_GAP_CERTIFICATE_STATUSES = frozenset({"infeasible"})
 from discopt.status import is_local_status as _is_local_status  # noqa: E402
 
 
+def _value_not_a_variable_message(node: Any) -> str:
+    """Why ``SolveResult.value(node)`` cannot serve a non-``Variable`` argument.
+
+    ``result.x`` is keyed by variable name, so anything that is not a column of
+    the solved model has no entry in it. Looking the argument's ``.name`` up
+    anyway raised a bare ``KeyError`` on the node's display name (#1218) -- an
+    internal error where the honest answer is structural: an expression is
+    computed FROM the solution, it is not part of it.
+    """
+    if isinstance(node, CustomCall):
+        return (
+            f"value() takes a model Variable; {node.name!r} is an opaque custom "
+            "block (a CustomCall). Its body is traced and evaluated inside the "
+            "objective/constraints -- it is not a column of the model, so the "
+            "solution has no entry for it. If it came from dm.argmin(): the "
+            "follower's y* is recovered either by calling the layer at the "
+            "solution (phi = dm.argmin_layer(inner, [q]); phi(jnp.array([p*]))), "
+            "or by using dm.argmin_kkt(model, inner, ...) instead, which lowers "
+            "the follower so its variables ARE model variables and "
+            "result.value(v[0]) works."
+        )
+    if isinstance(node, Expression):
+        return (
+            f"value() takes a model Variable; got a {type(node).__name__} "
+            "expression. Only variables have entries in result.x -- an "
+            "expression is computed from them. Read the variables it is built "
+            "from (result.value(x)) and combine them, or add the quantity to "
+            "the model as a named variable fixed by an equality constraint."
+        )
+    return (
+        f"value() takes a model Variable; got {type(node).__name__}. Pass the "
+        "Variable object returned by model.continuous()/integer()/binary(), or "
+        "any handle that names one of the solved model's variables."
+    )
+
+
 @dataclass
 class SolveResult:
     """
@@ -2540,7 +2576,13 @@ class SolveResult:
         Parameters
         ----------
         var : Variable
-            A variable from the solved model.
+            A variable from the solved model (or any handle naming one, such as
+            an :class:`~discopt.modeling.indexed.IndexedVar`). Only *variables*
+            have entries in the solution: an expression built from them (a sum,
+            a product, an opaque :func:`~discopt.modeling.core.custom` /
+            :func:`~discopt.modeling.argmin.argmin` node) is not a column of the
+            model, and is refused with the reason rather than raising a bare
+            ``KeyError`` on its display name (#1218).
 
         Returns
         -------
@@ -2551,10 +2593,28 @@ class SolveResult:
         ------
         ValueError
             If no feasible solution is available.
+        TypeError
+            If *var* is an expression rather than a variable.
+        KeyError
+            If *var* names no variable of the solved model.
         """
         if self.x is None:
             raise ValueError("No solution available")
-        return self.x[var.name]
+        # Resolve by name first: the lookup is what it always was, so every
+        # handle that names a column of the solved model -- Variable, IndexedVar,
+        # anything else carrying its name -- keeps working. Only a lookup that
+        # WOULD have raised reaches the diagnosis below.
+        name = getattr(var, "name", None)
+        if isinstance(name, str) and name in self.x:
+            return self.x[name]
+        if not isinstance(var, Variable):
+            raise TypeError(_value_not_a_variable_message(var))
+        known = ", ".join(sorted(self.x)[:12]) or "(none)"
+        raise KeyError(
+            f"No variable named {var.name!r} in this solution -- it is not a "
+            "variable of the model that was solved (a variable of a different "
+            f"Model, or one dropped before the solve). Solution variables: {known}."
+        )
 
     def explain(self, llm: bool = False, model: str | None = None) -> str:
         """Get a human-readable explanation of the solve result.
