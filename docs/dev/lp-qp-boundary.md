@@ -4,7 +4,8 @@ Status: **binding contract** (§0) plus the audit that motivated it (§2).
 Written 2026-09-12. Consolidation is tracked by issue #1230 (§3 is its task list).
 Scope: the LP, QP, MILP and MIQP solve paths only — the
 MINLP/spatial paths have their own producer contract (`_relax/spatial_producer.py`,
-`solvers/_convex_kernel.py`) and are out of scope here.
+`solvers/_convex_kernel.py`) and are out of scope here — their separation is
+tracked by issue #1231.
 
 ## §0 The line (binding)
 
