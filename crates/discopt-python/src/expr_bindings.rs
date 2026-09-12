@@ -666,7 +666,7 @@ impl PyModelRepr {
             self.n_builder_constraints,
             &initial_point,
         )
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("cannot write .nl: {e}")))
     }
 
     /// How many leading constraints came from the Rust model builder.
