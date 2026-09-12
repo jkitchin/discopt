@@ -39,6 +39,7 @@ const INF: f64 = 1e20;
 ///     further and it fails identically at round 4 with a 7.1e-07 gap;
 ///   - refusing only the sub-tolerance tightenings still leaves a 3.2e-9
 ///     crossing from the tightenings that do clear the bar.
+///
 /// Refusing the junk movements is what stops the compounding; judging
 /// emptiness at the same scale is what stops a residual wobble being read as a
 /// proof. Together the box survives and 602 columns still fix.
