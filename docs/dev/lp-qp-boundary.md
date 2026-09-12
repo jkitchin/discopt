@@ -1,7 +1,8 @@
 # The LP/QP Rust–Python boundary
 
 Status: **binding contract** (§0) plus the audit that motivated it (§2).
-Written 2026-09-12. Scope: the LP, QP, MILP and MIQP solve paths only — the
+Written 2026-09-12. Consolidation is tracked by issue #1230 (§3 is its task list).
+Scope: the LP, QP, MILP and MIQP solve paths only — the
 MINLP/spatial paths have their own producer contract (`_relax/spatial_producer.py`,
 `solvers/_convex_kernel.py`) and are out of scope here.
 
@@ -174,7 +175,7 @@ equivalent exists**. But a solver that cannot be trusted to validate its own
 output has the validation on the wrong side of the boundary: the check belongs
 next to the arithmetic it is checking.
 
-## §3 Migration order
+## §3 Migration order (tracked by #1230)
 
 Ordered by (certificate risk × cost to fix), not by size:
 
