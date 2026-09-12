@@ -65,6 +65,14 @@ SHAPES = {
 }
 
 
+# The n=20000 MPS cases cost 8-18 s uninstrumented but 35-74 s under
+# `--cov` (measured, M4 Pro), and CI's coverage lane runs `--timeout=120` on a
+# slower runner -- so the default timeout was deciding this test rather than the
+# assertion, exactly what the `python-correctness-slow` lane's `--timeout=1800`
+# comment in `ci.yml` warns against. The assertion is unchanged and the sizes are
+# untouched (`test_the_old_failure_point_is_actually_crossed` pins them); only the
+# hang backstop is sized for an instrumented run.
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("writer", sorted(WRITERS))
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("n", SIZES)
