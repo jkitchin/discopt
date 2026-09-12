@@ -18,6 +18,41 @@ use crate::lp::simplex::sparse::SparseCols;
 
 const INF: f64 = 1e20;
 
+/// Feasibility tolerance for propagation: the smallest bound movement FBBT is
+/// allowed to believe, and the slack on its empty-box proof.
+///
+/// This is a **feasibility** tolerance, not the LP pivot tolerance the callers
+/// pass in `tol` (1e-9). A derived bound carries the rounding error of every
+/// earlier tightening baked into the incoming `lo`/`hi`, which the per-row
+/// `res_err` budget below does *not* model — it covers only the current row's
+/// own summation. Over a few rounds that inherited error compounds.
+///
+/// Instance #2122 (`ref/HiGHS/check/instances/2122.lp`, 1473x2328 after
+/// slacks): by round 2 the drift on column 51 — true value exactly 0, box
+/// [0, 8700] — had reached `lo=3.25e-09 > hi=2.58e-11`, a gap of 3.2e-9 on row
+/// data of magnitude 1e4 (3e-13 relative, ~1400 eps). Against `tol=1e-9` that
+/// read as a *proof* of infeasibility and the solver returned `infeasible` for
+/// a problem whose optimum is 187616.11.
+///
+/// Both uses matter, and neither suffices alone (measured on #2122):
+///   - loosening only the empty-box test lets the same drift accumulate
+///     further and it fails identically at round 4 with a 7.1e-07 gap;
+///   - refusing only the sub-tolerance tightenings still leaves a 3.2e-9
+///     crossing from the tightenings that do clear the bar.
+/// Refusing the junk movements is what stops the compounding; judging
+/// emptiness at the same scale is what stops a residual wobble being read as a
+/// proof. Together the box survives and 602 columns still fix.
+///
+/// Both directions are strictly conservative: refusing a tightening only ever
+/// keeps points, and a looser empty-box test only ever prunes less, so neither
+/// can produce a false optimal or an invalid bound.
+///
+/// HiGHS makes the same distinction — `mip_feasibility_tolerance` (1e-6) for
+/// propagation, with `adjustedLb`/`adjustedUb` refusing movements below it and
+/// snapping a bound that would cross its opposite
+/// (`ref/HiGHS/highs/mip/HighsDomain.cpp:1293-1350`).
+const FEAS_TOL: f64 = 1e-6;
+
 /// Tightened bounds plus an infeasibility flag.
 pub struct PresolveResult {
     /// Tightened lower bounds (length `n`).
@@ -248,15 +283,18 @@ fn fbbt_row(
                 new_hi = (new_hi + round_tol).floor();
             }
         }
-        if new_lo > lo[k] + tol {
+        // Accept only movements large enough to be real (see `FEAS_TOL`). The
+        // caller's `tol` still applies when it is the coarser of the two.
+        let feas = tol.max(FEAS_TOL);
+        if new_lo > lo[k] + feas {
             lo[k] = new_lo;
             changed = true;
         }
-        if new_hi < hi[k] - tol {
+        if new_hi < hi[k] - feas {
             hi[k] = new_hi;
             changed = true;
         }
-        if lo[k] > hi[k] + tol {
+        if lo[k] > hi[k] + feas {
             return None;
         }
     }
@@ -276,6 +314,86 @@ mod tests {
         u: &'a [f64],
     ) -> LpView<'a> {
         LpView { a, m, n, c, l, u }
+    }
+
+    /// #2122 regression: real MIP data is inconsistent at the 1e-9 level, and
+    /// propagation must not read that as a proof of infeasibility.
+    ///
+    /// These six rows and five columns are the reduced core of the root box of
+    /// `2122.lp` (HiGHS's own instance collection; optimum 187616.11), found by
+    /// greedy deletion from the 1473x2328 standard form. Written out:
+    ///
+    /// ```text
+    ///   x0 = 222.34033333
+    ///   x1 = 1714.007
+    ///   x2 = x0
+    ///   1.01333353535354 * (x1 - x2) = 1511.55585690236
+    ///   x0 + x3 = 14501,  x2 + x4 = 14501
+    /// ```
+    ///
+    /// The last equality re-derives `x1` as 1714.006999996697 — 3.4e-9 below
+    /// the value the second row fixes it to. That is the instance's own data
+    /// residual, five orders below any feasibility tolerance; HiGHS solves the
+    /// problem to a certified optimum. Against the LP pivot tolerance (1e-9)
+    /// FBBT instead concluded `lo > hi` and reported the whole problem
+    /// infeasible.
+    ///
+    /// Both halves of the fix are load-bearing here, and each was measured
+    /// insufficient alone on the full instance: refusing sub-`FEAS_TOL`
+    /// movements stops the drift compounding, and judging emptiness at the
+    /// same scale stops the residue being read as a proof.
+    #[test]
+    fn tiny_data_residual_is_not_a_proof_of_infeasibility() {
+        const N: usize = 5;
+        let rows: [(&[(usize, f64)], f64); 6] = [
+            (&[(0, 1.0)], 222.34033333),
+            (&[(1, -1.0)], -1714.007),
+            (&[(0, -1.0), (2, 1.0)], 0.0),
+            (
+                &[(1, 1.01333353535354), (2, -1.01333353535354)],
+                1511.55585690236,
+            ),
+            (&[(0, 1.0), (3, 1.0)], 14501.0),
+            (&[(2, 1.0), (4, 1.0)], 14501.0),
+        ];
+        let m = rows.len();
+        let mut a = vec![0.0; m * N];
+        let mut b = vec![0.0; m];
+        for (i, (nz, bi)) in rows.iter().enumerate() {
+            for &(j, v) in nz.iter() {
+                a[i * N + j] = v;
+            }
+            b[i] = *bi;
+        }
+        let c = [0.0; N];
+        let l = [0.0; N];
+        let u = [8700.0, INF, 8700.0, INF, INF];
+        let is_int = [false; N];
+
+        let r = tighten_bounds(&view(&a, m, N, &c, &l, &u), &b, &is_int, 1e-9);
+        assert!(
+            !r.infeasible,
+            "FBBT reported infeasible on a 3.4e-9 data residual: x1 in [{}, {}]",
+            r.l[1], r.u[1]
+        );
+        // The contraction is still useful: every column pins down to its value.
+        for k in 0..N {
+            assert!(
+                r.u[k] - r.l[k] < 1e-6,
+                "column {k} did not fix: [{}, {}]",
+                r.l[k],
+                r.u[k]
+            );
+        }
+        assert!((r.l[0] - 222.34033333).abs() < 1e-6);
+        assert!((r.l[1] - 1714.007).abs() < 1e-6);
+
+        // The CSC entry must agree (the T3b4 parity contract).
+        let csc = SparseCols::from_dense(&a, m, N);
+        let rc = tighten_bounds_csc(&csc, m, N, &l, &u, &b, &is_int, 1e-9);
+        assert!(!rc.infeasible);
+        assert_eq!(r.l, rc.l);
+        assert_eq!(r.u, rc.u);
     }
 
     #[test]
