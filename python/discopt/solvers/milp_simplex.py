@@ -27,6 +27,8 @@ from typing import Callable, NamedTuple, Optional, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._relax.std_form import logical_block as _logical_block
+from discopt._relax.std_form import row_logicals_enabled as _row_logicals_enabled
 from discopt.solvers import MILPResult, SolveStatus
 
 logger = logging.getLogger(__name__)
@@ -730,17 +732,27 @@ def _marshal_std_form(
     the two entry points cannot drift: a lazy-cut row is written in the *caller's*
     ``x`` space, which only means anything if both paths lay the columns out the
     same way (structural first, then one slack per row).
+
+    The layout itself is owned by :mod:`discopt._relax.std_form`, shared with the
+    ``Model.solve`` extractors so *those* two paths cannot drift either. Under
+    ``DISCOPT_LP_ROW_LOGICALS`` an equality becomes ONE row with a logical fixed
+    at ``[0, 0]``; with the flag off it keeps the legacy pair of opposing ``<=``
+    rows. Either way every row owns exactly one logical at column ``n + r``, which
+    is the shape ``BaseRows::build``, GMI separation and the dual warm start all
+    index by — so both call sites' ``n + m`` total-column count stays correct.
     """
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
+    row_logicals = _row_logicals_enabled()
 
-    # Assemble all rows as `<=` (A_eq becomes a pair of `<=` rows) then slack.
-    # SPARSE throughout: a dense `[A_ub | I]` would materialize an m×(n+m) matrix
-    # (~73 GB for qap's 85k×21k McCormick relaxation) that the Rust driver never
-    # needs — it consumes CSC. We keep every block sparse and hand the driver the
-    # CSC triplets of the standard-form matrix; nothing is ever densified here.
+    # Assemble all rows, then one logical column per row. SPARSE throughout: a
+    # dense `[A_ub | I]` would materialize an m×(n+m) matrix (~73 GB for qap's
+    # 85k×21k McCormick relaxation) that the Rust driver never needs — it consumes
+    # CSC. We keep every block sparse and hand the driver the CSC triplets of the
+    # standard-form matrix; nothing is ever densified here.
     blocks: list[sp.spmatrix] = []
     rhs: list[float] = []
+    senses: list[str] = []
     if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
         au = (
             sp.csr_matrix(cast("sp.spmatrix", A_ub))
@@ -749,6 +761,7 @@ def _marshal_std_form(
         )
         blocks.append(au)
         rhs.extend(np.asarray(b_ub, dtype=np.float64).ravel().tolist())
+        senses.extend(["le"] * au.shape[0])
     if A_eq is not None and b_eq is not None and np.size(b_eq) > 0:
         ae = (
             sp.csr_matrix(cast("sp.spmatrix", A_eq))
@@ -758,8 +771,17 @@ def _marshal_std_form(
         be = np.asarray(b_eq, dtype=np.float64).ravel()
         blocks.append(ae)
         rhs.extend(be.tolist())
-        blocks.append(-ae)
-        rhs.extend((-be).tolist())
+        if row_logicals:
+            senses.extend(["eq"] * ae.shape[0])
+        else:
+            # Legacy: `ae x = be` as `ae x <= be` and `-ae x <= -be`, so that both
+            # halves get a logical. Doubles the equality rows into an always-tight
+            # opposing pair — the degenerate configuration
+            # `_dual_start_slack_basis`'s docstring blames for cold-primal stalls.
+            senses.extend(["le"] * ae.shape[0])
+            blocks.append(-ae)
+            rhs.extend((-be).tolist())
+            senses.extend(["le"] * ae.shape[0])
 
     if blocks:
         a_ub_sp = sp.vstack(blocks, format="csr")
@@ -767,11 +789,21 @@ def _marshal_std_form(
         a_ub_sp = sp.csr_matrix((0, n), dtype=np.float64)
     b_vec = np.asarray(rhs, dtype=np.float64)
     m = a_ub_sp.shape[0]
+    assert len(senses) == m, f"{len(senses)} senses for {m} rows"
 
-    # Standard form A_eq z = b with one slack per row: [A_ub | I] z = b_ub, built
-    # directly as CSC (never densified). ``sort_indices`` gives ascending row
-    # order within each column, which ``SparseCols::from_csc`` requires.
-    a_std_sp = sp.hstack([a_ub_sp, sp.identity(m, dtype=np.float64, format="csr")], format="csc")
+    # `eq_logicals=True` unconditionally: the legacy arm already turned every
+    # equality into `le` rows above, so this block is one logical per row in both
+    # arms and only the ROW COUNT differs between them.
+    block = _logical_block(senses, n, eq_logicals=True, inf_value=_INF)
+    lg_rows, lg_cols, lg_vals = block.entries()
+
+    # Standard form A_eq z = b with one logical per row, built directly as CSC
+    # (never densified). ``sort_indices`` gives ascending row order within each
+    # column, which ``SparseCols::from_csc`` requires.
+    logical_sp = sp.coo_matrix(
+        (lg_vals, (lg_rows, lg_cols - n)), shape=(m, block.n_logical), dtype=np.float64
+    )
+    a_std_sp = sp.hstack([a_ub_sp, logical_sp.tocsr()], format="csc")
     a_std_sp.sum_duplicates()
     a_std_sp.sort_indices()
     csc_col_ptr = np.ascontiguousarray(a_std_sp.indptr, dtype=np.int64)
@@ -779,9 +811,9 @@ def _marshal_std_form(
     csc_vals = np.ascontiguousarray(a_std_sp.data, dtype=np.float64)
 
     lb, ub = _marshal_col_bounds(bounds, n)
-    lb_std = np.concatenate([lb, np.zeros(m)])
-    ub_std = np.concatenate([ub, np.full(m, _INF)])
-    c_std = np.concatenate([c_arr, np.zeros(m)])
+    lb_std = np.concatenate([lb, block.lb])
+    ub_std = np.concatenate([ub, block.ub])
+    c_std = np.concatenate([c_arr, np.zeros(block.n_logical)])
 
     if integrality is not None:
         int_mask = np.asarray(integrality, dtype=np.int64).ravel()

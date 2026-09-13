@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 # free of JAX/XLA cold-start.
 from discopt._flat_index import resolve_scalar_slot
 from discopt._relax.scalarize import sum_is_full_reduction
+from discopt._relax.std_form import logical_block as _logical_block
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -960,12 +961,19 @@ def _eval_const(expr) -> float:  # type: ignore[return-value]
     raise ValueError(f"Not a constant expression: {type(expr).__name__}")
 
 
-def _extract_constraints_algebraic(model: Model, n_orig: int):
+def _extract_constraints_algebraic(model: Model, n_orig: int, *, for_qp: bool = False):
     """Extract linear constraint data algebraically (shared by LP and QP paths).
 
-    Returns (A_eq, b_eq, x_l, x_u, n_slack) where slacks are appended for
-    inequality constraints. ``A_eq`` is dense while it fits ``_DENSE_A_MAX_BYTES``
-    and scipy CSR beyond it (#863) — consumers densify via ``dense_A()``.
+    Returns (A_eq, b_eq, x_l, x_u, n_slack) where logical (slack) columns are
+    appended per :mod:`discopt._relax.std_form` — one per inequality row, plus
+    one fixed at zero per equality row under the row-logical layout. ``A_eq`` is
+    dense while it fits ``_DENSE_A_MAX_BYTES`` and scipy CSR beyond it (#863) —
+    consumers densify via ``dense_A()``.
+
+    ``for_qp`` pins the inequality-only block regardless of the layout flag: the
+    QP consumer is POUNCE's interior-point solver, which needs no logical for an
+    equality row and would only gain a structurally singular KKT direction from
+    one.
 
     Raises _NotLinearError if any constraint is not linear.
     """
@@ -995,7 +1003,19 @@ def _extract_constraints_algebraic(model: Model, n_orig: int):
 
     n_eq = len(eq_terms)
     n_ineq = len(ineq_terms)
-    n_slack = n_ineq
+
+    # One logical column per row, or only per inequality row: the layout decision
+    # is :mod:`discopt._relax.std_form`'s, never this extractor's (all four
+    # extractors here used to make it independently, and drifted).
+    # ``eq_logicals=False`` on the QP route: POUNCE's IPM wants ``A x = b``
+    # without a zero-fixed column per equality (see that module's docstring).
+    block = _logical_block(
+        ["eq"] * n_eq + list(ineq_senses),
+        n_orig,
+        eq_logicals=False if for_qp else None,
+        inf_value=1e20,
+    )
+    n_slack = block.n_logical
     n_total = n_orig + n_slack
 
     # COO triples, not np.stack() of dense (n_total,) rows: that stack is
@@ -1013,19 +1033,22 @@ def _extract_constraints_algebraic(model: Model, n_orig: int):
     for i in range(n_ineq):
         r = n_eq + i
         _append_row_coo(coo_rows, coo_cols, coo_vals, r, ineq_terms[i])
-        # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
-        coo_rows.append(r)
-        coo_cols.append(n_orig + i)
-        coo_vals.append(1.0 if ineq_senses[i] == "le" else -1.0)
         b_vals.append(ineq_rhs[i])
+
+    # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
+    # An equality's logical (row-logical layout only) is fixed at 0 by its box.
+    _lrows, _lcols, _lvals = block.entries()
+    coo_rows.extend(int(v) for v in _lrows)
+    coo_cols.extend(int(v) for v in _lcols)
+    coo_vals.extend(float(v) for v in _lvals)
 
     m_total = n_eq + n_ineq
     A_eq = _materialise_A(coo_rows, coo_cols, coo_vals, m_total, n_total)
     b_eq = np.array(b_vals, dtype=np.float64)
 
     x_l_orig, x_u_orig = _get_variable_bounds(model)
-    x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
-    x_u = np.concatenate([x_u_orig, np.full(n_slack, 1e20, dtype=np.float64)])
+    x_l = np.concatenate([x_l_orig, block.lb])
+    x_u = np.concatenate([x_u_orig, block.ub])
 
     return A_eq, b_eq, x_l, x_u, n_slack
 
@@ -1181,7 +1204,7 @@ def _extract_qcp_constraints_algebraic(
     return A_ub, b_ub, A_eq, b_eq, tuple(q_rows)
 
 
-def extract_lp_data_algebraic(model: Model) -> LPData:
+def extract_lp_data_algebraic(model: Model, *, for_qp: bool = False) -> LPData:
     """Extract LP standard form by walking the expression DAG algebraically.
 
     Much faster than extract_lp_data() because it avoids JAX tracing/autodiff.
@@ -1198,7 +1221,7 @@ def extract_lp_data_algebraic(model: Model) -> LPData:
 
     c, obj_const = _extract_linear_coefficients(obj_expr, model, n_orig)
 
-    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig)
+    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig, for_qp=for_qp)
     c_full = np.concatenate([c, np.zeros(n_slack, dtype=np.float64)])
 
     # Handle objective sense: negate for maximization
@@ -1233,7 +1256,7 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
 
     Q, c_vec, obj_const = _extract_quadratic_coefficients(obj_expr, model, n_orig)
 
-    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig)
+    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig, for_qp=True)
 
     if n_slack > 0:
         n_total = n_orig + n_slack
@@ -1361,7 +1384,7 @@ class _LPRows(NamedTuple):
     n_slack: int
 
 
-def _lp_rows_from_repr(model: Model, repr_) -> _LPRows:
+def _lp_rows_from_repr(model: Model, repr_, *, for_qp: bool = False) -> _LPRows:
     """Constraints, slacks and bounds off the Rust arena. No objective.
 
     Split out of :func:`_extract_lp_data_from_repr` because it has two callers
@@ -1408,7 +1431,16 @@ def _lp_rows_from_repr(model: Model, repr_) -> _LPRows:
 
     n_eq = len(eq_terms)
     n_ineq = len(ineq_terms)
-    n_slack = n_ineq
+
+    # Layout owned by :mod:`discopt._relax.std_form`; ``for_qp`` pins the
+    # inequality-only block for ``_assemble_qp_from_repr``'s IPM consumer.
+    block = _logical_block(
+        ["eq"] * n_eq + list(ineq_senses),
+        n_orig,
+        eq_logicals=False if for_qp else None,
+        inf_value=np.inf,
+    )
+    n_slack = block.n_logical
     n_total = n_orig + n_slack
 
     coo_rows: list[int] = []
@@ -1423,19 +1455,22 @@ def _lp_rows_from_repr(model: Model, repr_) -> _LPRows:
     for i in range(n_ineq):
         r = n_eq + i
         _append_row_coo(coo_rows, coo_cols, coo_vals, r, ineq_terms[i])
-        # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
-        coo_rows.append(r)
-        coo_cols.append(n_orig + i)
-        coo_vals.append(1.0 if ineq_senses[i] == "le" else -1.0)
         b_vals.append(ineq_rhs[i])
+
+    # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
+    # An equality's logical (row-logical layout only) is fixed at 0 by its box.
+    _lrows, _lcols, _lvals = block.entries()
+    coo_rows.extend(int(v) for v in _lrows)
+    coo_cols.extend(int(v) for v in _lcols)
+    coo_vals.extend(float(v) for v in _lvals)
 
     m_total = n_eq + n_ineq
     A_eq = _materialise_A(coo_rows, coo_cols, coo_vals, m_total, n_total)
     b_eq = np.array(b_vals, dtype=np.float64)
 
     x_l_orig, x_u_orig = _get_variable_bounds(model)
-    x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
-    x_u = np.concatenate([x_u_orig, np.full(n_slack, np.inf, dtype=np.float64)])
+    x_l = np.concatenate([x_l_orig, block.lb])
+    x_u = np.concatenate([x_u_orig, block.ub])
 
     # This extractor reduces each constraint to a single scalar row. Vector-/
     # matrix-valued constraints (DAE collocation residuals, `Variable @ Constant`
@@ -1455,7 +1490,7 @@ def _lp_rows_from_repr(model: Model, repr_) -> _LPRows:
     return _LPRows(A_eq=A_eq, b_eq=b_eq, x_l=x_l, x_u=x_u, n_slack=n_slack)
 
 
-def _extract_lp_data_from_repr(model: Model) -> LPData:
+def _extract_lp_data_from_repr(model: Model, *, for_qp: bool = False) -> LPData:
     """Extract LP standard form by reading the coefficients off the Rust arena.
 
     One :func:`_linear_terms_from_repr` call per row -- that function does the
@@ -1469,7 +1504,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     repr_ = model_to_repr(model, getattr(model, "_builder", None))
     n_orig = repr_.n_vars
 
-    rows = _lp_rows_from_repr(model, repr_)
+    rows = _lp_rows_from_repr(model, repr_, for_qp=for_qp)
     A_eq, b_eq, x_l, x_u, n_slack = rows
 
     obj_terms, obj_at_zero = _linear_terms_from_repr(repr_, n_orig, None)
@@ -1725,7 +1760,9 @@ def _assemble_qp_from_repr(model, repr_, n_orig: int, Q, c_vec, d: float) -> QPD
     """
     # Constraints only: this caller supplies its own (quadratic) objective, and
     # the arena walk would refuse to read that one as linear. See _lp_rows_from_repr.
-    rows = _lp_rows_from_repr(model, repr_)
+    # ``for_qp``: the IPM consumer takes ``A x = b`` and wants no zero-fixed
+    # logical per equality row (discopt._relax.std_form).
+    rows = _lp_rows_from_repr(model, repr_, for_qp=True)
     n_slack = rows.n_slack
 
     if n_slack > 0:
@@ -1854,19 +1891,25 @@ def _extract_qcp_data_from_repr(model: Model) -> QCPData:
     )
 
 
-def extract_lp_data(model: Model) -> LPData:
+def extract_lp_data(model: Model, *, for_qp: bool = False) -> LPData:
     """Extract LP standard form from a model classified as LP.
 
     Tries Rust repr-based extraction first (for fast-API models), then
     algebraic extraction (for expression-based), then falls back to
     autodiff-based extraction if the DAG walk fails.
 
-    Inequality constraints are converted to equalities with slacks:
+    Constraints are converted to equalities with a logical (slack) column per
+    :mod:`discopt._relax.std_form` — that module owns the layout, and every rung
+    of this ladder produces the same one:
       - body <= 0 becomes body + s = 0, s >= 0
       - body >= 0 becomes body - s = 0, s >= 0
+      - body == 0 becomes body + s = 0, s == 0 (row-logical layout only)
 
     Args:
         model: A Model classified as ProblemClass.LP.
+        for_qp: The caller is marshaling for POUNCE's interior-point QP solver,
+            which wants no zero-fixed logical on an equality row. Pins the
+            inequality-only block whatever the layout flag says.
 
     Returns:
         LPData with c, A_eq, b_eq, x_l, x_u.
@@ -1879,14 +1922,14 @@ def extract_lp_data(model: Model) -> LPData:
     # and there is exactly one rung. The ``_builder`` gate was never about
     # correctness: ``model_to_repr`` accepts ``_builder=None``.
     try:
-        return _extract_lp_data_from_repr(model)
+        return _extract_lp_data_from_repr(model, for_qp=for_qp)
     except Exception as exc:  # noqa: BLE001 - falls through to the algebraic extractor
         # Each rung of this ladder is a *fast path*: a silent fall-through turns
         # "the repr extractor declined" into an unexplained measurement.
         logger.debug("LP repr extraction declined: %s: %s", type(exc).__name__, exc)
 
     try:
-        return extract_lp_data_algebraic(model)
+        return extract_lp_data_algebraic(model, for_qp=for_qp)
     except Exception as exc:  # noqa: BLE001 - falls through to the tape/autodiff extractors
         logger.debug("LP algebraic extraction declined: %s: %s", type(exc).__name__, exc)
 
@@ -1895,14 +1938,14 @@ def extract_lp_data(model: Model) -> LPData:
     # stencil) reached `_extract_lp_data_autodiff` and imported JAX on a default
     # solve. The tape fans such a body out into one row per component, which is
     # the only thing `jax.jacobian` was still being used for here.
-    _tape_lp = _extract_lp_data_tape(model)
+    _tape_lp = _extract_lp_data_tape(model, for_qp=for_qp)
     if _tape_lp is not None:
         return _tape_lp
 
-    return _extract_lp_data_autodiff(model)
+    return _extract_lp_data_autodiff(model, for_qp=for_qp)
 
 
-def _extract_lp_data_tape(model: Model) -> LPData | None:
+def _extract_lp_data_tape(model: Model, *, for_qp: bool = False) -> LPData | None:
     """Extract LP standard form from the JAX-free tape evaluator, or ``None``.
 
     This is the rung that takes **vector-valued constraint bodies** off JAX.
@@ -2023,7 +2066,13 @@ def _extract_lp_data_tape(model: Model) -> LPData | None:
     eq_src = [r for r in range(m_rows) if row_sense[r] == "=="]
     ineq_src = [r for r in range(m_rows) if row_sense[r] != "=="]
     n_eq = len(eq_src)
-    n_slack = len(ineq_src)
+    block = _logical_block(
+        ["eq"] * n_eq + ["le" if row_sense[r] == "<=" else "ge" for r in ineq_src],
+        n_orig,
+        eq_logicals=False if for_qp else None,
+        inf_value=np.inf,
+    )
+    n_slack = block.n_logical
     n_total = n_orig + n_slack
 
     new_row = np.full(m_rows, -1, dtype=np.int64)
@@ -2048,11 +2097,8 @@ def _extract_lp_data_tape(model: Model) -> LPData | None:
         coo_vals = np.zeros(0, dtype=np.float64)
 
     # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
-    slack_rows = np.arange(n_eq, n_eq + n_slack, dtype=np.intp)
-    slack_cols = np.arange(n_orig, n_orig + n_slack, dtype=np.intp)
-    slack_vals = np.array(
-        [1.0 if row_sense[r] == "<=" else -1.0 for r in ineq_src], dtype=np.float64
-    )
+    # An equality's logical (row-logical layout only) is fixed at 0 by its box.
+    slack_rows, slack_cols, slack_vals = block.entries()
 
     coo_rows = np.concatenate([coo_rows, slack_rows])
     coo_cols = np.concatenate([coo_cols, slack_cols])
@@ -2072,8 +2118,8 @@ def _extract_lp_data_tape(model: Model) -> LPData | None:
 
     x_l_orig, x_u_orig = _get_variable_bounds(model)
     c_full = np.concatenate([c_vec, np.zeros(n_slack, dtype=np.float64)])
-    x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
-    x_u = np.concatenate([x_u_orig, np.full(n_slack, np.inf, dtype=np.float64)])
+    x_l = np.concatenate([x_l_orig, block.lb])
+    x_u = np.concatenate([x_u_orig, block.ub])
 
     # Handle objective sense: negate for maximization (solvers always minimize).
     if _maximize:
@@ -2091,7 +2137,7 @@ def _extract_lp_data_tape(model: Model) -> LPData | None:
     )
 
 
-def _extract_lp_data_autodiff(model: Model) -> LPData:
+def _extract_lp_data_autodiff(model: Model, *, for_qp: bool = False) -> LPData:
     """Extract LP standard form using autodiff (original slow path).
 
     Uses ``jax.jacobian`` rather than ``jax.grad`` so that vector-valued
@@ -2138,27 +2184,46 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
 
     n_eq_rows = sum(int(j.shape[0]) for j, _ in eq_blocks)
     n_ineq_rows = sum(int(j.shape[0]) for j, _, _ in ineq_blocks)
-    n_slack = n_ineq_rows
+    # Layout owned by :mod:`discopt._relax.std_form`; ``for_qp`` pins the
+    # inequality-only block for the IPM consumer. Rows are equalities first,
+    # then inequalities, matching the assembly order below.
+    block = _logical_block(
+        ["eq"] * n_eq_rows
+        + [sense for jac, _, sense in ineq_blocks for _ in range(int(jac.shape[0]))],
+        n_orig,
+        eq_logicals=False if for_qp else None,
+        inf_value=np.inf,
+    )
+    n_slack = block.n_logical
     n_total = n_orig + n_slack
 
     A_rows: list[jnp.ndarray] = []
     b_vals: list[float] = []
 
+    def _logical_col(row: int, sense_coef: float) -> jnp.ndarray:
+        """The row's logical column as a dense length-``n_slack`` vector."""
+        col = jnp.zeros(n_slack)
+        j = int(block.col_of_row[row])
+        if j < 0:  # legacy layout: an equality row carries no logical
+            return col
+        return col.at[j - n_orig].set(sense_coef)
+
+    row_idx = 0
     for jac, body0 in eq_blocks:
         for r in range(jac.shape[0]):
-            A_rows.append(jnp.concatenate([jac[r], jnp.zeros(n_slack)]))
+            # An equality's logical (row-logical layout only) is fixed at 0 by
+            # its box, so the +1 entry adds a column but no freedom.
+            A_rows.append(jnp.concatenate([jac[r], _logical_col(row_idx, 1.0)]))
             b_vals.append(-float(body0[r]))
+            row_idx += 1
 
-    slack_offset = 0
     for jac, body0, sense in ineq_blocks:
         for r in range(jac.shape[0]):
-            slack_col = jnp.zeros(n_slack)
             sign = 1.0 if sense == "le" else -1.0
             # body ≤ 0 → body + s = 0, s ≥ 0; body ≥ 0 → body − s = 0, s ≥ 0.
-            slack_col = slack_col.at[slack_offset].set(sign)
-            A_rows.append(jnp.concatenate([jac[r], slack_col]))
+            A_rows.append(jnp.concatenate([jac[r], _logical_col(row_idx, sign)]))
             b_vals.append(-float(body0[r]))
-            slack_offset += 1
+            row_idx += 1
 
     m_total = n_eq_rows + n_ineq_rows
     if m_total > 0:
@@ -2171,8 +2236,8 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     # Bounds: original vars keep their bounds, slack vars >= 0
     x_l_orig, x_u_orig = _get_variable_bounds(model)
     c_full = jnp.concatenate([c, jnp.zeros(n_slack)])
-    x_l = jnp.concatenate([x_l_orig, jnp.zeros(n_slack)])
-    x_u = jnp.concatenate([x_u_orig, jnp.full(n_slack, jnp.inf)])
+    x_l = jnp.concatenate([x_l_orig, jnp.asarray(block.lb)])
+    x_u = jnp.concatenate([x_u_orig, jnp.asarray(block.ub)])
 
     # Handle objective sense: negate for maximization (solvers always minimize).
     # C-30: this autodiff fallback previously dropped the maximize negation that
@@ -2344,8 +2409,9 @@ def _extract_qp_data_autodiff(model: Model) -> QPData:
         terms = _qp_terms_jax(model, n_orig)
     Q, c_vec, obj_const = terms
 
-    # Extract LP data for constraints (they're all linear)
-    lp_data = extract_lp_data(model)
+    # Extract LP data for constraints (they're all linear). ``for_qp``: this is
+    # the IPM's QP, which wants no zero-fixed logical per equality row.
+    lp_data = extract_lp_data(model, for_qp=True)
     n_slack = lp_data.c.shape[0] - n_orig
 
     # Extend Q with zeros for slack variables

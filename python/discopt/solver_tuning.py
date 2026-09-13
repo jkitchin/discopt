@@ -1123,6 +1123,26 @@ class SolverTuning:
     )
     """Warm-start the node LP from the parent basis (``DISCOPT_LP_WARMSTART``)."""
 
+    lp_row_logicals: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_LP_ROW_LOGICALS", default=False)
+    )
+    """Marshal every LP row with its own logical column, equalities included
+    (``DISCOPT_LP_ROW_LOGICALS``); see :mod:`discopt._relax.std_form` for the
+    layout and why the engine needs it.
+
+    OFF reproduces the two pre-consolidation layouts exactly: the ``Model.solve``
+    extractors give an equality row no column (so the basis is short of ``m``,
+    which turns off the dual warm start, GMI separation and slack substitution),
+    while ``milp_simplex._marshal_std_form`` splits each equality into two
+    opposing ``<=`` rows to get the shape another way.
+
+    Default OFF pending the graduation panel (CLAUDE.md §5). It is bound-CHANGING
+    in effect: the columns it adds are fixed at zero, so the feasible set and
+    every valid bound are unchanged, but restoring the warm start and the cut
+    families changes which bounds the search actually proves, and with them the
+    node counts.
+    """
+
     lp_cold_dual_start: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_COLD_DUAL_START", default=False)
     )
