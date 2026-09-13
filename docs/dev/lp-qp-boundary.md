@@ -36,6 +36,21 @@ Two corollaries that are the whole point of the rule:
    never assembled, scaled, decomposed or repaired across the FFI.
 2. **The certificate has exactly one implementation.** There is one safe-bound
    function in the tree. Not one per backend, not one per call site.
+3. **No twin with a silent fallback.** The same computation implemented on both
+   sides, with a `try`/`except` picking between them, is the defect — regardless
+   of which side is "primary". A fallback that exists must be *counted and
+   surfaced*, so "the Rust path is in use" is a measured fact rather than an
+   assumption.
+
+**Refinement (2026-09-13, from the MINLP audit in #1231).** "Python owns the
+producer" above is a statement about *ownership and iteration speed*, not a
+prohibition on optimizing a hot producer walk. `_relax/term_classifier.py:662`
+moved an analyze-once DAG walk into Rust and was right to — a 53k-node body is
+slow even once per solve. Producer work **may** be accelerated in Rust wherever
+it measurably pays. What is forbidden is corollary 3: it did so as a *twin*, and
+`_classify_nonlinear_terms_python` is still load-bearing behind two bare
+`except Exception: return None`. Language is the second-order question here; the
+duplication is the defect.
 
 ### What the producer is allowed to compute
 
