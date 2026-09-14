@@ -8644,3 +8644,141 @@ run against the wrong tree cannot read as a pass (§8).
   #1215 already diagnosed this as "a real trade, not an oversight": 26 modules
   read `.body` and never `.rhs`. Changing it is a normalized-body contract
   change, not a construction optimisation.
+
+## 64. FALSIFIED AT ENTRY: the trace-once template is sound but unreachable (2026-09-14)
+
+§40's direction item 1 named "a template/bulk construction API — one symbolic
+form instantiated N times below the Python line (what JuMP's macros and oximo
+do)" as the lever, and §53 left it as the last untaken idea on the per-element
+path after eager linear fusion was built and reverted at 0.99×. The premise is
+that `m.constraint(idx, rule)` **calls the rule once per index** (§53), so the
+Python `Expression` objects are minted no matter what runs downstream; a
+template would trace the rule ONCE against a symbolic index and instantiate in
+Rust, removing them.
+
+Per §4 the entry experiment ran before any implementation. It has three gates,
+and the idea **passes the soundness gate and fails the reachability gate by
+about three orders of magnitude.** Nothing was built.
+
+Instruments, both committed:
+`discopt_benchmarks/scripts/issue1215_template_entry.py` (gates 1 and 2; also a
+pytest plugin) and `issue1215_template_share.py` (gate 3). Both assert the
+loaded `discopt` and a source marker before measuring (§8) and print an executed
+count, exiting non-zero at zero (§6).
+
+### Gate 1 — what per-element construction costs at the sizes that occur
+
+In-repo corpus row counts, 66 `.nl` instances:
+`min=0 p25=2 p50=5 p75=33 p90=150 p99=517 max=718`, **3 703 rows in total across
+the whole corpus.**
+
+Per-element construction (`m.constraint` + rule, the same 4-form nonlinear body
+mix as `bench_model_construction.py`'s `build_discopt`, so no fast path fires),
+best of 5, `gc.collect()` per rep, load 0.17:
+
+| rows | wall_ms | sd_ms | µs/row |
+|---:|---:|---:|---:|
+| 8 | 0.115 | 0.041 | 14.35 |
+| 20 | 0.137 | 0.017 | 6.87 |
+| 132 | 0.384 | 0.033 | 2.91 |
+| 600 | 1.735 | 0.436 | 2.89 |
+| 2 068 | 5.215 | 0.411 | 2.52 |
+| 2 872 | 7.143 | 0.147 | 2.49 |
+
+Replicated at `--reps 3` on the committed copy: 13.50 / 6.60 / 3.14 / 2.62 /
+2.63 / 2.34 µs/row — every cell inside the first run's spread.
+
+**At the corpus p90 (150 rows) a whole model's per-element construction is
+1.7 ms. At the largest in-repo instance (718 rows) it is 7 ms.** Below ~100 rows
+the µs/row figure is dominated by fixed overhead, not per-row work, so the
+per-row lever cannot touch most of it.
+
+### Gate 2 — how much of it a template could legally take
+
+A template is only sound when every member of a family produces a structurally
+identical DAG. The probe wraps `Model.constraint`, fingerprints the rows the
+family **actually produced** (read off the returned `IndexedConstraint._members`
+— an earlier version re-ran the rule per member, which perturbs any rule with a
+side effect and is not what the model contains), and calls a family eligible
+when it has one DAG shape, one sense, and no `Skip`.
+
+The fingerprint abstracts constant values and index positions — the axes a
+template varies — so it is the **upper bound** on eligibility: it can only
+over-count. It covers all 11 `Expression` subclasses and raises on an unknown
+node rather than mis-fingerprinting (§7). That guard fired on first run —
+`SumOverExpression` was uncovered — and produced 20 loud test failures rather
+than a quiet wrong verdict, which is the guard working. The fixed probe
+reproduces the un-instrumented baseline exactly (979 passed / 1 pre-existing
+failure with and without it; 415 passed / 0 failed over the 17 rule-path files).
+
+243 families over three populations (the 17 test files that use the rule path,
+the wider modeling selection, and all 21 shipped `modeling/examples.py` models):
+
+| | eligible |
+|---|---|
+| by family | **233/243 (95.9%)** |
+| by row | 692/714 (96.9%) |
+| by wall | 35.27/35.69 ms (98.8%) |
+
+Ineligible causes: non-uniform DAG shape 4, empty family 2, mixed sense 2,
+`Skip` 2.
+
+**The idea is sound.** 96% of real families would be template-compatible. That
+is the half of this section worth keeping.
+
+### Gate 3 — the share of a solve, which is the number that decides it
+
+The eight largest in-repo instances, construction measured at each instance's
+own row count, solved end to end at a 30 s limit:
+
+| instance | rows | build_ms | solve_s | share% | status |
+|---|---:|---:|---:|---:|---|
+| hda | 718 | 3.392 | 31.216 | 0.011 | time_limit |
+| casctanks | 517 | 2.248 | 30.744 | 0.007 | feasible |
+| heatexch_gen3 | 510 | 2.255 | 30.217 | 0.007 | time_limit |
+| contvar | 284 | 1.652 | 30.591 | 0.005 | feasible |
+| bchoco08 | 190 | 1.251 | 33.401 | 0.004 | time_limit |
+| heatexch_gen2 | 166 | 0.842 | 30.288 | 0.003 | time_limit |
+| bchoco07 | 153 | 0.731 | 30.405 | 0.002 | time_limit |
+| clay0303hfsg | 150 | 0.730 | 30.544 | 0.002 | feasible |
+
+**Median construction share of solve wall: 0.005%** (an independent earlier run
+of the same script gave 0.004%). Two runs, loads 0.94 and lower; the conclusion
+is four orders of magnitude wide and no plausible load artifact reaches it.
+
+A template that removed *all* per-element construction on the largest in-repo
+instance would return 3.4 ms of a 31 s solve.
+
+### Two structural findings that close the escape hatches
+
+1. **discopt's own large-model generators never touch the rule path.**
+   `python/discopt/{nn,dae,gdp}` contain **zero** `m.constraint(set, rule)` call
+   sites and 30 `subject_to` sites, emitting vectorised bodies after §55–§59. The
+   population §48 worried about ("the NN and GDP emitters put every user on the
+   slow side of a 7–11× cliff") was fixed by vectorising the emitters, not by
+   making the element cheap. Generated models — DAE collocation, NN embedding,
+   mb-doe — are exactly the large ones, and they are already off this path.
+2. **Extrapolating to full MINLPLib does not rescue it.** §62's corpus
+   percentiles are p50=111, p90=4 009, p99=68 072 rows. At the 2.5 µs/row
+   asymptote above, p99 construction is ≈170 ms — still well under 1% of a 30–60 s
+   solve, and that is the 99th percentile.
+
+### Disposition
+
+**Closed as falsified at entry. Not built, and not deferred.** The cost side is
+a new tracing path, a symbolic index, and a soundness detector for
+index-dependent branching whose failure mode is a silently wrong model — real
+risk, per §3 it would have to be a loud refusal — bought for at most 0.011% of a
+solve.
+
+`add_linear_constraints`' 0.31 µs/row (§40) stands as proof of the ceiling, but
+a ceiling nobody is standing under is not a lever. **§40 direction item 1 is
+hereby withdrawn**, and with §53 already closed, the per-element path has **no
+remaining candidate**: §63 left it at 1.09× Pyomo like-for-like, which is the
+CPython ceiling, and this section says that ceiling costs nothing worth
+recovering.
+
+Gate 2's 95.9% is retained as a standing result: if a corpus of very large
+hand-written per-element models ever appears, the idea is sound and the
+instrument is committed to re-measure gates 1 and 3 against it. Reachability, not
+soundness, is what killed it.
