@@ -12,6 +12,58 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **The modeling surface's NumPy-shaped gaps** (#1233, #1234, #1235). Three
+  consequences of one deliberate design choice, fixed together.
+  `Expression.__array_ufunc__ = None` is the NEP-13 opt-out that makes
+  `x * np.array([1.0, 2.0])` collapse into a single `BinaryOp` instead of an
+  object array of two — the basis of the array-valued-body idiom, and it stays.
+  Its side-effect is that NumPy habits do not transfer, so every route it closes
+  has to be opened on discopt's own surface, and three were not:
+
+  - **All 19 remaining intrinsics are exported from the top level** (#1233).
+    `from discopt import tanh` raised `ImportError` while `np.tanh(x)` raised
+    `TypeError`, leaving no discoverable way to write a `tanh` model by hand;
+    only 6 of `modeling/core.py`'s 25 intrinsics had been re-exported. (The issue
+    reported 13 missing of 19; introspecting the module rather than reading the
+    list found 19 missing of 25 — `erf`, `sigmoid`, `sign`, `softplus`, `minimum`
+    and `maximum` were absent too.) A regression test now enumerates them by
+    introspection, so the two lists cannot drift apart again. `abs_` keeps its
+    underscore at the top level: `discopt.modeling` exports it as `dm.abs`
+    because that namespace is always reached through the `dm.` prefix, but a bare
+    `abs` here would shadow the builtin under `from discopt import *`.
+
+  - **Object-dtype arrays combine with a scalar expression elementwise** (#1234).
+    `np.array([x, y], dtype=object) * t` — the shape a comprehension over
+    expressions produces — died inside NumPy with `ValueError: setting an array
+    element with a sequence`, naming neither the operand nor the fix, while every
+    neighbouring case (`arr * arr`, `arr + 1.0`, `A @ arr`) worked. All five
+    arithmetic operators now go elementwise in both operand orders, returning the
+    same object-ndarray contract `concatenate`/`stack` already return. A
+    **shaped** expression operand is refused rather than broadcast: `arr * xs`
+    with both of length 3 could mean elementwise pairing or nine rows, and
+    guessing would produce a wrong model silently. Comparisons are deliberately
+    left alone — `arr <= 1.0` cannot work either, because NumPy coerces each
+    element to `bool` and a `Constraint` has no truth value.
+
+  - **Shaped expressions have reductions** (#1235). `xs.sum()`, `.prod()` and
+    `.mean()` each emit one n-ary node, so the constructed DAG is a fixed depth
+    regardless of `len(xs)`; the builtin `sum(xs)` folds left and was the only
+    route, building `n-1` `BinaryOp` objects nested `n` deep (measured depth 202
+    for n=200). Defining the methods also makes NumPy's reduction protocol reach
+    us, so `np.sum(xs)` / `np.prod` / `np.mean` now work. Keywords that cannot be
+    honoured are refused by name rather than ignored: `out=` asks for a write
+    into a buffer and `dtype=` for an accumulation type, and a caller who passed
+    `out=` and got an unwritten buffer back would have a wrong answer, not a slow
+    one. `.reshape`/`.flatten`/`.T` are **not** added — "`Variable` has no
+    `.reshape`, so declare the shape you want" is a documented position, and
+    reversing it is a design change rather than a bug fix.
+
+  Construction cost is unchanged: the object-array branch sits after the
+  `isinstance(other, Expression)` test that dominates a build, and the reductions
+  are plain methods with no per-instance state. Measured over 5 000–200 000
+  constraint instances, discopt's per-element build stays 1.1–2.1× faster than
+  Pyomo and the vectorised arm stays flat — see the PR for the table.
+
 - **`dm.argmin` — an inner NLP as a block of an outer model** (#1216). The inner
   problem is passed as a `Model`, unchanged: its forward pass is a POUNCE solve,
   and its derivatives are the sIPOPT KKT sensitivity wired into the outer solve

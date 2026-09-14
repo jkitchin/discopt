@@ -641,41 +641,236 @@ class Expression:
     # calls per row and that count is the budget, so the duplication is worth it
     # here -- and only here.
 
+    # An object-dtype ndarray operand takes the elementwise branch (issue #1234).
+    # ``__array_ufunc__ = None`` sends ``arr * x`` here instead of letting numpy
+    # loop, and ``_wrap`` then tried to build ONE ``Constant`` out of an array of
+    # Expressions -- which surfaced as numpy's ``ValueError: setting an array
+    # element with a sequence``, naming neither the operand nor the fix. The
+    # branch is placed AFTER the ``isinstance(other, Expression)`` test that the
+    # comment above calls the budget, so the ``x[i] * y[i]`` path is untouched;
+    # the numeric-operand path pays one extra ``isinstance`` against ndarray,
+    # measured at the 200 000-row scale as within the run-to-run spread.
+
     def __add__(self, other):
-        return BinaryOp("+", self, other if isinstance(other, Expression) else _wrap(other))
+        if isinstance(other, Expression):
+            return BinaryOp("+", self, other)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("+", self, other)
+        return BinaryOp("+", self, _wrap(other))
 
     def __radd__(self, other):
-        return BinaryOp("+", other if isinstance(other, Expression) else _wrap(other), self)
+        if isinstance(other, Expression):
+            return BinaryOp("+", other, self)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("+", other, self)
+        return BinaryOp("+", _wrap(other), self)
 
     def __sub__(self, other):
-        return BinaryOp("-", self, other if isinstance(other, Expression) else _wrap(other))
+        if isinstance(other, Expression):
+            return BinaryOp("-", self, other)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("-", self, other)
+        return BinaryOp("-", self, _wrap(other))
 
     def __rsub__(self, other):
-        return BinaryOp("-", other if isinstance(other, Expression) else _wrap(other), self)
+        if isinstance(other, Expression):
+            return BinaryOp("-", other, self)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("-", other, self)
+        return BinaryOp("-", _wrap(other), self)
 
     def __mul__(self, other):
-        return BinaryOp("*", self, other if isinstance(other, Expression) else _wrap(other))
+        if isinstance(other, Expression):
+            return BinaryOp("*", self, other)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("*", self, other)
+        return BinaryOp("*", self, _wrap(other))
 
     def __rmul__(self, other):
-        return BinaryOp("*", other if isinstance(other, Expression) else _wrap(other), self)
+        if isinstance(other, Expression):
+            return BinaryOp("*", other, self)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("*", other, self)
+        return BinaryOp("*", _wrap(other), self)
 
     def __truediv__(self, other):
-        return BinaryOp("/", self, other if isinstance(other, Expression) else _wrap(other))
+        if isinstance(other, Expression):
+            return BinaryOp("/", self, other)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("/", self, other)
+        return BinaryOp("/", self, _wrap(other))
 
     def __rtruediv__(self, other):
-        return BinaryOp("/", other if isinstance(other, Expression) else _wrap(other), self)
+        if isinstance(other, Expression):
+            return BinaryOp("/", other, self)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("/", other, self)
+        return BinaryOp("/", _wrap(other), self)
 
     def __pow__(self, other):
-        return BinaryOp("**", self, other if isinstance(other, Expression) else _wrap(other))
+        if isinstance(other, Expression):
+            return BinaryOp("**", self, other)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("**", self, other)
+        return BinaryOp("**", self, _wrap(other))
 
     def __rpow__(self, other):
-        return BinaryOp("**", other if isinstance(other, Expression) else _wrap(other), self)
+        if isinstance(other, Expression):
+            return BinaryOp("**", other, self)
+        if isinstance(other, np.ndarray) and other.dtype == object:
+            return _object_array_binop("**", other, self)
+        return BinaryOp("**", _wrap(other), self)
 
     def __neg__(self):
         return UnaryOp("neg", self)
 
     def __abs__(self):
         return UnaryOp("abs", self)
+
+    # ── Reductions over a shaped expression (issue #1235) ──
+    #
+    # Each emits ONE n-ary node, so the DAG *as constructed* is a constant depth
+    # independent of ``len(xs)``, and carries one node where the builtin
+    # ``sum(xs)`` -- the only route before -- carries ``n-1`` ``BinaryOp`` objects
+    # nested ``n`` deep. ``np.sum(xs)`` cannot serve instead: it reduces through
+    # ``np.add.reduce``, which ``__array_ufunc__ = None`` refuses by design, so
+    # defining ``.sum`` is also what makes numpy's reduction protocol reach us.
+    #
+    # What this does NOT claim: a left-deep fold can still appear *downstream*,
+    # because the array scalarizer expands a reduction into one (performance-plan
+    # §54, where depth-n folds raised ``RecursionError`` out of the LP/MPS/GAMS
+    # writers for n >= 1000). This removes the depth the modeling layer builds;
+    # it does not change what scalarization later produces.
+    #
+    # These are plain methods on the class, so they cost a model build nothing:
+    # no per-instance state, nothing on the construction path.
+    #
+    # Deliberately NOT added: ``.reshape`` / ``.flatten`` / ``.T``. "``Variable``
+    # has no ``.reshape``, so declare the shape you want" is a documented
+    # position in ``docs/notebooks/modeling_guide.ipynb`` pinned by
+    # ``test_variable_has_no_reshape_so_the_guide_says_declare_the_shape``;
+    # reversing it is a design change, not a bug fix.
+
+    def sum(self, axis: Optional[int] = None, dtype=None, out=None, **kwargs) -> "Expression":
+        """Sum over this expression's elements as a single n-ary node.
+
+        Parameters
+        ----------
+        axis : int or tuple of int, optional
+            Axis (or axes) to reduce. ``None`` (default) is a full reduction to a
+            scalar; an ``axis=k`` reduction leaves the other axes standing, so the
+            node stays array-valued and stands for one row per surviving element.
+        dtype, out, **kwargs
+            Accepted only so ``np.sum(expr)`` dispatches here (numpy's reduction
+            protocol calls ``expr.sum(axis=..., out=...)``). Anything but the
+            default is refused; see :meth:`_reject_numpy_reduction_kwargs`.
+
+        Examples
+        --------
+        >>> xs = m.continuous("xs", shape=(200,), lb=0, ub=1)
+        >>> xs.sum()                 # one node, not a 200-deep chain
+        >>> X.sum(axis=1)            # one row sum per row of a 2-D family
+        """
+        self._reject_numpy_reduction_kwargs("sum", dtype, out, kwargs)
+        return SumExpression(self, axis=axis)
+
+    def prod(self, axis: Optional[int] = None, dtype=None, out=None, **kwargs) -> "Expression":
+        """Product over **all** of this expression's elements, as a single node.
+
+        ``axis`` exists only to accept ``np.prod(expr)``'s call and must be
+        ``None``: the ``prod`` node the evaluator, the relaxation layer and the
+        ``.nl`` writer implement is a full reduction (``jnp.prod`` over the
+        flattened operand). An ``axis`` keyword that silently ignored the axis
+        would fold rows together that belong apart -- the failure mode issue
+        #1160 fixed for ``sum`` -- so it is refused instead.
+        """
+        self._reject_numpy_reduction_kwargs("prod", dtype, out, kwargs)
+        if axis is not None:
+            raise NotImplementedError(
+                f"prod(axis={axis!r}) is not supported: the `prod` node is a full "
+                "reduction over every element, so an axis argument could not be "
+                "honoured and would silently collapse rows that belong apart. "
+                "Build the per-axis product explicitly from the elements you want."
+            )
+        return FunctionCall("prod", self)
+
+    def mean(self, axis: Optional[int] = None, dtype=None, out=None, **kwargs) -> "Expression":
+        """Arithmetic mean over this expression's elements.
+
+        ``self.sum(axis) / n``, where ``n`` is the number of elements reduced.
+        Requires a statically known shape, since ``n`` has to be a literal in the
+        DAG; raises :class:`TypeError` rather than guessing when the shape is not
+        known (a matmul result, a custom call, an indexed container).
+        """
+        self._reject_numpy_reduction_kwargs("mean", dtype, out, kwargs)
+        shape = _known_shape(self)
+        if shape is None:
+            raise TypeError(
+                f"mean() needs a statically known shape to divide by, and a "
+                f"{type(self).__name__} does not carry one. Use "
+                f"`expr.sum({'' if axis is None else f'axis={axis}'}) / n` with the "
+                f"count you intend, or take the mean of a shaped variable directly."
+            )
+        if axis is None:
+            n = 1
+            for d in shape:
+                n *= int(d)
+        else:
+            nd = len(shape)
+            axes = axis if isinstance(axis, tuple) else (axis,)
+            n = 1
+            seen: set[int] = set()
+            for a in axes:
+                a = int(a)
+                if not -nd <= a < nd:
+                    raise np.exceptions.AxisError(
+                        f"axis {a} is out of bounds for an expression of shape {shape}"
+                    )
+                if a % nd in seen:
+                    raise ValueError(f"duplicate axis {a} in mean(axis={axis!r})")
+                seen.add(a % nd)
+                n *= int(shape[a % nd])
+        if n == 0:
+            raise ValueError(f"mean() of an empty reduction (shape {shape}, axis={axis!r})")
+        return BinaryOp("/", SumExpression(self, axis=axis), _wrap(float(n)))
+
+    @staticmethod
+    def _reject_numpy_reduction_kwargs(name: str, dtype, out, kwargs) -> None:
+        """Refuse the numpy reduction keywords this layer cannot honour.
+
+        ``np.sum(expr)`` reaches :meth:`sum` because numpy's ``_wrapreduction``
+        looks for a same-named method on any non-ndarray and calls it as
+        ``expr.sum(axis=..., out=...)``. Accepting those parameters is what makes
+        ``np.sum`` / ``np.prod`` / ``np.mean`` work on a shaped expression at all
+        -- without them numpy's call raises ``unexpected keyword argument 'out'``,
+        which says nothing about the real constraint.
+
+        Accepting them *silently* would be worse than refusing: ``out=`` asks for
+        a write into a preallocated buffer and ``dtype=`` for an accumulation
+        type, and an expression is a DAG node with no storage and no dtype, so
+        either one can only be ignored -- and a caller who passed ``out=`` and got
+        an unwritten buffer back has a wrong answer, not a slow one. They are
+        refused by name instead.
+        """
+        if dtype is not None:
+            raise TypeError(
+                f"{name}(dtype={dtype!r}) is not supported: an expression is a DAG "
+                "node, not an array, and carries no accumulation dtype. The model "
+                "is evaluated in float64."
+            )
+        if out is not None:
+            raise TypeError(
+                f"{name}(out=...) is not supported: an expression is a DAG node "
+                "with no storage to write into. Use the returned expression."
+            )
+        # ``keepdims`` / ``initial`` / ``where`` only reach here when the caller
+        # passed them explicitly -- numpy strips its own ``_NoValue`` defaults.
+        if kwargs:
+            unsupported = ", ".join(sorted(kwargs))
+            raise TypeError(
+                f"{name}() got unsupported keyword argument(s): {unsupported}. "
+                "Expression reductions accept only `axis`."
+            )
 
     # ── Comparison operators produce Constraints, not booleans ──
 
@@ -1466,6 +1661,72 @@ def _wrap(x) -> Expression:
             _SCALAR_CONSTS[x] = node
         return node
     return Constant(x)
+
+
+#: Elementwise fallbacks for an object-dtype ndarray operand (issue #1234), keyed
+#: by the same operator spelling ``BinaryOp`` uses. Comparisons are deliberately
+#: absent: ``arr <= 1.0`` cannot work either, because numpy coerces each element
+#: result to ``bool`` and a :class:`Constraint` has no truth value, so there is no
+#: working neighbour for ``arr <= x`` to be inconsistent with.
+_OBJECT_ARRAY_OPS: "dict[str, Callable[[Any, Any], Any]]" = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+    "/": lambda a, b: a / b,
+    "**": lambda a, b: a**b,
+}
+
+
+def _object_array_binop(op: str, left, right) -> np.ndarray:
+    """``left <op> right`` elementwise when exactly one side is an object ndarray.
+
+    The cold half of the arithmetic dunders (issue #1234). An object-dtype array
+    of expressions -- what a comprehension like ``np.array([f(i) for i in ...],
+    dtype=object)`` produces -- combined with a scalar :class:`Expression` used to
+    die inside numpy with ``ValueError: setting an array element with a
+    sequence``, while every neighbouring case (``arr * arr``, ``arr + 1.0``,
+    ``A @ arr``, ``x * np.array([1.0, 2.0])``) worked.
+
+    The scalar operand is broadcast against the array: element ``i`` of the
+    result is ``arr[i] <op> scalar`` (or ``scalar <op> arr[i]``), which is what
+    numpy itself would have produced had ``__array_ufunc__`` not been set to
+    ``None``, and what ``arr * arr`` already does. The result is an object
+    ndarray of scalar expressions -- the same contract :func:`concatenate` and
+    :func:`stack` return, so it supports indexing, iteration, ``.shape`` and
+    further elementwise arithmetic.
+
+    A **shaped** expression operand is refused rather than broadcast. ``arr * xs``
+    with both of length 3 reads as elementwise pairing, but treating ``xs`` as one
+    scalar operand would give a length-3 array whose every element is itself
+    length-3 -- a model with nine rows where the author meant three, and no error
+    to say so. The two readings cannot be told apart from the expression, so this
+    refuses and names both supported spellings (§3: refuse loudly rather than
+    approximate). Only a scalar expression, which is what issue #1234 reported,
+    goes through.
+    """
+    fn = _OBJECT_ARRAY_OPS[op]
+    if isinstance(left, np.ndarray):
+        arr, scalar, arr_on_left = left, right, True
+    else:
+        arr, scalar, arr_on_left = right, left, False
+    scalar_shape = _known_shape(scalar) if isinstance(scalar, Expression) else ()
+    if scalar_shape is not None and scalar_shape != ():
+        raise TypeError(
+            f"cannot combine an object-dtype array of shape {arr.shape} with a "
+            f"{type(scalar).__name__} of shape {scalar_shape} elementwise: it is "
+            f"ambiguous whether you mean to pair them element by element or to "
+            f"broadcast each element against the whole operand. For elementwise "
+            f"pairing put both sides in object arrays of the same shape; for a "
+            f"vectorized model body use shaped variables directly "
+            f"(`m.continuous(..., shape=...)`), which support `{op}` without an "
+            f"object array."
+        )
+    out = np.empty(arr.shape, dtype=object)
+    # ``np.ndindex(())`` yields the single empty index, so a 0-d array needs no
+    # special case -- it goes round the loop once and writes ``out[()]``.
+    for idx in np.ndindex(arr.shape):
+        out[idx] = fn(arr[idx], scalar) if arr_on_left else fn(scalar, arr[idx])
+    return out
 
 
 def _is_term_iterable(x) -> bool:
