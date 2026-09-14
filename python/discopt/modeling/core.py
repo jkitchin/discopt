@@ -645,81 +645,129 @@ class Expression:
     # ``__array_ufunc__ = None`` sends ``arr * x`` here instead of letting numpy
     # loop, and ``_wrap`` then tried to build ONE ``Constant`` out of an array of
     # Expressions -- which surfaced as numpy's ``ValueError: setting an array
-    # element with a sequence``, naming neither the operand nor the fix. The
-    # branch is placed AFTER the ``isinstance(other, Expression)`` test that the
-    # comment above calls the budget, so the ``x[i] * y[i]`` path is untouched;
-    # the numeric-operand path pays one extra ``isinstance`` against ndarray,
-    # measured at the 200 000-row scale as within the run-to-run spread.
+    # element with a sequence``, naming neither the operand nor the fix.
+    #
+    # The dispatch is an EXCEPTION, not an ``isinstance`` test here, and the cost
+    # is why. The obvious spelling -- a third branch reading
+    # ``isinstance(other, np.ndarray) and other.dtype == object`` before calling
+    # ``_wrap`` -- was written first and measured: +2.7% on ``x[i] * 2.0`` at 3.0
+    # sigma over 20 interleaved reps, and +9.9% at 3.6 sigma on ``x * ndarray``.
+    # Small, but real, and on the path #1215 spent its budget on: a scalar literal
+    # operand is ~3 of the 35 calls per row and pays that test on every one.
+    # Moving the test into ``_wrap``'s Constant fallback puts it where only a
+    # genuine array operand reaches it -- an interned literal returns before it --
+    # and CPython 3.11+ exception tables make an untaken ``except`` free.
+    #
+    # Measured three ways in one container, 20 interleaved reps each, warm-up
+    # dropped, loadavg 0.21-0.26 at every arm (ratio against the pre-fix tree):
+    #
+    #     arm                     explicit test      this version
+    #     x[i] * y[i]             0.989 (-2.3 sd)    1.007 (+0.8 sd)
+    #     x[i] * 2.0              1.022 (+3.3 sd)    0.990 (-1.3 sd)
+    #     x * ndarray             1.127 (+2.8 sd)    1.148 (+3.9 sd)
+    #
+    # So this version buys the scalar-literal path back and makes the genuine
+    # array operand ~15% slower instead. That is the right way round and not a
+    # close call: the literal is ~3 of the 35 calls PER ROW, while an array
+    # operand appears once per constraint FORM -- 40 of them against 200 000 rows
+    # on the #1215 panel, and ~0.2 us each, so ~8 us total. Whole-model wall
+    # cannot resolve either effect; do not try to re-measure this there.
+    #
+    # The narrow ``try`` is deliberate: it wraps ONLY ``_wrap``, never the
+    # ``BinaryOp`` construction after it, because ``BinaryOp`` legitimately raises
+    # ``ValueError`` on a shape mismatch (``_broadcast_shapes``) and swallowing
+    # that into the elementwise branch would turn a rejected model into a silently
+    # reshaped one.
 
     def __add__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("+", self, other)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            rhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("+", self, other)
-        return BinaryOp("+", self, _wrap(other))
+        return BinaryOp("+", self, rhs)
 
     def __radd__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("+", other, self)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            lhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("+", other, self)
-        return BinaryOp("+", _wrap(other), self)
+        return BinaryOp("+", lhs, self)
 
     def __sub__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("-", self, other)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            rhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("-", self, other)
-        return BinaryOp("-", self, _wrap(other))
+        return BinaryOp("-", self, rhs)
 
     def __rsub__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("-", other, self)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            lhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("-", other, self)
-        return BinaryOp("-", _wrap(other), self)
+        return BinaryOp("-", lhs, self)
 
     def __mul__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("*", self, other)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            rhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("*", self, other)
-        return BinaryOp("*", self, _wrap(other))
+        return BinaryOp("*", self, rhs)
 
     def __rmul__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("*", other, self)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            lhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("*", other, self)
-        return BinaryOp("*", _wrap(other), self)
+        return BinaryOp("*", lhs, self)
 
     def __truediv__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("/", self, other)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            rhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("/", self, other)
-        return BinaryOp("/", self, _wrap(other))
+        return BinaryOp("/", self, rhs)
 
     def __rtruediv__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("/", other, self)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            lhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("/", other, self)
-        return BinaryOp("/", _wrap(other), self)
+        return BinaryOp("/", lhs, self)
 
     def __pow__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("**", self, other)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            rhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("**", self, other)
-        return BinaryOp("**", self, _wrap(other))
+        return BinaryOp("**", self, rhs)
 
     def __rpow__(self, other):
         if isinstance(other, Expression):
             return BinaryOp("**", other, self)
-        if isinstance(other, np.ndarray) and other.dtype == object:
+        try:
+            lhs = _wrap(other)
+        except _ObjectArrayOperand:
             return _object_array_binop("**", other, self)
-        return BinaryOp("**", _wrap(other), self)
+        return BinaryOp("**", lhs, self)
 
     def __neg__(self):
         return UnaryOp("neg", self)
@@ -1660,7 +1708,31 @@ def _wrap(x) -> Expression:
             node = Constant(x)
             _SCALAR_CONSTS[x] = node
         return node
+    if isinstance(x, np.ndarray) and x.dtype == object:
+        # Reached only by the ``Constant`` fallback -- an interned scalar literal
+        # returns above and never pays this test. See ``_ObjectArrayOperand``.
+        raise _ObjectArrayOperand(
+            f"cannot build a single Constant from an object-dtype array of shape "
+            f"{x.shape}; its elements are expressions, not numbers"
+        )
     return Constant(x)
+
+
+class _ObjectArrayOperand(ValueError):
+    """``_wrap`` was handed an object-dtype ndarray (issue #1234).
+
+    The signal the arithmetic dunders catch to route to
+    :func:`_object_array_binop`. Raising from ``_wrap``'s ``Constant`` fallback --
+    rather than testing for the array in each operator -- keeps the test off the
+    scalar-literal path, which is ~3 of the 35 calls a constraint row makes and
+    where an extra ``isinstance`` measured +2.7% at 3.0 sigma.
+
+    Subclasses :class:`ValueError` on purpose. ``_wrap`` has many callers besides
+    the operators (``dm.sum``, ``dm.prod``, ``Constraint`` bodies), and an
+    uncaught escape from one of those should still read as the ``ValueError`` that
+    numpy used to raise there -- just with a message that names the operand
+    instead of ``setting an array element with a sequence``.
+    """
 
 
 #: Elementwise fallbacks for an object-dtype ndarray operand (issue #1234), keyed

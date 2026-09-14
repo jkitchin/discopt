@@ -58,11 +58,18 @@ The release procedure that produces these entries is documented in
     `.reshape`, so declare the shape you want" is a documented position, and
     reversing it is a design change rather than a bug fix.
 
-  Construction cost is unchanged: the object-array branch sits after the
-  `isinstance(other, Expression)` test that dominates a build, and the reductions
-  are plain methods with no per-instance state. Measured over 5 000–200 000
-  constraint instances, discopt's per-element build stays 1.1–2.1× faster than
-  Pyomo and the vectorised arm stays flat — see the PR for the table.
+  Construction cost holds. Over 5 000–200 000 constraint instances discopt's
+  per-element build stays **1.1–2.1× faster than Pyomo** at every scale and
+  retained memory moves under 0.6%. The dispatch to the elementwise branch is an
+  exception raised from `_wrap`, not a type test in each operator, and that
+  choice was forced by measurement rather than taste: the obvious spelling — an
+  `isinstance(other, np.ndarray)` branch in all ten dunders — cost **+2.2% at 3.3
+  sigma** on `x[i] * 2.0`, a scalar literal being ~3 of the 35 calls a row makes.
+  Raising from `_wrap`'s `Constant` fallback puts the test where an interned
+  literal never reaches it, returning that path to baseline (0.990, −1.3 sigma)
+  at the price of ~15% on a genuine ndarray operand, which appears once per
+  constraint *form* rather than per row (~8 µs across the 40-form panel). The
+  reductions are plain methods and cost a build nothing.
 
 - **`dm.argmin` — an inner NLP as a block of an outer model** (#1216). The inner
   problem is passed as a `Model`, unchanged: its forward pass is a POUNCE solve,

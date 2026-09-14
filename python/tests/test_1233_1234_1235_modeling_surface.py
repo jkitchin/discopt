@@ -247,6 +247,35 @@ def test_1234_a_shaped_expression_operand_is_refused_not_broadcast(model):
             expr()
 
 
+def test_1234_the_dispatch_sentinel_is_a_valueerror_for_wraps_other_callers(model):
+    """``_wrap`` is not only called by the operators, so its escape must read well.
+
+    The elementwise branch is reached by catching ``_ObjectArrayOperand`` raised
+    from ``_wrap``, which keeps the type test off the scalar-literal path (it is
+    ~3 of the 35 calls a constraint row makes, and an ``isinstance`` there
+    measured +2.2% at 3.3 sigma). But ``dm.sum``, ``dm.prod`` and constraint
+    bodies call ``_wrap`` too, and an uncaught escape from one of those must
+    still look like the ``ValueError`` numpy used to raise -- with a better
+    message, not a stranger type.
+    """
+    assert issubclass(core._ObjectArrayOperand, ValueError)
+    with pytest.raises(ValueError, match="object-dtype array"):
+        core._wrap(np.array([model.continuous("q", lb=0, ub=1)], dtype=object))
+
+
+def test_1234_a_shape_mismatch_is_still_rejected_not_reshaped(model):
+    """The ``try`` must not swallow ``BinaryOp``'s own shape guard.
+
+    ``BinaryOp`` raises ``ValueError`` from ``_broadcast_shapes`` on incompatible
+    operands. If the ``try`` wrapped the construction rather than just ``_wrap``,
+    that rejection would be caught and rerouted into the elementwise branch,
+    turning a model the layer correctly refuses into a silently reshaped one.
+    """
+    a = model.continuous("a", shape=(3,), lb=0, ub=1)
+    with pytest.raises(ValueError):
+        a * np.ones((4,))
+
+
 def test_1234_the_neighbouring_cases_still_behave_as_before(model):
     """The table in the issue -- these worked and must keep working.
 
