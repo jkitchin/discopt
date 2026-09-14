@@ -175,10 +175,34 @@ from discopt.modeling import (
     VarType as VarType,
 )
 from discopt.modeling import (
+    acos as acos,
+)
+from discopt.modeling import (
+    acosh as acosh,
+)
+from discopt.modeling import (
+    asin as asin,
+)
+from discopt.modeling import (
+    asinh as asinh,
+)
+from discopt.modeling import (
+    atan as atan,
+)
+from discopt.modeling import (
+    atanh as atanh,
+)
+from discopt.modeling import (
     concatenate as concatenate,
 )
 from discopt.modeling import (
     cos as cos,
+)
+from discopt.modeling import (
+    cosh as cosh,
+)
+from discopt.modeling import (
+    erf as erf,
 )
 from discopt.modeling import (
     exp as exp,
@@ -187,7 +211,34 @@ from discopt.modeling import (
     log as log,
 )
 from discopt.modeling import (
+    log1p as log1p,
+)
+from discopt.modeling import (
+    log2 as log2,
+)
+from discopt.modeling import (
+    log10 as log10,
+)
+from discopt.modeling import (
+    maximum as maximum,
+)
+from discopt.modeling import (
+    minimum as minimum,
+)
+from discopt.modeling import (
+    sigmoid as sigmoid,
+)
+from discopt.modeling import (
+    sign as sign,
+)
+from discopt.modeling import (
     sin as sin,
+)
+from discopt.modeling import (
+    sinh as sinh,
+)
+from discopt.modeling import (
+    softplus as softplus,
 )
 from discopt.modeling import (
     sqrt as sqrt,
@@ -197,6 +248,12 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     tan as tan,
+)
+from discopt.modeling import (
+    tanh as tanh,
+)
+from discopt.modeling.core import (
+    abs_ as abs_,
 )
 from discopt.modeling.examples import (
     example_assignment as example_assignment,
