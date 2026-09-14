@@ -722,9 +722,13 @@ _answered = []
 _orig = pc._extract_lp_data_tape
 
 
-def _counting(model):
+def _counting(model, **kwargs):
+    # Forward **kwargs verbatim: this stub only counts, so it must stay
+    # transparent to the real signature (it grew ``for_qp`` when the two LP
+    # marshalers were consolidated). Pinning the arity here would make an
+    # unrelated signature change look like a jax leak.
     _reached.append(1)
-    out = _orig(model)
+    out = _orig(model, **kwargs)
     if out is not None:
         _answered.append(1)
     return out

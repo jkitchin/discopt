@@ -10213,6 +10213,9 @@ def solve_model(
                 # proceeds (unchanged behavior); the *default* route simply
                 # declines to take over.
                 _engine_bound: Optional[float] = None
+                # Carries the engine's valid dual bound and the work it spent
+                # back out when it DEFERS, so neither is thrown away (see below).
+                _deferred: dict = {}
                 _want_engine = nlp_solver == "simplex" or (
                     _milp_engine_default_on() and not lagrangian_bound
                 )
@@ -10223,9 +10226,6 @@ def solve_model(
                             "monolithic Rust MILP engine has no per-node hook); use the "
                             "default nlp_solver='pounce' MILP path to enable it."
                         )
-                    # Carries the engine's valid dual bound back out when it
-                    # DEFERS, so the work is not thrown away (see below).
-                    _deferred: dict = {}
                     _simplex_res = _solve_milp_simplex(
                         model,
                         time_limit,
@@ -10268,7 +10268,10 @@ def solve_model(
                     initial_point=initial_point,
                     incumbent_time_extension=incumbent_time_extension,
                 )
-                return _merge_engine_bound(_bb_res, _engine_bound, model)
+                return _merge_engine_stats(
+                    _merge_engine_bound(_bb_res, _engine_bound, model),
+                    _deferred.get("stats"),
+                )
             logger.info(
                 "MILP with a lazy_constraints/incumbent_callback — routing to spatial "
                 "Branch-and-Bound (the specialized MILP engine cannot honor these "
@@ -19286,18 +19289,51 @@ def _mip_recover_relaxation_duals(
     return cd, bdl, bdu
 
 
+def _fixed_col_mask(col_ub: Optional[np.ndarray], n_cols: int) -> Optional[np.ndarray]:
+    """Which columns are logicals FIXED at zero, i.e. equality rows' logicals.
+
+    ``col_ub`` is the standard form's full upper-bound vector over
+    ``[structural | logical]``, or ``None`` from a caller that does not have one.
+    ``None`` means "classify by sparsity alone", which is what every call site did
+    before :mod:`discopt._relax.std_form` existed and what the legacy layout still
+    needs: there an equality row has no logical at all, so sparsity is sufficient.
+
+    Under the row-logical layout it is NOT sufficient -- every row carries a
+    logical there, so a sparsity-only classifier turns each equality into a
+    one-sided inequality and silently stops checking the other direction. That
+    would weaken the MILP feasibility gate, so a caller on that layout must pass
+    ``col_ub`` and let the logical's BOX decide.
+
+    Returned as a whole mask rather than a per-column predicate because the
+    sparse decomposition consults it once per stored nonzero: on qap04's
+    marshaled form that is a Python call per entry, and a vectorized mask makes
+    it an array index instead.
+    """
+    if col_ub is None:
+        return None
+    from discopt._relax.std_form import logical_fixed_mask
+
+    fixed = logical_fixed_mask(col_ub)
+    mask = np.zeros(n_cols, dtype=bool)
+    k = min(n_cols, fixed.shape[0])
+    mask[:k] = fixed[:k]
+    return mask
+
+
 def _decompose_eq_slack_form_sparse(
     A_eq_full: Any,
     b_eq_full: np.ndarray,
     n_orig: int,
     n_slack: int,
+    col_ub: Optional[np.ndarray] = None,
 ) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
     """Sparse counterpart of :func:`_decompose_eq_slack_form`; same semantics.
 
     Row classification and ordering match the dense path exactly:
 
     * a row is an inequality iff its slack block holds an entry with
-      ``abs(v) > 1e-15`` -- a *stored* zero fails that test in both paths;
+      ``abs(v) > 1e-15`` -- a *stored* zero fails that test in both paths --
+      AND, when ``col_ub`` is given, that entry's column is not fixed at zero;
     * among the slack entries the dense path takes ``np.argmax(np.abs(...))``,
       which resolves ties to the LOWEST column index; scanning CSR indices in
       ascending order with a strict ``>`` does the same;
@@ -19317,12 +19353,16 @@ def _decompose_eq_slack_form_sparse(
     indptr, indices, data = A.indptr, A.indices, A.data
     is_ub = np.zeros(m, dtype=bool)
     sign = np.ones(m, dtype=np.float64)
+    # A logical fixed at [0, 0] gives its row no freedom, so it must not make
+    # that row read as an inequality. ``None`` (no ``col_ub``) leaves every
+    # column free, which is the pre-consolidation behaviour exactly.
+    fixed = _fixed_col_mask(col_ub, A.shape[1])
     if n_slack > 0:
         for i in range(m):
             best_abs = 0.0
             best_val = 0.0
             for k in range(indptr[i], indptr[i + 1]):
-                if indices[k] < n_orig:
+                if indices[k] < n_orig or (fixed is not None and fixed[indices[k]]):
                     continue
                 a = abs(data[k])
                 if a > best_abs:  # strict: ties keep the lowest column index
@@ -19351,14 +19391,20 @@ def _decompose_eq_slack_form(
     b_eq_full: np.ndarray,
     n_orig: int,
     n_slack: int,
+    col_ub: Optional[np.ndarray] = None,
 ) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
     """Reconstruct (A_ub, b_ub, A_eq, b_eq) from an equality-plus-slack form.
 
     `extract_lp_data` / `extract_qp_data` convert inequalities to equalities
-    with non-negative slacks. Rows whose slack column is nonzero are the
-    original inequalities; rows with no slack are true equalities. This
-    helper projects back to inequality/equality form over the original
-    variables so HiGHS LP/MILP/QP solvers can consume it.
+    with non-negative slacks. Rows whose slack column is *free* are the
+    original inequalities; rows with no slack, or whose only slack is fixed at
+    zero, are true equalities. This helper projects back to
+    inequality/equality form over the original variables so HiGHS LP/MILP/QP
+    solvers can consume it.
+
+    ``col_ub`` is the standard form's upper-bound vector; pass it whenever the
+    caller holds one. See :func:`_fixed_col_mask` for why omitting it is only
+    safe on the legacy layout.
     """
     if A_eq_full.shape[0] == 0:
         return None, None, None, None
@@ -19376,15 +19422,24 @@ def _decompose_eq_slack_form(
     except ImportError:  # pragma: no cover - scipy is a hard dependency
         _is_sparse = False
     if _is_sparse:
-        return _decompose_eq_slack_form_sparse(A_eq_full, b_eq_full, n_orig, n_slack)
+        return _decompose_eq_slack_form_sparse(A_eq_full, b_eq_full, n_orig, n_slack, col_ub)
 
     eq_rows: list[np.ndarray] = []
     eq_rhs: list[float] = []
     ub_rows: list[np.ndarray] = []
     ub_rhs: list[float] = []
 
+    # Same classification rule as the sparse path, computed once for all rows.
+    _fixed_all = _fixed_col_mask(col_ub, A_eq_full.shape[1])
+    _fixed_slack = None if _fixed_all is None else _fixed_all[n_orig:]
+
     for i in range(A_eq_full.shape[0]):
-        slack_part = A_eq_full[i, n_orig:]
+        slack_part = np.asarray(A_eq_full[i, n_orig:], dtype=np.float64)
+        if _fixed_slack is not None and slack_part.size:
+            # A logical fixed at [0, 0] gives its row no freedom, so it must not
+            # make that row read as an inequality; zeroing it here leaves the
+            # argmax/sign logic below untouched for every free logical.
+            slack_part = np.where(_fixed_slack[: slack_part.size], 0.0, slack_part)
         has_slack = n_slack > 0 and np.any(np.abs(slack_part) > 1e-15)
         if has_slack:
             slack_idx = np.argmax(np.abs(slack_part))
@@ -19638,7 +19693,9 @@ def _solve_lp_matrix(
     n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(lp_data.b_eq)
-    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(lp_data.x_u, dtype=np.float64)
+    )
 
     try:
         result = solve_lp_fn(
@@ -20184,7 +20241,9 @@ def _solve_qp_matrix(
     n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(qp_data.b_eq)
-    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(qp_data.x_u, dtype=np.float64)
+    )
 
     # Build integrality array for MIQP
     integrality = None
@@ -20373,7 +20432,9 @@ def _solve_milp_gurobi(
     n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(lp_data.b_eq)
-    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(lp_data.x_u, dtype=np.float64)
+    )
 
     int_arr = np.zeros(n_orig, dtype=np.int32)
     offset = 0
@@ -20699,7 +20760,9 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
             # decomposition returns ``None`` for an absent block (no pure
             # equalities or no inequalities), which POUNCE's ``solve_qp``
             # accepts directly.
-            A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(A_eq, b_eq, n_orig, n_slack)
+            A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
+                A_eq, b_eq, n_orig, n_slack, np.asarray(qp_data.x_u, dtype=np.float64)
+            )
             P_s = Q[:n_orig, :n_orig]
             c_s = c[:n_orig]
             A_struct = A_eq[:, :n_orig]
@@ -20836,6 +20899,7 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
             np.asarray(lp_data.b_eq, dtype=np.float64),
             n_orig,
             n_slack,
+            np.asarray(lp_data.x_u, dtype=np.float64),
         )
         lb_n = np.asarray(node_lb, dtype=np.float64)
         ub_n = np.asarray(node_ub, dtype=np.float64)
@@ -20918,6 +20982,7 @@ def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, t
             np.asarray(lp_data.b_eq, dtype=np.float64),
             n_orig,
             n_slack,
+            np.asarray(lp_data.x_u, dtype=np.float64),
         )
         lb_n = np.asarray(node_lb, dtype=np.float64)
         ub_n = np.asarray(node_ub, dtype=np.float64)
@@ -21384,7 +21449,11 @@ def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t
     _A_eq_dense = _dense_A(lp_data.A_eq)
     n_total = _A_eq_dense.shape[1] if _A_eq_dense.shape[0] > 0 else n_orig
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
-        _A_eq_dense, np.asarray(lp_data.b_eq), n_orig, n_total - n_orig
+        _A_eq_dense,
+        np.asarray(lp_data.b_eq),
+        n_orig,
+        n_total - n_orig,
+        np.asarray(lp_data.x_u, dtype=np.float64),
     )
     c_m = np.asarray(lp_data.c[:n_orig])
     obj_const = float(lp_data.obj_const)
@@ -22057,6 +22126,25 @@ def _root_dive(
 _SIMPLEX_MILP_BUDGET_CAP_S = 10.0
 
 
+def _merge_engine_stats(res: SolveResult, engine_stats: Optional[dict]) -> SolveResult:
+    """Fold a DEFERRED engine's work counters into the fallback's result.
+
+    Companion to ``_merge_engine_bound``: when ``_solve_milp_simplex`` defers,
+    the SolveResult the caller sees comes from the fallback engine, so the
+    driver's node/iteration counts vanish -- on exactly the budget-exhausting
+    instances where a work metric matters most. The keys are namespaced
+    ``milp_driver/*`` by the producer, so a reader can never mistake them for
+    the fallback's own counters, and an existing key is never overwritten.
+    Pure instrumentation: nothing about the reported solution changes.
+    """
+    if not engine_stats:
+        return res
+    merged = dict(res.solver_stats or {})
+    for key, value in engine_stats.items():
+        merged.setdefault(key, float(value))
+    return dataclasses.replace(res, solver_stats=merged)
+
+
 def _merge_engine_bound(
     res: SolveResult, engine_bound: Optional[float], model: Model
 ) -> SolveResult:
@@ -22438,6 +22526,18 @@ def _solve_milp_simplex(
         **_cut_opts,
     )
 
+    def _driver_stats() -> dict[str, float]:
+        """Total simplex iterations the driver spent over the whole tree.
+
+        Node count alone cannot say whether a marshaling change moved work or
+        merely moved it around -- a run with half the nodes and twice the
+        iterations per node is not an improvement -- so the cross-solver work
+        metric is surfaced on ``SolveResult`` rather than left in a
+        ``DISCOPT_PROFILE`` counter this product path drops on the floor. Pure
+        instrumentation: the driver returns the number either way.
+        """
+        return {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
+
     # Feasibility gate (shared by the return path below and the #698 re-entry
     # adoption test). The row/bound/integrality decomposition is independent of
     # the point, so build it once and close over it.
@@ -22445,7 +22545,11 @@ def _solve_milp_simplex(
     # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
     _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_gate, np.asarray(lp_data.b_eq), n_orig, _A_n - n_orig
+        _A_gate,
+        np.asarray(lp_data.b_eq),
+        n_orig,
+        _A_n - n_orig,
+        np.asarray(lp_data.x_u, dtype=np.float64),
     )
     _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
@@ -22560,6 +22664,11 @@ def _solve_milp_simplex(
                     obj = _obj2
                     bound = _bound2
                     nodes = nodes + _nodes2
+                    # Accumulated in the same branch as ``nodes`` and nowhere
+                    # else: a work metric whose numerator counts the re-entry's
+                    # iterations while its denominator omits the re-entry's
+                    # nodes reports a per-node cost that no run ever had.
+                    _lp_iters = _lp_iters + _iters2
 
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -22696,9 +22805,15 @@ def _solve_milp_simplex(
             constraint_duals=constraint_duals,
             bound_duals_lower=bound_duals_lower,
             bound_duals_upper=bound_duals_upper,
+            solver_stats=_driver_stats(),
         )
     if status == "unbounded":
-        return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
+        return SolveResult(
+            status="unbounded",
+            wall_time=wall_time,
+            node_count=nodes,
+            solver_stats=_driver_stats(),
+        )
     if status == "node_limit":
         # The simplex MILP engine exhausted its node/time budget without proving
         # optimality and found no usable incumbent here. Rather than surface a
@@ -22719,8 +22834,26 @@ def _solve_milp_simplex(
             # back into the model's own sense, exactly as the optimal/feasible
             # branch does at the ``bound_val`` assignment above.
             deferred["bound"] = float(-bound if maximize else bound)
+        if deferred is not None:
+            # The work the driver did before deferring is not thrown away either.
+            # Without this, ``lp/iters`` is absent on exactly the instances that
+            # exhaust the budget -- the hard ones a marshaling A/B most needs a
+            # work metric for -- because the returned SolveResult comes from the
+            # fallback engine. Namespaced so it is never confused with the
+            # fallback's own counters (CLAUDE.md 6: the metric must say which
+            # engine produced it).
+            _ds = _driver_stats()
+            deferred["stats"] = {
+                "milp_driver/iters": _ds["lp/iters"],
+                "milp_driver/nodes": _ds["lp/driver_nodes"],
+            }
         return _debug_stopped_result()
-    return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
+    return SolveResult(
+        status="infeasible",
+        wall_time=wall_time,
+        node_count=nodes,
+        solver_stats=_driver_stats(),
+    )
 
 
 def _solve_milp_bb(
@@ -22814,7 +22947,11 @@ def _solve_milp_bb(
     _A_eq_dense = _dense_A(lp_data.A_eq)
     _n_total0 = _A_eq_dense.shape[1] if _A_eq_dense.shape[0] > 0 else n_orig
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_eq_dense, np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
+        _A_eq_dense,
+        np.asarray(lp_data.b_eq),
+        n_orig,
+        _n_total0 - n_orig,
+        np.asarray(lp_data.x_u, dtype=np.float64),
     )
     _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
     try:
@@ -23599,7 +23736,11 @@ def _solve_miqp_bb(
     _A_eq_dense = _dense_A(qp_data.A_eq)
     _n_total0 = _A_eq_dense.shape[1] if _A_eq_dense.shape[0] > 0 else n_orig
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_eq_dense, np.asarray(qp_data.b_eq), n_orig, _n_total0 - n_orig
+        _A_eq_dense,
+        np.asarray(qp_data.b_eq),
+        n_orig,
+        _n_total0 - n_orig,
+        np.asarray(qp_data.x_u, dtype=np.float64),
     )
     _c_m = np.asarray(qp_data.c[:n_orig])
     _Q_m = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
@@ -24071,7 +24212,11 @@ def _solve_miqp_bb(
             n_slack_local = n_total - n_orig
             b_eq_full = np.asarray(qp_data.b_eq)
             A_ub_, b_ub_, A_eq_, b_eq_ = _decompose_eq_slack_form(
-                A_eq_full, b_eq_full, n_orig, n_slack_local
+                A_eq_full,
+                b_eq_full,
+                n_orig,
+                n_slack_local,
+                np.asarray(qp_data.x_u, dtype=np.float64),
             )
             Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
             constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
