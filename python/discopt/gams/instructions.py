@@ -26,7 +26,11 @@ from enum import IntEnum
 from typing import Callable
 
 from discopt.modeling import core as dm
-from discopt.modeling.core import Expression
+from discopt.modeling.core import (
+    _UNREPRESENTABLE_INTRINSICS,
+    Expression,
+    _unrepresentable_intrinsic_message,
+)
 
 
 class GamsTranslationError(Exception):
@@ -428,13 +432,22 @@ def translate_instructions(
     return result
 
 
-# GAMS intrinsics that are discontinuous (or piecewise-constant): they have no
-# valid continuous relaxation and meaningless gradients, so they are rejected
-# from the (continuous) global path rather than silently mis-solved. Discrete
-# behaviour must be modelled with integer variables instead.
-_DISCONTINUOUS: frozenset[str] = frozenset(
-    {"ceil", "floor", "round", "trunc", "frac", "mod", "ifthen"}
-)
+#: GAMS intrinsics with no node in discopt's expression IR: discontinuous or
+#: piecewise-constant, so no continuous relaxation and no meaningful gradient.
+#: They are rejected rather than silently mis-solved; discrete behaviour must be
+#: modelled with integer variables instead.
+#:
+#: The shared names come from :data:`discopt.modeling.core._UNREPRESENTABLE_INTRINSICS`
+#: rather than being restated, so this doorway cannot drift from the modeling
+#: API's, the GAMS parser's or the ``.nl`` parser's (issue #1237 -- four separate
+#: hand-maintained copies of this list existed, and one of them, the GAMS
+#: parser's, had silently fallen out of sync and accepted the names instead).
+#: ``intdiv`` in that registry is a ``.nl`` opcode name with no GAMS spelling, so
+#: it simply never matches a ``FUNC_NAME`` lookup. The extras below are the
+#: GAMS-only names with no counterpart elsewhere.
+_GAMS_ONLY_DISCONTINUOUS: frozenset[str] = frozenset({"frac", "mod", "ifthen"})
+
+_DISCONTINUOUS: frozenset[str] = frozenset(_UNREPRESENTABLE_INTRINSICS) | _GAMS_ONLY_DISCONTINUOUS
 
 
 def _apply_func(func_code: int, args: list[Expression]) -> Expression:
@@ -442,6 +455,15 @@ def _apply_func(func_code: int, args: list[Expression]) -> Expression:
     if name is None:
         raise GamsTranslationError(f"unknown function code {func_code}")
     if name in _DISCONTINUOUS:
+        if name in _UNREPRESENTABLE_INTRINSICS:
+            # Shared wording with every other doorway, including the
+            # reformulation recipe -- a user hitting this through the GAMS link
+            # gets the same explanation as one calling `dm.floor` directly.
+            raise GamsTranslationError(
+                _unrepresentable_intrinsic_message(
+                    name, where=f"GAMS function {name}(...) over a variable"
+                )
+            )
         raise GamsTranslationError(
             f"GAMS function '{name}' is discontinuous and not supported for "
             "continuous optimization; model discrete behaviour with integer "

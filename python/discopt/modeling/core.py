@@ -882,6 +882,140 @@ class Expression:
             raise ValueError(f"mean() of an empty reduction (shape {shape}, axis={axis!r})")
         return BinaryOp("/", SumExpression(self, axis=axis), _wrap(float(n)))
 
+    # ── min / max over a shaped expression (issue #1238) ──
+    #
+    # These do NOT follow ``.sum()``'s one-n-ary-node shape, and the difference is
+    # measured rather than stylistic. ``sum`` has ``SumExpression``, a node every
+    # consumer reduces over. ``min``/``max`` have ``MathFunc::Min``/``Max``, which
+    # look n-ary (``FunctionCall`` takes ``*args``) but are read as strictly
+    # BINARY by four consumers -- ``expr.rs``'s two evaluators, ``fbbt.rs``'s
+    # forward interval, ``dag_compiler``/``relaxation_compiler``/``differentiable``
+    # -- each of which indexes ``args[0], args[1]`` and would silently DROP
+    # ``args[2:]``. A dropped argument in the FBBT interval is not a loose bound,
+    # it is a wrong one (``min`` over a subset is too high), i.e. a false
+    # certificate. ``nl_parser.rs`` already reached this conclusion for the
+    # ``.nl`` ``o11``/``o12`` minlist/maxlist opcodes and folds them to binary for
+    # exactly this reason (C-8), so emitting n-ary here would be re-opening a hole
+    # the parser deliberately closed.
+    #
+    # #1238 proposed lifting all four consumers to n-ary, on the hypothesis that a
+    # single n-ary envelope would be TIGHTER than the fold. Measured first
+    # (CLAUDE.md §4), and falsified: over 300 fixed-box comparisons through
+    # ``build_uniform_relaxation`` -- the default per-node engine since #632 --
+    # spanning ``min``/``max``, both objective senses, n = 3..8, and affine /
+    # square / bilinear / exp / variable-sharing arguments, the n-ary bound equals
+    # the balanced fold's bound EXACTLY in 300/300 cases, with 0 unsound bounds.
+    # It has to: ``uniform_relax._build_multivar`` emits the exact convex-hull
+    # facets ``w >= a_i`` (resp. ``w <= a_i``), and a fold's intermediate auxes
+    # project straight back out of that system. The issue's own kill criterion
+    # ("if the n-ary envelope is not tighter than the balanced binary fold, ship
+    # only the balanced fold") therefore fires. Recorded in
+    # ``docs/dev/performance-plan.md`` §64.
+    #
+    # What the fold IS for is the depth, which is the part of #1238 that is a real
+    # defect: ``dm.minimum(dm.minimum(a, b), c)`` -- the only spelling there was --
+    # grows depth 1:1 with the element count, and performance-plan §54 records
+    # depth-n folds raising ``RecursionError`` out of the LP/MPS/GAMS writers at
+    # n >= 1000. A balanced fold is ``ceil(log2(n))`` deep instead: 7 for n = 100,
+    # 10 for n = 1000. Same nodes, same math, same bound -- only the nesting
+    # changes.
+
+    def min(self, axis: Optional[int] = None, out=None, **kwargs) -> "Expression":
+        """Smallest element of this expression, as a balanced binary fold.
+
+        Parameters
+        ----------
+        axis : None
+            Accepted only so ``np.min(expr)`` dispatches here (numpy's reduction
+            protocol calls ``expr.min(axis=..., out=...)``). Must be ``None``; see
+            below.
+        out, ``**kwargs``
+            Refused; see :meth:`_reject_numpy_reduction_kwargs`.
+
+        Requires a statically known shape, since the elements have to be indexed
+        out one at a time to be folded -- raises :class:`TypeError` rather than
+        guessing when the shape is not known (a matmul result, a custom call).
+
+        Examples
+        --------
+        >>> xs = m.continuous("xs", shape=(200,), lb=0, ub=1)
+        >>> xs.min()                 # ceil(log2(200)) = 8 levels of min, not 199
+        >>> m.subject_to(xs.max() <= 0.9, name="bottleneck")
+        """
+        return self._minmax_reduction("min", axis, out, kwargs)
+
+    def max(self, axis: Optional[int] = None, out=None, **kwargs) -> "Expression":
+        """Largest element of this expression, as a balanced binary fold.
+
+        The ``max`` counterpart of :meth:`min`; see it for the parameters and for
+        why this is a fold rather than one n-ary node.
+        """
+        return self._minmax_reduction("max", axis, out, kwargs)
+
+    def _minmax_reduction(self, fname: str, axis, out, kwargs) -> "Expression":
+        """Shared body of :meth:`min` / :meth:`max`."""
+        # numpy's ``np.min``/``np.max`` pass ``axis`` and ``out`` only -- unlike
+        # ``np.sum``/``np.prod`` there is no ``dtype`` to accumulate in -- so
+        # ``dtype`` is hardwired ``None`` here rather than exposed as a parameter
+        # nobody can reach.
+        self._reject_numpy_reduction_kwargs(fname, None, out, kwargs)
+        if axis is not None:
+            # An axis reduction has to stay array-valued, and this layer has no
+            # array-valued min/max node to return: ``SumExpression(axis=k)`` is
+            # what makes ``.sum(axis=k)`` possible and ``min``/``max`` have no
+            # equivalent. The one thing that could be returned instead -- an
+            # object ndarray of scalar folds -- is a trap: ``arr <= 0.8`` on it
+            # makes numpy loop into ``Expression.__le__`` per element and then try
+            # to pack the resulting Constraints into a bool array, which raises
+            # "A Constraint has no truth value" from a line the user did not
+            # write. Refuse instead of returning something that breaks one
+            # operator later (CLAUDE.md §3).
+            raise NotImplementedError(
+                f"{fname}(axis={axis!r}) is not supported: an axis reduction has to "
+                f"stay array-valued and there is no array-valued {fname} node to "
+                f"carry it (`sum` has `SumExpression`; `{fname}` does not). Reduce "
+                f"one slice at a time -- `X[i, :].{fname}()` for each row, or "
+                f"`dm.{'minimum' if fname == 'min' else 'maximum'}(*X[i, :])`."
+            )
+        return _balanced_minmax_fold(fname, self._flat_elements(fname))
+
+    def _flat_elements(self, caller: str) -> list["Expression"]:
+        """This expression's elements in C order, as scalar expressions.
+
+        The reduction helpers fold over these. A statically known shape is
+        required: without one there is no element count to index over, and
+        guessing would build a model over the wrong number of terms.
+        """
+        shape = _known_shape(self)
+        if shape is None:
+            raise TypeError(
+                f"{caller}() needs a statically known shape to reduce over, and a "
+                f"{type(self).__name__} does not carry one. Fold the elements you "
+                f"mean explicitly with "
+                f"`dm.{'minimum' if caller == 'min' else 'maximum'}(*terms)`, or "
+                f"take the {caller} of a shaped variable directly."
+            )
+        if shape == ():
+            # A scalar is its own min and max. Returning ``self`` keeps the DAG
+            # unchanged rather than wrapping it in a one-argument call no
+            # consumer would relax.
+            return [self]
+        n = 1
+        for d in shape:
+            n *= int(d)
+        if n == 0:
+            raise ValueError(
+                f"{caller}() of an empty reduction (shape {shape}): the minimum of "
+                "no elements is undefined."
+            )
+        if len(shape) == 1:
+            return [self[i] for i in range(int(shape[0]))]
+        # ``np.ndindex`` yields C order, matching ``.flatten()`` and the order
+        # ``.sum()`` reduces in. Order does not change a min/max, but it does
+        # decide which pairs meet in the fold, so keeping it canonical keeps the
+        # built DAG reproducible across runs.
+        return [self[idx] for idx in np.ndindex(*shape)]
+
     @staticmethod
     def _reject_numpy_reduction_kwargs(name: str, dtype, out, kwargs) -> None:
         """Refuse the numpy reduction keywords this layer cannot honour.
@@ -1659,10 +1793,102 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
 )
 
 
+class DiscontinuousIntrinsicError(NotImplementedError):
+    """Raised for an intrinsic that is recognised but has no node in the IR.
+
+    ``floor``, ``ceil``, ``round``, ``trunc`` and ``intdiv`` are *step*
+    functions. Unlike every intrinsic the modeling layer does export, they are
+    discontinuous in their argument, so representing one soundly is not a matter
+    of adding a name to a table -- it needs, at minimum:
+
+    * an ``ExprNode``/``MathFunc`` variant in the Rust IR,
+    * forward and backward FBBT rules for a step function
+      (``crates/discopt-core/src/presolve/fbbt.rs``),
+    * a convex/concave envelope in the relaxation layer, and
+    * an integrality reformulation (``floor(x) = z`` with ``z`` integer and
+      ``z <= x <= z + 1 - eps``), which changes the model's *variable set*
+      rather than just its expression DAG -- so the AD tape has something
+      differentiable to work with.
+
+    Until that exists, discopt refuses rather than substituting a different
+    operator. This mirrors the ``.nl`` parser's C-5 policy
+    (``NlParseError::UnsupportedOpcode`` for opcodes o13/o14/o55/o57/o58):
+    silently rewriting ``floor(x)`` to ``x`` makes the solver *certify the
+    optimum of a different problem than the user posed*, which is a false
+    certificate, not a slow answer (CLAUDE.md §1).
+
+    Why ``sign`` is exported and these are not, although it is discontinuous
+    too: ``sign`` already has every piece listed above -- an IR variant
+    (``MathFunc::Sign``), the interval rule ``sign(x) in [-1, 1]``
+    (``fbbt.rs``), and an envelope (``relax_sign``, dispatched from
+    ``_relax/relaxation_compiler.py``) -- because its range is a bounded,
+    fixed, three-point set that needs no auxiliary variable. A step function
+    with an unbounded range does not fit that treatment; it needs the integer
+    reformulation above. So the difference is not "``sign`` is smoother", it is
+    "``sign`` was implemented and these were not".
+
+    See https://github.com/jkitchin/discopt/issues/1237.
+    """
+
+
+#: Intrinsics that are *recognised but unimplemented*, mapped to the note shown
+#: to the user. Membership here is the single source of truth: every doorway into
+#: the IR (:class:`FunctionCall`, the GAMS parser, the public ``dm.floor`` /
+#: ``dm.ceil`` / ``dm.round_`` / ``dm.trunc`` shims) refuses the same set with the
+#: same message, so a name can never be unrepresentable at one door and accepted
+#: at another. Keep in sync with the ``.nl`` parser's C-5 opcode refusals
+#: (``crates/discopt-core/src/nl_parser.rs``).
+_UNREPRESENTABLE_INTRINSICS: dict = {
+    "floor": "floor(x) -- the greatest integer <= x",
+    "ceil": "ceil(x) -- the least integer >= x",
+    "round": "round(x) -- x rounded to the nearest integer",
+    "trunc": "trunc(x) -- x truncated toward zero",
+    "intdiv": "intdiv(a, b) -- integer (truncating) division",
+}
+
+
+def _unrepresentable_intrinsic_message(name: str, *, where: str = "") -> str:
+    """Build the refusal text for an unimplemented discontinuous intrinsic."""
+    what = _UNREPRESENTABLE_INTRINSICS[name]
+    prefix = f"{where}: " if where else ""
+    return (
+        f"{prefix}{name!r} is not implemented: {what} is a discontinuous step "
+        "function, and discopt's expression IR has no node for it. Modeling it "
+        "soundly requires an integrality reformulation that adds variables (for "
+        f"{name!r}: an integer z with z <= x <= z + 1 - eps), plus FBBT and "
+        "relaxation rules for a step function -- not just an expression node."
+        "\n\n"
+        "discopt refuses here rather than substituting a different operator "
+        "(e.g. the identity), because that would make the solver certify the "
+        "optimum of a different problem than the one posed -- a false "
+        "certificate rather than a slow answer. The .nl parser refuses the "
+        "matching opcodes for the same reason (correctness issue C-5)."
+        "\n\n"
+        "Reformulate the model explicitly instead. For y = floor(x) with "
+        "l <= x <= u, declare an integer variable and bound it:\n"
+        "    z = m.integer('z', lb=math.floor(l), ub=math.floor(u))\n"
+        "    m.subject_to(z <= x)\n"
+        "    m.subject_to(x <= z + 1 - eps)\n"
+        "and use z in place of floor(x). Track native support at "
+        "https://github.com/jkitchin/discopt/issues/1237."
+    )
+
+
 class FunctionCall(Expression):
     """Named function call: exp(x), log(x), sin(x), etc."""
 
     def __init__(self, func_name: str, *args: Expression):
+        # Refuse an intrinsic that has no IR node AT CONSTRUCTION, not at solve
+        # time. This is the single choke point every doorway funnels through
+        # (the GAMS parser's function mapper, `serialize.loads`, user code), so
+        # guarding it here means such a name can never reach a node. Without it
+        # the model builds happily and the first symptom is the
+        # incumbent-verification snapshot failing -- which *disables the
+        # false-primal guard for that solve* -- followed by an opaque
+        # "Unknown function: 'ceil'" from the DAG compiler. See
+        # `serialize._known_funcs` for the same argument at the read doorway.
+        if func_name in _UNREPRESENTABLE_INTRINSICS:
+            raise DiscontinuousIntrinsicError(_unrepresentable_intrinsic_message(func_name))
         self.func_name = func_name
         self.args = args
         # Element-wise functions preserve / broadcast their argument shapes, so
@@ -2264,40 +2490,149 @@ def sign(x: Union[Expression, float]) -> Expression:
     return FunctionCall("sign", _wrap(x))
 
 
-def minimum(x: Union[Expression, float], y: Union[Expression, float]) -> Expression:
+def _refuse_unrepresentable(name: str):
+    """Build a public shim for an intrinsic discopt recognises but cannot model.
+
+    The name is exported so that ``dm.floor`` reads as a *deliberate exclusion
+    with an explanation* rather than as an oversight: before this, the only
+    signal was ``AttributeError: module 'discopt.modeling' has no attribute
+    'floor'``, which is indistinguishable from a name someone forgot to export
+    (issue #1237).
     """
-    Element-wise minimum of two expressions.
+
+    def shim(*args, **kwargs):
+        raise DiscontinuousIntrinsicError(_unrepresentable_intrinsic_message(name))
+
+    shim.__name__ = name
+    shim.__qualname__ = name
+    shim.__doc__ = (
+        f"Not implemented: ``{name}`` is a discontinuous step function with no "
+        "node in discopt's expression IR.\n\n"
+        f"Calling this raises :class:`DiscontinuousIntrinsicError` (a "
+        "``NotImplementedError``) explaining how to reformulate the model with "
+        "an explicit integer variable. It exists so the refusal is explicit and "
+        "documented rather than an ``AttributeError`` from a missing name.\n\n"
+        "See :class:`DiscontinuousIntrinsicError` for why ``sign`` is supported "
+        "and this is not, and https://github.com/jkitchin/discopt/issues/1237 "
+        "to track native support."
+    )
+    return shim
+
+
+floor = _refuse_unrepresentable("floor")
+ceil = _refuse_unrepresentable("ceil")
+#: ``round`` shadows a builtin, so it carries the trailing-underscore spelling
+#: the modeling layer already uses for ``abs_``. ``trunc`` shadows nothing in
+#: builtins (only ``math.trunc``), so it keeps its plain name.
+round_ = _refuse_unrepresentable("round")
+trunc = _refuse_unrepresentable("trunc")
+
+
+def _balanced_minmax_fold(fname: str, terms: Sequence[Expression]) -> Expression:
+    """Fold ``terms`` into a ``ceil(log2(n))``-deep tree of binary ``min``/``max``.
+
+    ``min``/``max`` are associative, so every parenthesisation of the same terms
+    is the same function; the fold shape is free, and pairing adjacent terms is
+    what makes the depth logarithmic instead of linear. The left-deep fold this
+    replaces -- ``dm.minimum(dm.minimum(a, b), c)``, which was the only spelling
+    available before #1238 -- is ``n - 1`` deep, and performance-plan §54 records
+    depth-n folds raising ``RecursionError`` out of the LP/MPS/GAMS writers at
+    n >= 1000.
+
+    Node *count* is unchanged at ``n - 1``; only the nesting differs. The bound is
+    unchanged too, measured: see the ``Expression.min`` comment and
+    performance-plan §64.
+
+    A single term folds to itself -- ``min(a)`` is ``a`` -- rather than to a
+    one-argument ``FunctionCall("min", a)``, which no consumer relaxes (they all
+    read ``args[0], args[1]``).
+    """
+    if not terms:
+        raise ValueError(f"{fname}() of no terms is undefined")
+    current: list[Expression] = list(terms)
+    while len(current) > 1:
+        paired: list[Expression] = [
+            FunctionCall(fname, current[i], current[i + 1]) for i in range(0, len(current) - 1, 2)
+        ]
+        if len(current) % 2:
+            # Odd term out rides to the next level untouched; it meets a partner
+            # one round later. This keeps the tree balanced to within one level.
+            paired.append(current[-1])
+        current = paired
+    return current[0]
+
+
+def _minmax_operands(fname: str, args: tuple) -> list[Expression]:
+    """Validate and wrap the operands of ``minimum`` / ``maximum``."""
+    if len(args) >= 2:
+        return [_wrap(a) for a in args]
+    # One operand is the interesting error. ``minimum`` is the ELEMENT-WISE op
+    # (numpy's ``np.minimum``), and numpy refuses ``np.minimum(xs)`` too -- so
+    # quietly re-reading it as the reduction ``np.min(xs)`` would make one name
+    # mean two different things depending on how many arguments it got, and would
+    # silently collapse a shaped model row to a scalar. Name the reduction
+    # spelling instead (CLAUDE.md §3).
+    reducer = "min" if fname == "min" else "max"
+    public = "minimum" if fname == "min" else "maximum"
+    if len(args) == 1:
+        raise TypeError(
+            f"{public}() needs at least two operands: it is the ELEMENT-WISE "
+            f"{reducer}imum of its arguments (numpy's `np.{public}`), not a "
+            f"reduction over one shaped operand. For the smallest/largest element "
+            f"of a vector use `xs.{reducer}()` (or `np.{reducer}(xs)`); to reduce "
+            f"a list of separate terms use `{public}(*terms)`."
+        )
+    raise TypeError(
+        f"{public}() needs at least two operands; none were given. "
+        f"For the {reducer} over a shaped expression use `xs.{reducer}()`."
+    )
+
+
+def minimum(*args: Union[Expression, float]) -> Expression:
+    """
+    Element-wise minimum of two or more expressions.
 
     Parameters
     ----------
-    x : Expression or float
-        First operand.
-    y : Expression or float
-        Second operand.
+    *args : Expression or float
+        Two or more operands, broadcast against each other element-wise. Three or
+        more are folded into a balanced tree of binary ``min`` nodes (issue
+        #1238), which is ``ceil(log2(n))`` deep rather than ``n - 1``; the two
+        operand call is one node, exactly as before.
 
     Returns
     -------
     Expression
+
+    See Also
+    --------
+    Expression.min : the smallest element *of one shaped expression*.
+
+    Examples
+    --------
+    >>> dm.minimum(x, y)
+    >>> dm.minimum(x, y, z, w)          # one balanced tree, 2 deep
+    >>> dm.minimum(*[c[i] * x[i] for i in range(n)])
     """
-    return FunctionCall("min", _wrap(x), _wrap(y))
+    return _balanced_minmax_fold("min", _minmax_operands("min", args))
 
 
-def maximum(x: Union[Expression, float], y: Union[Expression, float]) -> Expression:
+def maximum(*args: Union[Expression, float]) -> Expression:
     """
-    Element-wise maximum of two expressions.
+    Element-wise maximum of two or more expressions.
 
-    Parameters
-    ----------
-    x : Expression or float
-        First operand.
-    y : Expression or float
-        Second operand.
+    The ``max`` counterpart of :func:`minimum`; see it for the parameters and for
+    the balanced fold three or more operands are built into.
 
     Returns
     -------
     Expression
+
+    See Also
+    --------
+    Expression.max : the largest element *of one shaped expression*.
     """
-    return FunctionCall("max", _wrap(x), _wrap(y))
+    return _balanced_minmax_fold("max", _minmax_operands("max", args))
 
 
 def _find_owning_model(*exprs: Expression) -> Optional["Model"]:
@@ -3498,6 +3833,47 @@ class SolveResult:
         )
         return validate_explanation(text)
 
+    def _ensure_sensitivity(self) -> np.ndarray:
+        """Envelope-theorem ``d(obj*)/dp`` for every parameter, computed once.
+
+        The gate-and-compute half of :meth:`gradient`, shared with
+        ``Model.solve(sensitivity=True)`` so the eager and lazy paths cannot
+        disagree about what is supported or about which point the derivative
+        belongs to -- it is always *this* result's ``x``.
+
+        Returns
+        -------
+        numpy.ndarray
+            1-D sensitivities for the model's whole flat parameter vector.
+        """
+        if self._model is None:
+            raise ValueError(
+                "No model attached to this SolveResult. "
+                "gradient() requires the model reference (set by Model.solve())."
+            )
+        if not self._model._parameters:
+            raise ValueError("Model has no parameters. Nothing to differentiate.")
+
+        # Check all variables are continuous
+        for v in self._model._variables:
+            if v.var_type != VarType.CONTINUOUS:
+                raise ValueError(
+                    "gradient() only supports continuous models. "
+                    f"Variable '{v.name}' is {v.var_type.value}."
+                )
+        if not self.x:
+            raise ValueError(
+                "This result carries no incumbent, so there is no point at which to "
+                f"evaluate a sensitivity (status: {self.status!r})."
+            )
+
+        # Lazy computation: compute sensitivity from existing solution
+        if self._sensitivity is None:
+            from discopt._relax.differentiable import _compute_sensitivity_at_solution
+
+            self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
+        return self._sensitivity
+
     def gradient(self, param: Parameter) -> Union[float, np.ndarray]:
         """
         Sensitivity of optimal objective w.r.t. a parameter.
@@ -3522,35 +3898,16 @@ class SolveResult:
         ------
         ValueError
             If the model has integer/binary variables, no model reference
-            is attached, or no parameters exist.
+            is attached, no parameters exist, or the result carries no
+            incumbent to evaluate the sensitivity at.
         """
-        if self._model is None:
-            raise ValueError(
-                "No model attached to this SolveResult. "
-                "gradient() requires the model reference (set by Model.solve())."
-            )
-        if not self._model._parameters:
-            raise ValueError("Model has no parameters. Nothing to differentiate.")
-
-        # Check all variables are continuous
-        for v in self._model._variables:
-            if v.var_type != VarType.CONTINUOUS:
-                raise ValueError(
-                    "gradient() only supports continuous models. "
-                    f"Variable '{v.name}' is {v.var_type.value}."
-                )
-
-        # Lazy computation: compute sensitivity from existing solution
-        if self._sensitivity is None:
-            from discopt._relax.differentiable import _compute_sensitivity_at_solution
-
-            self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
+        sensitivity = self._ensure_sensitivity()
 
         # Extract the slice for this parameter
         from discopt._relax.differentiable import _get_param_slice
 
         start, end = _get_param_slice(param, self._model)
-        grad_flat = self._sensitivity[start:end]
+        grad_flat = sensitivity[start:end]
         if param.shape == () or (end - start) == 1:
             return float(grad_flat[0])
         return grad_flat.reshape(param.shape)
@@ -5678,7 +6035,12 @@ class Model:
         llm : bool, default False
             Enable LLM explanation of results.
         sensitivity : bool, default False
-            Compute sensitivities w.r.t. Parameters.
+            Eagerly compute ``d(obj*)/dp`` w.r.t. every Parameter, so
+            :meth:`SolveResult.gradient` answers without further work and an
+            unsupported model is refused here. This is the *objective*
+            sensitivity (envelope theorem) only; for ``dx*/dp``, ``dλ*/dp``,
+            second derivatives, or the total derivative of an arbitrary
+            expression, use :meth:`Model.sensitivity`.
         stream : bool, default False
             If True, return an iterator of :class:`SolveUpdate` instead of
             the final result. **Not implemented** — no backend produces the update
@@ -6478,6 +6840,25 @@ class Model:
                     _exp_exc,
                 )
 
+        if sensitivity:
+            # Until this branch existed the flag was DEAD: `sensitivity` appeared in
+            # the signature and the docstring and was read nowhere, so
+            # `solve(sensitivity=True)` was byte-for-byte `solve()` while promising
+            # derivatives (CLAUDE.md §3 -- no dead flags). It now eagerly computes
+            # what `result.gradient()` would otherwise compute on first call, at THIS
+            # result's own x, so the two paths cannot disagree and an unsupported
+            # model (integers, no parameters, no incumbent) is refused here rather
+            # than at some later `.gradient()` call.
+            #
+            # Deliberately NOT wrapped in try/except: the caller asked for
+            # derivatives, so failing to produce them is a failure, not an advisory
+            # (contrast the `llm` block above, which is decoration).
+            #
+            # This is d(obj*)/dp only -- the envelope theorem needs nothing but the
+            # duals already in hand. dx*/dp is a different object requiring its own
+            # KKT solve, and lives in `Model.sensitivity()`.
+            result._ensure_sensitivity()
+
         if validate and result.x:  # same no-incumbent guard as above (#1105)
             try:
                 from discopt.validation.examiner import examine
@@ -6487,6 +6868,63 @@ class Model:
                 result.validation_report = None
 
         return result
+
+    def sensitivity(
+        self,
+        wrt=None,
+        *,
+        order: int = 1,
+        method: str = "exact",
+        options: Optional[dict] = None,
+    ):
+        """Solve and return every derivative of the solution -- the unified entry point.
+
+        Where :meth:`solve` answers "what is the optimum", this answers "how does
+        the optimum move". One call gives the solution together with ``dx*/dp``,
+        ``dλ*/dp``, optionally ``d²x*/dp²``, the total derivative of *any* model
+        expression through the solution map, a first-order re-solve, and the JAX
+        layer form -- instead of choosing between
+        :meth:`SolveResult.gradient`, :func:`discopt.solvers.sipopt.pounce_sensitivity`,
+        :func:`discopt.modeling.argmin_layer` and
+        :func:`discopt.parametric.compile_expression` and then lining up flat
+        indices by hand.
+
+        The derivatives come from the implicit function theorem applied to the KKT
+        system at the solution, so they describe the smooth branch the solution
+        currently sits on; continuous variables and scalar Parameters only.
+
+        Parameters
+        ----------
+        wrt : Parameter, str, or sequence, optional
+            Parameters (or their names) to differentiate with respect to.
+            Defaults to every Parameter the model declares.
+        order : int, default 1
+            2 also computes ``d²x*/dp²``.
+        method : {"exact", "fd"}, default "exact"
+            ``"exact"`` differentiates the compiled model symbolically; ``"fd"``
+            central-differences the right-hand side as a cross-check.
+        options : dict, optional
+            POUNCE options for the solve.
+
+        Returns
+        -------
+        discopt.sensitivity.Sensitivity
+
+        Examples
+        --------
+        >>> s = m.sensitivity(wrt=[cost])           # doctest: +SKIP
+        >>> s.d("flow")                             # dflow*/dcost, shaped like flow
+        >>> s.d(price * flow)                       # total derivative of revenue
+        >>> s.predict({cost: 2.1})                  # linearised re-solve
+
+        See Also
+        --------
+        discopt.sensitivity.sensitivity : the function form.
+        solve : the flag ``solve(sensitivity=True)`` for ``d(obj*)/dp`` alone.
+        """
+        from discopt.sensitivity import sensitivity as _sensitivity
+
+        return _sensitivity(self, wrt, order=order, method=method, options=options)
 
     def _solve_streaming(self, **kwargs) -> Iterator["SolveUpdate"]:
         """Streaming solve that yields updates during B&B.

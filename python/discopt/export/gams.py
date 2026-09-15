@@ -698,7 +698,22 @@ class _GamsWriter:
             if fn == "log2":
                 inner = self._expr_to_gams(expr.args[0])
                 return f"(log({inner}) / log(2))"
-            gams_fn = self._FUNC_MAP.get(expr.func_name, expr.func_name)
+            # No blanket passthrough of an unmapped name. Emitting
+            # `expr.func_name` verbatim wrote whatever the node happened to carry
+            # into the .gms file: a name GAMS does not have (`entropy(x)`), or one
+            # it has with a different arity -- a one-argument node named `mod`
+            # was written as `mod(y)`, but GAMS's mod takes two. Either way
+            # the writer reported success and produced a file that is not the model
+            # (issue #1237; same class as the GAMS parser's silent acceptance on
+            # the way in). Refuse instead, naming the function.
+            gams_fn = self._FUNC_MAP.get(fn)
+            if gams_fn is None:
+                raise ValueError(
+                    f"Unknown function in GAMS export: {expr.func_name!r}. The "
+                    "writer has no GAMS spelling for it, and emitting the name "
+                    "verbatim would produce a .gms file that is not this model. "
+                    "Refusing rather than writing something GAMS will misread."
+                )
             args_str = ", ".join(self._expr_to_gams(a) for a in expr.args)
             return f"{gams_fn}({args_str})"
 
