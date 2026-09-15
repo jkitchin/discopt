@@ -208,6 +208,9 @@ from discopt.modeling import (
     exp as exp,
 )
 from discopt.modeling import (
+    load as load,
+)
+from discopt.modeling import (
     log as log,
 )
 from discopt.modeling import (
