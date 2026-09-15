@@ -243,7 +243,7 @@ class Sensitivity:
     order: int
     p0: np.ndarray
     p_all: np.ndarray
-    _cache: dict = field(default_factory=dict, repr=False, compare=False)
+    _cache: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
 
     # ── basic descriptors ────────────────────────────────────
 
@@ -491,15 +491,20 @@ class Sensitivity:
         use = self.order if order is None else order
         if use not in (1, 2):
             raise ValueError(f"order must be 1 or 2, got {use}")
-        if use == 2 and self.d2x_dp2 is None:
+        # Bind the second-order term to a local: it discharges the Optional once,
+        # here, so the einsum below cannot be reached with `None` and the reader
+        # (and the typechecker) can see that from one line rather than by pairing
+        # a guard with a use several statements away.
+        curvature = self.d2x_dp2 if use == 2 else None
+        if use == 2 and curvature is None:
             raise ValueError(
                 "Second-order prediction needs d2x_dp2; re-run with `sensitivity(..., order=2)`."
             )
         dp = self._delta(values)
         out = self.x + self.dx_dp @ dp
-        if use == 2:
-            out = out + 0.5 * np.einsum("ijk,j,k->i", self.d2x_dp2, dp, dp)
-        return out
+        if curvature is not None:
+            out = out + 0.5 * np.einsum("ijk,j,k->i", curvature, dp, dp)
+        return np.asarray(out, dtype=np.float64)
 
     def predict(self, values, order: Optional[int] = None) -> dict:
         """Taylor prediction of ``x*``, keyed by variable name like ``SolveResult.x``.
