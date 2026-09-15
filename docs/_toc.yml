@@ -90,6 +90,7 @@ parts:
       - file: notebooks/decision_focused_learning
       - file: notebooks/estimation
       - file: notebooks/tutorial_estimation
+      - file: notebooks/cstr_fit_doe_optimize
   - caption: API Reference
     chapters:
       - file: api
