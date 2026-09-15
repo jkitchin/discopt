@@ -35,6 +35,10 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "pounce-solver>=0.10",
+    # Pure LP/MILP is routed to HiGHS (issue #1229, docs/dev/lp-milp-highs-routing-plan.md).
+    # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
+    # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
+    "highspy>=1.10",
 ]
 
 [project.urls]
@@ -48,13 +52,11 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.10"]
 ipopt = ["cyipopt>=1.4"]
-# Opt-in MILP *master* engine for the MIP-NLP family (`milp_solver="highs"`,
-# issue #1060). #356 removed HiGHS from the per-node LP path and from every
-# fallback order and that stands -- nothing here is on a default path, so a tree
-# without highspy behaves exactly as before. It earns the extra on the masters
-# the in-house driver cannot close: 86.1% root-gap closure on the rsyn0840m OA
-# master against 0.0%, turning a 60 s timeout into `optimal` in 1.9 s.
-highs = ["highspy>=1.7"]
+# highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
+# extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
+# It also serves the opt-in MIP-NLP MILP master (`milp_solver="highs"`, issue
+# #1060). #356's removal of HiGHS from the per-node MINLP LP path still stands.
+highs = ["highspy>=1.10"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.

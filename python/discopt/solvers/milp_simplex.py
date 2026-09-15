@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class SimplexBackendUnavailable(RuntimeError):
-    """Raised when the Rust ``solve_milp_py`` binding cannot be imported."""
+    """Raised when the Rust ``solve_milp_csc_py`` binding cannot be imported."""
 
 
 _NS_MARGIN_REL = 1e-9
