@@ -24,19 +24,20 @@ status, never the discriminator.
 The states this vocabulary keeps apart
 --------------------------------------
 
-* (1) :data:`OPTIMAL` — certified optimal.
-* (2) :data:`FEASIBLE` (with a finite ``bound``) — certified bound + incumbent, gap > 0.
-* (3) :data:`FEASIBLE` (no ``bound``) — feasible, no bound.
-* (4) :data:`LOCAL_OPTIMAL` — local stationary point, **no global claim**.
-* (4b) :data:`LOCAL_LIMIT` — a *point*, from a local search that stopped on a
-  limit without establishing stationarity. Separate from ``LOCAL_OPTIMAL``
-  for the same reason ``LOCAL_INFEASIBLE`` is separate from ``INFEASIBLE``:
-  the weaker claim needs its own name, or it is made under the stronger one.
-* (5) :data:`INFEASIBLE` vs :data:`LOCAL_INFEASIBLE` — a *certified* infeasibility
-  proof versus a local solver that merely failed to find a point. A stalled
-  MPEC continuation must never surface as ``"infeasible"``: that is a false
-  certificate in the other direction, and it is why the two have separate
-  names rather than a shared one plus a flag.
+1. :data:`OPTIMAL` — certified optimal.
+2. :data:`FEASIBLE` (with a finite ``bound``) — certified bound + incumbent, gap > 0.
+3. :data:`FEASIBLE` (no ``bound``) — feasible, no bound.
+4. :data:`LOCAL_OPTIMAL` — local stationary point, **no global claim**.
+5. :data:`LOCAL_LIMIT` — the sibling of the previous entry: a *point*, from a
+   local search that stopped on a limit without establishing stationarity.
+   Separate from ``LOCAL_OPTIMAL`` for the same reason ``LOCAL_INFEASIBLE`` is
+   separate from ``INFEASIBLE``: the weaker claim needs its own name, or it is
+   made under the stronger one.
+6. :data:`INFEASIBLE` vs :data:`LOCAL_INFEASIBLE` — a *certified* infeasibility
+   proof versus a local solver that merely failed to find a point. A stalled
+   MPEC continuation must never surface as ``"infeasible"``: that is a false
+   certificate in the other direction, and it is why the two have separate
+   names rather than a shared one plus a flag.
 """
 
 from __future__ import annotations

@@ -156,32 +156,33 @@ def _fbbt_on_node(
     except Exception:
         return lb, ub, 0, False
 
-    saved = [(v.lb, v.ub) for v in model._variables]
-    try:
-        off = 0
-        for v in model._variables:
-            sz = v.size
-            if off + sz <= n:
-                v.lb = lb[off : off + sz].reshape(v.lb.shape)
-                v.ub = ub[off : off + sz].reshape(v.ub.shape)
-            off += sz
-        repr_ = model_to_repr(model, getattr(model, "_builder", None))
-        fbbt_lbs, fbbt_ubs = repr_.fbbt_with_cutoff(
-            max_iter=max_iter,
-            tol=tol,
-            incumbent_bound=(float(cutoff) if cutoff is not None and np.isfinite(cutoff) else None),
-        )
-    except Exception as exc:
-        # C-41: surface, never silently swallow — a swallowed error here is the
-        # exact compounding smell behind C-40 (a misaligned map that corrupts a
-        # box, then eats the resulting IndexError). Tighten-only: on any failure
-        # keep the node box unchanged (a valid, looser box).
-        logger.debug("node cutoff-FBBT skipped (build/solve failed): %s", exc)
-        return lb, ub, 0, False
-    finally:
-        for v, (olb, oub) in zip(model._variables, saved):
-            v.lb = olb
-            v.ub = oub
+    # Bounds are restored by ``saved_bounds`` on every exit path, the
+    # ``return`` in the except arm included -- this pass must leave the
+    # search tree exactly as it found it (C-41).
+    with model.saved_bounds():
+        try:
+            off = 0
+            for v in model._variables:
+                sz = v.size
+                if off + sz <= n:
+                    v.lb = lb[off : off + sz].reshape(v.lb.shape)
+                    v.ub = ub[off : off + sz].reshape(v.ub.shape)
+                off += sz
+            repr_ = model_to_repr(model, getattr(model, "_builder", None))
+            fbbt_lbs, fbbt_ubs = repr_.fbbt_with_cutoff(
+                max_iter=max_iter,
+                tol=tol,
+                incumbent_bound=(
+                    float(cutoff) if cutoff is not None and np.isfinite(cutoff) else None
+                ),
+            )
+        except Exception as exc:
+            # C-41: surface, never silently swallow — a swallowed error here is the
+            # exact compounding smell behind C-40 (a misaligned map that corrupts a
+            # box, then eats the resulting IndexError). Tighten-only: on any failure
+            # keep the node box unchanged (a valid, looser box).
+            logger.debug("node cutoff-FBBT skipped (build/solve failed): %s", exc)
+            return lb, ub, 0, False
 
     fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
     fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
