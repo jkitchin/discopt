@@ -23,9 +23,9 @@ import re
 import numpy as np
 import pytest
 from discopt.export import to_gams, to_lp, to_nl
+from discopt.ml import DenseLayer, NetworkDefinition, OffsetScaling
+from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
 from discopt.modeling import Model
-from discopt.nn import DenseLayer, NetworkDefinition, OffsetScaling
-from discopt.nn.formulations.relu_bigm import ReluBigMFormulation
 
 
 def _net(sizes, act="relu"):

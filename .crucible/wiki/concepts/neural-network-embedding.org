@@ -114,7 +114,7 @@ provides a good tradeoff citep:grimstad-andersson-2019.
 
 ** Implementation in discopt
 
-discopt's =nn= module (=python/discopt/nn/=) implements neural network
+discopt's =nn= module (=python/discopt/ml/=) implements neural network
 embedding with three formulation strategies. =FullSpaceFormulation=
 handles networks with smooth activations (sigmoid, tanh) by introducing
 explicit variables for every neuron and constraining them with the
@@ -125,12 +125,12 @@ citep:fischetti-jo-2018. =ReducedSpaceFormulation= avoids auxiliary
 variables by nesting the network's computation as a single composite
 expression, which is compact but produces dense derivatives.
 
-The =bounds= module (=python/discopt/nn/bounds.py=) implements interval
+The =bounds= module (=python/discopt/ml/bounds.py=) implements interval
 arithmetic propagation through network layers, computing pre-activation
 bounds that feed into the big-M constants of =ReluBigMFormulation=.
 Tighter bounds from this propagation directly improve solve performance,
 as emphasized by citep:grimstad-andersson-2019. The ONNX reader
-(=python/discopt/nn/readers/onnx_reader.py=) loads pretrained models from
+(=python/discopt/ml/readers/onnx_reader.py=) loads pretrained models from
 standard ML frameworks, bridging the gap between training (in PyTorch,
 TensorFlow, etc.) and optimization.
 

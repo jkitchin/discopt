@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
 
 def _linear_wb(linear) -> tuple[np.ndarray, np.ndarray]:

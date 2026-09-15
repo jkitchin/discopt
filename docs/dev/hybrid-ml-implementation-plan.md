@@ -62,7 +62,7 @@ Every PR must pass, and its description must state what was run and the result:
    SOFTPLUS. RELU is refused with a loud `ValueError` naming the reason
    (nonsmooth under a gradient NLP solver) and the alternative (softplus).
    No silent substitution.
-4. **The frozen path (`discopt.nn` formulations) is not modified.** Trainable and
+4. **The frozen path (`discopt.ml` formulations) is not modified.** Trainable and
    frozen are two regimes of one story, bridged by `freeze()` /
    `from_definition()`; they do not share constraint-emission code.
 5. LLM safety invariant untouched; nothing in this plan touches `discopt/llm/`.
@@ -84,8 +84,8 @@ decomposition premise* — full-space training converged in 17 iterations / 37 s
   `feat(nn): HM1.1 TrainableDense/TrainableNetwork`).
 - Do not rebuild what exists: collocation transcription (`discopt.dae`),
   least-squares detection (`_relax/least_squares.py`), warm-start validation
-  (`discopt/warm_start.py`), readers (`discopt/nn/readers/`), frozen formulations
-  (`discopt/nn/formulations/`). Check `docs/design/relaxation-catalog.md` before
+  (`discopt/warm_start.py`), readers (`discopt/ml/readers/`), frozen formulations
+  (`discopt/ml/formulations/`). Check `docs/design/relaxation-catalog.md` before
   any HM4 envelope work.
 
 ### 0.6 Stop-and-escalate conditions
@@ -128,7 +128,7 @@ User-visible surface when done:
 
 ```python
 import discopt.modeling as dm
-from discopt.nn import TrainableNetwork
+from discopt.ml import TrainableNetwork
 from discopt.dae import ContinuousSet, DAEBuilder, Trajectory, fit_trajectories
 
 m = dm.Model()
@@ -148,7 +148,7 @@ fit = fit_trajectories(
 )
 m.minimize(fit.least_squares() + 1e-4 * net.l2_penalty())
 
-from discopt.nn import train
+from discopt.ml import train
 result = train(m, initial_solution=fit.warm_start() | net.initial_values(seed=0))
 
 frozen = net.freeze(result)               # NetworkDefinition for the frozen path
@@ -156,7 +156,7 @@ frozen = net.freeze(result)               # NetworkDefinition for the frozen pat
 
 Non-goals (this plan): decomposition machinery (falsified need, §0.4), GP
 hyperparameter learning inside the NLP, decision-tree *training*, ReLU training,
-any `discopt.nn` frozen-formulation change, AMP vectorized-constraint support
+any `discopt.ml` frozen-formulation change, AMP vectorized-constraint support
 (HM4 candidate only).
 
 ## 2. Evidence base (all measured, 2026-07-10)
@@ -176,12 +176,12 @@ any `discopt.nn` frozen-formulation change, AMP vectorized-constraint support
 ## 3. Module layout
 
 ```
-python/discopt/nn/surrogate.py      # NEW: Surrogate protocol (the contract; HM5.1)
-python/discopt/nn/trainable.py      # NEW: TrainableDense, TrainableNetwork,
+python/discopt/ml/surrogate.py      # NEW: Surrogate protocol (the contract; HM5.1)
+python/discopt/ml/trainable.py      # NEW: TrainableDense, TrainableNetwork,
                                     #      TrainableKernelExpansion, train()
 python/discopt/dae/fit.py           # NEW: Trajectory, fit_trajectories, TrajectoryFit
 python/discopt/warm_start.py        # ADD: unflatten_solution()
-python/discopt/nn/__init__.py       # export the new names (lazy, as existing style)
+python/discopt/ml/__init__.py       # export the new names (lazy, as existing style)
 python/discopt/dae/__init__.py      # export Trajectory, fit_trajectories
 python/tests/test_surrogate_protocol.py  # NEW (HM5.1)
 python/tests/test_nn_trainable.py   # NEW
@@ -212,7 +212,7 @@ branch (which must abstain), these are refusal paths that should raise
 `python/tests/test_tightening_sliced_index.py` with one test per site (fails
 before, passes after).
 
-## 5. Phase HM1 — trainable surrogate API (`discopt/nn/trainable.py`, ~1.5–2 EW)
+## 5. Phase HM1 — trainable surrogate API (`discopt/ml/trainable.py`, ~1.5–2 EW)
 
 ### HM1.1 — `TrainableDense` + `TrainableNetwork`
 
@@ -257,7 +257,7 @@ Binding details:
   (verified working). Output squeezes the trailing axis when `sizes[-1] == 1`.
   Add shape validation with actionable error messages — this is the part users
   will get wrong.
-- **Activations**: map through the existing `discopt.nn.network.Activation` enum;
+- **Activations**: map through the existing `discopt.ml.network.Activation` enum;
   RELU raises per §0.3.3. Use `dm.tanh` / `dm.sigmoid` / `dm.softplus` intrinsics
   only (native, relaxable — no CustomCall).
 - **`initial_values`**: Glorot-style, `scale/sqrt(n_in)` std for `W`, `0.3·scale`
@@ -417,7 +417,7 @@ linear-in-parameters is the better choice (conditioning; measured 12-iter/zero-i
 result).
 
 **HM3.2 — CLAUDE.md + module docs.** Add `nn/trainable.py` and `dae/fit.py` to the
-CLAUDE.md architecture section (one sentence each); extend `discopt/nn/__init__.py`
+CLAUDE.md architecture section (one sentence each); extend `discopt/ml/__init__.py`
 module docstring with the trainable-vs-frozen regime distinction and the
 train-then-freeze bridge.
 

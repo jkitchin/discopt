@@ -204,7 +204,7 @@ highest-value additions, all **Rust** unless noted:
 
 1. **Coefficient tightening** — cheap, strong LP-bound impact.
 2. **Clique table + clique merging** — foundational for binary-heavy
-   MINLPs and for [[file:../concepts/big-m-formulations.org][big-M formulations]] in =python/discopt/nn/formulations/=.
+   MINLPs and for [[file:../concepts/big-m-formulations.org][big-M formulations]] in =python/discopt/ml/formulations/=.
 3. **Dominated columns / parallel rows.**
 4. **Aggregator / implied-free substitution.**
 5. **Connected-component decomposition** — Rust detection, Python

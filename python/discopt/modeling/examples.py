@@ -489,14 +489,14 @@ def example_logical_constraints():
 
 
 def example_nn_surrogate():
-    """Optimize over a trained NN surrogate using discopt.nn.
+    """Optimize over a trained NN surrogate using discopt.ml.
 
     A 2-input, 1-output network predicts process yield.
     We find the input conditions that maximize predicted yield
     subject to operating bounds.
     """
-    from discopt.nn import NetworkDefinition, NNFormulation
-    from discopt.nn.network import Activation, DenseLayer
+    from discopt.ml import NetworkDefinition, NNFormulation
+    from discopt.ml.network import Activation, DenseLayer
 
     # Simulate a trained network (normally loaded from file / ONNX)
     np.random.seed(0)
@@ -534,7 +534,7 @@ def example_nn_surrogate():
     # For small networks, use reduced_space (no intermediate variables):
     #   nn = NNFormulation(m, net_small, strategy="reduced_space")
     # Load from ONNX:
-    #   from discopt.nn import load_onnx
+    #   from discopt.ml import load_onnx
     #   net = load_onnx("model.onnx", input_bounds=(lb, ub))
 
     print(m)
