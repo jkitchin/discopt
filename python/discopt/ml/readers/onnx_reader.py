@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
 _ONNX_ACTIVATION_MAP = {
     "Relu": Activation.RELU,

@@ -42,7 +42,7 @@ class TestOnnxReaderHardening:
 
     def test_gemm_alpha_beta_applied(self, tmp_path):
         """Gemm alpha/beta fold into weight/bias; forward matches onnxruntime."""
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         rng = np.random.RandomState(0)
@@ -71,7 +71,7 @@ class TestOnnxReaderHardening:
 
     def test_transa_raises(self, tmp_path):
         """Gemm with transA=1 (data-input transpose) is refused."""
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         W = np.eye(2, dtype=np.float32)
@@ -94,7 +94,7 @@ class TestOnnxReaderHardening:
 
     def test_two_branch_add_raises(self, tmp_path):
         """A graph whose two branches join in an Add is refused as non-sequential."""
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         W1 = np.eye(2, dtype=np.float32)
@@ -126,7 +126,7 @@ class TestOnnxReaderHardening:
 
     def test_transb_roundtrips(self, tmp_path):
         """transB=1 stores W transposed; forward matches onnxruntime."""
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         rng = np.random.RandomState(1)
@@ -167,8 +167,8 @@ class TestSklearnReaderFixes:
 
     def test_binary_mlp_classifier_sigmoid_matches_proba(self):
         """Binary MLPClassifier embeds with a SIGMOID head matching predict_proba."""
-        from discopt.nn.network import Activation
-        from discopt.nn.readers.sklearn_reader import load_sklearn_mlp
+        from discopt.ml.network import Activation
+        from discopt.ml.readers.sklearn_reader import load_sklearn_mlp
         from sklearn.neural_network import MLPClassifier
 
         rng = np.random.RandomState(0)
@@ -187,7 +187,7 @@ class TestSklearnReaderFixes:
 
     def test_multiclass_mlp_classifier_raises(self):
         """Softmax (multi-class) MLPClassifier has no scalar embedding -> ValueError."""
-        from discopt.nn.readers.sklearn_reader import load_sklearn_mlp
+        from discopt.ml.readers.sklearn_reader import load_sklearn_mlp
         from sklearn.neural_network import MLPClassifier
 
         rng = np.random.RandomState(0)
@@ -201,7 +201,7 @@ class TestSklearnReaderFixes:
             load_sklearn_mlp(clf)
 
     def test_gradient_boosting_classifier_raises(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble
+        from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble
         from sklearn.ensemble import GradientBoostingClassifier
 
         rng = np.random.RandomState(0)
@@ -213,7 +213,7 @@ class TestSklearnReaderFixes:
             load_sklearn_ensemble(clf)
 
     def test_random_forest_classifier_raises(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble
+        from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble
         from sklearn.ensemble import RandomForestClassifier
 
         rng = np.random.RandomState(0)
@@ -225,7 +225,7 @@ class TestSklearnReaderFixes:
             load_sklearn_ensemble(clf)
 
     def test_decision_tree_classifier_raises(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_tree
+        from discopt.ml.readers.sklearn_reader import load_sklearn_tree
         from sklearn.tree import DecisionTreeClassifier
 
         rng = np.random.RandomState(0)
@@ -238,7 +238,7 @@ class TestSklearnReaderFixes:
 
     def test_constant_target_regressor_single_leaf(self):
         """A constant-target regressor (single leaf) loads and predicts (no 0-d crash)."""
-        from discopt.nn.readers.sklearn_reader import load_sklearn_tree
+        from discopt.ml.readers.sklearn_reader import load_sklearn_tree
         from sklearn.tree import DecisionTreeRegressor
 
         rng = np.random.RandomState(0)
@@ -268,7 +268,7 @@ class TestTorchReaderBiasFalse:
         """A Linear(bias=False) layer loads (zero bias) and matches torch forward."""
         import torch
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         torch.manual_seed(0)
         model = nn.Sequential(

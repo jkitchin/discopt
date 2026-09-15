@@ -27,9 +27,9 @@ import re
 import numpy as np
 import pytest
 from discopt.export import to_gams, to_nl
+from discopt.ml import DenseLayer, NetworkDefinition, OffsetScaling
+from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.modeling import Model
-from discopt.nn import DenseLayer, NetworkDefinition, OffsetScaling
-from discopt.nn.formulations.reduced_space import ReducedSpaceFormulation
 
 
 def _net(sizes, act="tanh"):

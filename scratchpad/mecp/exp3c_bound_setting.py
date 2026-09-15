@@ -21,8 +21,8 @@ import discopt.modeling as dm  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import mecp_models as M  # noqa: E402
 from discopt._relax.mcbox import MCBox  # noqa: E402
-from discopt.nn import add_predictor  # noqa: E402
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition  # noqa: E402
+from discopt.ml import add_predictor  # noqa: E402
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition  # noqa: E402
 from sklearn.neural_network import MLPRegressor  # noqa: E402
 
 NDIM, TL = 3, 300.0
@@ -78,7 +78,7 @@ for mb in ("auto", "lp"):
         CHECKS += 1
         assert r.bound <= E_REF + 1e-4, f"SOUNDNESS: bound {r.bound} > {E_REF}"
 
-# --- discopt.nn surrogate, lp bounds --------------------------------------
+# --- discopt.ml surrogate, lp bounds --------------------------------------
 rng = np.random.default_rng(0)
 X = rng.uniform(B[:, 0], B[:, 1], size=(4000, NDIM))
 W1t, W2t = tw.states([X[:, i] for i in range(NDIM)], exp=np.exp)

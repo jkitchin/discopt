@@ -1699,8 +1699,8 @@ parser module header; standing gates pass.
 
 ## C-25 (P1, FIXED) — Embedded-NN scaling propagates bounds in the wrong (unscaled) domain → infeasible or true optimum cut
 
-**Area:** `python/discopt/nn/formulations/full_space.py:72`,
-`python/discopt/nn/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
+**Area:** `python/discopt/ml/formulations/full_space.py:72`,
+`python/discopt/ml/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
 `net.input_bounds` (the user/unscaled domain — those bounds are applied to the
 unscaled `inputs` var) while layer 1 actually consumes
 `scaled_in = (inputs − x_offset)/x_factor`. Every `zhat`/`z` variable bound and
@@ -1762,7 +1762,7 @@ No behavior change when scaling is None/identity.
 
 ## C-26 (P1, FIXED) — Tree-ensemble big-M is invalid for thresholds outside the declared feature box → cuts feasible points
 
-**Area:** `python/discopt/nn/formulations/tree_ensemble.py:79,98-111`. The per-leaf
+**Area:** `python/discopt/ml/formulations/tree_ensemble.py:79,98-111`. The per-leaf
 constraints use `M_j = ub_j − lb_j`, which keeps a non-selected leaf's constraint
 inert only when `lb_j ≤ thr ≤ ub_j − eps`.
 **Reachability:** default path for any embedded tree ensemble whose optimization
@@ -1817,7 +1817,7 @@ when selected, and are strictly tighter LP relaxations. Drop the unused
 
 ## C-27 (P2) — ONNX reader silently mis-reads Gemm attributes, residual Adds, and branched graphs
 
-**Area:** `python/discopt/nn/readers/onnx_reader.py`. (a) Gemm `alpha`/`beta`/
+**Area:** `python/discopt/ml/readers/onnx_reader.py`. (a) Gemm `alpha`/`beta`/
 `transA` ignored (`:104-121`); (b) a `MatMul → Add` where the `Add` is not an
 initializer (e.g. a residual connection) is consumed and zero biases substituted
 (`:74-79`); (c) no dataflow verification — a branched graph of individually
@@ -1873,7 +1873,7 @@ residual-Add-as-zero-bias path).
 
 ## C-28 (P2) — sklearn classifier readers silently embed logits / wrong base_score
 
-**Area:** `python/discopt/nn/readers/sklearn_reader.py`. `load_sklearn_mlp`
+**Area:** `python/discopt/ml/readers/sklearn_reader.py`. `load_sklearn_mlp`
 ignores `model.out_activation_`, so an `MLPClassifier` embeds pre-activation
 logits while the docstring claims classifier support; `load_sklearn_ensemble` on a
 `GradientBoostingClassifier` reads `base_score` wrong (a classifier's `init_` has

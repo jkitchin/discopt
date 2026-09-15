@@ -298,6 +298,24 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`discopt.nn` is renamed `discopt.ml`** (#1219). The package was named for one
+  of the four things it does: decision trees and tree ensembles (`tree.py`,
+  `formulations/tree_ensemble.py`, the sklearn readers) are first-class in it,
+  and the `Surrogate` protocol admits GP means, kernel expansions, soft trees and
+  symbolic formulas — none of them networks. Its own dispatcher is
+  `add_predictor()`, not `add_network()`. Nothing about the formulations changed;
+  this is a rename plus a deprecation shim.
+
+  `import discopt.nn` still works, emits a `DeprecationWarning`, and forwards by
+  **object identity** rather than by copy: every submodule path
+  (`discopt.nn.network`, `discopt.nn.formulations.base`,
+  `discopt.nn.readers.sklearn_reader`, …) resolves to the same module object as
+  its `discopt.ml` counterpart, so `isinstance(f, discopt.ml.NNFormulation)`
+  holds for objects built through the old spelling. `test_1219_nn_shim.py` pins
+  that (it fails on 6 of 7 tests with the shim removed). The shim is scheduled
+  for removal in 0.10. The `[nn]` and `[ml]` install extras are dependency sets
+  (ONNX and scikit-learn respectively), not module paths, and are unchanged.
+
 - **The benchmark neutrality harness refuses wall-limited rows** (#1187, part 2).
   `deterministic=True` cannot equalise work on a run that terminates on the wall
   clock, because the terminating condition *is* the wall clock — `time_limit` is

@@ -7,7 +7,7 @@ relax.  The practical bridge is a surrogate: fit W1 and W2 (or a diabatic
 matrix) to reference points, then optimize the surrogate globally.  This
 experiment tests whether discopt can actually do that, three ways:
 
-  (A) ``discopt.nn`` -- embed two trained feedforward networks (tanh, smooth,
+  (A) ``discopt.ml`` -- embed two trained feedforward networks (tanh, smooth,
       as a PES fit should be) as algebraic constraints and solve
       ``min W1_nn s.t. W1_nn - W2_nn == 0`` globally.
 
@@ -104,7 +104,7 @@ except ImportError:
 
 def fit_net(y, hidden=(12, 12), seed=0):
     """Return (predict_fn, NetworkDefinition-compatible weight list)."""
-    from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
     if HAVE_SK:
         mlp = MLPRegressor(
@@ -150,10 +150,10 @@ print(f"      surrogate RMSE: W1={r1:.4f}  W2={r2:.4f}  (energy units)")
 check(r1 < 0.5 and r2 < 0.5, f"surrogate fit too poor to be meaningful (RMSE {r1:.3f}/{r2:.3f})")
 
 # ==========================================================================
-print("\n[A] discopt.nn: embed both networks, solve min W1 s.t. W1-W2 == 0")
+print("\n[A] discopt.ml: embed both networks, solve min W1 s.t. W1-W2 == 0")
 # ==========================================================================
 try:
-    from discopt.nn import add_predictor
+    from discopt.ml import add_predictor
 
     m = dm.Model("nn_surrogate_mecp")
     # scaled inputs live in [-1,1]; the geometry is recovered afterwards
@@ -187,7 +187,7 @@ try:
 except Exception as exc:
     print(f"   RAISED: {type(exc).__name__}: {exc}")
     traceback.print_exc(limit=4)
-    note(f"discopt.nn route raised {type(exc).__name__}: {exc}")
+    note(f"discopt.ml route raised {type(exc).__name__}: {exc}")
     CHECKS += 1
 
 # ==========================================================================

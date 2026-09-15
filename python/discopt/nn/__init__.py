@@ -1,126 +1,98 @@
-"""Neural network embedding and training for discopt optimization models.
+"""Deprecated alias for :mod:`discopt.ml`.
 
-This module spans two regimes of one hybrid-model story:
+The package was renamed in 0.8.1: it embeds *machine-learning* predictors —
+decision trees and tree ensembles as much as neural networks, plus anything
+satisfying the :class:`~discopt.ml.surrogate.Surrogate` protocol — so the old
+``nn`` name described one of the families it supports (issue #1219).
 
-- **Frozen** (``NetworkDefinition`` + ``NNFormulation`` / :func:`add_predictor`):
-  embed a *trained* network as algebraic constraints and optimize *over* it —
-  its weights are constants — with global optimality guarantees.
-- **Trainable** (:mod:`discopt.nn.trainable`: ``TrainableNetwork``,
-  ``TrainableDense``, ``TrainableKernelExpansion``, :func:`train`): the surrogate's
-  weights are decision ``Variable`` objects, so it can be *trained* jointly with a
-  physics model (e.g. a neural rate law inside a collocation DAE). Trained weights
-  bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
-  ``from_definition()`` — train, freeze, then optimize.
-
-The trainable regime is open: any object satisfying the :class:`Surrogate`
-protocol (a callable ``__call__(x) -> expression`` plus ``parameters`` /
-``n_parameters`` / ``l2_penalty`` / ``initial_values``) plugs into the hybrid
-pipeline, so custom surrogates — a Gaussian-process mean, a soft decision tree, a
-fixed-structure symbolic formula whose constants are trained in the NLP — work
-without new framework code. See :mod:`discopt.nn.surrogate`.
-
-Example (frozen)
-----------------
->>> import discopt.modeling as dm
->>> from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation
->>>
->>> m = dm.Model("nn_opt")
->>> net = NetworkDefinition([
-...     DenseLayer(W1, b1, Activation.RELU),
-...     DenseLayer(W2, b2, Activation.LINEAR),
-... ], input_bounds=(lb, ub))
->>>
->>> nn = NNFormulation(m, net, strategy="relu_bigm")
->>> nn.formulate()
->>> m.minimize(dm.sum(nn.outputs))
->>> m.subject_to(nn.inputs[0] >= 1.0)
->>> result = m.solve()
+Importing ``discopt.nn`` emits a :class:`DeprecationWarning` and forwards to
+:mod:`discopt.ml`. The forwarding is by object identity, not by copy: every
+submodule path (``discopt.nn.network``, ``discopt.nn.formulations.base``,
+``discopt.nn.readers.sklearn_reader``, ...) resolves to the *same* module
+object as its ``discopt.ml`` counterpart, so ``isinstance`` checks and
+class identity hold across the two spellings. Update imports to
+``discopt.ml``; this shim is scheduled for removal in 0.10.
 """
 
-from discopt.nn.bounds import LayerBounds, propagate_bounds
-from discopt.nn.formulations.base import NNFormulation, TreeFormulation
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.presolve import (
-    DeadReluLayer,
-    NNPresolvePass,
-    NNPresolveResult,
-    detect_dead_relus,
-    tighten_network,
+from __future__ import annotations
+
+import importlib
+import pkgutil
+import sys
+import warnings
+
+import discopt.ml as _ml
+
+warnings.warn(
+    "discopt.nn is deprecated and will be removed in 0.10; use discopt.ml "
+    "instead (the package embeds ML predictors generally — trees and other "
+    "surrogates as well as neural networks). See issue #1219.",
+    DeprecationWarning,
+    stacklevel=2,
 )
-from discopt.nn.scaling import OffsetScaling
-from discopt.nn.surrogate import Surrogate
-from discopt.nn.trainable import (
-    TrainableDense,
-    TrainableKernelExpansion,
-    TrainableNetwork,
-    train,
+
+
+def _install_submodule_aliases() -> None:
+    """Register every ``discopt.ml`` submodule under its ``discopt.nn`` name.
+
+    Eager rather than lazy: the alias entries must already be in
+    ``sys.modules`` when the import machinery resolves ``import
+    discopt.nn.network``, otherwise it looks for a file that no longer exists.
+    Walking the real package instead of hardcoding a list means a module added
+    to ``discopt.ml`` later is aliased without touching this file.
+
+    No module under ``discopt.ml`` imports a third-party dependency at import
+    time — the optional readers defer ``onnx`` / ``sklearn`` / ``torch`` into
+    their functions — so walking the whole package is cheap and cannot fail on
+    a missing extra. ``onerror`` re-raises rather than accepting
+    ``walk_packages``' default of swallowing an ``ImportError``: a subpackage
+    that failed to import would otherwise drop itself *and its children* from
+    the alias set, and the only symptom would be a ``ModuleNotFoundError`` at
+    some later ``import discopt.nn.<something>``.
+    """
+
+    def _reraise(name: str) -> None:
+        # Called from inside walk_packages' own ``except ImportError``, so a
+        # bare raise re-raises that error (verified: with onerror=None the
+        # failing subpackage *and* its children vanish from the walk silently).
+        raise
+
+    for info in pkgutil.walk_packages(_ml.__path__, prefix=f"{_ml.__name__}.", onerror=_reraise):
+        module = importlib.import_module(info.name)
+        alias = f"{__name__}{info.name[len(_ml.__name__) :]}"
+        sys.modules[alias] = module
+
+
+_install_submodule_aliases()
+
+# Re-export the full public surface. Forwarding by ``getattr`` on the real
+# module keeps the two spellings from drifting: a name added to ``discopt.ml``
+# is reachable here with no edit to this file, and every object is the same
+# object, not a copy.
+_FORWARDED = (
+    *_ml.__all__,
+    # Deferred loaders for the optional readers; public, but kept out of
+    # ``discopt.ml.__all__`` because each imports a third-party dependency.
+    "add_predictor",
+    "load_onnx",
+    "load_sklearn_ensemble",
+    "load_sklearn_mlp",
+    "load_sklearn_tree",
+    "load_torch_sequential",
 )
-from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
 
-__all__ = [
-    "Activation",
-    "DeadReluLayer",
-    "DecisionTree",
-    "DenseLayer",
-    "LayerBounds",
-    "NNFormulation",
-    "NNPresolvePass",
-    "NNPresolveResult",
-    "NetworkDefinition",
-    "OffsetScaling",
-    "Surrogate",
-    "TrainableDense",
-    "TrainableKernelExpansion",
-    "TrainableNetwork",
-    "TreeEnsembleDefinition",
-    "TreeFormulation",
-    "detect_dead_relus",
-    "propagate_bounds",
-    "tighten_network",
-    "train",
-]
+__all__ = list(_FORWARDED)
 
 
-# Lazy imports for optional dependencies
+def __getattr__(name: str) -> object:
+    """Forward any public ``discopt.ml`` attribute, including ones added later."""
+    if not name.startswith("_"):
+        try:
+            return getattr(_ml, name)
+        except AttributeError:
+            pass
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def load_onnx(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Load an ONNX model. Requires ``pip install discopt[nn]``."""
-    from discopt.nn.readers.onnx_reader import load_onnx as _load_onnx
-
-    return _load_onnx(*args, **kwargs)
-
-
-def load_sklearn_mlp(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Load sklearn MLPRegressor/Classifier. Requires scikit-learn."""
-    from discopt.nn.readers.sklearn_reader import load_sklearn_mlp as _f
-
-    return _f(*args, **kwargs)
-
-
-def load_sklearn_tree(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Load sklearn DecisionTree. Requires scikit-learn."""
-    from discopt.nn.readers.sklearn_reader import load_sklearn_tree as _f
-
-    return _f(*args, **kwargs)
-
-
-def load_sklearn_ensemble(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Load sklearn ensemble (GBR, RF). Requires scikit-learn."""
-    from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble as _f
-
-    return _f(*args, **kwargs)
-
-
-def load_torch_sequential(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Load torch.nn.Sequential. Requires PyTorch."""
-    from discopt.nn.readers.torch_reader import load_torch_sequential as _f
-
-    return _f(*args, **kwargs)
-
-
-def add_predictor(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Embed a trained ML model as constraints. See :func:`discopt.nn.predictor.add_predictor`."""
-    from discopt.nn.predictor import add_predictor as _f
-
-    return _f(*args, **kwargs)
+def __dir__() -> list[str]:
+    return sorted({*__all__, *dir(_ml)})

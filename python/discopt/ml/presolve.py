@@ -46,8 +46,8 @@ from typing import Optional, Sequence
 import numpy as np
 
 from discopt._relax.presolve.protocol import make_python_delta
-from discopt.nn.bounds import LayerBounds, propagate_bounds
-from discopt.nn.network import Activation, NetworkDefinition
+from discopt.ml.bounds import LayerBounds, propagate_bounds
+from discopt.ml.network import Activation, NetworkDefinition
 
 logger = logging.getLogger(__name__)
 

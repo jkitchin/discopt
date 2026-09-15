@@ -1,4 +1,4 @@
-"""Tests for the trainable ML surrogate API (``discopt.nn.trainable``).
+"""Tests for the trainable ML surrogate API (``discopt.ml.trainable``).
 
 Covers the HM1 acceptance criteria from
 ``docs/dev/hybrid-ml-implementation-plan.md`` §5:
@@ -17,13 +17,13 @@ a trainable rate law) and solve it, so they are marked ``smoke``.
 import numpy as np
 import pytest
 from discopt.dae import ContinuousSet, DAEBuilder
-from discopt.modeling import Model
-from discopt.nn import (
+from discopt.ml import (
     TrainableKernelExpansion,
     TrainableNetwork,
     train,
 )
-from discopt.nn.network import Activation
+from discopt.ml.network import Activation
+from discopt.modeling import Model
 
 # ── ground truth for the reactor problem (mirrors scripts/hybrid_ml) ────────
 
@@ -117,7 +117,7 @@ def test_relu_refused_on_trainable_path():
     with pytest.raises(ValueError, match=r"RELU is not supported.*softplus"):
         TrainableNetwork(m, [1, 3, 1], activation="relu", name="r")
     with pytest.raises(ValueError, match=r"RELU is not supported"):
-        from discopt.nn import TrainableDense
+        from discopt.ml import TrainableDense
 
         TrainableDense(m, 1, 3, activation=Activation.RELU, name="d")
 

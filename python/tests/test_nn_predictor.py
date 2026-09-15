@@ -1,4 +1,4 @@
-"""Tests for ``discopt.nn.predictor.add_predictor`` ergonomics (task T-N2.3).
+"""Tests for ``discopt.ml.predictor.add_predictor`` ergonomics (task T-N2.3).
 
 Covers the four improvements landed under T-N2.3:
 
@@ -27,8 +27,8 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.predictor import add_predictor
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.predictor import add_predictor
 
 # Make the sibling equivalence harness importable regardless of pytest import mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))

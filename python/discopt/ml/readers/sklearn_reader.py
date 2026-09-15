@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
 
 _SKLEARN_ACTIVATION_MAP = {
     "relu": Activation.RELU,

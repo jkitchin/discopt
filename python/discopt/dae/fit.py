@@ -4,7 +4,7 @@
 (:class:`~discopt.dae.collocation.DAEBuilder`) per experimental trajectory on a
 *shared* model, wiring them all to the same right-hand side. When that RHS closes
 over a trainable surrogate's weight ``Variable`` objects (see
-:mod:`discopt.nn.trainable`), the weights are shared across every trajectory and
+:mod:`discopt.ml.trainable`), the weights are shared across every trajectory and
 trained jointly — the simultaneous multi-experiment neural-DAE setup measured in
 ``scripts/hybrid_ml/exp_c_paper_scale.py``.
 
@@ -115,7 +115,7 @@ class TrajectoryFit:
         """Extract ``(t, x)`` for trajectory ``k``'s ``state`` from a solve result.
 
         Accepts either a ``SolveResult`` (has ``.value``) or an ``NLPResult``
-        from :func:`discopt.nn.train` (has a flat ``.x``).
+        from :func:`discopt.ml.train` (has a flat ``.x``).
         """
         builder = self.builders[k]
         if not callable(getattr(result, "value", None)):
@@ -133,7 +133,7 @@ class _ValueResultAdapter:
     """Wrap an ``NLPResult`` (flat ``.x``) with a ``.value(var)`` accessor.
 
     ``DAEBuilder.extract_solution`` expects a ``SolveResult``; the local
-    :func:`discopt.nn.train` returns an ``NLPResult``. This adapter bridges the
+    :func:`discopt.ml.train` returns an ``NLPResult``. This adapter bridges the
     two by splitting the flat solution with the model's variable ordering.
     """
 

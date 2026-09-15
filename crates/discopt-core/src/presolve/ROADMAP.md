@@ -429,7 +429,7 @@ fixed-point loop so that downstream variable bound tightening triggers
 re-tightening of NN activations. No prior solver embeds NNs as first-class
 constraints, so this is genuinely new territory.
 
-**Where.** `python/discopt/nn/presolve.py` (new), called from
+**Where.** `python/discopt/ml/presolve.py` (new), called from
 `formulations/relu_bigm.py` and integrated with the Python-side presolve
 package (A3).
 

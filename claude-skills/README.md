@@ -51,7 +51,7 @@ plugin: `discopt-doe-install-skill`.)
 `convexity-detection-expert`, `differentiability-expert`, `estimation-expert`, `heuristics-expert`,
 `highs-expert`, `ipopt-expert`,
 `llm-feature-expert`, `minlp-solver-expert`,
-`modeling-expert`, `multiobjective-expert`, `nn-embedding-expert`,
+`modeling-expert`, `multiobjective-expert`, `ml-embedding-expert`,
 `presolve-expert`, `robust-opt-expert`, `scip-expert`.
 
 The source of truth for these files is `python/discopt/skills/commands/`
