@@ -644,6 +644,7 @@ class MccormickLPRelaxer:
                 if _inc.ok:
                     self._inc = _inc
             except Exception:
+                logger.debug("__init__ failed; using fallback", exc_info=True)
                 self._inc = None
 
         # Composite convex/concave OA lift detection is LAZY (see
@@ -672,6 +673,7 @@ class MccormickLPRelaxer:
                 _probe = build_uniform_relaxation(self._model, box=(_flb, _fub))
                 self._has_composite_lift_cache = bool(_probe.composite_multivar_specs)
             except Exception:
+                logger.debug("_model_has_composite_lift failed; using fallback", exc_info=True)
                 self._has_composite_lift_cache = False
         return self._has_composite_lift_cache
 
@@ -930,6 +932,7 @@ class MccormickLPRelaxer:
                         A, b, bounds, in_basis=None, time_limit=_lp_budget()
                     )
                 except Exception:
+                    logger.debug("_try_incremental_node failed; using fallback", exc_info=True)
                     c_status = None
                     c_bound = None
                     c_x = None
@@ -992,6 +995,7 @@ class MccormickLPRelaxer:
         try:
             a_csr = sp.csr_matrix(A)
         except Exception:
+            logger.debug("_reverify_incremental_infeasible failed; using fallback", exc_info=True)
             return None
 
         try:
@@ -1006,6 +1010,7 @@ class MccormickLPRelaxer:
                 time_limit=time_limit,
             )
         except Exception:
+            logger.debug("_reverify_incremental_infeasible failed; using fallback", exc_info=True)
             return None  # re-verify failed -> trusted cold rebuild
         if status == "infeasible":
             # Fathom ONLY on a verified Farkas ray; an uncertified infeasible is not a
@@ -2171,6 +2176,7 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            logger.debug("_separate_multilinear failed; using fallback", exc_info=True)
             return res
 
     def _separate_univariate_square(self, milp, varmap, res, deadline):
@@ -2268,6 +2274,7 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            logger.debug("_separate_univariate_square failed; using fallback", exc_info=True)
             return res
 
     def _record_singular_tangent_hits(self, rows, rhs, x) -> None:
@@ -2637,6 +2644,7 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            logger.debug("_separate_convex failed; using fallback", exc_info=True)
             return res
 
     def _g_convex_enabled(self) -> bool:
@@ -2648,6 +2656,7 @@ class MccormickLPRelaxer:
 
                 v = bool(g_convex_cuts_enabled())
             except Exception:
+                logger.debug("_g_convex_enabled failed; using fallback", exc_info=True)
                 v = False
             self._gconv_flag = v
         return v
@@ -2699,6 +2708,7 @@ class MccormickLPRelaxer:
             from discopt._relax.convexity.g_convexity import certify_g_convex
             from discopt._relax.convexity.interval import Interval
         except Exception:
+            logger.debug("_separate_g_convex failed; using fallback", exc_info=True)
             return res
         cands = self._gconv_candidate_constraints()
         if not cands:
@@ -2735,6 +2745,7 @@ class MccormickLPRelaxer:
             try:
                 cert = certify_g_convex(phi, self._model, box=box)
             except Exception:
+                logger.debug("_separate_g_convex failed; using fallback", exc_info=True)
                 cert = None
             if cert is None or cert.kind != "g_convex" or not (cert.rho > 0.0):
                 continue
@@ -2853,6 +2864,7 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            logger.debug("_separate_rlt failed; using fallback", exc_info=True)
             return res
 
     def _separate_psd(self, milp, varmap, res, deadline, max_rounds: int = 8):
@@ -2968,6 +2980,7 @@ class MccormickLPRelaxer:
             logger.debug("psd_cut_loop: rounds=%d stopped_on=%s", _psd_rounds, _psd_stop)
             return res
         except Exception:
+            logger.debug("_separate_psd failed; using fallback", exc_info=True)
             return res
 
     def _separate_edge_concave(self, milp, varmap, res, deadline):
@@ -3099,4 +3112,5 @@ class MccormickLPRelaxer:
                 res = new_res
             return res
         except Exception:
+            logger.debug("_separate_edge_concave failed; using fallback", exc_info=True)
             return res

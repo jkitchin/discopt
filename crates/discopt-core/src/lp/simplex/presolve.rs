@@ -15,6 +15,7 @@
 
 use crate::lp::crossover::LpView;
 use crate::lp::simplex::sparse::SparseCols;
+use crate::presolve::fbbt::FEAS_TOL;
 
 const INF: f64 = 1e20;
 
@@ -256,8 +257,22 @@ fn fbbt_row(
             hi[k] = new_hi;
             changed = true;
         }
-        if lo[k] > hi[k] + tol {
+        // Emptiness needs a crossing beyond the feasibility tolerance, not the
+        // simplex pivot `tol`: the row data are rounded decimals, so a row can
+        // imply `lo` a few 1e-9 above an `hi` another row implied. On HiGHS
+        // check instance 2122 a 3.2e-9 crossing (row 307, col 51) was declared
+        // empty and the driver returned a certified `infeasible` for a MILP
+        // whose optimum is -187612.94. A sub-FEAS_TOL crossing is widened to
+        // the pair of endpoints (the #907 idiom in `presolve::fbbt`), so neither
+        // derivation's sound endpoint is lost and no inverted box escapes.
+        let cross = lo[k] - hi[k];
+        if cross > FEAS_TOL {
             return None;
+        }
+        if cross > 0.0 {
+            let (a, b) = (lo[k].min(hi[k]), lo[k].max(hi[k]));
+            lo[k] = a;
+            hi[k] = b;
         }
     }
     Some(changed)
@@ -324,6 +339,57 @@ mod tests {
         let u = [1.0, 1.0];
         let is_int = [false, false];
         let r = tighten_bounds(&view(&a, 1, 2, &c, &l, &u), &[5.0], &is_int, 1e-9);
+        assert!(r.infeasible);
+    }
+
+    // #1229 panel, `2122.lp`: the file's rounded coefficients leave the exact box
+    // empty by ~3e-9 on a continuous column (row `x51 − x258 + x259 − x525 = 0`), and
+    // the absolute `1e-9` test certified the MILP `infeasible` at 0 nodes. HiGHS
+    // (−187616.11) and SCIP (−187612.94) both solve it: a point that violates by less
+    // than the feasibility tolerance is feasible by the same definition the driver's
+    // own point gate uses, so an emptiness claim must exceed that tolerance.
+    //
+    // Minimal shape: `3 x0 = 1` puts x0 at 1/3; `x0 − x1 = 0` with `x1 ≤ 0.3333333`
+    // (1/3 rounded to 7 digits) crosses by 3.3e-8. `x0 = x1 = 0.3333333` satisfies
+    // both rows within 1e-7.
+    #[test]
+    fn crossing_within_feasibility_tolerance_is_not_an_empty_box() {
+        let a = [3.0, 0.0, 1.0, -1.0];
+        let c = [0.0, 0.0];
+        let l = [0.0, 0.0];
+        let u = [1.0, 0.3333333];
+        let is_int = [false, false];
+        let r = tighten_bounds(&view(&a, 2, 2, &c, &l, &u), &[1.0, 0.0], &is_int, 1e-9);
+        assert!(
+            !r.infeasible,
+            "a 3.3e-8 crossing is data rounding, not an empty box (l={:?} u={:?})",
+            r.l, r.u
+        );
+        let p = 0.3333333;
+        for k in 0..2 {
+            assert!(r.l[k] <= r.u[k], "col {k}: returned bounds must be ordered");
+            assert!(
+                r.l[k] - 1e-6 <= p && p <= r.u[k] + 1e-6,
+                "col {k}: the tolerance-feasible point must stay in the box: [{}, {}]",
+                r.l[k],
+                r.u[k]
+            );
+        }
+        let csc = SparseCols::from_dense(&a, 2, 2);
+        let rc = tighten_bounds_csc(&csc, 2, 2, &l, &u, &[1.0, 0.0], &is_int, 1e-9);
+        assert_eq!((rc.infeasible, &rc.l, &rc.u), (r.infeasible, &r.l, &r.u));
+    }
+
+    // The tolerance must not swallow a real empty box: the same shape with
+    // `x1 ≤ 0.3333` crosses by 3.3e-5, well past any feasibility tolerance.
+    #[test]
+    fn crossing_beyond_feasibility_tolerance_is_still_infeasible() {
+        let a = [3.0, 0.0, 1.0, -1.0];
+        let c = [0.0, 0.0];
+        let l = [0.0, 0.0];
+        let u = [1.0, 0.3333];
+        let is_int = [false, false];
+        let r = tighten_bounds(&view(&a, 2, 2, &c, &l, &u), &[1.0, 0.0], &is_int, 1e-9);
         assert!(r.infeasible);
     }
 

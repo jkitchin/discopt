@@ -1133,3 +1133,129 @@ reading was wrong.
   concurrent calphad job ran (load 9–16), and the run was stopped. No H5/E1 overhead claim
   is made. Rerun `lp_milp_panel.py tiny` on a quiet machine.
 - Stage 1b and Stage 2 (E2) were not built. Both are optional under §2.3.
+
+**2026-09-15 — audit of the performance evidence against §6.5: H5 fails; H1–H3 were
+not run as registered.** Recomputed from the raw panel JSONs
+(`scratchpad/before_after.py`). Setup: R/H/H0 interleaved, 3 rounds, TL 20 s, gap 1e-4,
+base `a837ffb8`, highspy 1.15.1.
+
+- **Loads broke the §6.3 gate** (< 2 to start, abort above 4): M 2.7 → 8.0, L 2.8 → 6.2.
+  Walls below are not gate-valid. Status, nodes and objectives do not depend on load.
+
+  | Panel | Certified optimal R / H | Total wall R / H | Geo-mean wall R/H | SGM (1 s shift) R / H |
+  |---|---|---|---|---|
+  | M (23 M-HiGHS + Probe-1183) | 19/24 / 24/24 | 85.0 s / 5.3 s | 5.68 | 1.258 s / 0.200 s |
+  | L (24 HiGHS-check LPs) | 21/24 / 24/24 | 117.0 s / 3.2 s | 11.89 | 1.680 s / 0.123 s |
+
+- **Objectives agree.** In 88 comparisons of R or H against H0, the worst relative
+  difference is 1.7e-5, inside gap 1e-4. Where both R and H are optimal, no pair differs
+  by more than 1e-6.
+- **H1** is registered on M-MIPLIB (38) and was **not run**. On the 24-MILP proxy panel,
+  H solves 5 more than R (the kill line is ≤ 3 more), and the geo-mean ratio 5.7 meets
+  "H ≤ R/3". The shifted SGM ratio, 1.9, does not. The registration names no shift.
+- **H2** is registered on L-Netlib (112) and was **not run**. On the 24-LP proxy panel,
+  objectives are equal and NS decertification is 0/24. Duals parity was not measured on
+  a panel.
+- **H3 is not tested.** The gated tiny run `panel_tiny_h5.json` (load 2.47 → 2.52,
+  200 instances, 200 objectives agree) has only arms R (median 4.11 ms) and H0
+  (0.29 ms), with no H arm. **Retraction:** the P4 entry above and PR #1258 said "E1 not
+  measured". E1's R/H0 comparison was measured; the H arm is what is missing.
+- **H5 fails.** All 48 instances have H0 wall < 1 s, so the 20 ms bound applies to each.
+  - H − H0 exceeds 20 ms on 20/24 MILPs and 17/24 LPs; the medians are 44 ms and 38 ms.
+  - Worst: 25fv47 760 ms, issue-2446 542 ms, 2122 536 ms, issue-2173 451 ms.
+  - The load cannot explain an excess 10–40× the threshold. Attributed below.
+- The panel JSONs live in the session scratchpad, not the repo.
+
+**2026-09-15 — H5 attributed: the excess is the shared `Model.solve` pipeline and HiGHS
+runs, not certification.** `scratchpad/h5_wall.py` wraps the named stages with wall-clock
+timers (cProfile was discarded: it charged HiGHS's threaded C time to `_set_options`).
+One run each, load 4.4–4.5, so shares only.
+
+| Instance | H − H0 | NBT on declared box | Convexity classify | Std-form extract | HiGHS `run` (calls) | All certificate checks |
+|---|---|---|---|---|---|---|
+| 25fv47 (LP) | 735 ms | 216 ms | 151 ms | 84 ms | 90 ms (1) | 44 ms (34 ms `exact_ns_bound`) |
+| 2122 | 534 ms | 67 ms | — | 44 ms | 450 ms (3) vs H0 128 ms | 4 ms |
+| issue-2446 | 555 ms | 152 ms | — | 194 ms | 54 ms (3) | 8 ms |
+| lseu | 39 ms | 4 ms | — | 2 ms | 146 ms (3) | < 1 ms |
+
+- The certificate checks are ≤ 44 ms on every instance, and < 10 ms on the MILPs.
+- The largest shares are stages that every `Model.solve` pays before dispatch, on the R route too:
+  - nonlinear bound tightening of the declared box (`_declared_box_tightening`), run here on a
+    purely linear model;
+  - convexity classification;
+  - DAG → std-form extraction.
+- On each MILP the route makes three HiGHS runs: one `solve_milp_std` and two `solve_lp_std`
+  (the stage counts). On 2122 those runs take 3.5× H0's single run.
+- **Verdict: H5 fails as registered.** A 20 ms bound is not reachable through `Model.solve` on
+  these sizes without bypassing the pre-dispatch pipeline. That is a separate change (skip the
+  NBT and classification for route-bound models); it is not made here. No overhead claim is made.
+
+**2026-09-15 — the Rust route's 2122 false `infeasible`, fixed.** Rust presolve `fbbt_row`
+(`lp/simplex/presolve.rs`) declared a box empty when `lo > hi + tol`, with `tol` the pivot
+tolerance.
+
+- 2122's rounded row data leave a 3.2e-9 crossing (row 307, col 51). The driver returned a
+  certified `infeasible` for a MILP whose optimum is −187612.94.
+- Fix: emptiness needs a crossing > `FEAS_TOL`. A smaller crossing is widened to the pair of
+  endpoints (the #907 idiom); it is never replaced by a midpoint.
+- Tests:
+  - `crossing_within_feasibility_tolerance_is_not_an_empty_box` failed before and passes after.
+  - `crossing_beyond_feasibility_tolerance_is_still_infeasible` pins the refusal.
+- On the rebuilt binary, 2122 on `DISCOPT_LP_MILP_BACKEND=rust` now ends at `time_limit` with
+  bound −187609.32. For this maximize problem that is sound (≥ the optimum).
+
+**2026-09-15 — the shared dual engine's sentinel defect, fixed (`dual.rs` `select_leaving`).**
+The leaving-row test compared `x_B` with the raw bound arrays, so a ±1e20 sentinel side counted
+as a bound.
+
+- Effect: a free basic column that drifted past 1e20 was pivoted out *onto* the sentinel.
+- On the captured qplib2170 relaxation, before the fix:
+  - recovery off → `Numerical`, with 172 columns at |x| ≥ 1e19;
+  - recovery on → `optimal 0` after 17 794 pivots, with 44 columns parked at 1e20.
+- After the fix, both arms are `optimal 0` in 613 pivots, max |x| 2.
+- The defect was the only trigger of three mechanisms on that fixture: the unstable-pivot
+  bail/recovery, the "degeneracy", and the stall bail. The tests built on it were re-targeted
+  without weakening:
+  - `free_basic_column_is_never_pivoted_onto_the_sentinel` (qplib2170): no column at the
+    sentinel, 0 bails, 0 recoveries, < 2000 pivots. It fails under the old rule
+    ("HiGHS certifies optimal 0 left: Numerical").
+  - `unstable_pivot_recovery_is_not_gated_on_a_deadline`: a new fixture,
+    `testdata/bchoco06_unstable_pivot_lp.json`, is a real bchoco06 node LP (1002×1323) with its
+    warm basis, captured from a default MINLP solve that still reaches the mechanism after the
+    fix. Recovery off gives (bails, recoveries) = (1, 0); on gives (0, 1); status and objective
+    are the same. It passes under both rules.
+  - `cost_perturbation_breaks_the_degeneracy_on_the_captured_stall` moves to the tspn12
+    fixture: 1573 of 1727 pivots are degenerate unperturbed, 64 of 906 perturbed, with the same
+    optimum.
+  - `dual_stall_bail_can_cost_a_bound_when_the_cold_solve_fails` forces patience 256.
+- **Retraction:** `COST_PERTURB_EPS`'s qplib2170 evidence was this defect. Unperturbed it now
+  converges in 613 pivots, and perturbing costs 912. The doc comment says so; tspn12 and
+  st_testgr3 remain the evidence.
+- **MINLP guard, cert-clean** (`scratchpad/sentinel_ab_guard.py`): all 66 in-repo `.nl` files,
+  arms OLD (both old rules) / NEW / NEW2, `backend=rust`, TL 20 s, max_nodes 300, oracle
+  `minlplib.solu`.
+  - Result: ran 66, oracle-checked arms 156, oracle violations 0, certification regressions 0.
+  - Counter profiles differ on 14 instances, so the toggle fired.
+  - Four rows changed:
+    - beuster and tspn10 are noisy: NEW2 differs from NEW.
+    - casctanks: 17 → 9 nodes, with the same bound 6.24966 and incumbent 9.16348.
+    - nvs05: 73 → 63 nodes, same bound 2.70808; the incumbent improves from 1107.89 to 8.116
+      (NEW = NEW2).
+  - Both are `feasible` at the time limit under load ~11, so their node counts are time-bound.
+- The recovery and stall mechanisms stay live on the corpus after the fix: recoveries on
+  bchoco06 and tspn05; stall bails on 4stufen, bchoco06/07 and tspn05/08.
+
+**2026-09-15 — hda "floor-as-fallback": falsified, not built.** The hypothesis: a node whose
+cold solve is optimal keeps the #362 stale NS floor as `safe_bound`, and `_certify` would
+certify `r.objective` if the floor were only a fallback.
+
+- `scratchpad/hda_certify_chain.py` evaluated the rest of the `_certify` chain on every
+  stale-floor optimal result (2 evaluated). Both have obj −64509.85, with safe_bound −7.2e10 and
+  −2.5e16.
+- Both **decline on magnitude**: `_max_finite_magnitude` is 2.1e11, above the 1e7 limit. No
+  column is unbounded and nonlinear.
+- The kill criterion is met: floor-as-fallback cannot tighten hda. hda stays as documented.
+
+**2026-09-15 — swallowed exceptions in `mccormick_lp.py`.** The 14 `except Exception:`
+fallbacks that were silent now log `logger.debug("<method> failed; using fallback",
+exc_info=True)`. Control flow is unchanged.
