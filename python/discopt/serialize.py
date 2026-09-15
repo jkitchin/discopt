@@ -28,16 +28,17 @@ Scope
 -----
 Carried: variables (name, type, shape, element-wise bounds), parameters, the
 objective, algebraic constraints, the fast-construction (Rust builder) linear
-blocks and builder objective, indicator / SOS / disjunctive relations, the
-starting point, and -- optionally -- the solve result.
+blocks and builder objective, indicator / SOS / disjunctive relations,
+complementarity relations together with this model's lowering marks, the starting
+point, and -- optionally -- the solve result.
 
 Refused loudly (never silently dropped, per the repo's no-silent-approximation
 rule): :class:`~discopt.modeling.core.CustomCall` (an arbitrary Python callable;
 there is nothing faithful to write, and writing its *name* would reload into a
-different model), propositional ``_LogicalConstraint``, complementarity relations,
-and any expression node this version does not know. On read, an unknown ``op`` is
-a hard error -- a reader that skips what it does not understand silently drops a
-constraint and returns a model that solves to the wrong answer.
+different model), propositional ``_LogicalConstraint``, and any expression node
+this version does not know. On read, an unknown ``op`` is a hard error -- a reader
+that skips what it does not understand silently drops a constraint and returns a
+model that solves to the wrong answer.
 
 Examples
 --------
@@ -396,12 +397,6 @@ def _refuse_unsupported(model: Model) -> None:
             name = getattr(con, "name", None)
             where = f" named {name!r}" if name else ""
             raise SerializationError(f"cannot serialize: the model carries {what}{where}. {remedy}")
-    if getattr(model, "_complementarities", None):
-        raise SerializationError(
-            "cannot serialize: the model carries complementarity relations, which this "
-            "format version does not encode. Export to .nl instead (from_nl reconstructs "
-            "them), or drop them before saving."
-        )
 
 
 # ── variables / parameters ─────────────────────────────────────────────────
@@ -626,6 +621,124 @@ def _dec_constraint(d: dict, nodes: list) -> Constraint:
     return Constraint(body=nodes[d["body"]], sense=d["sense"], rhs=0.0, name=d["name"])
 
 
+# ── complementarity relations ──────────────────────────────────────────────
+#
+# A relation is a node of the model's IR that lives OUTSIDE `_constraints`: it is
+# recorded on `model._complementarities`, and whether this particular model already
+# carries the rows that encode it is recorded separately, on
+# `model._lowered_complementarities` (an identity map relation -> LoweringRecord).
+#
+# Both halves have to travel. Carrying the relations without the marks would
+# reload a model whose rows already encode every relation but which reports them
+# all as unlowered -- `unlowered_relations` is a solver-boundary refusal, so the
+# reloaded model would not solve at all. Carrying the marks without the *method*
+# would be worse than that: `LoweringRecord.is_exact` is derived from the method
+# alone, and a `scholtes` lowering is a RELAXATION of the relation. A mark that
+# lost its method would read as exact, and the solver would certify a relaxation
+# as if it were the declared model -- a false certificate.
+
+
+def _enc_complementarities(model: Model, table: _NodeTable) -> Optional[dict]:
+    """Encode the relation set, its declaration order, and this model's lowering marks."""
+    declared: list[Any] = list(getattr(model, "_complementarities", []) or [])
+    lowered_map: dict = dict(getattr(model, "_lowered_complementarities", {}) or {})
+    if not declared and not lowered_map:
+        return None
+
+    # Transitive closure over `source`: an element relation points at the vector
+    # relation it was scalarized from, and that parent need not itself appear in
+    # `_complementarities`. Dropping it would break `describe()`/attribution back
+    # to the declared relation.
+    order: list[Any] = []
+    seen: set[int] = set()
+
+    def visit(rel: Any) -> None:
+        if rel is None or id(rel) in seen:
+            return
+        seen.add(id(rel))
+        visit(rel.source)  # parent first, so its index is known when the child refers to it
+        order.append(rel)
+
+    for rel in declared:
+        visit(rel)
+    for rel in lowered_map:
+        visit(rel)
+
+    index_of = {id(rel): i for i, rel in enumerate(order)}
+
+    def enc_shape(shape) -> Optional[list[int]]:
+        return None if shape is None else [int(v) for v in shape]
+
+    relations = [
+        {
+            "f": table.add(rel.f),
+            "g": table.add(rel.g),
+            "name": rel.name,
+            "role": rel.role.value,
+            "f_bounds": [_enc_float(rel.f_bounds[0]), _enc_float(rel.f_bounds[1])],
+            "g_bounds": [_enc_float(rel.g_bounds[0]), _enc_float(rel.g_bounds[1])],
+            "scale": None if rel.scale is None else _enc_float(rel.scale),
+            "parent": rel.parent,
+            "f_shape": enc_shape(rel.f_shape),
+            "g_shape": enc_shape(rel.g_shape),
+            "index": enc_shape(rel.index),
+            "source": None if rel.source is None else index_of[id(rel.source)],
+        }
+        for rel in order
+    ]
+
+    return {
+        "relations": relations,
+        # `_complementarities` is the durable declared record and its order is part
+        # of the model; the closure above may hold relations that are not in it.
+        "declared": [index_of[id(rel)] for rel in declared],
+        # `rows` is deliberately not encoded: it holds Constraint objects of THIS
+        # model, and `LoweringRecord` documents `None` ("not tracked for this
+        # model") as what a rebuilding pass must record, which is what a reload is.
+        "lowered": [[index_of[id(rel)], record.method] for rel, record in lowered_map.items()],
+    }
+
+
+def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> None:
+    """Rebuild the relation set and re-apply this model's lowering marks."""
+    if not doc:
+        return
+    from discopt.mpec import Complementarity, ComplementarityRole, LoweringRecord
+
+    def dec_shape(v) -> Optional[tuple]:
+        return None if v is None else tuple(int(x) for x in v)
+
+    rebuilt: list[Any] = []
+    for d in doc["relations"]:
+        src_idx = d["source"]
+        if src_idx is not None and src_idx >= len(rebuilt):
+            raise SerializationError(
+                f"complementarity relation refers to a source at index {src_idx} that "
+                "has not been read yet; the document's relation order is invalid."
+            )
+        rebuilt.append(
+            Complementarity(
+                f=nodes[d["f"]],
+                g=nodes[d["g"]],
+                name=d["name"],
+                role=ComplementarityRole(d["role"]),
+                f_bounds=(_dec_float(d["f_bounds"][0]), _dec_float(d["f_bounds"][1])),
+                g_bounds=(_dec_float(d["g_bounds"][0]), _dec_float(d["g_bounds"][1])),
+                scale=None if d["scale"] is None else _dec_float(d["scale"]),
+                parent=d["parent"],
+                f_shape=dec_shape(d["f_shape"]),
+                g_shape=dec_shape(d["g_shape"]),
+                index=dec_shape(d["index"]),
+                source=None if src_idx is None else rebuilt[src_idx],
+            )
+        )
+
+    model._complementarities = [rebuilt[i] for i in doc["declared"]]
+    model._lowered_complementarities = {
+        rebuilt[i]: LoweringRecord(method=method, rows=None) for i, method in doc["lowered"]
+    }
+
+
 # ── JSON tree sanitising (for the embedded result payload) ─────────────────
 
 
@@ -730,6 +843,7 @@ def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> 
         "builder_objective": builder_obj,
         "rows": rows,
         "builder_blocks": _enc_builder_blocks(model, var_ids),
+        "complementarities": _enc_complementarities(model, table),
         "initial_point": [
             [name, int(elem), _enc_float(val)]
             for (name, elem), val in sorted(getattr(model, "_initial_point", {}).items())
@@ -804,6 +918,8 @@ def loads(text: Union[str, bytes]) -> Model:
             # Set through setattr: the flag is attached dynamically by the two
             # builder-objective setters, not declared on the dataclass.
             setattr(model._objective, "_is_placeholder", True)
+
+    _dec_complementarities(doc.get("complementarities"), model, nodes)
 
     model._initial_point = {
         (name, int(elem)): _dec_float(val) for name, elem, val in doc.get("initial_point", [])

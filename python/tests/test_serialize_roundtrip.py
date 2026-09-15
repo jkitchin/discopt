@@ -383,12 +383,189 @@ def test_foreign_document_is_refused():
         loads(json.dumps({"schema": "something/else"}))
 
 
-@pytest.mark.smoke
-def test_complementarity_model_is_refused_with_a_pointer_to_nl():
+# ── complementarity relations ──────────────────────────────────────────────
+#
+# A relation lives outside `_constraints`, and whether THIS model already carries
+# the rows encoding it is separate per-model state. Both halves have to survive:
+# losing the marks makes a lowered model refuse to solve, and losing the *method*
+# silently promotes a relaxation to an exact encoding.
+
+
+def _mpcc(name="pair0"):
+    """min (x-1)^2 + (y-1)^2 s.t. 0 <= x _|_ y >= 0."""
     m = dm.Model("mpcc")
     x = m.continuous("x", lb=0, ub=10)
     y = m.continuous("y", lb=0, ub=10)
-    m.minimize(x + y)
-    m.complementarity(x, y)
-    with pytest.raises(SerializationError, match="complementarity"):
-        dumps(m)
+    m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+    pair = m.complementarity(x, y, name=name)
+    return m, x, y, pair
+
+
+@pytest.mark.smoke
+def test_complementarity_relation_round_trips():
+    from discopt.mpec import resolve_source_variables
+
+    m, x, y, pair = _mpcc()
+    once = dumps(m)
+    back = loads(once)
+    assert dumps(back) == once
+
+    assert len(back._complementarities) == 1
+    rel = back._complementarities[0]
+    assert rel.name == pair.name
+    assert rel.role is pair.role
+    assert rel.f_bounds == pair.f_bounds
+    assert rel.g_bounds == pair.g_bounds
+    assert rel.scale == pair.scale
+    assert rel.parent == pair.parent
+    assert rel.is_symmetric_nonnegative == pair.is_symmetric_nonnegative
+
+    # Provenance: the relation must resolve to the RELOADED variables by identity,
+    # not to a stale object or a name-based match.
+    resolved = resolve_source_variables(back, rel, context="test")
+    assert [id(v) for v in resolved] == [id(v) for v in back._variables]
+
+
+@pytest.mark.smoke
+def test_lowering_mark_and_method_survive():
+    from discopt.mpec import unlowered_relations
+
+    m, _, _, _ = _mpcc()
+    before = m.solve(time_limit=60)
+    methods = sorted(r.method for r in m._lowered_complementarities.values())
+    assert methods, "the fixture must have produced a lowering mark"
+
+    back = loads(dumps(m))
+    assert sorted(r.method for r in back._lowered_complementarities.values()) == methods
+    assert unlowered_relations(back) == []
+
+    after = back.solve(time_limit=60)
+    assert after.status == before.status
+    assert after.node_count == before.node_count
+    assert after.objective == before.objective
+
+
+@pytest.mark.smoke
+def test_unlowered_relation_is_not_marked_lowered():
+    """The negative control: proves the loader does not mark everything as lowered.
+
+    The solver boundary refuses a declared-but-unlowered relation, because solving
+    it would silently drop the condition and certify the answer. That refusal must
+    survive the round trip.
+    """
+    from discopt.mpec import complementarity, register_relations, unlowered_relations
+
+    m = dm.Model("declared_only")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+    register_relations(m, [complementarity(x, y, name="never_lowered")])
+    assert len(unlowered_relations(m)) == 1
+
+    once = dumps(m)
+    back = loads(once)
+    assert dumps(back) == once
+    assert len(unlowered_relations(back)) == 1
+    assert back._lowered_complementarities == {}
+
+    with pytest.raises(NotImplementedError, match="no lowering"):
+        back.solve(time_limit=30)
+
+
+@pytest.mark.smoke
+def test_a_relaxing_lowering_is_not_promoted_to_exact():
+    """`scholtes` RELAXES the relation; reloading must not report it as an encoding.
+
+    `LoweringRecord.is_exact` is derived from the method alone, so a mark that lost
+    its method would read as exact and the solver would certify a relaxation as the
+    declared model -- a false certificate.
+    """
+    from discopt.mpec import complementarity, register_relations, relaxed_relations, solve_mpec
+
+    m = dm.Model("scholtes")
+    a = m.continuous("a", lb=0, ub=10)
+    b = m.continuous("b", lb=0, ub=10)
+    m.minimize((a - 1) ** 2 + (b - 1) ** 2)
+    pair = complementarity(a, b, name="relaxed_pair")
+    register_relations(m, [pair])
+    solve_mpec(m, [pair], method="scholtes")
+
+    records = list(m._lowered_complementarities.values())
+    assert records and not records[0].is_exact, "fixture must produce a relaxing lowering"
+    assert len(relaxed_relations(m)) == 1
+
+    back = loads(dumps(m))
+    reloaded = list(back._lowered_complementarities.values())
+    assert [r.method for r in reloaded] == [r.method for r in records]
+    assert [r.is_exact for r in reloaded] == [r.is_exact for r in records]
+    assert len(relaxed_relations(back)) == 1
+
+
+@pytest.mark.smoke
+def test_vector_relation_keeps_its_shape():
+    m = dm.Model("vec_mpcc")
+    u = m.continuous("u", shape=(3,), lb=0, ub=10)
+    v = m.continuous("v", shape=(3,), lb=0, ub=10)
+    m.minimize(dm.sum((u - 1.0) ** 2) + dm.sum((v - 2.0) ** 2))
+    declared = m.complementarity(u, v, name="vecpair")
+
+    back = loads(dumps(m))
+    rel = back._complementarities[0]
+    assert rel.f_shape == declared.f_shape == (3,)
+    assert rel.g_shape == declared.g_shape
+    assert rel.index == declared.index
+
+    before, after = m.solve(time_limit=60), back.solve(time_limit=60)
+    assert before.status == after.status
+    assert before.node_count == after.node_count
+    assert before.objective == after.objective
+
+
+@pytest.mark.smoke
+def test_source_link_carries_a_parent_outside_the_declared_list():
+    """An element relation's `source` parent need not itself be declared on the model.
+
+    `Complementarity` is public and constructible, so a caller can register only the
+    element. Dropping its parent would break attribution back to the declared
+    relation (`describe()`, the #1148 source-residual report).
+    """
+    from discopt.mpec import (
+        Complementarity,
+        ComplementarityRole,
+        register_relations,
+    )
+
+    m = dm.Model("elementwise")
+    u = m.continuous("u", shape=(2,), lb=0, ub=10)
+    v = m.continuous("v", shape=(2,), lb=0, ub=10)
+    m.minimize(dm.sum(u) + dm.sum(v))
+
+    parent = Complementarity(u, v, name="vec", role=ComplementarityRole.NCP_PAIR)
+    elements = [
+        Complementarity(
+            u[i],
+            v[i],
+            name=f"vec[{i}]",
+            role=ComplementarityRole.NCP_PAIR,
+            f_shape=(),
+            g_shape=(),
+            index=(i,),
+            source=parent,
+        )
+        for i in range(2)
+    ]
+    register_relations(m, elements)  # only the elements are declared
+    assert all(p is not parent for p in m._complementarities)
+
+    once = dumps(m)
+    back = loads(once)
+    assert dumps(back) == once
+
+    assert len(back._complementarities) == 2
+    parents = {id(rel.source) for rel in back._complementarities}
+    assert len(parents) == 1, "both elements must share ONE reloaded parent object"
+    restored_parent = back._complementarities[0].source
+    assert restored_parent is not None
+    assert restored_parent.name == "vec"
+    assert [rel.index for rel in back._complementarities] == [(0,), (1,)]
+    assert back._complementarities[0].describe() == elements[0].describe()
