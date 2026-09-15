@@ -37,6 +37,13 @@ _SCALAR_FIELDS = (
     "convex_fast_path",
     "nlp_bb",
     "gap_certified",
+    # #1244. Both must round-trip: ``__post_init__`` can only DERIVE
+    # ``bound_valid`` from ``gap_certified``, so dropping the stored value would
+    # silently downgrade every uncertified-but-valid bound (a ``time_limit``
+    # exit's tree bound) to "no claim" on reload -- exactly the information a
+    # consumer reads the file for.
+    "bound_valid",
+    "bound_source",
     "subnlp_calls",
     "subnlp_feasible",
     "subnlp_incumbent_updates",

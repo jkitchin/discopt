@@ -1707,6 +1707,9 @@ def _try_native_spatial_kernel(
     off = float(res["meta_obj_offset"])
     obj_val = sign * (float(res["incumbent"]) + off) if res.get("incumbent") is not None else None
     bound_val = sign * (float(res["bound"]) + off)
+    # #1244: the kernel's own frontier minimum until the bound-less fallback
+    # below replaces it.
+    _native_bound_source = "bnb_tree"
     x_incumbent = np.asarray(res["incumbent_x"], dtype=np.float64)
     if obj_val is None:
         x_flat = None
@@ -1801,7 +1804,7 @@ def _try_native_spatial_kernel(
                 _native_jax_s += time.perf_counter() - _t_phase
             except Exception as _rr_exc:  # pragma: no cover - defensive
                 logger.debug("native-kernel root-relaxation fallback failed: %s", _rr_exc)
-        _fb_bound, _ = _finalize_reported_bound(
+        _fb_bound, _, _ = _finalize_reported_bound(
             tree_bound_internal=None,
             tree_bound_valid=False,
             is_maximize=_nk_maximize,
@@ -1815,6 +1818,7 @@ def _try_native_spatial_kernel(
                 _fb_bound,
             )
             bound_val = _fb_bound
+            _native_bound_source = "root_relaxation"
 
     # #1193: an uncertified exit ends the solve here, so this is the LAST place the
     # incumbent can still be improved — #1153 made the kernel terminal on
@@ -1873,6 +1877,15 @@ def _try_native_spatial_kernel(
         jax_time=jax_total,
         python_time=wall_time - rust_total - jax_total,
         gap_certified=math.isfinite(bound_val),
+        # #1244: stated explicitly rather than left to the ``gap_certified``
+        # derivation, because on this route that flag is set from bound
+        # FINITENESS rather than from gap closure. ``bound_val`` here is either
+        # the kernel's own rigorous frontier minimum (`TreeStatus` never reports
+        # a bound it did not prove) or, when the kernel exited bound-less, the
+        # root-relaxation fallback composed above -- both valid on every exit
+        # status the kernel is accepted on.
+        bound_valid=math.isfinite(bound_val),
+        bound_source=_native_bound_source,
         solver_stats=_native_stats,
     )
 
@@ -4072,7 +4085,7 @@ def _finalize_reported_bound(
     is_maximize: bool,
     obj_val: Optional[float],
     independent_bounds_internal: "tuple[Optional[float], ...]" = (),
-) -> "tuple[Optional[float], Optional[float]]":
+) -> "tuple[Optional[float], Optional[float], Optional[str]]":
     """#933 part (b): the ONE composition of an *uncertified* exit's reported dual
     bound, shared by every solve path instead of five hand-rolled variants.
 
@@ -4097,11 +4110,21 @@ def _finalize_reported_bound(
     a composed bound is capped at the incumbent objective, mirroring the cap the
     Rust tree applies to its own frontier minimum.
 
-    Returns ``(bound, gap)`` in the REPORTED objective sense (negated for a
-    MAXIMIZE, where a lower bound on the internal ``-obj`` is an upper bound on
-    ``obj``); the gap is ``|obj - bound| / max(1, |obj|)`` or ``None`` without a
-    finite incumbent. Never raises; never certifies — callers own
+    Returns ``(bound, gap, source)`` in the REPORTED objective sense (negated
+    for a MAXIMIZE, where a lower bound on the internal ``-obj`` is an upper
+    bound on ``obj``); the gap is ``|obj - bound| / max(1, |obj|)`` or ``None``
+    without a finite incumbent. Never raises; never certifies — callers own
     ``gap_certified`` and any re-certification logic.
+
+    ``source`` (#1244) names which machinery proved the value that survived:
+    ``"bnb_tree"`` when the untainted tree bound won, ``"root_relaxation"``
+    when an independently proved bound did, ``None`` when there is no bound.
+    Every value this returns IS a valid global dual bound — that is the whole
+    contract of the taint rule above — so a caller may set
+    ``bound_valid=True`` on the strength of a non-``None`` return. That is the
+    #1244 claim the public flag exists to carry: a ``time_limit`` exit does not
+    certify a *gap*, but its retained bound is still valid, and before this
+    there was no way for a caller to tell.
     """
     # Effective-infinity refusal threshold (see docstring): 1e19, one order
     # below the LP layer's 1e20 sentinel so values merely approaching the cap
@@ -4115,15 +4138,18 @@ def _finalize_reported_bound(
         and abs(float(tree_bound_internal)) < _eff_inf
     ):
         best = float(tree_bound_internal)
+    source: Optional[str] = "bnb_tree" if best is not None else None
     for _cand in independent_bounds_internal:
         if _cand is None:
             continue
         _c = float(_cand)
         if not np.isfinite(_c) or abs(_c) >= _eff_inf:
             continue
-        best = _c if best is None else max(best, _c)
+        if best is None or _c > best:
+            best = _c
+            source = "root_relaxation"
     if best is None:
-        return None, None
+        return None, None, None
     if obj_val is not None and np.isfinite(obj_val):
         # bound <= incumbent (min sense): the optimum is <= any feasible value,
         # so a valid internal lower bound never exceeds the internal incumbent.
@@ -4133,7 +4159,7 @@ def _finalize_reported_bound(
     gap_val: Optional[float] = None
     if obj_val is not None and np.isfinite(obj_val):
         gap_val = abs(float(obj_val) - bound_val) / max(1.0, abs(float(obj_val)))
-    return bound_val, gap_val
+    return bound_val, gap_val, source
 
 
 def _invoke_pre_import_callbacks(
@@ -11038,6 +11064,14 @@ def solve_model(
             rust_time=rust_time,
             jax_time=jax_time,
             python_time=wall_time - rust_time - jax_time,
+            # #1244: stated, not derived. With no incumbent the #875 guard clears
+            # ``gap_certified``, and rightly so -- no gap was formed. The bound is
+            # still what the log line above calls it: a rigorous root-relaxation
+            # bound, valid whether or not a primal was ever found. That asymmetry
+            # (no certified gap, valid bound) is precisely the case this field
+            # exists to express.
+            bound_valid=_rr_bound is not None,
+            bound_source="root_relaxation" if _rr_bound is not None else None,
         )
 
     # --- Create PyTreeManager (Rust) ---
@@ -16056,6 +16090,11 @@ def solve_model(
         _gap_certified = False
 
     _bound_from_taint_recovery = False
+    # #1244: which machinery proved the value that ends up in ``bound_val``.
+    # Updated at each of the four places below that can replace it. Every one of
+    # them is documented as rigorous -- that is what makes the public
+    # ``bound_valid`` claim honest on an uncertified exit.
+    _bound_source: Optional[str] = "bnb_tree"
     if not _gap_certified:
         gap_val = None
         # Keep the untainted tree bound on a feasible exit; recompute its gap. Only
@@ -16100,6 +16139,9 @@ def solve_model(
                         -_rig_int if model._objective.sense == ObjectiveSense.MAXIMIZE else _rig_int
                     )
                     _bound_from_taint_recovery = True
+                    # Still tree-derived: min(frontier, taint floor), every term
+                    # of which was proved at a node.
+                    _bound_source = "bnb_tree"
                     if obj_val is not None and np.isfinite(obj_val):
                         gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
 
@@ -16121,6 +16163,7 @@ def solve_model(
         # The pool bound is rigorous independently of the tree's taint, so it
         # may re-certify below exactly as before (B2-FIX gate does not apply).
         _bound_from_taint_recovery = False
+        _bound_source = "root_relaxation"
         if obj_val is not None and np.isfinite(obj_val):
             gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
@@ -16184,9 +16227,11 @@ def solve_model(
             if bound_val is None or not np.isfinite(bound_val):
                 bound_val = _rr_signed
                 _bound_from_taint_recovery = False
+                _bound_source = "root_relaxation"
             elif (_rr_signed <= bound_val) if _is_maximize else (_rr_signed >= bound_val):
                 bound_val = _rr_signed
                 _bound_from_taint_recovery = False
+                _bound_source = "root_relaxation"
             if obj_val is not None and np.isfinite(obj_val):
                 gap_val = abs(bound_val - obj_val) / max(1.0, abs(obj_val))
 
@@ -16353,6 +16398,13 @@ def solve_model(
         root_time=_root_time,
         solver_stats=_solver_stats or None,
         gap_certified=_gap_certified,
+        # #1244: every branch that can set ``bound_val`` above is a rigorous
+        # source -- the untainted tree frontier, the taint-recovery
+        # min(frontier, floor), the root cut-pool bound, or the root relaxation
+        # fallback -- and a value that is not rigorous is dropped to None rather
+        # than reported. So "a bound was reported" IS the validity claim.
+        bound_valid=bound_val is not None,
+        bound_source=_bound_source,
         subnlp_calls=_subnlp_calls,
         subnlp_feasible=_subnlp_feasible,
         subnlp_incumbent_updates=_subnlp_incumbent_updates,
@@ -18461,13 +18513,16 @@ def _solve_nlp_bb(
         if bound_val is not None and _bb_maximize:
             bound_val = -bound_val
         gap_val = stats["gap"]
+        # #1244: the frontier minimum of a tree every node of which entered with
+        # a soundness proof.
+        _bound_source: Optional[str] = "bnb_tree"
     else:
         # #933 part (b): the shared chokepoint applies the taint rule and the
         # independent-bound fallback once, for every path. A valid tree bound is
         # kept (even with no incumbent — previously discarded); a tainted one is
         # replaced by the strongest independently-proved root bound (the
         # untainted root-batch snapshot) instead of reporting no bound at all.
-        bound_val, gap_val = _finalize_reported_bound(
+        bound_val, gap_val, _bound_source = _finalize_reported_bound(
             tree_bound_internal=stats["global_lower_bound"],
             tree_bound_valid=_tree_bound_valid,
             is_maximize=_bb_maximize,
@@ -18552,6 +18607,13 @@ def _solve_nlp_bb(
         root_time=_root_time,
         nlp_bb=True,
         gap_certified=_gap_certified,
+        # #1244: every value the branches above publish is a valid global
+        # dual bound -- the certified branch reports the certificate itself,
+        # and the uncertified branch went through the taint-checked composer,
+        # which returns None rather than a bound it cannot vouch for. So the
+        # claim is exactly "a bound was reported".
+        bound_valid=bound_val is not None,
+        bound_source=_bound_source,
         subnlp_calls=_subnlp_calls,
         subnlp_feasible=_subnlp_feasible,
         subnlp_incumbent_updates=_subnlp_incumbent_updates,
@@ -19908,6 +19970,11 @@ def _solve_lp_matrix(
             status="optimal",
             objective=obj_val,
             bound=obj_val,
+            # #1244: a local minimum of a PROVED-convex problem is the global
+            # minimum, so the incumbent is simultaneously a valid lower bound.
+            # That is the same premise that licenses returning after one solve.
+            bound_valid=True,
+            bound_source="convex_proof",
             gap=_optimal_relative_gap(obj_val),
             x=_unpack_solution(model, np.asarray(result.x[:n_orig])),
             wall_time=wall_time,
@@ -20520,6 +20587,13 @@ def _solve_qp_matrix(
             status="optimal",
             objective=objective,
             bound=objective,
+            # #1244: valid by the same convexity premise as the NLP fast path
+            # above for a continuous PSD QP. With integrality the value came
+            # from a certified B&B over convex nodes, so it is a tree bound --
+            # ``__post_init__`` derives validity from ``gap_certified`` there,
+            # and the source is named below once the route is known.
+            bound_valid=True,
+            bound_source="convex_proof" if integrality is None else "bnb_tree",
             gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
             x=_unpack_solution(model, x_flat),
             wall_time=wall_time,
@@ -22966,6 +23040,12 @@ def _solve_milp_simplex(
             root_gap=root_gap_val,
             root_time=root_time_val,
             gap_certified=status == "optimal",
+            # #1244: ``bound_val`` here is the monolithic Rust MILP driver's own
+            # tree bound (``_certified_bound`` on an ``optimal`` exit, the
+            # driver's valid dual bound otherwise). Named so a consumer on this
+            # route sees the same provenance vocabulary as on the Python tree.
+            bound_valid=bound_val is not None,
+            bound_source="bnb_tree" if bound_val is not None else None,
             constraint_duals=constraint_duals,
             bound_duals_lower=bound_duals_lower,
             bound_duals_upper=bound_duals_upper,
@@ -23757,8 +23837,12 @@ def _solve_milp_bb(
         # closed yet): surface the root LP relaxation bound then, exactly as
         # before #933 (this is what keeps AMP's short per-iteration MILP budget
         # returning a finite lower bound instead of None).
+        _bound_source: Optional[str] = "bnb_tree"
         if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
             bound_val = -_root_lp_bound if _maximize else _root_lp_bound
+            # #1244: the certificate's own bound was unusable here, so what is
+            # reported is the root LP relaxation's dual value, not the tree's.
+            _bound_source = "root_relaxation"
     else:
         # #933 part (b): the shared chokepoint applies the taint rule and the
         # independent-bound fallback once, for every path. A valid tree bound is
@@ -23766,7 +23850,7 @@ def _solve_milp_bb(
         # tainted one is replaced by the strongest independently-proved root
         # bound — the root LP relaxation bound (always valid) or the untainted
         # root-batch snapshot.
-        bound_val, gap_val = _finalize_reported_bound(
+        bound_val, gap_val, _bound_source = _finalize_reported_bound(
             tree_bound_internal=stats["global_lower_bound"],
             tree_bound_valid=_tree_bound_valid,
             is_maximize=_maximize,
@@ -23823,6 +23907,13 @@ def _solve_milp_bb(
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
         gap_certified=_gap_certified,
+        # #1244: every value the branches above publish is a valid global
+        # dual bound -- the certified branch reports the certificate itself,
+        # and the uncertified branch went through the taint-checked composer,
+        # which returns None rather than a bound it cannot vouch for. So the
+        # claim is exactly "a bound was reported".
+        bound_valid=bound_val is not None,
+        bound_source=_bound_source,
         solver_stats=_milp_solver_stats or None,
     )
 
@@ -24486,13 +24577,16 @@ def _solve_miqp_bb(
         if bound_val is not None and _bb_maximize:
             bound_val = -bound_val
         gap_val = stats["gap"]
+        # #1244: the frontier minimum of a tree every node of which entered with
+        # a soundness proof.
+        _bound_source: Optional[str] = "bnb_tree"
     else:
         # #933 part (b): the shared chokepoint applies the taint rule and the
         # independent-bound fallback once, for every path. A valid tree bound is
         # kept (even with no incumbent — previously discarded); a tainted one is
         # replaced by the strongest independently-proved root bound (the
         # untainted root-batch snapshot) instead of reporting no bound at all.
-        bound_val, gap_val = _finalize_reported_bound(
+        bound_val, gap_val, _bound_source = _finalize_reported_bound(
             tree_bound_internal=stats["global_lower_bound"],
             tree_bound_valid=_tree_bound_valid,
             is_maximize=_bb_maximize,
@@ -24552,5 +24646,12 @@ def _solve_miqp_bb(
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
         gap_certified=_gap_certified,
+        # #1244: every value the branches above publish is a valid global
+        # dual bound -- the certified branch reports the certificate itself,
+        # and the uncertified branch went through the taint-checked composer,
+        # which returns None rather than a bound it cannot vouch for. So the
+        # claim is exactly "a bound was reported".
+        bound_valid=bound_val is not None,
+        bound_source=_bound_source,
         solver_stats=_ext_stats,
     )
