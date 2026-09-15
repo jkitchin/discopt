@@ -460,13 +460,12 @@ def feasibility_pump(
         # this, the re-solve uses the original (open) bounds and drifts the
         # integers straight back to their fractional relaxation values, so the
         # rounding — and the perturbation below — accomplishes nothing. Bounds are
-        # always restored in the finally so the search tree is left untouched.
-        saved_bounds: list[tuple[np.ndarray, np.ndarray]] = []
-        try:
+        # always restored by ``saved_bounds`` (including on the ``continue``
+        # below) so the search tree is left untouched.
+        with model.saved_bounds():
             offset = 0
             for v in model._variables:
                 sz = v.size
-                saved_bounds.append((v.lb.copy(), v.ub.copy()))
                 if v.var_type in (VarType.BINARY, VarType.INTEGER):
                     fixed = x0[offset : offset + sz].reshape(v.lb.shape)
                     v.lb = fixed.copy()
@@ -489,10 +488,6 @@ def feasibility_pump(
                 # producing no point and perturb on the next round.
                 logger.debug("fix-and-solve NLP round failed: %s: %s", type(exc).__name__, exc)
                 continue
-        finally:
-            for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
-                v.lb = lb_v
-                v.ub = ub_v
 
         if nlp_result.status not in _PUMP_ACCEPT_STATUSES or nlp_result.x is None:
             continue
@@ -745,17 +740,15 @@ def subnlp(
     # Fix integer variables by rounding and clamping bounds to that value.
     # We mutate the model variables' bounds in-place and restore afterwards
     # since NLPEvaluator.variable_bounds reads from the model on each call.
-    saved_bounds: list[tuple[np.ndarray, np.ndarray]] = []
-    try:
+    with model.saved_bounds():
         if np.any(int_mask):
             x0[int_mask] = np.round(x0[int_mask])
             x0 = np.clip(x0, lb_orig, ub_orig)
 
-            # Save and tighten bounds on integer variables.
+            # Tighten bounds on integer variables; ``saved_bounds`` restores them.
             offset = 0
             for v in model._variables:
                 sz = v.size
-                saved_bounds.append((v.lb.copy(), v.ub.copy()))
                 if v.var_type in (VarType.BINARY, VarType.INTEGER):
                     fixed = x0[offset : offset + sz].reshape(v.lb.shape)
                     v.lb = fixed.copy()
@@ -772,10 +765,6 @@ def subnlp(
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
             return None
-    finally:
-        for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
-            v.lb = lb_v
-            v.ub = ub_v
 
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
