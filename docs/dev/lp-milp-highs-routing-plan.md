@@ -1256,6 +1256,18 @@ certify `r.objective` if the floor were only a fallback.
   column is unbounded and nonlinear.
 - The kill criterion is met: floor-as-fallback cannot tighten hda. hda stays as documented.
 
+**2026-09-15 — #1183 evidence on the issue's own reproducer.** `scratchpad/i1183_evidence.py`
+runs the issue's Pyomo model (`gdp.bigm`, `SolverFactory("discopt")`) in a fresh subprocess per
+run, with arms interleaved over 3 rounds.
+
+- Before (`=rust`): 4973 nodes in all 3 rounds, the issue's figure exactly; `optimal` 224,
+  certified; 2.673 ± 0.060 s.
+- After (default): 7 nodes in all 3 rounds; `optimal` 224, certified, on the verified HiGHS route;
+  0.463 ± 0.010 s.
+- Load was 6.3 → 6.8, above the gate, so the walls are indicative only.
+- The issue's own HiGHS 1.14 and SCIP figures are 109 and 179 nodes, both at 0.6 s.
+- The issue's side remark about OA masters and spatial B&B is not addressed (Stage 2, optional).
+
 **2026-09-15 — swallowed exceptions in `mccormick_lp.py`.** The 14 `except Exception:`
 fallbacks that were silent now log `logger.debug("<method> failed; using fallback",
 exc_info=True)`. Control flow is unchanged.
