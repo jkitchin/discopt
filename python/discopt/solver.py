@@ -1530,6 +1530,12 @@ def _try_native_spatial_kernel(
     incumbent_time_extension: float = 0.0,
     rr_reserve_s: float = 0.0,
     psd_cuts: bool = False,
+    # #1243: the caller's absolute gap tolerance, or ``None`` when they never
+    # named one. Deliberately the RAW option rather than the resolved value:
+    # this route's established absolute tolerance is ``gap_tolerance`` itself
+    # (its ``gap_tol`` is applied absolutely), so "unset" has to stay
+    # distinguishable from "set to the Python tree's 1e-6 default".
+    abs_gap_tolerance: Optional[float] = None,
 ):
     """Issue #764: if the native Rust spatial kernel is enabled and the model is in
     its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
@@ -1625,9 +1631,24 @@ def _try_native_spatial_kernel(
         if rr_reserve_s > 0.0 and remaining is not None and remaining > 0.0:
             _bound_reserve = min(float(rr_reserve_s), 0.5 * remaining)
             remaining = remaining - _bound_reserve
+        # #1243. The kernel's ``gap_tol`` has always been applied ABSOLUTELY
+        # (``bound >= inc - gap_tol``), so this route's established absolute
+        # tolerance *is* the caller's ``gap_tolerance`` -- which is why the
+        # default below is ``gap_tolerance`` and not ``_DEFAULT_ABS_GAP_TOL``:
+        # anything else would silently change every solve that routes here.
+        # When the caller names ``abs_gap_tolerance`` they get it as the absolute
+        # arm, and ``rel_gap_tol`` switches the kernel's test to the same
+        # disjunction the Python tree uses, so the two routes agree. Left at 0.0
+        # the relative arm can never fire and the kernel behaves exactly as
+        # before.
+        _kernel_abs_tol = (
+            float(gap_tolerance) if abs_gap_tolerance is None else float(abs_gap_tolerance)
+        )
+        _kernel_rel_tol = 0.0 if abs_gap_tolerance is None else float(gap_tolerance)
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
-            gap_tol=float(gap_tolerance),
+            gap_tol=_kernel_abs_tol,
+            rel_gap_tol=_kernel_rel_tol,
             time_limit_s=remaining,
             # Node-LP start basis (default OFF). The kernel's cold two-phase primal
             # grinds to `max_iter` on equality-rich, hence primal-degenerate,
@@ -4944,6 +4965,61 @@ def _gap_values_converged(
     return abs_gap / denom <= gap_tolerance
 
 
+def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
+    """Which of the two convergence criteria the final ``(ub, lb)`` pair meets.
+
+    ``"absolute"`` when the absolute gap closed, ``"relative"`` when only the
+    relative one did, ``None`` when neither holds -- a solve that stopped on
+    ``time_limit`` / ``node_limit`` / an exhausted tree rather than on the gap.
+    Both arms use the *identical* arithmetic to :func:`_gap_values_converged`,
+    so the reported criterion can never disagree with the test that stopped the
+    search; ``"absolute"`` wins a tie because it is the tighter statement
+    (#1243).
+
+    Pure reporting: nothing here feeds back into the solver's math.
+    """
+    if not np.isfinite(ub) or not np.isfinite(lb):
+        return None
+    abs_gap = max(0.0, ub - lb)
+    if abs_gap <= abs_gap_tol:
+        return "absolute"
+    denom = max(abs(ub), abs(lb), 1e-10)
+    if abs_gap / denom <= gap_tolerance:
+        return "relative"
+    return None
+
+
+def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
+    """The absolute gap tolerance a solve runs at, validated.
+
+    ``None`` -- the default -- means "the established default for this route",
+    which for every Python-tree route is :data:`_DEFAULT_ABS_GAP_TOL`. An
+    explicit value must be strictly positive and finite: a zero or negative
+    absolute tolerance cannot be met by a floating-point gap, so it would
+    silently turn the disjunctive criterion into the relative one alone, which
+    is exactly the mode #1243 exists to escape.
+    """
+    if abs_gap_tolerance is None:
+        return _DEFAULT_ABS_GAP_TOL
+    val = float(abs_gap_tolerance)
+    if not np.isfinite(val) or val <= 0.0:
+        raise ValueError(
+            f"abs_gap_tolerance must be a finite positive number, got {abs_gap_tolerance!r}"
+        )
+    return val
+
+
+#: Effective ``(gap_tolerance, abs_gap_tolerance)`` of the solve currently
+#: running, pushed by ``solve_model`` and popped by ``_stamp_layer_timing``.
+#:
+#: Same rail, and for the same reason, as ``_ROUTE_FALLBACK_NOTE``: ``solve_model``
+#: builds a ``SolveResult`` at ~18 sites and the stamping wrapper is the one place
+#: every one of them passes through. A list, not a scalar, so a nested solve
+#: (``Model.solve`` runs ``solve_model`` more than once) restores the exact depth
+#: it entered at and a raised exception cannot leak a pair into the next solve.
+_GAP_TOLERANCES: list[tuple[float, float]] = []
+
+
 def _format_bad_bound_entries(
     model: Model,
     flat_lb: np.ndarray,
@@ -7301,6 +7377,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
         started = time.perf_counter()
         _route_depth = len(_ROUTE_FALLBACK_NOTE)
         _state_depth = len(_ROUTE_FALLBACK_STATE)
+        _gap_depth = len(_GAP_TOLERANCES)
         try:
             result = fn(*args, **kwargs)
         finally:
@@ -7316,6 +7393,8 @@ def _stamp_layer_timing(fn: _F) -> _F:
                 else None
             )
             del _ROUTE_FALLBACK_STATE[_state_depth:]
+            _gap_tols = _GAP_TOLERANCES[_gap_depth] if len(_GAP_TOLERANCES) > _gap_depth else None
+            del _GAP_TOLERANCES[_gap_depth:]
         elapsed = time.perf_counter() - started
         # #1059: a solve that fell back off the auto-route must say so, otherwise
         # it is indistinguishable from one that was never routed -- the exact
@@ -7364,6 +7443,27 @@ def _stamp_layer_timing(fn: _F) -> _F:
         # Everything that is not native Rust is interpreted Python.
         result.python_time = max(0.0, wall - native)
         result.jax_time = min(spent["jax"], result.python_time)
+        # #1243: say which of the two criteria stopped the search. Derived from
+        # the returned (incumbent, bound) pair with the SAME arithmetic the
+        # convergence test uses, so the two can never disagree; ``None`` -- the
+        # key absent -- when neither holds, i.e. the solve stopped on a budget
+        # or an exhausted tree rather than on the gap.
+        if _gap_tols is not None and result.objective is not None and result.bound is not None:
+            # A MAXIMIZE result reports ``bound`` as an UPPER bound (bound >=
+            # objective) where a MINIMIZE one reports a LOWER bound, and the
+            # convergence arithmetic is written for ``ub - lb``. Ordering the
+            # pair covers both senses without asking the result which it is --
+            # the gap is |objective - bound| either way, and both the absolute
+            # and the relative arm are symmetric in |ub|, |lb|.
+            _o, _b = float(result.objective), float(result.bound)
+            _hi, _lo_ = (_o, _b) if _o >= _b else (_b, _o)
+            _crit = _gap_criterion(_hi, _lo_, _gap_tols[0], _gap_tols[1])
+            if _crit is not None:
+                stats = result.solver_stats
+                if stats is None:
+                    stats = {}
+                    result.solver_stats = stats
+                stats["gap_criterion"] = _crit
         return result
 
     return cast(_F, wrapper)
@@ -7378,6 +7478,7 @@ def solve_model(
     model: Model,
     time_limit: float = 3600.0,
     gap_tolerance: float = 1e-4,
+    abs_gap_tolerance: Optional[float] = None,
     threads: int = 1,
     deterministic: bool = False,
     batch_size: int = 16,
@@ -7454,6 +7555,22 @@ def solve_model(
         Wall-clock time limit in seconds.
     gap_tolerance : float, default 1e-4
         Relative optimality gap tolerance for termination.
+    abs_gap_tolerance : float, optional
+        Absolute optimality gap tolerance ``UB - LB`` for termination. The
+        search stops when EITHER the relative or the absolute criterion holds,
+        which is what it has always done -- this exposes the absolute half,
+        which was the module constant ``_DEFAULT_ABS_GAP_TOL = 1e-6`` with no
+        caller control (#1243). ``None`` (the default) keeps each route's
+        established default, so an omitted argument changes nothing.
+
+        Needed whenever the optimum sits near zero, where a relative tolerance
+        means nothing: a CALPHAD phase-stability certificate is the test
+        ``LB >= -eps`` on a pricing optimum that is approximately 0 at
+        equilibrium. Note that tightening this cannot make the search stop
+        *later* than the relative arm allows on its own -- the criterion is a
+        disjunction -- but near zero the relative gap
+        ``(UB-LB)/max(|UB|,|LB|,1e-10)`` is itself large, so the absolute arm
+        is the one that binds.
     threads : int, default 1
         Number of CPU threads (reserved for future use).
     deterministic : bool, default False
@@ -7725,6 +7842,15 @@ def solve_model(
     from discopt.mpec import require_all_relations_lowered
 
     require_all_relations_lowered(model, context="solve_model")
+
+    # --- #1243: the absolute half of the convergence criterion ---
+    # Resolved once, here, so every route below reads the same number and an
+    # invalid value is rejected before any work is done rather than at whichever
+    # route happens to run. Pushed onto the scoped stash so the single stamping
+    # point (`_stamp_layer_timing`) can report which criterion stopped the solve
+    # without threading a field through ~18 SolveResult construction sites.
+    abs_gap_tol = _resolve_abs_gap_tolerance(abs_gap_tolerance)
+    _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
 
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
@@ -8765,6 +8891,12 @@ def solve_model(
         # rel_gap defaults to gap_tolerance if not separately provided
         if "rel_gap" not in amp_kwargs:
             amp_kwargs["rel_gap"] = gap_tolerance
+        # #1243: the same mapping for the absolute half. An explicit ``abs_tol``
+        # still wins -- it is AMP's own spelling of the same knob, and a caller
+        # who named it meant it -- but ``abs_gap_tolerance`` is the portable name
+        # that reaches every route, so it must not be silently dropped here.
+        if "abs_tol" not in amp_kwargs and abs_gap_tolerance is not None:
+            amp_kwargs["abs_tol"] = abs_gap_tol
 
         from discopt._relax.gdp_reformulate import reformulate_gdp
 
@@ -10064,6 +10196,7 @@ def solve_model(
             rens_enabled=rens,
             _lns_enabled=_lns_enabled,
             incumbent_time_extension=incumbent_time_extension,
+            abs_gap_tol=abs_gap_tol,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -10219,6 +10352,26 @@ def solve_model(
                 _want_engine = nlp_solver == "simplex" or (
                     _milp_engine_default_on() and not lagrangian_bound
                 )
+                # #1243: the monolithic engine stops on ``TreeManager::gap()``,
+                # whose denominator is FLOORED AT 1.0. Its effective absolute
+                # threshold is therefore ``gap_tolerance * max(|incumbent|, 1)``,
+                # never tighter than ``gap_tolerance`` — so a caller asking for a
+                # tighter absolute gap cannot be served here. Route to the Python
+                # MILP tree, which applies the criterion exactly, rather than
+                # return a result that claims a tolerance it did not meet. This
+                # is the same "stay on the Python path rather than mis-serve an
+                # explicit request" choice ``lagrangian_bound`` makes above.
+                if abs_gap_tolerance is not None and abs_gap_tol < gap_tolerance:
+                    if nlp_solver == "simplex":
+                        logger.info(
+                            "abs_gap_tolerance=%g is tighter than gap_tolerance=%g; the "
+                            "monolithic Rust MILP engine cannot certify to it (its gap "
+                            "denominator floors at 1.0), so this solve uses the Python "
+                            "MILP tree instead.",
+                            abs_gap_tol,
+                            gap_tolerance,
+                        )
+                    _want_engine = False
                 if _want_engine:
                     if lagrangian_bound:
                         logger.warning(
@@ -10267,6 +10420,7 @@ def solve_model(
                     lagrangian_frequency=lagrangian_frequency,
                     initial_point=initial_point,
                     incumbent_time_extension=incumbent_time_extension,
+                    abs_gap_tol=abs_gap_tol,
                 )
                 return _merge_engine_stats(
                     _merge_engine_bound(_bb_res, _engine_bound, model),
@@ -10321,6 +10475,7 @@ def solve_model(
                         t_start,
                         prefer_pounce=True,
                         incumbent_time_extension=incumbent_time_extension,
+                        abs_gap_tol=abs_gap_tol,
                     )
                 logger.info(
                     "Convex MIQP with a lazy_constraints/incumbent_callback — routing "
@@ -10519,6 +10674,7 @@ def solve_model(
                 _lns_enabled=_lns_enabled,
                 precomputed_is_convex=_root_is_convex,
                 incumbent_time_extension=incumbent_time_extension,
+                abs_gap_tol=abs_gap_tol,
             )
 
     # --- Extract variable info ---
@@ -10785,6 +10941,7 @@ def solve_model(
             # inside the budget. Flag-gated with the rest of #933.
             rr_reserve_s=_rr_reserve_s if _root_bound_seed_enabled() else 0.0,
             psd_cuts=psd_cuts,
+            abs_gap_tolerance=abs_gap_tolerance,
         )
     if _native_result is not None:
         return _native_result
@@ -15422,7 +15579,7 @@ def solve_model(
         # Check termination
         if tree.is_finished():
             break
-        if _gap_converged(tree, gap_tolerance):
+        if _gap_converged(tree, gap_tolerance, abs_gap_tol):
             break
 
         stats = tree.stats()
@@ -15780,13 +15937,14 @@ def solve_model(
                 if (
                     np.isfinite(_rig_int)
                     and abs(_rig_int) < _SENTINEL_THRESHOLD
-                    and _gap_values_converged(float(_inc_int), _rig_int, gap_tolerance)
+                    and _gap_values_converged(float(_inc_int), _rig_int, gap_tolerance, abs_gap_tol)
                 ):
                     _gap_certified = True
                     _taint_rig_bound_internal = _rig_int
 
         search_closed = not _rr_reserve_yield and (
-            _gap_converged(tree, gap_tolerance) or (tree.is_finished() and not _bound_unresolved)
+            _gap_converged(tree, gap_tolerance, abs_gap_tol)
+            or (tree.is_finished() and not _bound_unresolved)
         )
         if search_closed and _gap_certified:
             status = "optimal"
@@ -16717,6 +16875,10 @@ def _solve_nlp_bb(
     # #917: extra wall-clock seconds this search may take once it holds an
     # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
     incumbent_time_extension: float = 0.0,
+    # #1243: the absolute half of the convergence criterion, resolved once in
+    # ``solve_model``. Defaulted so a direct caller of this driver keeps the
+    # established behaviour exactly.
+    abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -17871,7 +18033,7 @@ def _solve_nlp_bb(
         # Check termination
         if tree.is_finished():
             break
-        if _gap_converged(tree, gap_tolerance):
+        if _gap_converged(tree, gap_tolerance, abs_gap_tol):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -18222,7 +18384,9 @@ def _solve_nlp_bb(
         # "optimal" requires both a closed search AND a certified gap: a node
         # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
         # bound uncertified, so the search closing does not prove optimality.
-        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
+        if (
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+        ) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -22872,6 +23036,10 @@ def _solve_milp_bb(
     # #917: extra wall-clock seconds this search may take once it holds an
     # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
     incumbent_time_extension: float = 0.0,
+    # #1243: the absolute half of the convergence criterion, resolved once in
+    # ``solve_model``. Defaulted so a direct caller of this driver keeps the
+    # established behaviour exactly.
+    abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL,
 ) -> SolveResult:
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
@@ -23379,7 +23547,7 @@ def _solve_milp_bb(
         iteration += 1
         if tree.is_finished():
             break
-        if _gap_converged(tree, gap_tolerance):
+        if _gap_converged(tree, gap_tolerance, abs_gap_tol):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -23520,7 +23688,9 @@ def _solve_milp_bb(
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
+        if (
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+        ) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -23669,6 +23839,10 @@ def _solve_miqp_bb(
     # #917: extra wall-clock seconds this search may take once it holds an
     # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
     incumbent_time_extension: float = 0.0,
+    # #1243: the absolute half of the convergence criterion, resolved once in
+    # ``solve_model``. Defaulted so a direct caller of this driver keeps the
+    # established behaviour exactly.
+    abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL,
 ) -> SolveResult:
     """Solve a MIQP via B&B with QP relaxation solves at each node.
 
@@ -24088,7 +24262,7 @@ def _solve_miqp_bb(
         iteration += 1
         if tree.is_finished():
             break
-        if _gap_converged(tree, gap_tolerance):
+        if _gap_converged(tree, gap_tolerance, abs_gap_tol):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -24245,7 +24419,9 @@ def _solve_miqp_bb(
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
+        if (
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+        ) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"

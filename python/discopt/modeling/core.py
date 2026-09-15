@@ -3193,14 +3193,21 @@ class SolveResult:
         the root bound or the incumbent is unavailable.
     root_time : float or None
         Wall-clock seconds elapsed when the root node was fathomed/branched.
-    solver_stats : dict of str to float, or None
-        Instrumentation counters, or None. Two key families: per-family
+    solver_stats : dict of str to float or str, or None
+        Instrumentation counters, or None. Key families: per-family
         reduction/separation timers (``reduce/<fam>`` / ``separate/<fam>``,
-        cumulative seconds) and per-source cut counts (``cuts/<source>``, added by
-        the P3.1b cut-measurement work and read by the ``p3_1*`` scripts) and
-        cut-pool gating telemetry (``pool/gate_*``, categorical decision codes). Only
-        the timer families are seconds and bounded by ``wall_time``; ``cuts/`` are
-        counts and ``pool/`` are decision codes.
+        cumulative seconds), per-source cut counts (``cuts/<source>``, added by
+        the P3.1b cut-measurement work and read by the ``p3_1*`` scripts),
+        cut-pool gating telemetry (``pool/gate_*``, categorical decision codes),
+        and ``"gap_criterion"``. Only the timer families are seconds and bounded
+        by ``wall_time``; ``cuts/`` are counts and ``pool/`` are decision codes.
+
+        ``"gap_criterion"`` is the one non-numeric entry: ``"absolute"`` or
+        ``"relative"``, naming which arm of the convergence disjunction the
+        returned ``(objective, bound)`` pair satisfies (#1243). The key is
+        ABSENT when neither does — a solve that stopped on ``time_limit`` /
+        ``node_limit`` or on an exhausted tree — so a consumer reading it with
+        ``.get()`` gets ``None`` rather than a criterion the solve never met.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -3266,7 +3273,15 @@ class SolveResult:
     # phase-name -> cumulative seconds across the solve, e.g.
     # ``{"reduce/fbbt": .., "reduce/obbt": .., "separate/psd": .., ...}``. Pure
     # instrumentation (never affects solver math); None when nothing was timed.
-    solver_stats: Optional[dict[str, float]] = None
+    # ``float`` for every counter and timer; ``str`` only for the categorical
+    # ``"gap_criterion"`` (#1243). ``Any`` rather than ``Union[float, str]``
+    # because ``dict`` is INVARIANT in its value type: the ~8 producers across
+    # ``solver.py`` build a ``dict[str, float]``, and a ``Union`` value type
+    # rejects every one of them at the constructor. The real contract is the
+    # docstring above. The criterion is spelled out as a name rather than
+    # encoded as a magic number because this dict is read by humans and by the
+    # report tooling, and a code would have to be decoded in both.
+    solver_stats: Optional[dict[str, Any]] = None
 
     # KKT duals at the returned point, when the underlying solver exposes them.
     # ``constraint_duals`` is keyed by Constraint.name; entries with a vector
@@ -5691,6 +5706,7 @@ class Model:
         self,
         time_limit: float = 3600,
         gap_tolerance: float = 1e-4,
+        abs_gap_tolerance: Optional[float] = None,
         threads: int = 1,
         llm: bool = False,
         sensitivity: bool = False,
@@ -5724,6 +5740,23 @@ class Model:
             Wall-clock time limit in seconds.
         gap_tolerance : float, default 1e-4
             Relative optimality gap tolerance for termination.
+        abs_gap_tolerance : float, optional
+            Absolute optimality gap tolerance ``|objective - bound|`` for
+            termination. The search stops when EITHER the relative or the
+            absolute criterion holds -- as it always has; this exposes the
+            absolute half, which used to be a module constant (1e-6) with no
+            caller control (#1243). ``None`` (the default) keeps each route's
+            established default, so omitting it changes nothing.
+
+            Use it when the optimum sits near zero, where a relative tolerance
+            carries no information: a phase-stability certificate is the
+            absolute test ``bound >= -eps`` on a quantity that is approximately
+            0 at the answer. Must be finite and strictly positive.
+
+            :attr:`SolveResult.solver_stats` then carries ``"gap_criterion"``,
+            ``"absolute"`` or ``"relative"``, naming which arm stopped the
+            search; the key is absent when neither did (a ``time_limit`` /
+            ``node_limit`` stop, or an exhausted tree).
         threads : int, default 1
             Number of CPU threads for Rust components.
         llm : bool, default False
@@ -6027,7 +6060,10 @@ class Model:
 
         if stream:
             return self._solve_streaming(
-                time_limit=time_limit, gap_tolerance=gap_tolerance, **kwargs
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+                **kwargs,
             )
 
         # Convex LP-OA branch-and-cut kernel fast path (#798, gated by
@@ -6240,6 +6276,7 @@ class Model:
                     time_limit=_primary_tl,
                     incumbent_time_extension=_fb_extension,
                     gap_tolerance=gap_tolerance,
+                    abs_gap_tolerance=abs_gap_tolerance,
                     threads=threads,
                     deterministic=deterministic,
                     partitions=partitions,

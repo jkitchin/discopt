@@ -271,3 +271,22 @@ def test_entropy_objective_solves_globally_with_a_valid_bound():
     # never exceeds the true optimum of a model whose incumbent is feasible.
     assert res.bound <= res.objective + 1e-9
     assert res.objective == pytest.approx(-0.05834134944143926, abs=1e-6)
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_entropy_objective_certifies_to_an_absolute_gap_of_1e_9():
+    """The issue's stated acceptance bar.
+
+    Reaching it needs #1243: at the default the search stops on the *absolute*
+    criterion at ~9e-7, because ``_DEFAULT_ABS_GAP_TOL = 1e-6`` used to be a
+    module constant with no caller control. Tightening ``gap_tolerance`` alone
+    does nothing — the absolute arm is what binds here.
+    """
+    res = _acceptance_model().solve(
+        solver="bb", time_limit=300, gap_tolerance=1e-9, abs_gap_tolerance=1e-9
+    )
+    assert res.status == "optimal"
+    assert res.bound is not None and math.isfinite(res.bound)
+    assert abs(res.objective - res.bound) <= 1e-9
+    assert res.bound <= res.objective + 1e-12
