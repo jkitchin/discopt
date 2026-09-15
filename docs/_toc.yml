@@ -69,6 +69,7 @@ parts:
       - file: notebooks/nlp_bb
       - file: notebooks/implicit_function_node
       - file: notebooks/export_formats
+      - file: notebooks/model_serialization
       - file: notebooks/model_representations
       - file: notebooks/pyomo_solver
       - file: pyomo_solver
