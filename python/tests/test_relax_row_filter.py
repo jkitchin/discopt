@@ -108,17 +108,19 @@ def test_hda_certifies_a_tight_bound_at_default(monkeypatch):
 @pytest.mark.slow
 def test_hda_optout_restores_loose_candidate_a_floor(monkeypatch):
     """The ``=0`` opt-out restores the legacy no-filter path: hda's ill-conditioned
-    root LP false-fails and the reported bound falls back to candidate A's loose
-    floor (≪ −1e7), never the tight value. Proves the legacy path is intact and
-    the graduated behavior is genuinely gated (not hardcoded)."""
+    root LP falls back to a looser bound than the filtered ``>= -7e4`` value above.
+    Proves the legacy path is intact and the graduated behavior is genuinely gated
+    (not hardcoded). Before #1229 that bound was candidate A's floor (≪ −1e7); the
+    #1229 ``dual_slack_basis`` fix lets the legacy path reach −141697 (measured),
+    still sound and still looser than the filtered root value."""
     monkeypatch.setenv(_FLAG, "0")
     r = dm.from_nl(os.path.join(_NL_DATA, "hda.nl")).solve(time_limit=60)
-    # Sound either way; the point is the bound is the LOOSE floor without the filter.
+    # Sound either way; the point is the bound is looser without the filter.
     if r.bound is not None and math.isfinite(r.bound):
         assert r.bound <= _HDA_OPT + 1e-2, f"UNSOUND: bound {r.bound:.6g} > opt {_HDA_OPT}"
-        assert r.bound < -1e7, (
-            f"opt-out bound {r.bound:.6g} is unexpectedly tight — the legacy "
-            "no-filter path should give the loose candidate-A floor"
+        assert r.bound < -7e4, (
+            f"opt-out bound {r.bound:.6g} is as tight as the filtered root value — "
+            "the opt-out is not reaching the legacy no-filter path"
         )
 
 

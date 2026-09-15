@@ -1315,3 +1315,31 @@ Not defects, after checking: oracle rounding and near-parallel-row mismatches (x
 loudly at model build. Weak but honest, left as is: `error` where HiGHS rejects a 1e20-scale
 right-hand side, and MILP `kSolveError` inside HiGHS
 (`HighsMipSolverData::transformNewIntegerFeasibleSolution`).
+
+**2026-09-15 — claim-boundary CI failure: the #1229 `dual_slack_basis` fix loosened hda.** CI on
+964aea71 failed `test_current_root_lp_matches_committed_baseline`: hda root LP −64675.25 →
+−5710326.49 at an identical fingerprint, same value on Linux CI and macOS.
+
+- *Attribution* (each arm its own `CARGO_TARGET_DIR`, `.so` md5 asserted): reverting only the
+  `dual_slack_basis` free-column rule restores −64675.25. The `select_leaving` and `fbbt_row`
+  fixes do not move it.
+- *Not unsound* (`scratchpad/hda_lp_truth.py`, every LP the relaxer solves re-solved with
+  HiGHS): the branch vertex is primal feasible at −64675.25 (row violation 1.6e-10). Only its
+  Neumaier–Shcherbina bound, read off inaccurate duals, is −5.71e6. Before the fix the simplex
+  hit its iteration limit, the #671 failure-triggered row filter fired, and HiGHS confirms the
+  filtered LP at −64675.2492.
+- *Solve impact* (hda, `max_nodes=200`, TL 120, 2 interleaved rounds, both `time_limit` at 3
+  nodes): main −64509.8, branch −1.40e10.
+- *Entry experiment* (`scratchpad/hda_filter_entry.py`): the filtered re-solve of each of the
+  branch's root LPs certifies −64675.2492.
+- *Fix:* `relax_row_filter_loose_bound` (default ON, `DISCOPT_RELAX_ROW_FILTER_LOOSE_BOUND=0`
+  opts out). An `optimal` node whose certified bound is more than 1e-3 relative below its vertex
+  objective re-solves a row-filtered copy and keeps the larger certified bound. Sound by
+  superset; inert when no row is float64-intractable.
+- *Result:* root partition hda back to `unchanged` (ON: 4 unreproduced, alan/contvar/nvs08/
+  tanksize, all host drift that main shows too; OFF: 5 with hda). hda solve bound −64509.8, equal
+  to main. `test_row_filter_loose_bound.py` fails with the flag off (−5710326), passes on.
+- *Cert-clean panel* (`scratchpad/loose_ab_guard.py`, 66 `.nl`, arms OFF/ON/ON2, TL 20 s,
+  max_nodes 300): ran 66, oracle-checked arms 156, oracle violations 0, certification
+  regressions 0. Changed rows: clay0303hfsg, nvs05, tls2, all noisy (ON2 differs from ON).
+- The baseline is not regenerated: with the fix the committed hda row reproduces.

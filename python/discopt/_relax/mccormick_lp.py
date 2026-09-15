@@ -17,6 +17,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 from __future__ import annotations
 
 import collections
+import copy
 import dataclasses
 import logging
 import os
@@ -237,6 +238,11 @@ _SOLVE_DEADLINE_FLOOR_S = 0.05
 # crossing within the tolerance is treated as float round-off and repaired by
 # widening to the enclosing box (sound — widening only enlarges the relaxation).
 _EMPTY_BOX_TOL = 1e-6
+
+# #1229: an ``optimal`` node's certified bound this far below its vertex objective
+# (relative, floor 1) triggers the row-filtered re-solve. A healthy NS bound is
+# within ~1e-9 relative of the vertex; hda's root loose bound is ~87x the vertex.
+_LOOSE_BOUND_REL_GAP = 1e-3
 
 # Cap on constraints probed per node by the (opt-in, default-OFF) G-convexity
 # separator (#181) — bounds the per-node interval-Hessian certification cost.
@@ -1993,6 +1999,34 @@ class MccormickLPRelaxer:
             presep_bound = _certify(_presep_res)
             if presep_bound is not None:
                 bound, x_source = presep_bound, _presep_res
+
+        # #1229: an ``optimal`` node whose certified bound lost most of its value
+        # against the vertex objective (hda root: vertex −64675.25, NS bound −5.71e6
+        # read off inaccurate duals). The #671 failure trigger above does not fire
+        # on an ``optimal`` solve, so re-solve a row-filtered COPY and keep the
+        # tighter certified bound. Sound: the filtered LP is a superset, so its
+        # certified bound is valid, and ``max`` of two valid bounds is valid.
+        # ``_certify`` still judges conditioning on the unfiltered ``milp``, which
+        # only makes it more conservative. The node's own LP and ``x`` are untouched.
+        if (
+            bound is not None
+            and _tuning().relax_row_filter
+            and _tuning().relax_row_filter_loose_bound
+            and x_source.objective is not None
+            and np.isfinite(x_source.objective)
+            and bound
+            < x_source.objective - _LOOSE_BOUND_REL_GAP * max(1.0, abs(x_source.objective))
+        ):
+            from discopt._relax.milp_relaxation import _filter_unresolvable_rows
+
+            _filtered = copy.copy(milp)
+            _filtered._warm_basis = None
+            if _filter_unresolvable_rows(_filtered) > 0:
+                _filtered_bound = _certify(
+                    _filtered.solve(time_limit=_remaining(), backend=self._backend)
+                )
+                if _filtered_bound is not None and _filtered_bound > bound:
+                    bound = _filtered_bound
 
         if bound is None or not np.isfinite(bound):
             # #961: the LP may have solved to optimality, yet every certification
