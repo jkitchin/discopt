@@ -808,7 +808,7 @@ class Expression:
             Axis (or axes) to reduce. ``None`` (default) is a full reduction to a
             scalar; an ``axis=k`` reduction leaves the other axes standing, so the
             node stays array-valued and stands for one row per surviving element.
-        dtype, out, **kwargs
+        dtype, out, ``**kwargs``
             Accepted only so ``np.sum(expr)`` dispatches here (numpy's reduction
             protocol calls ``expr.sum(axis=..., out=...)``). Anything but the
             default is refused; see :meth:`_reject_numpy_reduction_kwargs`.
@@ -1152,6 +1152,11 @@ class Variable(Expression):
         self._size = int(np.prod(shape)) if shape else 1
         # Canonical `x[i]` handles -- see `__getitem__`.
         self._elem_cache: dict = {}
+        # Boxes saved by `fix()`, popped by `unfix()`. A STACK, not a slot:
+        # fixes nest (a primal heuristic fixes integers inside a solve whose
+        # node loop is already overriding boxes), and a single slot would
+        # restore the wrong box on the inner unfix.
+        self._bound_stack: list[tuple[np.ndarray, np.ndarray]] = []
 
     @property
     def size(self) -> int:
@@ -1212,6 +1217,161 @@ class Variable(Expression):
             self._elem_cache[idx] = node
             return node
         return Expression.__getitem__(self, idx)
+
+    # ── Fixing: bounds are the fixing route ──────────────────────────
+    #
+    # There is no separate "fixed" flag anywhere in the stack. ``lb == ub`` IS
+    # how a fixed column is expressed, and the Rust lowering re-reads both from
+    # the live Python object on every solve (C-41, ``expr_bindings.rs``). That
+    # makes fixing cheap and makes a *leaked* fix dangerous in a specific way:
+    # a stale ``lb == ub`` does not raise, it silently redefines the problem and
+    # still returns ``status="optimal"``. Hence the stack + the context managers
+    # below -- the point of the API is that ``unfix`` cannot be forgotten.
+
+    @property
+    def fix_depth(self) -> int:
+        """How many :meth:`fix` frames are currently stacked on this variable."""
+        return len(self._bound_stack)
+
+    @property
+    def is_fixed(self) -> bool:
+        """True when *every* element is pinned (``lb == ub`` elementwise).
+
+        Reports the variable's actual mathematical state, not whether
+        :meth:`fix` is what produced it: a variable declared
+        ``m.continuous("c", lb=3, ub=3)`` is fixed and says so. A partial fix
+        (see ``where``) is therefore ``False`` -- some elements are still free.
+        """
+        return bool(np.all(np.asarray(self.lb) == np.asarray(self.ub)))
+
+    def fix(self, value, *, where=None) -> "Variable":
+        """Pin this variable at *value* by setting ``lb = ub = value``.
+
+        Re-entrant: each call pushes the box it replaced onto a stack and
+        :meth:`unfix` pops exactly one frame, so nested fixes unwind in LIFO
+        order. A single saved slot would break here — the primal heuristics fix
+        integers inside a solve whose node loop is already overriding boxes —
+        so the stack is load-bearing, not defensive.
+
+        Parameters
+        ----------
+        value : float or array_like
+            The value(s) to pin at, broadcast to this variable's shape.
+        where : array_like of bool, optional
+            Elementwise mask; only elements where it is true are pinned, the
+            rest keep their current box. This is the multi-experiment case:
+            one design block free while the blocks carrying observed data stay
+            at their measured conditions.
+
+        Raises
+        ------
+        ValueError
+            If *value* is outside this variable's *declared* box (the one it
+            had before any ``fix``), or is not finite.
+            Both are refused rather than accommodated: pinning outside the
+            declared domain yields a silently infeasible model, and pinning at
+            NaN/inf yields a model whose relaxation is meaningless. Widen the
+            declared bounds first if the wider box is what you meant.
+
+        Examples
+        --------
+        >>> k.fix(0.7965)                       # scalar
+        >>> F.fix(F_data, where=[False, True, True])   # pin all but block 0
+        """
+        prev_lb = np.array(self.lb, dtype=np.float64, copy=True)
+        prev_ub = np.array(self.ub, dtype=np.float64, copy=True)
+        target = np.broadcast_to(np.asarray(value, dtype=np.float64), self.shape)
+
+        if where is None:
+            pinned = np.ones(self.shape, dtype=bool) if self.shape else np.array(True)
+            new_lb = np.array(target, dtype=np.float64)
+            new_ub = np.array(target, dtype=np.float64)
+        else:
+            pinned = np.broadcast_to(np.asarray(where, dtype=bool), self.shape)
+            new_lb = np.where(pinned, target, prev_lb)
+            new_ub = np.where(pinned, target, prev_ub)
+
+        # A non-finite pin makes every relaxation built from this column
+        # meaningless; refuse rather than propagate it (development philosophy
+        # §3 -- refuse loudly over a silent approximation).
+        bad = np.asarray(pinned & ~np.isfinite(target))
+        if bad.any():
+            i = int(np.argmax(bad.ravel()))
+            raise ValueError(
+                f"Variable {self.name!r}: cannot fix element {i} at "
+                f"{float(np.asarray(target).ravel()[i])!r} -- a fixed value must be finite."
+            )
+        # Outside the DECLARED domain: the model becomes infeasible with no other
+        # symptom, since a fixed column is just a degenerate box.
+        #
+        # Checked against the declared domain -- the bottom of the stack, i.e.
+        # the box before any fix -- and deliberately NOT against the box this
+        # call replaces. Against the latter, every nested re-fix would be
+        # refused: once ``fix(4.0)`` has made the box ``[4, 4]``, an inner
+        # ``fix(5.0)`` is "outside" it, which would make the stack useless for
+        # the override case it exists to serve. Narrowings that did not come
+        # from ``fix`` (a branch-and-bound node box, a presolve tightening) are
+        # likewise not the domain: pinning outside one of those legitimately
+        # means "this node is infeasible", which is an ordinary search outcome
+        # rather than a modeling error.
+        domain_lb, domain_ub = self._bound_stack[0] if self._bound_stack else (prev_lb, prev_ub)
+        outside = np.asarray(pinned & ((target < domain_lb) | (target > domain_ub)))
+        if outside.any():
+            i = int(np.argmax(outside.ravel()))
+            raise ValueError(
+                f"Variable {self.name!r}: cannot fix element {i} at "
+                f"{float(np.asarray(target).ravel()[i])!r}, which is outside its "
+                f"declared bounds [{float(np.asarray(domain_lb).ravel()[i])!r}, "
+                f"{float(np.asarray(domain_ub).ravel()[i])!r}]. Fixing there would make "
+                f"the model infeasible with no other symptom; widen the declared bounds "
+                f"first if that is what you meant."
+            )
+
+        self._bound_stack.append((prev_lb, prev_ub))
+        self.lb = new_lb
+        self.ub = new_ub
+        return self
+
+    def unfix(self) -> "Variable":
+        """Undo the most recent :meth:`fix`, restoring the box it replaced."""
+        if not self._bound_stack:
+            raise ValueError(
+                f"Variable {self.name!r} has no fix() to undo (fix_depth is 0). "
+                "unfix() restores the box a fix() saved; it is not a way to clear "
+                "bounds set at declaration time."
+            )
+        self.lb, self.ub = self._bound_stack.pop()
+        return self
+
+    @_contextlib.contextmanager
+    def fixed(self, value, *, where=None) -> "Iterator[Variable]":
+        """Scoped :meth:`fix` — restores the previous box on exit, exceptions included.
+
+        Prefer this to a bare ``fix``/``unfix`` pair whenever the fix is
+        temporary: an exception between the two leaves ``lb == ub`` behind, and
+        because bounds are read live, the *next* solve then reports
+        ``status="optimal"`` for a different problem.
+
+        >>> with k.fixed(0.7965):
+        ...     m.maximize(profit)
+        ...     result = m.solve()
+        """
+        depth_before = len(self._bound_stack)
+        self.fix(value, where=where)
+        completed = False
+        try:
+            yield self
+            completed = True
+        finally:
+            while len(self._bound_stack) > depth_before:
+                self.unfix()
+            if completed and len(self._bound_stack) != depth_before:
+                raise RuntimeError(
+                    f"Variable {self.name!r}: the body of fixed() called unfix() more "
+                    f"often than fix(), leaving the stack below the depth this scope "
+                    f"entered at ({len(self._bound_stack)} < {depth_before}); the box "
+                    "restored on exit is therefore not the one this scope saved."
+                )
 
     def __hash__(self):
         return id(self)
@@ -1644,12 +1804,14 @@ def bulk_construction_gc() -> "Iterator[None]":
     the next row traverses the whole model and frees nothing. Raising the gen-0
     threshold makes those sweeps proportionally rarer.
 
-    | arm | µs/row | |
-    |---|---:|---|
-    | default thresholds | 6.39 | 1.00× |
-    | raised, scoped per call | 4.24 | **1.51×** |
-    | raised for the whole build | 4.33 | 1.48× |
-    | GC disabled entirely | 3.66 | 1.73× |
+    ==========================  ======  =========
+    arm                         µs/row  speed-up
+    ==========================  ======  =========
+    default thresholds            6.39  1.00×
+    raised, scoped per call       4.24  **1.51×**
+    raised for the whole build    4.33  1.48×
+    GC disabled entirely          3.66  1.73×
+    ==========================  ======  =========
 
     The saving is real rather than deferred: every arm above was timed with a
     full ``gc.collect()`` *inside* the timed region, so postponed traversal is
@@ -4131,6 +4293,150 @@ class Model:
         >>> m.maximize(profit @ x - dm.sum(penalty * y))
         """
         self._objective = Objective(_wrap(expr), ObjectiveSense.MAXIMIZE)
+
+    # ── Bound scoping: the shared primitive behind every fix ──────────
+
+    def _resolve_variable(self, key) -> "Variable":
+        """``key`` as a Variable of *this* model, or a loud refusal."""
+        if isinstance(key, Variable):
+            if key.model is not self:
+                raise ValueError(
+                    f"Variable {key.name!r} belongs to model {key.model.name!r}, not "
+                    f"{self.name!r}. Fixing it would have no effect on this model's "
+                    "solve, and nothing downstream would report the mismatch."
+                )
+            return key
+        if isinstance(key, str):
+            for v in self._variables:
+                if v.name == key:
+                    return v
+            raise KeyError(
+                f"No variable named {key!r} in model {self.name!r} "
+                f"(have: {[v.name for v in self._variables][:10]})"
+            )
+        raise TypeError(f"Expected a Variable or a variable name, got {type(key).__name__}.")
+
+    @_contextlib.contextmanager
+    def saved_bounds(self, variables=None, *, copy: bool = False) -> "Iterator[Model]":
+        """Snapshot variable boxes on entry; restore them on exit, exceptions included.
+
+        The low-level primitive: it saves and restores *boxes*, so it covers the
+        bound-override passes (whose ``lb`` and ``ub`` differ) as well as fixing
+        (where they coincide). :meth:`fixed` is the fixing-shaped sugar over it.
+
+        Three call sites in ``_relax/`` hand-rolled this exact
+        ``saved = [...]`` / ``try`` / ``finally: restore`` block before it
+        existed (node_reduce, root_reduce, primal_heuristics); they now share
+        this one so their restore semantics cannot drift apart.
+
+        Parameters
+        ----------
+        variables : iterable of Variable, optional
+            Restrict the snapshot to these. Defaults to every variable.
+        copy : bool, default False
+            Snapshot bound *arrays* by reference (the default) or by value.
+            By-reference is sound because of an invariant that holds across
+            the tree: a writer either **rebinds** ``v.lb`` outright, or rebinds
+            it to a fresh writable copy *before* mutating (``gams_parser`` does
+            the latter) — so a snapshot taken earlier still refers to the array
+            it saved. Declared bounds are a read-only ``broadcast_to`` view, so
+            a naive in-place write raises rather than silently corrupting the
+            snapshot. The default matters: this runs once per branch-and-bound
+            node, where copying every box would add allocation to the hot loop
+            for no correctness gain. Pass ``copy=True`` if the body hands the
+            arrays to something that may mutate them in place.
+
+        Notes
+        -----
+        The fix stack is restored too, so a :meth:`Variable.fix` leaked inside
+        the scope is unwound with everything else. A body that *over*-unfixes
+        cannot have those frames restored (their boxes are gone); the box
+        itself is still restored, which is what the solve reads.
+        """
+        vars_ = list(self._variables) if variables is None else list(variables)
+        if copy:
+            saved = [
+                (
+                    np.array(v.lb, dtype=np.float64, copy=True),
+                    np.array(v.ub, dtype=np.float64, copy=True),
+                    len(v._bound_stack),
+                )
+                for v in vars_
+            ]
+        else:
+            saved = [(v.lb, v.ub, len(v._bound_stack)) for v in vars_]
+        try:
+            yield self
+        finally:
+            for v, (lb, ub, depth) in zip(vars_, saved):
+                v.lb = lb
+                v.ub = ub
+                del v._bound_stack[depth:]
+
+    @_contextlib.contextmanager
+    def fixed(self, *mappings, **by_name) -> "Iterator[Model]":
+        """Fix several variables for the duration of a block, then restore them.
+
+        The scoped counterpart of :meth:`Variable.fix`, and the recommended way
+        to run one task on a model built for another: a regression and a design
+        problem differ only in their objective and in which columns are free, so
+        the model is written once and each task states what it holds fixed.
+
+        Variables may be named by keyword, or given as a mapping keyed by
+        ``Variable`` or by name — the mapping form is what indexed variables
+        need, since their names are not Python identifiers.
+
+        >>> m.minimize(sse)
+        >>> with m.fixed(F=F_data):                 # regression: k, n free
+        ...     fit = m.solve()
+        >>> m.maximize(profit)
+        >>> with m.fixed({k: fit.value(k), n: fit.value(n)}):   # design: F free
+        ...     design = m.solve()
+
+        For a *partial* fix — some elements of one variable pinned, others free
+        — use :meth:`Variable.fixed` with ``where``, composing several with
+        :class:`contextlib.ExitStack` when there is more than one.
+
+        Raises
+        ------
+        ValueError
+            If no variables were given, or one belongs to another model.
+        """
+        targets: list[tuple[Variable, Any]] = []
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                raise TypeError(
+                    "Model.fixed() takes mappings of variable -> value and/or "
+                    f"name=value keywords, got a positional {type(mapping).__name__}."
+                )
+            targets.extend((self._resolve_variable(k), v) for k, v in mapping.items())
+        targets.extend((self._resolve_variable(k), v) for k, v in by_name.items())
+        if not targets:
+            raise ValueError(
+                "Model.fixed() needs at least one variable to fix; an empty scope "
+                "would silently do nothing while reading as if it fixed something."
+            )
+
+        depths = [(var, len(var._bound_stack)) for var, _ in targets]
+        completed = False
+        try:
+            for var, value in targets:
+                var.fix(value)
+            yield self
+            completed = True
+        finally:
+            unbalanced = []
+            for var, depth_before in reversed(depths):
+                while len(var._bound_stack) > depth_before:
+                    var.unfix()
+                if len(var._bound_stack) != depth_before:
+                    unbalanced.append(var.name)
+            if completed and unbalanced:
+                raise RuntimeError(
+                    f"The body of Model.fixed() called unfix() more often than fix() "
+                    f"on {unbalanced}; the boxes restored on exit are not the ones "
+                    "this scope saved."
+                )
 
     def implicit(
         self,
