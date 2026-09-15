@@ -1343,3 +1343,34 @@ right-hand side, and MILP `kSolveError` inside HiGHS
   max_nodes 300): ran 66, oracle-checked arms 156, oracle violations 0, certification
   regressions 0. Changed rows: clay0303hfsg, nvs05, tls2, all noisy (ON2 differs from ON).
 - The baseline is not regenerated: with the fix the committed hda row reproduces.
+
+**2026-09-15 — final before/after on 9bd6aa64: the new default is 19× (M) and 37× (L)
+faster in total wall, and certifies every instance. Still not gate-valid; the gate is
+unreachable on this host.** `scratchpad/perf_gate.sh`, both panels, R (old default) and H
+(new) interleaved per round, 3 rounds, TL 20 s, gap 1e-4, highspy 1.15.1, each solve in a
+fresh subprocess. Executed 144 per panel, `incorrect_count` 0 on both.
+
+| Panel | Arm | Total wall | Median | Max `wall_sd` | Nodes | Certified |
+|---|---|---|---|---|---|---|
+| M (24 MILPs) | R (before) | 104.05 s | 0.202 s | 0.150 s | 610 256 | 19/24 |
+| M (24 MILPs) | H (after) | 5.35 s | 0.140 s | 0.011 s | 217 | 24/24 |
+| L (24 LPs) | R (before) | 116.76 s | 0.202 s | 0.214 s | — | 21/24 |
+| L (24 LPs) | H (after) | 3.16 s | 0.037 s | 0.006 s | — | 24/24 |
+
+- Per-instance geometric mean of the R/H wall ratio: M 6.25, L 11.91. Largest — M:
+  sp150x300d 93×, bell5 42×, issue-2446 35×; L: standmps 89×, shell 78×, scrs8 63×. The one
+  instance where R wins is issue-2173 (0.6×).
+- The certification change is the substantive one: R leaves 5 MILPs (2 `time_limit`,
+  3 `feasible`) and 3 LPs (`time_limit`) without a certificate; H returns `optimal` and
+  certified on all 48. Nodes on M collapse 610 256 → 217 (sp150x300d `feasible`/44 163 →
+  `optimal`/1; p0548 11 309 → 1; lseu 8 241 → 15).
+- **The §6.3 load gate is not met and is not restated to fit.** Start load 1.88, but 21 of
+  25 samples ran above 4 (max 9.13). A rerun cannot fix it: with nothing else running, 12
+  samples over 2 minutes give an idle load of min 2.65, median 3.06, max 4.53 — never below
+  the gate. The load average here is dominated by uninterruptible system daemons rather than
+  CPU contention: concurrent `top` reports 89.7% idle on 14 cores with 1 runnable thread. Walls are indicative only. `incorrect_count`, status,
+  certification and nodes do not depend on load, and they carry the result; `wall_sd` is
+  ≤ 11 ms (M) and ≤ 6 ms (L) on the H arm against a 6–12× per-instance effect.
+- **Retraction:** the 2026-09-15 audit entry above reports M 85.0 s / 5.3 s and geo-mean
+  5.68 / 11.89 from an earlier out-of-gate run. This run supersedes those numbers. Neither
+  is gate-valid; direction and magnitude agree.
