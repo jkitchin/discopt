@@ -12,6 +12,43 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Vector `min` / `max`** (#1238). "The smallest element of this vector" had no
+  spelling: `dm.minimum`/`dm.maximum` took exactly two operands, a shaped
+  `Variable` had no `.min()`/`.max()`, and `np.min(xs)` is refused by the
+  `__array_ufunc__ = None` opt-out, so the only route was the hand-written chain
+  `dm.minimum(dm.minimum(a, b), c)`. `xs.min()` / `xs.max()` now exist (so
+  `np.min` / `np.max` reach them too), and `dm.minimum` / `dm.maximum` take any
+  number of operands. A bottleneck constraint or a makespan objective is one
+  call.
+
+  These fold into **balanced** binary `min`/`max` nodes rather than the single
+  n-ary node `.sum()` gets, and that is a measured choice, not a shortcut. The
+  issue's hypothesis was that one n-ary envelope would be *tighter* than the
+  fold; over 288 fixed-box comparisons through the default per-node engine —
+  both functions, both objective senses, n = 3..8, affine / square / bilinear /
+  `exp` / variable-sharing arguments — the two bounds are **identical in
+  288/288 cases** with 0 unsound bounds, because `_build_multivar` already emits
+  the exact convex-hull facets and a fold's intermediate auxes project straight
+  back out of them. So the issue's own kill criterion fires (recorded in
+  `docs/dev/performance-plan.md` §64), and the fold is also the safer arm: four
+  consumers — both `expr.rs` evaluators, `fbbt.rs`'s forward interval, and the
+  three Python relaxation compilers — index `args[0], args[1]` and would
+  silently drop `args[2:]`, which in the FBBT interval is not a loose bound but
+  a *wrong* one. `nl_parser.rs` folds the `.nl` `o11`/`o12` minlist/maxlist
+  opcodes to binary for exactly that reason (C-8).
+
+  What the balanced shape buys is the part of the issue that is a real defect:
+  depth `ceil(log2(n))` instead of `n-1` (12 against 1001 at n = 1000), the
+  same left-deep fold `performance-plan.md` §54 records raising `RecursionError`
+  out of the LP/MPS/GAMS writers. Node count, math and bound are unchanged, and
+  the two-operand `dm.minimum(x, y)` is still exactly one node. `.min(axis=k)`
+  is **refused** rather than faked: an axis reduction has to stay array-valued,
+  `min`/`max` have no array-valued node to carry it (`sum` has `SumExpression`),
+  and the one alternative — an object ndarray of scalar folds — breaks on the
+  next `<=`. `dm.minimum(xs)` is refused too, with the reduction spelling named:
+  `minimum` is the element-wise op, and re-reading a one-operand call as a
+  reduction would make one name mean two things.
+
 - **The modeling surface's NumPy-shaped gaps** (#1233, #1234, #1235). Three
   consequences of one deliberate design choice, fixed together.
   `Expression.__array_ufunc__ = None` is the NEP-13 opt-out that makes

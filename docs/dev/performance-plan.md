@@ -8644,3 +8644,81 @@ run against the wrong tree cannot read as a pass (§8).
   #1215 already diagnosed this as "a real trade, not an oversight": 26 modules
   read `.body` and never `.rhs`. Changing it is a normalized-body contract
   change, not a construction optimisation.
+
+## 64. #1238 vector `min`/`max`: the n-ary envelope is not tighter than the balanced fold (falsified 2026-09-15)
+
+#1238 asked for a way to write "the smallest element of this vector".
+`dm.minimum`/`dm.maximum` took exactly two operands, a shaped `Variable` had no
+`.min()`/`.max()`, and `np.min(xs)` is refused by `__array_ufunc__ = None`, so
+the only route was the hand-written chain `dm.minimum(dm.minimum(a, b), c)` —
+the same left-deep fold #1235 removed for `sum`, and the one §54 records raising
+`RecursionError` out of the LP/MPS/GAMS writers at n >= 1000.
+
+The issue proposed two things in order: an **n-ary `Min`/`Max` IR node**, and the
+relaxation work it needs. Its entry hypothesis was that the n-ary envelope would
+be *tighter* than the binary fold it replaces, with a stated kill criterion: if
+it is not, ship only the balanced fold — no flag, no IR change, no corpus panel.
+
+### The measurement
+
+Three mathematically identical spellings of the same function — left-deep fold,
+balanced fold, and one n-ary `FunctionCall` — minimised/maximised over the same
+fixed box through `build_uniform_relaxation` (the default per-node engine since
+#632), with the producer's `sign * (internal + offset)` mapping applied, against
+a sampled/cornered estimate of the true box optimum.
+
+| arm | points |
+|---|---:|
+| affine arguments over distinct variables, `min`/`max` × `min`/`max` sense × n ∈ {3,4,5,8} | 96 |
+| `x_i^2 + x_j`, `x_i·x_j`, `exp(x_i)`, and all-arguments-share-two-variables, n ∈ {3,5,6} | 192 |
+| **total comparisons** | **288** |
+| **soundness checks** (each arm's bound vs. the sampled truth) | **864** |
+
+Result: **n-ary tighter 0, equal 288, looser 0**, and **0 unsound bounds**.
+Left-deep, balanced and n-ary agree to the last bit on every point, for both
+functions and both senses.
+
+### Why it has to come out that way
+
+`uniform_relax._build_multivar` already emits the **exact convex-hull facets**
+for the n-ary case — `w >= a_i` for each argument of a `max`, `w <= a_i` for each
+argument of a `min` — and caps `w` with the aux interval. A fold introduces
+intermediate auxes (`w1 >= a, w1 >= b; w >= w1, w >= c`) which project straight
+back out of that system to `w >= a, b, c`, with the same interval cap. There is
+no polyhedron to gain. `convexity/rules.py`, `convexity/interval_eval.py`,
+`convexity/log_lattice.py` and `canonical_expr.py` are already n-ary-capable for
+the same reason; what is binary-only is the *value/derivative* side —
+`expr.rs`'s two evaluators, `fbbt.rs`'s forward interval,
+`dag_compiler`/`relaxation_compiler`/`differentiable`, and
+`_nl_expr_compiler`'s `_require(args, 2, …)`.
+
+### Binding consequence
+
+The kill criterion fires: **the balanced fold ships, the n-ary node does not.**
+That is not merely the cheaper option, it is the safer one. Every consumer in the
+list above indexes `args[0], args[1]` and would **silently drop `args[2:]`** —
+and a dropped argument in the FBBT forward interval is not a loose bound, it is a
+*wrong* one (`min` over a subset is too high), i.e. a false certificate.
+`nl_parser.rs` reached this conclusion already and folds the `.nl` `o11`/`o12`
+minlist/maxlist opcodes to binary Min/Max for exactly this reason (C-8); emitting
+n-ary from the modeling layer would have re-opened a hole the parser deliberately
+closed. Lifting those four consumers to n-ary would buy **zero** bound and cost a
+corpus-wide differential panel under §5's bound-changing regime.
+
+What does ship is the half of #1238 that is a real defect — the depth.
+`Expression.min()`/`.max()` and n-ary `dm.minimum()`/`dm.maximum()` fold
+*balanced*: `ceil(log2(n))` deep instead of `n - 1` (measured: 12 vs 1001 at
+n = 1000, counting the shared `IndexExpression` + leaf). Same node count
+(`n - 1`), same math, same bound.
+
+`o11`/`o12` in `nl_parser.rs` is still a left-deep fold with the same latent
+depth, and is **deliberately left alone**: **0 of the 66 in-repo corpus `.nl`
+instances contain either opcode**, so there is no measurement that would justify
+re-nesting it, and §5's bound-neutral regime would require a certifying panel to
+ship it. Noted here so the next reader does not re-derive the search.
+
+Probes: `COMPARISONS_EXECUTED 96` / `192`, `SOUNDNESS_CHECKS_EXECUTED 288` /
+`576`, each exiting non-zero on a zero count (§6). Pinned in-repo by
+`test_1238_balanced_fold_is_bound_neutral_against_the_left_deep_fold`, which
+compares all three spellings — the unshipped n-ary form included — through the
+same engine.
