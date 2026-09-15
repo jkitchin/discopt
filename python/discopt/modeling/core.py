@@ -3803,6 +3803,12 @@ class Model:
         # sense)`` for ``0.5 x'Qx + c'x + constant``. At most one is set.
         self._builder_linear_objective: Optional[tuple] = None
         self._builder_quadratic_objective: Optional[tuple] = None
+        # A solve result loaded alongside this model by ``discopt.load`` (the
+        # fitted state saved with ``Model.save(..., result=...)``). ``None`` on a
+        # freshly built model and on one saved without a result. Nothing on the
+        # solve path reads it; it is there so a model and the fit it belongs to
+        # travel together instead of desynchronising across two files.
+        self.saved_result: Optional["SolveResult"] = None
 
     # ── Rich representation (LaTeX / HTML in standard PSE form) ──
 
@@ -7017,6 +7023,33 @@ class Model:
                 "which are generated during lowering and are not source-level "
                 "identities. Choose a name outside that namespace."
             )
+
+    def save(self, path, *, result=None, indent: Optional[int] = None) -> None:
+        """Save this model -- and optionally its solve result -- to a file.
+
+        The native round-trippable format: unlike ``.nl`` / ``.gms`` export it
+        keeps variable names, carries the non-algebraic relations, and can embed
+        the fitted state, so a model reloads tomorrow as the model it was.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination. A ``.gz`` suffix gzips the document; :func:`discopt.load`
+            detects compression by magic bytes either way.
+        result : SolveResult, optional
+            A solve result to store alongside the model. It comes back on the
+            reloaded model's ``saved_result`` attribute.
+        indent : int, optional
+            JSON indent. ``None`` writes compactly; ``2`` is readable and diffs well.
+
+        Examples
+        --------
+        >>> m.save("kinetics.dopt", result=result)          # doctest: +SKIP
+        >>> m2 = discopt.load("kinetics.dopt")              # doctest: +SKIP
+        """
+        from discopt.serialize import save as _save
+
+        _save(self, path, result=result, indent=indent)
 
 
 # Internal constraint types (not part of public API)

@@ -108,6 +108,7 @@ from discopt.modeling.indexed import (
     Skip,
 )
 from discopt.modeling.sets import ProductSet, RangeSet, Set
+from discopt.serialize import dumps, load, loads
 
 __all__ = [
     "Model",
@@ -161,6 +162,9 @@ __all__ = [
     "from_pyomo",
     "from_nl",
     "from_gams",
+    "load",
+    "loads",
+    "dumps",
     "from_description",
     "BooleanVar",
     "BooleanVarArray",
