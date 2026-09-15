@@ -808,7 +808,7 @@ class Expression:
             Axis (or axes) to reduce. ``None`` (default) is a full reduction to a
             scalar; an ``axis=k`` reduction leaves the other axes standing, so the
             node stays array-valued and stands for one row per surviving element.
-        dtype, out, **kwargs
+        dtype, out, ``**kwargs``
             Accepted only so ``np.sum(expr)`` dispatches here (numpy's reduction
             protocol calls ``expr.sum(axis=..., out=...)``). Anything but the
             default is refused; see :meth:`_reject_numpy_reduction_kwargs`.
@@ -1804,12 +1804,14 @@ def bulk_construction_gc() -> "Iterator[None]":
     the next row traverses the whole model and frees nothing. Raising the gen-0
     threshold makes those sweeps proportionally rarer.
 
-    | arm | µs/row | |
-    |---|---:|---|
-    | default thresholds | 6.39 | 1.00× |
-    | raised, scoped per call | 4.24 | **1.51×** |
-    | raised for the whole build | 4.33 | 1.48× |
-    | GC disabled entirely | 3.66 | 1.73× |
+    ==========================  ======  =========
+    arm                         µs/row  speed-up
+    ==========================  ======  =========
+    default thresholds            6.39  1.00×
+    raised, scoped per call       4.24  **1.51×**
+    raised for the whole build    4.33  1.48×
+    GC disabled entirely          3.66  1.73×
+    ==========================  ======  =========
 
     The saving is real rather than deferred: every arm above was timed with a
     full ``gc.collect()`` *inside* the timed region, so postponed traversal is
