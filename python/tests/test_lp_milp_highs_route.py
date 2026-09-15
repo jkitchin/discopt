@@ -164,6 +164,44 @@ def test_exact_dual_correction_is_a_valid_bound_from_any_dual():
     assert H.exact_ns_bound(np.array([np.nan]), sf)[0] is None
 
 
+def test_exact_dual_correction_zeroes_a_sentinel_scale_side():
+    """A finite ±9.999e19 side is as useless as an open one for a bound: roundoff
+    reduced cost 1e-18 times 9.999e19 costs ~100 of bound (nlp_cvx_001_010 lost 1.9e3
+    this way and stayed uncertified). The correction must zero it too."""
+    B = 9.999e19
+    sf = H.StdForm.from_arrays(
+        [1.0, 0.0, 0.0], [[1.0, 0.1, -0.1]], [1.0], [0.0, 0.0, 0.0], [10.0, B, B]
+    )
+    y = np.array([1e-17])
+    g_float = H.ns_bound(y, sf)
+    assert g_float is not None and g_float < -50.0  # finite, valid, and far from 0
+    g, why = H.exact_ns_bound(y, sf)
+    assert why == "" and g == 0.0
+
+
+def test_exact_elimination_is_capped_by_work_not_wall(monkeypatch):
+    from fractions import Fraction as F
+
+    M = [[F(2), F(1), F(1)], [F(1), F(3), F(2)], [F(1), F(0), F(0)]]
+    rhs = [F(4), F(5), F(6)]
+    z = H._exact_solve(M, rhs, None)
+    assert z is not None
+    assert [sum(M[i][k] * z[k] for k in range(3)) for i in range(3)] == rhs
+    monkeypatch.setattr(H, "EXACT_MAX_WORK", 10)
+    assert H._exact_solve(M, rhs, None) is None  # same input, same refusal, any machine
+
+
+def test_recession_ray_is_verified_and_absent_for_a_bounded_lp():
+    # min -x0 - x1 with no rows over x >= 0: HiGHS may report unbounded with no ray.
+    sf = H.StdForm.from_arrays([-1.0, -1.0], np.zeros((0, 2)), [], [0.0, 0.0], [INF, INF])
+    d = H.recession_ray(sf, time_limit=None)
+    assert d is not None and H.primal_ray_verified(d, sf)
+    out = H.solve_lp_std(sf)
+    assert out.status == "unbounded"
+    bounded = H.StdForm.from_arrays([-1.0], np.zeros((0, 1)), [], [0.0], [5.0])
+    assert H.recession_ray(bounded, time_limit=None) is None
+
+
 def test_fbbt_box_contains_the_feasible_set_under_huge_term_cancellation():
     # x0 + x1 - x2 = 1 with x0 up to 1e19 and x1, x2 open: a derived side of x1 subtracts
     # terms of size 1e19, where plain float cancellation is off by far more than 1e-9.
@@ -453,6 +491,68 @@ def test_milp_integer_infeasible_is_certified_with_highs_provenance(highs):
     assert res.gap_certified
     assert res.solver_stats.get("milp/infeasible_provenance_highs") == 1.0
     assert "milp/infeasible_provenance_farkas" not in res.solver_stats
+
+
+def test_milp_on_the_default_box_is_not_falsely_infeasible(highs):
+    """HiGHS MIP given the finite ±9.999e19 box of the free column ``y`` answered
+    ``kInfeasible``, and the route certified it. Feasible: optimum 4.0 at x=(-1, 2, 1,
+    3, 3), y=0 (scipy and the Rust route agree). Found by adversarial testing."""
+    m = dm.Model("milp_default_box")
+    lo, hi = [-1, 1, 0, 0, 3], [-1, 8, 2, 4, 3]
+    x = [m.integer(f"x{j}", lb=lo[j], ub=hi[j]) for j in range(5)]
+    y = m.continuous("y")
+    m.minimize(-4 * x[0] + 4 * x[1] - 4 * x[2] - x[3] + 5 * y - 1)
+    m.subject_to(-3 * x[2] + 2 * x[3] + 5 * x[4] - 5 * y == 18)
+    m.subject_to(-x[0] + 5 * x[1] + x[2] + 4 * x[3] + x[4] <= 27)
+    m.subject_to(-3 * x[0] - x[1] + 3 * x[2] + x[3] - x[4] + y >= 4)
+    m.subject_to(2 * x[0] - 3 * x[1] + 5 * x[2] <= -2.8685039722160535)
+    m.subject_to(x[0] - 2 * x[1] - 3 * x[2] - 3 * x[4] - y <= -17)
+    m.subject_to(4 * x[0] + 3 * x[1] + 5 * x[2] - 5 * x[3] - 3 * x[4] <= -17)
+    res = m.solve(time_limit=30)
+    assert _on_highs_route(res)
+    assert res.status == "optimal" and res.gap_certified
+    assert res.objective == pytest.approx(4.0, abs=1e-6)
+    assert res.solver_stats.get("milp/huge_box_relaxed") == 1.0
+
+
+def test_lp_coefficient_at_highs_drop_threshold_is_kept(highs):
+    """HiGHS drops ``|a| <= small_matrix_value`` (default 1e-9) and passModel only warns;
+    the route raised on that warning. ``1e-9 x >= 1e-9`` is ``x >= 1``."""
+    m = dm.Model("lp_tiny_coef")
+    x = m.continuous("x", lb=0.0)
+    m.subject_to(1e-9 * x >= 1e-9)
+    m.minimize(x)
+    res = m.solve(time_limit=20)
+    assert _on_highs_route(res)
+    assert res.status == "optimal" and res.gap_certified
+    assert res.objective == pytest.approx(1.0, abs=1e-6)
+
+
+def test_row_rhs_at_the_infinity_sentinel_is_an_error_not_a_crash(highs):
+    """HiGHS refuses a row bound >= 1e20 (passModel kError); the route raised
+    ``RuntimeError`` out of ``solve``. It is now an uncertified ``error`` result."""
+    m = dm.Model("lp_rhs_sentinel")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    m.subject_to(2 * x <= 1.94849311702961e20)
+    m.minimize(-x)
+    res = m.solve(time_limit=20)
+    assert _on_highs_route(res)
+    assert res.status == "error" and not res.gap_certified
+    assert res.objective is None
+
+
+def test_milp_highs_would_perturb_gets_no_answer_from_it(highs):
+    """Below ``small_matrix_value`` HiGHS solves a different MILP, and neither its
+    infeasible label nor its tree bound can be re-derived for the real one."""
+    m = dm.Model("milp_sub_threshold_coef")
+    x = m.integer("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x + 1e-13 * y >= 1)
+    m.minimize(x + y)
+    res = m.solve(time_limit=20)
+    assert _on_highs_route(res)
+    assert res.status == "error" and not res.gap_certified
+    assert res.objective is None
 
 
 def test_issue_1229_instance_returns_a_feasible_point_on_the_highs_route():

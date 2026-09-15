@@ -8912,7 +8912,17 @@ def solve_model(
     if _solver is None and not _has_bb_callbacks and not skip_convex_check:
         from discopt.gp import classify_gp, solve_gp
 
-        if classify_gp(model) is not None:
+        # A GP that is also a pure LP (a linear posynomial over positive boxes, e.g.
+        # ``minimize(dm.sum(y))`` with ``y >= 1``) goes to the #1229 HiGHS route. The
+        # log-space NLP answers it only to IPM accuracy (3 + 7.5e-9 for an optimum of 3).
+        if classify_gp(model) is not None and not _highs_takes_pure_lp_milp(
+            model,
+            solver_name=_solver,
+            nlp_bb=nlp_bb,
+            nlp_solver=nlp_solver,
+            lagrangian_bound=lagrangian_bound,
+            has_callbacks=lazy_constraints is not None or incumbent_callback is not None,
+        ):
             gp_result = solve_gp(
                 model,
                 time_limit=time_limit,

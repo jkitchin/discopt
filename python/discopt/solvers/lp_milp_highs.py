@@ -52,6 +52,9 @@ FEAS_TOL = 1e-6
 FEAS_RTOL = 1e-9
 #: conftest integrality tolerance.
 INT_TOL = 1e-5
+#: HiGHS drops matrix entries with ``|a| <= small_matrix_value``; this is the smallest
+#: value the option accepts (1e-13 is rejected, highspy 1.12).
+SMALL_MATRIX_VALUE = 1e-12
 #: An LP is ``optimal`` iff ``objective - ns_bound <= CERT_ABS + CERT_REL*|objective|``.
 CERT_ABS = 1e-6
 CERT_REL = 1e-9
@@ -374,9 +377,12 @@ FBBT_ROUNDS = 20
 #: uncertified (never guessed).
 EXACT_MAX_COLUMNS = 256
 EXACT_MAX_ROUNDS = 8
-#: Wall budget (s) for one exact correction, also under a larger or absent time limit:
-#: rational elimination can grow its denominators, and a fallback must not hang a solve.
-EXACT_TIME_BUDGET = 10.0
+#: Work cap for one rational elimination, in bit operations (entries updated times the
+#: bit length of the operands). Rational elimination can grow its denominators, and a
+#: fallback must not hang a solve; a count, not a clock, so whether a bound is certified
+#: does not depend on machine speed (#912). Calibrated on dense 60-bit rational systems
+#: at 1.0-2.2e8 units/s (n=60: 5.9e8 units, 6.0 s), so the cap is ~1-2 s of elimination.
+EXACT_MAX_WORK = 200_000_000
 _EPS = float(np.finfo(np.float64).eps)
 
 
@@ -468,17 +474,27 @@ def _exact_reduced_costs(Y: list, sf: StdForm, cols) -> dict:
 
 
 def _on_open_side(r, sf: StdForm, j: int) -> bool:
-    """A reduced cost that selects an open side makes the box term ``-inf``."""
-    return bool((r > 0 and sf.xl[j] <= -INF) or (r < 0 and sf.xu[j] >= INF))
+    """A reduced cost that selects an open or sentinel-scale side.
+
+    On an open side the box term is ``-inf``. On a finite side at ``READBACK_LIMIT`` or
+    beyond (the default ``±9.999e19`` box) it is finite but useless: a roundoff reduced
+    cost of 1.4e-17 times that side cost 1.9e3 of bound on nlp_cvx_001_010, leaving an
+    objective of -2.04 uncertified. Both are corrected to an exact zero.
+    """
+    return bool((r > 0 and sf.xl[j] <= -READBACK_LIMIT) or (r < 0 and sf.xu[j] >= READBACK_LIMIT))
 
 
 def _exact_solve(M: list, rhs: list, deadline: Optional[float]) -> Optional[list]:
-    """``M z = rhs`` over the rationals by Gaussian elimination; ``None`` if singular or
-    past ``deadline``."""
+    """``M z = rhs`` over the rationals by Gaussian elimination; ``None`` if singular, past
+    ``EXACT_MAX_WORK`` bit operations, or past the caller's ``deadline``."""
     from fractions import Fraction
+
+    def size(q: Fraction) -> int:
+        return int(q.numerator.bit_length() + q.denominator.bit_length())
 
     n = len(rhs)
     T = [row[:] + [rhs[i]] for i, row in enumerate(M)]
+    work = 0
     for col in range(n):
         if deadline is not None and time.perf_counter() > deadline:
             return None
@@ -487,9 +503,13 @@ def _exact_solve(M: list, rhs: list, deadline: Optional[float]) -> Optional[list
             return None
         T[col], T[piv] = T[piv], T[col]
         p = T[col][col]
+        row_size = max(size(v) for v in T[col][col:])
         for r in range(col + 1, n):
             if T[r][col] != 0:
                 f = T[r][col] / p
+                work += (n + 1 - col) * (size(f) + row_size)
+                if work > EXACT_MAX_WORK:
+                    return None
                 T[r] = [a - f * b for a, b in zip(T[r], T[col])]
     z = [Fraction(0)] * n
     for i in reversed(range(n)):
@@ -522,11 +542,11 @@ def exact_ns_bound(
     if y.shape != (sf.m,) or not np.all(np.isfinite(y)):
         return None, "dual is not a finite vector over the rows"
     Y = [Fraction(float(v)) for v in y]
-    open_cols = np.flatnonzero((sf.xl <= -INF) | (sf.xu >= INF))
+    open_cols = np.flatnonzero((sf.xl <= -READBACK_LIMIT) | (sf.xu >= READBACK_LIMIT))
     held: list[int] = []
     for rnd in range(EXACT_MAX_ROUNDS + 1):
         if deadline is not None and time.perf_counter() > deadline:
-            return None, "time budget exhausted during the exact dual correction"
+            return None, "time limit reached during the exact dual correction"
         rc = _exact_reduced_costs(Y, sf, open_cols)
         wrong = [j for j, r in rc.items() if _on_open_side(r, sf, j)]
         if not wrong:
@@ -554,7 +574,7 @@ def exact_ns_bound(
         M = [[Fraction(float(block[i, kc])) for i in range(rank)] for kc in range(rank)]
         dy = _exact_solve(M, [rcS[j] for j in indep], deadline)
         if dy is None:
-            return None, "pivot block singular in exact arithmetic, or time budget exhausted"
+            return None, "pivot block singular in exact arithmetic, or work/time limit reached"
         for i, v in zip(prow, dy):
             Y[int(i)] += v
         held = S
@@ -611,7 +631,9 @@ def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> t
             return False, "no time left for the phase-1 LP"
         opts.append(("time_limit", float(time_limit)))
     h = _new_highs(highspy, opts)
-    _pass_model(h, highspy, work, integer=False)
+    pass_st, pass_why = _pass_model(h, highspy, work, integer=False)
+    if pass_st == highspy.HighsStatus.kError:
+        return False, f"phase-1 LP: {pass_why}"
     h.run()
     name = _status_name(h)
     if name != "kOptimal":
@@ -624,15 +646,43 @@ def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> t
     g = ns_bound(y, box)
     if g is not None and g > margin:
         return True, "phase1-ns-fbbt-box"
-    budget = EXACT_TIME_BUDGET
-    if time_limit is not None:
-        budget = min(budget, float(time_limit) - (time.perf_counter() - t0))
-    deadline = time.perf_counter() + budget
+    # The caller's own time_limit only; the work is capped by count (EXACT_MAX_WORK).
+    deadline = None if time_limit is None else t0 + float(time_limit)
     g2, why = exact_ns_bound(y, box, deadline=deadline)
     if g2 is not None and g2 > margin:
         return True, "phase1-exact-dual-correction"
     best = max((v for v in (g, g2) if v is not None), default=None)
     return False, f"phase-1 bound {best} does not exceed {margin:.3g}{'; ' + why if why else ''}"
+
+
+def recession_ray(sf: StdForm, *, time_limit: Optional[float]) -> Optional[np.ndarray]:
+    """A candidate descent ray of ``{A x = b, xl <= x <= xu}``, or ``None``.
+
+    Solves ``min cᵀd  s.t.  A d = 0`` with ``d_j`` in ``[-1, 0]`` on an open lower side,
+    ``[0, 1]`` on an open upper side (both for a free column) and fixed at 0 otherwise.
+    That LP is bounded and ``d = 0`` is feasible, so its value is at most 0. A negative
+    value gives a ray. The caller still checks it with ``primal_ray_verified``, so this
+    decides only whether a ray is found, never whether one is accepted.
+    """
+    highspy = require_highspy()
+    if time_limit is not None and time_limit <= 0.0:
+        return None
+    lo = np.where(sf.xl <= -INF, -1.0, 0.0)
+    hi = np.where(sf.xu >= INF, 1.0, 0.0)
+    if not np.any(lo) and not np.any(hi):
+        return None
+    work = StdForm.from_arrays(sf.c, sf.A, np.zeros(sf.m), lo, hi)
+    opts: list[tuple[str, Any]] = [("run_crossover", "on")]
+    if time_limit is not None:
+        opts.append(("time_limit", float(time_limit)))
+    h = _new_highs(highspy, opts)
+    if _pass_model(h, highspy, work, integer=False)[0] == highspy.HighsStatus.kError:
+        return None
+    h.run()
+    if _status_name(h) != "kOptimal":
+        return None
+    d = np.asarray(h.getSolution().col_value, dtype=np.float64)
+    return d if float(sf.c @ d) < 0.0 else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -653,7 +703,31 @@ def _set_options(h, highspy, opts: list[tuple[str, Any]]) -> None:
             raise RuntimeError(f"HiGHS rejected option {key}={val!r} (status {st})")
 
 
-def _pass_model(h, highspy, sf: StdForm, integer: bool) -> None:
+def _huge_box(sf: StdForm) -> np.ndarray:
+    """Columns with a finite declared bound at sentinel-adjacent magnitude (the default
+    ±9.999e19 box)."""
+    lo = (np.abs(sf.xl) >= READBACK_LIMIT) & (sf.xl > -INF)
+    hi = (np.abs(sf.xu) >= READBACK_LIMIT) & (sf.xu < INF)
+    return np.asarray(lo | hi, dtype=bool)
+
+
+def _relax_huge_box(sf: StdForm, huge: np.ndarray) -> StdForm:
+    """``sf`` with the huge finite bounds opened to infinity: a relaxation of ``sf``."""
+    return dataclasses.replace(
+        sf,
+        xl=np.where(huge & (sf.xl < 0), -INF, sf.xl),
+        xu=np.where(huge & (sf.xu > 0), INF, sf.xu),
+    )
+
+
+def _pass_model(h, highspy, sf: StdForm, integer: bool) -> tuple[Any, str]:
+    """Hand ``sf`` to HiGHS; returns ``(passModel status, reason)``, ``reason`` empty on kOk.
+
+    kWarning means HiGHS changed the model on the way in -- it drops every matrix entry
+    with ``|a| <= small_matrix_value`` -- so the caller decides whether its certificates
+    survive that. kError means HiGHS holds no model. Neither is raised: both are
+    properties of the input, not defects, and the route reports them as ``error``.
+    """
     from discopt.solvers.milp_highs import _to_highs_inf
 
     if sf.A.nnz >= 2**31 or sf.n >= 2**31:
@@ -681,8 +755,22 @@ def _pass_model(h, highspy, sf: StdForm, integer: bool) -> None:
             kinds[int(j)] = highspy.HighsVarType.kInteger
         lp.integrality_ = kinds
     st = h.passModel(lp)
-    if st != highspy.HighsStatus.kOk:
-        raise RuntimeError(f"HiGHS rejected the model (passModel status {st})")
+    if st == highspy.HighsStatus.kWarning:
+        # HiGHS's default 1e-9 dropped a coefficient (``1e-9 x >= 1e-9`` lost its only
+        # entry); re-pass at the smallest value it accepts. Only then: the option also
+        # moves HiGHS's internal numerics, and set on every model it turned netlib
+        # klein1 from a proved infeasible into kUnknown.
+        _set_options(h, highspy, [("small_matrix_value", SMALL_MATRIX_VALUE)])
+        st = h.passModel(lp)
+    if st == highspy.HighsStatus.kOk:
+        return st, ""
+    a = np.abs(sf.A.data)
+    reason = (
+        f"HiGHS passModel {str(st).rsplit('.', 1)[-1]}: {int((a <= SMALL_MATRIX_VALUE).sum())} "
+        f"|a_ij| <= {SMALL_MATRIX_VALUE:g} dropped, {int((a >= 1e15).sum())} |a_ij| >= 1e15, "
+        f"{int((np.abs(sf.b) >= INF).sum())} row right-hand sides at the 1e20 infinity sentinel"
+    )
+    return st, reason
 
 
 def _status_name(h) -> str:
@@ -735,9 +823,7 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
     # bounds relaxed to infinity then looks for a Farkas ray. A ray of the relaxed
     # problem also proves the declared problem empty, and it is verified against the
     # declared bounds regardless. Nothing else from that re-solve is used.
-    huge_box = ((np.abs(sf.xl) >= READBACK_LIMIT) & (sf.xl > -INF)) | (
-        (np.abs(sf.xu) >= READBACK_LIMIT) & (sf.xu < INF)
-    )
+    huge_box = _huge_box(sf)
     presolve_off = False
     relaxed = False
     last_reason = ""
@@ -756,14 +842,16 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             opts.append(("presolve", "off"))
         h = _new_highs(highspy, opts)
         stats["highs/version"] = _version_number(h)
-        sf_pass = sf
-        if relaxed:
-            sf_pass = dataclasses.replace(
-                sf,
-                xl=np.where(huge_box & (sf.xl < 0), -INF, sf.xl),
-                xu=np.where(huge_box & (sf.xu > 0), INF, sf.xu),
-            )
-        _pass_model(h, highspy, sf_pass, integer=False)
+        sf_pass = _relax_huge_box(sf, huge_box) if relaxed else sf
+        pass_st, pass_why = _pass_model(h, highspy, sf_pass, integer=False)
+        if pass_st == highspy.HighsStatus.kError:
+            return done(HighsOutcome("error", message=pass_why))
+        if pass_why:
+            # kWarning: HiGHS solves a perturbed LP. Every certificate below -- the
+            # point's feasibility, the NS bound, the Farkas and primal rays -- is
+            # re-verified against ``sf`` itself, so a perturbed answer is refused, not
+            # trusted.
+            stats["lp/highs_pass_warning"] = 1.0
         run_st = h.run()
         name = _status_name(h)
         info = h.getInfo()
@@ -813,9 +901,8 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
                 if g is not None and (ns is None or g > ns):
                     ns, provenance = g, "ns-fbbt-box"
                 if ns is None or obj - ns > thr:
-                    rem = remaining()
-                    budget = EXACT_TIME_BUDGET if rem is None else min(rem, EXACT_TIME_BUDGET)
-                    deadline = time.perf_counter() + budget
+                    # The caller's own time_limit only; the work is capped by count.
+                    deadline = None if time_limit is None else t0 + float(time_limit)
                     g, why = exact_ns_bound(y, box, deadline=deadline)
                     if g is not None and (ns is None or g > ns):
                         ns, provenance = g, "ns-exact-dual-correction"
@@ -861,6 +948,12 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             point_ok = xp is not None and not (
                 readback_problem(xp, sf) or feasibility_problem(xp, sf, check_integrality=False)
             )
+            if point_ok and (d is None or not primal_ray_verified(d, sf)):
+                # HiGHS can label an LP unbounded with no ray (measured: ``min x`` over a
+                # free column and no rows, highspy 1.12 and 1.15). Look for one directly.
+                d = recession_ray(sf, time_limit=remaining())
+                if d is not None:
+                    stats["lp/recession_ray_lp"] = 1.0
             if d is not None and point_ok and primal_ray_verified(d, sf):
                 return done(HighsOutcome("unbounded", x=xp, ray=d, highs_status=name))
             last_reason = "unbounded label without a verified ray and feasible point"
@@ -958,7 +1051,22 @@ def solve_milp_std(
         opts.append(("time_limit", float(rem)))
     h = _new_highs(highspy, opts)
     stats["highs/version"] = _version_number(h)
-    _pass_model(h, highspy, sf, integer=True)
+    # HiGHS MIP on the finite default ±9.999e19 box returns false kInfeasible. Measured
+    # on adversarial MILPs, replaying the route's own standard form: 5 of 6 labelled
+    # infeasible solve to optimal with that box at ±inf (one 6-column model: 4.0, as
+    # with ±1e9), the sixth returns an undecided status instead of a false label.
+    # HiGHS is handed the relaxation with those bounds open. That keeps an infeasible
+    # label and a dual bound valid for ``sf``, and every incumbent is still verified
+    # against the declared box below.
+    huge = _huge_box(sf)
+    if huge.any():
+        stats["milp/huge_box_relaxed"] = 1.0
+    pass_st, pass_why = _pass_model(h, highspy, _relax_huge_box(sf, huge), integer=True)
+    if pass_why:
+        # No MILP certificate is re-derivable from ``sf`` (HiGHS's infeasible label and
+        # tree bound are trusted as-is), so a model HiGHS changed on the way in -- or
+        # refused -- gets no answer from it.
+        return done(HighsOutcome("error", message=pass_why))
 
     if initial_point is not None:
         seed = complete_seed(sf, initial_point, sf.n if n_struct is None else int(n_struct))

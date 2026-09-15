@@ -1271,3 +1271,47 @@ run, with arms interleaved over 3 rounds.
 **2026-09-15 — swallowed exceptions in `mccormick_lp.py`.** The 14 `except Exception:`
 fallbacks that were silent now log `logger.debug("<method> failed; using fallback",
 exc_info=True)`. Control flow is unchanged.
+
+**2026-09-15 — retraction: "the branch is complete".** That was said before CI ran on the
+merged branch. CI then failed 14 tests in 9 files (2 lanes). They were tests whose subject is
+discopt's own LP/MILP machinery and that the new default routed to HiGHS (pinned to
+`DISCOPT_LP_MILP_BACKEND=rust`, none weakened), the #912 wall-budget inventory (the exact
+dual correction's carved `budget` slices replaced by a deterministic work cap
+`EXACT_MAX_WORK` plus the caller's own `time_limit`), and a GP-classified pure LP that the
+log-space NLP answered to IPM accuracy only (now routed to HiGHS first).
+
+**2026-09-15 — adversarial testing of the route: five soundness/robustness defects, fixed.**
+A separate session ran 5,085 random LP/MILP comparisons (exact `Fraction` vertex/integer
+enumeration for n ≤ 6, else scipy `milp`) plus 45 hand-built edge cases, on both backends.
+Every wrong-answer claim was confirmed with an exactly checked witness.
+
+- *F1, declared-box tightening false `infeasible` (both backends).* A ±9.999e19 box
+  contribution absorbed the small terms of a row's activity sum; the leave-one-out rest came
+  out 0 instead of −1 and the derived bound cut the only feasible point. Fix: widen by a
+  floating-point error bound (`nonlinear_bound_tightening.py`).
+- *F2, HiGHS MIP false `kInfeasible` with the finite default box.* 21 saved instances. Passing
+  the sentinel-magnitude box as ±inf makes them optimal; the box-open problem is a relaxation,
+  so its `kInfeasible` and tree bound stay valid.
+- *F3, a proved `infeasible` overwritten by the #844 fallback.* An integer column in
+  [−1.6, −1.07]; tightening proved infeasibility, the no-incumbent fallback still ran, and the
+  `lp_spatial` verifier accepted a rounded-then-clipped non-integer point: `optimal`,
+  certified, on both backends. Fix: the fallback skips a certified infeasible or unbounded
+  result, and the verifier refuses a non-integral integer column.
+- *Empty integer box with no rows.* Nothing rounded the box, and `=rust` raised
+  `MILP-BB returned an infeasible point`. The tightening pass now proves infeasibility when an
+  integer column's box holds no integer within the 1e-5 integrality tolerance. Fires on 0 of
+  the 66 in-repo `.nl` files.
+- *passModel crashes.* `kError` (row side at the 1e20 sentinel, 124 saved instances) and
+  `kWarning` (HiGHS dropped |a| ≤ 1e-9, 47) raised `RuntimeError` out of `Model.solve`. Now:
+  `kError` is an `error` result; on `kWarning` the model is re-passed at
+  `small_matrix_value=1e-12`. Setting 1e-12 unconditionally was tried first and **falsified**:
+  it turned netlib klein1 from a proved infeasible into `kUnknown`, so the option moves
+  HiGHS's numerics beyond the drop threshold. A MILP still perturbed at 1e-12 is `error`
+  (its label and tree bound cannot be re-derived); an LP continues, since every LP
+  certificate is re-verified against the unperturbed form.
+
+Not defects, after checking: oracle rounding and near-parallel-row mismatches (x residual
+≤ 1e-8, rust agrees), two integrality cases inside the 1e-5 tolerance, and `lb > ub` refused
+loudly at model build. Weak but honest, left as is: `error` where HiGHS rejects a 1e20-scale
+right-hand side, and MILP `kSolveError` inside HiGHS
+(`HighsMipSolverData::transformNewIntegerFeasibleSolution`).

@@ -27,10 +27,11 @@ class TestSumProdOverIndexedContainer:
         assert r.objective == pytest.approx(3.0, abs=1e-5)
 
     def test_sum_indexed_var_equals_sum_flat(self):
-        # The two arms take DIFFERENT engine paths — `dm.sum(y.flat)` classifies
-        # linear and goes to lp_pounce, `dm.sum(y)` on the bare container goes to
-        # the general NLP path — so this is a real cross-path invariant and the
-        # tight 1e-9 bound is worth keeping.
+        # The two arms build the objective through DIFFERENT expression forms —
+        # `dm.sum(y.flat)` and `dm.sum(y)` on the bare container. Both are now pure
+        # LPs taken by the #1229 HiGHS route (before it, the bare container went to
+        # the GP log-space NLP, which answers only to IPM accuracy), so this is a
+        # cross-form invariant and the tight 1e-9 bound is worth keeping.
         #
         # It once passed for the WRONG reason: both paths returned points ~7.5e-9
         # BELOW lb=1 (Ipopt's bound_relax_factor), so both objectives were 2.25e-8
