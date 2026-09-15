@@ -1,4 +1,4 @@
-"""Tests for discopt.nn formulations, readers, and predictor API.
+"""Tests for discopt.ml formulations, readers, and predictor API.
 
 Covers NNFormulation (full_space, relu_bigm, reduced_space), TreeFormulation,
 reader modules (sklearn, torch, onnx), and the add_predictor convenience API.
@@ -13,11 +13,11 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import pytest
-from discopt.nn.bounds import LayerBounds, propagate_bounds
-from discopt.nn.formulations.base import NNFormulation, TreeFormulation
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.scaling import OffsetScaling
-from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
+from discopt.ml.bounds import LayerBounds, propagate_bounds
+from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.scaling import OffsetScaling
+from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
 
 # ---------------------------------------------------------------------------
 # Helpers: small synthetic networks and trees
@@ -402,7 +402,7 @@ class TestBoundPropagationMultiLayer:
 class TestAddPredictor:
     def test_with_network_definition(self):
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         net = _make_relu_net()
         m = dm.Model("pred_net")
@@ -413,7 +413,7 @@ class TestAddPredictor:
 
     def test_with_network_definition_custom_method(self):
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         net = _make_tanh_net()
         m = dm.Model("pred_custom")
@@ -423,7 +423,7 @@ class TestAddPredictor:
 
     def test_with_tree_ensemble(self):
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         ens = _make_tree_ensemble()
         m = dm.Model("pred_tree")
@@ -434,7 +434,7 @@ class TestAddPredictor:
 
     def test_unsupported_predictor_raises(self):
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         m = dm.Model("pred_bad")
         x = m.continuous("x", shape=(2,))
@@ -444,7 +444,7 @@ class TestAddPredictor:
     def test_auto_selects_relu_bigm(self):
         """Auto method should pick relu_bigm for networks with ReLU."""
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         net = _make_relu_net()
         m = dm.Model("pred_auto_relu")
@@ -455,7 +455,7 @@ class TestAddPredictor:
     def test_auto_selects_full_space_for_smooth(self):
         """Auto method should pick full_space for smooth activations."""
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         net = _make_sigmoid_net()
         m = dm.Model("pred_auto_smooth")
@@ -466,7 +466,7 @@ class TestAddPredictor:
     def test_input_bounds_override(self):
         """add_predictor should accept input_bounds override."""
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         net = _make_linear_net(with_bounds=False)
         m = dm.Model("pred_bounds")
@@ -487,7 +487,7 @@ class TestSklearnReader:
         pytest.importorskip("sklearn")
 
     def test_load_mlp_regressor(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_mlp
+        from discopt.ml.readers.sklearn_reader import load_sklearn_mlp
         from sklearn.neural_network import MLPRegressor
 
         rng = np.random.RandomState(0)
@@ -504,7 +504,7 @@ class TestSklearnReader:
     def test_mlp_formulate(self):
         """Converted sklearn MLP can be formulated."""
         import discopt.modeling as dm
-        from discopt.nn.readers.sklearn_reader import load_sklearn_mlp
+        from discopt.ml.readers.sklearn_reader import load_sklearn_mlp
         from sklearn.neural_network import MLPRegressor
 
         rng = np.random.RandomState(0)
@@ -520,7 +520,7 @@ class TestSklearnReader:
         assert nn.inputs is not None
 
     def test_load_decision_tree(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_tree
+        from discopt.ml.readers.sklearn_reader import load_sklearn_tree
         from sklearn.tree import DecisionTreeRegressor
 
         rng = np.random.RandomState(0)
@@ -535,7 +535,7 @@ class TestSklearnReader:
         assert len(ens.trees) == 1
 
     def test_load_gradient_boosting(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble
+        from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble
         from sklearn.ensemble import GradientBoostingRegressor
 
         rng = np.random.RandomState(0)
@@ -550,7 +550,7 @@ class TestSklearnReader:
         assert ens.base_score != 0.0
 
     def test_load_random_forest(self):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble
+        from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble
         from sklearn.ensemble import RandomForestRegressor
 
         rng = np.random.RandomState(0)
@@ -566,7 +566,7 @@ class TestSklearnReader:
     def test_add_predictor_with_sklearn_mlp(self):
         """add_predictor auto-detects sklearn MLP."""
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
         from sklearn.neural_network import MLPRegressor
 
         rng = np.random.RandomState(0)
@@ -584,7 +584,7 @@ class TestSklearnReader:
     def test_add_predictor_with_sklearn_tree(self):
         """add_predictor auto-detects sklearn DecisionTree."""
         import discopt.modeling as dm
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
         from sklearn.tree import DecisionTreeRegressor
 
         rng = np.random.RandomState(0)
@@ -612,7 +612,7 @@ class TestTorchReader:
 
     def test_load_sequential(self):
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         model = nn.Sequential(
             nn.Linear(2, 4),
@@ -628,7 +628,7 @@ class TestTorchReader:
         """Converted torch model can be formulated."""
         import discopt.modeling as dm
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         model = nn.Sequential(
             nn.Linear(2, 3),
@@ -643,7 +643,7 @@ class TestTorchReader:
 
     def test_sigmoid_activation(self):
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         model = nn.Sequential(
             nn.Linear(2, 3),
@@ -657,7 +657,7 @@ class TestTorchReader:
     def test_trailing_linear(self):
         """Model ending in Linear (no activation) gets LINEAR activation."""
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         model = nn.Sequential(nn.Linear(3, 2))
         net = load_torch_sequential(model)
@@ -666,7 +666,7 @@ class TestTorchReader:
 
     def test_unsupported_layer_raises(self):
         import torch.nn as nn
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         model = nn.Sequential(nn.Linear(2, 3), nn.GELU(), nn.Linear(3, 1))
         with pytest.raises(ValueError, match="Unsupported layer type"):
@@ -676,7 +676,7 @@ class TestTorchReader:
         """add_predictor auto-detects torch Sequential."""
         import discopt.modeling as dm
         import torch.nn as nn
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
 
         model = nn.Sequential(nn.Linear(2, 3), nn.ReLU(), nn.Linear(3, 1))
         m = dm.Model("torch_pred")
@@ -699,7 +699,7 @@ class TestOnnxReader:
     def test_load_simple_onnx(self, tmp_path):
         """Create a minimal ONNX model and load it."""
         import onnx
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         # Build a single Gemm node: y = x @ W + b
@@ -727,7 +727,7 @@ class TestOnnxReader:
     def test_onnx_with_relu(self, tmp_path):
         """ONNX model with Gemm + Relu activation."""
         import onnx
-        from discopt.nn.readers.onnx_reader import load_onnx
+        from discopt.ml.readers.onnx_reader import load_onnx
         from onnx import TensorProto, helper, numpy_helper
 
         W = np.array([[1.0], [1.0]], dtype=np.float32)
@@ -756,7 +756,7 @@ class TestOnnxReader:
         """add_predictor accepts a file path to an ONNX model."""
         import discopt.modeling as dm
         import onnx
-        from discopt.nn.predictor import add_predictor
+        from discopt.ml.predictor import add_predictor
         from onnx import TensorProto, helper, numpy_helper
 
         W = np.array([[1.0], [1.0]], dtype=np.float32)

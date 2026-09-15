@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
-from discopt.nn.scaling import OffsetScaling
-from discopt.nn.tree import TreeEnsembleDefinition
+from discopt.ml.scaling import OffsetScaling
+from discopt.ml.tree import TreeEnsembleDefinition
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable

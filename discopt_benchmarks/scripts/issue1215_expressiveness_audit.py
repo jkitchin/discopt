@@ -107,7 +107,7 @@ def f_gdp():
 
 
 def _net(activation: str):
-    from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
     rng = np.random.default_rng(0)
     return NetworkDefinition(
@@ -128,7 +128,7 @@ def _net(activation: str):
 
 
 def _nn(method: str, activation: str):
-    from discopt.nn.predictor import add_predictor
+    from discopt.ml.predictor import add_predictor
 
     m = Model()
     x = m.continuous("x", shape=(2,), lb=-1, ub=1)

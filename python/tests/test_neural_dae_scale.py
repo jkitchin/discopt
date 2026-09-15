@@ -15,8 +15,8 @@ thresholds.
 import numpy as np
 import pytest
 from discopt.dae import Trajectory, fit_trajectories
+from discopt.ml import TrainableNetwork, train
 from discopt.modeling import Model
-from discopt.nn import TrainableNetwork, train
 
 pytestmark = pytest.mark.slow
 

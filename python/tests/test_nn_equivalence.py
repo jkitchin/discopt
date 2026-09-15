@@ -1,6 +1,6 @@
 """Equivalence-test harness for embedded NN / tree predictors (task T-N0.1).
 
-The product of ``discopt.nn`` is the equivalence
+The product of ``discopt.ml`` is the equivalence
 ``solve(embedded model) == trained predictor``. This module provides two
 reusable, importable helpers that every later nn-fix regression test builds on:
 
@@ -34,9 +34,9 @@ import itertools
 
 import numpy as np
 import pytest
-from discopt.nn.formulations.base import NNFormulation, TreeFormulation
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
+from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
 
 # ---------------------------------------------------------------------------
 # Reference predictor + input-box helpers

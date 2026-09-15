@@ -30,12 +30,12 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import discopt.modeling as dm
-from discopt.nn.bounds import propagate_bounds
-from discopt.nn.formulations.base import NNFormulation, TreeFormulation
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-from discopt.nn.presolve import NNPresolvePass, tighten_network
-from discopt.nn.scaling import OffsetScaling
-from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
+from discopt.ml.bounds import propagate_bounds
+from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.presolve import NNPresolvePass, tighten_network
+from discopt.ml.scaling import OffsetScaling
+from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
 from test_nn_equivalence import assert_embedding_matches, assert_optimum_matches
 
 _SENTINEL = 9.999e19  # Model.continuous unbounded default magnitude

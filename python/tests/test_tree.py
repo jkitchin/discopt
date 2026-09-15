@@ -12,7 +12,7 @@ import pytest
 
 def _simple_tree():
     """A 2-feature tree: if x[0] <= 0.5 -> 1.0, else 2.0."""
-    from discopt.nn.tree import DecisionTree
+    from discopt.ml.tree import DecisionTree
 
     return DecisionTree(
         n_features=2,
@@ -33,7 +33,7 @@ def _deeper_tree():
     Node 3: leaf, value=3.0
     Node 4: leaf, value=5.0
     """
-    from discopt.nn.tree import DecisionTree
+    from discopt.ml.tree import DecisionTree
 
     return DecisionTree(
         n_features=2,
@@ -85,7 +85,7 @@ class TestDecisionTree:
         assert tree.leaf_ancestors(4) == [(0, "right"), (2, "right")]
 
     def test_validation(self):
-        from discopt.nn.tree import DecisionTree
+        from discopt.ml.tree import DecisionTree
 
         with pytest.raises(ValueError):
             DecisionTree(
@@ -100,14 +100,14 @@ class TestDecisionTree:
 
 class TestTreeEnsembleDefinition:
     def test_predict_single_tree(self):
-        from discopt.nn.tree import TreeEnsembleDefinition
+        from discopt.ml.tree import TreeEnsembleDefinition
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(trees=[tree], n_features=2)
         assert ens.predict(np.array([0.3, 0.0])) == 1.0
 
     def test_predict_two_trees(self):
-        from discopt.nn.tree import TreeEnsembleDefinition
+        from discopt.ml.tree import TreeEnsembleDefinition
 
         t1 = _simple_tree()
         t2 = _simple_tree()
@@ -116,7 +116,7 @@ class TestTreeEnsembleDefinition:
         assert ens.predict(np.array([0.3, 0.0])) == 2.0
 
     def test_base_score(self):
-        from discopt.nn.tree import TreeEnsembleDefinition
+        from discopt.ml.tree import TreeEnsembleDefinition
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(trees=[tree], n_features=2, base_score=10.0)
@@ -133,7 +133,7 @@ class TestTreeEnsembleFormulation:
     def test_single_tree_fixed_input(self):
         """Fix input to left branch, verify leaf value."""
         import discopt.modeling as dm
-        from discopt.nn import TreeEnsembleDefinition, TreeFormulation
+        from discopt.ml import TreeEnsembleDefinition, TreeFormulation
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(
@@ -158,7 +158,7 @@ class TestTreeEnsembleFormulation:
     def test_single_tree_optimize(self):
         """Minimize over a tree should select the leaf with minimum value."""
         import discopt.modeling as dm
-        from discopt.nn import TreeEnsembleDefinition, TreeFormulation
+        from discopt.ml import TreeEnsembleDefinition, TreeFormulation
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(
@@ -180,7 +180,7 @@ class TestTreeEnsembleFormulation:
     def test_two_tree_ensemble(self):
         """Ensemble of 2 trees, verify output matches predict()."""
         import discopt.modeling as dm
-        from discopt.nn import TreeEnsembleDefinition, TreeFormulation
+        from discopt.ml import TreeEnsembleDefinition, TreeFormulation
 
         t1 = _simple_tree()
         t2 = _deeper_tree()
@@ -206,7 +206,7 @@ class TestTreeEnsembleFormulation:
         np.testing.assert_allclose(result.objective, expected, atol=1e-4)
 
     def test_requires_input_bounds(self):
-        from discopt.nn import TreeEnsembleDefinition, TreeFormulation
+        from discopt.ml import TreeEnsembleDefinition, TreeFormulation
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(trees=[tree], n_features=2)
@@ -226,8 +226,8 @@ class TestTreeEnsembleFormulation:
 class TestAddPredictor:
     def test_auto_detect_network(self):
         import discopt.modeling as dm
-        from discopt.nn import NetworkDefinition, add_predictor
-        from discopt.nn.network import Activation, DenseLayer
+        from discopt.ml import NetworkDefinition, add_predictor
+        from discopt.ml.network import Activation, DenseLayer
 
         W = np.array([[1.0], [-1.0]], dtype=np.float64)
         b = np.array([0.0], dtype=np.float64)
@@ -244,7 +244,7 @@ class TestAddPredictor:
 
     def test_auto_detect_tree(self):
         import discopt.modeling as dm
-        from discopt.nn import TreeEnsembleDefinition, add_predictor
+        from discopt.ml import TreeEnsembleDefinition, add_predictor
 
         tree = _simple_tree()
         ens = TreeEnsembleDefinition(
@@ -261,7 +261,7 @@ class TestAddPredictor:
 
     def test_unknown_type_raises(self):
         import discopt.modeling as dm
-        from discopt.nn import add_predictor
+        from discopt.ml import add_predictor
 
         m = dm.Model("ap_bad")
         x = m.continuous("x", shape=(1,), lb=0, ub=1)
@@ -281,7 +281,7 @@ class TestSklearnReaders:
         pytest.importorskip("sklearn")
 
     def test_load_decision_tree(self):
-        from discopt.nn import load_sklearn_tree
+        from discopt.ml import load_sklearn_tree
         from sklearn.tree import DecisionTreeRegressor
 
         X = np.array([[0.0], [0.5], [1.0]])
@@ -299,7 +299,7 @@ class TestSklearnReaders:
             np.testing.assert_allclose(ens.predict(x), dt.predict(x.reshape(1, -1))[0], atol=1e-10)
 
     def test_load_gradient_boosting(self):
-        from discopt.nn import load_sklearn_ensemble
+        from discopt.ml import load_sklearn_ensemble
         from sklearn.ensemble import GradientBoostingRegressor
 
         rng = np.random.RandomState(42)
@@ -318,7 +318,7 @@ class TestSklearnReaders:
             np.testing.assert_allclose(ens.predict(x), gbr.predict(x.reshape(1, -1))[0], atol=1e-6)
 
     def test_load_sklearn_mlp(self):
-        from discopt.nn import load_sklearn_mlp
+        from discopt.ml import load_sklearn_mlp
         from sklearn.neural_network import MLPRegressor
 
         rng = np.random.RandomState(0)
@@ -344,7 +344,7 @@ class TestSklearnReaders:
     def test_sklearn_tree_milp_roundtrip(self):
         """Train sklearn tree, embed in discopt, solve, verify."""
         import discopt.modeling as dm
-        from discopt.nn import TreeFormulation, load_sklearn_tree
+        from discopt.ml import TreeFormulation, load_sklearn_tree
         from sklearn.tree import DecisionTreeRegressor
 
         X = np.array([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])

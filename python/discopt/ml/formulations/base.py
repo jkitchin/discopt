@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Union
 
-from discopt.nn.formulations.full_space import FullSpaceFormulation
-from discopt.nn.formulations.reduced_space import ReducedSpaceFormulation
-from discopt.nn.formulations.relu_bigm import ReluBigMFormulation
-from discopt.nn.network import NetworkDefinition
-from discopt.nn.scaling import OffsetScaling
-from discopt.nn.tree import TreeEnsembleDefinition
+from discopt.ml.formulations.full_space import FullSpaceFormulation
+from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
+from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml.network import NetworkDefinition
+from discopt.ml.scaling import OffsetScaling
+from discopt.ml.tree import TreeEnsembleDefinition
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
@@ -164,7 +164,7 @@ class TreeFormulation:
         if self._formulated:
             raise RuntimeError("formulate() has already been called")
 
-        from discopt.nn.formulations.tree_ensemble import TreeEnsembleFormulation
+        from discopt.ml.formulations.tree_ensemble import TreeEnsembleFormulation
 
         strategy = TreeEnsembleFormulation(
             self._model, self._ensemble, self._prefix, self._scaling, self._split_eps

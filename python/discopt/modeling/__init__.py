@@ -28,6 +28,7 @@ from discopt.modeling.core import (
     Constraint,
     # Opaque AD-only user function node (for isinstance checks)
     CustomCall,
+    DiscontinuousIntrinsicError,
     Disjunct,
     # Disjunction semantics (issue #1124)
     DisjunctionSemantics,
@@ -55,6 +56,7 @@ from discopt.modeling.core import (
     atleast,
     atmost,
     bulk_construction_gc,
+    ceil,
     concatenate,
     cos,
     cosh,
@@ -63,6 +65,7 @@ from discopt.modeling.core import (
     exactly,
     # Mathematical functions
     exp,
+    floor,
     from_description,
     from_gams,
     from_nl,
@@ -81,6 +84,7 @@ from discopt.modeling.core import (
     minimum,
     norm,
     prod,
+    round_,
     sigmoid,
     sign,
     sin,
@@ -92,6 +96,7 @@ from discopt.modeling.core import (
     sum,
     tan,
     tanh,
+    trunc,
     udf,
 )
 from discopt.modeling.core import (
@@ -108,6 +113,7 @@ from discopt.modeling.indexed import (
     Skip,
 )
 from discopt.modeling.sets import ProductSet, RangeSet, Set
+from discopt.serialize import dumps, load, loads
 
 __all__ = [
     "Model",
@@ -138,6 +144,14 @@ __all__ = [
     "sigmoid",
     "sign",
     "softplus",
+    # Recognised but unimplemented discontinuous intrinsics: these are
+    # exported so the refusal is explicit and documented (issue #1237).
+    # Calling one raises DiscontinuousIntrinsicError.
+    "floor",
+    "ceil",
+    "round_",
+    "trunc",
+    "DiscontinuousIntrinsicError",
     "minimum",
     "maximum",
     "if_else",
@@ -161,6 +175,9 @@ __all__ = [
     "from_pyomo",
     "from_nl",
     "from_gams",
+    "load",
+    "loads",
+    "dumps",
     "from_description",
     "BooleanVar",
     "BooleanVarArray",

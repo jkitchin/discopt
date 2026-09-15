@@ -1,0 +1,133 @@
+"""Machine-learning model embedding and training for discopt optimization models.
+
+The module covers the ML predictor families discopt can put *inside* a model —
+feedforward networks, decision trees and tree ensembles, and any object meeting
+the :class:`Surrogate` protocol (a Gaussian-process mean, a kernel expansion, a
+soft tree, a fixed-structure symbolic formula). Networks are the best-known
+case, not the only one; ``discopt.nn`` is a deprecated alias for this package.
+
+It spans two regimes of one hybrid-model story:
+
+- **Frozen** (``NetworkDefinition`` / ``TreeEnsembleDefinition`` +
+  ``NNFormulation`` / :func:`add_predictor`): embed a *trained* predictor as
+  algebraic constraints and optimize *over* it — its weights are constants —
+  with global optimality guarantees.
+- **Trainable** (:mod:`discopt.ml.trainable`: ``TrainableNetwork``,
+  ``TrainableDense``, ``TrainableKernelExpansion``, :func:`train`): the surrogate's
+  weights are decision ``Variable`` objects, so it can be *trained* jointly with a
+  physics model (e.g. a neural rate law inside a collocation DAE). Trained weights
+  bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
+  ``from_definition()`` — train, freeze, then optimize.
+
+The trainable regime is open: any object satisfying the :class:`Surrogate`
+protocol (a callable ``__call__(x) -> expression`` plus ``parameters`` /
+``n_parameters`` / ``l2_penalty`` / ``initial_values``) plugs into the hybrid
+pipeline, so custom surrogates — a Gaussian-process mean, a soft decision tree, a
+fixed-structure symbolic formula whose constants are trained in the NLP — work
+without new framework code. See :mod:`discopt.ml.surrogate`.
+
+Example (frozen)
+----------------
+>>> import discopt.modeling as dm
+>>> from discopt.ml import NNFormulation, NetworkDefinition, DenseLayer, Activation
+>>>
+>>> m = dm.Model("nn_opt")
+>>> net = NetworkDefinition([
+...     DenseLayer(W1, b1, Activation.RELU),
+...     DenseLayer(W2, b2, Activation.LINEAR),
+... ], input_bounds=(lb, ub))
+>>>
+>>> nn = NNFormulation(m, net, strategy="relu_bigm")
+>>> nn.formulate()
+>>> m.minimize(dm.sum(nn.outputs))
+>>> m.subject_to(nn.inputs[0] >= 1.0)
+>>> result = m.solve()
+"""
+
+from discopt.ml.bounds import LayerBounds, propagate_bounds
+from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+from discopt.ml.presolve import (
+    DeadReluLayer,
+    NNPresolvePass,
+    NNPresolveResult,
+    detect_dead_relus,
+    tighten_network,
+)
+from discopt.ml.scaling import OffsetScaling
+from discopt.ml.surrogate import Surrogate
+from discopt.ml.trainable import (
+    TrainableDense,
+    TrainableKernelExpansion,
+    TrainableNetwork,
+    train,
+)
+from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
+
+__all__ = [
+    "Activation",
+    "DeadReluLayer",
+    "DecisionTree",
+    "DenseLayer",
+    "LayerBounds",
+    "NNFormulation",
+    "NNPresolvePass",
+    "NNPresolveResult",
+    "NetworkDefinition",
+    "OffsetScaling",
+    "Surrogate",
+    "TrainableDense",
+    "TrainableKernelExpansion",
+    "TrainableNetwork",
+    "TreeEnsembleDefinition",
+    "TreeFormulation",
+    "detect_dead_relus",
+    "propagate_bounds",
+    "tighten_network",
+    "train",
+]
+
+
+# Lazy imports for optional dependencies
+
+
+def load_onnx(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Load an ONNX model. Requires ``pip install discopt[nn]``."""
+    from discopt.ml.readers.onnx_reader import load_onnx as _load_onnx
+
+    return _load_onnx(*args, **kwargs)
+
+
+def load_sklearn_mlp(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Load sklearn MLPRegressor/Classifier. Requires scikit-learn."""
+    from discopt.ml.readers.sklearn_reader import load_sklearn_mlp as _f
+
+    return _f(*args, **kwargs)
+
+
+def load_sklearn_tree(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Load sklearn DecisionTree. Requires scikit-learn."""
+    from discopt.ml.readers.sklearn_reader import load_sklearn_tree as _f
+
+    return _f(*args, **kwargs)
+
+
+def load_sklearn_ensemble(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Load sklearn ensemble (GBR, RF). Requires scikit-learn."""
+    from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble as _f
+
+    return _f(*args, **kwargs)
+
+
+def load_torch_sequential(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Load torch.nn.Sequential. Requires PyTorch."""
+    from discopt.ml.readers.torch_reader import load_torch_sequential as _f
+
+    return _f(*args, **kwargs)
+
+
+def add_predictor(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Embed a trained ML model as constraints. See :func:`discopt.ml.predictor.add_predictor`."""
+    from discopt.ml.predictor import add_predictor as _f
+
+    return _f(*args, **kwargs)

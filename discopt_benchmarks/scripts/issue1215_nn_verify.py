@@ -48,10 +48,10 @@ import numpy as np
 from discopt._rust import model_to_repr
 from discopt.export import to_gams, to_lp, to_nl
 from discopt.modeling import Model
-from discopt.nn import DenseLayer, NetworkDefinition, OffsetScaling
-from discopt.nn.formulations.full_space import FullSpaceFormulation
-from discopt.nn.formulations.reduced_space import ReducedSpaceFormulation
-from discopt.nn.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml import DenseLayer, NetworkDefinition, OffsetScaling
+from discopt.ml.formulations.full_space import FullSpaceFormulation
+from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
+from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
 
 METHOD, OUT = sys.argv[1], sys.argv[2]
 pathlib.Path(OUT).write_text("")

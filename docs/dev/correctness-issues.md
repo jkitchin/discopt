@@ -763,6 +763,47 @@ would need IR + relaxation work — out of scope here; the fix is the refusal.)
   (`test_adversarial_recent_fixes.py`) 10 passed; all 61 corpus files still parse.
 - Regression tests named above are committed and fast (sub-millisecond, direct
   `parse_nl` calls; no `Model.solve()`).
+- 2026-09-15 — **Two sibling doorways found open and closed** (issue #1237). The
+  C-5 refusal covered the `.nl` parser only; the same names reached the IR by two
+  other routes.
+  (a) **GAMS import.** `gams_parser._map_func` fell through to
+  `FunctionCall(fn, *args)` for every name in `_GAMS_FUNCS` it had no mapping for
+  — `ceil`, `floor`, `round`, `mod`, `uniform`, `normal`. Measured before the fix:
+  `from_gams` on a model whose equation body contains `ceil(x)` **succeeded**, and
+  the failure surfaced only mid-solve as `ValueError: Unknown function: 'ceil'`,
+  *after* the incumbent-verification snapshot had failed and printed
+  "the false-primal guard is disabled for this solve" — the exact failure mode
+  `serialize._known_funcs` documents for the deserialization doorway, which had
+  already been fixed there. Now refused at the boundary with a message naming the
+  function. Literal-argument calls (`ceil(2.3)` inside an equation body) are
+  constant-folded first and still import: only *endogenous* uses are refused.
+  (b) **Python modeling API.** `dm.floor` / `dm.ceil` did not exist at all, so the
+  only signal was `AttributeError`, indistinguishable from a forgotten export.
+  Now exported as shims raising `DiscontinuousIntrinsicError(NotImplementedError)`
+  with the reformulation recipe.
+  The registry `core._UNREPRESENTABLE_INTRINSICS` is now the single source of
+  truth (floor/ceil/round/trunc/intdiv) and `FunctionCall.__init__` enforces it, so
+  these names cannot enter the IR through *any* doorway; a test asserts the
+  registry stays a subset of `nl_parser.rs`'s `UnsupportedOpcode` names so the two
+  lists cannot drift. Still no IR/relaxation support — the fix remains the refusal.
+  Two further doorways were found in the same sweep and closed with it: the GAMS
+  **link** (`gams/instructions.py`) already refused these, but from its own
+  hand-maintained `_DISCONTINUOUS` set — now derived from the core registry, which
+  is how the parser had drifted; and the GAMS **writer** (`export/gams.py`) passed
+  any unmapped function name straight through, writing `FunctionCall("mod", y)` as
+  the arity-invalid `mod(y)` and reporting success. Four hand-maintained copies of
+  this list existed; there is now one.
+  Entry experiment for #1237 (whether the corpus justifies real support):
+  **0 endogenous floor/ceil across 6,380 instance files** — 6,221 JuMP models from
+  MINLPLib.jl (`lanl-ansi/MINLPLib.jl`, which carries the 1,513 MINLPLib2
+  instances), 153 `.nl` scanned for o13/o14, and 6 `.gms`; 884,764 executed checks.
+  The probe carries a positive control (779,084 `exp`/`log`/`sqrt` hits over the
+  same files) and exits non-zero if that control is empty, so the zero is a
+  measurement rather than a scanner that read nothing. The `.gms` snapshot named
+  in CLAUDE.md was not mounted and `www.minlplib.org` is denied by the network
+  policy, so MINLPLib.jl's JuMP translation stands in for it; o13/o14 and JuMP's
+  nonlinear macros both represent endogenous floor/ceil, so an instance using one
+  would have shown up rather than been dropped.
 
 ---
 
@@ -1699,8 +1740,8 @@ parser module header; standing gates pass.
 
 ## C-25 (P1, FIXED) — Embedded-NN scaling propagates bounds in the wrong (unscaled) domain → infeasible or true optimum cut
 
-**Area:** `python/discopt/nn/formulations/full_space.py:72`,
-`python/discopt/nn/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
+**Area:** `python/discopt/ml/formulations/full_space.py:72`,
+`python/discopt/ml/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
 `net.input_bounds` (the user/unscaled domain — those bounds are applied to the
 unscaled `inputs` var) while layer 1 actually consumes
 `scaled_in = (inputs − x_offset)/x_factor`. Every `zhat`/`z` variable bound and
@@ -1762,7 +1803,7 @@ No behavior change when scaling is None/identity.
 
 ## C-26 (P1, FIXED) — Tree-ensemble big-M is invalid for thresholds outside the declared feature box → cuts feasible points
 
-**Area:** `python/discopt/nn/formulations/tree_ensemble.py:79,98-111`. The per-leaf
+**Area:** `python/discopt/ml/formulations/tree_ensemble.py:79,98-111`. The per-leaf
 constraints use `M_j = ub_j − lb_j`, which keeps a non-selected leaf's constraint
 inert only when `lb_j ≤ thr ≤ ub_j − eps`.
 **Reachability:** default path for any embedded tree ensemble whose optimization
@@ -1817,7 +1858,7 @@ when selected, and are strictly tighter LP relaxations. Drop the unused
 
 ## C-27 (P2) — ONNX reader silently mis-reads Gemm attributes, residual Adds, and branched graphs
 
-**Area:** `python/discopt/nn/readers/onnx_reader.py`. (a) Gemm `alpha`/`beta`/
+**Area:** `python/discopt/ml/readers/onnx_reader.py`. (a) Gemm `alpha`/`beta`/
 `transA` ignored (`:104-121`); (b) a `MatMul → Add` where the `Add` is not an
 initializer (e.g. a residual connection) is consumed and zero biases substituted
 (`:74-79`); (c) no dataflow verification — a branched graph of individually
@@ -1873,7 +1914,7 @@ residual-Add-as-zero-bias path).
 
 ## C-28 (P2) — sklearn classifier readers silently embed logits / wrong base_score
 
-**Area:** `python/discopt/nn/readers/sklearn_reader.py`. `load_sklearn_mlp`
+**Area:** `python/discopt/ml/readers/sklearn_reader.py`. `load_sklearn_mlp`
 ignores `model.out_activation_`, so an `MLPClassifier` embeds pre-activation
 logits while the docstring claims classifier support; `load_sklearn_ensemble` on a
 `GradientBoostingClassifier` reads `base_score` wrong (a classifier's `init_` has

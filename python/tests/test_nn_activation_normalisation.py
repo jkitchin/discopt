@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from discopt.nn.network import Activation, DenseLayer
+from discopt.ml.network import Activation, DenseLayer
 
 pytestmark = pytest.mark.smoke
 
@@ -41,7 +41,7 @@ def test_unknown_activation_names_the_valid_ones():
 def test_smooth_network_with_string_activations_formulates():
     """The end-to-end regression: this used to raise ``AttributeError``."""
     import discopt.modeling as dm
-    from discopt.nn import NetworkDefinition, add_predictor
+    from discopt.ml import NetworkDefinition, add_predictor
 
     m = dm.Model("nn")
     x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
@@ -60,7 +60,7 @@ def test_smooth_network_with_string_activations_formulates():
 def test_unsupported_activation_reports_a_message_not_an_attribute_error():
     """ReLU is genuinely unsupported by the smooth formulation -- say so clearly."""
     import discopt.modeling as dm
-    from discopt.nn import NetworkDefinition, add_predictor
+    from discopt.ml import NetworkDefinition, add_predictor
 
     m = dm.Model("nn_relu")
     x = m.continuous("x", shape=(2,), lb=0.0, ub=1.0)

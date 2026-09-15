@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from discopt.nn.network import Activation, NetworkDefinition
+from discopt.ml.network import Activation, NetworkDefinition
 
 # Sentinel "unbounded" values matching Model.continuous defaults; used when no
 # layer bounds were propagated so downstream vars stay effectively free.
@@ -62,7 +62,7 @@ def propagate_bounds(
         ``(lb, ub)`` box to propagate instead of ``network.input_bounds``. When
         given, layer 1 consumes *this* box; use it to propagate over the domain
         the layers actually see (e.g. the scaled input box when an
-        :class:`~discopt.nn.scaling.OffsetScaling` is applied — see T-N0.2 /
+        :class:`~discopt.ml.scaling.OffsetScaling` is applied — see T-N0.2 /
         finding F1). Defaults to ``network.input_bounds`` (behavior-preserving).
 
     Returns

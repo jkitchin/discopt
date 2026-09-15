@@ -29,7 +29,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust B&B kernel / TreeManager
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt {cite:p}`Wachter2006`, AMP, the MIP-NLP decomposition family, GDPopt-LOA, the derivative-free backends, and an optional Gurobi backend. highspy is used only on the OA/GDP paths.
 
-**Neural network embedding** (`python/discopt/nn`): embeds trained feedforward networks as algebraic MINLP constraints {cite:p}`Ceccon2022` via full-space (smooth activations), ReLU big-M MILP {cite:p}`Anderson2020`, and reduced-space strategies; interval arithmetic bound propagation; ONNX model import.
+**ML model embedding** (`python/discopt/ml`): embeds trained ML predictors as algebraic MINLP constraints {cite:p}`Ceccon2022` — feedforward networks via full-space (smooth activations), ReLU big-M MILP {cite:p}`Anderson2020`, and reduced-space strategies, and decision trees/ensembles via a per-leaf MILP encoding {cite:p}`Misic2020`; interval arithmetic bound propagation; ONNX, scikit-learn and PyTorch model import. (Imported as `discopt.nn` before 0.8.1; that name still works as a deprecated alias.)
 
 **Generalized disjunctive programming** (`python/discopt/_relax/gdp_reformulate.py`): reformulates GDP models — `BooleanVar`, propositional logic operators, `either_or()`, `if_then()` — into standard MINLP via big-M, multiple big-M (LP-tightened), convex hull, or Logic-based Outer Approximation.
 

@@ -339,9 +339,9 @@ Three routes, in decreasing order of what they give you:
    (47 nodes / 1.6 s on a 3-coordinate problem), and `dm.udf` is exactly as
    fast as inline primitives because it is a documented pass-through.
 
-2. **A trained network via {mod}`discopt.nn`.** Fitting two tanh networks to
+2. **A trained network via {mod}`discopt.ml`.** Fitting two tanh networks to
    the two surfaces and embedding them with
-   {func}`~discopt.nn.predictor.add_predictor` models the problem correctly and
+   {func}`~discopt.ml.predictor.add_predictor` models the problem correctly and
    returns a good geometry, but does **not** currently certify: two 12×12 nets
    over three coordinates gave a dual bound of −20.6 against an optimum near
    1.6 after 601 s. Useful for the answer, not for the proof.
@@ -370,7 +370,7 @@ open.
 | Same-spin, diabatic representation available | `min (W₁₁+W₂₂)/2 s.t. W₁₁−W₂₂ = 0, W₁₂ = 0` | yes, cheapest |
 | Same-spin, adiabatic energies only | `min T/2 s.t. T² − 4D ≤ 0` | yes, more expensive |
 | A numerical tolerance on the gap | `min W₁ s.t. \|W₁−W₂\| ≤ tol` | yes |
-| A trained-network surrogate | {func}`~discopt.nn.predictor.add_predictor` | no — good answer, no proof |
+| A trained-network surrogate | {func}`~discopt.ml.predictor.add_predictor` | no — good answer, no proof |
 | A true black box | `solver="direct"` on the penalty objective | no, by design |
 | — | the penalty objective in branch-and-bound | **no — do not** |
 | — | free Cartesian coordinates | **no — do not** |

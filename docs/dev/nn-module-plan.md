@@ -1,11 +1,11 @@
-# NN-module remediation plan (`python/discopt/nn/`)
+# NN-module remediation plan (`python/discopt/ml/`)
 
 **Date:** 2026-07-03
 **Status:** proposed (from a full-module review, 2026-07-03: all 17 files ~2,100
 lines + `test_nn_formulations.py` read; wiring claims verified against the
 modeling API and presolve pipeline). Every finding below carries a file:line
 anchor from that review.
-**Scope:** the NN/tree embedding layer only (`python/discopt/nn/`). No solver-core
+**Scope:** the NN/tree embedding layer only (`python/discopt/ml/`). No solver-core
 changes, so the certification-gap-plan baselines (`cert-baseline.jsonl`) are not
 implicated; the ground truth here is *model equivalence* — the embedded
 formulation must agree with the trained predictor it claims to encode.
@@ -323,11 +323,11 @@ each is real scope with no current user; file issues if demand appears.
 
 ### Wave 4 — hygiene (fast follows)
 
-**T-N4.1 —** Remove `python/discopt/nn/readers/onnx_reader.py` from the
+**T-N4.1 —** Remove `python/discopt/ml/readers/onnx_reader.py` from the
 coverage omit list (`pyproject.toml:263`) once T-N1.1's tests exist. If CI does
 not install the `[nn]` extra, add `onnx`/`onnxruntime` to the dev extra first
 (pure-python wheels) — do not leave the omit in place to hide untested code.
-**T-N4.2 —** Update CLAUDE.md's `python/discopt/nn/` paragraph: it omits
+**T-N4.2 —** Update CLAUDE.md's `python/discopt/ml/` paragraph: it omits
 `predictor.py` (`add_predictor`), `tree.py`/`tree_ensemble.py`, `presolve.py`,
 `scaling.py`, and the sklearn/torch readers.
 **T-N4.3 —** File F1–F4 as cards in `docs/dev/correctness-issues.md` (its §0

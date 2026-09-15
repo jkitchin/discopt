@@ -57,6 +57,7 @@ parts:
       - file: notebooks/infeasibility_iis
       - file: notebooks/conflict_analysis
       - file: notebooks/primal_heuristics
+      - file: notebooks/model_derivatives
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features
@@ -69,6 +70,7 @@ parts:
       - file: notebooks/nlp_bb
       - file: notebooks/implicit_function_node
       - file: notebooks/export_formats
+      - file: notebooks/model_serialization
       - file: notebooks/model_representations
       - file: notebooks/pyomo_solver
       - file: pyomo_solver
