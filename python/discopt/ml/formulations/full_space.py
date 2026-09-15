@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
-from discopt.nn.bounds import propagate_bounds, scaled_output_bounds
-from discopt.nn.network import Activation, NetworkDefinition
-from discopt.nn.scaling import OffsetScaling
+from discopt.ml.bounds import propagate_bounds, scaled_output_bounds
+from discopt.ml.network import Activation, NetworkDefinition
+from discopt.ml.scaling import OffsetScaling
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable

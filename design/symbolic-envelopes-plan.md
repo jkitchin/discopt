@@ -173,7 +173,7 @@ soundness.
   (compressor maps — monotone in flow/speed → exact interval image `[g(lb),g(ub)]`;
   AC loss / power-flow surrogates — convex NN → certified convex relaxation;
   thermodynamic property models — monotone in T / convex in composition). Embedded
-  via `discopt.nn`, relaxed *tightly because of* the guaranteed structure.
+  via `discopt.ml`, relaxed *tightly because of* the guaranteed structure.
 - (c) **Certification layer.** Bound worst-case under/over-estimation with the
   outward-rounded interval arithmetic in `_relax/convexity/interval.py` + a Lipschitz
   bound, subtract a sound constant margin (preserving convexity), track the gap.

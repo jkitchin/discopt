@@ -810,7 +810,7 @@ def _force_dead_relu_network():
     (pre-activation always negative on the input box) and neuron 1 is
     dead-active (pre-activation always positive)."""
     import numpy as np
-    from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
     # input shape (2,), output of layer is (3,):
     #   neuron 0: x0 - x1 - 10 ; over [0,1]^2 ⇒ pre ∈ [-12, -9]   ⇒ dead-zero
@@ -832,7 +832,7 @@ def _force_dead_relu_network():
 
 
 def test_d6_detect_dead_relus_classifies_neurons():
-    from discopt.nn.presolve import detect_dead_relus, tighten_network
+    from discopt.ml.presolve import detect_dead_relus, tighten_network
 
     net = _force_dead_relu_network()
     res = tighten_network(net)
@@ -852,8 +852,8 @@ def test_d6_tighten_network_uses_input_box_override():
     activation envelopes must match that tighter box, not the network's
     declared one."""
     import numpy as np
-    from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-    from discopt.nn.presolve import tighten_network
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+    from discopt.ml.presolve import tighten_network
 
     W = np.array([[1.0]], dtype=np.float64)
     b = np.array([0.0], dtype=np.float64)
@@ -883,7 +883,7 @@ def test_d6_nn_presolve_pass_emits_dead_relu_implications():
     network's input layer; check the delta carries dead-relu
     implications for every dead neuron."""
 
-    from discopt.nn.presolve import NNPresolvePass
+    from discopt.ml.presolve import NNPresolvePass
 
     net = _force_dead_relu_network()
 
@@ -906,7 +906,7 @@ def test_d6_nn_presolve_pass_emits_dead_relu_implications():
 def test_d6_nn_presolve_pass_no_block_index_falls_back():
     """Without an input_block_index, the pass uses the network's
     declared input_bounds and still runs to completion."""
-    from discopt.nn.presolve import NNPresolvePass
+    from discopt.ml.presolve import NNPresolvePass
 
     net = _force_dead_relu_network()
 
@@ -926,7 +926,7 @@ def test_d6_nn_presolve_pass_no_block_index_falls_back():
 def test_d6_nn_presolve_pass_block_size_mismatch_falls_back():
     """If the named block's element count doesn't match the network's
     input size, the pass quietly falls back to declared bounds."""
-    from discopt.nn.presolve import NNPresolvePass
+    from discopt.ml.presolve import NNPresolvePass
 
     net = _force_dead_relu_network()  # input_size = 2
 
@@ -946,8 +946,8 @@ def test_d6_nn_presolve_pass_no_dead_relus_is_clean():
     """A network with all-live ReLUs over its input box yields a delta
     with zero implications and zero dead count."""
     import numpy as np
-    from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
-    from discopt.nn.presolve import NNPresolvePass
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+    from discopt.ml.presolve import NNPresolvePass
 
     # pre = x0 + x1, over [-1, 1]^2 ⇒ pre ∈ [-2, 2] ⇒ live (straddles 0)
     W = np.array([[1.0], [1.0]], dtype=np.float64)

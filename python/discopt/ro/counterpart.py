@@ -22,7 +22,7 @@ Supported uncertainty sets and the corresponding reformulation strategies:
 +----------------------------+------------------------------------------+
 
 The class follows the same builder pattern as
-:class:`~discopt.nn.formulations.base.NNFormulation`: construct, then call
+:class:`~discopt.ml.formulations.base.NNFormulation`: construct, then call
 :meth:`formulate` to mutate the model.
 
 Example

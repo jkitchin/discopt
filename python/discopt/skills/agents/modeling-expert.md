@@ -103,5 +103,5 @@ Prefer tight M; wide M makes LP relaxation loose.
 - **"What relaxation did discopt build for x*y?"** → `convex-relaxation-expert`.
 - **"My GAMS file won't import"** → check `python/discopt/modeling/gams_parser.py`; ask modeling-expert only for discopt-side idioms.
 - **"Differentiate through the optimum"** → `differentiability-expert`.
-- **"Add a neural network as a constraint"** → `nn-embedding-expert`.
+- **"Add a neural network as a constraint"** → `ml-embedding-expert`.
 - **"Formulate robust / multi-objective / DOE"** → `robust-opt-expert` / `multiobjective-expert` / `doe-expert` (the last ships with the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin, not this repo).

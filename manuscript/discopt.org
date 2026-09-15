@@ -167,12 +167,12 @@ The =discopt.dae= module extends the modeling API to dynamic optimization proble
 
 ** Neural Network Embedding
 
-The =discopt.nn= module embeds trained feedforward neural networks as algebraic constraints in MINLP models, enabling optimization over machine learning surrogates with global optimality guarantees. This follows the approach of OMLT cite:&Ceccon2022, adapted to discopt's expression DAG, automatic differentiation, and McCormick relaxation framework.
+The =discopt.ml= module embeds trained feedforward neural networks as algebraic constraints in MINLP models, enabling optimization over machine learning surrogates with global optimality guarantees. This follows the approach of OMLT cite:&Ceccon2022, adapted to discopt's expression DAG, automatic differentiation, and McCormick relaxation framework.
 
 An =NNFormulation= builder (following the same pattern as =DAEBuilder=) takes an existing =Model=, a =NetworkDefinition= describing the trained network's weights, biases, and activation functions, and a formulation strategy, then adds all necessary variables and constraints:
 
 #+BEGIN_SRC python
-from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation
+from discopt.ml import NNFormulation, NetworkDefinition, DenseLayer, Activation
 
 net = NetworkDefinition([
     DenseLayer(W1, b1, Activation.RELU),
@@ -984,7 +984,7 @@ Earlier revisions of this table were taken before the =.nl= import path carried 
 
 ** Neural Network Embedding Validation
 
-We validate the =discopt.nn= module on feedforward networks with ReLU and smooth activations. A representative 2-input, 4-hidden, 1-output network demonstrates the three formulation strategies:
+We validate the =discopt.ml= module on feedforward networks with ReLU and smooth activations. A representative 2-input, 4-hidden, 1-output network demonstrates the three formulation strategies:
 
 - *ReLU big-M*: 4 binary variables (one per hidden ReLU neuron), 9 continuous variables, 16 linear constraints. Interval arithmetic propagates tight pre-activation bounds, simplifying neurons whose bounds are entirely positive or negative to linear constraints with no binary variable.
 - *Full-space* (tanh): 9 continuous variables, 8 nonlinear activation constraints. McCormick relaxations applied to tanh activation functions provide valid lower bounds within spatial B&B.

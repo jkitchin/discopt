@@ -3,10 +3,10 @@
 A *hybrid model* replaces one unknown term of a physics model (a rate law, a
 transport coefficient, a closure) with a trainable ML surrogate, then trains the
 surrogate's parameters *simultaneously* with the discretized states as one NLP
-(see :mod:`discopt.nn.trainable` and :mod:`discopt.dae.fit`). This module declares
+(see :mod:`discopt.ml.trainable` and :mod:`discopt.dae.fit`). This module declares
 the small, duck-typed contract such a surrogate follows, so *any* object — not
-just the built-in :class:`~discopt.nn.trainable.TrainableNetwork` /
-:class:`~discopt.nn.trainable.TrainableKernelExpansion` — can plug into the
+just the built-in :class:`~discopt.ml.trainable.TrainableNetwork` /
+:class:`~discopt.ml.trainable.TrainableKernelExpansion` — can plug into the
 hybrid pipeline.
 
 The one load-bearing requirement
@@ -23,7 +23,7 @@ is an ordinary discopt expression built from (a) the native **smooth** intrinsic
 (``exp``, ``log``, ``sqrt``, ``sin``/``cos``/``tan``, ``tanh``, ``sigmoid``,
 ``softplus``, ``abs``, ``min``/``max``, ``pow``, ``+ - * / @``) and (b) whatever
 decision :class:`~discopt.modeling.core.Variable` objects you want trained. The
-solver is entirely decoupled from the surrogate: :func:`discopt.nn.train` operates
+solver is entirely decoupled from the surrogate: :func:`discopt.ml.train` operates
 on the assembled ``Model``, and :func:`discopt.dae.fit_trajectories` takes your
 ``rhs`` callable — neither calls the surrogate directly.
 
@@ -50,7 +50,7 @@ polynomials, splines, soft/differentiable decision trees, and any fixed-structur
 symbolic formula (e.g. a symbolic-regression result whose constants are trained
 in the NLP). It excludes non-smooth or discrete structure — ReLU, hard-split
 decision trees, or *searching* a symbolic structure — which belong on the frozen
-path (embed via :func:`discopt.nn.add_predictor`, optimize *over* the model) or in
+path (embed via :func:`discopt.ml.add_predictor`, optimize *over* the model) or in
 an MINLP, not the smooth simultaneous NLP.
 
 Usage

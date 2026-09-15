@@ -1,7 +1,7 @@
 # NN Module Review — Correctness, Robustness, SOTA
 
 **Date:** 2026-07-03
-**Scope:** `python/discopt/nn/` — `network.py`, `bounds.py`, `presolve.py`,
+**Scope:** `python/discopt/ml/` — `network.py`, `bounds.py`, `presolve.py`,
 `formulations/{full_space,reduced_space,relu_bigm,tree_ensemble}.py`,
 `readers/{onnx,sklearn,torch}_reader.py`, `scaling.py`, and tests.
 **Method:** Delegated verification pass with numerical repros; the headline P0

@@ -1,4 +1,4 @@
-"""Tests for the ``Surrogate`` protocol (``discopt.nn.surrogate``).
+"""Tests for the ``Surrogate`` protocol (``discopt.ml.surrogate``).
 
 Verifies that (1) the built-in trainable surrogates conform, (2) conformance is
 structural (a class missing the load-bearing ``__call__`` does not), and (3) the
@@ -12,15 +12,15 @@ the NLP, and checks it recovers the true constants.
 import numpy as np
 import pytest
 from discopt.dae import ContinuousSet, DAEBuilder
-from discopt.modeling import Model
-from discopt.modeling.core import Variable
-from discopt.nn import (
+from discopt.ml import (
     Surrogate,
     TrainableDense,
     TrainableKernelExpansion,
     TrainableNetwork,
     train,
 )
+from discopt.modeling import Model
+from discopt.modeling.core import Variable
 
 TF = 2.0
 CA0, CB0 = 1.0, 0.0
@@ -96,7 +96,7 @@ class RationalRate:
 
     Implements the :class:`Surrogate` protocol with two trainable constants — the
     fixed-structure symbolic form a symbolic-regression search would return, with
-    its constants fit in the NLP. No inheritance from anything in discopt.nn.
+    its constants fit in the NLP. No inheritance from anything in discopt.ml.
     """
 
     def __init__(self, model: Model, *, name: str):

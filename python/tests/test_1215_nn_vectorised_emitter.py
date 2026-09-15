@@ -24,9 +24,9 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt.export import to_lp, to_nl
+from discopt.ml import Activation, DenseLayer, NetworkDefinition, OffsetScaling
+from discopt.ml.formulations.full_space import FullSpaceFormulation, _family_name
 from discopt.modeling import Model
-from discopt.nn import Activation, DenseLayer, NetworkDefinition, OffsetScaling
-from discopt.nn.formulations.full_space import FullSpaceFormulation, _family_name
 
 
 def _net(sizes, act="tanh"):

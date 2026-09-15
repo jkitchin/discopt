@@ -252,7 +252,7 @@ def test_enclosure_contains_sampled_values_of_a_nonlinear_matmul_model():
     """Base contract: every pointwise value in the box lies inside the enclosure.
 
     ``sin(A @ x)`` puts the matmul enclosure underneath a nonlinear atom, which
-    is how ``discopt.nn`` and ``discopt.dae`` models reach this code. The check is
+    is how ``discopt.ml`` and ``discopt.dae`` models reach this code. The check is
     per output element; ``dm.sum`` is deliberately not used, because
     ``SumExpression`` is a separate unreduced-enclosure defect (#1158) that this
     change neither causes nor fixes.

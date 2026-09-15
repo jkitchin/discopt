@@ -12,8 +12,8 @@ Covers the HM2 acceptance criteria from
 import numpy as np
 import pytest
 from discopt.dae import Trajectory, fit_trajectories
+from discopt.ml import TrainableKernelExpansion, train
 from discopt.modeling import Model
-from discopt.nn import TrainableKernelExpansion, train
 from discopt.warm_start import unflatten_solution, validate_initial_solution
 
 TF = 2.0

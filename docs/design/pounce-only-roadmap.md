@@ -150,7 +150,7 @@ cost:
   evaluation — how the Phase 2 "GPU speedup ≥15×" gate was met on pooling).
 - Naturally wide solve waves: OBBT (2n LPs/round), multistart, batched
   strong branching, diving — though these parallelize fine on CPU cores.
-- **NN-embedded MINLP** (`discopt.nn`): dense matmul-dominated relaxations
+- **NN-embedded MINLP** (`discopt.ml`): dense matmul-dominated relaxations
   are genuinely GPU-shaped. If NN-constrained optimization becomes a
   flagship use case, revisit GPU then.
 

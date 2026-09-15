@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Union
 
 import numpy as np
 
-from discopt.nn.formulations.base import NNFormulation, TreeFormulation
-from discopt.nn.network import Activation, NetworkDefinition
-from discopt.nn.tree import TreeEnsembleDefinition
+from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.network import Activation, NetworkDefinition
+from discopt.ml.tree import TreeEnsembleDefinition
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
@@ -189,7 +189,7 @@ def _convert(
         if not p.exists():
             raise FileNotFoundError(f"Predictor file not found: {predictor}")
         if p.suffix == ".onnx":
-            from discopt.nn.readers.onnx_reader import load_onnx
+            from discopt.ml.readers.onnx_reader import load_onnx
 
             return load_onnx(str(predictor), input_bounds=input_bounds)
         raise TypeError(f"Unsupported predictor file format: {predictor}")
@@ -198,25 +198,25 @@ def _convert(
 
     # sklearn MLP
     if hasattr(predictor, "coefs_") and hasattr(predictor, "intercepts_"):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_mlp
+        from discopt.ml.readers.sklearn_reader import load_sklearn_mlp
 
         return load_sklearn_mlp(predictor, input_bounds=input_bounds)
 
     # sklearn single tree
     if hasattr(predictor, "tree_") and not hasattr(predictor, "estimators_"):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_tree
+        from discopt.ml.readers.sklearn_reader import load_sklearn_tree
 
         return load_sklearn_tree(predictor, input_bounds=input_bounds)
 
     # sklearn ensemble (GBR, RF)
     if hasattr(predictor, "estimators_") and hasattr(predictor, "n_features_in_"):
-        from discopt.nn.readers.sklearn_reader import load_sklearn_ensemble
+        from discopt.ml.readers.sklearn_reader import load_sklearn_ensemble
 
         return load_sklearn_ensemble(predictor, input_bounds=input_bounds)
 
     # PyTorch Sequential
     if mod.startswith("torch"):
-        from discopt.nn.readers.torch_reader import load_torch_sequential
+        from discopt.ml.readers.torch_reader import load_torch_sequential
 
         return load_torch_sequential(predictor, input_bounds=input_bounds)
 

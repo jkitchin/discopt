@@ -1,7 +1,7 @@
 """Trainable ML surrogates for hybrid physics+ML models.
 
 This module is the *training* counterpart to the frozen-network embedding in
-:mod:`discopt.nn.formulations`. Where a frozen formulation bakes trained weights
+:mod:`discopt.ml.formulations`. Where a frozen formulation bakes trained weights
 into constraint coefficients (to *optimize over* a fixed surrogate), the classes
 here create the weights as decision ``Variable`` objects and emit ordinary symbolic
 expressions, so a surrogate can be *trained simultaneously* with the rest of a
@@ -11,7 +11,7 @@ neural-DAE approach of Lueg et al., arXiv:2504.04665).
 
 Two regimes, one story:
 
-- **Frozen** (``discopt.nn.formulations`` / :func:`discopt.nn.add_predictor`):
+- **Frozen** (``discopt.ml.formulations`` / :func:`discopt.ml.add_predictor`):
   weights are constants; you optimize inputs/outputs of a fixed net, with global
   optimality guarantees.
 - **Trainable** (this module): weights are ``Variable`` objects; you fit them to data.
@@ -38,8 +38,8 @@ from typing import TYPE_CHECKING, Callable, Union
 import numpy as np
 
 import discopt.modeling as dm
+from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 from discopt.modeling.core import Model, Variable
-from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
 
 if TYPE_CHECKING:
     from discopt.solvers import NLPResult
@@ -71,7 +71,7 @@ def _resolve_activation(activation: Union[str, Activation]) -> Activation:
             "RELU is not supported on the trainable path: it is non-smooth, so a "
             "gradient-based NLP solver oscillates at the kink. Use 'softplus' (a "
             "smooth ReLU surrogate) instead. RELU remains available on the frozen "
-            "path via the big-M formulation (discopt.nn.add_predictor)."
+            "path via the big-M formulation (discopt.ml.add_predictor)."
         )
     if activation not in _SYMBOLIC_ACTIVATIONS:
         raise ValueError(
