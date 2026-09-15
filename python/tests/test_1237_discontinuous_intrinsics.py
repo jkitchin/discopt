@@ -9,7 +9,7 @@ Before this change there were two distinct wrong behaviours:
    attribute 'floor'`` -- indistinguishable from a name someone forgot to
    export, rather than a deliberate exclusion.
 2. The GAMS importer **silently accepted** ``ceil(x)`` over a variable. Its
-   ``_map_func`` fell through to ``FunctionCall("ceil", x)``, so ``from_gams``
+   ``_map_func`` fell through to an unchecked node named ``ceil``, so ``from_gams``
    returned a model carrying a node nothing downstream understands. The failure
    surfaced much later, mid-solve, as an opaque ``ValueError: Unknown function:
    'ceil'`` -- *after* the incumbent-verification snapshot had already failed
@@ -17,24 +17,28 @@ Before this change there were two distinct wrong behaviours:
    documents exactly this failure mode for the deserialization doorway, where it
    was already fixed; the GAMS doorway was not.
 
-Entry experiment (CLAUDE.md §4), run before implementing:
+Entry experiment (CLAUDE.md §4), run before implementing
+(``scripts/i1237_floor_ceil_corpus_probe.py``):
 
     Hypothesis: endogenous floor/ceil appear in enough of the MINLPLib corpus to
     justify the IR + FBBT + relaxation + reformulation work.
-    Measurement: scan the in-repo corpora -- 153 ``.nl`` files for opcodes o13
-    (floor) / o14 (ceil), which AMPL/GAMS emit only for a NON-literal argument,
-    and 6 ``.gms`` files for ``floor(``/``ceil(`` with a non-literal argument.
-    Result: 105,680 token/opcode comparisons, **0** endogenous uses.
-    The full ~4,800-instance MINLPLib snapshot was NOT reachable from the
-    environment this ran in (no corpus mount; ``www.minlplib.org`` denied by the
-    network policy), so that larger count remains unmeasured and is recorded as
-    such rather than guessed.
+    Measurement: **6,380 instance files** across three formats -- 6,221 JuMP
+    models from MINLPLib.jl (``lanl-ansi/MINLPLib.jl``, which includes the 1,513
+    MINLPLib2 instances), 153 ``.nl`` files scanned for opcodes o13 (floor) /
+    o14 (ceil), and 6 ``.gms`` files. AMPL/GAMS emit o13/o14 only for a
+    NON-literal argument, and JuMP's nonlinear macros accept ``floor``/``ceil``
+    over a variable, so an instance using one would appear rather than be dropped.
+    Result: **0** endogenous uses, over 884,764 executed checks.
+    The probe carries a positive control -- 779,084 ``exp``/``log``/``sqrt`` hits
+    across the same files -- and exits non-zero if that control is empty, so the
+    zero is a measurement and not a scanner that silently read nothing.
 
-The kill criterion therefore fired on every corpus that could be measured, and
-this file pins the outcome it prescribes: a named, explanatory refusal. It does
-NOT pin "floor is unimplementable" -- if the corpus count is ever measured to be
-non-zero, the implementation replaces these refusals and these tests change with
-it.
+The kill criterion fired, and this file pins the outcome it prescribes: a named,
+explanatory refusal, uniform across every doorway. It does NOT pin "floor is
+unimplementable" -- ``DiscontinuousIntrinsicError`` says *not implemented*
+precisely because ``floor`` over a bounded box is relaxable in principle. If
+demand ever shows up, native support is a new feature, and these tests change
+with it.
 """
 
 from __future__ import annotations
@@ -287,3 +291,130 @@ def test_gams_func_table_partitions_into_mapped_and_refused():
     assert attempts >= 2 * len(_Parser._GAMS_FUNCS) - len(mapped), "probe short-circuited"
     assert refused == {"ceil", "floor", "round", "mod", "uniform", "normal"}
     assert mapped and not (mapped & refused)
+
+
+# ─────────────────────────────────────────────────────────────
+# 5. the remaining two doorways: the GMO link, and the GAMS writer
+# ─────────────────────────────────────────────────────────────
+
+
+def test_gmo_link_refuses_with_the_shared_message():
+    """The GAMS *link* (GMO instruction stream) is a fourth doorway.
+
+    It already refused these, but from its own hand-maintained
+    ``_DISCONTINUOUS`` set with its own wording. That set is now derived from the
+    core registry, so it cannot drift -- which is how the GAMS *parser* ended up
+    accepting the same names this one rejected.
+    """
+    from discopt.gams.instructions import (
+        _DISCONTINUOUS,
+        FUNC_NAME,
+        GamsTranslationError,
+        _apply_func,
+    )
+    from discopt.modeling import core as _core
+
+    assert set(_core._UNREPRESENTABLE_INTRINSICS) <= _DISCONTINUOUS
+
+    codes = {name: code for code, name in FUNC_NAME.items()}
+    checked = 0
+    for name in ("ceil", "floor", "round", "trunc"):
+        with pytest.raises(GamsTranslationError) as exc:
+            _apply_func(codes[name], [1.0])
+        assert "not implemented" in str(exc.value)
+        assert "m.integer(" in str(exc.value)  # the shared reformulation recipe
+        checked += 1
+    assert checked == 4
+
+
+def test_gams_writer_refuses_a_name_it_cannot_spell():
+    """The GAMS *writer* passed any unmapped name straight through.
+
+    Measured before the fix: a one-argument node named `mod` was written as
+    `mod(y)`, but GAMS's mod takes two arguments -- so the exported file was not
+    valid GAMS and the writer reported success anyway. Same class as the parser's
+    silent acceptance, in the other direction.
+
+    (Function names are spelled here without a literal call construction on
+    purpose: `test_every_produced_operator_name_is_accepted` scans the tree for
+    those and would read this docstring as a node the package produces.)
+    """
+    from discopt.export import gams as gexp
+
+    m = dm.Model("p")
+    y = m.continuous("y", lb=0.5, ub=3.5)
+    m.minimize(y)
+    m.subject_to(core.FunctionCall("entropy", y) <= 2.0)
+    with pytest.raises(ValueError, match="Unknown function in GAMS export"):
+        gexp.to_gams(m)
+
+    # and a name it CAN spell still exports, so the guard is not over-broad
+    m2 = dm.Model("q")
+    z = m2.continuous("z", lb=0.5, ub=3.5)
+    m2.minimize(z)
+    m2.subject_to(dm.sqrt(z) <= 2.0)
+    assert "sqrt(z)" in gexp.to_gams(m2)
+
+
+def test_every_doorway_into_the_ir_refuses_floor():
+    """The closing argument for #1237: no route into the IR accepts ``floor``.
+
+    The issue's defect was that *some* doorways refused and others silently
+    accepted, so which behaviour you got depended on how the model arrived. This
+    enumerates every route a ``floor`` node could take and asserts all of them
+    refuse. A new import path that forgets the registry fails here.
+    """
+    import tempfile
+
+    from discopt.export import gams as gexp
+    from discopt.gams.instructions import FUNC_NAME, _apply_func
+
+    refused = 0
+
+    def refuses(fn):
+        nonlocal refused
+        try:
+            fn()
+        except Exception:  # each doorway raises its own layer's error type
+            refused += 1
+            return True
+        return False
+
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.5, ub=3.5)
+
+    assert refuses(lambda: discopt.floor(1.5))  # public API
+    assert refuses(lambda: core.FunctionCall("floor", x))  # constructor
+    assert refuses(lambda: _from_gams("floor(x)"))  # .gms parser
+    assert refuses(  # GAMS link / GMO instruction stream
+        lambda: _apply_func({v: k for k, v in FUNC_NAME.items()}["floor"], [1.0])
+    )
+
+    import discopt.serialize as ser
+
+    assert refuses(  # serialize.loads
+        lambda: ser.loads('{"nodes":[{"op":"call","f":"floor","args":[]}]}')
+    )
+
+    def _nl():  # .nl parser (Rust, C-5): objective is the bare o13 over v0
+        with tempfile.NamedTemporaryFile("w", suffix=".nl", delete=False) as fh:
+            fh.write(
+                "g3 0 1 0\n 1 1 1 0 1\n 1 1\n 0 0\n 1 0 0\n 0 0 0 1\n 1 1\n"
+                " 0 1\n 0 0 0 0 0\nC0\no13\nv0\nb\n3\nr\n1 0\n"
+            )
+            path = fh.name
+        try:
+            return dm.from_nl(path)
+        finally:
+            Path(path).unlink()
+
+    assert refuses(_nl)
+
+    # and the way OUT: the GAMS writer no longer emits a name it cannot spell
+    w = dm.Model("w")
+    y = w.continuous("y", lb=0.5, ub=3.5)
+    w.minimize(y)
+    w.subject_to(core.FunctionCall("entropy", y) <= 2.0)
+    assert refuses(lambda: gexp.to_gams(w))
+
+    assert refused == 7, f"only {refused} of 7 doorways refused"

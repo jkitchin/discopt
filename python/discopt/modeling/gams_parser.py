@@ -2325,7 +2325,7 @@ class _ModelBuilder:
         # refused with their own reasons. uniform/normal are NOT folded even for
         # literal arguments: they are nondeterministic, and the data-statement
         # path deliberately leaves them unevaluable for the same reason.
-        if fn in ("ceil", "floor", "round"):
+        if fn in dm._UNREPRESENTABLE_INTRINSICS:
             raise GamsParseError(
                 dm._unrepresentable_intrinsic_message(
                     fn, where=f"GAMS function {fn}(...) over a variable"

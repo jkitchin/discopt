@@ -786,11 +786,24 @@ would need IR + relaxation work — out of scope here; the fix is the refusal.)
   these names cannot enter the IR through *any* doorway; a test asserts the
   registry stays a subset of `nl_parser.rs`'s `UnsupportedOpcode` names so the two
   lists cannot drift. Still no IR/relaxation support — the fix remains the refusal.
-  Entry experiment for #1237 (whether the corpus justifies real support): 0
-  endogenous floor/ceil across the in-repo corpora (153 `.nl` scanned for o13/o14,
-  6 `.gms`; 105,680 comparisons). The full ~4,800-instance MINLPLib snapshot was
-  **not reachable** from that environment (no corpus mount; `www.minlplib.org`
-  denied by the network policy), so that count is unmeasured, not zero.
+  Two further doorways were found in the same sweep and closed with it: the GAMS
+  **link** (`gams/instructions.py`) already refused these, but from its own
+  hand-maintained `_DISCONTINUOUS` set — now derived from the core registry, which
+  is how the parser had drifted; and the GAMS **writer** (`export/gams.py`) passed
+  any unmapped function name straight through, writing `FunctionCall("mod", y)` as
+  the arity-invalid `mod(y)` and reporting success. Four hand-maintained copies of
+  this list existed; there is now one.
+  Entry experiment for #1237 (whether the corpus justifies real support):
+  **0 endogenous floor/ceil across 6,380 instance files** — 6,221 JuMP models from
+  MINLPLib.jl (`lanl-ansi/MINLPLib.jl`, which carries the 1,513 MINLPLib2
+  instances), 153 `.nl` scanned for o13/o14, and 6 `.gms`; 884,764 executed checks.
+  The probe carries a positive control (779,084 `exp`/`log`/`sqrt` hits over the
+  same files) and exits non-zero if that control is empty, so the zero is a
+  measurement rather than a scanner that read nothing. The `.gms` snapshot named
+  in CLAUDE.md was not mounted and `www.minlplib.org` is denied by the network
+  policy, so MINLPLib.jl's JuMP translation stands in for it; o13/o14 and JuMP's
+  nonlinear macros both represent endogenous floor/ceil, so an instance using one
+  would have shown up rather than been dropped.
 
 ---
 
