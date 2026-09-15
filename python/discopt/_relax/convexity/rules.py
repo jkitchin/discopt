@@ -1042,6 +1042,11 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
         "atan",
         "asinh",
         "erf",
+        # entropy needs `arg >= 0` to license its CONVEX profile, and the
+        # arguments that matter (a site fraction's complement `1 - y`, a
+        # normalized fraction) are nonnegative only by the box, never
+        # syntactically (#1242).
+        "entropy",
     )
     if name in _sign_refined_atoms and not is_strict(arg_sign):
         arg_sign = _refine_sign(expr.args[0], model, cache, arg_sign)

@@ -363,6 +363,18 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
         # nondecreasing on all of R (like exp, but with bounded slope).
         return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
 
+    if name == "entropy":
+        # entropy(t) = t*log(t): f'' = 1/t > 0, so CONVEX on the closed domain
+        # [0, inf) (continuous there with f(0) = 0). It is NOT monotone --
+        # decreasing on [0, 1/e], increasing after -- so the monotonicity is
+        # UNKNOWN and `compose` licenses a verdict only for an AFFINE argument
+        # (entropy(affine) is convex; entropy(nonconvex) need not be). That is
+        # exactly the CALPHAD / ideal-mixing case: the arguments are site
+        # fractions and affine functions of them (#1242).
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.UNKNOWN)
+        return None
+
     if name in ("log", "log2", "log10"):
         # log is concave and nondecreasing on strictly positive R.
         if is_pos(arg_sign):

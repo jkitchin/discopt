@@ -1651,6 +1651,7 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
         "tanh",
         "sigmoid",
         "softplus",
+        "entropy",
         "abs",
         "sign",
         "min",
@@ -2228,6 +2229,56 @@ def softplus(x: Union[Expression, float]) -> Expression:
         Expression representing ``softplus(x)``, always positive.
     """
     return FunctionCall("softplus", _wrap(x))
+
+
+def xlogx(x: Union[Expression, float]) -> Expression:
+    r"""
+    Negative-entropy term :math:`x \log x`, extended by continuity to ``x = 0``.
+
+    This is the ideal-mixing / Shannon-entropy atom: a sum
+    :math:`\sum_i x_i \log x_i` over a simplex is the (negative) entropy of the
+    distribution ``x``. Building it with this helper rather than as the raw
+    product ``x * dm.log(x)`` matters for a *global* solve: the atom carries a
+    dedicated convex underestimator, an exact interval rule and a convexity
+    profile, whereas the raw product is relaxed factorably (``x`` times a
+    ``log``) and its bound does not tighten to the true convex envelope.
+
+    Values and derivatives at the endpoints of the domain:
+
+    - ``xlogx(0) = 0``. The mathematical limit :math:`x \log x \to 0` as
+      :math:`x \to 0^+` is taken as the *value*, so the atom is continuous and
+      finite on the closed domain ``[0, inf)`` — which is what makes it usable
+      on a site-fraction / mole-fraction box that starts at 0.
+    - The true derivative ``log(x) + 1`` diverges to ``-inf`` at ``x = 0``.
+      Evaluators deliberately report a large finite number there instead (the
+      argument is floored at ``1e-300``, giving a slope near ``-689.8``), so a
+      box pinned at ``[0, 0]`` cannot propagate a non-finite into a bound. The
+      *symbolic* derivative (:func:`discopt.bilevel.symbolic_diff.diff`) is the
+      exact ``log(x) + 1`` and is therefore unbounded at 0.
+    - ``x < 0`` is outside the domain. The interval rule abstains (returns
+      ``[-inf, inf]``) rather than guessing, so a certificate over a box that
+      dips below zero is refused, not silently wrong.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression. The relaxation and interval rules require a
+        nonnegative, finite box on ``x``.
+
+    Returns
+    -------
+    Expression
+        Expression representing ``x * log(x)``, convex on ``x >= 0``, with
+        minimum ``-1/e`` at ``x = 1/e``.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> m = dm.Model()
+    >>> y = m.continuous("y", lb=0.0, ub=1.0)
+    >>> m.minimize(dm.xlogx(y) + dm.xlogx(1 - y))   # binary entropy
+    """
+    return FunctionCall("entropy", _wrap(x))
 
 
 def abs_(x: Union[Expression, float]) -> Expression:

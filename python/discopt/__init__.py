@@ -255,6 +255,9 @@ from discopt.modeling import (
 from discopt.modeling import (
     tanh as tanh,
 )
+from discopt.modeling import (
+    xlogx as xlogx,
+)
 from discopt.modeling.core import (
     abs_ as abs_,
 )

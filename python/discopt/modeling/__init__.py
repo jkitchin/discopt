@@ -93,6 +93,7 @@ from discopt.modeling.core import (
     tan,
     tanh,
     udf,
+    xlogx,
 )
 from discopt.modeling.core import (
     abs_ as abs,
@@ -139,6 +140,7 @@ __all__ = [
     "sigmoid",
     "sign",
     "softplus",
+    "xlogx",
     "minimum",
     "maximum",
     "if_else",
