@@ -3703,6 +3703,47 @@ class SolveResult:
         )
         return validate_explanation(text)
 
+    def _ensure_sensitivity(self) -> np.ndarray:
+        """Envelope-theorem ``d(obj*)/dp`` for every parameter, computed once.
+
+        The gate-and-compute half of :meth:`gradient`, shared with
+        ``Model.solve(sensitivity=True)`` so the eager and lazy paths cannot
+        disagree about what is supported or about which point the derivative
+        belongs to -- it is always *this* result's ``x``.
+
+        Returns
+        -------
+        numpy.ndarray
+            1-D sensitivities for the model's whole flat parameter vector.
+        """
+        if self._model is None:
+            raise ValueError(
+                "No model attached to this SolveResult. "
+                "gradient() requires the model reference (set by Model.solve())."
+            )
+        if not self._model._parameters:
+            raise ValueError("Model has no parameters. Nothing to differentiate.")
+
+        # Check all variables are continuous
+        for v in self._model._variables:
+            if v.var_type != VarType.CONTINUOUS:
+                raise ValueError(
+                    "gradient() only supports continuous models. "
+                    f"Variable '{v.name}' is {v.var_type.value}."
+                )
+        if not self.x:
+            raise ValueError(
+                "This result carries no incumbent, so there is no point at which to "
+                f"evaluate a sensitivity (status: {self.status!r})."
+            )
+
+        # Lazy computation: compute sensitivity from existing solution
+        if self._sensitivity is None:
+            from discopt._relax.differentiable import _compute_sensitivity_at_solution
+
+            self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
+        return self._sensitivity
+
     def gradient(self, param: Parameter) -> Union[float, np.ndarray]:
         """
         Sensitivity of optimal objective w.r.t. a parameter.
@@ -3727,35 +3768,16 @@ class SolveResult:
         ------
         ValueError
             If the model has integer/binary variables, no model reference
-            is attached, or no parameters exist.
+            is attached, no parameters exist, or the result carries no
+            incumbent to evaluate the sensitivity at.
         """
-        if self._model is None:
-            raise ValueError(
-                "No model attached to this SolveResult. "
-                "gradient() requires the model reference (set by Model.solve())."
-            )
-        if not self._model._parameters:
-            raise ValueError("Model has no parameters. Nothing to differentiate.")
-
-        # Check all variables are continuous
-        for v in self._model._variables:
-            if v.var_type != VarType.CONTINUOUS:
-                raise ValueError(
-                    "gradient() only supports continuous models. "
-                    f"Variable '{v.name}' is {v.var_type.value}."
-                )
-
-        # Lazy computation: compute sensitivity from existing solution
-        if self._sensitivity is None:
-            from discopt._relax.differentiable import _compute_sensitivity_at_solution
-
-            self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
+        sensitivity = self._ensure_sensitivity()
 
         # Extract the slice for this parameter
         from discopt._relax.differentiable import _get_param_slice
 
         start, end = _get_param_slice(param, self._model)
-        grad_flat = self._sensitivity[start:end]
+        grad_flat = sensitivity[start:end]
         if param.shape == () or (end - start) == 1:
             return float(grad_flat[0])
         return grad_flat.reshape(param.shape)
@@ -5883,7 +5905,12 @@ class Model:
         llm : bool, default False
             Enable LLM explanation of results.
         sensitivity : bool, default False
-            Compute sensitivities w.r.t. Parameters.
+            Eagerly compute ``d(obj*)/dp`` w.r.t. every Parameter, so
+            :meth:`SolveResult.gradient` answers without further work and an
+            unsupported model is refused here. This is the *objective*
+            sensitivity (envelope theorem) only; for ``dx*/dp``, ``dλ*/dp``,
+            second derivatives, or the total derivative of an arbitrary
+            expression, use :meth:`Model.sensitivity`.
         stream : bool, default False
             If True, return an iterator of :class:`SolveUpdate` instead of
             the final result. **Not implemented** — no backend produces the update
@@ -6683,6 +6710,25 @@ class Model:
                     _exp_exc,
                 )
 
+        if sensitivity:
+            # Until this branch existed the flag was DEAD: `sensitivity` appeared in
+            # the signature and the docstring and was read nowhere, so
+            # `solve(sensitivity=True)` was byte-for-byte `solve()` while promising
+            # derivatives (CLAUDE.md §3 -- no dead flags). It now eagerly computes
+            # what `result.gradient()` would otherwise compute on first call, at THIS
+            # result's own x, so the two paths cannot disagree and an unsupported
+            # model (integers, no parameters, no incumbent) is refused here rather
+            # than at some later `.gradient()` call.
+            #
+            # Deliberately NOT wrapped in try/except: the caller asked for
+            # derivatives, so failing to produce them is a failure, not an advisory
+            # (contrast the `llm` block above, which is decoration).
+            #
+            # This is d(obj*)/dp only -- the envelope theorem needs nothing but the
+            # duals already in hand. dx*/dp is a different object requiring its own
+            # KKT solve, and lives in `Model.sensitivity()`.
+            result._ensure_sensitivity()
+
         if validate and result.x:  # same no-incumbent guard as above (#1105)
             try:
                 from discopt.validation.examiner import examine
@@ -6692,6 +6738,63 @@ class Model:
                 result.validation_report = None
 
         return result
+
+    def sensitivity(
+        self,
+        wrt=None,
+        *,
+        order: int = 1,
+        method: str = "exact",
+        options: Optional[dict] = None,
+    ):
+        """Solve and return every derivative of the solution -- the unified entry point.
+
+        Where :meth:`solve` answers "what is the optimum", this answers "how does
+        the optimum move". One call gives the solution together with ``dx*/dp``,
+        ``dλ*/dp``, optionally ``d²x*/dp²``, the total derivative of *any* model
+        expression through the solution map, a first-order re-solve, and the JAX
+        layer form -- instead of choosing between
+        :meth:`SolveResult.gradient`, :func:`discopt.solvers.sipopt.pounce_sensitivity`,
+        :func:`discopt.modeling.argmin_layer` and
+        :func:`discopt.parametric.compile_expression` and then lining up flat
+        indices by hand.
+
+        The derivatives come from the implicit function theorem applied to the KKT
+        system at the solution, so they describe the smooth branch the solution
+        currently sits on; continuous variables and scalar Parameters only.
+
+        Parameters
+        ----------
+        wrt : Parameter, str, or sequence, optional
+            Parameters (or their names) to differentiate with respect to.
+            Defaults to every Parameter the model declares.
+        order : int, default 1
+            2 also computes ``d²x*/dp²``.
+        method : {"exact", "fd"}, default "exact"
+            ``"exact"`` differentiates the compiled model symbolically; ``"fd"``
+            central-differences the right-hand side as a cross-check.
+        options : dict, optional
+            POUNCE options for the solve.
+
+        Returns
+        -------
+        discopt.sensitivity.Sensitivity
+
+        Examples
+        --------
+        >>> s = m.sensitivity(wrt=[cost])           # doctest: +SKIP
+        >>> s.d("flow")                             # dflow*/dcost, shaped like flow
+        >>> s.d(price * flow)                       # total derivative of revenue
+        >>> s.predict({cost: 2.1})                  # linearised re-solve
+
+        See Also
+        --------
+        discopt.sensitivity.sensitivity : the function form.
+        solve : the flag ``solve(sensitivity=True)`` for ``d(obj*)/dp`` alone.
+        """
+        from discopt.sensitivity import sensitivity as _sensitivity
+
+        return _sensitivity(self, wrt, order=order, method=method, options=options)
 
     def _solve_streaming(self, **kwargs) -> Iterator["SolveUpdate"]:
         """Streaming solve that yields updates during B&B.
