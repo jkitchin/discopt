@@ -320,7 +320,7 @@ class CategoryBenchmarkRunner:
             lp = extract_lp_data_algebraic(model)
 
             import numpy as np
-            from discopt.solvers.lp_highs import solve_lp
+            from discopt.solvers.lp_milp_highs import solve_lp
 
             # Convert to HiGHS format
             c = np.asarray(lp.c)
