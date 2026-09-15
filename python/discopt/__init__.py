@@ -144,6 +144,14 @@ from discopt.infeasibility import (
 from discopt.modeling import (
     Constraint as Constraint,
 )
+
+# Recognised but unimplemented discontinuous intrinsics. Exported so that
+# `discopt.floor` is a deliberate, self-explaining refusal rather than an
+# AttributeError that reads as a missing export (issue #1237). Calling one
+# raises DiscontinuousIntrinsicError, a NotImplementedError.
+from discopt.modeling import (
+    DiscontinuousIntrinsicError as DiscontinuousIntrinsicError,
+)
 from discopt.modeling import (
     DisjunctionSemantics as DisjunctionSemantics,
 )
@@ -193,6 +201,9 @@ from discopt.modeling import (
     atanh as atanh,
 )
 from discopt.modeling import (
+    ceil as ceil,
+)
+from discopt.modeling import (
     concatenate as concatenate,
 )
 from discopt.modeling import (
@@ -206,6 +217,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     exp as exp,
+)
+from discopt.modeling import (
+    floor as floor,
 )
 from discopt.modeling import (
     load as load,
@@ -227,6 +241,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     minimum as minimum,
+)
+from discopt.modeling import (
+    round_ as round_,
 )
 from discopt.modeling import (
     sigmoid as sigmoid,
@@ -254,6 +271,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     tanh as tanh,
+)
+from discopt.modeling import (
+    trunc as trunc,
 )
 from discopt.modeling.core import (
     abs_ as abs_,
