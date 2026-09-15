@@ -1659,10 +1659,102 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
 )
 
 
+class DiscontinuousIntrinsicError(NotImplementedError):
+    """Raised for an intrinsic that is recognised but has no node in the IR.
+
+    ``floor``, ``ceil``, ``round``, ``trunc`` and ``intdiv`` are *step*
+    functions. Unlike every intrinsic the modeling layer does export, they are
+    discontinuous in their argument, so representing one soundly is not a matter
+    of adding a name to a table -- it needs, at minimum:
+
+    * an ``ExprNode``/``MathFunc`` variant in the Rust IR,
+    * forward and backward FBBT rules for a step function
+      (``crates/discopt-core/src/presolve/fbbt.rs``),
+    * a convex/concave envelope in the relaxation layer, and
+    * an integrality reformulation (``floor(x) = z`` with ``z`` integer and
+      ``z <= x <= z + 1 - eps``), which changes the model's *variable set*
+      rather than just its expression DAG -- so the AD tape has something
+      differentiable to work with.
+
+    Until that exists, discopt refuses rather than substituting a different
+    operator. This mirrors the ``.nl`` parser's C-5 policy
+    (``NlParseError::UnsupportedOpcode`` for opcodes o13/o14/o55/o57/o58):
+    silently rewriting ``floor(x)`` to ``x`` makes the solver *certify the
+    optimum of a different problem than the user posed*, which is a false
+    certificate, not a slow answer (CLAUDE.md §1).
+
+    Why ``sign`` is exported and these are not, although it is discontinuous
+    too: ``sign`` already has every piece listed above -- an IR variant
+    (``MathFunc::Sign``), the interval rule ``sign(x) in [-1, 1]``
+    (``fbbt.rs``), and an envelope (``relax_sign``, dispatched from
+    ``_relax/relaxation_compiler.py``) -- because its range is a bounded,
+    fixed, three-point set that needs no auxiliary variable. A step function
+    with an unbounded range does not fit that treatment; it needs the integer
+    reformulation above. So the difference is not "``sign`` is smoother", it is
+    "``sign`` was implemented and these were not".
+
+    See https://github.com/jkitchin/discopt/issues/1237.
+    """
+
+
+#: Intrinsics that are *recognised but unimplemented*, mapped to the note shown
+#: to the user. Membership here is the single source of truth: every doorway into
+#: the IR (:class:`FunctionCall`, the GAMS parser, the public ``dm.floor`` /
+#: ``dm.ceil`` / ``dm.round_`` / ``dm.trunc`` shims) refuses the same set with the
+#: same message, so a name can never be unrepresentable at one door and accepted
+#: at another. Keep in sync with the ``.nl`` parser's C-5 opcode refusals
+#: (``crates/discopt-core/src/nl_parser.rs``).
+_UNREPRESENTABLE_INTRINSICS: dict = {
+    "floor": "floor(x) -- the greatest integer <= x",
+    "ceil": "ceil(x) -- the least integer >= x",
+    "round": "round(x) -- x rounded to the nearest integer",
+    "trunc": "trunc(x) -- x truncated toward zero",
+    "intdiv": "intdiv(a, b) -- integer (truncating) division",
+}
+
+
+def _unrepresentable_intrinsic_message(name: str, *, where: str = "") -> str:
+    """Build the refusal text for an unimplemented discontinuous intrinsic."""
+    what = _UNREPRESENTABLE_INTRINSICS[name]
+    prefix = f"{where}: " if where else ""
+    return (
+        f"{prefix}{name!r} is not implemented: {what} is a discontinuous step "
+        "function, and discopt's expression IR has no node for it. Modeling it "
+        "soundly requires an integrality reformulation that adds variables (for "
+        f"{name!r}: an integer z with z <= x <= z + 1 - eps), plus FBBT and "
+        "relaxation rules for a step function -- not just an expression node."
+        "\n\n"
+        "discopt refuses here rather than substituting a different operator "
+        "(e.g. the identity), because that would make the solver certify the "
+        "optimum of a different problem than the one posed -- a false "
+        "certificate rather than a slow answer. The .nl parser refuses the "
+        "matching opcodes for the same reason (correctness issue C-5)."
+        "\n\n"
+        "Reformulate the model explicitly instead. For y = floor(x) with "
+        "l <= x <= u, declare an integer variable and bound it:\n"
+        "    z = m.integer('z', lb=math.floor(l), ub=math.floor(u))\n"
+        "    m.subject_to(z <= x)\n"
+        "    m.subject_to(x <= z + 1 - eps)\n"
+        "and use z in place of floor(x). Track native support at "
+        "https://github.com/jkitchin/discopt/issues/1237."
+    )
+
+
 class FunctionCall(Expression):
     """Named function call: exp(x), log(x), sin(x), etc."""
 
     def __init__(self, func_name: str, *args: Expression):
+        # Refuse an intrinsic that has no IR node AT CONSTRUCTION, not at solve
+        # time. This is the single choke point every doorway funnels through
+        # (the GAMS parser's function mapper, `serialize.loads`, user code), so
+        # guarding it here means such a name can never reach a node. Without it
+        # the model builds happily and the first symptom is the
+        # incumbent-verification snapshot failing -- which *disables the
+        # false-primal guard for that solve* -- followed by an opaque
+        # "Unknown function: 'ceil'" from the DAG compiler. See
+        # `serialize._known_funcs` for the same argument at the read doorway.
+        if func_name in _UNREPRESENTABLE_INTRINSICS:
+            raise DiscontinuousIntrinsicError(_unrepresentable_intrinsic_message(func_name))
         self.func_name = func_name
         self.args = args
         # Element-wise functions preserve / broadcast their argument shapes, so
@@ -2262,6 +2354,44 @@ def sign(x: Union[Expression, float]) -> Expression:
     Expression
     """
     return FunctionCall("sign", _wrap(x))
+
+
+def _refuse_unrepresentable(name: str):
+    """Build a public shim for an intrinsic discopt recognises but cannot model.
+
+    The name is exported so that ``dm.floor`` reads as a *deliberate exclusion
+    with an explanation* rather than as an oversight: before this, the only
+    signal was ``AttributeError: module 'discopt.modeling' has no attribute
+    'floor'``, which is indistinguishable from a name someone forgot to export
+    (issue #1237).
+    """
+
+    def shim(*args, **kwargs):
+        raise DiscontinuousIntrinsicError(_unrepresentable_intrinsic_message(name))
+
+    shim.__name__ = name
+    shim.__qualname__ = name
+    shim.__doc__ = (
+        f"Not implemented: ``{name}`` is a discontinuous step function with no "
+        "node in discopt's expression IR.\n\n"
+        f"Calling this raises :class:`DiscontinuousIntrinsicError` (a "
+        "``NotImplementedError``) explaining how to reformulate the model with "
+        "an explicit integer variable. It exists so the refusal is explicit and "
+        "documented rather than an ``AttributeError`` from a missing name.\n\n"
+        "See :class:`DiscontinuousIntrinsicError` for why ``sign`` is supported "
+        "and this is not, and https://github.com/jkitchin/discopt/issues/1237 "
+        "to track native support."
+    )
+    return shim
+
+
+floor = _refuse_unrepresentable("floor")
+ceil = _refuse_unrepresentable("ceil")
+#: ``round`` shadows a builtin, so it carries the trailing-underscore spelling
+#: the modeling layer already uses for ``abs_``. ``trunc`` shadows nothing in
+#: builtins (only ``math.trunc``), so it keeps its plain name.
+round_ = _refuse_unrepresentable("round")
+trunc = _refuse_unrepresentable("trunc")
 
 
 def minimum(x: Union[Expression, float], y: Union[Expression, float]) -> Expression:

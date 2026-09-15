@@ -763,6 +763,34 @@ would need IR + relaxation work — out of scope here; the fix is the refusal.)
   (`test_adversarial_recent_fixes.py`) 10 passed; all 61 corpus files still parse.
 - Regression tests named above are committed and fast (sub-millisecond, direct
   `parse_nl` calls; no `Model.solve()`).
+- 2026-09-15 — **Two sibling doorways found open and closed** (issue #1237). The
+  C-5 refusal covered the `.nl` parser only; the same names reached the IR by two
+  other routes.
+  (a) **GAMS import.** `gams_parser._map_func` fell through to
+  `FunctionCall(fn, *args)` for every name in `_GAMS_FUNCS` it had no mapping for
+  — `ceil`, `floor`, `round`, `mod`, `uniform`, `normal`. Measured before the fix:
+  `from_gams` on a model whose equation body contains `ceil(x)` **succeeded**, and
+  the failure surfaced only mid-solve as `ValueError: Unknown function: 'ceil'`,
+  *after* the incumbent-verification snapshot had failed and printed
+  "the false-primal guard is disabled for this solve" — the exact failure mode
+  `serialize._known_funcs` documents for the deserialization doorway, which had
+  already been fixed there. Now refused at the boundary with a message naming the
+  function. Literal-argument calls (`ceil(2.3)` inside an equation body) are
+  constant-folded first and still import: only *endogenous* uses are refused.
+  (b) **Python modeling API.** `dm.floor` / `dm.ceil` did not exist at all, so the
+  only signal was `AttributeError`, indistinguishable from a forgotten export.
+  Now exported as shims raising `DiscontinuousIntrinsicError(NotImplementedError)`
+  with the reformulation recipe.
+  The registry `core._UNREPRESENTABLE_INTRINSICS` is now the single source of
+  truth (floor/ceil/round/trunc/intdiv) and `FunctionCall.__init__` enforces it, so
+  these names cannot enter the IR through *any* doorway; a test asserts the
+  registry stays a subset of `nl_parser.rs`'s `UnsupportedOpcode` names so the two
+  lists cannot drift. Still no IR/relaxation support — the fix remains the refusal.
+  Entry experiment for #1237 (whether the corpus justifies real support): 0
+  endogenous floor/ceil across the in-repo corpora (153 `.nl` scanned for o13/o14,
+  6 `.gms`; 105,680 comparisons). The full ~4,800-instance MINLPLib snapshot was
+  **not reachable** from that environment (no corpus mount; `www.minlplib.org`
+  denied by the network policy), so that count is unmeasured, not zero.
 
 ---
 

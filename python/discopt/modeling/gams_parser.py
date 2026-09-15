@@ -2289,8 +2289,71 @@ class _ModelBuilder:
             return dm.maximum(args[0], args[1])
         if fn == "errorf":
             return dm.erf(args[0])
-        # fallback
-        return dm.FunctionCall(fn, *args)
+        # Every remaining name in `_GAMS_FUNCS` -- ceil, floor, round, mod,
+        # uniform, normal -- has NO sound mapping into the IR. Building
+        # `FunctionCall(fn, *args)` for them used to let `from_gams` return a
+        # model carrying a node nothing downstream understands: the import
+        # succeeded, and the failure surfaced much later as an opaque
+        # "Unknown function: 'ceil'" from the DAG compiler -- after the
+        # incumbent-verification snapshot had already failed and *disabled the
+        # false-primal guard for that solve*. Refuse at the boundary instead, the
+        # same policy the `.nl` parser applies to the matching opcodes (C-5) and
+        # `serialize.loads` applies to an unknown function name on read.
+        #
+        # Only an ENDOGENOUS use is refused. `ceil(2.3)` inside an equation body
+        # is a number, not a step function of a variable, and GAMS itself allows
+        # it, so fold it first -- `_eval_const_expr_with_env` handles the
+        # data/assignment sites but does not run on equation bodies, which reach
+        # `_map_func` with their literal arguments already wrapped as Constants.
+        # (Measured: without this fold, `c1.. x + ceil(2.3) =L= 2;` refused.)
+        if args and all(isinstance(a, dm.Constant) for a in args):
+            cargs: list[float] = [float(a.value) for a in args]
+            if fn == "ceil":
+                return dm.Constant(float(math.ceil(cargs[0])))
+            if fn == "floor":
+                return dm.Constant(float(math.floor(cargs[0])))
+            if fn == "round":
+                nd = int(cargs[1]) if len(cargs) > 1 else 0
+                return dm.Constant(float(round(cargs[0], nd)))
+            # GAMS mod(a, b) = a - b*trunc(a/b), i.e. fmod semantics. A zero
+            # divisor is a GAMS execution error, so refuse rather than fold.
+            if fn == "mod" and len(cargs) > 1 and cargs[1] != 0.0:
+                return dm.Constant(float(math.fmod(cargs[0], cargs[1])))
+
+        # ceil/floor/round carry the shared discontinuous-intrinsic message
+        # (which explains the integer reformulation); mod/uniform/normal are
+        # refused with their own reasons. uniform/normal are NOT folded even for
+        # literal arguments: they are nondeterministic, and the data-statement
+        # path deliberately leaves them unevaluable for the same reason.
+        if fn in ("ceil", "floor", "round"):
+            raise GamsParseError(
+                dm._unrepresentable_intrinsic_message(
+                    fn, where=f"GAMS function {fn}(...) over a variable"
+                )
+            )
+        if fn == "mod":
+            raise GamsParseError(
+                "GAMS mod(a, b) could not be reduced to a constant here (a "
+                "non-literal argument, or a zero divisor): mod is discontinuous in "
+                "its arguments and discopt's expression IR has no node for it. "
+                "Refusing rather than building a node that fails later during the "
+                "solve. Reformulate with an explicit integer quotient "
+                "(a = q*b + r, q integer, 0 <= r < b) and use r."
+            )
+        if fn in ("uniform", "normal"):
+            raise GamsParseError(
+                f"GAMS function {fn}(...) over a variable is not supported: it draws "
+                "a random number, so it does not denote a deterministic function of "
+                "the model's variables and has no meaning in an expression discopt "
+                "must optimise over. Refusing rather than building a node that fails "
+                "later during the solve. (A literal-argument call in a data "
+                "statement is a separate path and is already refused there.)"
+            )
+        raise GamsParseError(
+            f"GAMS function {fn!r} has no mapping into discopt's expression IR. "
+            "Refusing rather than building a node that fails later during the "
+            "solve."
+        )
 
     def _store_initial_value(self, b, var, val: float):
         """Store .l initial value for a variable."""
