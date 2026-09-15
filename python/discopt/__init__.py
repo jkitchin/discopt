@@ -290,6 +290,9 @@ from discopt.modeling.examples import (
 from discopt.modeling.examples import (
     example_transportation as example_transportation,
 )
+from discopt.sensitivity import (
+    Sensitivity as Sensitivity,
+)
 from discopt.solver_tuning import (
     SolverTuning as SolverTuning,
 )
