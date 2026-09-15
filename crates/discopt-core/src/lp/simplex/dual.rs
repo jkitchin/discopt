@@ -217,6 +217,12 @@ pub(super) fn cost_perturb_default() -> f64 {
 /// clean-up costs 26 164 pivots, *worse* than the 17 794 of the unperturbed solve;
 /// too large and the perturbed problem is a different LP whose optimum is far from
 /// the true one (1e-3 costs 1920 perturbed pivots against 534 at 1e-5).
+///
+/// The `qplib2170` figures above predate #1229: its 17 794-pivot stall was free
+/// basic columns being pivoted onto the ±1e20 sentinel in `select_leaving`, not
+/// cost ties. After that fix it converges unperturbed in 613 pivots and perturbed
+/// in 912, so it no longer argues for the perturbation; `tspn12` (1727 → 906) and
+/// `st_testgr3` (216 → 47) still do.
 const COST_PERTURB_EPS: f64 = 1e-5;
 
 /// Consecutive degenerate dual pivots after which the warm loop is abandoned for
@@ -1623,9 +1629,12 @@ fn select_leaving(
     let mut delta = 0.0f64;
     for i in 0..m {
         let bi = basis[i];
-        let viol = if xb[i] < l[bi] - tol {
+        // A sentinel side (`±INF`, 1e20) is no bound at all. Testing it as one made
+        // a basic free column that drifted past 1e20 "leave" pinned AT 1e20, so a
+        // warm re-solve ended `Optimal` with columns sitting at x = 1e20.
+        let viol = if l[bi] > -INF && xb[i] < l[bi] - tol {
             Some((l[bi] - xb[i], true))
-        } else if xb[i] > u[bi] + tol {
+        } else if u[bi] < INF && xb[i] > u[bi] + tol {
             Some((xb[i] - u[bi], false))
         } else {
             None
@@ -2610,23 +2619,28 @@ mod tests {
         );
     }
 
-    // #1008 R1: the near-zero-pivot recovery must not be reachable only by
-    // supplying a deadline.
+    // #1229: a basic column whose sentinel side is no bound must never be selected
+    // as leaving for "violating" it.
     //
-    // Same captured QPLIB_2170 relaxation and the same starting basis in both
-    // arms; the ONLY difference is `recover_unstable_pivot`. Off, the loop hits one
-    // unstable pivot and hands off to the cold primal, which fails — no bound. On,
-    // it refactorizes in place, re-selects, and reaches `optimal 0`, the value
-    // HiGHS certifies in 81 pivots.
+    // The captured QPLIB_2170 relaxation starts with 351 free zero-cost columns
+    // basic. `select_leaving` used to test `x_B < l - tol` and `x_B > u + tol`
+    // against the raw bound arrays, so a free column that drifted past ±1e20 was
+    // priced as a bound violation and pivoted out *onto the sentinel*: x=±1e20 as
+    // if that were a real bound. Measured on this fixture and starting basis
+    // (legacy warm options, no deadline): recovery off → one near-zero pivot, the
+    // cold hand-off fails, `Numerical` with 172 columns at |x| ≥ 1e19; recovery on →
+    // `optimal 0`, but after 17 794 pivots with 44 columns parked at 1e20. With
+    // the sentinel side skipped both arms are `optimal 0` in 613 pivots, max |x| 2.
     //
-    // Before the split this option did not exist and the recovery rode on
-    // `bank_deadline_duals`, which `lp_bindings` sets to `deadline.is_some()`. So
-    // the two arms below were reachable from Python only by passing or omitting
-    // `time_limit` — a wall-clock argument silently deciding whether a bound comes
-    // back. `deadline` is `None` in both arms here, which is the point: the
-    // recovery has nothing to do with deadlines.
+    // This fixture was #1008 R1's evidence that the unstable-pivot recovery must
+    // not ride on `bank_deadline_duals`. The option split stands (the two arms
+    // below still differ only in `recover_unstable_pivot`, neither has a deadline),
+    // but the near-zero pivot it recovered from was this defect: after the fix this
+    // fixture reaches neither the recovery nor the bail, so this test pins the verdict
+    // and `unstable_pivot_recovery_is_not_gated_on_a_deadline` (a real bchoco06 node
+    // LP) now carries the mechanism.
     #[test]
-    fn unstable_pivot_recovery_is_not_gated_on_a_deadline() {
+    fn free_basic_column_is_never_pivoted_onto_the_sentinel() {
         let _guard = crate::profile::test_guard();
         crate::profile::reset();
         crate::profile::set_enabled(true);
@@ -2654,31 +2668,116 @@ mod tests {
         let recoveries = crate::profile::counter(crate::profile::Ctr::DualUnstablePivotRecoveries);
         crate::profile::set_enabled(false);
 
-        // The mechanism is what separates the arms, proven by counter rather than
-        // inferred from the outcome (§6): the same pivot goes one way or the other.
+        // Both verdicts are the HiGHS optimum 0 regardless of the recovery option,
+        // and no pivot was near-zero: before the fix the OFF arm was `Numerical`
+        // (bails=1) and the ON arm needed the recovery (recoveries=1).
+        for (label, r) in [("recovery off", &without), ("recovery on", &with)] {
+            assert_eq!(
+                r.status,
+                LpStatus::Optimal,
+                "{label}: HiGHS certifies optimal 0"
+            );
+            assert!(r.obj.abs() <= 1e-6, "{label}: obj {} must be 0", r.obj);
+            let parked = r.x.iter().filter(|v| v.abs() >= INF * 0.1).count();
+            assert_eq!(
+                parked, 0,
+                "{label}: {parked} columns at the 1e20 sentinel — a free basic column was \
+                 pivoted out onto a bound it does not have"
+            );
+        }
         assert_eq!(
-            bails, 1,
-            "the OFF arm must bail on exactly one unstable pivot"
+            bails, 0,
+            "no unstable pivot may occur once the sentinel is not a bound"
         );
-        assert_eq!(
-            recoveries, 1,
-            "the ON arm must recover from exactly one unstable pivot"
-        );
-        assert_ne!(
-            without.status,
-            LpStatus::Optimal,
-            "the OFF arm is the defect: it must not already solve this LP"
-        );
-        assert_eq!(
-            with.status,
-            LpStatus::Optimal,
-            "the recovery must retain the bound with no deadline supplied"
-        );
+        assert_eq!(recoveries, 0, "and so nothing to recover from");
         assert!(
-            with.obj.abs() <= 1e-6,
-            "obj {} must match the HiGHS optimum 0",
-            with.obj
+            with.iters < 2_000,
+            "the sentinel path cost 17 794 pivots; got {}",
+            with.iters
         );
+    }
+
+    // #1008 R1: the near-zero-pivot recovery is its own option, not a rider on
+    // `bank_deadline_duals`, and it is reachable with no deadline.
+    //
+    // Fixture: a `bchoco06` node LP (1002×1323, |a_ij| up to 1e8) captured with its
+    // real warm basis from `solve_lp_warm_csc_py` in a default MINLP solve, selected
+    // because `DualUnstablePivotRecoveries` rose across that call — the only
+    // corpus solve in the #1229 guard that still reaches the recovery once free
+    // basic columns stop being pivoted onto the sentinel (the QPLIB_2170 fixture
+    // this test used to read reached it only through that defect; see
+    // `free_basic_column_is_never_pivoted_onto_the_sentinel`). Measured under both
+    // the pre- and post-#1229 `select_leaving`, identically.
+    //
+    // The two arms differ only in `recover_unstable_pivot`; neither has a deadline.
+    // Only reach and verdict-neutrality are asserted: on this LP the recovery does
+    // not change the verdict under either option set (legacy: Numerical both ways;
+    // shipped: Optimal both ways), so claiming it retains a bound here would be
+    // pinning something this fixture does not show.
+    #[test]
+    fn unstable_pivot_recovery_is_not_gated_on_a_deadline() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+
+        let json = include_str!("testdata/bchoco06_unstable_pivot_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        let mut compared = 0usize;
+        for (label, base) in [("legacy", legacy_warm_opts()), ("shipped", opts())] {
+            let mut off = base.clone();
+            off.bank_deadline_duals = true;
+            off.recover_unstable_pivot = false;
+            assert!(off.deadline.is_none(), "no arm may carry a deadline");
+            reset();
+            set_enabled(true);
+            let without = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+            let (bails_off, recov_off) = (
+                counter(Ctr::DualUnstablePivotBails),
+                counter(Ctr::DualUnstablePivotRecoveries),
+            );
+
+            let mut on = off.clone();
+            on.recover_unstable_pivot = true;
+            reset();
+            let with = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
+            let (bails_on, recov_on) = (
+                counter(Ctr::DualUnstablePivotBails),
+                counter(Ctr::DualUnstablePivotRecoveries),
+            );
+            set_enabled(false);
+
+            // The same pivot goes one way or the other, proven by counter (§6).
+            assert_eq!(
+                (bails_off, recov_off),
+                (1, 0),
+                "{label}: OFF must bail on exactly one unstable pivot"
+            );
+            assert_eq!(
+                (bails_on, recov_on),
+                (0, 1),
+                "{label}: ON must recover from exactly one unstable pivot"
+            );
+            assert_eq!(
+                without.status, with.status,
+                "{label}: the recovery must not change the verdict on this LP"
+            );
+            if with.status == LpStatus::Optimal {
+                assert!(
+                    (with.obj - without.obj).abs() <= 1e-6 * (1.0 + with.obj.abs()),
+                    "{label}: obj {} vs {}",
+                    with.obj,
+                    without.obj
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 2, "both option sets must have been exercised");
     }
 
     // #1008: the cold primal must not CLAIM `Unbounded` on a bounded LP.
@@ -2798,8 +2897,12 @@ mod tests {
         // nothing. Only the firing is asserted: what the handoff *returns* here
         // (`Unbounded`, against a true optimum of 0) is the defect that motivates
         // the default, and pinning it would cement a bug rather than a guarantee.
+        // Patience below this LP's degenerate run. It was `STALL_PATIENCE` (2048)
+        // while the #1229 sentinel defect made this a 17 794-pivot stall; the warm
+        // loop now converges in 613 pivots, all degenerate, so the shipped patience
+        // can no longer trip on it and the fixture would stop reaching the bail.
         let mut forced = legacy_warm_opts();
-        forced.dual_stall_patience = STALL_PATIENCE;
+        forced.dual_stall_patience = 256;
         forced.bank_deadline_duals = true;
         forced.recover_unstable_pivot = true;
         let bailed = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &forced);
@@ -3021,14 +3124,18 @@ mod tests {
     /// #1013 (the issue's anchor cell): cost perturbation breaks the dual
     /// degeneracy that neither existing escape can, and returns the same optimum.
     ///
-    /// The captured `QPLIB_2170` root relaxation warm-solves in ~18k pivots of
-    /// which every one is degenerate — `d_q ≈ 0`, so the dual objective never
-    /// moves — with `DualStallTrips` at 0 and Bland engaged but not helping. HiGHS
-    /// certifies the same LP in 81 pivots. Perturbing the nonbasic costs removes
-    /// the ties, and the clean-up on the true costs returns the same objective.
+    /// Fixture: the captured `tspn12` root relaxation, 1573 of 1727 warm pivots
+    /// degenerate unperturbed and 64 of 906 perturbed (measured after #1229).
+    /// Perturbing the nonbasic costs removes the ties, and the clean-up on the true
+    /// costs returns the same objective.
+    ///
+    /// This test used QPLIB_2170, whose ~17.8k degenerate pivots turned out to be
+    /// the #1229 sentinel defect (free basic columns pivoted onto ±1e20), not cost
+    /// ties: with that fixed it converges unperturbed in 613 pivots, and perturbing
+    /// it costs more (912) than it saves.
     #[test]
     fn cost_perturbation_breaks_the_degeneracy_on_the_captured_stall() {
-        let json = include_str!("testdata/qplib2170_cold_fail_lp.json");
+        let json = include_str!("testdata/tspn12_dual_stall_lp.json");
         let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
             parse_stall_fixture(json);
         let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
@@ -3072,17 +3179,16 @@ mod tests {
 
         // The stall is what changed. Both numbers are deterministic.
         assert!(
-            base_degen > 10_000,
-            "the baseline cell must still be the ~18k-degenerate-pivot stall; got {base_degen}"
+            base_degen > 1_000,
+            "the baseline cell must still be the ~1.6k-degenerate-pivot stall; got {base_degen}"
         );
         assert!(
             pert_degen * 10 < base_degen,
             "the perturbation must remove the degeneracy: {pert_degen} vs {base_degen}"
         );
         assert!(
-            pert.iters * 4 < base.iters,
-            "total pivots (perturbed + clean-up) {} must be far below the \
-             unperturbed {}",
+            pert.iters < base.iters,
+            "total pivots (perturbed + clean-up) {} must be below the unperturbed {}",
             pert.iters,
             base.iters
         );

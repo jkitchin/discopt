@@ -615,6 +615,63 @@ jobs:
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
 
+  python-highspy-versions:
+    # highspy is a core dependency (#1229, docs/dev/lp-milp-highs-routing-plan.md §5)
+    # with the floor `highspy>=1.10` (1.9.0 has no getDualRay/getPrimalRay). Every
+    # other lane installs the latest highspy, so nothing else would notice a route that
+    # quietly needs a newer API. This lane runs the route's own tests against the floor
+    # and the latest release, plus the cross-backend soundness files on the
+    # DISCOPT_LP_MILP_BACKEND=rust opt-out (every other lane runs the HiGHS default).
+    name: HiGHS route (highspy ${{ matrix.highspy }}, 3.12, ubuntu)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        highspy: ["==1.10.0", ""]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          uv pip install maturin
+          uv pip install \
+            numpy scipy "highspy${{ matrix.highspy }}" \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
+            pytest pytest-timeout
+          maturin develop --release
+          python -c "import highspy; print('highspy', highspy.Highs().version())"
+      - name: Route tests
+        run: |
+          source .venv/bin/activate
+          pytest -q --tb=short --timeout=300 -p no:cacheprovider \
+            python/tests/test_lp_milp_highs_route.py \
+            python/tests/test_issue_1229_free_column_sentinel.py
+      - name: Cross-backend soundness files on the Rust opt-out route
+        run: |
+          source .venv/bin/activate
+          pytest -q --tb=short --timeout=300 -p no:cacheprovider \
+            python/tests/test_lp_huge_finite_box_937.py \
+            python/tests/test_850_cross_backend_unbounded_and_feasibility.py \
+            python/tests/test_solver_duals.py \
+            python/tests/test_issue_1229_free_column_sentinel.py
+        env:
+          DISCOPT_LP_MILP_BACKEND: rust
+
   python-coverage:
     name: Python coverage (3.12, ubuntu)
     # Run coverage on main pushes, or on PRs explicitly opted in

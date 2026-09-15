@@ -6621,7 +6621,14 @@ class Model:
         # 1.0 s floor between two runs of the same configuration (incumbent -580.4 in
         # one, none in the other). The #844 fallback keeps the budget it was
         # panelled at.
-        if _fb_reserve > 1.0 and result.objective is None:
+        # A certified infeasible and an unbounded result also carry no objective, but
+        # they are answers, not missing incumbents: the fallback filling one in
+        # overwrote a proved ``infeasible`` with ``optimal`` (integer column boxed in
+        # [-1.6, -1.07], found by adversarial testing of #1229).
+        _primary_decided = result.status == "unbounded" or (
+            result.status == "infeasible" and bool(result.gap_certified)
+        )
+        if _fb_reserve > 1.0 and result.objective is None and not _primary_decided:
             try:
                 from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 

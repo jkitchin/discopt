@@ -4,6 +4,12 @@ Status: entry measurements done 2026-09-05; source review against HiGHS 1.14 and
 SCIP 10.0.2 done 2026-09-05. **No stage below has been started.**
 Goal: discopt competitive with HiGHS/SCIP on pure MILP.
 
+**Closed 2026-09-15 (#1229).** Pure LP/MILP models now route to HiGHS by default with
+discopt-verified certificates (`lp-milp-highs-routing-plan.md`), so this goal is met by
+routing rather than by the stages below. The Rust MILP driver stays reachable through
+`DISCOPT_LP_MILP_BACKEND=rust` and `nlp_solver="simplex"`. Its search work is not
+pursued unless new evidence reopens it.
+
 ## 0. The measurement this plan replaces
 
 The prior plan was "raise the root cut budget and clean up slack cuts". It looked

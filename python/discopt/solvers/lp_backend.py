@@ -149,7 +149,7 @@ def _milp_pounce() -> Callable | None:
 def _milp_simplex() -> Callable | None:
     # Pure-Rust warm-started-simplex B&B; available iff the binding is built.
     try:
-        from discopt._rust import solve_milp_py  # noqa: F401
+        from discopt._rust import solve_milp_csc_py  # noqa: F401  (what solve_milp calls)
         from discopt.solvers.milp_simplex import solve_milp
 
         return solve_milp

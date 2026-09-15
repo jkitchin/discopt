@@ -4822,8 +4822,17 @@ fn dual_slack_basis(
             }
             col_status[j] = AT_UPPER;
         } else {
-            // |c_j| ≈ 0: dual-feasible at either bound; prefer a finite one.
-            col_status[j] = if l[j] > -INF { AT_LOWER } else { AT_UPPER };
+            // |c_j| ≈ 0: dual-feasible at either bound; prefer a finite one. A FREE
+            // column has neither, and must take `AT_LOWER`, the engine's "free, sits
+            // at 0" encoding (`primal.rs` `run`/`nb_value`). Labeling it `AT_UPPER`
+            // made every readback (`dual.rs` `assemble`, `reduced_rhs`) return
+            // `u_j = 1e20`: paired sentinels cancel exactly in the rows that pair
+            // them, so an infeasible point came back `optimal` (#1229).
+            col_status[j] = if l[j] > -INF || u[j] >= INF {
+                AT_LOWER
+            } else {
+                AT_UPPER
+            };
         }
     }
     let basic_vars: Vec<usize> = row_basic.iter().map(|&j| j as usize).collect();
@@ -5016,6 +5025,33 @@ mod tests {
         }
     }
     use super::*;
+
+    /// #1229: a zero-cost FREE column must never be parked `AT_UPPER` by the slack
+    /// basis — its upper bound is the `INF` sentinel, so every readback returned
+    /// `1e20` for it and `issue-2388.lp` came back `optimal` at an infeasible point.
+    #[test]
+    fn dual_slack_basis_never_parks_a_free_column_at_the_sentinel() {
+        // Row 0: s0 + x1 + x2 = 1. Columns: s0 slack in [0, inf] (the first
+        // zero-cost singleton, so it is the row's basic column), x1 free, x2 in
+        // [-inf, 3], x3 free and in no row. All costs 0.
+        let (m, n) = (1, 4);
+        let dense = vec![1.0, 1.0, 1.0, 0.0];
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let c = vec![0.0; n];
+        let l = vec![0.0, -INF, -INF, -INF];
+        let u = vec![INF, INF, 3.0, INF];
+        let basis = dual_slack_basis(&sp, m, n, &c, &l, &u, 1e-9).expect("slack basis exists");
+        assert_eq!(basis.basic_vars, vec![0]);
+        assert_eq!(basis.col_status[0], BASIC);
+        for j in [1, 3] {
+            assert_eq!(
+                basis.col_status[j], AT_LOWER,
+                "free column {j} must sit at 0 (AT_LOWER), not at the sentinel upper bound"
+            );
+        }
+        // An open-below column with a finite upper bound still takes that bound.
+        assert_eq!(basis.col_status[2], AT_UPPER);
+    }
 
     // ---- objective-lattice fathoming (DISCOPT_OBJ_INTEGRALITY) ----
 

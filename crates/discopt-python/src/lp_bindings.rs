@@ -21,6 +21,7 @@ use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
 use discopt_core::lp::mir::separate_mir;
+use discopt_core::lp::simplex::refine::ns_safe_bound_csc;
 use discopt_core::lp::simplex::{
     solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc,
     unstable_pivot_recovery_default, LpInstance, LpStatus, SimplexOptions, SparseCols,
@@ -1218,6 +1219,68 @@ pub fn solve_milp_py<'py>(
         0,
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
+}
+
+/// Neumaier–Shcherbina safe lower bound for `min cᵀx s.t. A x = b, l ≤ x ≤ u` from
+/// an arbitrary dual `y`, with `A` as raw CSC (`col_ptr` length `n+1`).
+///
+/// Thin shim over `refine::ns_safe_bound_csc`, which computes `bᵀy` and every
+/// `(Aᵀy)_j` in double-double, so the value is a valid lower bound whatever solver
+/// produced `y` (the HiGHS LP route, plan §3.1.6). Open bounds use the `1e20`
+/// sentinel. Returns `None` when the bound is `−∞`. The core function only
+/// `debug_assert`s its shapes, so they are validated here: a release build handed
+/// a short `col_ptr` would otherwise index out of bounds or read a wrong bound.
+#[pyfunction]
+pub fn ns_safe_bound_csc_py(
+    y: PyReadonlyArray1<'_, f64>,
+    c: PyReadonlyArray1<'_, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'_, i64>,
+    row_idx: PyReadonlyArray1<'_, i64>,
+    vals: PyReadonlyArray1<'_, f64>,
+    b: PyReadonlyArray1<'_, f64>,
+    lb: PyReadonlyArray1<'_, f64>,
+    ub: PyReadonlyArray1<'_, f64>,
+) -> PyResult<Option<f64>> {
+    let (y, c, vals, b) = (
+        y.as_slice()?,
+        c.as_slice()?,
+        vals.as_slice()?,
+        b.as_slice()?,
+    );
+    let (l, u) = (lb.as_slice()?, ub.as_slice()?);
+    if y.len() != m || b.len() != m || c.len() != n || l.len() != n || u.len() != n {
+        return Err(PyValueError::new_err(format!(
+            "ns_safe_bound_csc_py: shape mismatch (m={m}, n={n}, y={}, b={}, c={}, lb={}, ub={})",
+            y.len(),
+            b.len(),
+            c.len(),
+            l.len(),
+            u.len()
+        )));
+    }
+    let cp_raw = col_ptr.as_slice()?;
+    let ri_raw = row_idx.as_slice()?;
+    if cp_raw.len() != n + 1 || cp_raw[0] != 0 || ri_raw.len() != vals.len() {
+        return Err(PyValueError::new_err(
+            "ns_safe_bound_csc_py: col_ptr must have length n+1 starting at 0, \
+             and row_idx/vals must have equal length",
+        ));
+    }
+    if cp_raw.windows(2).any(|w| w[1] < w[0]) || cp_raw[n] as usize != vals.len() {
+        return Err(PyValueError::new_err(
+            "ns_safe_bound_csc_py: col_ptr must be non-decreasing and end at nnz",
+        ));
+    }
+    if ri_raw.iter().any(|&r| r < 0 || r as usize >= m) {
+        return Err(PyValueError::new_err(
+            "ns_safe_bound_csc_py: row index out of range",
+        ));
+    }
+    let cp: Vec<usize> = cp_raw.iter().map(|&v| v as usize).collect();
+    let ri: Vec<usize> = ri_raw.iter().map(|&v| v as usize).collect();
+    Ok(ns_safe_bound_csc(y, c, &cp, &ri, vals, m, n, b, l, u))
 }
 
 /// CSC-input MILP entry (docs/dev/sparse-milp-plan.md T4): the constraint matrix is

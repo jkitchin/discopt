@@ -119,6 +119,9 @@ def test_default_solve_reaches_the_engine(monkeypatch):
 
     monkeypatch.setattr(sv, "_solve_milp_simplex", spy)
     monkeypatch.delenv("DISCOPT_MILP_ENGINE", raising=False)
+    # The default among discopt's own MILP paths. The #1229 HiGHS route runs before
+    # them for a pure MILP, so pin the opt-out under which this choice is made.
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     res = _milp().solve(time_limit=30.0)
     assert seen, "the default MILP route never consulted the Rust engine"
     # And it is still right: x=3, y=4 -> -9-8 = -17.

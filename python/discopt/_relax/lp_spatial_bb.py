@@ -781,6 +781,11 @@ def solve_lp_spatial_bb(
         the relaxation builder negates the LP cost, so the two agree without any
         further adjustment. ``sgn`` is applied once, at the exit."""
         xr = _round_integers(xhat)
+        # Clipping to the root box can undo the rounding: an integer column boxed in
+        # [-1.6, -1.07] has no integer value, rounds to -1, clips back to -1.07, and
+        # ``_pt_feasible`` checks only the constraints -- so that point was accepted.
+        if np.any(np.abs(xr[is_int] - np.round(xr[is_int])) > _INT_TOL):
+            return None
         if not _pt_feasible(xr):
             return None
         try:

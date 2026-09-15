@@ -33,7 +33,7 @@ import scipy.sparse as sp
 from discopt.solvers import LPResult, SolveStatus
 
 try:
-    from discopt._rust import solve_milp_py  # noqa: F401
+    from discopt._rust import solve_lp_warm_csc_py  # noqa: F401  (the binding solve_lp calls)
 
     SIMPLEX_AVAILABLE = True
 except ImportError:

@@ -8912,7 +8912,17 @@ def solve_model(
     if _solver is None and not _has_bb_callbacks and not skip_convex_check:
         from discopt.gp import classify_gp, solve_gp
 
-        if classify_gp(model) is not None:
+        # A GP that is also a pure LP (a linear posynomial over positive boxes, e.g.
+        # ``minimize(dm.sum(y))`` with ``y >= 1``) goes to the #1229 HiGHS route. The
+        # log-space NLP answers it only to IPM accuracy (3 + 7.5e-9 for an optimum of 3).
+        if classify_gp(model) is not None and not _highs_takes_pure_lp_milp(
+            model,
+            solver_name=_solver,
+            nlp_bb=nlp_bb,
+            nlp_solver=nlp_solver,
+            lagrangian_bound=lagrangian_bound,
+            has_callbacks=lazy_constraints is not None or incumbent_callback is not None,
+        ):
             gp_result = solve_gp(
                 model,
                 time_limit=time_limit,
@@ -9753,6 +9763,19 @@ def solve_model(
     # above overran ``time_limit``): presolve only tightens bounds, so declining
     # it leaves a looser-but-valid box and lets the wall track ``time_limit``
     # (#654). ``propagate_bounds_to_model`` is a no-op when skipped.
+    #
+    # #1229 (plan §12, H5): a pure LP / MILP bound for the HiGHS route skips root
+    # presolve and the presolve-gated passes below; HiGHS presolves internally.
+    if presolve and _highs_takes_pure_lp_milp(
+        model,
+        solver_name=_solver,
+        nlp_bb=nlp_bb,
+        nlp_solver=nlp_solver,
+        lagrangian_bound=lagrangian_bound,
+        has_callbacks=lazy_constraints is not None or incumbent_callback is not None,
+    ):
+        logger.info("Root presolve skipped: the HiGHS LP/MILP route presolves internally")
+        presolve = False
     if _model_repr is not None and presolve and not _deadline_exhausted():
         try:
             from discopt._relax.presolve_pipeline import (
@@ -10177,6 +10200,8 @@ def solve_model(
     _pure_continuous_force_spatial = False
     if problem_class is not None:
         if problem_class == ProblemClass.LP:
+            if _lp_milp_backend() == "highs":
+                return _solve_lp_highs(model, t_start, time_limit)
             return _solve_lp(model, t_start, time_limit, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.QP:
             if _pure_continuous:
@@ -10200,6 +10225,24 @@ def solve_model(
             # speed for correctness (CLAUDE.md §1). This mirrors the #740 fix on
             # the spatial path.
             if lazy_constraints is None and incumbent_callback is None:
+                # #1229 HiGHS route (default; DISCOPT_LP_MILP_BACKEND=rust opts out). An explicit
+                # ``nlp_solver="simplex"`` still names the Rust engine, and
+                # ``lagrangian_bound`` still needs the per-node Python path.
+                if (
+                    _lp_milp_backend() == "highs"
+                    and nlp_solver != "simplex"
+                    and not lagrangian_bound
+                ):
+                    _highs_res = _solve_milp_highs(
+                        model,
+                        time_limit,
+                        gap_tolerance,
+                        max_nodes,
+                        t_start,
+                        initial_point=initial_point,
+                    )
+                    if _highs_res is not None:
+                        return _highs_res
                 # Warm-started-simplex engine: the whole MILP B&B runs in Rust
                 # with dual-warm-started simplex node solves. Reached explicitly
                 # via ``nlp_solver="simplex"``, and — since the routing panel
@@ -19175,6 +19218,7 @@ def _mip_recover_relaxation_duals(
     time_limit: Optional[float] = None,
     Q_orig: Optional[np.ndarray] = None,
     prefer_pounce: bool = False,
+    backend: Optional[str] = None,
 ) -> tuple[
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
@@ -19197,12 +19241,22 @@ def _mip_recover_relaxation_duals(
     the returned dicts — they reflect the act of fixing, not feasibility of
     the original integer-feasible point.
     """
+    if backend not in (None, "highs"):
+        raise ValueError(f"unknown dual-recovery backend {backend!r}")
     try:
         if Q_orig is not None:
             # QP/MIQP dual recovery is HiGHS-free (issue #359): always POUNCE.
             from discopt.solvers.qp_pounce import solve_qp as _recover_qp
+        elif backend == "highs":
+            # The HiGHS LP/MILP route (#1229) recovers with the engine that solved
+            # the MILP, so the reported duals come from one engine's view.
+            from discopt.solvers.lp_milp_highs import (  # type: ignore[assignment]
+                solve_lp as _recover_lp,
+            )
         elif prefer_pounce:
-            from discopt.solvers.lp_pounce import solve_lp as _recover_lp
+            from discopt.solvers.lp_pounce import (  # type: ignore[assignment]
+                solve_lp as _recover_lp,
+            )
         else:
             from discopt.solvers.lp_simplex import (  # type: ignore[assignment]
                 solve_lp as _recover_lp,
@@ -19320,6 +19374,44 @@ def _fixed_col_mask(col_ub: Optional[np.ndarray], n_cols: int) -> Optional[np.nd
     return mask
 
 
+def _slack_row_orientation(
+    A: Any,
+    n_orig: int,
+    n_slack: int,
+    col_ub: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per row of a CSR equality-plus-slack form: ``(is_ub, sign)``.
+
+    The single statement of the row-classification rule of
+    :func:`_decompose_eq_slack_form_sparse` (whose docstring lists the rule and
+    its equivalence to the dense path). Shared so a consumer mapping duals onto the
+    projection -- the HiGHS route -- orients rows exactly as the projection does.
+    """
+    m = A.shape[0]
+    indptr, indices, data = A.indptr, A.indices, A.data
+    is_ub = np.zeros(m, dtype=bool)
+    sign = np.ones(m, dtype=np.float64)
+    # A logical fixed at [0, 0] gives its row no freedom, so it must not make
+    # that row read as an inequality. ``None`` (no ``col_ub``) leaves every
+    # column free, which is the pre-consolidation behaviour exactly.
+    fixed = _fixed_col_mask(col_ub, A.shape[1])
+    if n_slack > 0:
+        for i in range(m):
+            best_abs = 0.0
+            best_val = 0.0
+            for k in range(indptr[i], indptr[i + 1]):
+                if indices[k] < n_orig or (fixed is not None and fixed[indices[k]]):
+                    continue
+                a = abs(data[k])
+                if a > best_abs:  # strict: ties keep the lowest column index
+                    best_abs = a
+                    best_val = data[k]
+            if best_abs > 1e-15:
+                is_ub[i] = True
+                sign[i] = 1.0 if best_val > 0 else -1.0
+    return is_ub, sign
+
+
 def _decompose_eq_slack_form_sparse(
     A_eq_full: Any,
     b_eq_full: np.ndarray,
@@ -19347,30 +19439,8 @@ def _decompose_eq_slack_form_sparse(
     import scipy.sparse as _sp
 
     A = A_eq_full.tocsr()
-    m = A.shape[0]
     b = np.asarray(b_eq_full, dtype=np.float64)
-
-    indptr, indices, data = A.indptr, A.indices, A.data
-    is_ub = np.zeros(m, dtype=bool)
-    sign = np.ones(m, dtype=np.float64)
-    # A logical fixed at [0, 0] gives its row no freedom, so it must not make
-    # that row read as an inequality. ``None`` (no ``col_ub``) leaves every
-    # column free, which is the pre-consolidation behaviour exactly.
-    fixed = _fixed_col_mask(col_ub, A.shape[1])
-    if n_slack > 0:
-        for i in range(m):
-            best_abs = 0.0
-            best_val = 0.0
-            for k in range(indptr[i], indptr[i + 1]):
-                if indices[k] < n_orig or (fixed is not None and fixed[indices[k]]):
-                    continue
-                a = abs(data[k])
-                if a > best_abs:  # strict: ties keep the lowest column index
-                    best_abs = a
-                    best_val = data[k]
-            if best_abs > 1e-15:
-                is_ub[i] = True
-                sign[i] = 1.0 if best_val > 0 else -1.0
+    is_ub, sign = _slack_row_orientation(A, n_orig, n_slack, col_ub)
 
     orig = A[:, :n_orig]
     ub_idx = np.flatnonzero(is_ub)
@@ -22214,6 +22284,326 @@ def _milp_engine_default_on() -> bool:
     return os.environ.get("DISCOPT_MILP_ENGINE", "1").lower() not in ("0", "false", "no")
 
 
+def _lp_milp_backend() -> str:
+    """Which engine solves a pure LP / MILP: ``"highs"`` (default) or ``"rust"``.
+
+    Issue #1229; the contract is ``docs/dev/lp-milp-highs-routing-plan.md`` §3, and
+    the graduation evidence is its §12 (P4). ``DISCOPT_LP_MILP_BACKEND=rust`` is the
+    opt-out to the legacy Rust route. Re-read each call so tests and panels can flip
+    it in-process. Any other value is refused loudly: a typo must not silently run the
+    default engine and be reported as a measurement of the other one.
+    """
+    val = os.environ.get("DISCOPT_LP_MILP_BACKEND", "highs").strip().lower()
+    if val not in ("rust", "highs"):
+        raise ValueError(f"DISCOPT_LP_MILP_BACKEND={val!r}: expected 'rust' or 'highs'")
+    return val
+
+
+def _highs_takes_pure_lp_milp(
+    model: Model,
+    *,
+    solver_name: Optional[str],
+    nlp_bb: Optional[bool],
+    nlp_solver: str,
+    lagrangian_bound: bool,
+    has_callbacks: bool,
+) -> bool:
+    """Whether the #1229 HiGHS route will solve *model*, decided before root presolve.
+
+    Mirrors the LP / MILP HiGHS dispatch conditions in ``_solve_impl``. discopt's root
+    presolve only tightens bounds, and HiGHS presolves the model itself, so running it
+    first costs wall and changes nothing the route reports (plan §12, H5: identical
+    status/objective/bound/nodes with it on and off, 9.6x and 3.7x wall). A model for
+    which this answers ``True`` but that later leaves the route still gets a valid,
+    merely looser, declared box -- skipping presolve is never unsound.
+    """
+    if _lp_milp_backend() != "highs" or solver_name == "gurobi":
+        return False
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+    problem_class = classify_problem(model)
+    if problem_class == ProblemClass.LP:
+        return True
+    return (
+        problem_class == ProblemClass.MILP
+        and nlp_bb is not True
+        and not has_callbacks
+        and nlp_solver != "simplex"
+        and not lagrangian_bound
+        and _milp_is_exactly_linear(model)
+    )
+
+
+def _milp_is_exactly_linear(model: Model) -> bool:
+    """Whether ``extract_lp_data``'s linear projection of *model* is the model.
+
+    ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
+    term is silently dropped. Solving that linear projection as if exact is sound
+    ONLY for a genuinely linear model. Otherwise a dropped *bounding* nonlinear
+    constraint can make the projection falsely unbounded/optimal — carton7
+    (issue #286): continuous variables with infinite upper bounds, bounded only
+    by the dropped nonlinear constraints, were reported as a false global
+    ``unbounded`` at the root. A pure-MILP engine must defer any model carrying
+    nonlinear terms to the spatial / NLP path (which keeps those constraints).
+    """
+    from discopt._relax.term_classifier import classify_nonlinear_terms
+
+    _nl = classify_nonlinear_terms(model)
+    if (
+        _nl.bilinear
+        or _nl.trilinear
+        or _nl.multilinear
+        or _nl.monomial
+        or _nl.fractional_power
+        or _nl.bilinear_with_fp
+        or _nl.ratio_of_products
+        or _nl.general_nl
+    ):
+        return False
+
+    # Authoritative linearity backstop (defense-in-depth). The term classifier
+    # above can have blind spots: a power/product over a *non-variable* base —
+    # e.g. fac2's ``(x36+…+x41)**2.5`` objective — is missed by both the Rust and
+    # Python term classifiers, yet ``extract_lp_data`` still silently drops it,
+    # so the engine would certify a wrong 'optimal' on the linear projection
+    # (off by 134x on fac2). The degree analysis behind ``is_objective_linear`` /
+    # ``is_constraint_linear`` (the same check the router trusts to reach this
+    # MILP branch) catches every such term, so defer unless the model is provably
+    # linear in its objective and every constraint. For models that reach here
+    # through the normal MILP route this is a no-op (the router already proved
+    # linearity); it only guards direct calls, future re-routing, and any
+    # router/extractor representation discrepancy.
+    try:
+        from discopt._rust import model_to_repr
+
+        _repr = model_to_repr(model, getattr(model, "_builder", None))
+        _fully_linear = bool(_repr.is_objective_linear()) and all(
+            _repr.is_constraint_linear(i) for i in range(_repr.n_constraints)
+        )
+    except Exception:
+        _fully_linear = False
+    return _fully_linear
+
+
+def _highs_std_form(model: Model):
+    """``(lp_data, n_orig, StdForm)`` for the HiGHS route: the model's own standard
+    form, integers marked, so every certificate is about exactly what was solved."""
+    import scipy.sparse as _sp
+
+    from discopt._relax.problem_classifier import extract_lp_data
+    from discopt.solvers.lp_milp_highs import StdForm
+
+    lp_data = extract_lp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+    _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    c = np.asarray(lp_data.c, dtype=np.float64).ravel()
+    A: Any = lp_data.A_eq
+    if A.shape[0] == 0:
+        A = _sp.csc_matrix((0, c.shape[0]))
+    elif not _sp.issparse(A):
+        A = _dense_A(A)
+    sf = StdForm.from_arrays(
+        c, A, lp_data.b_eq, lp_data.x_l, lp_data.x_u, float(lp_data.obj_const), int_idx
+    )
+    if sf.n < n_orig:
+        raise ValueError(f"standard form has {sf.n} columns for {n_orig} model variables")
+    return lp_data, n_orig, sf
+
+
+def _highs_decomposed_duals(model: Model, n_orig: int, sf, row_dual, col_dual):
+    """Map standard-form HiGHS duals onto ``_lp_qp_unpack_duals``'s layout.
+
+    That layout is the ``_decompose_eq_slack_form`` projection: oriented inequality
+    rows first, then equalities, each in declared order. The orientation comes from
+    :func:`_slack_row_orientation`, the rule the projection itself uses, so the two
+    cannot drift. A standard-form row dual is ``∂obj/∂b_i``; the projected
+    inequality row has right-hand side ``sign_i·b_i``, so its dual is
+    ``sign_i·y_i``. Reduced costs ``c - Aᵀy`` are identical in both forms.
+    """
+    is_ub, sign = _slack_row_orientation(sf.A.tocsr(), n_orig, sf.n - n_orig, sf.xu)
+    ub = np.flatnonzero(is_ub)
+    eq = np.flatnonzero(~is_ub)
+    y = np.asarray(row_dual, dtype=np.float64)
+    rd = np.concatenate([sign[ub] * y[ub], y[eq]])
+    return _lp_qp_unpack_duals(
+        model,
+        row_dual=rd,
+        col_dual=np.asarray(col_dual, dtype=np.float64)[:n_orig],
+        n_eq=int(eq.size),
+        n_ub=int(ub.size),
+        n_orig=n_orig,
+    )
+
+
+def _highs_route_label(kind: str, out) -> str:
+    labels = "; ".join(f"{k}={v}" for k, v in sorted(out.labels.items()))
+    base = f"highs-{kind}: verified HiGHS route (HiGHS {out.highs_status or 'not run'})"
+    return f"{base}; {labels}" if labels else base
+
+
+def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = None) -> SolveResult:
+    """Solve a pure LP with HiGHS under the verified contract of plan §3.1.
+
+    No fallback engine (plan §4): an outcome HiGHS cannot back with a certificate
+    discopt verifies is reported as ``error`` with the reason logged.
+    """
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers.lp_milp_highs import solve_lp_std
+
+    _, n_orig, sf = _highs_std_form(model)
+    rem = None if time_limit is None else float(time_limit) - (time.perf_counter() - t_start)
+    out = solve_lp_std(sf, time_limit=rem)
+    wall = time.perf_counter() - t_start
+    maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+    route = _highs_route_label("lp", out)
+    stats = dict(out.stats)
+
+    if out.status in ("optimal", "feasible"):
+        assert out.x is not None and out.objective is not None
+        obj = -out.objective if maximize else out.objective
+        bound = None if out.bound is None else (-out.bound if maximize else out.bound)
+        if out.status == "optimal":
+            gap = _optimal_relative_gap(obj)
+        else:
+            gap = None if bound is None else abs(obj - bound) / max(1.0, abs(obj))
+        cd, bdl, bdu = _highs_decomposed_duals(model, n_orig, sf, out.row_dual, out.col_dual)
+        sr = SolveResult(
+            status=out.status,
+            objective=obj,
+            bound=bound,
+            gap=gap,
+            x=_unpack_solution(model, out.x[:n_orig]),
+            wall_time=wall,
+            node_count=0,
+            python_time=wall,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
+            gap_certified=out.gap_certified,
+            solver_stats=stats,
+            algorithm_route=route,
+        )
+        sr.convex_fast_path = out.status == "optimal"
+        if out.status == "feasible":
+            logger.warning("HiGHS LP optimum not certified: %s", out.message)
+        return sr
+    if out.status in ("infeasible", "unbounded"):
+        return SolveResult(
+            status=out.status, wall_time=wall, solver_stats=stats, algorithm_route=route
+        )
+    if out.status == "error":
+        logger.warning("HiGHS LP route: %s", out.message)
+    return SolveResult(
+        status=out.status,
+        wall_time=wall,
+        gap_certified=False,
+        solver_stats=stats,
+        algorithm_route=route,
+    )
+
+
+def _solve_milp_highs(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    max_nodes: int,
+    t_start: float,
+    initial_point: Optional[np.ndarray] = None,
+) -> Optional[SolveResult]:
+    """Solve a pure MILP with HiGHS under the verified contract of plan §3.2.
+
+    Returns ``None`` only when the model is not exactly linear (the same gate as
+    ``_solve_milp_simplex``: the MILP projection would drop terms). Every other
+    outcome is returned, ``error`` included -- no fallback engine (plan §4).
+    """
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers.lp_milp_highs import solve_milp_std
+
+    if not _milp_is_exactly_linear(model):
+        return None
+    lp_data, n_orig, sf = _highs_std_form(model)
+    seed = None
+    if initial_point is not None and np.asarray(initial_point).size == n_orig:
+        seed = np.asarray(initial_point, dtype=np.float64).ravel()
+    out = solve_milp_std(
+        sf,
+        time_limit=float(time_limit) - (time.perf_counter() - t_start),
+        gap_tolerance=float(gap_tolerance),
+        max_nodes=int(max_nodes),
+        initial_point=seed,
+        n_struct=n_orig,
+    )
+    wall = time.perf_counter() - t_start
+    maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+
+    def _flip(v: Optional[float]) -> Optional[float]:
+        return None if v is None else (-v if maximize else v)
+
+    route = _highs_route_label("milp", out)
+    stats = dict(out.stats)
+    bound = _flip(out.bound)
+    root_bound = _flip(out.root_bound)
+
+    if out.x is not None and out.status in ("optimal", "feasible"):
+        assert out.objective is not None
+        obj = _flip(out.objective)
+        assert obj is not None
+        gap = None if bound is None else abs(obj - bound) / (abs(obj) + 1e-10)
+        root_gap = None if root_bound is None else abs(obj - root_bound) / max(1.0, abs(obj))
+        xo = out.x[:n_orig]
+        A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+            lp_data.A_eq if lp_data.A_eq.shape[0] else np.zeros((0, sf.n)),
+            np.asarray(lp_data.b_eq),
+            n_orig,
+            sf.n - n_orig,
+            np.asarray(lp_data.x_u, dtype=np.float64),
+        )
+        cd, bdl, bdu = _mip_recover_relaxation_duals(
+            model,
+            lp_data=lp_data,
+            x_flat=xo,
+            n_orig=n_orig,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            time_limit=max(0.1, float(time_limit) - (time.perf_counter() - t_start)),
+            backend="highs",
+        )
+        return SolveResult(
+            status=out.status,
+            objective=obj,
+            bound=bound,
+            gap=gap,
+            x=_unpack_solution(model, xo),
+            wall_time=time.perf_counter() - t_start,
+            node_count=out.node_count,
+            root_bound=root_bound,
+            root_gap=root_gap,
+            root_time=out.root_time,
+            gap_certified=out.gap_certified,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
+            solver_stats=stats,
+            algorithm_route=route,
+        )
+    if out.status == "error":
+        logger.warning("HiGHS MILP route: %s", out.message)
+    return SolveResult(
+        status=out.status,
+        bound=bound if out.status in ("time_limit", "node_limit") else None,
+        wall_time=wall,
+        node_count=out.node_count,
+        root_bound=root_bound,
+        root_time=out.root_time,
+        gap_certified=out.status == "infeasible",
+        solver_stats=stats,
+        algorithm_route=route,
+    )
+
+
 def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """Root cut options for the pure-MILP engine, or ``None`` to keep the
     binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
@@ -22408,43 +22798,7 @@ def _solve_milp_simplex(
     # by the dropped nonlinear constraints, were reported as a false global
     # ``unbounded`` at the root. Defer any model carrying nonlinear terms to the
     # spatial / NLP path (which keeps those constraints).
-    from discopt._relax.term_classifier import classify_nonlinear_terms
-
-    _nl = classify_nonlinear_terms(model)
-    if (
-        _nl.bilinear
-        or _nl.trilinear
-        or _nl.multilinear
-        or _nl.monomial
-        or _nl.fractional_power
-        or _nl.bilinear_with_fp
-        or _nl.ratio_of_products
-        or _nl.general_nl
-    ):
-        return None
-
-    # Authoritative linearity backstop (defense-in-depth). The term classifier
-    # above can have blind spots: a power/product over a *non-variable* base —
-    # e.g. fac2's ``(x36+…+x41)**2.5`` objective — is missed by both the Rust and
-    # Python term classifiers, yet ``extract_lp_data`` still silently drops it,
-    # so the engine would certify a wrong 'optimal' on the linear projection
-    # (off by 134x on fac2). The degree analysis behind ``is_objective_linear`` /
-    # ``is_constraint_linear`` (the same check the router trusts to reach this
-    # MILP branch) catches every such term, so defer unless the model is provably
-    # linear in its objective and every constraint. For models that reach here
-    # through the normal MILP route this is a no-op (the router already proved
-    # linearity); it only guards direct calls, future re-routing, and any
-    # router/extractor representation discrepancy.
-    try:
-        from discopt._rust import model_to_repr
-
-        _repr = model_to_repr(model, getattr(model, "_builder", None))
-        _fully_linear = bool(_repr.is_objective_linear()) and all(
-            _repr.is_constraint_linear(i) for i in range(_repr.n_constraints)
-        )
-    except Exception:
-        _fully_linear = False
-    if not _fully_linear:
+    if not _milp_is_exactly_linear(model):
         return None
 
     lp_data = extract_lp_data(model)

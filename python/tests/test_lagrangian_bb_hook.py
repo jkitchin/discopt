@@ -288,8 +288,13 @@ def test_hook_sound_and_helpful_on_a_branching_tree(monkeypatch):
     settings, five instance sizes): off 13/11/25/101/89 nodes vs on 1/1/1/31/15 —
     the hook's real, large benefit, which the cross-engine comparison had been
     hiding behind luck.
+
+    The same flaw returned with the #1229 HiGHS route: it takes the hook-off arm
+    (not the ``lagrangian_bound=True`` one) and closed it at 1 node on CI, so the
+    off arm is pinned to the legacy route as well.
     """
     monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     m_off, c, n = _branching_instance()
     opt = _branching_brute(c, n)
     off = m_off.solve(time_limit=60)

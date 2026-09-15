@@ -49,6 +49,13 @@ def _spy(monkeypatch, name):
 
 
 class TestLPBackendSeam:
+    @pytest.fixture(autouse=True)
+    def _legacy_lp_route(self, monkeypatch):
+        # ``_solve_lp``'s engine order is the legacy LP route. A pure LP goes to the
+        # #1229 HiGHS route by default (covered in ``test_lp_milp_highs_route.py``),
+        # so pin the opt-out that keeps this seam reachable.
+        monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+
     def test_default_routes_to_pounce(self, monkeypatch):
         # POUNCE is now the universal default: the default solve must route to
         # the POUNCE engine and must NOT consult the simplex.

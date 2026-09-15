@@ -365,10 +365,7 @@ fn write_expr(
                 }
             }
             c if c >= OP_FUNC_BASE
-                && matches!(
-                    c - OP_FUNC_BASE,
-                    FUNC_LOG1P | FUNC_SIGMOID | FUNC_SOFTPLUS
-                ) =>
+                && matches!(c - OP_FUNC_BASE, FUNC_LOG1P | FUNC_SIGMOID | FUNC_SOFTPLUS) =>
             {
                 // Each is prefix tokens followed by the single argument, so the
                 // argument subtree is simply pushed last -- no trailing text.
@@ -969,7 +966,10 @@ mod func_table_tests {
             }
         }
         // Prove the loop ran: an empty ALL would pass every assertion above.
-        assert_eq!(admitted, 18, "expected 18 expanded functions, saw {admitted}");
+        assert_eq!(
+            admitted, 18,
+            "expected 18 expanded functions, saw {admitted}"
+        );
     }
 
     #[test]
