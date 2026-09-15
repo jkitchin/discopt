@@ -32,6 +32,9 @@ blocks and builder objective, indicator / SOS / disjunctive relations,
 complementarity relations together with this model's lowering marks, the starting
 point, and -- optionally -- the solve result.
 
+Index expressions carry integers, slices and tuples of them; a fancy (array/list)
+index, ``None`` or ``Ellipsis`` is refused rather than approximated.
+
 Refused loudly (never silently dropped, per the repo's no-silent-approximation
 rule): :class:`~discopt.modeling.core.CustomCall` (an arbitrary Python callable;
 there is nothing faithful to write, and writing its *name* would reload into a
@@ -335,6 +338,37 @@ _KNOWN_OPS = frozenset(
 )
 
 
+#: Non-element-wise function names a ``FunctionCall`` can legally carry. The
+#: element-wise ones come from ``core._ELEMENTWISE_FUNCS``; these are the rest of
+#: what the modeling layer produces (reductions, two-argument and entropy forms).
+#: ``test_every_produced_operator_name_is_accepted`` scans the package for every
+#: ``FunctionCall`` / ``BinaryOp`` / ``UnaryOp`` construction with a literal name and
+#: fails if any produced name is missing here -- a name omitted from these sets
+#: would make `loads` refuse a perfectly valid document. (Spelled without the call
+#: parentheses on purpose: that scan would otherwise match this very comment.)
+_EXTRA_FUNCS = frozenset({"atan2", "centropy", "entropy", "prod", "signpower", "sum"})
+
+_KNOWN_BINARY_OPS = frozenset({"+", "-", "*", "/", "**"})
+_KNOWN_UNARY_OPS = frozenset({"neg", "abs"})
+
+
+def _known_funcs() -> frozenset:
+    """Function names a ``FunctionCall`` node may carry.
+
+    Built from the modeling layer's own set rather than restated here, so it cannot
+    drift from what a node can legally hold. ``BinaryOp``/``UnaryOp``/``FunctionCall``
+    do not validate their own ``op``/``func_name``, so without a read-time check a
+    document naming an operator that does not exist loads without complaint and
+    fails much later, during a solve -- where the first symptom is the
+    incumbent-verification snapshot failing and the false-primal guard being
+    disabled for that solve. That contradicts this module's own promise that an
+    unknown op is refused on read.
+    """
+    from discopt.modeling import core as _core
+
+    return frozenset(_core._ELEMENTWISE_FUNCS) | _EXTRA_FUNCS
+
+
 def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Parameter]):
     """Rebuild expression objects from the node table.
 
@@ -342,6 +376,7 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
     forward pass suffices and sharing is restored by construction: two parents
     referencing id ``k`` get the *same* object back.
     """
+    known_funcs = _known_funcs()
     built: list[Any] = []
     for i, nd in enumerate(table):
         op = nd.get("op")
@@ -349,6 +384,21 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
             raise SerializationError(
                 f"node {i} has unknown op {op!r}. This file was written by a newer "
                 "discopt than the one reading it; refusing rather than dropping the node."
+            )
+        if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
+            raise SerializationError(
+                f"node {i} names unknown binary operator {nd.get('o')!r}. Refusing on "
+                "read rather than building a node that fails much later, during a solve."
+            )
+        if op == "unop" and nd.get("o") not in _KNOWN_UNARY_OPS:
+            raise SerializationError(
+                f"node {i} names unknown unary operator {nd.get('o')!r}. Refusing on "
+                "read rather than building a node that fails much later, during a solve."
+            )
+        if op == "call" and nd.get("f") not in known_funcs:
+            raise SerializationError(
+                f"node {i} names unknown function {nd.get('f')!r}. Refusing on read "
+                "rather than building a node that fails much later, during a solve."
             )
         if op == "const":
             shape = nd.get("shape")
@@ -403,12 +453,24 @@ def _refuse_unsupported(model: Model) -> None:
 
 
 def _enc_variable(v: Variable) -> dict:
+    # `lb`/`ub` are the variable's LIVE box, which inside a `fix()` / `Model.fixed(...)`
+    # scope is the pinned one. The declared domain then lives at the bottom of
+    # `_bound_stack`, and every entry above it is a box some `fix()` replaced.
+    #
+    # Writing only the live box would persist a *temporary* pin as the model's
+    # permanent declared domain: the reloaded model solves a different problem with
+    # no warning, `fix_depth` is 0 so the pin cannot be undone, and re-fixing is
+    # refused as "outside its declared bounds". So the stack travels with the box,
+    # and the reloaded variable is pinned exactly as deeply as the saved one.
     return {
         "name": v.name,
         "type": v.var_type.value,
         "shape": list(v.shape),
         "lb": _enc_array(v.lb),
         "ub": _enc_array(v.ub),
+        "bound_stack": [
+            [_enc_array(lb), _enc_array(ub)] for lb, ub in getattr(v, "_bound_stack", [])
+        ],
     }
 
 
@@ -421,6 +483,12 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # plus a [0, 1e6] fallback for an unspecified bound). Reloading a saved model
     # must reproduce the bounds that were saved, exactly, with no re-defaulting.
     var = Variable(d["name"], VarType(d["type"]), shape, lb, ub, model)
+    # Restore the fix stack, so `fix_depth`, `unfix()` and the declared-domain check
+    # in `fix()` all see what the saved model saw.
+    var._bound_stack = [
+        (_dec_array(entry[0], shape), _dec_array(entry[1], shape))
+        for entry in d.get("bound_stack", [])
+    ]
     return model._register_variable(var)
 
 
@@ -739,6 +807,187 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> No
     }
 
 
+# ── the rest of the model's state ──────────────────────────────────────────
+#
+# `loads` builds a fresh `Model` and restores section by section, so any attribute
+# with no section is silently reset to its `__init__` default. For the decomposition
+# annotations that is worse than losing a label: `discopt.decomposition` falls back
+# to AUTO-DETECTING structure when they are empty, so a user's declared Benders /
+# Lagrangian decomposition is quietly replaced by a guess.
+#
+# `_MODEL_STATE` is the registry of every `Model.__init__` attribute and how this
+# format handles it. `test_every_model_attribute_is_accounted_for` compares it
+# against a live `Model`, so a field added to `Model` in future cannot slip through
+# unhandled -- it fails the test until someone decides which bucket it belongs in.
+
+#: Attributes carried by a dedicated section elsewhere in the document.
+_STATE_IN_OWN_SECTION = frozenset(
+    {
+        "name",
+        "_variables",
+        "_parameters",
+        "_constraints",
+        "_objective",
+        "_initial_point",
+        "_complementarities",
+        "_lowered_complementarities",
+        "_builder_linear_blocks",
+        "_builder_linear_objective",
+        "_builder_quadratic_objective",
+        "saved_result",
+    }
+)
+
+#: Attributes rebuilt as a side effect of restoring the sections above, so writing
+#: them would be writing a derived value that could disagree with its source.
+_STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache"})
+
+#: Attributes carried verbatim in the "state" section (plain JSON-safe values).
+_STATE_PLAIN = ("_aux_counter", "_decomp_stages", "_decomp_blocks")
+
+#: Attributes carried in "state" as a sorted list (a set is not JSON).
+_STATE_AS_SORTED_LIST = ("_zero_spanning_factor_auxes",)
+
+#: Attributes carried in "state" by a bespoke encoder.
+_STATE_BESPOKE = ("_coupling_keys", "_sets", "_simplex_lowerings")
+
+_MODEL_STATE = (
+    _STATE_IN_OWN_SECTION
+    | _STATE_DERIVED
+    | frozenset(_STATE_PLAIN)
+    | frozenset(_STATE_AS_SORTED_LIST)
+    | frozenset(_STATE_BESPOKE)
+)
+
+
+def _enc_sets(model: Model) -> list[dict]:
+    """Named index sets (``Model.set``). Members are scalars or tuples."""
+    out = []
+    for st in getattr(model, "_sets", []) or []:
+        members = [list(mem) if isinstance(mem, tuple) else mem for mem in st.members]
+        out.append({"name": st.name, "dimen": int(st.dimen), "members": members})
+    return out
+
+
+def _dec_sets(docs: list[dict]) -> list:
+    from discopt.modeling.sets import Set
+
+    return [
+        Set(
+            d["name"],
+            [tuple(mem) if isinstance(mem, list) else mem for mem in d["members"]],
+            dimen=d["dimen"],
+        )
+        for d in docs
+    ]
+
+
+def _enc_coupling_keys(model: Model, rows: list) -> dict:
+    """Coupling-constraint marks (``Model.mark_coupling``).
+
+    The set holds a mix: name strings, and ``id(constraint)`` for the object form.
+    A raw ``id`` is a process-local address and means nothing after a reload, so it
+    is written as the constraint's ROW INDEX and turned back into the rebuilt row's
+    ``id`` on load. An id matching no row is refused rather than dropped -- a
+    silently missing coupling mark changes which rows get dualized.
+    """
+    keys: set = getattr(model, "_coupling_keys", set()) or set()
+    row_of_id = {id(con): i for i, con in enumerate(rows)}
+    names: list[str] = []
+    indices: list[int] = []
+    for key in keys:
+        if isinstance(key, str):
+            names.append(key)
+        elif isinstance(key, int):
+            idx = row_of_id.get(key)
+            if idx is None:
+                raise SerializationError(
+                    "a coupling mark refers to a constraint object that is not among "
+                    "this model's rows, so it cannot be written as a stable reference. "
+                    "Re-mark the coupling constraints on the current model "
+                    "(Model.mark_coupling), or mark them by name."
+                )
+            indices.append(idx)
+        else:
+            raise SerializationError(
+                f"cannot serialize a coupling mark of type {type(key).__name__}; "
+                "Model.mark_coupling records a name string or a constraint object."
+            )
+    return {"names": sorted(names), "row_indices": sorted(indices)}
+
+
+def _dec_coupling_keys(d: Optional[dict], rows: list) -> set:
+    if not d:
+        return set()
+    out: set = set(d.get("names", []))
+    for idx in d.get("row_indices", []):
+        if idx >= len(rows):
+            raise SerializationError(
+                f"a coupling mark refers to row {idx}, but the model has {len(rows)} rows."
+            )
+        out.add(id(rows[idx]))
+    return out
+
+
+def _enc_simplex_lowerings(model: Model) -> list[dict]:
+    out = []
+    for rec in getattr(model, "_simplex_lowerings", []) or []:
+        sizes = rec.sizes
+        out.append(
+            {
+                "name": rec.name,
+                "n_disjuncts": int(rec.n_disjuncts),
+                "weight_names": list(rec.weight_names),
+                "sizes": {
+                    "disjunctions": int(sizes.disjunctions),
+                    "cnf_clauses": int(sizes.cnf_clauses),
+                    "literal_occurrences": int(sizes.literal_occurrences),
+                    "weight_variables": int(sizes.weight_variables),
+                    "rows": int(sizes.rows),
+                },
+            }
+        )
+    return out
+
+
+def _dec_simplex_lowerings(docs: list[dict]) -> list:
+    from discopt._relax.simplex_lowering import LoweringSizes, SimplexLoweringRecord
+
+    return [
+        SimplexLoweringRecord(
+            name=d["name"],
+            n_disjuncts=d["n_disjuncts"],
+            weight_names=list(d["weight_names"]),
+            sizes=LoweringSizes(**d["sizes"]),
+        )
+        for d in docs
+    ]
+
+
+def _enc_state(model: Model, rows: list) -> dict:
+    state: dict[str, Any] = {name: getattr(model, name) for name in _STATE_PLAIN}
+    for name in _STATE_AS_SORTED_LIST:
+        state[name] = sorted(getattr(model, name, set()) or set())
+    state["_coupling_keys"] = _enc_coupling_keys(model, rows)
+    state["_sets"] = _enc_sets(model)
+    state["_simplex_lowerings"] = _enc_simplex_lowerings(model)
+    return state
+
+
+def _dec_state(state: Optional[dict], model: Model, rows: list) -> None:
+    if not state:
+        return
+    for name in _STATE_PLAIN:
+        if name in state:
+            setattr(model, name, state[name])
+    for name in _STATE_AS_SORTED_LIST:
+        if name in state:
+            setattr(model, name, set(state[name]))
+    model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
+    model._sets = _dec_sets(state.get("_sets", []))
+    model._simplex_lowerings = _dec_simplex_lowerings(state.get("_simplex_lowerings", []))
+
+
 # ── JSON tree sanitising (for the embedded result payload) ─────────────────
 
 
@@ -844,6 +1093,7 @@ def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> 
         "rows": rows,
         "builder_blocks": _enc_builder_blocks(model, var_ids),
         "complementarities": _enc_complementarities(model, table),
+        "state": _enc_state(model, list(model._constraints)),
         "initial_point": [
             [name, int(elem), _enc_float(val)]
             for (name, elem), val in sorted(getattr(model, "_initial_point", {}).items())
@@ -872,7 +1122,10 @@ def loads(text: Union[str, bytes]) -> Model:
     schema = doc.get("schema")
     if not isinstance(schema, str) or not schema.startswith("discopt.model/"):
         raise SerializationError(f"not a discopt model document (schema={schema!r}).")
-    major = schema.split("/", 1)[1]
+    # Split on "." so a future "discopt.model/1.1" is read as major 1 (a minor bump
+    # is additive by construction) rather than refused as a major called "1.1".
+    version = schema.split("/", 1)[1]
+    major = version.split(".", 1)[0]
     if major != str(SCHEMA_MAJOR):
         raise SerializationError(
             f"document schema {schema!r} is major version {major}, but this discopt "
@@ -920,6 +1173,7 @@ def loads(text: Union[str, bytes]) -> Model:
             setattr(model._objective, "_is_placeholder", True)
 
     _dec_complementarities(doc.get("complementarities"), model, nodes)
+    _dec_state(doc.get("state"), model, list(model._constraints))
 
     model._initial_point = {
         (name, int(elem)): _dec_float(val) for name, elem, val in doc.get("initial_point", [])

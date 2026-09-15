@@ -569,3 +569,187 @@ def test_source_link_carries_a_parent_outside_the_declared_list():
     assert restored_parent.name == "vec"
     assert [rel.index for rel in back._complementarities] == [(0,), (1,)]
     assert back._complementarities[0].describe() == elements[0].describe()
+
+
+# ── review follow-ups (PR #1240) ───────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_saving_inside_a_fixed_scope_keeps_the_declared_domain():
+    """A temporary `fix()` must not be persisted as the permanent declared box.
+
+    Before this was handled, a model saved inside `Model.fixed(...)` reloaded with
+    the pinned value as its declared bounds: it solved a *different* problem with no
+    warning (18.0 -> 13.0 on this fixture), `fix_depth` was 0 so the pin could not be
+    undone, and re-fixing was refused as "outside its declared bounds".
+    """
+    m = dm.Model("fixdemo")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.maximize(3 * x + 2 * y)
+    m.subject_to(x + y <= 6)
+
+    with m.fixed(x=1.0):
+        doc = dumps(m)
+        assert (float(x.lb), float(x.ub)) == (1.0, 1.0)
+
+    back = loads(doc)
+    bx = back._variables[0]
+
+    # Saved while pinned, so the reloaded model is pinned too -- faithfully.
+    assert (float(bx.lb), float(bx.ub)) == (1.0, 1.0)
+    assert bx.fix_depth == 1
+
+    # ... and, unlike before, the pin is reversible and the declared domain is intact.
+    bx.unfix()
+    assert (float(bx.lb), float(bx.ub)) == (0.0, 10.0)
+    assert bx.fix_depth == 0
+    bx.fix(5.0)  # would have raised "outside its declared bounds"
+    assert (float(bx.lb), float(bx.ub)) == (5.0, 5.0)
+
+
+@pytest.mark.smoke
+def test_a_model_saved_outside_a_fixed_scope_solves_identically():
+    m = dm.Model("fixdemo2")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.maximize(3 * x + 2 * y)
+    m.subject_to(x + y <= 6)
+    with m.fixed(x=1.0):
+        pass  # scope exited: the box is the declared one again
+
+    back = loads(dumps(m))
+    assert back._variables[0].fix_depth == 0
+    before, after = m.solve(time_limit=60), back.solve(time_limit=60)
+    assert before.objective == after.objective
+    assert before.node_count == after.node_count
+
+
+@pytest.mark.smoke
+def test_decomposition_annotations_survive():
+    """Declared Benders/Lagrangian structure must not be replaced by auto-detection."""
+    m = dm.Model("decomp")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(x + y)
+    link = x + y >= 3
+    m.subject_to(link)
+    m.set_stage(x, 1)
+    m.set_stage(y, 2)
+    m.set_block(y, 0)
+    m.mark_coupling(link)
+
+    once = dumps(m)
+    back = loads(once)
+    assert dumps(back) == once
+    assert back._decomp_stages == m._decomp_stages
+    assert back._decomp_blocks == m._decomp_blocks
+    # `mark_coupling` records id(constraint) for the object form; a raw id is a
+    # process-local address, so it must come back pointing at the REBUILT row.
+    assert id(back._constraints[0]) in back._coupling_keys
+    assert len(back._coupling_keys) == len(m._coupling_keys)
+
+
+@pytest.mark.smoke
+def test_named_sets_and_aux_counter_survive():
+    m = dm.Model("sets")
+    plants = m.set("plants", ["pitt", "sf"])
+    links = m.set("links", [("pitt", "a"), ("sf", "b")])
+    x = m.continuous("x", over=plants, lb=0, ub=10)
+    m.minimize(sum(x[k] for k in plants))
+    m._aux_counter = 7
+    m._zero_spanning_factor_auxes = {"aux3", "aux1"}
+
+    back = loads(dumps(m))
+    assert [s.name for s in back._sets] == [s.name for s in m._sets]
+    assert [s.dimen for s in back._sets] == [s.dimen for s in m._sets]
+    assert list(back._sets[0].members) == list(plants.members)
+    assert list(back._sets[1].members) == list(links.members), "tuple members must stay tuples"
+    assert back._aux_counter == 7
+    assert back._zero_spanning_factor_auxes == {"aux1", "aux3"}
+
+
+def test_every_model_attribute_is_accounted_for():
+    """A field added to `Model.__init__` must not silently start being dropped.
+
+    `loads` restores section by section, so an unhandled attribute is reset to its
+    default with no error -- which for the decomposition annotations meant a user's
+    declared structure being quietly replaced by auto-detection. This fails until
+    the new field is classified in `_MODEL_STATE`.
+    """
+    from discopt.serialize import _MODEL_STATE
+
+    live = set(dm.Model("probe").__dict__)
+    unhandled = live - _MODEL_STATE
+    assert not unhandled, (
+        f"Model gained attribute(s) {sorted(unhandled)} that discopt.serialize does not "
+        "account for. Add each to the right bucket in _MODEL_STATE (carried in its own "
+        "section, derived on load, or carried in the 'state' section) -- or refuse it."
+    )
+    stale = _MODEL_STATE - live
+    assert not stale, f"_MODEL_STATE lists attribute(s) Model no longer has: {sorted(stale)}"
+
+
+def test_every_produced_operator_name_is_accepted():
+    """Read-time operator validation must not refuse a name the modeling layer emits.
+
+    Scans the package for every `BinaryOp("...")` / `UnaryOp("...")` / `FunctionCall("...")`
+    literal. A name missing from the accepted sets would make `loads` refuse a valid
+    document, so this is the guard against the validation drifting shut.
+    """
+    import re
+    from pathlib import Path
+
+    from discopt.serialize import _KNOWN_BINARY_OPS, _KNOWN_UNARY_OPS, _known_funcs
+
+    root = Path(__file__).resolve().parents[1] / "discopt"
+    binary, unary, funcs = set(), set(), set()
+    scanned = 0
+    for path in root.rglob("*.py"):
+        text = path.read_text()
+        scanned += 1
+        binary |= set(re.findall(r'BinaryOp\(\s*"([^"]+)"', text))
+        unary |= set(re.findall(r'UnaryOp\(\s*"([^"]+)"', text))
+        funcs |= set(re.findall(r'FunctionCall\(\s*"([a-z_0-9]+)"', text))
+
+    assert scanned > 0, "the scan found no source files"
+    assert binary and unary and funcs, "the scan matched no operator literals"
+    assert binary <= _KNOWN_BINARY_OPS, (
+        f"unaccepted binary op(s): {sorted(binary - _KNOWN_BINARY_OPS)}"
+    )
+    assert unary <= _KNOWN_UNARY_OPS, f"unaccepted unary op(s): {sorted(unary - _KNOWN_UNARY_OPS)}"
+    known = _known_funcs()
+    assert funcs <= known, f"unaccepted function name(s): {sorted(funcs - known)}"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("binop", {"op": "binop", "o": "frobnicate", "a": 0, "b": 0}),
+        ("unop", {"op": "unop", "o": "frobnicate", "a": 0}),
+        ("call", {"op": "call", "f": "frobnicate", "args": [0]}),
+    ],
+)
+def test_unknown_operator_name_is_refused_on_read(field, bad):
+    """Previously these loaded fine and failed during a solve, where the first
+    symptom is the incumbent-verification snapshot failing and the false-primal
+    guard being disabled for that solve."""
+    doc = json.loads(dumps(_kinetics_model()))
+    doc["nodes"].append(bad)
+    with pytest.raises(
+        SerializationError, match="unknown (binary|unary) operator|unknown function"
+    ):
+        loads(json.dumps(doc))
+
+
+@pytest.mark.smoke
+def test_a_future_minor_schema_is_readable_but_a_future_major_is_not():
+    """A minor bump is additive by construction, so "1.1" reads as major 1."""
+    doc = json.loads(dumps(_kinetics_model()))
+    doc["schema"] = "discopt.model/1.1"
+    assert loads(json.dumps(doc)) is not None
+
+    doc["schema"] = "discopt.model/2.0"
+    with pytest.raises(SerializationError, match="major version 2"):
+        loads(json.dumps(doc))
