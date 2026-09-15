@@ -900,11 +900,11 @@ class Expression:
     #
     # #1238 proposed lifting all four consumers to n-ary, on the hypothesis that a
     # single n-ary envelope would be TIGHTER than the fold. Measured first
-    # (CLAUDE.md §4), and falsified: over 288 fixed-box comparisons through
+    # (CLAUDE.md §4), and falsified: over 300 fixed-box comparisons through
     # ``build_uniform_relaxation`` -- the default per-node engine since #632 --
     # spanning ``min``/``max``, both objective senses, n = 3..8, and affine /
     # square / bilinear / exp / variable-sharing arguments, the n-ary bound equals
-    # the balanced fold's bound EXACTLY in 288/288 cases, with 0 unsound bounds.
+    # the balanced fold's bound EXACTLY in 300/300 cases, with 0 unsound bounds.
     # It has to: ``uniform_relax._build_multivar`` emits the exact convex-hull
     # facets ``w >= a_i`` (resp. ``w <= a_i``), and a fold's intermediate auxes
     # project straight back out of that system. The issue's own kill criterion

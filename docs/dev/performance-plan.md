@@ -8667,16 +8667,26 @@ fixed box through `build_uniform_relaxation` (the default per-node engine since
 #632), with the producer's `sign * (internal + offset)` mapping applied, against
 a sampled/cornered estimate of the true box optimum.
 
+The committed probe is `scripts/entry_1238_minmax_nary_vs_fold.py`; its grid is
+5 argument families × 2 functions × 2 objective senses × n ∈ {3,4,5,6,8} × 3
+trials.
+
 | arm | points |
 |---|---:|
-| affine arguments over distinct variables, `min`/`max` × `min`/`max` sense × n ∈ {3,4,5,8} | 96 |
-| `x_i^2 + x_j`, `x_i·x_j`, `exp(x_i)`, and all-arguments-share-two-variables, n ∈ {3,5,6} | 192 |
-| **total comparisons** | **288** |
-| **soundness checks** (each arm's bound vs. the sampled truth) | **864** |
+| `affine` — `c_i·x_i + k_i`, distinct variables | 60 |
+| `square` — `c_i·x_i² + x_{i+1}` | 60 |
+| `bilinear` — `c_i·x_i·x_{i+1}` | 60 |
+| `exp` — `c_i·exp(x_i)` | 60 |
+| `shared` — every argument over the *same two* variables | 60 |
+| **total comparisons** | **300** |
+| **soundness checks** (each of the three arms' bounds vs. the sampled truth) | **900** |
 
-Result: **n-ary tighter 0, equal 288, looser 0**, and **0 unsound bounds**.
-Left-deep, balanced and n-ary agree to the last bit on every point, for both
-functions and both senses.
+Result: **n-ary tighter 0, equal 300, looser 0**, **0 points with no bound**, and
+**0 unsound bounds**. Left-deep, balanced and n-ary agree to the last bit on
+every point, for both functions and both senses. (A first ad-hoc run on a
+slightly different grid — 288 comparisons, 864 soundness checks — gave the same
+verdict; the committed script is the reproducible one and its numbers are the
+ones quoted here.)
 
 ### Why it has to come out that way
 
@@ -8717,8 +8727,8 @@ instances contain either opcode**, so there is no measurement that would justify
 re-nesting it, and §5's bound-neutral regime would require a certifying panel to
 ship it. Noted here so the next reader does not re-derive the search.
 
-Probes: `COMPARISONS_EXECUTED 96` / `192`, `SOUNDNESS_CHECKS_EXECUTED 288` /
-`576`, each exiting non-zero on a zero count (§6). Pinned in-repo by
+Probe: `COMPARISONS_EXECUTED 300`, `SOUNDNESS_CHECKS_EXECUTED 900`, exiting
+non-zero on a zero count (§6). Pinned in-repo by
 `test_1238_balanced_fold_is_bound_neutral_against_the_left_deep_fold`, which
 compares all three spellings — the unshipped n-ary form included — through the
 same engine.

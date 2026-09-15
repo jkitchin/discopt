@@ -24,7 +24,7 @@ KILL CRITERION (the issue's own)
     it still removes the ``O(n)`` depth.
 
 RESULT (2026-09-15, recorded in ``docs/dev/performance-plan.md`` §64)
-    288 comparisons, 864 soundness checks: n-ary tighter 0, equal 288, looser 0,
+    300 comparisons, 900 soundness checks: n-ary tighter 0, equal 300, looser 0,
     unsound 0. The kill criterion fires.
 
 USAGE

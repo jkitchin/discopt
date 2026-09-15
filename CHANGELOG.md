@@ -24,10 +24,11 @@ The release procedure that produces these entries is documented in
   These fold into **balanced** binary `min`/`max` nodes rather than the single
   n-ary node `.sum()` gets, and that is a measured choice, not a shortcut. The
   issue's hypothesis was that one n-ary envelope would be *tighter* than the
-  fold; over 288 fixed-box comparisons through the default per-node engine —
+  fold; over 300 fixed-box comparisons through the default per-node engine —
   both functions, both objective senses, n = 3..8, affine / square / bilinear /
   `exp` / variable-sharing arguments — the two bounds are **identical in
-  288/288 cases** with 0 unsound bounds, because `_build_multivar` already emits
+  300/300 cases** with 0 unsound bounds (900 soundness checks), because
+  `_build_multivar` already emits
   the exact convex-hull facets and a fold's intermediate auxes project straight
   back out of them. So the issue's own kill criterion fires (recorded in
   `docs/dev/performance-plan.md` §64), and the fold is also the safer arm: four

@@ -10,7 +10,7 @@ count -- the same left-deep fold #1235 removed for ``sum``, and the one
 LP/MPS/GAMS writers at n >= 1000.
 
 What ships is the *balanced* fold, not an n-ary ``Min``/``Max`` IR node. #1238's
-entry experiment measured the n-ary envelope against the balanced fold over 288
+entry experiment measured the n-ary envelope against the balanced fold over 300
 fixed-box comparisons and found them bit-identical (performance-plan §64), so the
 issue's own kill criterion fires: the fold needs no flag, no IR change and no
 corpus panel, and it is the only one of the two that cannot reintroduce the
