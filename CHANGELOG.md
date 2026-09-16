@@ -12,6 +12,57 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **FAIR provenance and the validation report on result files** (#1266, the
+  result-side half of #1264). `result_io.serialize_result` emitted
+  `schema_version: 1` plus solver metrics and nothing else, so an archived
+  `wall_time` had no record of which discopt produced it, with what options, or
+  when — a number that cannot be interpreted, let alone reproduced. The
+  Examiner `validation_report` was dropped outright as "non-JSON-safe".
+
+  Result documents are now `schema_version: 2` and carry `provenance`,
+  `solve_options` and `validation_report`. The bump is additive: a v1 document
+  reads unchanged, and `deserialize_result` restores each section when present.
+
+  The load-bearing rule is **a carried value always wins over a freshly
+  captured one**, because the provenance of a result is the identity of the
+  process that *solved* it — which on the daemon path is not the process that
+  writes the file. A warm daemon solves in its own interpreter, so the daemon
+  stamps the block and the CLI carries it to disk untouched; recomputing at the
+  writer would record the client's version for numbers the daemon produced.
+  That is why the wire format carries the block, which #1266 had left open:
+  it is one small dict per reply, and the only place that identity exists.
+
+  The validation report round-trips as a real `ExaminerReport`, not a dict —
+  the CLI deserializes a daemon reply and then re-serializes it to disk, so a
+  report left as a plain dict would be refused by the encoder at exactly that
+  step and vanish. A `validation_report` that is not an `ExaminerReport` raises
+  rather than being dropped. `infeasibility_certificate` is still dropped: it
+  is a backend object rather than a report and needs its own encoding.
+
+  `infeasibility_certificate` is carried too, and the earlier "non-JSON-safe"
+  grouping with `_model` was simply wrong about it: it is a three-field
+  dataclass (a total violation and two float arrays). An infeasible result is a
+  *claim*, and the witness for it is the part worth archiving. One caveat
+  travels with it in the docstring: the violation arrays are indexed in backend
+  LP row order, not the user's constraint order, and the file does not carry
+  that mapping. `_model` remains dropped — it is a live object graph, not data.
+
+  **Every float** written by this module — the scalars, the solution and dual
+  arrays, and the nested blocks — now goes through `discopt.serialize`'s
+  tagging, and `write_json` dumps with `allow_nan=False` so a value that slipped
+  past the encoders raises instead of silently writing a non-standard token.
+  Previously an unbounded `objective` wrote a bare `Infinity`, which is not JSON
+  and which every parser outside Python rejects. This is not a compatibility
+  break in any case that previously worked: such a document was *already*
+  invalid, finite values are written exactly as before, and anything going
+  through `deserialize_result` sees real floats either way. (`bound` and `gap`
+  cannot reach a non-finite value — `SolveResult.__post_init__` nulls one as a
+  soundness guard — so `objective` and the timing fields are where this bites.)
+
+  One behavior is now strictly stricter: a `validation_report` or
+  `infeasibility_certificate` holding a value this writer cannot faithfully
+  encode raises instead of being silently dropped.
+
 - **FAIR provenance on saved models**. A `.dopt` document recorded the schema id
   and `discopt.__version__` and nothing else -- and the version was *written but
   never read*: `serialize.loads` validated only the schema major, so a model
