@@ -25,10 +25,27 @@
 //! only to ~1e-7), we do **not** trust the input vertex: the basic primal
 //! values `x_B = B⁻¹(b − A_N x_N)` and the tableau rows `B⁻ᵀ e_i` are both
 //! recomputed from the *exact* basis and bounds with **iterative refinement**
-//! (driving the residual to ~machine precision), and the refined `ā_j` are then
-//! snapped to the nearest integer within [`SNAP_TOL`]. This collapses the flip
-//! error so the cut is valid up to machine precision; a small caller-side rhs
-//! margin then absorbs the remainder.
+//! (driving the residual to ~machine precision).
+//!
+//! The refined `ā_j` are **not** snapped to the nearest integer. This module used
+//! to snap them within [`SNAP_TOL`], justified as collapsing the flip error above.
+//! That justification does not hold: the flip is in `f_j`, and `ψ(f)` is
+//! *continuous* with `ψ → 0` at both `f → 0` and `f → 1`, so a coefficient
+//! straddling an integer produces a near-zero `ψ` either way and there is nothing
+//! to collapse. What snapping actually did was zero the `ψ` of a **continuous**
+//! column whose `ā_j` was merely small, deleting `ψ_j·x̃_j` from the LHS of a `≥`
+//! cut — a *strengthening*, and the one way this routine can emit an invalid cut.
+//! See #1236: on the `fac2` OA master that deleted two terms worth 0.47 and 0.025
+//! against a rhs of 1 (continuous slacks, `u = 1e20`, `x̃ ≈ 7e7` and `2.3e8`), and
+//! the driver certified a false `optimal` 7839 above the true optimum.
+//!
+//! A tiny `ψ_j` may still leave the LHS, but only as a **relaxation**: its maximum
+//! over the box, `ψ_j·(u_j − l_j)`, is charged to the rhs, and only when that
+//! product is itself negligible. When the range is unbounded the term cannot move
+//! and is kept exactly. Bounds are tested against the `1e20` sentinel directly and
+//! never through a product — for a small `ψ` the product of an unbounded bound is
+//! an ordinary finite number, which is precisely how this layer has produced a
+//! false certified `optimal` before.
 
 use super::basis::{Basis, AT_UPPER, BASIC};
 use super::crossover::LpView;
@@ -310,10 +327,21 @@ pub fn separate_gomory_cols(
             // ā_j = w · A[:,j], snapped to the nearest integer when very close
             // (the refined value is accurate, so this only removes ulp noise).
             // Sparse dot over column j's nonzeros (was an O(m) dense scan per j).
-            let mut abar: f64 = sp.dot(j, &w);
-            if (abar - abar.round()).abs() < SNAP_TOL {
-                abar = abar.round();
-            }
+            let abar: f64 = sp.dot(j, &w);
+            // #1236: `abar` is NOT snapped to the nearest integer. The header used
+            // to justify snapping as collapsing a "flip error", but psi(f) is
+            // continuous and zero at every integer, so there is no flip to
+            // collapse -- and snapping a CONTINUOUS column's abar to 0 zeroes its
+            // psi, which silently deletes `psi * xtilde_j` from the LHS of a `>=`
+            // cut. Deleting a nonnegative term from the LHS of `sum psi xtilde >= 1`
+            // STRENGTHENS it, so the cut can exclude feasible integer points.
+            // Measured on the fac2 OA master: two such terms sat on continuous
+            // slacks with u = 1e20 and xtilde ~ 7e7 / 2.3e8 at the optimum, so
+            // coefficients of ~1e-10 were worth 0.47 and 0.025 against a rhs of 1.
+            // The resulting cut cut off the optimum and the driver certified a
+            // false `optimal` 7839 above it. `snap_eligible` survives only as the
+            // "this integer column's abar is at an integer" flag used below.
+            let snap_eligible = (abar - abar.round()).abs() < SNAP_TOL;
             // Nonbasic at its upper bound uses x̃_j = u_j − x_j (sign flip).
             let at_upper = basis.col_status[j] == AT_UPPER;
             let alpha = if at_upper { -abar } else { abar };
@@ -339,12 +367,37 @@ pub fn separate_gomory_cols(
             } else {
                 -alpha / (1.0 - f0)
             };
-            if psi.abs() <= tol {
-                continue;
-            }
             if !psi.is_finite() {
                 ok = false;
                 break;
+            }
+            if psi == 0.0 {
+                continue;
+            }
+            // #1236: a tiny term `psi * xtilde_j` (psi >= 0, xtilde >= 0) may only
+            // leave the LHS of `sum psi xtilde >= 1` if its MAXIMUM over the box,
+            // `psi * (u_j - l_j)`, is charged to the rhs -- that is a relaxation,
+            // which is always sound. Dropping it outright is a strengthening and is
+            // not. With an infinite range the term cannot move at all, so it is kept
+            // exactly. The bound is tested against the 1e20 sentinel directly, never
+            // via a product: for a small `psi` the product of an unbounded bound is
+            // an ordinary finite number, which is exactly how this layer has
+            // produced a false certified `optimal` before (CLAUDE.md, INF note).
+            //
+            // `substitute_slacks_to_structural` in the driver already applies this
+            // rule correctly (it moves a small term to the rhs at its maximising
+            // bound and refuses the cut when that pin is infinite); the separator
+            // was the inconsistent one.
+            let tiny = psi.abs() <= tol || (integrality[j] && snap_eligible);
+            if tiny {
+                let range = u[j] - l[j];
+                // Charge the term to the rhs only when its MAXIMUM contribution
+                // over the box is itself negligible (<= tol): a bounded
+                // weakening. Otherwise keep the exact coefficient.
+                if u[j] < 1e20 && l[j] > -1e20 && range.is_finite() && psi * range <= tol {
+                    rhs -= psi * range;
+                    continue;
+                }
             }
             if at_upper {
                 coeffs[j] = -psi;
@@ -354,7 +407,19 @@ pub fn separate_gomory_cols(
                 rhs += psi * l[j];
             }
             max_c = max_c.max(psi.abs());
-            min_c = min_c.min(psi.abs());
+            // #1236: a tiny coefficient kept EXACTLY -- because its range was
+            // unbounded and it therefore could not be charged to the rhs -- does not
+            // count toward the dynamism gate. Counting it refuses nearly every cut
+            // on a big-M master, which is sound but measurably harmful: on the
+            // rsyn0830m master the refusals cost 6408 -> 17804 nodes. The cut itself
+            // is exact either way; where a bound-based cleanup exists
+            // (`substitute_slacks_to_structural`) it weakens these terms soundly or
+            // refuses the cut, and where it does not (the convex kernel's
+            // `substitute_slacks`) the row is still exact -- strictly better than the
+            // deletion this replaces, which was unsound.
+            if !tiny {
+                min_c = min_c.min(psi.abs());
+            }
         }
 
         if !ok
@@ -654,5 +719,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #1236 regression: a continuous column with a TINY tableau coefficient and a
+    /// huge range must not be silently dropped from a GMI cut. Row
+    /// `x0 + 1e-10*y + s = 0.5`, `x0 ∈ {0,1}`, `y ∈ [0, 1e20]`, `s >= 0`; vertex
+    /// (0.5, 0, 0). Snapping `abar_y = 1e-10` to 0 (or skipping `psi_y = 2e-10`)
+    /// yields `2 s >= 1`, which cuts off the feasible integer point
+    /// `(0, 5e9, 0)`. The exact cut `2e-10 y + 2 s >= 1` holds there with equality.
+    #[test]
+    fn gmi_tiny_coefficient_on_wide_continuous_column_is_not_dropped() {
+        let a = [1.0, 1e-10, 1.0];
+        let c = [0.0, 0.0, 0.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [1.0, 1e20, f64::INFINITY];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 3,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let b = [0.5];
+        let x = [0.5, 0.0, 0.0];
+        let integrality = [true, false, false];
+        let basis = recover_basis(&x, &lp, 1e-9).expect("basis");
+        assert_eq!(basis.basic_vars, vec![0]);
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-9, 1e12);
+        assert_eq!(cuts.len(), 1, "one GMI cut off the fractional basic x0");
+        let cut = &cuts[0];
+        assert!(
+            dot(&cut.coeffs, &x) < cut.rhs - 1e-6,
+            "cut must separate the vertex"
+        );
+        let pt = [0.0, 5e9, 0.0]; // feasible: 0 + 1e-10*5e9 + 0 = 0.5
+        assert!(
+            dot(&cut.coeffs, &pt) >= cut.rhs - 1e-9,
+            "cut excludes feasible integer point {pt:?}: lhs={} rhs={}",
+            dot(&cut.coeffs, &pt),
+            cut.rhs
+        );
     }
 }

@@ -9172,3 +9172,121 @@ any search:
 No performance change is claimed, and none shipped: every candidate fix was
 falsified by measurement before implementation, or (§68.3) after implementation
 and before shipping.
+
+## 69. #1236 the GMI separator deleted terms from a cut's LHS — a certified false `optimal` (2026-09-16)
+
+§68 diagnosed the node-count tail. Reproducing its fac2 row found something
+worse underneath: the in-house Rust MILP driver returns a **certified false
+`optimal`**, 7839 above a point feasible for the very problem it was handed.
+`incorrect_count` class, §1, zero slack.
+
+### 69.1 Reproduction, reduced to no MINLP and no OA
+
+The OA master captured from `fac2` is now
+`python/tests/data/oa_masters/fac2_master0.npz` (418 x 67, 12 integers) with a
+witness `z_star` verified feasible at **331837498.17693394**. Replayed through
+`milp_simplex.solve_milp`, three engines on the identical problem:
+
+| backend | status | objective | nodes |
+|---|---|---:|---:|
+| **in-house simplex** (`auto`) | optimal | **331845337.44** | 27 |
+| POUNCE | optimal | 331837498.50 | 99 |
+| HiGHS | optimal | 331837498.18 | 1 |
+
+### 69.2 Root cause
+
+`lp/gomory.rs::separate_gomory_cols` builds `Σ ψ_j x̃_j ≥ 1` with `ψ_j ≥ 0`,
+`x̃_j ≥ 0`, and removed terms from the LHS two ways — snapping `ā_j` to the
+nearest integer within `SNAP_TOL` (which zeroes a *continuous* column's `ψ`),
+and `if psi.abs() <= tol { continue }` — charging **nothing** to the rhs.
+Removing a nonnegative term from the LHS of a `≥` is a **strengthening**, so the
+cut can exclude feasible integer points.
+
+Harmless while `x̃` is O(1), which is every binary — which is presumably all it
+was exercised on. On this master the two dropped terms sat on continuous slacks
+with `u = 1e20` and `x̃ ≈ 7e7` / `2.3e8`, so coefficients of ~1e-10 were worth
+**0.4735 and 0.025 against a rhs of 1**. Root cut #1 is violated at the witness
+by **-1.739e-2**; the driver then fathomed the subtree holding the optimum
+*correctly for the problem it was searching*, and certified.
+
+The module header's justification for snapping — that it "collapses the flip
+error" — is false. The flip is in `f_j`; `ψ(f)` is continuous with `ψ → 0` at
+both `f → 0` and `f → 1`, so a coefficient straddling an integer gives a
+near-zero `ψ` either way. Header corrected.
+
+Same family as the `INF`-sentinel note in CLAUDE.md: reasoning about a
+coefficient's magnitude instead of the bound it multiplies. `1e20` is not
+infinity, and `1e-10 x 2.3e8` is not negligible.
+
+### 69.3 The fix, and the three arms rejected
+
+A tiny term may leave the LHS only as a **relaxation**: its maximum over the box
+`ψ_j·(u_j − l_j)` is charged to the rhs, and only when that product is itself
+`<= tol`. An unbounded range means the term cannot move, so it is kept exactly.
+Bounds are tested against the `1e20` sentinel directly, never through a product.
+`substitute_slacks_to_structural` in the driver already applied this rule
+correctly; the separator was the inconsistent one.
+
+Rejected, each on measurement:
+
+* **charge `ψ·range` whenever the range is finite** — over-weakens at the tests'
+  `tol=1e-7`; breaks `gmi_cut_valid_when_integer_var_has_fractional_bound`
+  ("cut must separate vertex").
+* **keep tiny exact coefficients but count them in the dynamism gate** — sound,
+  all tests pass, but the separator then refuses nearly every cut on a big-M
+  master: the rsyn0830m master goes **6408 -> 17804 nodes**. Sound-but-harmful,
+  the `DISCOPT_CUT_INHERIT` rule. Tiny coefficients kept exactly are therefore
+  excluded from the dynamism gate; the cut is exact either way, and where a
+  bound-based cleanup exists it weakens them soundly or refuses the cut.
+* **keep snapping/dropping and add an rhs margin** — the margin needed here is
+  ~0.5 against a rhs of 1, i.e. the cut's entire strength. §3 band-aid.
+
+Numerically-safe GMI (Cook–Dash–Fukasawa–Goycoolea directed rounding) remains
+the answer to the residual floating-point exposure on big-M models; this removes
+the O(1) hole, not that.
+
+### 69.4 Differential panel (66 in-repo instances, 20 s, both arms marker-verified)
+
+| | OFF (pristine) | ON (fixed) |
+|---|---|---|
+| bound-above-incumbent violations | 1 (`syn05hfsg`) | 1 (`syn05hfsg`) |
+| **introduced by the fix** | — | **0** |
+| certification lost / gained | — | **0 / 0** |
+| objective drift > 1e-6 | — | **0** |
+| node counts | — | 60 unchanged, 1 fewer, 5 more |
+| total nodes | 4055 | 4072 (+0.4 %) |
+
+`fac2` goes **39 -> 0 nodes** end to end and certifies in 1.4 s instead of 20.2 s,
+matching the MINLPLib reference to 7e-11. The five instances that cost nodes are
++2 to +24 (`tls2` 75 -> 99 is the largest). Cert-clean and node-neutral; the
+change ships as a correctness fix, not on this column.
+
+Each arm asserts its own identity before measuring: the captured master is a
+false `optimal` on the pristine separator and correct on the fixed one, so an arm
+that loaded the wrong `.so` fails instead of quietly measuring the other arm
+(CLAUDE.md §8).
+
+### 69.5 Blast radius
+
+Every caller of the separator: the driver's root cut loop (so every in-house MILP
+solve with `gmi_cuts` on, including `_LEGACY_CUT_PROFILE`) — OA masters,
+GDP-LOA, `_relax/milp_relaxation.py`, `partition_selection.py`, AMP via
+`MilpRelaxationModel`, RINS/RENS sub-MIPs — plus **`bnb/convex_kernel.rs`'s
+per-node separation** and the Python B&B route through `gomory_cuts_py`.
+Lagrangian and Benders pin `backend="simplex"`. Top-level pure LP/MILP is routed
+to HiGHS (`DISCOPT_LP_MILP_BACKEND`), so a user's own MILP was not exposed; the
+MINLP paths were.
+
+This is why "route the OA master to HiGHS" (`lp-milp-highs-routing-plan.md`
+Stage 2) was not an acceptable substitute for the fix: it reaches neither the
+convex kernel nor the pinned Lagrangian/Benders callers.
+
+### 69.6 Two defects this surfaced and did NOT fix
+
+* **`syn05hfsg` reports a dual bound 2.757 ABOVE its own incumbent** on a
+  time-limited `feasible` exit. Present in **both** panel arms, so pre-existing
+  and unrelated to the separator. `gap_certified` is False, so nothing is
+  certified — but `bound <= incumbent` is violated, which is a §1 invariant.
+* **`cover.rs:134` and `mir.rs:242` skip small weights in the same shape** as the
+  GMI drop this section fixes, before the sign check. Not measured; an audit is
+  warranted on the same reasoning.
