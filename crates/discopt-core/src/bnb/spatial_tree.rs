@@ -470,7 +470,7 @@ pub fn solve_spatial_tree(
         // Fathom by the parent bound if the incumbent already dominates it. The
         // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
-            if gap_closed(parent_bound, inc, &config) {
+            if gap_closed(parent_bound, inc, config) {
                 global_lb_closed = global_lb_closed.min(parent_bound);
                 continue;
             }
@@ -583,7 +583,7 @@ pub fn solve_spatial_tree(
         let bound = node.bound.max(parent_bound);
         // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
-            if gap_closed(bound, inc, &config) {
+            if gap_closed(bound, inc, config) {
                 global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
@@ -661,7 +661,7 @@ pub fn solve_spatial_tree(
             // region may hold BETTER points, so it must be branched further
             // (closing here would be a premature fathom → a false certificate).
             let inc_now = incumbent.unwrap();
-            if gap_closed(bound, inc_now, &config) {
+            if gap_closed(bound, inc_now, config) {
                 global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
@@ -715,7 +715,7 @@ pub fn solve_spatial_tree(
     match incumbent {
         Some(inc) => {
             let bound = global_lb_closed.min(inc);
-            let status = if gap_closed(bound, inc, &config) {
+            let status = if gap_closed(bound, inc, config) {
                 TreeStatus::Optimal
             } else {
                 TreeStatus::Exhausted
