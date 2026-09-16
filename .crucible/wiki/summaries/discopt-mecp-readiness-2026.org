@@ -1,0 +1,157 @@
+#+TITLE: Summary — discopt Readiness for Minimum-Energy Crossing Points (2026)
+#+FILETAGS: :summary:discopt:mecp:meci:readiness:measurement:global-optimization:surrogate:certification:
+
+* Summary — discopt Readiness for Minimum-Energy Crossing Points (2026)
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: kitchin2026 levine2008 koppel1984 lykhin2016 lindner2019 richings2023 schweidtmann2019ann
+:STATUS: draft
+:CREATED: 2026-08-22
+:END:
+
+An in-repo measurement campaign citep:kitchin2026
+(=docs/dev/mecp-readiness-2026-08-22.md=, PR #1110) assessing whether discopt
+can compute *certified global* minimum-energy crossing points and conical
+intersections. Every number below is from a probe in
+=scratchpad/mecp/= that prints an executed-check count and exits non-zero if that
+count is zero; the models are written once against an injected =exp= so the numpy
+oracle and the discopt expression tree cannot diverge. Background:
+[[file:../concepts/potential-energy-surface-crossings.org][Potential Energy Surface Crossings]]; formulations:
+[[file:../methods/eigenvalue-degeneracy-constraints.org][Eigenvalue Degeneracy Constraints]]; the established chemistry algorithms:
+[[file:../methods/crossing-point-optimization.org][Crossing Point Optimization]].
+
+** Headline
+
+The MECP in its constrained form is a small dense nonconvex NLP with one or two
+nonlinear equalities — a shape discopt handles natively — and it *already solves
+to a certified global optimum* on models with independent oracles. No established
+MECP method returns a bound at all, so the certificate is a genuinely new object
+in this domain rather than a faster route to a known one.
+
+Three findings carry the assessment.
+
+*** 1. Formulation dominates everything
+
+The same physical problem is trivial or hopeless depending on how it is written.
+On the analytic two-mode LVC conical intersection citep:koppel1984 (exact answer
+\(E=0.13\)):
+
+| Formulation | certified | nodes | wall |
+|---|---|---|---|
+| diabatic, two equalities | yes | 0 | 0.03 s |
+| adiabatic radical \(E_+-E_-=0\) | yes | 1 | 1.53 s |
+| gap band \(E_+-E_-\le 10^{-4}\) | yes | 3 | 0.87 s |
+
+The penalty objective the field actually minimizes citep:levine2008 is the one
+failure, and it is a *formulation* failure: at \(\sigma=3.5,\alpha=0.025\) it hit
+the 300 s limit at a relative gap of \(3.4\times10^{3}\) on a two-variable
+problem, and \(2.0\times10^{4}\) at \(\sigma=20,\alpha=0.005\). Never hand a
+global solver the penalty form.
+
+*** 2. Global search buys a quantifiable answer
+
+On a two-basin spin-crossing model (global seam basin at \(E=1.270685\), second
+at \(1.548537\)), discopt certifies the global basin in 5 nodes and 0.5 s. Over
+200 random starting geometries the standard local methods reach the seam but not
+its lowest point:
+
+| Method | reached the seam | found the global basin |
+|---|---|---|
+| penalty, \(\sigma\) escalation + L-BFGS-B | 200/200 | 127/200 (63.5 %) |
+| direct constrained SLSQP | 199/200 | 78/199 (39.2 %) |
+
+Because the MECP energy enters a nonadiabatic transition-state rate constant
+exponentially citep:lykhin2016, a 0.278 basin error is a rate error of
+\(\sim 4.6\times 10^{4}\) at 300 K if the unit is read as eV. This is the
+argument for a global method in this domain, stated as a measurement rather than
+an aspiration.
+
+*** 3. The ceiling is dimensional, and it is the expected one
+
+Certified solves on the spin-crossing model, 300 s cap, \(n\) internal
+coordinates: \(n=2\) → 5 nodes / 0.54 s; \(n=6\) → 1113 nodes / 43 s; \(n=8\) →
+7709 nodes / 194 s; \(n=9\) → uncertified at the cap (0.6 % gap). Cost grows
+about \(\times 2.7\) per added coordinate. Since \(3N-6\) makes a triatomic
+\(n=3\), certified global MECP is available outright for triatomics through
+roughly five-atom systems, and for larger molecules only in a reduced active
+subspace — in which case the certificate applies to the *reduced* subspace, a
+qualification that must accompany every use of the word "global".
+
+A secondary observation from the same sweep: discopt's incumbent beat a
+stochastic seam oracle (random sampling plus Newton projection) by a margin that
+*grows* with dimension, from \(-0.006\) at \(n=3\) to \(-1.19\) at \(n=8\) —
+the same degradation a chemist would meet using a stochastic seam explorer
+citep:lindner2019. No certified bound anywhere in the campaign exceeded a known
+feasible seam point.
+
+** Coordinates
+
+A triatomic written three ways over the same energies: internal coordinates
+certify in 5 nodes and ~1 s; nine free Cartesians reached a 93 % gap in 180 s;
+gauge-fixed Cartesians certify again at ~66× the internal-coordinate node count.
+The practical rule is firm; the mechanism (dimension vs extra =sqrt=
+compositions vs the six-parameter continuum of equivalent optima) is confounded
+in this measurement and remains unisolated.
+
+** The characteristic-polynomial form and LICQ
+
+Writing degeneracy as \(T^2-4D\le 0\) citep:richings2023 needs no diabatization
+and makes constraint qualification fail on the entire feasible set — fatal in
+theory for Newton-type local methods, irrelevant to a relaxation-based solver,
+which needs valid bounds and not LICQ. Measured, the practical damage is
+implementation-dependent (an SQP implementation failed on about half of random
+starts where a trust-region interior method did not). The form is cheap on a
+conical intersection but ~600× worse than the plain difference form on a spin
+crossing, so it is a bridge for representation-free and learned-invariant
+surfaces, not a default.
+
+** Surrogate routes — the real gap
+
+Real energies are black boxes, so a certified answer is necessarily a statement
+about a surrogate. On the same \(n=3\) instance (certified reference 1.558620):
+
+| Route | certified | dual bound | wall |
+|---|---|---|---|
+| symbolic expression / =dm.udf= | yes | 1.558547 | ~2 s |
+| =dm.custom= + reduced-space McCormick | no (7.2 % gap) | 1.446551 | 300 s |
+| =solver="direct"= (derivative-free) | no, by design | — | 1.2 s |
+| two trained tanh 12×12 nets via =discopt.nn= | no (gap 13.7) | −20.56 | 601 s |
+
+All routes agree on the optimum — a useful cross-validation — but only the
+symbolic ones certify. The neural route *models* the problem correctly and its
+returned geometry was ~10× more accurate than the surrogate's own RMSE; what is
+missing is a relaxation tight enough to certify it citep:schweidtmann2019ann.
+That is the one item where performance work would change what is *possible*
+rather than what is convenient. The reduced-space route engages but announces a
+fallback to the αBB underestimator (issue #120), which is too weak here.
+
+Even a certificate on a surrogate certifies the global optimum *of the fit*.
+Bracketing the true crossing point needs a validated \(|E_\text{true} -
+E_\text{surrogate}|\le\epsilon\); discopt has rigorous-remainder machinery for
+factorable functions but nothing that produces such a bound for a data-fitted
+surrogate. Research gap, not an implementation gap.
+
+** Multiple states
+
+For the lowest crossing over *any* pair of three states, enumerating the three
+pairs beat a disjunctive formulation by ~2.7× — the expected answer at that size.
+The disjunctive form becomes interesting as \(K\) grows, and where the crossover
+lies is unmeasured.
+
+** Byproduct
+
+The campaign surfaced a general solver defect: an endpoint tangent whose
+derivative is infinite (=sqrt= at 0, =asin= at ±1, =log= near 0) is silently
+dropped from the univariate envelope, losing the tightest facet exactly where the
+adiabatic radical's argument vanishes — i.e. at the answer. Sound but loose;
+tracked as discopt issue #1111.
+
+** What this does and does not establish
+
+The models are analytic surrogates with known answers, chosen so soundness could
+be checked against an independent oracle at every step. They are not ab-initio
+surfaces, and nothing here demonstrates a certified crossing point on a real
+molecule. What it establishes is that the *solver* is not the obstacle at
+chemically relevant dimension, and that the obstacles which remain are a
+formulation discipline (settled), a coordinate discipline (settled in practice),
+and a certified surrogate relaxation (open).

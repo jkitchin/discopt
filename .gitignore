@@ -103,6 +103,9 @@ docs/notebooks/*.xlsx
 # stray solver listing files (GAMS/BARON .lst) — not part of the repo
 *.lst
 
+# HiGHS writes its run log to Highs.log in whatever directory it ran from.
+Highs.log
+
 # GAMS scratch directories. A `gams` invocation creates one per run in the CWD,
 # named <pid-ish digits><letter> (225a, 225b, ...), and it contains `gamslice.dat`
 # — the machine's GAMS *license file*. A blanket `git add -A` after a BARON run
@@ -119,6 +122,16 @@ scratchpad/**/*.out
 # panel/probe result files are outputs too: the harness is tracked, the
 # numbers it produces belong in the plan doc that interprets them.
 scratchpad/**/*.json
+scratchpad/**/*.jsonl
+# Large result data a probe writes: numpy arrays, captured stdout, and the
+# .new/.bak/.zip leftovers of a run. (About 4 MB of .npz sat untracked across
+# the issue directories.)
+scratchpad/**/*.npz
+scratchpad/**/*.npy
+scratchpad/**/*.stdout
+scratchpad/**/*.new
+scratchpad/**/*.bak
+scratchpad/**/*.zip
 # per-cell worker scripts a probe WRITES at run time (same rule: keep the
 # harness, drop what it generates). The leading underscore is the convention —
 # a hand-written harness like ``issue966_neutral_worker.py`` has none and stays
