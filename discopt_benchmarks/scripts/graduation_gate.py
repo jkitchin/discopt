@@ -305,6 +305,11 @@ def run_cert_neutrality(
         # out of budget -> its nodes and incumbent stop being yardsticks, but a
         # certificate THIS arm holds is still bracketed against the oracle. Neither
         # set is dropped silently: both travel back with the verdict and are printed.
+        # The absolute check (#1204 follow-up): the true optimum must lie between each
+        # row's own dual bound and its incumbent. Its coverage travels back with the
+        # verdict so the arm can print how many rows it actually read.
+        "from utils.cert_neutrality import oracle_bracket_coverage\n"
+        "bracketed, unbracketable = oracle_bracket_coverage(new_rows, oracle)\n"
         "arms = wall_limited_arms(new_rows, reference, budgets=budgets)\n"
         "skipped = {i: w.reason for i, w in arms.items() if w.both}\n"
         "onesided = {i: w.reason for i, w in arms.items() if not w.both}\n"
@@ -312,6 +317,7 @@ def run_cert_neutrality(
         "    regime=regime, oracle=oracle, wall_limited=arms)\n"
         "print('SKIPJSON:' + json.dumps(skipped))\n"
         "print('ONESIDEJSON:' + json.dumps(onesided))\n"
+        "print('BRACKETJSON:' + json.dumps([bracketed, unbracketable]))\n"
         "print('ROWSJSON:' + json.dumps(new_rows))\n"
         "print('CERTJSON:' + json.dumps([{'instance': v.instance, 'kind': v.kind,\n"
         "    'detail': v.detail} for v in viol]))\n"
@@ -353,6 +359,13 @@ def run_cert_neutrality(
     unmeasured = json.loads(skip_line[len("SKIPJSON:") :]) if skip_line else {}
     one_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("ONESIDEJSON:")), None)
     one_sided = json.loads(one_line[len("ONESIDEJSON:") :]) if one_line else {}
+    br_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("BRACKETJSON:")), None)
+    bracketed, unbracketable = json.loads(br_line[len("BRACKETJSON:") :]) if br_line else [0, {}]
+    print(
+        f"# oracle bracket: {bracketed} row(s) checked against the true optimum"
+        + (f", {len(unbracketable)} not checkable" if unbracketable else ""),
+        flush=True,
+    )
     if unmeasured:
         print(
             f"# {len(unmeasured)} cert row(s) UNMEASURED — both arms ended on the wall "

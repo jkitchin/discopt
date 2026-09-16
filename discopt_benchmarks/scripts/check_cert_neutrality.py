@@ -54,11 +54,12 @@ sys.path.insert(0, str(_BENCH_ROOT))
 sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig  # noqa: E402
-from scripts.gen_cert_baseline import _instance_budgets  # noqa: E402
+from scripts.gen_cert_baseline import _CERT_OPTIMA, _instance_budgets  # noqa: E402
 from utils.cert_neutrality import (  # noqa: E402
     PERF_CLASS_KINDS,
     check_neutrality,
     load_baseline,
+    oracle_bracket_coverage,
     wall_limited_arms,
     wall_limited_rows,
 )
@@ -245,11 +246,28 @@ def main() -> int:
     # Nothing is dropped silently: every excluded or reclassified row is printed.
     arms = wall_limited_arms(new_rows, baseline, budgets=budgets)
     unmeasured = wall_limited_rows(new_rows, baseline, budgets=budgets)
+    # The oracle arms the one ABSOLUTE check here: the true optimum must lie between
+    # each row's own dual bound and its incumbent. It is passed in this regime too --
+    # it does not change the byte-reproducibility comparison, and it is the check no
+    # exclusion above may switch off.
+    oracle = json.loads(Path(_CERT_OPTIMA).read_text()) if Path(_CERT_OPTIMA).exists() else {}
     violations = check_neutrality(
-        new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED, wall_limited=arms
+        new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED, wall_limited=arms, oracle=oracle
     )
+    bracketed, unbracketable = oracle_bracket_coverage(new_rows, oracle)
     print("\n─── neutrality result ───")
     print(f"  {scale.reason}")
+    # An executed-assertion count, not a claim: "no violations" over zero rows read
+    # is not a pass, and a run whose oracle file went missing would otherwise look
+    # exactly like a clean one.
+    print(
+        f"  oracle bracket: {bracketed} of {len(new_rows)} row(s) checked against the true "
+        f"optimum (bound <= opt <= incumbent, either sense)"
+    )
+    if unbracketable:
+        print(f"    {len(unbracketable)} row(s) NOT checked:")
+        for inst, why in sorted(unbracketable.items()):
+            print(f"      {inst:20s} {why}")
     if not scale.measured:
         # Say it where the verdict is read, not only where the probe ran: an
         # uncalibrated panel is one whose wall-limited rows are the box's doing.

@@ -86,7 +86,7 @@ class NeutralityViolation:
 
 #: Findings that say the run got a **wrong answer**. Fatal in every regime; never
 #: downgraded, never suppressed by a budget.
-SOUNDNESS_CLASS_KINDS = frozenset({"objective", "status", "missing"})
+SOUNDNESS_CLASS_KINDS = frozenset({"objective", "status", "missing", "oracle_bracket"})
 
 #: Findings that say the run did **more work** (or ran out of budget doing it).
 #: Real regressions, but not wrong answers: fatal for a bound-neutral change, where
@@ -233,6 +233,120 @@ def _objective_violation(
             f"(obj {nb} -> {no}; no oracle to bracket against)",
         )
     return None
+
+
+#: Magnitude at or above which a bound/objective is a sentinel rather than a number.
+#: ``INF`` in the Rust LP layer is ``1e20``, not ``f64::INFINITY`` — testing for
+#: infinity alone silently accepts the sentinel as an ordinary finite value.
+_INF_SENTINEL = 1e20
+
+
+def _finite(value) -> float | None:
+    """``value`` as a float when it is a real number, else None (sentinel-aware)."""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or abs(out) >= _INF_SENTINEL:  # NaN or the INF sentinel
+        return None
+    return out
+
+
+def _oracle_bracket_violation(
+    inst: str, row: dict, opt: float
+) -> tuple[NeutralityViolation | None, str | None]:
+    """The true optimum must lie between this row's dual bound and its incumbent.
+
+    Returns ``(violation, skip_reason)`` — exactly one is None. The skip reason is
+    returned rather than swallowed so a caller can report how much of the panel this
+    check actually read (CLAUDE.md §6); a guard that quietly reads nothing is the
+    failure mode, not the exception.
+
+    **This is an absolute check, not a differential one.** Every other check here
+    compares two runs; this one compares ONE run against the model's own true
+    optimum, which no budget, runner or flag can change. It therefore applies to
+    every row — certified or not, excluded or not, wall-limited or not.
+
+    The rule needs no objective sense, which is why it can live in this
+    solver-free module. For a minimization ``bound <= opt <= incumbent``; for a
+    maximization ``incumbent <= opt <= bound``; in both cases ``opt`` lies inside
+    ``[min(bound, incumbent), max(bound, incumbent)]``. Outside it, one of two
+    soundness faults has occurred, and the message says which:
+
+    * ``opt`` past the **incumbent** side — the run is reporting a point BETTER than
+      the true optimum, so that point cannot be feasible. Accepting an infeasible
+      point is a false answer whether or not the run certified.
+    * ``opt`` past the **bound** side — the dual bound has crossed the true optimum,
+      so it would prune the optimum away. A false bound is a false certificate
+      waiting for the search to close on it.
+
+    Why it did not already exist: #1195 correctly stopped bracketing *uncertified*
+    incumbents against the oracle, because an incumbent ABOVE the optimum is the
+    expected shape of an open gap, not a wrong answer (``nvs05`` at 27 % above, on
+    which the old check hard-failed two arms). Stopping there also stopped catching
+    an incumbent BELOW the optimum, which is a wrong answer at any certification
+    status — and left the dual bound of an uncertified row unchecked entirely. This
+    asks the question that stays meaningful in both directions.
+
+    Measured before shipping on 96 real solves (48 vendored panel instances at 2 s
+    and 8 s budgets, chosen to force open gaps): 87 rows bracketable, **10 of them
+    uncertified**, zero violations. The 9 skips are rows with no oracle, no
+    incumbent yet, or no dual bound at all (``alan`` and ``fac2`` at 2 s, where the
+    relaxation layer produced none) — all reported, none assumed.
+    """
+    obj = _finite(row.get("objective"))
+    bound = _finite(row.get("bound"))
+    if obj is None and bound is None:
+        return None, "no finite incumbent or dual bound"
+    if obj is None:
+        return None, "no finite incumbent (dual bound alone has no side without the sense)"
+    if bound is None:
+        return None, "no finite dual bound (incumbent alone has no side without the sense)"
+    lo, hi = min(bound, obj), max(bound, obj)
+    tol = CORRECTNESS_ATOL + CORRECTNESS_RTOL * abs(opt)
+    if lo - tol <= opt <= hi + tol:
+        return None, None
+    if opt > hi + tol:
+        # The optimum is beyond BOTH numbers: whichever of them is the incumbent is
+        # better than the true optimum, so the point behind it is infeasible.
+        detail = (
+            f"true optimum {opt!r} lies OUTSIDE [bound {bound!r}, incumbent {obj!r}] "
+            f"(tol {tol:.3e}) — the run reports a point better than the optimum, so "
+            f"that point cannot be feasible (status={row.get('status')!r})"
+        )
+    else:
+        detail = (
+            f"true optimum {opt!r} lies OUTSIDE [bound {bound!r}, incumbent {obj!r}] "
+            f"(tol {tol:.3e}) — the dual bound has crossed the optimum and would "
+            f"prune it away (status={row.get('status')!r})"
+        )
+    return NeutralityViolation(inst, "oracle_bracket", detail), None
+
+
+def oracle_bracket_coverage(
+    rows: dict[str, dict], oracle: dict[str, float] | None
+) -> tuple[int, dict[str, str]]:
+    """``(rows bracketed, instance -> why not)`` for :func:`_oracle_bracket_violation`.
+
+    Callers print both. The count is the executed-assertion count this check must
+    publish to be believed: "0 violations" over 0 comparisons is not a pass, and a
+    panel whose oracle file went missing would otherwise read exactly like a clean
+    one.
+    """
+    checked, skipped = 0, {}
+    for inst, row in rows.items():
+        opt = (oracle or {}).get(inst)
+        if opt is None:
+            skipped[inst] = "no true optimum in the oracle"
+            continue
+        _, reason = _oracle_bracket_violation(inst, row, opt)
+        if reason is None:
+            checked += 1
+        else:
+            skipped[inst] = reason
+    return checked, skipped
 
 
 def _is_wall_limited(row: dict, budget: float | None) -> bool:
@@ -424,6 +538,15 @@ def check_neutrality(
       per-check: a row-wholesale exclusion would delete a live false-certificate
       guard, which is the one soundness question still answerable here.
 
+    ``oracle`` additionally arms an **absolute** guard that no exclusion can switch
+    off: the true optimum must lie between each row's own dual bound and its
+    incumbent (:func:`_oracle_bracket_violation`). Pass it in every regime. It is
+    what makes the wall rules above safe to widen — a row this function declines to
+    *compare* is still checked against the model's own optimum — and it is the only
+    check here that survives ``exclude``. Callers should print
+    :func:`oracle_bracket_coverage` so "no violations" is distinguishable from "no
+    rows read".
+
     ``regime`` selects the objective check (see :func:`_objective_violation`):
     ``bound_neutral`` (default) demands byte-reproducibility; ``bound_changing``
     demands agreement with the true optimum ``oracle`` (or a correctness-tolerance
@@ -438,6 +561,16 @@ def check_neutrality(
         if new is None:
             violations.append(NeutralityViolation(inst, "missing", "absent from new run"))
             continue
+        # ABSOLUTE checks first, because no exclusion may reach them. Everything
+        # below this point compares two runs and can therefore be invalidated by a
+        # budget; this compares one run against the model's own true optimum, which
+        # no budget, runner or flag can change. A row that is "not evidence either
+        # way" about the flag is still evidence about itself.
+        opt = (oracle or {}).get(inst)
+        if opt is not None:
+            bracket, _ = _oracle_bracket_violation(inst, new, opt)
+            if bracket is not None:
+                violations.append(bracket)
         # Not evidence either way (#1187). ``missing`` above is still reported for an
         # excluded instance that never ran — "we chose not to read this row" and
         # "the row is not there" are different facts.

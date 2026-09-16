@@ -225,7 +225,14 @@ def test_the_perf_and_soundness_buckets_are_exhaustive():
     neither is a bug this test catches.
     """
     assert not (SOUNDNESS_CLASS_KINDS & PERF_CLASS_KINDS)
-    emitted = {"objective", "status", "missing", "node_regression", "wall_regression"}
+    emitted = {
+        "objective",
+        "status",
+        "missing",
+        "oracle_bracket",
+        "node_regression",
+        "wall_regression",
+    }
     assert emitted == (SOUNDNESS_CLASS_KINDS | PERF_CLASS_KINDS)
 
 

@@ -322,6 +322,31 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **An incumbent better than the true optimum, and a dual bound past it, are now
+  caught on every row — certified or not** (#1204 follow-up). #1195 correctly
+  stopped bracketing *uncertified* incumbents against the oracle: an incumbent
+  above the optimum is the expected shape of an open gap, and the old check
+  hard-failed two graduation-gate arms on `nvs05` sitting 27 % above it. Stopping
+  there also stopped catching an incumbent *below* the optimum — a point better
+  than the optimum cannot be feasible, which is a wrong answer at any certification
+  status — and left the dual bound of an uncertified row unchecked entirely, though
+  a bound past the optimum would prune the optimum away.
+
+  One sense-free rule catches both: `min(bound, incumbent) <= opt <= max(bound,
+  incumbent)` to correctness tolerance, which holds for a minimization and a
+  maximization alike, so it needs no access to the model and lives in the
+  solver-free `cert_neutrality` module. It is the one **absolute** check there —
+  every other compares two runs and can be invalidated by a budget — so no
+  exclusion reaches it: a row the wall rules decline to *compare* is still checked
+  against the model's own optimum. Both gate scripts print an executed-assertion
+  count, because "no violations" over zero rows read is not a pass.
+
+  Falsified before shipping on 96 real solves (48 vendored instances at 2 s and 8 s
+  budgets, small on purpose to force open gaps): 87 rows bracketable, 10 of them
+  uncertified, zero violations; the 9 skips are rows with no oracle, no incumbent
+  or no dual bound, each reported. Verified to fire end-to-end through the real
+  script with one oracle value poisoned.
+
 - **A certification lost at the wall clock no longer hard-fails a graduation-gate
   arm as a soundness fault** (#1204). The cert panel's budgets are wall-clock
   seconds chosen on the machine that generated `cert-baseline.jsonl`, where the
