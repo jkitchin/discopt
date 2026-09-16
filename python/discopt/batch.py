@@ -99,11 +99,21 @@ def _solve_serialized(payload: tuple) -> tuple:
 
 
 def _pickle_result(result) -> tuple[bytes, tuple]:
-    """Pickle ``result``, dropping unpicklable diagnostic fields if it refuses."""
+    """Pickle ``result``, dropping unpicklable diagnostic fields if it refuses.
+
+    Each refusal is logged with its type and message (#864): a result that comes
+    back missing a diagnostic must say why it is missing, or the worker's
+    reduction reads as the solver never having produced it.
+    """
     try:
         return pickle.dumps(result), ()
-    except Exception:  # noqa: BLE001 - fall through to the reduced form
-        pass
+    except Exception as exc:  # noqa: BLE001 - reduce and retry, having said why
+        logger.debug(
+            "solve_batch worker: the full result will not pickle (%s: %s); dropping "
+            "diagnostic fields one at a time",
+            type(exc).__name__,
+            exc,
+        )
     dropped: list[str] = []
     for field in _DROPPABLE_RESULT_FIELDS:
         if getattr(result, field, None) is None:
@@ -112,8 +122,13 @@ def _pickle_result(result) -> tuple[bytes, tuple]:
         dropped.append(field)
         try:
             return pickle.dumps(result), tuple(dropped)
-        except Exception:  # noqa: BLE001 - keep dropping
-            continue
+        except Exception as exc:  # noqa: BLE001 - keep dropping, having said why
+            logger.debug(
+                "solve_batch worker: still unpicklable after dropping %s (%s: %s)",
+                field,
+                type(exc).__name__,
+                exc,
+            )
     # Out of things to drop: let the exception name the offender at the caller.
     return pickle.dumps(result), tuple(dropped)
 
@@ -155,7 +170,10 @@ def solve_batch(
         no serialization at all — byte-for-byte what calling ``m.solve()`` on
         each model would do, including the bound tightening a solve writes back
         onto the model. With ``workers > 1`` the solves run in a spawned process
-        pool and the *caller's* model objects are left untouched.
+        pool and the *caller's* model objects are left untouched — except for a
+        batch of a single model, which is solved in this process whatever
+        ``workers`` says, because spawning a pool to run one solve costs more
+        than the solve.
     start_method : str, default "spawn"
         Multiprocessing start method. ``"spawn"`` is the default because the
         native core and its solver threads are not fork-safe; change it only if

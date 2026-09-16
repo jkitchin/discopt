@@ -123,7 +123,15 @@ _SCALAR_FIELDS = (
     "subnlp_feasible",
     "subnlp_incumbent_updates",
     "algorithm_route",
+    # #1246: the reason a failed solve failed. Dropping it on a round trip would
+    # reload a batch's error result as a bare ``status="error"`` with no reason,
+    # which is exactly what the field exists to prevent.
+    "error",
 )
+#: ``{str: float}`` fields. Written through the same float tagging as the
+#: scalars, so a non-finite residual is a tagged string rather than a bare
+#: ``NaN``/``Infinity`` token.
+_FLOAT_DICT_FIELDS = ("kkt",)
 _DICT_ARRAY_FIELDS = (
     "x",
     "constraint_duals",
@@ -134,7 +142,7 @@ _DICT_ARRAY_FIELDS = (
 #: Scalar fields whose value is text, not a number. They are excluded from float
 #: tag *decoding*: without this, a status or route that happened to read exactly
 #: ``"inf"`` would be turned into a float on the way back in.
-_STRING_SCALAR_FIELDS = frozenset({"status", "algorithm_route"})
+_STRING_SCALAR_FIELDS = frozenset({"status", "algorithm_route", "error"})
 
 
 def _jsonify_arrays(d: Optional[dict]) -> Optional[dict]:
@@ -272,6 +280,12 @@ def serialize_result(
         val = _jsonify_arrays(getattr(r, name, None))
         if val is not None:
             out[name] = val
+    for name in _FLOAT_DICT_FIELDS:
+        fval = getattr(r, name, None)
+        if fval is not None:
+            # Tagged like every other float here: a KKT residual is exactly the
+            # kind of number that comes back non-finite from a diverged solve.
+            out[name] = {k: _enc_float(float(v)) for k, v in fval.items()}
     if r.mip_nlp_trace is not None:
         out["mip_nlp_trace"] = r.mip_nlp_trace
     expl = getattr(r, "_explanation", None)
@@ -323,6 +337,9 @@ def deserialize_result(d: dict) -> SolveResult:
             # `_dec_tree` BEFORE `np.asarray`: a tagged "inf" left as a string
             # would make an object-dtype array rather than a float one.
             kwargs[name] = {k: np.asarray(_dec_tree(v), dtype=float) for k, v in d[name].items()}
+    for name in _FLOAT_DICT_FIELDS:
+        if d.get(name) is not None:
+            kwargs[name] = {k: _dec_float(v) for k, v in d[name].items()}
     if d.get("mip_nlp_trace") is not None:
         kwargs["mip_nlp_trace"] = d["mip_nlp_trace"]
     if d.get("validation_report") is not None:

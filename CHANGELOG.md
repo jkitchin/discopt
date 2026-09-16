@@ -12,6 +12,36 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`dm.solve_batch` -- many small independent global solves, optionally in
+  parallel** (#1246). `dm.solve_batch(models, workers=8, **solve_kwargs)` returns
+  one `SolveResult` per model, in input order. `workers=1` is a plain `m.solve()`
+  per model in this process; `workers > 1` uses a spawned pool. Two obstacles it
+  exists to absorb: a *solved* `Model` is not picklable (the solve leaves a live
+  Rust `PyModelRepr` and module references on the model and its variables), so
+  workers receive the model's serialized `.dopt` text and rebuild it; and a
+  `SolveResult` holds a back-reference to its model, which the worker clears and
+  the parent re-attaches, so `result.value(var)` still works. A model whose solve
+  raises comes back as `SolveResult(status="error", error=<reason>)` and the rest
+  of the batch runs -- `SolveResult.error` is new, and is the first place a failed
+  solve carries its reason. Measured: 32 small global models, `workers=1` 5.73 s
+  vs `workers=8` 2.65 s on 4 cores, 32/32 identical in status, objective and
+  bound. A wall-clock `time_limit` is not comparable across worker counts, which
+  the docstring states.
+
+- **Primal-dual warm start, and `SolveResult.kkt`** (#1247).
+  `Model.solve(warm_start=previous_result)` forwards the previous solve's point,
+  constraint multipliers, bound multipliers and terminal barrier parameter to
+  POUNCE. On a restricted-equilibrium NLP after a 1% change in the conditions:
+  7 POUNCE iterations cold, 5 with `initial_solution=` (the point alone), 2 with
+  `warm_start=` -- same optimum to 1e-7. On non-NLP routes the primal half is
+  still used as the initial point, so a warm start is never silently inert (and
+  `stream=True`, which has no seam for either, refuses it). `SolveResult.kkt`
+  reports the terminal residuals on the single-NLP routes: the four scaled
+  `final_*` values POUNCE's own convergence test runs on, the same four
+  `_unscaled` in the model's units (what a certificate stated in problem units
+  must use), and `barrier_parameter`. It is `None` on every branch-and-bound
+  route rather than carrying an inner subproblem's number.
+
 - **FAIR provenance and the validation report on result files** (#1266, the
   result-side half of #1264). `result_io.serialize_result` emitted
   `schema_version: 1` plus solver metrics and nothing else, so an archived
@@ -291,6 +321,25 @@ The release procedure that produces these entries is documented in
   section is written, exactly as before.
 
 ### Fixed
+
+- **The parameter staleness check was 4.5% of a parameterised solve** (#1245).
+  The tape evaluator re-derives its tape whenever a `Parameter.value` moves, and
+  the check guarding that ran in front of *every* objective / gradient /
+  constraint / Jacobian / Hessian evaluation -- rebuilding the whole snapshot
+  tuple, one `np.asarray(...).copy()` per parameter, on every call. Measured at
+  12.15 us/call with 5 scalar parameters, 48 341 calls across 8 solves. It now
+  compares against the retained snapshot in place, with a float compare for the
+  0-d parameters: 0.82 us/call, 14.7x, with the verdict unchanged element for
+  element (exact equality; a NaN-valued parameter still reads as changed).
+
+  The issue also asked for compiled relaxations to be reused across parameter
+  changes. That is **declined on measurement** and recorded in
+  `docs/dev/performance-plan.md` §65: the relaxation compiler the issue names is
+  not on the default solve path (0 calls in 3 solves), the per-solve relaxation
+  analysis that *is* rebuilt costs 0.4-3.8% of a solve, only ~35% of it is
+  soundly reusable (the rest depends on declared variable bounds that nothing
+  versions, so persisting it reopens the #742 false-bound class), and a solve
+  with a parameter change was not measurably slower than one without.
 
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the

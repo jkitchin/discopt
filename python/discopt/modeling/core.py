@@ -6692,6 +6692,15 @@ class Model:
                 )
 
         if stream:
+            if warm_start is not None:
+                # The streaming driver takes neither a start point nor duals, so a
+                # warm start handed to it would be silently inert — the exact
+                # failure #1247 exists to remove. (``initial_solution`` has the
+                # same limitation on this path; it predates this guard.)
+                raise ValueError(
+                    "solve(stream=True) cannot take a warm_start: the streaming driver has no "
+                    "seam for a starting point or its duals. Solve without stream=True to use it."
+                )
             return self._solve_streaming(
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,

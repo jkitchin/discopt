@@ -7,7 +7,7 @@ potentials and the temperature — both ``Parameter``s — moving between solves
 The ask was to stop rebuilding compiled relaxations on every such solve.
 
 What the measurement found (recorded in
-``docs/dev/performance-plan.md`` §64, with the probes it came from):
+``docs/dev/performance-plan.md`` §65, with the probes it came from):
 
 * the relaxation *compiler* the issue names (``_relax/relaxation_compiler.py``)
   is not on the default solve path at all — 0 calls across 3 solves;

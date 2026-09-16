@@ -243,6 +243,15 @@ def test_warm_start_from_a_result_without_a_point_raises():
         m.solve(time_limit=30, warm_start=empty)
 
 
+def test_streaming_refuses_a_warm_start():
+    """The streaming driver has no seam for a start point or its duals, so taking
+    one would make it silently inert."""
+    m, _b = _restricted_equilibrium()
+    base = m.solve(time_limit=30)
+    with pytest.raises(ValueError, match="stream=True"):
+        m.solve(time_limit=30, stream=True, warm_start=base)
+
+
 def test_an_unknown_pounce_option_is_named_not_swallowed():
     """#1247's last item. pounce validates option NAMES at solve time, so a typo
     used to surface as a raw Rust ``OPTION_INVALID`` from inside the solver."""
