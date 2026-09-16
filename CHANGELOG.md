@@ -401,6 +401,15 @@ The release procedure that produces these entries is documented in
   floored tree still certifies when its floor-inclusive gap closes. The #1082
   canary tests no longer wait for tls2 to stall on its own, which it has stopped
   doing: they inject the stall and assert that it fired.
+- **Benchmark results keep discopt's `unbounded` and `error` statuses** (#1214).
+  The shared `DISCOPT_STATUS_MAP` omitted both, so the in-process runner and the
+  subprocess worker recorded them as `unknown`. This intentionally moves rows
+  between report buckets without any change in solver behaviour: an `error` row
+  now scores as `error` instead of `unknown`, and an `unbounded` row is now
+  settled for `cert_neutrality`. `score_result` has no unbounded bucket, so that
+  row still scores `unknown`. Unrecognised statuses still map to `unknown`, and
+  the `local_*` statuses stay `local`. The category and GDPLib runners no
+  longer re-spell the two entries.
 
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
