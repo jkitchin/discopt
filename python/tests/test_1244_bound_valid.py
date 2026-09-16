@@ -1,0 +1,551 @@
+"""``SolveResult.bound_valid`` / ``bound_source`` (#1244).
+
+A consumer that wants to say "globally certified to eps" has to know whether
+``bound`` is a valid global dual bound. Until now the only public signal was
+``gap_certified``, which answers a *narrower* question: whether the gap CLOSED.
+A ``time_limit`` or ``node_limit`` exit never closes the gap, yet its bound is
+usually perfectly valid -- the frontier minimum over a tree whose every node
+bound entered with a soundness proof, or an independently proved root bound
+that replaced a tainted one. Reading ``gap_certified`` throws all of those away;
+reading ``bound`` without it risks using one that is not valid. The real flag
+lived in ``solver.py`` internals (``_tree_bound_valid``).
+
+The tests below are the acceptance criteria:
+
+* a table over termination status x algorithm route, on instances with RECORDED
+  optima, asserting the soundness invariant ``bound_valid => bound <= f* + tol``
+  (``>=`` for a maximize) -- including ``node_limit=3`` stops, very small time
+  limits, and convex fast-path instances;
+* ``bound_valid`` is False whenever ``bound`` is None.
+
+Soundness note: the invariant is asserted against the reference-optima registry
+(``tests/data/known_optima.toml``), the same oracle the certification suites
+use, not against discopt's own answer -- a bound checked against the solver that
+produced it proves nothing.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import discopt.modeling as dm
+import pytest
+from _optima import known_optimum, optima_registry
+from discopt import Model
+from discopt.modeling.core import BOUND_SOURCES, SolveResult
+
+_CORPUS = Path(__file__).parent / "data" / "minlplib_nl"
+
+#: Instances with a recorded optimum that are also vendored as ``.nl`` here.
+_ORACLE_INSTANCES = sorted(n for n in optima_registry() if (_CORPUS / f"{n}.nl").exists())
+
+#: Termination regimes to sweep. Each forces a different exit: a full solve, a
+#: node-budget stop, and a wall-budget stop. ``node_limit=3`` and a very small
+#: ``time_limit`` are named in the issue's acceptance criteria.
+_REGIMES = {
+    "full": {"time_limit": 20},
+    "node_limit_3": {"time_limit": 20, "max_nodes": 3},
+    "tiny_time_limit": {"time_limit": 0.2},
+}
+
+
+def _tol_for(optimum: float) -> float:
+    """Absolute slack for the soundness comparison, scaled like the suites'."""
+    return 1e-6 + 1e-6 * abs(float(optimum))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1. The dataclass contract
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_bound_valid_is_false_whenever_bound_is_none():
+    """The issue's second acceptance criterion, at the chokepoint that enforces it."""
+    checked = 0
+    for status in ("time_limit", "node_limit", "feasible", "infeasible", "unbounded"):
+        r = SolveResult(status=status, objective=1.0, bound=None, bound_valid=True)
+        assert r.bound_valid is False, status
+        assert r.bound_source is None, status
+        checked += 1
+    assert checked == 5
+    # A non-finite bound is no bound either.
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        r = SolveResult(
+            status="time_limit", objective=1.0, bound=bad, bound_valid=True, gap_certified=False
+        )
+        assert r.bound_valid is False
+
+
+@pytest.mark.unit
+def test_a_certified_gap_implies_a_valid_bound():
+    """``gap_certified`` is the repo's certificate flag; it asserts bound validity.
+
+    Deriving here rather than at each of the ~43 construction sites is what
+    keeps a new return site from reporting "no claim" on a bound it certified.
+    """
+    r = SolveResult(status="optimal", objective=2.0, bound=2.0, gap_certified=True)
+    assert r.bound_valid is True
+    # ...but an infeasibility certificate is not a bound certificate.
+    r2 = SolveResult(status="infeasible", bound=None, gap_certified=True)
+    assert r2.bound_valid is False
+
+
+@pytest.mark.unit
+def test_a_local_status_may_not_claim_a_valid_bound():
+    """A local solve makes no global claim, so it can carry no dual bound."""
+    from discopt.status import is_local_status
+
+    local = next(
+        s for s in ("local_optimal", "local_feasible", "local_stationary") if is_local_status(s)
+    )
+    r = SolveResult(status=local, objective=1.0, bound=None, bound_valid=True)
+    assert r.bound_valid is False and r.bound_source is None
+
+
+@pytest.mark.unit
+def test_an_unknown_bound_source_is_refused():
+    """Closed vocabulary: a typo must not silently read as "some other source"."""
+    with pytest.raises(ValueError, match="bound_source"):
+        SolveResult(status="optimal", objective=1.0, bound=1.0, bound_source="bnb")
+    for src in sorted(BOUND_SOURCES):
+        r = SolveResult(status="optimal", objective=1.0, bound=1.0, bound_source=src)
+        assert r.bound_source == src
+
+
+@pytest.mark.unit
+def test_the_claim_survives_a_serialization_round_trip():
+    """``__post_init__`` can only DERIVE validity from ``gap_certified``.
+
+    A stored result that drops ``bound_valid`` therefore reloads with every
+    uncertified-but-valid bound downgraded to "no claim" — silently, and exactly
+    the field a consumer reads the file for.
+    """
+    from discopt.result_io import deserialize_result, serialize_result
+
+    original = SolveResult(
+        status="time_limit",
+        objective=1.0,
+        bound=0.5,
+        gap_certified=False,
+        bound_valid=True,
+        bound_source="bnb_tree",
+    )
+    assert original.bound_valid is True  # not clobbered on the way in
+    restored = deserialize_result(serialize_result(original))
+    assert restored.bound_valid is True
+    assert restored.bound_source == "bnb_tree"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2. The convex fast path
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_convex_fast_path_reports_a_valid_bound_named_by_its_proof():
+    """``bound = objective`` there, valid because the convexity proof is rigorous."""
+    m = Model()
+    x = m.continuous("x", shape=3, lb=-5.0, ub=5.0)
+    m.subject_to(dm.sum(x) >= 1.0)
+    m.minimize(dm.sum(x * x))
+    res = m.solve(time_limit=30)
+    assert res.status == "optimal"
+    assert res.bound_valid is True
+    assert res.bound is not None
+    # f* = 1/3 for min ||x||^2 s.t. sum(x) >= 1 in R^3.
+    assert res.bound <= 1.0 / 3.0 + 1e-6
+    if res.convex_fast_path:
+        assert res.bound_source == "convex_proof"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1b. The triple survives MUTATION, not just construction (#1260 review)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_withholding_a_local_certificate_also_withholds_the_validity_claim():
+    """``__post_init__`` runs once; mutation has to maintain the triple by hand.
+
+    ``_withhold_local_optimality_certificate`` cleared ``bound`` and left
+    ``bound_valid=True`` standing, so a result reported ``bound=None`` with
+    ``bound_valid=True`` — violating this field's own rule, and in the one
+    function whose entire job is removing claims it cannot stand behind.
+
+    Reachable on any nonconvex continuous model solved with
+    ``skip_convex_check=True``, and behind an opaque ``dm.custom`` body.
+    """
+    from discopt.solver import _withhold_local_optimality_certificate
+
+    res = SolveResult(status="optimal", objective=15.06, bound=15.06, gap_certified=True)
+    assert res.bound_valid is True  # the state the withholder receives
+    out = _withhold_local_optimality_certificate(res)
+    assert out.bound is None
+    assert out.bound_valid is False, "bound cleared but the claim about it left standing"
+    assert out.bound_source is None
+
+
+@pytest.mark.unit
+def test_the_844_fallback_merge_does_not_read_fields_its_result_lacks():
+    """``solve_lp_spatial_bb`` returns ``LpSpatialResult``, a 6-field NamedTuple.
+
+    The merge read ``_fb.bound_valid`` off it, which raised ``AttributeError``
+    *after* ``result.bound`` had already been mutated; the enclosing
+    ``except Exception`` downgraded that to a ``RuntimeWarning``, so the solve
+    returned the fallback's bound beside the primary's stale flag, a stale gap,
+    a wrong node count and no primal adoption — worse than either branch alone.
+    """
+    from discopt._relax.lp_spatial_bb import LpSpatialResult
+
+    fb = LpSpatialResult(status="optimal", objective=1.0, bound=0.5, gap=0.5, x=None, node_count=3)
+    for missing in ("bound_valid", "bound_source"):
+        assert not hasattr(fb, missing), (
+            f"LpSpatialResult grew {missing}; the merge should carry its claim "
+            "directly instead of deriving one"
+        )
+
+
+@pytest.mark.unit
+def test_set_bound_keeps_the_triple_consistent():
+    """The helper every post-construction bound mutation now goes through."""
+    res = SolveResult(status="time_limit", objective=1.0, bound=None, gap_certified=False)
+
+    res._set_bound(0.5, valid=True, source="bnb_tree")
+    assert (res.bound, res.bound_valid, res.bound_source) == (0.5, True, "bnb_tree")
+
+    # No bound means no claim, whatever the caller passes.
+    res._set_bound(None, valid=True, source="bnb_tree")
+    assert (res.bound, res.bound_valid, res.bound_source) == (None, False, None)
+
+    # A non-finite bound is no bound either.
+    res._set_bound(float("inf"), valid=True, source="lp_dual")
+    assert res.bound_valid is False and res.bound_source is None
+
+    # The vocabulary stays closed under mutation too.
+    with pytest.raises(ValueError, match="bound_source"):
+        res._set_bound(0.5, valid=True, source="bnb")
+
+    # An invalid bound carries no provenance.
+    res._set_bound(0.5, valid=False, source="bnb_tree")
+    assert res.bound == 0.5 and res.bound_valid is False and res.bound_source is None
+
+
+@pytest.mark.unit
+def test_no_bound_mutation_bypasses_the_helper():
+    """The guard that makes the helper's existence worth anything.
+
+    Adding a field that every mutation site must maintain, and teaching only
+    SOME of those sites about it, converts a latent inconsistency into a
+    shipped one. Four sites in these three modules assigned ``.bound``
+    directly; review found two of them after the first two were fixed, which is
+    exactly as many as a reviewer happened to look for.
+
+    So the invariant is asserted structurally rather than trusted: in the three
+    modules that own ``SolveResult``, the only functions allowed to assign
+    ``.bound`` are ``__post_init__`` (which derives the triple on construction)
+    and ``_set_bound`` (which maintains it afterwards). A fifth site fails this
+    test the moment it is written, not the moment it is noticed.
+    """
+    import ast
+
+    import discopt.modeling.core as _core
+    import discopt.result_io as _rio
+    import discopt.solver as _solver
+
+    allowed = {"__post_init__", "_set_bound"}
+    offenders: list[str] = []
+    assignments = 0
+
+    for mod in (_core, _solver, _rio):
+        path = Path(mod.__file__)
+        tree = ast.parse(path.read_text())
+
+        # Walk with the enclosing function carried down, so an assignment is
+        # attributed to the function it is written in rather than to the file.
+        def visit(node, fn):
+            nonlocal assignments
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fn = node.name
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            for t in targets:
+                if isinstance(t, ast.Attribute) and t.attr == "bound":
+                    assignments += 1
+                    if fn not in allowed:
+                        offenders.append(
+                            f"{path.name}:{t.lineno} in {fn}(): {ast.unparse(t)} = ..."
+                        )
+            for child in ast.iter_child_nodes(node):
+                visit(child, fn)
+
+        visit(tree, "<module>")
+
+    # CLAUDE.md §6: a probe that traversed nothing reports "0 violations" and
+    # reads as a pass. These three modules DO assign ``.bound``; if the walk
+    # found none, the walk is broken (a renamed module, a changed AST shape).
+    assert assignments >= 3, (
+        f"the AST walk found only {assignments} '.bound' assignments across "
+        "core.py/solver.py/result_io.py; the probe is not traversing"
+    )
+    assert not offenders, (
+        "these assign SolveResult.bound without maintaining bound_valid/"
+        "bound_source; route them through _set_bound:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.unit
+def test_the_merge_carries_the_losers_claim_with_the_losers_bound():
+    """#1244, the third mutation site: ``_merge_route_and_fallback``.
+
+    The merge keeps the tighter dual bound from EITHER side, so the winner can
+    end up publishing a number the loser proved. The claim about that number
+    has to travel with it: leaving the winner's own ``bound_source`` in place
+    attributes the loser's proof to the winner's machinery, and leaving the
+    winner's ``bound_valid`` in place can assert validity for a bound nothing
+    has validated.
+    """
+    from discopt.solver import _merge_route_and_fallback
+
+    # Minimize. The route has the better incumbent and wins; the fallback has
+    # the tighter (larger) lower bound, which is what gets installed.
+    route = SolveResult(status="feasible", objective=10.0, gap_certified=False)
+    route._set_bound(1.0, valid=True, source="lp_dual")
+    fallback = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback._set_bound(5.0, valid=True, source="bnb_tree")
+
+    merged = _merge_route_and_fallback(route, fallback, is_maximize=False)
+    assert merged.bound == 5.0
+    assert merged.bound_source == "bnb_tree", (
+        "the merge published the fallback's bound under the route's provenance"
+    )
+    assert merged.bound_valid is True
+
+    # And the claim travels in the other direction too: an UNVALIDATED bound
+    # that wins on tightness must not inherit the winner's validity.
+    route2 = SolveResult(status="feasible", objective=10.0, gap_certified=False)
+    route2._set_bound(1.0, valid=True, source="lp_dual")
+    fallback2 = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback2._set_bound(5.0, valid=False)
+
+    merged2 = _merge_route_and_fallback(route2, fallback2, is_maximize=False)
+    assert merged2.bound == 5.0
+    assert merged2.bound_valid is False, (
+        "an unvalidated bound inherited the winner's bound_valid=True"
+    )
+    assert merged2.bound_source is None
+
+
+@pytest.mark.unit
+def test_the_crossing_guard_retracts_the_claim_with_the_bound():
+    """#1244, the fourth mutation site: the #1059 crossing guard.
+
+    Its own log line calls the bound it is about to drop "a bound known to be
+    invalid". It cleared ``bound``, ``gap`` and ``gap_certified`` and left
+    ``bound_valid=True`` standing beside them -- the single assertion the guard
+    exists to retract, surviving the retraction.
+    """
+    from discopt.solver import _merge_route_and_fallback
+
+    # Minimize: a lower bound of 12.0 above the incumbent 10.0 is inverted.
+    route = SolveResult(status="feasible", objective=10.0, gap_certified=True)
+    route._set_bound(12.0, valid=True, source="bnb_tree")
+    fallback = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback._set_bound(None, valid=False)
+
+    merged = _merge_route_and_fallback(route, fallback, is_maximize=False)
+    assert merged.bound is None
+    assert merged.gap is None and merged.gap_certified is False
+    assert merged.bound_valid is False, (
+        "the guard suppressed the invalid bound but kept the claim that it was valid"
+    )
+    assert merged.bound_source is None
+
+
+@pytest.mark.unit
+def test_a_round_trip_never_strengthens_a_stored_certificate():
+    """Persistence is an identity, not a re-derivation (#1244).
+
+    ``deserialize_result`` rebuilds through ``SolveResult(**kwargs)``, which
+    re-runs ``__post_init__`` -- including its rule that ``gap_certified``
+    implies ``bound_valid``. That rule is right for a result being CONSTRUCTED
+    from a solve, and wrong for one being RESTORED: it overwrote the stored
+    value and handed back a certificate stronger than the one written down.
+
+    The triple below is not hypothetical. ``Model.solve``'s #844 fallback merge
+    builds exactly it whenever a ``gap_certified`` result's surviving bound
+    carries ``bound_valid=False``.
+    """
+    from discopt.result_io import deserialize_result, serialize_result
+
+    # The bound has to be present at CONSTRUCTION: ``__post_init__`` revokes
+    # ``gap_certified`` outright for a result that arrives without a finite one,
+    # so the triple under test cannot be built by adding the bound afterwards.
+    r = SolveResult(status="optimal", objective=2.0, bound=1.0, gap=0.0, gap_certified=True)
+    assert r.bound_valid is True  # rule 1 raised it
+    r._set_bound(1.0, valid=False)  # ...and a later mutation lowered it again
+    assert (r.gap_certified, r.bound_valid, r.bound_source) == (True, False, None)
+
+    back = deserialize_result(serialize_result(r))
+    assert back.bound == 1.0
+    assert back.gap_certified is True
+    assert back.bound_valid is False, (
+        "the round trip UPGRADED a stored bound_valid=False to True; a persisted "
+        "certificate must never come back stronger than it went in"
+    )
+    assert back.bound_source is None
+
+    # The ordinary direction still round-trips, provenance included.
+    r2 = SolveResult(status="time_limit", objective=2.0, gap_certified=False)
+    r2._set_bound(1.0, valid=True, source="root_relaxation")
+    back2 = deserialize_result(serialize_result(r2))
+    assert (back2.bound, back2.bound_valid, back2.bound_source) == (
+        1.0,
+        True,
+        "root_relaxation",
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2b. The verified HiGHS LP/MILP route (#1258)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_the_highs_lp_route_names_its_safe_bound():
+    """That route's LP bound is a Neumaier-Shcherbina SAFE bound.
+
+    Strictly stronger than the floating-point LP duals the other routes' bounds
+    rest on, so it is worth telling apart -- which is what ``bound_source``
+    is for.
+    """
+    m = Model()
+    x = m.continuous("x", shape=3, lb=0.0, ub=10.0)
+    m.subject_to(dm.sum(x) <= 4.0)
+    m.subject_to(x[0] + 2 * x[1] <= 5.0)
+    m.maximize(3 * x[0] + 2 * x[1] + x[2])
+    res = m.solve(time_limit=30)
+    assert res.algorithm_route and "highs-lp" in res.algorithm_route
+    assert res.bound_valid is True
+    assert res.bound_source == "lp_dual"
+    # Maximize: the bound is an UPPER bound and may not sit below the incumbent.
+    assert res.bound >= res.objective - 1e-9
+
+
+@pytest.mark.smoke
+def test_the_highs_milp_route_names_its_tree_bound():
+    """HiGHS's MIP dual bound is trusted as-is (``milp/bound_provenance=highs-fp``).
+
+    That is the same floating-point standard every other branch-and-bound route
+    in this repo reports, so ``bnb_tree`` is the honest label -- deliberately
+    NOT ``lp_dual``, which would claim the LP route's stronger guarantee.
+    """
+    m = Model()
+    x = m.integer("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    m.subject_to(x + y <= 7.5)
+    m.subject_to(y <= 3.2)
+    m.maximize(1.0 * x + 2.0 * y)
+    res = m.solve(time_limit=30)
+    assert res.algorithm_route and "highs-milp" in res.algorithm_route
+    assert res.bound_valid is True
+    assert res.bound_source == "bnb_tree"
+    assert res.bound >= res.objective - 1e-9
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 3. The acceptance table: status x route, against recorded optima
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+@pytest.mark.parametrize("name", _ORACLE_INSTANCES)
+@pytest.mark.parametrize("regime", sorted(_REGIMES))
+def test_a_valid_bound_never_crosses_the_recorded_optimum(name, regime):
+    """``bound_valid => bound <= f* + tol`` (minimize) on every status x route.
+
+    This is the invariant the whole field exists to make safe to rely on: a
+    consumer reading ``bound_valid`` and then using ``bound`` as a global bound
+    must never be handed one that crosses the true optimum.
+    """
+    from discopt.modeling import from_nl
+
+    entry = known_optimum(name, full=True)
+    optimum = float(entry["optimum"])
+    model = from_nl(str(_CORPUS / f"{name}.nl"))
+    res = model.solve(**_REGIMES[regime])
+
+    # Whatever happened, the pairing must be self-consistent.
+    if res.bound is None:
+        assert res.bound_valid is False
+        assert res.bound_source is None
+        pytest.skip(f"{name}/{regime}: no bound reported; nothing to check")
+    assert res.bound_source is None or res.bound_source in BOUND_SOURCES
+
+    if not res.bound_valid:
+        pytest.skip(f"{name}/{regime}: bound reported but not claimed valid")
+
+    assert math.isfinite(res.bound)
+    from discopt.modeling.core import ObjectiveSense
+
+    is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    tol = _tol_for(optimum)
+    if is_max:
+        assert res.bound >= optimum - tol, (
+            f"{name}/{regime}: bound_valid bound {res.bound!r} is BELOW the "
+            f"recorded optimum {optimum!r} for a maximize model "
+            f"(status={res.status}, source={res.bound_source})"
+        )
+    else:
+        assert res.bound <= optimum + tol, (
+            f"{name}/{regime}: bound_valid bound {res.bound!r} EXCEEDS the "
+            f"recorded optimum {optimum!r} (status={res.status}, "
+            f"source={res.bound_source})"
+        )
+    # And the certificate invariant against this run's own incumbent.
+    if res.objective is not None and math.isfinite(res.objective):
+        if is_max:
+            assert res.bound >= res.objective - tol
+        else:
+            assert res.bound <= res.objective + tol
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_the_table_actually_covered_budget_limited_exits():
+    """Prove the sweep above is not vacuous (CLAUDE.md §6).
+
+    A table whose every row certifies would assert nothing about the case the
+    issue is really about — a bound reported at a budget stop. Count the
+    regimes that produced a non-``optimal`` status carrying a valid bound, and
+    fail if none did.
+    """
+    from discopt.modeling import from_nl
+
+    budget_limited_with_valid_bound = 0
+    rows = 0
+    for name in _ORACLE_INSTANCES:
+        model = from_nl(str(_CORPUS / f"{name}.nl"))
+        res = model.solve(time_limit=20, max_nodes=3)
+        rows += 1
+        if res.status != "optimal" and res.bound_valid:
+            budget_limited_with_valid_bound += 1
+            optimum = float(known_optimum(name))
+            from discopt.modeling.core import ObjectiveSense
+
+            is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+            tol = _tol_for(optimum)
+            if is_max:
+                assert res.bound >= optimum - tol, (name, res.bound, optimum)
+            else:
+                assert res.bound <= optimum + tol, (name, res.bound, optimum)
+    assert rows == len(_ORACLE_INSTANCES)
+    assert budget_limited_with_valid_bound > 0, (
+        "no instance produced a budget-limited exit carrying a valid bound; the "
+        "acceptance table proves nothing about the case #1244 exists for"
+    )

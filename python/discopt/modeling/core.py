@@ -1785,6 +1785,7 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
         "tanh",
         "sigmoid",
         "softplus",
+        "entropy",
         "abs",
         "sign",
         "min",
@@ -2454,6 +2455,56 @@ def softplus(x: Union[Expression, float]) -> Expression:
         Expression representing ``softplus(x)``, always positive.
     """
     return FunctionCall("softplus", _wrap(x))
+
+
+def xlogx(x: Union[Expression, float]) -> Expression:
+    r"""
+    Negative-entropy term :math:`x \log x`, extended by continuity to ``x = 0``.
+
+    This is the ideal-mixing / Shannon-entropy atom: a sum
+    :math:`\sum_i x_i \log x_i` over a simplex is the (negative) entropy of the
+    distribution ``x``. Building it with this helper rather than as the raw
+    product ``x * dm.log(x)`` matters for a *global* solve: the atom carries a
+    dedicated convex underestimator, an exact interval rule and a convexity
+    profile, whereas the raw product is relaxed factorably (``x`` times a
+    ``log``) and its bound does not tighten to the true convex envelope.
+
+    Values and derivatives at the endpoints of the domain:
+
+    - ``xlogx(0) = 0``. The mathematical limit :math:`x \log x \to 0` as
+      :math:`x \to 0^+` is taken as the *value*, so the atom is continuous and
+      finite on the closed domain ``[0, inf)`` — which is what makes it usable
+      on a site-fraction / mole-fraction box that starts at 0.
+    - The true derivative ``log(x) + 1`` diverges to ``-inf`` at ``x = 0``.
+      Evaluators deliberately report a large finite number there instead (the
+      argument is floored at ``1e-300``, giving a slope near ``-689.8``), so a
+      box pinned at ``[0, 0]`` cannot propagate a non-finite into a bound. The
+      *symbolic* derivative (:func:`discopt.bilevel.symbolic_diff.diff`) is the
+      exact ``log(x) + 1`` and is therefore unbounded at 0.
+    - ``x < 0`` is outside the domain. The interval rule abstains (returns
+      ``[-inf, inf]``) rather than guessing, so a certificate over a box that
+      dips below zero is refused, not silently wrong.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression. The relaxation and interval rules require a
+        nonnegative, finite box on ``x``.
+
+    Returns
+    -------
+    Expression
+        Expression representing ``x * log(x)``, convex on ``x >= 0``, with
+        minimum ``-1/e`` at ``x = 1/e``.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> m = dm.Model()
+    >>> y = m.continuous("y", lb=0.0, ub=1.0)
+    >>> m.minimize(dm.xlogx(y) + dm.xlogx(1 - y))   # binary entropy
+    """
+    return FunctionCall("entropy", _wrap(x))
 
 
 def abs_(x: Union[Expression, float]) -> Expression:
@@ -3373,6 +3424,20 @@ class Parameter(Expression):
 #: ``bound=-inf``, so it is decertified by the dual-side check regardless.
 _NON_GAP_CERTIFICATE_STATUSES = frozenset({"infeasible"})
 
+#: Where a valid dual bound came from (#1244). A closed vocabulary, checked in
+#: ``SolveResult.__post_init__``, so a consumer can branch on provenance without
+#: string-matching whatever a producer happened to write.
+#:
+#: * ``"bnb_tree"`` -- the branch-and-bound frontier minimum, over a tree in
+#:   which every node's bound entered with a soundness proof.
+#: * ``"convex_proof"`` -- the objective value at a KKT point of a model *proved*
+#:   convex. A local minimum of a convex problem is the global minimum, so the
+#:   incumbent is simultaneously a valid lower bound.
+#: * ``"root_relaxation"`` -- a rigorous bound proved on the root box alone,
+#:   used when the tree's own bound had to be discarded as tainted.
+#: * ``"lp_dual"`` -- a dual-feasible point of an LP relaxation (weak duality).
+BOUND_SOURCES = frozenset({"bnb_tree", "convex_proof", "root_relaxation", "lp_dual"})
+
 #: Statuses that make no claim about the GLOBAL problem (#1148). Imported from
 #: ``discopt.status`` -- a leaf module with no imports of its own -- rather than
 #: re-spelled here, so the vocabulary has exactly one definition and the benchmark
@@ -3477,14 +3542,21 @@ class SolveResult:
         the root bound or the incumbent is unavailable.
     root_time : float or None
         Wall-clock seconds elapsed when the root node was fathomed/branched.
-    solver_stats : dict of str to float, or None
-        Instrumentation counters, or None. Two key families: per-family
+    solver_stats : dict of str to float or str, or None
+        Instrumentation counters, or None. Key families: per-family
         reduction/separation timers (``reduce/<fam>`` / ``separate/<fam>``,
-        cumulative seconds) and per-source cut counts (``cuts/<source>``, added by
-        the P3.1b cut-measurement work and read by the ``p3_1*`` scripts) and
-        cut-pool gating telemetry (``pool/gate_*``, categorical decision codes). Only
-        the timer families are seconds and bounded by ``wall_time``; ``cuts/`` are
-        counts and ``pool/`` are decision codes.
+        cumulative seconds), per-source cut counts (``cuts/<source>``, added by
+        the P3.1b cut-measurement work and read by the ``p3_1*`` scripts),
+        cut-pool gating telemetry (``pool/gate_*``, categorical decision codes),
+        and ``"gap_criterion"``. Only the timer families are seconds and bounded
+        by ``wall_time``; ``cuts/`` are counts and ``pool/`` are decision codes.
+
+        ``"gap_criterion"`` is the one non-numeric entry: ``"absolute"`` or
+        ``"relative"``, naming which arm of the convergence disjunction the
+        returned ``(objective, bound)`` pair satisfies (#1243). The key is
+        ABSENT when neither does — a solve that stopped on ``time_limit`` /
+        ``node_limit`` or on an exhausted tree — so a consumer reading it with
+        ``.get()`` gets ``None`` rather than a criterion the solve never met.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -3496,6 +3568,57 @@ class SolveResult:
         True if the reported optimality gap is mathematically certified.
         False when NLP-BB is used on a nonconvex problem (heuristic mode),
         where the NLP objective is not a valid lower bound.
+    bound_valid : bool
+        True if ``bound`` is a valid global dual bound — a lower bound on the
+        global optimum for a MINIMIZE model, an upper bound for a MAXIMIZE one —
+        **whatever the termination status** (#1244).
+
+        This is the flag to read before using ``bound`` as a certificate.
+        ``gap_certified`` answers a narrower question: whether the *gap closed*.
+        A ``time_limit`` or ``node_limit`` exit leaves the gap open, so it is
+        never ``gap_certified``, yet its dual bound is usually perfectly valid —
+        the frontier minimum over a tree whose every node bound entered with a
+        soundness proof. A consumer that reads ``gap_certified`` to decide
+        whether ``bound`` can be trusted therefore throws away every valid bound
+        from a budgeted run.
+
+        Fails closed: ``False`` means "discopt makes no claim here", not "the
+        bound is wrong". It is ``False`` whenever ``bound`` is ``None`` or
+        non-finite, on every local status (which may not carry a bound at all),
+        and on any producer that has not been taught to assert it.
+
+        Validity by status × route, for the branch-and-bound routes:
+
+        =================  ==================================================
+        status             ``bound_valid``
+        =================  ==================================================
+        ``optimal``        True. The bound is the certificate.
+        ``feasible``       True when a bound is reported. The exit did not
+                           close the gap, but the retained bound passed the
+                           same taint check the certificate does; a tainted one
+                           is replaced by an independently proved root bound or
+                           dropped to ``None``.
+        ``time_limit``     As ``feasible``: True with a bound, and a bound is
+        ``node_limit``     reported whenever the search proved one, incumbent
+                           or not.
+        ``infeasible``     False — ``bound`` is ``None``. The certificate is
+                           the infeasibility proof, not a bound.
+        ``unbounded``      False.
+        local statuses     False — a local solve makes no global claim and may
+                           not carry a bound (see ``__post_init__``).
+        =================  ==================================================
+
+        The convex fast path (``convex_fast_path=True``) reports
+        ``bound = objective`` with ``bound_source="convex_proof"``: valid
+        because the convexity proof is rigorous, which is the same premise that
+        licenses returning after a single NLP solve.
+    bound_source : str or None
+        Where a valid bound came from — one of
+        :data:`~discopt.modeling.core.BOUND_SOURCES` (``"bnb_tree"``,
+        ``"convex_proof"``, ``"root_relaxation"``, ``"lp_dual"``) — or ``None``
+        when there is no bound, or when the producer asserted validity without
+        naming a provenance. Diagnostic: ``bound_valid`` is the safety-critical
+        flag; this says which machinery earned it.
     algorithm_route : Optional[str]
         Why an algorithm other than the default branch-and-bound ran, when the
         solver chose it automatically (#1059). ``None`` when no automatic
@@ -3550,7 +3673,15 @@ class SolveResult:
     # phase-name -> cumulative seconds across the solve, e.g.
     # ``{"reduce/fbbt": .., "reduce/obbt": .., "separate/psd": .., ...}``. Pure
     # instrumentation (never affects solver math); None when nothing was timed.
-    solver_stats: Optional[dict[str, float]] = None
+    # ``float`` for every counter and timer; ``str`` only for the categorical
+    # ``"gap_criterion"`` (#1243). ``Any`` rather than ``Union[float, str]``
+    # because ``dict`` is INVARIANT in its value type: the ~8 producers across
+    # ``solver.py`` build a ``dict[str, float]``, and a ``Union`` value type
+    # rejects every one of them at the constructor. The real contract is the
+    # docstring above. The criterion is spelled out as a name rather than
+    # encoded as a magic number because this dict is read by humans and by the
+    # report tooling, and a code would have to be decoded in both.
+    solver_stats: Optional[dict[str, Any]] = None
 
     # KKT duals at the returned point, when the underlying solver exposes them.
     # ``constraint_duals`` is keyed by Constraint.name; entries with a vector
@@ -3574,6 +3705,16 @@ class SolveResult:
     # NLP-BB indicator and gap certification
     nlp_bb: bool = False
     gap_certified: bool = True
+
+    # #1244: is ``bound`` a valid global dual bound, whatever the status?
+    #
+    # Defaults to False and is raised only where the solver can point at the
+    # proof, so a producer that has not been taught about this field reports "no
+    # claim" rather than a claim it never earned. ``__post_init__`` derives it
+    # from ``gap_certified`` (a certified gap IS the assertion that the bound is
+    # valid) and clears it whenever ``bound`` is absent or non-finite.
+    bound_valid: bool = False
+    bound_source: Optional[str] = None
 
     # SubNLP primal-heuristic counters (zero unless the heuristic ran).
     subnlp_calls: int = 0
@@ -3727,6 +3868,93 @@ class SolveResult:
             # makes none. Absent certification is interpreted as NOT certified.
             self.gap_certified = False
             self.gap = None
+
+        # #1244: ``bound_valid`` / ``bound_source``, normalized LAST so the
+        # derivation below reads the FINAL ``gap_certified``, not the value a
+        # producer passed in.
+        #
+        # The ordering is the whole point. ``gap_certified`` defaults to True,
+        # and the guards above revoke it for a missing/non-finite bound, a
+        # missing incumbent (#875) and every local status. Deriving validity
+        # before those ran would raise the flag off a certificate that is about
+        # to be withdrawn -- which is exactly what an early version of this block
+        # did on the #654 deadline short-circuit (``objective=None``,
+        # ``gap_certified`` still at its default). Right answer, wrong reason,
+        # and the wrong reason is what generalizes to a bound that is NOT valid.
+        #
+        # Three rules:
+        #
+        # 1. A surviving certified gap IS the assertion that ``bound`` is a valid
+        #    global dual bound -- that is what the certificate says, and it is
+        #    the flag the phase gates already count ``incorrect_count`` from.
+        #    Deriving it here rather than asking ~43 construction sites to repeat
+        #    themselves is what stops a new return site from silently reporting
+        #    "no claim" on a bound it did certify. It only ever RAISES the flag:
+        #    a producer that asserted validity on an uncertified exit (a
+        #    ``time_limit`` bound that passed the taint check) keeps it.
+        # 2. Validity is a claim ABOUT a number: no number, no claim. This is
+        #    also the acceptance criterion -- ``bound_valid`` is False whenever
+        #    ``bound`` is None.
+        # 3. The provenance vocabulary is closed, and an unknown value raises. A
+        #    consumer branching on ``bound_source`` must not have to guess
+        #    whether "bnb" meant "bnb_tree"; a typo reading as an unknown source
+        #    would silently take the else-branch forever (CLAUDE.md §3).
+        if self.gap_certified and self.status not in _NON_GAP_CERTIFICATE_STATUSES:
+            self.bound_valid = True
+        if self.bound is None or not np.isfinite(self.bound):
+            self.bound_valid = False
+            self.bound_source = None
+        if self.bound_source is not None and self.bound_source not in BOUND_SOURCES:
+            raise ValueError(
+                f"SolveResult(bound_source={self.bound_source!r}) is not one of "
+                f"{sorted(BOUND_SOURCES)}."
+            )
+
+    def _set_bound(
+        self,
+        bound: Optional[float],
+        *,
+        valid: bool,
+        source: Optional[str] = None,
+    ) -> None:
+        """Set ``bound`` together with its validity claim (#1244).
+
+        ``bound_valid`` / ``bound_source`` are DERIVED in ``__post_init__``, but
+        that runs once. Every post-construction mutation of ``bound`` then has to
+        maintain the triple by hand, and the audit that added the field found
+        FOUR such sites in the tree -- all four the same shape of mistake, none
+        of them noticed until searched for:
+
+        * ``Model.solve``'s #844 fallback merge installed the fallback's bound
+          beside the primary's stale flag;
+        * ``solver._withhold_local_optimality_certificate`` cleared the bound and
+          left ``bound_valid=True`` standing;
+        * ``solver._merge_route_and_fallback`` installed the loser's bound on the
+          winner, leaving provenance naming the winner's machinery for a number
+          the other side proved;
+        * the same function's #1059 crossing guard cleared a bound it had just
+          proved invalid while leaving the claim that it was valid.
+
+        An earlier draft of this docstring said "two sites" -- that was a count of
+        the sites the field's own PR happened to touch first, not of the sites
+        that exist. The lesson is the opposite of a small number: a field that
+        every mutation site must maintain, taught to only some of them, converts
+        a latent inconsistency into a shipped one. So the triple moves together
+        through here, and a new ``self.bound = ...`` anywhere is a bug.
+
+        The same two normalizations ``__post_init__`` applies are re-applied, so
+        a caller cannot install an inconsistent pair: no bound means no claim,
+        and the provenance vocabulary is closed.
+        """
+        self.bound = bound
+        if bound is None or not np.isfinite(bound):
+            self.bound_valid = False
+            self.bound_source = None
+            return
+        if source is not None and source not in BOUND_SOURCES:
+            raise ValueError(f"bound_source={source!r} is not one of {sorted(BOUND_SOURCES)}.")
+        self.bound_valid = bool(valid)
+        self.bound_source = source if valid else None
 
     def value(self, var: Variable) -> np.ndarray:
         """
@@ -6003,6 +6231,7 @@ class Model:
         self,
         time_limit: float = 3600,
         gap_tolerance: float = 1e-4,
+        abs_gap_tolerance: Optional[float] = None,
         threads: int = 1,
         llm: bool = False,
         sensitivity: bool = False,
@@ -6036,6 +6265,23 @@ class Model:
             Wall-clock time limit in seconds.
         gap_tolerance : float, default 1e-4
             Relative optimality gap tolerance for termination.
+        abs_gap_tolerance : float, optional
+            Absolute optimality gap tolerance ``|objective - bound|`` for
+            termination. The search stops when EITHER the relative or the
+            absolute criterion holds -- as it always has; this exposes the
+            absolute half, which used to be a module constant (1e-6) with no
+            caller control (#1243). ``None`` (the default) keeps each route's
+            established default, so omitting it changes nothing.
+
+            Use it when the optimum sits near zero, where a relative tolerance
+            carries no information: a phase-stability certificate is the
+            absolute test ``bound >= -eps`` on a quantity that is approximately
+            0 at the answer. Must be finite and strictly positive.
+
+            :attr:`SolveResult.solver_stats` then carries ``"gap_criterion"``,
+            ``"absolute"`` or ``"relative"``, naming which arm stopped the
+            search; the key is absent when neither did (a ``time_limit`` /
+            ``node_limit`` stop, or an exhausted tree).
         threads : int, default 1
             Number of CPU threads for Rust components.
         llm : bool, default False
@@ -6344,7 +6590,10 @@ class Model:
 
         if stream:
             return self._solve_streaming(
-                time_limit=time_limit, gap_tolerance=gap_tolerance, **kwargs
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+                **kwargs,
             )
 
         # Convex LP-OA branch-and-cut kernel fast path (#798, gated by
@@ -6557,6 +6806,7 @@ class Model:
                     time_limit=_primary_tl,
                     incumbent_time_extension=_fb_extension,
                     gap_tolerance=gap_tolerance,
+                    abs_gap_tolerance=abs_gap_tolerance,
                     threads=threads,
                     deterministic=deterministic,
                     partitions=partitions,
@@ -6707,15 +6957,48 @@ class Model:
                     # a primal is coming, and a budget-fraction early exit would forfeit
                     # exactly the late incumbents this fallback exists to catch.
                     if _fb.bound is not None:
-                        if result.bound is None:
-                            result.bound = _fb.bound
-                        elif (
+                        # #1244: this merge MUTATES an already-constructed
+                        # result, so it runs after ``__post_init__`` and must
+                        # maintain the (bound, bound_valid, bound_source) triple
+                        # itself -- a bound installed here with a stale
+                        # ``bound_valid=False`` beside it would be discarded by
+                        # every consumer that checks the flag, which is the whole
+                        # point of the fallback's work.
+                        _maximize = (
                             self._objective is not None
                             and self._objective.sense == ObjectiveSense.MAXIMIZE
-                        ):
-                            result.bound = min(result.bound, _fb.bound)
+                        )
+                        if result.bound is None:
+                            _fb_wins, _merged_bound = True, _fb.bound
+                        elif _maximize:
+                            _fb_wins = _fb.bound < result.bound
+                            _merged_bound = min(result.bound, _fb.bound)
                         else:
-                            result.bound = max(result.bound, _fb.bound)
+                            _fb_wins = _fb.bound > result.bound
+                            _merged_bound = max(result.bound, _fb.bound)
+                        if _fb_wins:
+                            # #1244. ``_fb`` is an ``LpSpatialResult`` -- a
+                            # 6-field NamedTuple with NO ``bound_valid`` /
+                            # ``bound_source``, so reading them off it raised
+                            # ``AttributeError``, which the ``except`` below
+                            # turned into a warning after ``result.bound`` had
+                            # already been mutated. The claim is derived here
+                            # instead, from what that engine documents: it is a
+                            # spatial branch-and-bound whose module invariant is
+                            # "every LP bound is a valid LOWER bound on sgn*f",
+                            # gated on ``_objective_bound_valid`` -- the same
+                            # frontier-bound standard the other B&B routes
+                            # report, hence ``bnb_tree``.
+                            result._set_bound(_merged_bound, valid=True, source="bnb_tree")
+                        else:
+                            # The primary's bound survives; its existing claim
+                            # still describes it, so re-assert it unchanged
+                            # rather than leaving the triple to drift.
+                            result._set_bound(
+                                _merged_bound,
+                                valid=result.bound_valid,
+                                source=result.bound_source,
+                            )
                     result.node_count = (result.node_count or 0) + _fb.node_count
                 # #1038: ``solve_lp_spatial_bb`` neither receives nor consults
                 # ``lazy_constraints``/``incumbent_callback``, so its primal is

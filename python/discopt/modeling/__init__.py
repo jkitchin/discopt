@@ -98,6 +98,7 @@ from discopt.modeling.core import (
     tanh,
     trunc,
     udf,
+    xlogx,
 )
 from discopt.modeling.core import (
     abs_ as abs,
@@ -144,6 +145,7 @@ __all__ = [
     "sigmoid",
     "sign",
     "softplus",
+    "xlogx",
     # Recognised but unimplemented discontinuous intrinsics: these are
     # exported so the refusal is explicit and documented (issue #1237).
     # Calling one raises DiscontinuousIntrinsicError.

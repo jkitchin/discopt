@@ -363,6 +363,30 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
         # nondecreasing on all of R (like exp, but with bounded slope).
         return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
 
+    if name == "entropy":
+        # entropy(t) = t*log(t): f'' = 1/t > 0, so CONVEX. It is NOT monotone --
+        # decreasing on [0, 1/e], increasing after -- so the monotonicity is
+        # UNKNOWN and `compose` licenses a verdict only for an AFFINE argument
+        # (entropy(affine) is convex; entropy(nonconvex) need not be).
+        #
+        # #1242 WIDENED this gate from `is_pos` to `is_nonneg`; #1144 added the
+        # arm and required a strictly positive argument. The relaxation is
+        # sound, not a convenience: `t*log(t)` is continuous on the CLOSED
+        # domain [0, inf) once `f(0) = 0` is taken (the limit), and a function
+        # convex on an open interval and continuous at an endpoint is convex on
+        # the closed interval. `is_nonneg` is exactly that domain, so
+        # entropy(affine >= 0) is convex.
+        #
+        # It has to be widened, or the atom is unusable for what it is for: a
+        # site or mole fraction lives on [0, 1], which is NONNEG and never
+        # strictly POS, so the `is_pos` gate abstained on every ideal-mixing
+        # term there is. That is what made #1242's acceptance criterion -- "a
+        # convexity check proves y ln y + (1-y) ln(1-y) convex on [0, 1]" --
+        # unreachable before this.
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.UNKNOWN)
+        return None
+
     if name in ("log", "log2", "log10"):
         # log is concave and nondecreasing on strictly positive R.
         if is_pos(arg_sign):
@@ -450,14 +474,6 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
         # safely in-domain; weaker/unknown signs abstain (cf. log requiring >0).
         if is_nonneg(arg_sign):
             return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
-        return None
-
-    if name == "entropy":
-        # entropy(x) = x*log(x): f'' = 1/x > 0, so convex on the strictly
-        # positive domain. Non-monotone (minimum at x = 1/e), so monotonicity is
-        # unknown — sound for DCP composition over an affine argument.
-        if is_pos(arg_sign):
-            return AtomProfile(Curvature.CONVEX, Monotonicity.UNKNOWN)
         return None
 
     return None

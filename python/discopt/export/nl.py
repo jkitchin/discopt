@@ -1359,6 +1359,22 @@ class _NLWriter:
             raise ValueError("erf() has no .nl opcode; reformulate without erf")
         if fname == "sign":
             raise ValueError("sign() has no .nl opcode; reformulate without sign")
+        if fname in ("entropy", "centropy"):
+            # `.nl` has no entropy opcode, and the obvious rewrite is NOT a
+            # faithful substitute: `x*log(x)` evaluates to `nan` at x = 0, where
+            # the atom's value is the limit 0, and every chain-rule
+            # decomposition routes the second derivative through
+            # `log''(x) = -1/x**2`, which overflows f64 for x below ~1e-154
+            # (see `_nl_expr_compiler`'s `entropy` arm). Emitting it would hand
+            # an external solver a different function on exactly the boxes
+            # site-fraction models live on, so refuse instead (#1242).
+            shown = "xlogx" if fname == "entropy" else fname
+            raise ValueError(
+                f"{shown}() has no .nl opcode and no exact .nl rewrite "
+                f"(x*log(x) is nan at x=0 and its second derivative overflows "
+                f"near 0). Solve this model with discopt, or reformulate "
+                f"without {shown}."
+            )
         if fname in ("min", "max"):
             raise ValueError(f"{fname}() requires DNLP model type; not supported in .nl export")
         opcode = _FUNC_OPCODES.get(fname)

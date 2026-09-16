@@ -4,8 +4,8 @@
 //! through the expression DAG to tighten variable bounds.
 
 use crate::expr::{
-    BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr, ObjectiveSense, UnOp,
-    VarType,
+    xlogx, BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr,
+    ObjectiveSense, UnOp, VarType,
 };
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -675,6 +675,7 @@ fn eval_node_interval(
                     let sp = |x: f64| x.max(0.0) + (-x.abs()).exp().ln_1p();
                     Interval::new(sp(a0.lo), sp(a0.hi))
                 }
+                MathFunc::Entropy => entropy_interval(&a0),
                 MathFunc::Abs => interval_abs(&a0),
                 MathFunc::Sign => Interval::new(-1.0, 1.0),
                 MathFunc::Min => {
@@ -1104,6 +1105,18 @@ pub fn backward_propagate(
                         node_bounds,
                         var_bounds,
                     );
+                }
+                MathFunc::Entropy => {
+                    // `x*ln(x)` is not monotone: it falls on [0, 1/e] and rises
+                    // after. Invert only when the forward input sits inside one
+                    // branch; a box straddling 1/e has a preimage that is a
+                    // union of two intervals, and the enclosing hull of that
+                    // union is the input box itself -- no tightening, so skip
+                    // rather than pretend.
+                    let inp = node_bounds[args[0].0];
+                    if let Some(pre) = entropy_preimage(&inp, &tightened) {
+                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
+                    }
                 }
                 MathFunc::Erf => {
                     // erf increasing onto (-1, 1); invert with erfinv, clamped
@@ -1574,6 +1587,126 @@ pub fn fbbt_until(
 // ─────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// entropy(x) = x*ln(x): interval rules
+// ─────────────────────────────────────────────────────────────
+
+/// Minimizer of `x*ln(x)`.
+const ENTROPY_ARGMIN: f64 = 0.367_879_441_171_442_33; // 1/e
+/// Minimum value of `x*ln(x)`, `-1/e`.
+const ENTROPY_MIN: f64 = -0.367_879_441_171_442_33;
+
+/// Outward margin on an inverted `entropy` endpoint, absorbing the rounding of
+/// `x*ln(x)` in the bisection below. Applied to the *preimage*, so it can only
+/// widen the interval -- never cut a feasible point out of the box.
+const ENTROPY_INV_MARGIN: f64 = 1e-9;
+
+/// Forward interval enclosure of `entropy([lo, hi])`.
+///
+/// Mirrors `_relax/convexity/interval.py::entropy` up to the `XLOG_FLOOR` clamp
+/// and this module's usual absence of outward rounding, including the
+/// continuous extension `f(0) = 0` that makes a site-fraction box starting at 0
+/// enclose finitely (#1242). `lo < 0` is outside the domain and abstains.
+///
+/// "Exactly" would be too strong, in two ways, and a differential test written
+/// against that word would report both as bugs:
+///
+/// 1. This rule computes through [`expr::xlogx`], which floors its argument at
+///    `XLOG_FLOOR = 1e-300`; the Python rule uses the exact continuous
+///    extension with no floor. They agree at 0 and everywhere at or above
+///    1e-300, and differ on `x` in `(0, 1e-300)` -- at `x = 1e-310` this
+///    returns `1e-310*ln(1e-300)`, about 2.4e-309 ABOVE the true image.
+/// 2. The Python rule rounds its endpoints outward; this one does not. That is
+///    the convention throughout this module (`interval_exp`, `interval_log`,
+///    `interval_sqrt`, ... are all bare `Interval::new`), not something new
+///    here, but it does mean the Python enclosure is ~1 ULP wider on each side.
+fn entropy_interval(a: &Interval) -> Interval {
+    if a.lo < 0.0 {
+        return Interval::new(f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let f_lo = xlogx(a.lo);
+    let f_hi = xlogx(a.hi);
+    let lo = if a.lo <= ENTROPY_ARGMIN && a.hi >= ENTROPY_ARGMIN {
+        ENTROPY_MIN
+    } else {
+        f_lo.min(f_hi)
+    };
+    Interval::new(lo, f_lo.max(f_hi))
+}
+
+/// Preimage of `out` under `entropy`, restricted to the forward box `inp`.
+///
+/// Returns `None` when no sound tightening is available: `inp` outside the
+/// domain, or straddling the minimizer `1/e` (where the preimage is a union of
+/// two intervals whose hull is `inp` itself).
+fn entropy_preimage(inp: &Interval, out: &Interval) -> Option<Interval> {
+    if inp.lo < 0.0 || !inp.lo.is_finite() || !inp.hi.is_finite() || inp.lo > inp.hi {
+        return None;
+    }
+    if inp.hi <= ENTROPY_ARGMIN {
+        // Decreasing branch: f(lo) >= f(hi), so the preimage of [out.lo, out.hi]
+        // is [f^-1(out.hi), f^-1(out.lo)] with the decreasing inverse.
+        let lo = entropy_inv(out.hi, inp, false)?;
+        let hi = entropy_inv(out.lo, inp, false)?;
+        Some(Interval::new(
+            lo - ENTROPY_INV_MARGIN,
+            hi + ENTROPY_INV_MARGIN,
+        ))
+    } else if inp.lo >= ENTROPY_ARGMIN {
+        // Increasing branch.
+        let lo = entropy_inv(out.lo, inp, true)?;
+        let hi = entropy_inv(out.hi, inp, true)?;
+        Some(Interval::new(
+            lo - ENTROPY_INV_MARGIN,
+            hi + ENTROPY_INV_MARGIN,
+        ))
+    } else {
+        None
+    }
+}
+
+/// Solve `xlogx(t) = y` for `t` in the monotone box `inp`, by bisection.
+///
+/// `increasing` says which branch `inp` lies on. A target outside
+/// `entropy(inp)` is clamped to the nearer endpoint of `inp`, which is the
+/// correct preimage endpoint for a monotone function on a closed box.
+///
+/// Bisection is used rather than a Lambert-W: the root is bracketed by
+/// construction, every iteration keeps the bracket, and 200 halvings drive it
+/// to the last representable digit -- a rigorous enclosure, not a fitted
+/// approximation. The caller widens by [`ENTROPY_INV_MARGIN`] on top.
+fn entropy_inv(y: f64, inp: &Interval, increasing: bool) -> Option<f64> {
+    if y.is_nan() {
+        return None;
+    }
+    let (mut a, mut b) = (inp.lo, inp.hi);
+    let (fa, fb) = (xlogx(a), xlogx(b));
+    // Endpoint values bracket the whole attainable range on a monotone branch.
+    let (ylo, yhi) = if increasing { (fa, fb) } else { (fb, fa) };
+    if y <= ylo {
+        return Some(if increasing { a } else { b });
+    }
+    if y >= yhi {
+        return Some(if increasing { b } else { a });
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (a + b);
+        if mid <= a || mid >= b {
+            break; // adjacent floats: bracket is as tight as f64 allows
+        }
+        let fm = xlogx(mid);
+        let go_right = if increasing { fm < y } else { fm > y };
+        if go_right {
+            a = mid;
+        } else {
+            b = mid;
+        }
+    }
+    // Either endpoint of the final bracket is within one ulp of the root; the
+    // caller's outward margin covers the difference.
+    Some(0.5 * (a + b))
+}
 
 #[cfg(test)]
 mod tests {
@@ -3207,6 +3340,183 @@ mod tests {
             "C-31: feasible model x=[5, 0..3] must not be declared infeasible, \
              got {:?}",
             bounds
+        );
+    }
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::*;
+
+    /// Reference `x*ln(x)` sampled densely over a box; used to prove the
+    /// analytic enclosure actually contains the function (#1242).
+    fn sampled_range(lo: f64, hi: f64) -> (f64, f64) {
+        let n = 20_001;
+        let mut mn = f64::INFINITY;
+        let mut mx = f64::NEG_INFINITY;
+        for i in 0..n {
+            let t = lo + (hi - lo) * (i as f64) / ((n - 1) as f64);
+            let v = xlogx(t);
+            mn = mn.min(v);
+            mx = mx.max(v);
+        }
+        (mn, mx)
+    }
+
+    #[test]
+    fn entropy_value_at_zero_is_the_limit() {
+        assert_eq!(xlogx(0.0), 0.0);
+        assert_eq!(xlogx(1.0), 0.0);
+        assert!((xlogx(std::f64::consts::E.recip()) + std::f64::consts::E.recip()).abs() < 1e-15);
+        assert!(xlogx(-0.5).is_nan(), "x < 0 is outside the domain");
+        // The clamp keeps a denormal argument finite rather than -inf * 0.
+        assert!(xlogx(1e-320).is_finite());
+    }
+
+    #[test]
+    fn entropy_interval_is_exact_on_closed_domain() {
+        // (lo, hi, expected lo, expected hi)
+        let cases: &[(f64, f64, f64, f64)] = &[
+            // u < 1/e: decreasing branch, so [f(u), f(0)] = [u ln u, 0].
+            (0.0, 0.2, 0.2 * 0.2_f64.ln(), 0.0),
+            // u == 1/e: the minimizer is the right endpoint.
+            (0.0, ENTROPY_ARGMIN, ENTROPY_MIN, 0.0),
+            // u > 1/e: interior minimum, max at an endpoint (both are 0 here).
+            (0.0, 1.0, ENTROPY_MIN, 0.0),
+            // u > 1: max at the right endpoint.
+            (0.0, 2.0, ENTROPY_MIN, 2.0 * 2.0_f64.ln()),
+            // strictly-interior box, minimizer inside.
+            (0.1, 0.9, ENTROPY_MIN, 0.9 * 0.9_f64.ln()),
+            // strictly-increasing box: both endpoints past the minimizer.
+            (0.5, 0.9, 0.5 * 0.5_f64.ln(), 0.9 * 0.9_f64.ln()),
+        ];
+        let mut checked = 0usize;
+        for &(lo, hi, elo, ehi) in cases {
+            let got = entropy_interval(&Interval::new(lo, hi));
+            assert!(
+                (got.lo - elo).abs() < 1e-12 && (got.hi - ehi).abs() < 1e-12,
+                "entropy([{lo}, {hi}]) = [{}, {}], expected [{elo}, {ehi}]",
+                got.lo,
+                got.hi
+            );
+            // And it really encloses the function, not just the formula.
+            let (smn, smx) = sampled_range(lo, hi);
+            assert!(
+                got.lo <= smn + 1e-12 && got.hi >= smx - 1e-12,
+                "entropy([{lo}, {hi}]) = [{}, {}] does not enclose sampled [{smn}, {smx}]",
+                got.lo,
+                got.hi
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, cases.len(), "probe executed no comparisons");
+    }
+
+    #[test]
+    fn entropy_interval_abstains_below_zero() {
+        let got = entropy_interval(&Interval::new(-0.1, 1.0));
+        assert_eq!(got.lo, f64::NEG_INFINITY);
+        assert_eq!(got.hi, f64::INFINITY);
+    }
+
+    #[test]
+    fn entropy_preimage_is_sound_on_each_branch() {
+        // Decreasing branch [0, 1/e]: require entropy(x) <= -0.2.
+        //
+        // f(x) = -0.2 has roots at 0.07865836 and 0.77169097 (re-derived with
+        // brentq on each side of the minimizer). An earlier version of this
+        // comment quoted ~0.0712 and ~0.3070, which solve nothing nearby --
+        // f(0.0712) = -0.1881, f(0.3070) = -0.3625 -- and then argued from the
+        // fake second root that "both roots are below 1/e". They are not: the
+        // real one is 0.7717. The branch is still unambiguous here, for the
+        // other reason -- 0.7717 lies OUTSIDE `inp`, so on [0, 1/e] the
+        // constraint f(x) <= -0.2 is exactly x >= 0.07865836, and the expected
+        // preimage is [0.07865836, 1/e].
+        let inp = Interval::new(0.0, ENTROPY_ARGMIN);
+        let out = Interval::new(f64::NEG_INFINITY, -0.2);
+        let pre = entropy_preimage(&inp, &out).expect("decreasing branch inverts");
+        // Every point of `inp` with f(x) <= -0.2 must survive.
+        let mut kept = 0usize;
+        for i in 0..=10_000 {
+            let x = inp.lo + (inp.hi - inp.lo) * (i as f64) / 10_000.0;
+            if xlogx(x) <= -0.2 {
+                assert!(
+                    x >= pre.lo && x <= pre.hi,
+                    "feasible x={x} cut out by preimage [{}, {}]",
+                    pre.lo,
+                    pre.hi
+                );
+                kept += 1;
+            }
+        }
+        assert!(kept > 0, "probe found no feasible points to check");
+        // ...and it must be a real tightening. Without this, every assertion
+        // above is satisfied by `pre == inp` (or anything wider), so the arm
+        // would pass against an `entropy_preimage` that hands the input box
+        // straight back -- sound, and a complete no-op. Only the increasing
+        // arm below had this check.
+        assert!(
+            pre.lo > inp.lo,
+            "decreasing branch did not tighten: {pre:?}"
+        );
+        assert!(
+            (pre.lo - 0.078_658_360_286_855_77).abs() < 1e-6,
+            "decreasing branch cut at the wrong root: {pre:?}"
+        );
+
+        // Increasing branch [1/e, 3].
+        let inp = Interval::new(ENTROPY_ARGMIN, 3.0);
+        let out = Interval::new(f64::NEG_INFINITY, 1.0);
+        let pre = entropy_preimage(&inp, &out).expect("increasing branch inverts");
+        let mut kept2 = 0usize;
+        for i in 0..=10_000 {
+            let x = inp.lo + (inp.hi - inp.lo) * (i as f64) / 10_000.0;
+            if xlogx(x) <= 1.0 {
+                assert!(
+                    x >= pre.lo && x <= pre.hi,
+                    "feasible x={x} cut out by preimage [{}, {}]",
+                    pre.lo,
+                    pre.hi
+                );
+                kept2 += 1;
+            }
+        }
+        assert!(kept2 > 0, "probe found no feasible points to check");
+        // It must also be a real tightening, not the input box back.
+        assert!(pre.hi < 3.0, "increasing branch did not tighten: {pre:?}");
+    }
+
+    #[test]
+    fn entropy_preimage_skips_a_box_straddling_the_minimizer() {
+        // The preimage there is a union of two intervals whose hull is the
+        // input box; returning it would be sound but useless, and returning
+        // one branch would be UNSOUND. Skip is the only correct answer.
+        let inp = Interval::new(0.0, 1.0);
+        let out = Interval::new(f64::NEG_INFINITY, -0.2);
+        assert!(entropy_preimage(&inp, &out).is_none());
+    }
+
+    #[test]
+    fn entropy_forward_fbbt_bounds_a_variable_expression() {
+        let mut arena = ExprArena::new();
+        let x = arena.intern(ExprNode::Variable {
+            name: "y".to_string(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let e = arena.intern(ExprNode::FunctionCall {
+            func: MathFunc::Entropy,
+            args: vec![x],
+        });
+        let var_bounds = vec![Interval::new(0.0, 1.0)];
+        let node_bounds = forward_propagate(&arena, e, &var_bounds);
+        let got = node_bounds[e.0];
+        assert!(
+            (got.lo - ENTROPY_MIN).abs() < 1e-12 && got.hi.abs() < 1e-12,
+            "forward FBBT gave [{}, {}], expected [-1/e, 0]",
+            got.lo,
+            got.hi
         );
     }
 }

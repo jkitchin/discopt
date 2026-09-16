@@ -392,6 +392,7 @@ impl PyModelRepr {
                         MathFunc::Log1p => "log1p",
                         MathFunc::Sigmoid => "sigmoid",
                         MathFunc::Softplus => "softplus",
+                        MathFunc::Entropy => "entropy",
                         MathFunc::Norm1 => "norm1",
                         MathFunc::NormInf => "norminf",
                         MathFunc::NormP(_) => unreachable!(),
@@ -1864,6 +1865,7 @@ fn convert_expr(
                 "log1p" => MathFunc::Log1p,
                 "sigmoid" => MathFunc::Sigmoid,
                 "softplus" => MathFunc::Softplus,
+                "entropy" => MathFunc::Entropy,
                 "norm1" => MathFunc::Norm1,
                 "norminf" => MathFunc::NormInf,
                 // General integer-order p-norm "norm{p}" (p != 1, 2, inf).

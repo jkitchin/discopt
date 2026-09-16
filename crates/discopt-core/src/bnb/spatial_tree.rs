@@ -106,6 +106,25 @@ pub enum TreeStatus {
     Infeasible,
 }
 
+/// Whether `bound` closes the region against `inc` under the configured gap.
+///
+/// The single place the gap criterion is spelled out, so the fathoming tests,
+/// the node-limit exit and the terminal `Optimal` verdict can never drift apart
+/// — which is exactly how a fathom looser than the certificate becomes a false
+/// `Optimal`.
+///
+/// Purely ABSOLUTE, as this kernel has always been. #1243 briefly gave it a
+/// relative second arm so it would match the Python tree's disjunction; that was
+/// reverted, because the relative arm never existed here and adding one can only
+/// LOOSEN the fathom — a caller tightening `abs_gap_tolerance` would have
+/// widened the effective tolerance by orders of magnitude on a large objective.
+/// `solver.py` now maps a caller's absolute tolerance through `min`, so this
+/// route honours a tightening and declines a loosening.
+#[inline]
+fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
+    bound >= inc - config.gap_tol
+}
+
 /// Tunables for [`solve_spatial_tree`].
 #[derive(Clone, Copy, Debug)]
 pub struct SpatialTreeConfig {
@@ -437,7 +456,7 @@ pub fn solve_spatial_tree(
         // Fathom by the parent bound if the incumbent already dominates it. The
         // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
-            if parent_bound >= inc - config.gap_tol {
+            if gap_closed(parent_bound, inc, config) {
                 global_lb_closed = global_lb_closed.min(parent_bound);
                 continue;
             }
@@ -550,7 +569,7 @@ pub fn solve_spatial_tree(
         let bound = node.bound.max(parent_bound);
         // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
-            if bound >= inc - config.gap_tol {
+            if gap_closed(bound, inc, config) {
                 global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
@@ -628,7 +647,7 @@ pub fn solve_spatial_tree(
             // region may hold BETTER points, so it must be branched further
             // (closing here would be a premature fathom → a false certificate).
             let inc_now = incumbent.unwrap();
-            if bound >= inc_now - config.gap_tol {
+            if gap_closed(bound, inc_now, config) {
                 global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
@@ -682,7 +701,7 @@ pub fn solve_spatial_tree(
     match incumbent {
         Some(inc) => {
             let bound = global_lb_closed.min(inc);
-            let status = if bound >= inc - config.gap_tol {
+            let status = if gap_closed(bound, inc, config) {
                 TreeStatus::Optimal
             } else {
                 TreeStatus::Exhausted
@@ -1169,5 +1188,69 @@ mod tests {
                 "{undecided:?} is not a proof of emptiness and must not fathom"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gap_criterion_tests {
+    use super::*;
+
+    #[test]
+    fn gap_closed_is_the_absolute_test_it_consolidates() {
+        // `gap_closed` exists so the fathoming tests, the node-limit exit and
+        // the terminal `Optimal` verdict cannot drift apart. It must therefore
+        // stay EXACTLY the `bound >= inc - gap_tol` each of them spelled out
+        // inline before, across the whole range of magnitudes -- a helper that
+        // quietly differs from the four sites it replaced is worse than none.
+        let config = SpatialTreeConfig {
+            gap_tol: 1e-4,
+            ..Default::default()
+        };
+        let mut checked = 0usize;
+        for &inc in &[-1e6, -1.0, -1e-8, 0.0, 1e-8, 1.0, 1e6] {
+            for &gap in &[0.0, 1e-9, 1e-5, 1e-4, 1.1e-4, 1.0] {
+                let bound = inc - gap;
+                assert_eq!(
+                    gap_closed(bound, inc, &config),
+                    bound >= inc - config.gap_tol,
+                    "inc={inc} gap={gap}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 42, "probe ran {checked} comparisons");
+    }
+
+    #[test]
+    fn a_tighter_gap_tol_never_widens_the_fathom() {
+        // The #1260 review finding, pinned at the level it happened. A relative
+        // second arm was briefly added here so this route would match the Python
+        // tree's disjunction; on a large objective it turned a caller's TIGHTER
+        // absolute tolerance into a fathom orders of magnitude LOOSER
+        // (1e-9 requested, 10.0 effective at |inc| ~ 1e5). The criterion must be
+        // monotone in `gap_tol`: shrinking it can only ever close fewer regions.
+        let mut checked = 0usize;
+        for &inc in &[-1e5, -1.0, 0.0, 1.0, 1e5] {
+            for &gap in &[0.0, 1e-9, 1e-7, 1e-4, 1e-2, 1.0, 11.0] {
+                let bound = inc - gap;
+                let loose = SpatialTreeConfig {
+                    gap_tol: 1e-4,
+                    ..Default::default()
+                };
+                let tight = SpatialTreeConfig {
+                    gap_tol: 1e-9,
+                    ..Default::default()
+                };
+                if gap_closed(bound, inc, &tight) {
+                    assert!(
+                        gap_closed(bound, inc, &loose),
+                        "tightening closed a region the looser tolerance does not: \
+                         inc={inc} gap={gap}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 35, "probe ran {checked} comparisons");
     }
 }

@@ -897,6 +897,7 @@ mod func_table_tests {
             | MathFunc::Acosh
             | MathFunc::Atanh
             | MathFunc::Erf
+            | MathFunc::Entropy
             | MathFunc::Norm1
             | MathFunc::NormInf
             | MathFunc::NormP(_) => false,
@@ -931,6 +932,7 @@ mod func_table_tests {
         MathFunc::Log1p,
         MathFunc::Sigmoid,
         MathFunc::Softplus,
+        MathFunc::Entropy,
         MathFunc::Norm1,
         MathFunc::NormInf,
         MathFunc::NormP(3),

@@ -31,7 +31,9 @@ Nonsmoothness. ``abs`` and ``x**c`` have kinks; at a kink this returns a
 *subgradient* (``sign`` for ``abs``), which is documented and excluded from the
 differential-test tolerance. Opaque :class:`CustomCall` nodes have no symbolic
 form and are refused loudly. Multi-argument functions (``min``, ``max``,
-``atan2``, ``norm``, ``entropy``) are not differentiated in Phase 0 and raise.
+``atan2``, ``norm``, ``centropy``) are not differentiated in Phase 0 and raise.
+The unary ``entropy`` (``u*log(u)``) *is* differentiated, to the exact
+``log(u) + 1`` — which is unbounded at ``u = 0``.
 
 Correctness is pinned by a differential test against ``jax.grad``
 (``python/tests/test_bilevel_symbolic_diff.py``).
@@ -172,6 +174,10 @@ _FUNC_DERIV = {
     "atanh": lambda u: _div(_const(1.0), _sub(_const(1.0), _sq(u))),
     # softplus'(u) = sigmoid(u) = 1 / (1 + exp(-u))
     "softplus": lambda u: _div(_const(1.0), _add(_const(1.0), FunctionCall("exp", _neg(u)))),
+    # entropy(u) = u*log(u); entropy'(u) = log(u) + 1. Exact, and therefore
+    # unbounded as u -> 0+ -- unlike the evaluators, which floor the argument at
+    # 1e-300 to keep a box pinned at [0, 0] finite (#1242).
+    "entropy": lambda u: _add(FunctionCall("log", u), _const(1.0)),
     # Nonsmooth: subgradient. abs'(u) = sign(u); sign'(u) = 0 a.e.
     "abs": lambda u: FunctionCall("sign", u),
     "sign": lambda u: _const(0.0),

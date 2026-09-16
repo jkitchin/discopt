@@ -102,6 +102,10 @@ pub enum MathFunc {
     Sigmoid,
     /// Softplus (`softplus(x) = ln(1 + e^x)`).
     Softplus,
+    /// Negative-entropy term (`entropy(x) = x*ln(x)`), extended by continuity to
+    /// `entropy(0) = 0`. Convex on `[0, inf)`, minimized at `x = 1/e` with value
+    /// `-1/e`. Undefined for `x < 0`.
+    Entropy,
     /// L1 norm (sum of absolute values).
     Norm1,
     /// L-infinity norm (maximum absolute value).
@@ -110,6 +114,29 @@ pub enum MathFunc {
     /// (orders 1 and 2 use the dedicated `Norm1` / `Norm2` variants).
     NormP(u32),
 }
+
+/// `x*ln(x)` with the argument floored at [`XLOG_FLOOR`].
+///
+/// The floor is not a numerical nicety, it is the contract stated on
+/// [`MathFunc::Entropy`] and on `dm.xlogx`: the value at `x = 0` is the limit
+/// `0`, and the slope there is reported as the large finite `ln(1e-300)` rather
+/// than the true `-inf`, so a box pinned at `[0, 0]` cannot push a non-finite
+/// into a bound. It matches `_relax/dag_compiler.py` (`jnp.maximum(x, 1e-300)`)
+/// and `_nl_expr_compiler._XLOG_FLOOR` exactly, so the Rust and Python
+/// evaluators agree pointwise.
+///
+/// `x < 0` is outside the domain; it returns NaN rather than the clamp's
+/// spurious positive value, so a caller that reaches it sees it.
+pub fn xlogx(x: f64) -> f64 {
+    if x < 0.0 {
+        f64::NAN
+    } else {
+        x * x.max(XLOG_FLOOR).ln()
+    }
+}
+
+/// Argument floor for [`xlogx`]; matches `_nl_expr_compiler._XLOG_FLOOR`.
+pub const XLOG_FLOOR: f64 = 1e-300;
 
 /// One axis of a generalized index: either a scalar position or a slice.
 ///
@@ -1366,6 +1393,7 @@ impl ExprArena {
                     | MathFunc::Log1p
                     | MathFunc::Sigmoid
                     | MathFunc::Softplus
+                    | MathFunc::Entropy
                     | MathFunc::Norm1
                     | MathFunc::NormInf
                     | MathFunc::NormP(_)
@@ -1536,6 +1564,7 @@ impl ExprArena {
                     MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
                     // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
                     MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
+                    MathFunc::Entropy => xlogx(a0),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {
@@ -1959,6 +1988,7 @@ impl ModelRepr {
                     MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
                     // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
                     MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
+                    MathFunc::Entropy => xlogx(a0),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {

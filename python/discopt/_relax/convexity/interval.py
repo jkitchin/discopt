@@ -63,8 +63,20 @@ def _round_down_exact0(x: Number) -> np.ndarray:
     subnormal range and manufactures a coefficient ~300 orders of magnitude
     below everything else in the model. That value is still a sound
     enclosure, but it defeats downstream code that reasons about
-    *magnitudes* — the coefficient-spread test in ``milp_relaxation`` divides
-    by the smallest nonzero entry and overflows to ``inf`` on it.
+    *magnitudes* — the motivating case was the coefficient-spread test in
+    ``milp_relaxation``, which in its pre-#957 naive
+    ``nz.max() / nz.min() > trigger`` form divided by the smallest nonzero
+    entry and overflowed to ``inf`` on such a value.
+
+    That consumer is no longer vulnerable, and this sentence used to read as
+    though it still were: #957 hardened BOTH ends in one pass, so today
+    ``_coefficient_spread_exceeds`` cross-multiplies instead of dividing *and*
+    filters entries below ``_SUBNORMAL_FLOOR`` before measuring. The producer-
+    side rule below is still worth having — a manufactured ``±5e-324`` is a
+    magnitude-reasoning hazard for any consumer, not only that one — but it is
+    a general precaution now, not a live bug being patched around, and reading
+    it as the latter sends the next person hunting an overflow that cannot
+    happen.
 
     Skipping the nudge is sound **only** where a floating-point result of
     exactly ``0`` implies the exact real result is ``0`` — i.e. where the
@@ -497,20 +509,31 @@ def cosh(x: Interval) -> Interval:
 
 def entropy(x: Interval) -> Interval:
     """``entropy(t) = t*log(t)`` is convex on ``t > 0`` with a single interior
-    minimum at ``t = 1/e`` (value ``-1/e``).
+    minimum at ``t = 1/e`` (value ``-1/e``), extended by continuity to
+    ``entropy(0) = 0``.
 
     Convexity gives a tight enclosure: the lower endpoint is ``-1/e`` when the
     minimizer ``1/e`` lies in the box, else the smaller endpoint value; the upper
-    endpoint is the larger endpoint value. When the box is not strictly within
-    the positive domain (``lo <= 0``) the enclosure collapses outward to
-    ``[-inf, +inf]`` so the certificate soundly abstains.
+    endpoint is the larger endpoint value. That reasoning needs only convexity
+    and continuity on the CLOSED domain ``[0, inf)``, so a box whose lower end is
+    exactly ``0`` is enclosed exactly, using ``f(0) = 0`` -- the limit
+    ``t log t -> 0`` as ``t -> 0+`` (#1242). It has to be: an ideal-mixing term
+    over site or mole fractions always sits on a box that starts at 0, and the
+    previous ``lo > 0`` guard made the certificate abstain on every one of them.
+
+    ``lo < 0`` is genuinely outside the domain and still collapses outward to
+    ``[-inf, +inf]``, so the certificate soundly abstains rather than guessing.
     """
     xstar = 1.0 / np.e
     fstar = -1.0 / np.e
-    in_domain = x.lo > 0
+    in_domain = x.lo >= 0
     with np.errstate(divide="ignore", invalid="ignore"):
-        f_lo = x.lo * np.log(x.lo)
-        f_hi = x.hi * np.log(x.hi)
+        # ``0 * log(0)`` is ``nan`` in IEEE arithmetic; the continuous extension
+        # ``f(0) = 0`` is the value the whole rule rests on, so substitute it
+        # explicitly rather than letting a nan propagate into min/max (where it
+        # would be silently absorbed by ``np.minimum``'s nan handling).
+        f_lo = np.where(x.lo == 0, 0.0, x.lo * np.log(np.where(x.lo == 0, 1.0, x.lo)))
+        f_hi = np.where(x.hi == 0, 0.0, x.hi * np.log(np.where(x.hi == 0, 1.0, x.hi)))
     contains_min = (x.lo <= xstar) & (x.hi >= xstar)
     lo = np.where(contains_min, fstar, np.minimum(f_lo, f_hi))
     hi = np.maximum(f_lo, f_hi)
@@ -524,8 +547,9 @@ def centropy(x: Interval, y: Interval) -> Interval:
 
     Enclosed soundly (if loosely) via the identity ``centropy = entropy(x) -
     x*log(y)`` composed in interval arithmetic. The ``x -> 0+`` limit of
-    ``centropy`` is 0, matching ``entropy``'s clamp. When the box leaves the
-    domain (``x.lo < 0`` or ``y.lo <= 0``) the constituent enclosures collapse to
+    ``centropy`` is 0, matching ``entropy``'s continuous extension at 0, so
+    ``x.lo == 0`` is inside the domain here too. When the box leaves the domain
+    (``x.lo < 0`` or ``y.lo <= 0``) the constituent enclosures collapse to
     ``[-inf, +inf]`` so the certificate soundly abstains.
     """
     return entropy(x) - x * log(y)

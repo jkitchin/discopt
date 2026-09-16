@@ -184,15 +184,31 @@ class TestAtomProfiles:
             Curvature.CONVEX, Monotonicity.NONDEC
         )
 
-    def test_entropy_is_convex_nonmonotone_on_positive_domain(self):
-        # entropy(x) = x*log(x): convex on x>0, non-monotone (min at 1/e).
+    def test_entropy_is_convex_nonmonotone_on_the_closed_nonnegative_domain(self):
+        # entropy(x) = x*log(x): convex, non-monotone (min at 1/e).
         assert unary_atom_profile("entropy", Sign.POS) == AtomProfile(
             Curvature.CONVEX, Monotonicity.UNKNOWN
         )
-        # Requires a strictly positive argument; weaker signs abstain.
-        assert unary_atom_profile("entropy", Sign.NONNEG) is None
+        # #1242 widened this gate from `is_pos` to `is_nonneg`. `x*log(x)` is
+        # continuous on the CLOSED domain [0, inf) once `f(0) = 0` is taken (the
+        # limit), and a function convex on an open interval and continuous at an
+        # endpoint is convex on the closed interval -- so a NONNEG argument is
+        # inside the domain, not on its edge.
+        #
+        # The widening is what makes the atom usable at all: a site or mole
+        # fraction lives on [0, 1], which is NONNEG and never strictly POS, so
+        # the old gate abstained on every ideal-mixing term there is.
+        assert unary_atom_profile("entropy", Sign.NONNEG) == AtomProfile(
+            Curvature.CONVEX, Monotonicity.UNKNOWN
+        )
+        assert unary_atom_profile("entropy", Sign.ZERO) == AtomProfile(
+            Curvature.CONVEX, Monotonicity.UNKNOWN
+        )
+        # A sign that does NOT prove `x >= 0` still abstains: below zero the
+        # atom is undefined, so there is nothing to certify.
         assert unary_atom_profile("entropy", Sign.UNKNOWN) is None
         assert unary_atom_profile("entropy", Sign.NEG) is None
+        assert unary_atom_profile("entropy", Sign.NONPOS) is None
         assert unary_atom_profile("tanh", Sign.UNKNOWN) is None
 
     def test_unknown_atom(self):

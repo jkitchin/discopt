@@ -34,8 +34,70 @@ from discopt.solver import _finalize_reported_bound
 # ---------------------------------------------------------------------------
 
 
+def test_the_reported_bound_always_carries_its_provenance():
+    """#1244 widened this chokepoint's return to ``(bound, gap, source)``.
+
+    Pinned here rather than left as an ignored third element: every call site
+    in this file unpacks it, so without an assertion the widening would be
+    invisible to the suite that owns this function's contract (CLAUDE.md §6).
+
+    The contract is a pairing -- a source exactly when there is a bound -- plus
+    a closed vocabulary, and WHICH machinery won: the untainted tree bound, or
+    an independently proved one that replaced a tainted tree bound.
+    """
+    from discopt.modeling.core import BOUND_SOURCES
+
+    checked = 0
+
+    # 1. The tree bound survives -> the tree is the provenance.
+    bound, _, source = _finalize_reported_bound(
+        tree_bound_internal=5.0,
+        tree_bound_valid=True,
+        is_maximize=False,
+        obj_val=10.0,
+    )
+    assert bound == 5.0 and source == "bnb_tree"
+    checked += 1
+
+    # 2. Tainted tree, an independent bound stands in -> it is the provenance.
+    bound, _, source = _finalize_reported_bound(
+        tree_bound_internal=5.0,
+        tree_bound_valid=False,
+        is_maximize=False,
+        obj_val=10.0,
+        independent_bounds_internal=(3.0,),
+    )
+    assert bound == 3.0 and source == "root_relaxation"
+    checked += 1
+
+    # 3. An independent bound that BEATS a valid tree bound also wins the label.
+    bound, _, source = _finalize_reported_bound(
+        tree_bound_internal=5.0,
+        tree_bound_valid=True,
+        is_maximize=False,
+        obj_val=10.0,
+        independent_bounds_internal=(7.0,),
+    )
+    assert bound == 7.0 and source == "root_relaxation"
+    checked += 1
+
+    # 4. Nothing to report -> no bound and no claim about where it came from.
+    bound, gap, source = _finalize_reported_bound(
+        tree_bound_internal=None,
+        tree_bound_valid=False,
+        is_maximize=False,
+        obj_val=10.0,
+    )
+    assert bound is None and gap is None and source is None
+    checked += 1
+
+    assert checked == 4
+    for s_ in ("bnb_tree", "root_relaxation"):
+        assert s_ in BOUND_SOURCES
+
+
 def test_valid_tree_bound_is_reported_with_gap():
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=5.0,
         tree_bound_valid=True,
         is_maximize=False,
@@ -49,7 +111,7 @@ def test_valid_tree_bound_is_reported_with_gap():
 def test_valid_tree_bound_survives_missing_incumbent():
     # The #933 headline defect: a valid finite tree bound with NO incumbent
     # (a time/node-limited exit) must be reported, with gap None.
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=5.0,
         tree_bound_valid=True,
         is_maximize=False,
@@ -60,7 +122,7 @@ def test_valid_tree_bound_survives_missing_incumbent():
 
 
 def test_tainted_tree_bound_is_discarded_wholesale():
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=5.0,
         tree_bound_valid=False,
         is_maximize=False,
@@ -72,7 +134,7 @@ def test_tainted_tree_bound_is_discarded_wholesale():
 def test_tainted_tree_bound_falls_back_to_independent_bound():
     # A tainted tree discards its own bound but the independently-proved root
     # bound (untainted snapshot / root LP) still surfaces — the tightest wins.
-    bound, _ = _finalize_reported_bound(
+    bound, _, source = _finalize_reported_bound(
         tree_bound_internal=5.0,
         tree_bound_valid=False,
         is_maximize=False,
@@ -83,7 +145,7 @@ def test_tainted_tree_bound_falls_back_to_independent_bound():
 
 
 def test_valid_tree_bound_composes_with_tighter_independent_bound():
-    bound, _ = _finalize_reported_bound(
+    bound, _, source = _finalize_reported_bound(
         tree_bound_internal=2.0,
         tree_bound_valid=True,
         is_maximize=False,
@@ -96,7 +158,7 @@ def test_valid_tree_bound_composes_with_tighter_independent_bound():
 def test_sentinel_magnitude_bounds_are_refused():
     # np.isfinite(1e20) is True — the #930 hole. Neither the tree bound nor a
     # candidate may surface at/beyond the effective-infinity sentinel.
-    bound, _ = _finalize_reported_bound(
+    bound, _, source = _finalize_reported_bound(
         tree_bound_internal=1e20,
         tree_bound_valid=True,
         is_maximize=False,
@@ -109,7 +171,7 @@ def test_sentinel_magnitude_bounds_are_refused():
 def test_maximize_sense_mapping():
     # Internal min space tracks -obj: an internal lower bound of -7 is the user
     # upper bound 7, and must sit ABOVE the incumbent objective.
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=-7.0,
         tree_bound_valid=True,
         is_maximize=True,
@@ -125,7 +187,7 @@ def test_bound_never_crosses_the_incumbent():
     # Certificate invariant: bound <= incumbent (min sense). A candidate that
     # numerically exceeds the incumbent is capped at it, mirroring the Rust
     # tree's own cap; the gap then closes to exactly 0.
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=None,
         tree_bound_valid=False,
         is_maximize=False,
@@ -137,7 +199,7 @@ def test_bound_never_crosses_the_incumbent():
 
 
 def test_nothing_to_report_returns_none_pair():
-    bound, gap = _finalize_reported_bound(
+    bound, gap, source = _finalize_reported_bound(
         tree_bound_internal=float("-inf"),
         tree_bound_valid=True,
         is_maximize=False,
