@@ -5,21 +5,27 @@ in primitives, the Redlich-Kister binary the CALPHAD plugin prices phases with �
 ``x(1-x)(L0 + L1(2x-1)) + RT[x ln x + (1-x) ln(1-x)]`` — is relaxed term by term,
 which loses every cancellation between the terms.
 
-Measured before building anything (``scripts/entry_1248_envelope_gain.py``): the
-root bound misses the true optimum by 4% to 324%, and the ONE-VARIABLE global
-solve takes 131 to 7559 nodes. Measured after
-(``dm.register_function`` naming the composite):
+**RETRACTION (CLAUDE.md §11).** This file first reported 56x-216x node-count
+ratios for naming the composite. That measurement was taken against a primitive
+arm in which every ``dm.xlogx`` term reached the relaxation engine's INTERVAL
+FLOOR, because ``entropy`` had no ``_UNIVARIATE_FN`` entry (#1277). Almost the
+whole ratio was that missing envelope, not this mechanism. With the envelope in
+place (20 interleaved solves, same optimum in every one):
 
-    L0      L1       RT   primitive   registered   ratio
-     3.0    0.0      1.0    7559          35       216x
-     5.0    0.0      1.0    2655          47      56.5x
-     3.0    1.5      1.0    1741          15       116x
-     8.0   -4.0      1.0    1729          25      69.2x
- 20000.0 5000.0   8314.0    2019          19       106x
+    L0      L1       RT   primitive   registered   ratio   was reported
+     3.0    0.0      1.0        51          35     1.46x      216x
+     5.0    0.0      1.0        51          47     1.09x     56.5x
+     3.0    1.5      1.0        23          15     1.53x      116x
+     8.0   -4.0      1.0        29          25     1.16x     69.2x
+ 20000.0 5000.0   8314.0        29          19     1.53x      106x
 
-same optimum in every row. The mechanism is not new — it is the secant/tangent
-envelope the engine already emits for a univariate node of known curvature; what
-registration changes is that the whole composite is the node.
+The mechanism still earns its keep — a strict node-count reduction in every row,
+at the same optimum, and it is general (any user composite, not this family) —
+but the honest figure is 1.1x-1.5x, not two orders of magnitude.
+
+The mechanism is not new either: it is the secant/tangent envelope the engine
+already emits for a univariate node of known curvature; what registration changes
+is that the whole composite is the node.
 
 **Nothing is taken on trust.** The lowering is the definition; ``f``/``f'`` are
 evaluated on it through the solver's own tape, and the per-box curvature verdict
@@ -113,12 +119,15 @@ def test_registered_and_primitive_agree_on_the_optimum():
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("L0,L1,rt", [(3.0, 0.0, 1.0), (3.0, 1.5, 1.0)])
 def test_naming_the_composite_cuts_the_node_count(L0, L1, rt):
-    """The measured ratios are 56x-216x; the bar here is a conservative 5x so the
-    test pins the mechanism rather than a machine-specific number."""
+    """The measured ratios are 1.46x and 1.53x on these two rows (see the
+    retraction in the module docstring: the 216x first reported here was the
+    missing `entropy` envelope of #1277, not this mechanism). The bar is a strict
+    reduction rather than a factor, so the test pins the mechanism without
+    pinning a machine-specific number."""
     a = _primitive_model(L0, L1, rt).solve(time_limit=60)
     b = _registered_model(L0, L1, rt).solve(time_limit=60)
     assert a.status == b.status == "optimal"
-    assert b.node_count * 5 < a.node_count, (a.node_count, b.node_count)
+    assert b.node_count < a.node_count, (a.node_count, b.node_count)
 
 
 # --------------------------------------------------------------------------- #

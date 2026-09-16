@@ -9,11 +9,7 @@ A plugin knows structure that generic factorable relaxation throws away. Written
 in primitives, ``x(1-x)(L0 + L1(2x-1)) + RT[x ln x + (1-x) ln(1-x)]`` — the
 Redlich-Kister binary the CALPHAD plugin prices phases with — is relaxed *term by
 term*: each piece is enveloped over its own box and the pieces are summed, which
-loses every cancellation between them. Measured on that expression over
-``x in [0, 1]`` (``scripts/entry_1248_envelope_gain.py``), the root bound misses
-the true optimum by 4% to 324% depending on the interaction coefficients, and the
-one-variable global solve takes 131 to 7559 nodes to close what is, on each
-single-curvature sub-box, one secant and one tangent.
+loses every cancellation between them.
 
 What a registration buys
 ------------------------
@@ -22,6 +18,16 @@ the **lowering** — the ordinary primitive expression — so evaluation, `.nl`
 export, the Rust core, presolve and every other consumer are untouched and need
 no new opcode. What changes is that the *relaxation* layer recognises the named
 atom and envelopes it whole.
+
+Measured payoff, and a retraction (CLAUDE.md §11). This module first reported a
+root gap of "4% to 324%" and solves of "131 to 7559 nodes" for the primitive
+spelling. Those numbers were real but they measured something else: ``entropy``
+had no ``_UNIVARIATE_FN`` entry, so every ``dm.xlogx`` term in the primitive arm
+reached the engine's interval floor (#1277). With that envelope in place the
+primitive arm needs 23-51 nodes on the same family, and naming the composite
+still helps — 15-47 nodes, a strict reduction in every row at the same optimum —
+but by 1.1x-1.5x, not by two orders of magnitude. The per-row table is in
+``python/tests/test_1248_register_function.py``.
 
 Nothing is taken on trust. The lowering is the definition, and everything the
 relaxer needs is DERIVED from it:
