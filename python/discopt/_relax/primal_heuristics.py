@@ -35,6 +35,11 @@ from discopt.modeling.core import Model, VarType
 # ``qubo_local_search``; ``solve_model`` imports the JAX-free module directly.
 from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
 from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
+from discopt.validation.feasibility import (
+    SMALL_ROW_ABS_FLOOR,
+    feasible_distance_cap,
+    jacobian_row_gradient_norms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -528,7 +533,8 @@ def _check_constraint_feasibility(
     residual on that one row and was discarded, leaving a worse 162070 incumbent)
     while BARON, which scales feasibility by constraint magnitude, accepts it.
 
-    Use the conventional combined test ``|viol| <= tol + rtol*scale`` where the
+    Use the conventional combined test ``|viol| <= tol + rtol*scale``, capped by
+    ``feasible_distance_cap`` (#1254), where the
     per-row ``scale`` is the absolute linearized magnitude ``sum_j |J_ij|*|x_j|``
     -- the size of the row's additive terms, derived from the Jacobian and NOT
     from the (possibly +/-1e20 sentinel) bound values, so an unbounded row cannot
@@ -546,15 +552,31 @@ def _check_constraint_feasibility(
     if evaluator.n_constraints == 0:
         return True
     viol = row_violations(evaluator, x, cl, cu)
-    if viol.size == 0 or bool(np.all(viol <= tol)):
+    # The cheap absolute early-out survives only for rows the distance cap (#1254)
+    # cannot reach. That cap is never below ``SMALL_ROW_ABS_FLOOR``, so a row
+    # violated by no more than the floor is decided here with no Jacobian — which
+    # covers the exactly-satisfied rows that make up the common case. Anything
+    # above it needs the row's gradient before it can be judged: ``viol <= tol``
+    # alone is exactly the test that accepted a point 0.87 away, in a variable
+    # whose whole box is 3 wide, from satisfying its row.
+    if viol.size == 0 or bool(np.all(viol <= SMALL_ROW_ABS_FLOOR)):
         return True
-    # Some row exceeds the absolute tolerance: re-test those rows against a
-    # term-magnitude-scaled tolerance before declaring infeasibility.
+    # Re-test against the scaled tolerance — loosened on rows built from large
+    # terms (cancellation noise), capped by the first-order distance to the row's
+    # surface — before deciding.
     try:
-        scale = row_term_scale(evaluator, x)
+        jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
+        scale = _scale_from_jacobian(jac, x)
+        grad = jacobian_row_gradient_norms(jac)
     except Exception:
-        return False
-    return bool(np.all(viol <= combined_tolerance(scale, tol, rtol)))
+        # No Jacobian, so neither half of the scaled test can be formed. Fall back
+        # to the plain absolute verdict, which is exactly what this function
+        # returned before the cap existed: a point inside ``tol`` short-circuited
+        # to True above, and one outside it reached this ``except`` and returned
+        # False. Same answer, same direction, no Jacobian.
+        return bool(np.all(viol <= tol))
+    n = viol.size
+    return bool(np.all(viol <= combined_tolerance(scale[:n], tol, rtol, grad[:n])))
 
 
 def row_violations(
@@ -592,17 +614,41 @@ def row_term_scale(evaluator: NLPEvaluator, x: np.ndarray) -> np.ndarray:
     (possibly +/-1e20 sentinel) bound values, so an unbounded row cannot inflate a
     tolerance built on it.
     """
-    jac = np.abs(np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64))
+    return _scale_from_jacobian(evaluator.evaluate_jacobian(x), x)
+
+
+def _scale_from_jacobian(jac, x: np.ndarray) -> np.ndarray:
+    """:func:`row_term_scale` from a Jacobian already in hand — the tolerance needs
+    the row scale AND the row gradient norm, and evaluating the Jacobian twice for
+    them is pure waste."""
+    jac = np.abs(np.asarray(jac, dtype=np.float64))
     return jac @ np.abs(np.asarray(x, dtype=np.float64))
 
 
-def combined_tolerance(scale: np.ndarray, tol: float = 1e-6, rtol: float = 1e-9) -> np.ndarray:
-    """The per-row threshold ``tol + rtol*scale`` of the combined feasibility test.
+def combined_tolerance(
+    scale: np.ndarray,
+    tol: float = 1e-6,
+    rtol: float = 1e-9,
+    grad_inf: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """The per-row threshold of the combined feasibility test.
+
+    ``tol + rtol*scale`` is the loosening half — it forgives cancellation noise
+    proportional to a row's terms. ``grad_inf`` (``max_j |J_ij|``) adds the
+    tightening half (#1254): the point must also sit within
+    ``FEASIBLE_DISTANCE_TOL`` of the row's surface in VARIABLE space, so a row
+    that is nearly flat in every variable can no longer vouch for a point that no
+    small move would make feasible. Omit ``grad_inf`` and only the loosening half
+    applies, exactly as before it existed.
 
     One definition, used by every site that decides or reports against that test,
     so a threshold and the number compared to it can never drift apart.
     """
-    return tol + rtol * np.asarray(scale, dtype=np.float64)
+    scale = np.asarray(scale, dtype=np.float64)
+    allowed = tol + rtol * scale
+    if grad_inf is None:
+        return allowed
+    return np.minimum(allowed, feasible_distance_cap(grad_inf, scale))
 
 
 def scaled_violation_ratio(
@@ -628,8 +674,11 @@ def scaled_violation_ratio(
     viol = row_violations(evaluator, x, cl, cu)
     if viol.size == 0 or not bool(np.any(viol > 0.0)):
         return 0.0
-    scale = row_term_scale(evaluator, x)
-    return float(np.max(viol / combined_tolerance(scale, tol, rtol)))
+    jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
+    scale = _scale_from_jacobian(jac, x)
+    grad = jacobian_row_gradient_norms(jac)
+    n = viol.size
+    return float(np.max(viol / combined_tolerance(scale[:n], tol, rtol, grad[:n])))
 
 
 # --- The false-primal screen (#772 / #815 / #1061) ---------------------------

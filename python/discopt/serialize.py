@@ -32,6 +32,15 @@ blocks and builder objective, indicator / SOS / disjunctive relations,
 complementarity relations together with this model's lowering marks, the starting
 point, and -- optionally -- the solve result.
 
+Also carried, as descriptive metadata rather than model content: a ``provenance``
+block recording what wrote the document and when (:mod:`discopt.provenance`). It
+comes back on ``Model.provenance``, and a version difference between the writer
+and the reader raises a :class:`ProvenanceSkewWarning`. Note that the *reason* the
+version needs to travel is the paragraph above about JSON: this format carries no
+numpy or Python format version precisely so that the document does not depend on
+them, which leaves discopt's own version the only thing that fixes the meaning of
+what is written, and it is worth nothing if it is never checked.
+
 Index expressions carry integers, slices and tuples of them; a fancy (array/list)
 index, ``None`` or ``Ellipsis`` is refused rather than approximated.
 
@@ -60,6 +69,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import warnings
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -87,9 +97,14 @@ from discopt.modeling.core import (
     _IndicatorConstraint,
     _SOSConstraint,
 )
+from discopt.provenance import capture as _capture_provenance
+from discopt.provenance import skew_warning
 
-#: Format identifier written into every document.
-SCHEMA = "discopt.model/1"
+#: Format identifier written into every document. The minor bumped to 1.1 when
+#: the provenance block was added: additive, so a 1.0 reader still reads a 1.1
+#: document (it ignores the extra key) and this reader still reads a 1.0 one
+#: (it records no provenance).
+SCHEMA = "discopt.model/1.1"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -97,11 +112,29 @@ SCHEMA_MAJOR = 1
 
 _GZIP_MAGIC = b"\x1f\x8b"
 
-__all__ = ["SCHEMA", "dumps", "loads", "save", "load", "SerializationError"]
+__all__ = [
+    "SCHEMA",
+    "dumps",
+    "loads",
+    "save",
+    "load",
+    "SerializationError",
+    "ProvenanceSkewWarning",
+]
 
 
 class SerializationError(ValueError):
     """Raised when a model cannot be written faithfully, or a document cannot be read."""
+
+
+class ProvenanceSkewWarning(UserWarning):
+    """A document was written by a different discopt than the one reading it.
+
+    Its own category (rather than a bare ``UserWarning``) so a caller can silence
+    or escalate exactly this -- ``warnings.simplefilter("error",
+    ProvenanceSkewWarning)`` makes a version mismatch fatal for a pipeline that
+    requires an exact-version reload.
+    """
 
 
 # ── scalars ────────────────────────────────────────────────────────────────
@@ -835,6 +868,7 @@ _STATE_IN_OWN_SECTION = frozenset(
         "_builder_linear_objective",
         "_builder_quadratic_objective",
         "saved_result",
+        "provenance",
     }
 )
 
@@ -1020,7 +1054,14 @@ def _dec_tree(obj: Any) -> Any:
 # ── document ───────────────────────────────────────────────────────────────
 
 
-def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> str:
+def dumps(
+    model: Model,
+    *,
+    result: Any = None,
+    indent: Optional[int] = None,
+    provenance: bool = True,
+    author: Optional[str] = None,
+) -> str:
     """Serialize *model* to a JSON string.
 
     Parameters
@@ -1033,6 +1074,14 @@ def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> 
     indent : int, optional
         ``json.dumps`` indent. ``None`` (default) writes compactly; ``2`` is
         readable and diffs well.
+    provenance : bool, default True
+        Record who/when/with-what wrote the document (see :mod:`discopt.provenance`).
+        Pass ``False`` for a byte-reproducible document: the block carries a
+        timestamp, so two saves of the same model are otherwise not identical.
+        Turning it off is a deliberate loss of provenance, not a default.
+    author : str, optional
+        Creator of the model, recorded in the provenance block. Never inferred --
+        omitted unless passed here or via ``DISCOPT_PROVENANCE_AUTHOR``.
 
     Raises
     ------
@@ -1083,6 +1132,10 @@ def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> 
 
     doc: dict[str, Any] = {
         "schema": SCHEMA,
+        # Kept alongside the richer `provenance` block: a 1.0-era reader looks for
+        # this key, and dropping it would break documents this writer produces for
+        # readers that predate provenance. `provenance.software.version` is the
+        # same string; this is its backward-compatible alias, not a second source.
         "discopt": getattr(discopt, "__version__", None),
         "name": model.name,
         "variables": [_enc_variable(v) for v in model._variables],
@@ -1099,6 +1152,13 @@ def dumps(model: Model, *, result: Any = None, indent: Optional[int] = None) -> 
             for (name, elem), val in sorted(getattr(model, "_initial_point", {}).items())
         ],
     }
+
+    if provenance:
+        # `model.provenance` is set only by `loads`, so this records the document
+        # this model was read from -- not a block this same call just made up.
+        doc["provenance"] = _capture_provenance(
+            author=author, previous=getattr(model, "provenance", None)
+        )
 
     if result is not None:
         from discopt.result_io import serialize_result
@@ -1186,6 +1246,20 @@ def loads(text: Union[str, bytes]) -> Model:
     else:
         model.saved_result = None
 
+    # Provenance is descriptive metadata: it is surfaced, never acted on. Reading
+    # it cannot change a single coefficient of the model rebuilt above -- the same
+    # rule the LLM layer follows, for the same reason.
+    prov = doc.get("provenance")
+    if prov is not None and not isinstance(prov, dict):
+        raise SerializationError(
+            f"the 'provenance' section must be an object, got {type(prov).__name__}."
+        )
+    model.provenance = prov
+
+    message = skew_warning(prov)
+    if message is not None:
+        warnings.warn(message, ProvenanceSkewWarning, stacklevel=2)
+
     return model
 
 
@@ -1195,10 +1269,15 @@ def save(
     *,
     result: Any = None,
     indent: Optional[int] = None,
+    provenance: bool = True,
+    author: Optional[str] = None,
 ) -> None:
-    """Write *model* to *path*. Gzips when the path ends in ``.gz``."""
+    """Write *model* to *path*. Gzips when the path ends in ``.gz``.
+
+    ``provenance`` and ``author`` are passed through to :func:`dumps`.
+    """
     p = Path(path)
-    text = dumps(model, result=result, indent=indent)
+    text = dumps(model, result=result, indent=indent, provenance=provenance, author=author)
     if p.suffix == ".gz":
         with gzip.open(p, "wt", encoding="utf-8") as fh:
             fh.write(text)

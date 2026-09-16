@@ -57,6 +57,13 @@ from discopt.solvers import (
     pounce_incumbent_options,
     pounce_option_defaults,
 )
+from discopt.validation.feasibility import (
+    SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
+)
+from discopt.validation.feasibility import feasible_distance_cap as _feas_distance_cap
+from discopt.validation.feasibility import (
+    jacobian_row_gradient_norms as _feas_row_gradient_norms,
+)
 
 # R3a measurement sink (temporary, behavior-neutral). When set to a mutable
 # dict by an experiment harness, the nonconvex B&B path stores the Rust tree's
@@ -2932,6 +2939,11 @@ def _extract_variable_info(model: Model):
 # callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
+#: Absolute floor of the feasible-distance cap, aliased so the hot gate below can
+#: screen on it without an import per call.
+_FEAS_SMALL_ROW_ABS_FLOOR = _validation_small_row_abs_floor
+
+
 def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     """Return True if x satisfies all constraints within tolerance.
 
@@ -2946,16 +2958,22 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     cu_list : list[float]
         Upper bounds on constraints (use 1e20 for no upper bound).
     tol : float
-        Feasibility tolerance.
+        Absolute feasibility tolerance. Every row is additionally held to
+        :func:`~discopt.validation.feasibility.feasible_distance_cap` — the point
+        must sit within 1e-4 of the row's surface in VARIABLE space — so a row
+        that is nearly flat in every variable can no longer vouch for a point no
+        small move would make feasible (#1254).
 
     Returns
     -------
     bool
-        True if all constraints are satisfied within *tol*.
+        True if all constraints are satisfied within *tol* AND within the
+        feasible-distance cap.
     """
     if evaluator.n_constraints == 0:
         return True
-    cons = evaluator.evaluate_constraints(np.asarray(x, dtype=np.float64))
+    x = np.asarray(x, dtype=np.float64)
+    cons = evaluator.evaluate_constraints(x)
     cl = np.array(cl_list, dtype=np.float64)
     cu = np.array(cu_list, dtype=np.float64)
     # The evaluator may have more constraints than cl/cu (e.g., augmented with
@@ -2963,10 +2981,31 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     n_check = min(len(cons), len(cl))
     if n_check == 0:
         return True
-    max_viol = max(
-        float(np.max(cons[:n_check] - cu[:n_check])), float(np.max(cl[:n_check] - cons[:n_check]))
-    )
-    return max_viol <= tol
+    viol = np.maximum(np.maximum(cons[:n_check] - cu[:n_check], cl[:n_check] - cons[:n_check]), 0.0)
+    max_viol = float(np.max(viol))
+    if max_viol > tol:
+        return False
+    # #1254: the absolute test alone certified ``10**y1 + 10**y2 <= 10**z`` at a
+    # point 0.87 away in ``y1`` — a third of that variable's box — from satisfying
+    # the row, because every partial derivative there is ~2e-7 and the residual
+    # 2e-7 looked small on its own. Only a row violated by more than the cap's own
+    # floor can be rejected here, so an exactly-satisfied model costs nothing.
+    if max_viol <= _FEAS_SMALL_ROW_ABS_FLOOR:
+        return True
+    try:
+        from discopt._relax.primal_heuristics import _scale_from_jacobian
+
+        jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
+        grad = _feas_row_gradient_norms(jac)[:n_check]
+        scale = np.asarray(_scale_from_jacobian(jac, x), dtype=np.float64)[:n_check]
+    except Exception as exc:  # noqa: BLE001 - reported, never silently accepted
+        # No gradient means no distance estimate, hence no cap; the absolute test
+        # above already passed.
+        logger.debug("feasibility cap: row gradients unavailable (%s); absolute test only", exc)
+        return True
+    if grad.size != n_check or scale.size != n_check:
+        return True
+    return bool(np.all(viol <= _feas_distance_cap(grad, scale)))
 
 
 # Tolerance shared by the two conditions of :func:`_weakly_active_crossover` —
@@ -9359,6 +9398,37 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
+    # #1255: the lowering appends a selector binary per disjunct, so a warm start
+    # flattened against the variables the USER declared no longer describes this
+    # model's columns — and every consumer below (``_solve_continuous``,
+    # ``_solve_nlp_bb``, the B&B warm-start site) would hand the short vector to an
+    # evaluator that raises on it. Complete it here, once, next to the pass that
+    # widened the vector — the same place the binary-multilinear and
+    # integer-product reforms extend it. Dropping is the fallback, never an error:
+    # a hint must not be able to fail a solve.
+    if initial_point is not None:
+        initial_point = np.asarray(initial_point, dtype=np.float64).ravel()
+        _n_gdp_cols = int(sum(int(v.size) for v in model._variables))
+        if initial_point.size != _n_gdp_cols:
+            from discopt.warm_start import complete_initial_point
+
+            _gdp_x0 = complete_initial_point(model, initial_point)
+            if _gdp_x0 is None:
+                logger.warning(
+                    "Warm start dropped: the initial solution covers %d columns and "
+                    "the GDP-lowered model has %d. The solve continues without it.",
+                    int(initial_point.size),
+                    _n_gdp_cols,
+                )
+                initial_point = None
+            else:
+                logger.info(
+                    "Warm start extended from %d to %d columns across the GDP lowering",
+                    int(initial_point.size),
+                    _n_gdp_cols,
+                )
+                initial_point = _gdp_x0
+
     # --- Entropy-family canonicalization: recover the ``entropy(x) = x*log(x)``
     # and ``centropy(x, y) = x*log(x/y)`` intrinsics from the raw products that
     # AMPL/GAMS emit when they lower those opcodes into a ``.nl`` file. The
@@ -12172,6 +12242,38 @@ def solve_model(
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
+        # #1255: the point was flattened against the variables the USER declared;
+        # every solve-time reform between there and here appends columns (the GDP
+        # pass lowers a disjunction into selector binaries, the factorable lift
+        # adds monomial auxiliaries), so by now it can be shorter than the working
+        # model's vector. Evaluating it anyway raised ``ValueError: objective: x:
+        # expected length 5, got 3`` out of a solve that succeeds without a warm
+        # start. Complete it to this model's columns — the reform-added discrete
+        # columns are repaired to the values the given point implies — and when it
+        # cannot be completed, DROP it with a message. A warm start is a hint; it
+        # must never be able to fail a solve.
+        _n_cols = int(sum(int(v.size) for v in model._variables))
+        if initial_point.size != _n_cols:
+            from discopt.warm_start import complete_initial_point
+
+            _completed = complete_initial_point(model, initial_point, evaluator=evaluator)
+            if _completed is None:
+                logger.warning(
+                    "Warm start dropped: the initial solution covers %d columns and "
+                    "the model the solver built has %d (a reformulation added "
+                    "variables). The solve continues without it.",
+                    int(initial_point.size),
+                    _n_cols,
+                )
+                initial_point = None
+            else:
+                logger.info(
+                    "Warm start extended from %d to %d columns across a solve-time reformulation",
+                    int(initial_point.size),
+                    _n_cols,
+                )
+                initial_point = _completed
+    if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         # Check integer feasibility of the warm-start point
         ws_int_feas = True
@@ -14365,10 +14467,15 @@ def solve_model(
                     and not _model_is_convex
                     and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
+                    # Taken BEFORE the try: ``_observe_heur_nlp`` in the
+                    # ``finally`` reads it unconditionally, so an exception from
+                    # the import itself (which is a real possibility — one broke
+                    # this in review) turned a clean failure into an
+                    # ``UnboundLocalError`` from the cleanup path.
+                    _t_relax = time.perf_counter()
                     try:
                         from discopt._relax.primal_heuristics import feasibility_pump
 
-                        _t_relax = time.perf_counter()
                         _relax_opts = dict(opts)
                         _relax_opts["max_wall_time"] = max(
                             _DEADLINE_NODE_FLOOR_S,

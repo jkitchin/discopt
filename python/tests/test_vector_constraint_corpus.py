@@ -611,14 +611,17 @@ def test_row_scale_is_finite_when_a_derivative_is_unbounded_at_zero():
 
 
 def test_row_scales_keeps_its_whole_batch_fallback():
-    """``_row_scales`` must NOT inherit the public helper's per-row zeroing.
+    """``_row_scales_and_gradients`` must NOT inherit the public helper's per-row zeroing.
 
     One non-finite row there sends *every* suspect row to the Jacobian-free
     bound. Relaxing that to per-row would leave the co-occurring rows on their
     own larger scales — looser than before the helper was extracted, i.e. a
     relaxation in the accepting direction smuggled in by a refactor.
     """
-    from discopt.validation.feasibility import _jacobian_row_scales_checked, _row_scales
+    from discopt.validation.feasibility import (
+        _jacobian_row_scales_checked,
+        _row_scales_and_gradients,
+    )
 
     scales, all_finite = _jacobian_row_scales_checked(
         np.array([[np.inf, 1.0], [2.0, 3.0]]), np.array([0.0, 4.0])
@@ -630,8 +633,9 @@ def test_row_scales_keeps_its_whole_batch_fallback():
         def evaluate_jacobian(self, _x):
             return np.array([[np.inf, 1.0], [2.0, 3.0]])
 
-    assert _row_scales(_Ev(), np.array([0.0, 4.0]), np.array([0, 1])) is None, (
-        "_row_scales must decline the whole batch, not zero one row and keep the rest"
+    got = _row_scales_and_gradients(_Ev(), np.array([0.0, 4.0]), np.array([0, 1]))
+    assert got == (None, None), (
+        "the batch must be declined whole, not zeroed per row and the rest kept"
     )
 
 

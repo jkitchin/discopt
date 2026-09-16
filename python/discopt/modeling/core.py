@@ -4394,6 +4394,12 @@ class Model:
         # solve path reads it; it is there so a model and the fit it belongs to
         # travel together instead of desynchronising across two files.
         self.saved_result: Optional["SolveResult"] = None
+        #: Provenance of a model read back by :func:`discopt.load` -- what wrote
+        #: the document and when (see :mod:`discopt.provenance`). ``None`` on a
+        #: model built in memory: nothing has been written yet, so there is no
+        #: record to carry, and inventing one at construction would date the model
+        #: to when it was *built* rather than when it was saved.
+        self.provenance: Optional[dict] = None
 
     # ── Rich representation (LaTeX / HTML in standard PSE form) ──
 
@@ -7157,6 +7163,33 @@ class Model:
             except Exception:
                 result.validation_report = None
 
+        # --- No dual bound at all: say so (#1256) ---------------------------- #
+        # A solve that produces no valid relaxation bound returns ``bound=None``
+        # and, absent this, says nothing else: the only trace was a
+        # ``logger.debug`` inside whichever relaxation declined, so a user reading
+        # ``status="feasible", bound=None`` had no way to tell "the gap is open"
+        # from "nothing ever bounded this model". The reproducer was
+        # ``log10(sum(10**y))``, whose ``10**y`` canonicalized to an opaque node
+        # with no envelope; every node inherited no bound and the search ran to the
+        # limit silently. WARNING (not ``warnings.warn``) so it reaches a user who
+        # has configured no logging at all, without turning into a test-visible
+        # Python warning on a result that is otherwise correct.
+        if (
+            isinstance(result, SolveResult)
+            and result.bound is None
+            and result.status not in ("infeasible", "unbounded")
+        ):
+            _logging.getLogger("discopt.solver").warning(
+                "No valid dual bound was produced for model %r: the relaxation "
+                "layer could not bound this objective (status=%s). The result "
+                "cannot be certified globally optimal. A nonlinear term with no "
+                "envelope is the usual cause; an epigraph reformulation "
+                "(minimize z subject to f(x) <= z) often gives the relaxation "
+                "something to bound.",
+                self.name,
+                result.status,
+            )
+
         return result
 
     def sensitivity(
@@ -7752,7 +7785,15 @@ class Model:
                 "identities. Choose a name outside that namespace."
             )
 
-    def save(self, path, *, result=None, indent: Optional[int] = None) -> None:
+    def save(
+        self,
+        path,
+        *,
+        result=None,
+        indent: Optional[int] = None,
+        provenance: bool = True,
+        author: Optional[str] = None,
+    ) -> None:
         """Save this model -- and optionally its solve result -- to a file.
 
         The native round-trippable format: unlike ``.nl`` / ``.gms`` export it
@@ -7769,15 +7810,24 @@ class Model:
             reloaded model's ``saved_result`` attribute.
         indent : int, optional
             JSON indent. ``None`` writes compactly; ``2`` is readable and diffs well.
+        provenance : bool, default True
+            Record what wrote the file and when (:mod:`discopt.provenance`); it
+            comes back on the reloaded model's ``provenance`` attribute. Pass
+            ``False`` only when byte-for-byte reproducibility matters more, since
+            the block is timestamped.
+        author : str, optional
+            Creator of the model. Recorded only when given here or via
+            ``DISCOPT_PROVENANCE_AUTHOR`` -- never guessed.
 
         Examples
         --------
         >>> m.save("kinetics.dopt", result=result)          # doctest: +SKIP
         >>> m2 = discopt.load("kinetics.dopt")              # doctest: +SKIP
+        >>> print(m2.provenance["software"]["version"])     # doctest: +SKIP
         """
         from discopt.serialize import save as _save
 
-        _save(self, path, result=result, indent=indent)
+        _save(self, path, result=result, indent=indent, provenance=provenance, author=author)
 
 
 # Internal constraint types (not part of public API)
