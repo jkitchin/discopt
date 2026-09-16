@@ -140,7 +140,10 @@ class RegisteredFunction:
         # keeps every existing consumer working: to the evaluator, the Rust core,
         # the exporters and presolve this is an ordinary expression.
         try:
-            setattr(body, ATOM_ATTR, (self.name, arg))
+            # The tag carries the registration OBJECT, not just the name: the
+            # model keeps this body, so the envelope must be derived from this
+            # definition and no other (see :func:`atom_of`).
+            setattr(body, ATOM_ATTR, (self.name, arg, self))
         except AttributeError:  # pragma: no cover - slotted node types
             logger.debug(
                 "registered atom %r could not be tagged onto a %s; it will be relaxed term by term",
@@ -260,9 +263,10 @@ def register_function(
     description : str, optional
         Human-readable note, carried for diagnostics.
     replace : bool, default False
-        Allow re-registering a name. Off by default because a silent
-        re-definition changes the relaxation of every model already built
-        against the old one.
+        Allow re-registering a name. Models built against the previous
+        definition keep their body and stop being enveloped as an atom (they are
+        relaxed term by term); only expressions built after the replacement use
+        the new registration.
 
     Returns
     -------
@@ -291,8 +295,8 @@ def register_function(
         if name in _REGISTRY and not replace:
             raise ValueError(
                 f"register_function({name!r}): already registered. Pass replace=True to "
-                "redefine it — note that this changes the relaxation of models already "
-                "built against the previous definition."
+                "redefine it — models built against the previous definition then lose "
+                "the atom envelope and are relaxed term by term."
             )
         fn = RegisteredFunction(name=name, lower=lower, description=description)
         _REGISTRY[name] = fn
@@ -329,15 +333,19 @@ def clear_registered(name: Optional[str] = None) -> None:
 def atom_of(expr: object) -> Optional[tuple]:
     """``(name, arg)`` if ``expr`` is a tagged registered lowering, else ``None``.
 
-    Also returns ``None`` for a tag whose registration has since been dropped, so
-    a cleared registry degrades to term-by-term relaxation rather than to a
-    lookup error.
+    Also returns ``None`` for a tag whose registration has since been dropped OR
+    REPLACED. The model holds the body built by the registration that tagged it,
+    while the relaxer derives the envelope from whatever the registry holds under
+    the name now; after ``register_function(name, ..., replace=True)`` those are
+    different functions, and the new envelope would cut the old body's true
+    points — a false bound. A stale tag therefore degrades to term-by-term
+    relaxation of the body the model actually carries, which is sound.
     """
     tag = getattr(expr, ATOM_ATTR, None)
     if tag is None:
         return None
     name = str(tag[0])
     with _LOCK:
-        if name not in _REGISTRY:
+        if _REGISTRY.get(name) is not tag[2]:
             return None
     return (name, tag[1])

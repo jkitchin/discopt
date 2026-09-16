@@ -259,3 +259,40 @@ def test_the_engine_really_took_the_registered_envelope():
     r = m.solve(time_limit=60)
     assert r.status == "optimal"
     assert fn.use_count > 0, "the registered envelope was never consulted"
+
+
+def test_a_replaced_registration_never_envelopes_a_model_built_before_it():
+    """The model keeps the body it was built with; ``replace=True`` must not hand
+    the relaxer the NEW function's envelope for it. Before the fix the replaced
+    (``+100``) envelope was emitted for the old body and its rows cut the true
+    point ``(t, exp(t) + t^2)`` by ~100 — a false bound. A stale tag now falls
+    back to term-by-term relaxation of the body the model actually carries."""
+    from discopt._relax.uniform_relax import build_uniform_relaxation, clear_analysis_cache
+
+    def _kinds(model):
+        clear_analysis_cache(model)  # as solve_model does at the start of every solve
+        return sorted(k for k, _ in build_uniform_relaxation(model).coverage.values())
+
+    fn = dm.register_function("stale_probe", lambda x: dm.exp(x) + x * x, replace=True)
+    m_old = dm.Model("stale")
+    x = m_old.continuous("x", lb=0.5, ub=2.0)
+    m_old.minimize(fn(x))
+    assert _kinds(m_old) == ["univariate_call"], "control: the fresh tag must be an atom"
+
+    new = dm.register_function("stale_probe", lambda x: dm.exp(x) + x * x + 100.0, replace=True)
+    assert _kinds(m_old) != ["univariate_call"], (
+        "a model built before replace=True was still enveloped as the (new) atom"
+    )
+    uses_before = new.use_count
+    r = m_old.solve(time_limit=60)
+    truth = float(np.exp(0.5) + 0.25)
+    assert r.status == "optimal"
+    assert r.bound <= truth + 1e-6, (r.bound, truth)
+    assert abs(r.objective - truth) <= 1e-5, (r.objective, truth)
+    assert new.use_count == uses_before, "the replaced envelope was applied to the old body"
+
+    # Control arm: a model built AFTER the replacement is the new atom.
+    m_new = dm.Model("fresh")
+    y = m_new.continuous("y", lb=0.5, ub=2.0)
+    m_new.minimize(new(y))
+    assert _kinds(m_new) == ["univariate_call"]
