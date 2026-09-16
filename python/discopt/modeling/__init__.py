@@ -17,6 +17,7 @@ Examples
 >>> result = m.solve()
 """
 
+from discopt.batch import solve_batch
 from discopt.modeling.argmin import (
     argmin,
     argmin_kkt,
@@ -173,6 +174,7 @@ __all__ = [
     "stack",
     "tanh",
     "SolveResult",
+    "solve_batch",
     "SolveUpdate",
     "from_pyomo",
     "from_nl",

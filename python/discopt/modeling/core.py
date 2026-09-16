@@ -3759,6 +3759,13 @@ class SolveResult:
     # paths when iteration/provenance data is available.
     mip_nlp_trace: Optional[dict[str, object]] = None
 
+    # Why this solve failed, when the caller would otherwise be left with a bare
+    # ``status="error"`` and no reason (#1246). Set by :func:`discopt.solve_batch`
+    # for a model whose solve raised — the batch captures the exception here
+    # instead of aborting the remaining models — and ``None`` on every other
+    # route, which today reports failures by status alone.
+    error: Optional[str] = None
+
     # Why an algorithm other than the default branch-and-bound ran (#1059).
     # ``None`` means no automatic routing took place — either the caller named a
     # solver explicitly, or the router declined and the default path ran. When
