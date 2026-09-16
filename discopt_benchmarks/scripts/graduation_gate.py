@@ -380,7 +380,7 @@ def run_cert_neutrality(
     # as tuples at each call site, so a NEW kind would have been silently treated as
     # "not fatal" by appearing in neither list.
     hard = [v for v in viol if v["kind"] in SOUNDNESS_CLASS_KINDS]
-    node_only = [v for v in viol if v["kind"] in PERF_CLASS_KINDS]
+    perf = [v for v in viol if v["kind"] in PERF_CLASS_KINDS]
     unclassified = [v for v in viol if v["kind"] not in SOUNDNESS_CLASS_KINDS | PERF_CLASS_KINDS]
     if unclassified:
         # Fail closed: a finding the gate cannot class is treated as soundness.
@@ -394,13 +394,13 @@ def run_cert_neutrality(
     # control arm is skipped because it has its own drift report below; printing it
     # here as well would duplicate that under a byte-reproducibility regime whose
     # 1e-8 jitter this file already documents as noise, not drift.
-    if arm != "off" and (hard or node_only):
+    if arm != "off" and (hard or perf):
         print(
             f"# cert-neutrality vs the flag-OFF control: {len(hard)} soundness-class "
-            f"violation(s), {len(node_only)} node_count note(s)",
+            f"violation(s), {len(perf)} perf-class note(s)",
             flush=True,
         )
-        for v in hard + node_only:
+        for v in hard + perf:
             mark = "FAIL" if v in hard else "note"
             print(f"#   {mark} {v['instance']:22} {v['kind']:15} {v['detail'][:130]}", flush=True)
     if regime == "bound_neutral":
@@ -411,11 +411,10 @@ def run_cert_neutrality(
     # bound-changing / control: objective must hold; node drift is a perf note.
     neutral = not hard
     kind = "objective_only"
-    note = "certified objective + optimal-status enforced; node drift is a perf note"
-    if node_only:
-        note += (
-            f" ({len(node_only)} instance(s) changed node_count — expected where structure present)"
-        )
+    note = "certified objective + optimal-status enforced; node and wall drift are perf notes"
+    if perf:
+        kinds = ", ".join(sorted({v["kind"] for v in perf}))
+        note += f" ({len(perf)} perf-class finding(s): {kinds})"
     return CertResult(neutral, kind, hard, note, panel_rows, unmeasured, one_sided)
 
 

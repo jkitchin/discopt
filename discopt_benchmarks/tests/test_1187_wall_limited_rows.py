@@ -266,7 +266,10 @@ def test_a_failing_arm_names_the_rows_that_failed(capsys):
     assert "objective 1.0 -> None" in noisy
     assert "status=feasible (baseline optimal)" in noisy
     assert "tls2" in noisy, "the perf note was dropped; it is context for the failure"
-    assert "2 soundness-class violation(s), 1 node_count note(s)" in noisy
+    assert "2 soundness-class violation(s), 1 perf-class note(s)" in noisy, (
+        "the header must count both classes; it says perf-class rather than "
+        "node_count since #1204 added wall_regression to that bucket"
+    )
 
     quiet = _run_with([])
     assert "soundness-class violation(s)" not in quiet, (
