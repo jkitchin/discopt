@@ -6874,6 +6874,33 @@ class Model:
             except Exception:
                 result.validation_report = None
 
+        # --- No dual bound at all: say so (#1256) ---------------------------- #
+        # A solve that produces no valid relaxation bound returns ``bound=None``
+        # and, absent this, says nothing else: the only trace was a
+        # ``logger.debug`` inside whichever relaxation declined, so a user reading
+        # ``status="feasible", bound=None`` had no way to tell "the gap is open"
+        # from "nothing ever bounded this model". The reproducer was
+        # ``log10(sum(10**y))``, whose ``10**y`` canonicalized to an opaque node
+        # with no envelope; every node inherited no bound and the search ran to the
+        # limit silently. WARNING (not ``warnings.warn``) so it reaches a user who
+        # has configured no logging at all, without turning into a test-visible
+        # Python warning on a result that is otherwise correct.
+        if (
+            isinstance(result, SolveResult)
+            and result.bound is None
+            and result.status not in ("infeasible", "unbounded")
+        ):
+            _logging.getLogger("discopt.solver").warning(
+                "No valid dual bound was produced for model %r: the relaxation "
+                "layer could not bound this objective (status=%s). The result "
+                "cannot be certified globally optimal. A nonlinear term with no "
+                "envelope is the usual cause; an epigraph reformulation "
+                "(minimize z subject to f(x) <= z) often gives the relaxation "
+                "something to bound.",
+                self.name,
+                result.status,
+            )
+
         return result
 
     def sensitivity(

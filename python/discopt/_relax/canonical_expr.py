@@ -460,7 +460,18 @@ class _Canonicalizer:
                 offset = _compute_var_offset(op, self.model)
                 terms = [(1.0, self._var(offset + k)) for k in range(op.size)]
                 return self._sum(terms, 0.0)
-            raise UnsupportedCanonicalization("sum reduction")
+            # A reduction over anything else — ``sum(10**y)``, ``sum(x*z)`` — is a
+            # sum of its scalar ELEMENTS, which :mod:`_relax.scalarize` already
+            # derives for the constraint path (it is value-preserving by
+            # construction). Without this the whole reduction was one opaque node,
+            # so ``log10(sum(10**y))`` had no envelope and the solve returned
+            # ``bound=None`` (#1256) — while the same model written with scalar
+            # variables relaxed fine. ``None`` means the elements cannot be derived
+            # statically; that is the previous behaviour, unchanged.
+            elems = scalar_elements(op)
+            if elems is None:
+                raise UnsupportedCanonicalization("sum reduction")
+            return self._sum([(1.0, self.canon(e)) for e in elems], 0.0)
 
         raise UnsupportedCanonicalization(type(expr).__name__)
 
@@ -490,6 +501,22 @@ class _Canonicalizer:
             base, rexp = expr.left, expr.right
             if isinstance(rexp, Constant) and rexp.value.ndim == 0:
                 return self._pow(self.canon(base), float(rexp.value))
+            if isinstance(base, Constant) and base.value.ndim == 0:
+                # ``b**e`` with a POSITIVE constant base is ``exp(ln(b) * e)`` —
+                # an identity, not an approximation, for every real ``e``. Without
+                # it the node is opaque, and an opaque node has no envelope: the
+                # relaxation then has no valid objective bound at all and the solve
+                # returns ``bound=None`` after one node (#1256, ``10**y`` written
+                # for a log-concentration). ``exp`` is in the univariate table with
+                # a certified-convex verdict on every box, so the rewrite hands the
+                # engine a term it already relaxes.
+                b = float(base.value)
+                if b > 0.0:
+                    return self._call("exp", self._sum([(math.log(b), self.canon(rexp))], 0.0))
+                # ``b <= 0`` has no real-valued continuous extension in ``e``
+                # (``(-2)**0.5``), so it stays unsupported rather than being given
+                # an envelope that is wrong off the integers.
+                raise UnsupportedCanonicalization("non-positive constant base")
             raise UnsupportedCanonicalization("non-constant exponent")
         raise UnsupportedCanonicalization(f"binary {op}")
 
