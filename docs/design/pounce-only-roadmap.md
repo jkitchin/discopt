@@ -17,6 +17,11 @@ actually shipped; the corrections below take precedence over the body text:
   (§9 and elsewhere) is superseded — `pounce-solver` is now a hard core
   dependency in `pyproject.toml`; `[pounce]` is kept only as a back-compat alias
   extra.
+- **Goals 3 and 4 are retired for pure LP/MILP (2026-09-15, #1229).** Pure LP/MILP
+  models classified at entry now route to HiGHS with discopt-verified certificates,
+  and `highspy>=1.10` is a core dependency. See
+  `docs/dev/lp-milp-highs-routing-plan.md`. MINLP node LPs are unchanged: they
+  still run on the in-house Rust simplex and POUNCE.
 
 **Scope:** Multi-phase plan to make discopt a complete, pip-installable
 MILP/MIQP/MINLP solver whose only third-party numerical engine is POUNCE

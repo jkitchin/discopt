@@ -36,7 +36,7 @@ pub struct LinearRow {
 /// Returns `Some((coeffs_map, offset))` where `coeffs_map` maps
 /// variable index -> coefficient. Returns `None` if the expression
 /// is not linear.
-fn extract_linear_coeffs(arena: &ExprArena, id: ExprId) -> Option<(Vec<(usize, f64)>, f64)> {
+pub fn extract_linear_coeffs(arena: &ExprArena, id: ExprId) -> Option<(Vec<(usize, f64)>, f64)> {
     match arena.get(id) {
         ExprNode::Constant(v) => Some((vec![], *v)),
         ExprNode::ConstantArray(data, _) => {

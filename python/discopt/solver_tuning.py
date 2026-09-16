@@ -284,6 +284,24 @@ class SolverTuning:
     ``docs/dev/hda-certification-rowfilter-entry-2026-07-18.md`` and
     ``docs/dev/issue-671-resolution-plan-2026-07-18.md``."""
 
+    relax_row_filter_loose_bound: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RELAX_ROW_FILTER_LOOSE_BOUND", default=True)
+    )
+    """Also run the #671 row-filtered re-solve when a node LP is ``optimal`` but its
+    certified bound sits far below the vertex objective, and keep the tighter of
+    the two certified bounds (``DISCOPT_RELAX_ROW_FILTER_LOOSE_BOUND``, default ON;
+    ``=0`` restores failure-only triggering). Requires ``relax_row_filter``.
+
+    #1229: the ``dual_slack_basis`` free-column fix lets the warm simplex converge
+    on hda's root LP instead of hitting its iteration limit, so the failure trigger
+    above no longer fires. The vertex is primal feasible at −64675.25, but the
+    Neumaier–Shcherbina bound read off its duals is −5.71e6 (a 200-node solve:
+    −64509.8 → −1.40e10). The filtered LP certifies −64675.2492, the value main
+    recorded. **Sound:** dropping rows gives a superset LP, so its certified bound
+    is a valid lower bound, and ``max`` of two valid bounds is valid. Inert unless
+    the node's matrix has a float64-intractable row, so already-solving nodes see
+    one extra ``if``. See ``docs/dev/lp-milp-highs-routing-plan.md`` §12."""
+
     # --- #309 sharp NS safe-bound margin ---------------------------------------
     ns_sharp_margin: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=True)

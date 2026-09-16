@@ -76,8 +76,15 @@ class TestLexicographicPayoff:
         # The simple payoff (ideal_point + nadir_point) inflates nadir(f2)
         # because the f1 anchor sits on an alternative optimum; lexicographic
         # does not. This pins the *distinction* that makes it AUGMECON2.
+        #
+        # Which f1 optimum a solve returns is the LP engine's choice (the Rust
+        # route returned x2 = 2.2999, HiGHS the vertex x2 = 2), so the simple
+        # payoff is fed the Pareto-worst alternative optimum x2 = 3 explicitly:
+        # it is f1-optimal, and nothing in the simple method rejects it.
         m_simple, objs_simple = _alt_optimum_model()
         _, anchors = ideal_point(m_simple, objs_simple, senses=["min", "min"])
+        assert float(anchors[0]["x1"]) == pytest.approx(0.0, abs=1e-6)
+        anchors[0] = {"x1": np.array(0.0), "x2": np.array(3.0)}
         simple_nadir = nadir_point(m_simple, objs_simple, anchors, senses=["min", "min"])
 
         m_lex, objs_lex = _alt_optimum_model()

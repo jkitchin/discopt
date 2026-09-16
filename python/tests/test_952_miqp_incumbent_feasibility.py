@@ -264,7 +264,9 @@ def test_milp_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
     # simply solve this model, never entering the loop under test — so pin the
     # path explicitly rather than let the coverage evaporate. The routed engine's
     # own exit gate is covered by ``test_routed_engine_gate_refuses_an_off_row_incumbent``.
+    # A pure MILP goes to the #1229 HiGHS route before either, so that is pinned off too.
     monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
 
     # Variable order is y (1 binary) then x (2 continuous).
     state = _patch_offrow_tree(monkeypatch, slice(1, 3), -1e-3)
@@ -426,6 +428,7 @@ def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
     # Same reason as the test above: the snap call site under test lives in the
     # Python ``_solve_milp_bb`` path, which the routed Rust engine bypasses.
     monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.setattr(S, "PyTreeManager", _NearIntegralTree)
 
     r = m.solve(time_limit=60)  # must NOT raise: the unrounded point is feasible

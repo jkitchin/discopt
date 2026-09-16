@@ -206,13 +206,17 @@ def _knapsack(n: int = 14) -> dm.Model:
     return m
 
 
-def test_milp_budget_limited_exit_reports_live_tree_bound():
+def test_milp_budget_limited_exit_reports_live_tree_bound(monkeypatch):
     """Before #933 the MILP path dropped its (valid) tree bound on every
     uncertified exit and re-reported the STALE root LP value, so the reported
     bound never moved past the root no matter how far the search got — and the
     gap was reported as None next to a finite bound. After: the frontier bound
     is reported (strictly tighter once the tree has processed batches beyond
     the root), with the gap computed against it."""
+    # The tree under test is discopt's own. A pure MILP goes to the #1229 HiGHS
+    # route by default, which closes this knapsack inside max_nodes=3, so pin the
+    # legacy route that the opt-out keeps reachable.
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     shallow = _knapsack().solve(time_limit=60, max_nodes=3)
     deep = _knapsack().solve(time_limit=60, max_nodes=9)
 

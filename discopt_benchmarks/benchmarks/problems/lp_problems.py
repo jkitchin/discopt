@@ -244,9 +244,13 @@ register(
 
 
 def _build_lp_unbounded() -> dm.Model:
-    """Unbounded LP: min -x, x >= 0, no upper bound."""
+    """Unbounded LP: min -x, x >= 0, no upper bound.
+
+    ``ub=np.inf`` is required: the default ``continuous`` box is the finite
+    ±9.999e19, on which ``min -x`` is optimal at the corner (#850/#937).
+    """
     m = dm.Model("lp_unbounded")
-    x = m.continuous("x", lb=0.0)
+    x = m.continuous("x", lb=0.0, ub=np.inf)
     m.minimize(-x)
     return m
 

@@ -56,6 +56,9 @@ _ScaledMatch = TypeVar("_ScaledMatch")
 # snapped to a degenerate (lb == ub) box and left for the node NLP to validate;
 # a crossover larger than the tolerance is a genuine infeasibility and is pruned.
 _EMPTY_INTERVAL_FEAS_TOL = 1e-6
+#: Integrality tolerance (conftest ``integrality=1e-5``) for the empty-integer-box proof.
+_INTEGER_BOX_TOL = 1e-5
+_FLOAT_EPS = float(np.finfo(np.float64).eps)
 
 
 @dataclass(frozen=True)
@@ -1161,12 +1164,24 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 )
 
             total_min = float(sum(min_contribs.values()))
+            # A bound on the floating-point error of ``total_min`` and of every
+            # leave-one-out ``total_min - min_contribs[j]`` below. Without it a huge
+            # contribution absorbs the small ones: on x1 in the default ±9.999e19 box,
+            # -5·x1 + x2 <= 2 with x2 = -1 summed to -4.9995e20 + -1 == -4.9995e20, the
+            # leave-one-out rest for x1 came out 0 instead of -1, x1 >= -0.4 replaced
+            # x1 >= -0.6, and a feasible LP at x1 = -0.5 was certified infeasible.
+            # Widening outward by it keeps every inference valid in exact arithmetic.
+            float_err = (
+                (len(min_contribs) + 4.0)
+                * _FLOAT_EPS
+                * (sum(abs(v) for v in min_contribs.values()) + abs(constant_term))
+            )
             # Declare infeasibility only when the minimum separable activity
             # exceeds the upper bound by more than the feasibility tolerance;
             # a sub-tolerance excess is feasible within tolerance (e.g. the
             # eps-scale residual of an approximate GDP hull perspective) and
             # must not be pruned (issue #27a).
-            if constant_term + total_min > _EMPTY_INTERVAL_FEAS_TOL:
+            if constant_term + total_min > _EMPTY_INTERVAL_FEAS_TOL + float_err:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -1174,7 +1189,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 )
 
             for flat_idx, (a, b) in coeffs.items():
-                rhs = -constant_term - (total_min - min_contribs[flat_idx])
+                rhs = -constant_term - (total_min - min_contribs[flat_idx]) + float_err
                 if not np.isfinite(rhs):
                     continue
 
@@ -3369,6 +3384,35 @@ def tighten_nonlinear_bounds(
                 infeasibility_reason=f"initial interval is empty for flat variable {first_idx}",
             ),
         )
+    # An integer column whose box holds no integer. Rules round only the bounds they
+    # tighten, so with no row to tighten (``x`` integer in [1.2, 1.8], no constraints)
+    # nothing saw it, and the Rust MILP route raised on the clipped non-integer point.
+    # The 1e-5 slack is the integrality tolerance, so no tolerance-feasible point is cut.
+    is_int = np.fromiter(
+        (t in (VarType.INTEGER, VarType.BINARY) for t in metadata.flat_var_types),
+        dtype=bool,
+        count=len(metadata.flat_var_types),
+    )
+    if is_int.shape == tightened_lb.shape and is_int.any():
+        with np.errstate(invalid="ignore"):
+            no_integer = is_int & (
+                np.ceil(tightened_lb - _INTEGER_BOX_TOL) > np.floor(tightened_ub + _INTEGER_BOX_TOL)
+            )
+        if no_integer.any():
+            first_idx = int(np.flatnonzero(no_integer)[0])
+            return (
+                tightened_lb,
+                tightened_ub,
+                NonlinearBoundTighteningStats(
+                    n_tightened=0,
+                    applied_rules=(),
+                    infeasible=True,
+                    infeasibility_reason=(
+                        f"integer flat variable {first_idx} has no integer in "
+                        f"[{tightened_lb[first_idx]!r}, {tightened_ub[first_idx]!r}]"
+                    ),
+                ),
+            )
     # Snap sub-tolerance crossovers (lb slightly above ub) to a degenerate box
     # so they are explored and validated by the node NLP rather than pruned.
     _snap_tolerant_crossovers(tightened_lb, tightened_ub)
