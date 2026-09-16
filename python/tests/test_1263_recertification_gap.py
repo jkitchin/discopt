@@ -84,9 +84,10 @@ def test_predicate_is_the_convergence_test():
 #
 # portfol_roundlot names its route. On the default path the #1059 auto-route
 # hands over to NLP-BB when OA has not certified within its share of the budget.
-# That happens on a loaded CI runner, and there NLP-BB's exit gate raises, which
-# is a separate defect that also exists on main. Pinning OA keeps this test on
-# the certifier it covers.
+# That happens on a loaded CI runner, and which certifier answers then depends on
+# timing. Pinning OA keeps this test on the certifier it covers. The NLP-BB
+# fallback used to raise at its exit gate here; test_nlpbb_unscaled_refine.py
+# covers that.
 @pytest.mark.parametrize(
     "name, opt, kwargs",
     [

@@ -410,6 +410,17 @@ The release procedure that produces these entries is documented in
   row still scores `unknown`. Unrecognised statuses still map to `unknown`, and
   the `local_*` statuses stay `local`. The category and GDPLib runners no
   longer re-spell the two entries.
+- **NLP-BB no longer raises at its exit gate on large-coefficient rows**.
+  `portfol_roundlot` with `nlp_bb=True` raised `RuntimeError: NLP-BB returned
+  an infeasible point`. The #1059 auto-route hits the same error when it falls
+  back to NLP-BB. At the incumbent's lot counts, the rows `c_i x_i = n_i`
+  (`c_i` up to 1e5) and `sum x_i = 1` disagree by 3.35e-7. POUNCE's
+  gradient-scaled refine moved that residual onto a linking row, where it read
+  2.6e-6 unscaled. When the refined point fails the gate, NLP-BB now re-solves
+  the refine once with `nlp_scaling_method="none"`. It adopts that point only
+  if it clears the gate, and here it does: the worst row is 3.35e-7 and the
+  objective is within 1e-7 of `minlplib.solu`. The gate is unchanged. A solve
+  whose point already cleared it never takes the new branch.
 
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the

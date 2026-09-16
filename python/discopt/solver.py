@@ -18687,6 +18687,69 @@ def _solve_nlp_bb(
                     sol_flat = refined
                     x_dict = _unpack_solution(model, sol_flat)
                     obj_val = _ref_obj
+            # --- unscaled refine retry ---
+            # POUNCE ends on its SCALED residual. Gradient scaling shrinks a row
+            # with large coefficients by ``nlp_scaling_max_gradient / max|J_i|``,
+            # so the solve can leave an unscaled violation there that the exit
+            # gate below refuses, on a row whose term scale forgives nothing.
+            # Measured on portfol_roundlot (``nlp_bb=True``): at the incumbent's
+            # lot sizes the linking rows ``c_i x_i = n_i`` (c_i up to 1e5) and the
+            # budget row ``sum x_i = 1`` disagree by 3.35e-7. The scaled refine
+            # moved that onto the linking rows, where ``-78000 x2 + x11`` with
+            # ``x11 = 0`` read 2.6e-6, and POUNCE ended at "Solved To Acceptable
+            # Level". The exit raised and the solve returned nothing. The same
+            # refine with scaling off holds every linking row within 1.9e-10 and
+            # leaves the 3.35e-7 on the budget row, which the gate accepts.
+            #
+            # So when the point about to leave fails the gate, re-solve once
+            # unscaled, which is the norm the gate measures. Its output is adopted
+            # only when it clears the gate. The gate itself does not move, and a
+            # point that already clears it never reaches this branch.
+            _cur_exc, _, _ = _nonlinear_point_excess(
+                evaluator,
+                sol_flat,
+                cl_list,
+                cu_list,
+                n_rows=_declared_rows,
+                box=_declared_box,
+            )
+            if _cur_exc > _NLPBB_EXIT_ABS_TOL:
+                unscaled_opts = dict(refine_opts)
+                unscaled_opts["nlp_scaling_method"] = "none"
+                nlp_unscaled = _solve_node_nlp_kkt(
+                    evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, unscaled_opts
+                )
+                if (
+                    nlp_unscaled.status == SolveStatus.OPTIMAL
+                    and nlp_unscaled.x is not None
+                    and np.all(np.isfinite(nlp_unscaled.x))
+                    and nlp_unscaled.objective is not None
+                ):
+                    unscaled = np.asarray(nlp_unscaled.x, dtype=float).copy()
+                    for off, sz in zip(int_offsets, int_sizes):
+                        for k in range(int(sz)):
+                            unscaled[off + k] = round(float(sol_flat[off + k]))
+                    _uns_exc, _, _ = _nonlinear_point_excess(
+                        evaluator,
+                        unscaled,
+                        cl_list,
+                        cu_list,
+                        n_rows=_declared_rows,
+                        box=_declared_box,
+                    )
+                    if _uns_exc <= _NLPBB_EXIT_ABS_TOL:
+                        logger.info(
+                            "NLP-BB: adopting the unscaled refine (excess %.3e -> %.3e, "
+                            "objective %.6g -> %.6g); the scaled refine left the point "
+                            "outside the exit gate.",
+                            _cur_exc,
+                            _uns_exc,
+                            obj_val,
+                            float(nlp_unscaled.objective),
+                        )
+                        sol_flat = unscaled
+                        x_dict = _unpack_solution(model, sol_flat)
+                        obj_val = float(nlp_unscaled.objective)
             nlp_recovered = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
             )
