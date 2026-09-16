@@ -42,6 +42,7 @@ if str(_BENCH_ROOT) not in sys.path:
 from utils.cert_neutrality import (  # noqa: E402
     WALL_LIMIT_STATUSES,
     check_neutrality,
+    wall_limited_arms,
     wall_limited_rows,
 )
 
@@ -100,23 +101,39 @@ def test_a_settled_row_is_never_excluded_by_its_wall_time():
     assert any(v.kind == "objective" for v in check_neutrality(new, base))
 
 
-def test_a_lost_certification_is_still_a_violation():
+def test_a_lost_certification_is_still_reported():
     """The exclusion must not swallow a real regression.
 
-    baseline ``optimal`` -> new ``time_limit`` is the flag losing a certificate the
-    reference had. Only one arm is wall-limited, so the row is NOT excluded — and
-    that is deliberate even for an instance known to be wall-flaky. A certified
-    baseline is a verdict; refusing to compare against it because the new run ran
-    out of clock would hide exactly the regression this check exists for. The cost
-    is a false positive on an instance that does not reproduce against itself,
-    which a re-run settles; the alternative silently accepts a lost certificate.
+    baseline ``optimal`` -> new ``time_limit`` is a certificate the reference had
+    and this run does not. #1187 left it a soundness-class ``status`` violation and
+    said so here: "the alternative silently accepts a lost certificate".
+
+    **Superseded by #1204, on the objection's own terms.** The alternative it
+    rejected was going *silent*; what ships instead is a ``wall_regression``
+    finding — reported on every run, printed by both gate scripts, fatal in the
+    bound-neutral regime exactly as ``node_regression`` is. What changed is the
+    class, and only because the class was provably wrong: ``optimal`` is a settled
+    status, so a wall-limited row is never certified and carries no certificate to
+    be false. What #1187 called "a false positive on an instance that does not
+    reproduce against itself, which a re-run settles" turned out to decide gate
+    verdicts by coin flip — two runs of identical code failing on different arm
+    subsets — which is #1204's evidence.
+
+    The old contract still holds for every caller that does not supply the wall
+    context, which is asserted here too.
     """
     base = {"foo": _row(100.0, status="optimal")}
     new = {"foo": _row(None, status="time_limit")}
 
-    assert wall_limited_rows(new, base) == {}
+    assert wall_limited_rows(new, base) == {}, "not BOTH arms — #1187 does not fire"
+    # No wall context supplied: unchanged, soundness-class.
     kinds = {v.kind for v in check_neutrality(new, base)}
-    assert "status" in kinds, "a lost certification must still fail the gate"
+    assert "status" in kinds
+
+    # With it: still reported, now as the perf fact it is.
+    arms = wall_limited_arms(new, base)
+    kinds = {v.kind for v in check_neutrality(new, base, wall_limited=arms)}
+    assert kinds == {"wall_regression"}, "a lost certification must still be reported"
 
 
 def test_node_limited_rows_stay_comparable():
@@ -151,17 +168,20 @@ def test_both_gate_scripts_actually_exclude():
     """A helper no gate calls is a documented promise, not an enforced one.
 
     #1187 asks for the rule to be enforced in the harness, and the failure mode it
-    guards against is precisely a rule that exists only in prose.
+    guards against is precisely a rule that exists only in prose. #1204 replaced the
+    call with the finer ``wall_limited_arms`` — same rule for the both-arms case,
+    passed as ``wall_limited=`` instead of ``exclude=`` — so this checks the wiring
+    that is actually there, not the spelling it used to have.
     """
     checked = 0
     for rel in ("scripts/check_cert_neutrality.py", "scripts/graduation_gate.py"):
         text = (_BENCH_ROOT / rel).read_text()
-        assert "wall_limited_rows" in text, f"{rel} does not compute the excluded set"
+        assert "wall_limited_arms" in text, f"{rel} does not compute the wall-limited set"
         assert "budgets=budgets" in text, (
             f"{rel} does not pass the budgets, so it only catches an explicit "
             "time_limit status and misses the wall-cut feasible rows"
         )
-        assert "exclude=" in text, f"{rel} does not pass it to check_neutrality"
+        assert "wall_limited=" in text, f"{rel} does not pass it to check_neutrality"
         assert "UNMEASURED" in text, f"{rel} excludes rows without reporting them"
         checked += 1
     assert checked == 2, "the probe stopped reading files (rule 6)"
@@ -192,7 +212,7 @@ def test_graduation_gate_worker_source_still_compiles():
     src = captured.get("src")
     assert src, "the worker source was never built — the probe measured nothing"
     compile(src, "<graduation_gate worker>", "exec")
-    for needle in ("wall_limited_rows", "exclude=skipped", "SKIPJSON:"):
+    for needle in ("wall_limited_arms", "wall_limited=arms", "SKIPJSON:", "ONESIDEJSON:"):
         assert needle in src, f"the worker lost its #1187 wiring: {needle}"
 
 

@@ -52,7 +52,17 @@ jobs:
     # ~6m17s per panel in run 32706094552, i.e. ~50 min rather than ~44; 120 leaves
     # the same proportional headroom 90 did and keeps the timeout a hang backstop
     # rather than something a slightly slower runner trips.
-    timeout-minutes: 120
+    #
+    # 120 -> 180 (#1204): the panels now run at host-CALIBRATED budgets. A runner
+    # slower than the machine that generated cert-baseline.jsonl gets each row the
+    # reference's *work* allowance rather than its seconds, which is what stops
+    # "did this instance certify" being a fact about the runner — and it costs
+    # wall in proportion. The cost is bounded rather than hoped for:
+    # host_calibration.fit_scale_to_panel predicts each panel's wall before the run
+    # and shrinks the scale until it fits MAX_PANEL_WALL_S (900 s), so 8 panels plus
+    # the probe are bounded near ~2 h even on a box at the x4 scale cap. 180 keeps
+    # this a hang backstop at that bound instead of a ceiling the calibration trips.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

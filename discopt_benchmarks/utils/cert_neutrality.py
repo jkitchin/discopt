@@ -20,7 +20,7 @@ end-to-end solve against the committed ``cert-baseline.jsonl``.
 from __future__ import annotations
 
 import json
-from collections.abc import Collection  # noqa: TC003
+from collections.abc import Collection, Mapping  # noqa: TC003
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 
@@ -79,8 +79,44 @@ WALL_LIMIT_WALL_FRACTION = 0.98
 @dataclass
 class NeutralityViolation:
     instance: str
-    kind: str  # "objective" | "status" | "node_regression" | "missing"
+    # one of SOUNDNESS_CLASS_KINDS | PERF_CLASS_KINDS
+    kind: str
     detail: str
+
+
+#: Findings that say the run got a **wrong answer**. Fatal in every regime; never
+#: downgraded, never suppressed by a budget.
+SOUNDNESS_CLASS_KINDS = frozenset({"objective", "status", "missing"})
+
+#: Findings that say the run did **more work** (or ran out of budget doing it).
+#: Real regressions, but not wrong answers: fatal for a bound-neutral change, where
+#: any drift is evidence of a bug, and a reported note for a bound-changing flag,
+#: whose whole purpose is to change the search.
+#:
+#: The split used to be spelled out at each call site as a literal tuple, so a new
+#: kind landed in "not fatal" by being in neither list — silently. It is the
+#: module's own now, and ``test_1204``'s exhaustiveness test fails on a kind that
+#: is in neither set.
+PERF_CLASS_KINDS = frozenset({"node_regression", "wall_regression"})
+
+
+@dataclass(frozen=True)
+class WallLimited:
+    """Which side(s) of one comparison ended on the wall clock (#1187, #1204).
+
+    ``base`` / ``new`` say whether the reference arm and the measured arm
+    respectively stopped because the clock ran out. At least one is True for every
+    row :func:`wall_limited_arms` returns; both True is #1187's "not evidence either
+    way", and exactly one True is #1204's asymmetric case.
+    """
+
+    base: bool
+    new: bool
+    reason: str
+
+    @property
+    def both(self) -> bool:
+        return self.base and self.new
 
 
 def load_baseline(path: str | Path) -> dict[str, dict]:
@@ -104,6 +140,7 @@ def _objective_violation(
     obj_tol: float,
     obj_rtol: float,
     new_certified: bool = True,
+    baseline_comparable: bool = True,
 ) -> NeutralityViolation | None:
     """Decide whether the certified objective drift ``nb -> no`` is a violation.
 
@@ -145,8 +182,17 @@ def _objective_violation(
     (``optimal -> feasible``) is caught by the ``status`` check and, when the
     objective goes to ``None``, by the lost-certificate branch in
     :func:`check_neutrality` — neither is affected here.
+
+    ``baseline_comparable`` says whether ``nb`` is a number the new run is expected
+    to reproduce. It is False when the REFERENCE ended on the wall clock (#1204):
+    its incumbent is then whatever its budget bought, so both the byte-reproduction
+    check and the no-oracle drift fallback would be measuring the reference's clock.
+    The oracle bracket is unaffected — the true optimum is a property of the model,
+    not of either run — so a false certificate is still caught on such a row.
     """
     if regime != "bound_changing":
+        if not baseline_comparable:
+            return None
         if abs(no - nb) > obj_tol + obj_rtol * abs(nb):
             return NeutralityViolation(
                 inst, "objective", f"|Δobj|={abs(no - nb):.3e} (obj {nb} -> {no})"
@@ -175,6 +221,10 @@ def _objective_violation(
         return None
     # No oracle for this instance: fall back to a correctness-tolerance drift guard
     # vs the baseline (still catches a gross wrong answer; tolerant of benign jitter).
+    # Only when the baseline is a yardstick at all — a reference cut off at the wall
+    # reports whatever incumbent its budget bought (#1204).
+    if not baseline_comparable:
+        return None
     if abs(no - nb) > ctol:
         return NeutralityViolation(
             inst,
@@ -240,20 +290,81 @@ def wall_limited_rows(
     ``time_limit``) is a genuine regression and stays a violation, and a row that
     stopped on ``max_nodes`` stopped on a deterministic count and stays comparable.
     """
+    return {
+        inst: w.reason
+        for inst, w in wall_limited_arms(new_rows, baseline, budgets=budgets).items()
+        if w.both
+    }
+
+
+def wall_limited_arms(
+    new_rows: dict[str, dict],
+    baseline: dict[str, dict],
+    *,
+    budgets: dict[str, float] | None = None,
+) -> dict[str, WallLimited]:
+    """Every row where **either** arm ended on the wall clock (#1204).
+
+    :func:`wall_limited_rows` answers "is this row evidence at all?", which only the
+    both-arms case decides. This answers the finer question ``check_neutrality``
+    needs: *which side's numbers were set by the clock*, so each individual check
+    can be kept, suppressed, or reclassified on its own merits.
+
+    That distinction is the whole of #1204. Before it, a row was compared in full or
+    not at all, and the asymmetric case — reference certified, arm out of clock —
+    was compared in full, producing a ``status`` violation and a lost-certificate
+    ``objective`` violation. Both are soundness-class and hard-fail the arm, so
+    whether an arm failed depended on whether the *control* happened to certify the
+    edge rows on that runner: over four graduation-gate runs, two failures on
+    different arm subsets from identical code, and a ``main`` run that drifted more
+    and passed because its control lost ``tanksize`` to the wall.
+
+    The rule this enables is stated in :func:`check_neutrality`. What it must NOT
+    become is a row-wholesale exclusion: when the arm certified and the *reference*
+    was the side that ran out of clock, the arm holds a certificate, and a
+    certificate is bracketed against the oracle regardless of what the other arm
+    did. Excluding the row would delete that check.
+
+    ``budgets`` maps instance -> the wall budget the run was given; without it only
+    an explicit ``time_limit`` status is detected and the common wall-cut
+    ``feasible`` row is missed (see :data:`WALL_LIMIT_WALL_FRACTION`).
+    """
     budgets = budgets or {}
-    out: dict[str, str] = {}
+    out: dict[str, WallLimited] = {}
     for inst, base in baseline.items():
         new = new_rows.get(inst)
         if new is None:
             continue
         budget = budgets.get(inst)
-        if _is_wall_limited(base, budget) and _is_wall_limited(new, budget):
-            out[inst] = (
+        b_wall = _is_wall_limited(base, budget)
+        n_wall = _is_wall_limited(new, budget)
+        if not (b_wall or n_wall):
+            continue
+        if b_wall and n_wall:
+            reason = (
                 f"both arms ended on the wall clock (status "
                 f"{base.get('status')!r} -> {new.get('status')!r}); the work done is "
                 f"set by the budget, not by the change under test (#1187)"
             )
+        elif n_wall:
+            reason = (
+                f"this arm ran out of its {_fmt_budget(budget)} budget "
+                f"(status {base.get('status')!r} -> {new.get('status')!r}); an "
+                f"uncertified row carries no certificate, so this is a perf fact "
+                f"(#1204)"
+            )
+        else:
+            reason = (
+                f"the REFERENCE ran out of its {_fmt_budget(budget)} budget "
+                f"(status {base.get('status')!r} -> {new.get('status')!r}); its "
+                f"node_count and incumbent were set by the clock (#1204)"
+            )
+        out[inst] = WallLimited(base=b_wall, new=n_wall, reason=reason)
     return out
+
+
+def _fmt_budget(budget: float | None) -> str:
+    return "wall-clock" if budget is None else f"{budget:g} s"
 
 
 def check_neutrality(
@@ -267,6 +378,7 @@ def check_neutrality(
     regime: str = "bound_neutral",
     oracle: dict[str, float] | None = None,
     exclude: Collection[str] = (),
+    wall_limited: Mapping[str, WallLimited] | None = None,
 ) -> list[NeutralityViolation]:
     """Return the list of neutrality violations of ``new_rows`` vs ``baseline``.
 
@@ -290,6 +402,28 @@ def check_neutrality(
     caller has not established to be indeterminate would hide a real regression, so
     the set is computed, never hardcoded.
 
+    ``wall_limited`` maps instance -> :class:`WallLimited` for every row where one or
+    both arms ended on the wall clock — pass :func:`wall_limited_arms` here (#1204).
+    It is applied **per check**, never per row, because the clock invalidates the
+    checks one at a time:
+
+    * **both arms** wall-limited: no verdict at all (#1187). Two runs that each did
+      whatever their budget allowed are not two measurements of the same search.
+    * **this arm** wall-limited, reference certified: the lost certification is
+      reported as ``wall_regression``, perf-class. It cannot be soundness-class:
+      ``optimal`` is in :data:`_SETTLED_STATUSES`, so a wall-limited row is *never*
+      certified, carries no certificate, and can hide no false one. What it does
+      hide is "the flag made this instance slower past the wall" — a perf
+      regression, which is what it is now called. The ``status`` and
+      lost-certificate ``objective`` violations it used to raise are replaced by
+      that one finding, so nothing is dropped and nothing is silent.
+    * **the reference** wall-limited, this arm settled: the reference's node_count
+      and incumbent were set by its clock, so they are not yardsticks
+      (``baseline_comparable=False``) — but if this arm CERTIFIED, its certificate
+      is still bracketed against the ``oracle``. That check is the reason this is
+      per-check: a row-wholesale exclusion would delete a live false-certificate
+      guard, which is the one soundness question still answerable here.
+
     ``regime`` selects the objective check (see :func:`_objective_violation`):
     ``bound_neutral`` (default) demands byte-reproducibility; ``bound_changing``
     demands agreement with the true optimum ``oracle`` (or a correctness-tolerance
@@ -309,7 +443,28 @@ def check_neutrality(
         # "the row is not there" are different facts.
         if inst in excluded:
             continue
+        wall = (wall_limited or {}).get(inst)
+        if wall is not None and wall.both:
+            continue  # #1187, via the richer per-arm form
         gated = inst in perf_gated
+        # A row this arm lost to the clock (#1204). The certification it lost is a
+        # perf fact — a wall-limited row is never ``optimal``, so it carries no
+        # certificate and can hide no false one — and it is reported as exactly that
+        # instead of as the ``status`` + lost-certificate pair below, which are
+        # soundness-class and hard-fail the arm on the runner's draw. node_count is
+        # not compared either: a run cut off at the wall did the amount of work its
+        # budget allowed.
+        if wall is not None and wall.new:
+            if base.get("status") == "optimal" and not gated:
+                violations.append(
+                    NeutralityViolation(
+                        inst,
+                        "wall_regression",
+                        f"certification LOST at the wall: {wall.reason} — reported as "
+                        f"perf, not soundness (#1204)",
+                    )
+                )
+            continue
         # status: a REGRESSION relative to the reference, not an absolute demand.
         #
         # This used to read `new.status != "optimal"`, which is equivalent whenever
@@ -356,10 +511,18 @@ def check_neutrality(
                 obj_tol=obj_tol,
                 obj_rtol=obj_rtol,
                 new_certified=new.get("status") == "optimal",
+                # The reference ran out of clock: its incumbent is what its budget
+                # bought, so it is not a number to reproduce (#1204). The oracle
+                # bracket inside still fires — that one is a property of the model.
+                baseline_comparable=wall is None,
             )
             if ov is not None:
                 violations.append(ov)
         # node_count one-directional guard (perf-class — suppressed if perf-gated).
+        # A clock-truncated reference explored the tree its budget allowed, so its
+        # node_count is not a bar for this arm to clear (#1204).
+        if wall is not None:
+            continue
         base_nc, new_nc = base.get("node_count", 0), new.get("node_count", 0)
         if base_nc > 0 and new_nc > base_nc * (1.0 + node_regression_frac) and not gated:
             violations.append(

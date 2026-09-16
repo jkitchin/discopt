@@ -322,6 +322,36 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A certification lost at the wall clock no longer hard-fails a graduation-gate
+  arm as a soundness fault** (#1204). The cert panel's budgets are wall-clock
+  seconds chosen on the machine that generated `cert-baseline.jsonl`, where the
+  slowest rows certify at ~half of them (`tanksize` 31.0/60 s, `nvs05` 28.3/60,
+  `tls2` 30.4/60). On a runner ~2x slower they tip, and the comparison then read
+  that as a lost `optimal` *status* plus a lost certificate — two soundness-class
+  violations — so whether an arm failed depended on whether the flag-OFF **control**
+  happened to certify the edge rows: two gate runs of identical PR code failed on
+  different four-arm subsets, and a `main` run that drifted *more* passed because
+  its control lost `tanksize` and disarmed the tripwire.
+
+  Two changes, neither of which weakens a check. **Classification**:
+  `wall_limited_arms` reports which side of a comparison ran out of clock, and
+  `check_neutrality` applies it *per check* — both arms out of clock is still no
+  verdict (#1187); this arm out of clock is a perf-class `wall_regression`, because
+  `optimal` is a settled status so a wall-limited row is never certified and can
+  hide no false certificate; the reference out of clock stops its nodes and
+  incumbent being yardsticks **but leaves this arm's own certificate bracketed
+  against the oracle** — the one soundness question still answerable there, which a
+  row-wholesale exclusion would have deleted. Perf-class stays fatal in the
+  bound-neutral regime exactly as `node_regression` does. **Calibration**: the panel
+  now measures the box against the reference machine first (a bounded probe of
+  cheap settled rows, equal-node and unrouted) and scales every budget by the
+  result, clamped to `[1, 4]` and shrunk further if the panel's predicted wall
+  exceeds a ceiling; an unmeasurable calibration leaves the budgets nominal and says
+  so. Measured on a box 3.17x the reference: `tanksize` `time_limit` -> `optimal`
+  71.4 s, `tls2` `feasible` -> `optimal` 76.5 s, `nvs05` `feasible` (incumbent 27 %
+  above the optimum) -> `optimal` at the true optimum — all three at the reference's
+  answer (`docs/dev/data/README-1204-calibration.md`).
+
 - **An indexed array `Parameter` was not recognised as a constant, costing the
   convexity certificate** (#1272). The classifier knew a `Constant` and a
   `Parameter`, but not a *static index into one*, so in `mu[k] * x[k]` — the

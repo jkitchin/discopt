@@ -93,13 +93,23 @@ import generality_sweep as gs  # noqa: E402
 # CI-subset block in main), so it needs these directly and not only inside the
 # cert-neutrality worker's source string.
 from check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED  # noqa: E402
-from gen_cert_baseline import _CERT_OPTIMA  # noqa: E402
+from gen_cert_baseline import _CERT_OPTIMA, _instance_budgets  # noqa: E402
 
 from utils.cert_neutrality import (  # noqa: E402
     CORRECTNESS_ATOL,  # noqa: E402
     CORRECTNESS_RTOL,
+    PERF_CLASS_KINDS,
+    SOUNDNESS_CLASS_KINDS,
     check_neutrality,
     load_baseline,
+    wall_limited_arms,
+)
+from utils.host_calibration import (  # noqa: E402
+    HostScale,
+    calibration_probe_instances,
+    fit_scale_to_panel,
+    measure_host_scale,
+    scale_budgets,
 )
 
 DEFAULT_CORPUS = Path(os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark"))
@@ -162,10 +172,69 @@ class CertResult:
     # counting it as a silent pass — the neutrality claim is only over the rows that
     # were actually compared.
     unmeasured: dict = field(default_factory=dict)
+    # Rows the clock decided on exactly ONE side (#1204): instance -> why. Not an
+    # exclusion — the arm's certificate, if it has one, was still checked — but the
+    # rows whose status/node comparison was read as perf rather than soundness.
+    one_sided: dict = field(default_factory=dict)
+
+
+def run_host_calibration() -> HostScale:
+    """Measure this runner against the cert-baseline reference machine (#1204).
+
+    Run ONCE, flag-OFF, before the control panel; the resulting scale is handed to
+    the control and to every arm, so all eight panels share one set of budgets. A
+    per-arm re-measurement would insert a fresh noisy multiplier between an arm and
+    its reference — a new version of the asymmetry this exists to remove.
+
+    Flag-OFF is not a detail: the scale comes from rows whose ``node_count``
+    reproduced the reference exactly, and a flag that moves the tree would leave the
+    probe with no samples and silently fall back to nominal budgets.
+
+    Failure is never silent. The probe reports its sample count and spread, and a
+    calibration that could not be measured says so and leaves the budgets alone —
+    at which point the wall-limited rows are handled, not hidden, by
+    ``wall_limited_arms``.
+    """
+    baseline = load_baseline(_CERT_BASELINE)
+    probe = calibration_probe_instances(baseline)
+    worker = (
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(_BENCH_ROOT)!r}); sys.path.insert(0, {str(_REPO)!r})\n"
+        "from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig\n"
+        "from scripts.gen_cert_baseline import _instance_budgets\n"
+        "budgets = _instance_budgets(60.0)\n"
+        f"names = {probe!r}\n"
+        "solver = SolverConfig(name='discopt', command='', solver_type='internal')\n"
+        "rows = {}\n"
+        "for name in names:\n"
+        "    cfg = BenchmarkConfig(suite_name='cert-calib',\n"
+        "        time_limit=int(budgets.get(name, 60)), num_runs=1, solvers=[solver])\n"
+        "    rows[name] = BenchmarkRunner(cfg)._run_discopt(solver, name, 0).to_dict()\n"
+        "print('PROBEJSON:' + json.dumps(rows))\n"
+    )
+    env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", worker], capture_output=True, text=True, env=env, timeout=1800
+        )
+    except subprocess.TimeoutExpired:
+        return measure_host_scale({}, baseline)
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PROBEJSON:")), None)
+    rows = json.loads(line[len("PROBEJSON:") :]) if line else {}
+    if not rows:
+        print(
+            f"# calibration probe produced no rows (stderr tail: "
+            f"{proc.stderr.strip()[-200:]!r})",
+            flush=True,
+        )
+    return measure_host_scale(rows, baseline)
 
 
 def run_cert_neutrality(
-    arm: str, env_on: dict[str, str], reference_rows: dict | None = None
+    arm: str,
+    env_on: dict[str, str],
+    reference_rows: dict | None = None,
+    budget_scale: float = 1.0,
 ) -> CertResult:
     """Run ``check_cert_neutrality.py`` in a fresh subprocess with the flag ON.
 
@@ -188,6 +257,8 @@ def run_cert_neutrality(
     regime = gs.ARMS.get(arm, {}).get("regime", "bound_changing")
     env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
     env.update(env_on)
+    # One scale for the whole run (#1204). Measured once, before the control.
+    env["GRADGATE_BUDGET_SCALE"] = repr(float(budget_scale))
     # Emit machine-readable violations by importing the util in the subprocess and
     # dumping JSON — reusing check_cert_neutrality's own runner + baseline so we do
     # not fork its logic. The oracle (cert-optima.json) lets the bound-changing
@@ -198,8 +269,8 @@ def run_cert_neutrality(
         "from pathlib import Path\n"
         "from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig\n"
         "from scripts.gen_cert_baseline import _instance_budgets, _CERT_OPTIMA\n"
-        "from utils.cert_neutrality import (check_neutrality, load_baseline,\n"
-        "    wall_limited_rows)\n"
+        "from utils.cert_neutrality import check_neutrality, load_baseline, wall_limited_arms\n"
+        "from utils.host_calibration import scale_budgets\n"
         "from scripts.check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED\n"
         "baseline = load_baseline(_CERT_BASELINE)\n"
         # The panel to SOLVE is always the committed baseline's instance list; only
@@ -213,7 +284,12 @@ def run_cert_neutrality(
         "_op = Path(_CERT_OPTIMA)\n"
         "oracle = json.loads(_op.read_text()) if _op.exists() else {}\n"
         f"regime = {regime!r}\n"
-        "budgets = _instance_budgets(60.0)\n"
+        # #1204: every panel in this run -- the control and all 7 arms -- uses the
+        # SAME budgets, scaled once by the host calibration measured before the
+        # control. Re-measuring per arm would put a fresh noisy multiplier between
+        # the arm and its reference, which is the asymmetry this is here to remove.
+        "budgets = scale_budgets(_instance_budgets(60.0),\n"
+        "    float(os.environ.get('GRADGATE_BUDGET_SCALE') or 1.0))\n"
         "solver = SolverConfig(name='discopt', command='', solver_type='internal')\n"
         "new_rows = {}\n"
         "for name in sorted(baseline):\n"
@@ -221,14 +297,21 @@ def run_cert_neutrality(
         "        time_limit=int(budgets.get(name, 60)), num_runs=1, solvers=[solver])\n"
         "    res = BenchmarkRunner(cfg)._run_discopt(solver, name, 0)\n"
         "    new_rows[name] = res.to_dict()\n"
-        # #1187: a row that ended on the wall clock in BOTH arms is not evidence
-        # either way — the work it did was set by the budget, not by the flag — so
-        # it is excluded from the comparison and reported as unmeasured. It is not
-        # silently dropped: the excluded set travels back with the verdict.
-        "skipped = wall_limited_rows(new_rows, reference, budgets=budgets)\n"
+        # #1187 + #1204: the clock decided part of this panel, and ``wall_limited_arms``
+        # says per row WHICH side it decided. Both arms out of budget -> no verdict
+        # (#1187). This arm out of budget -> the certification it lost is reported as
+        # ``wall_regression``, perf-class, because a wall-limited row is never
+        # ``optimal`` and so carries no certificate to be false (#1204). The reference
+        # out of budget -> its nodes and incumbent stop being yardsticks, but a
+        # certificate THIS arm holds is still bracketed against the oracle. Neither
+        # set is dropped silently: both travel back with the verdict and are printed.
+        "arms = wall_limited_arms(new_rows, reference, budgets=budgets)\n"
+        "skipped = {i: w.reason for i, w in arms.items() if w.both}\n"
+        "onesided = {i: w.reason for i, w in arms.items() if not w.both}\n"
         "viol = check_neutrality(new_rows, reference, known_perf_gated=_KNOWN_PERF_GATED,\n"
-        "    regime=regime, oracle=oracle, exclude=skipped)\n"
+        "    regime=regime, oracle=oracle, wall_limited=arms)\n"
         "print('SKIPJSON:' + json.dumps(skipped))\n"
+        "print('ONESIDEJSON:' + json.dumps(onesided))\n"
         "print('ROWSJSON:' + json.dumps(new_rows))\n"
         "print('CERTJSON:' + json.dumps([{'instance': v.instance, 'kind': v.kind,\n"
         "    'detail': v.detail} for v in viol]))\n"
@@ -268,6 +351,8 @@ def run_cert_neutrality(
     panel_rows = json.loads(rows_line[len("ROWSJSON:") :]) if rows_line else {}
     skip_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("SKIPJSON:")), None)
     unmeasured = json.loads(skip_line[len("SKIPJSON:") :]) if skip_line else {}
+    one_line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("ONESIDEJSON:")), None)
+    one_sided = json.loads(one_line[len("ONESIDEJSON:") :]) if one_line else {}
     if unmeasured:
         print(
             f"# {len(unmeasured)} cert row(s) UNMEASURED — both arms ended on the wall "
@@ -275,11 +360,31 @@ def run_cert_neutrality(
             f"behaviour (#1187): {', '.join(sorted(unmeasured))}",
             flush=True,
         )
+    if one_sided:
+        # Printed for every arm, passing or failing. A row the clock decided on ONE
+        # side is the case that used to hard-fail an arm on the control's draw
+        # (#1204); it is now reported instead, and a report nobody prints is the
+        # weakening this change is careful not to be.
+        print(
+            f"# {len(one_sided)} cert row(s) wall-limited on ONE side only (#1204): "
+            f"{', '.join(sorted(one_sided))}",
+            flush=True,
+        )
     # Soundness-class violations (objective / status / missing) are hard fails in
-    # every regime. node_regression is perf-class: fatal for a bound-neutral flag,
-    # a documented note for a bound-changing / heuristic-policy flag.
-    hard = [v for v in viol if v["kind"] in ("objective", "status", "missing")]
-    node_only = [v for v in viol if v["kind"] == "node_regression"]
+    # every regime. Perf-class ones (node_regression, and #1204's wall_regression)
+    # are fatal for a bound-neutral flag and a documented note for a bound-changing
+    # / heuristic-policy flag.
+    #
+    # The two buckets are the library's (``SOUNDNESS_CLASS_KINDS`` /
+    # ``PERF_CLASS_KINDS``), not literals repeated here: they used to be spelled out
+    # as tuples at each call site, so a NEW kind would have been silently treated as
+    # "not fatal" by appearing in neither list.
+    hard = [v for v in viol if v["kind"] in SOUNDNESS_CLASS_KINDS]
+    node_only = [v for v in viol if v["kind"] in PERF_CLASS_KINDS]
+    unclassified = [v for v in viol if v["kind"] not in SOUNDNESS_CLASS_KINDS | PERF_CLASS_KINDS]
+    if unclassified:
+        # Fail closed: a finding the gate cannot class is treated as soundness.
+        hard = hard + unclassified
     # Say WHICH rows failed, on stdout, where the failure is read.
     #
     # This gate exits 1 on a hard violation and printed only `cert=FAIL`. The rows
@@ -302,7 +407,7 @@ def run_cert_neutrality(
         neutral = not viol
         kind = "byte_identical"
         note = "byte-identical required (bound-neutral flag)"
-        return CertResult(neutral, kind, viol, note, panel_rows, unmeasured)
+        return CertResult(neutral, kind, viol, note, panel_rows, unmeasured, one_sided)
     # bound-changing / control: objective must hold; node drift is a perf note.
     neutral = not hard
     kind = "objective_only"
@@ -311,7 +416,7 @@ def run_cert_neutrality(
         note += (
             f" ({len(node_only)} instance(s) changed node_count — expected where structure present)"
         )
-    return CertResult(neutral, kind, hard, note, panel_rows, unmeasured)
+    return CertResult(neutral, kind, hard, note, panel_rows, unmeasured, one_sided)
 
 
 # --------------------------------------------------------------------------- #
@@ -355,13 +460,16 @@ def evaluate_flag(
     off_cache: dict,
     ci_subset: bool,
     cert_reference: dict | None = None,
+    budget_scale: float = 1.0,
 ) -> Verdict:
     env_on = gs.ARMS[flag]["env"]
     regime = gs.ARMS[flag]["regime"]
     notes: list[str] = []
 
     # (2/3) cert-panel neutrality + incorrect_count (both regimes run this).
-    cert = run_cert_neutrality(flag, env_on, reference_rows=cert_reference)
+    cert = run_cert_neutrality(
+        flag, env_on, reference_rows=cert_reference, budget_scale=budget_scale
+    )
     notes.append(f"cert: {cert.note}")
 
     if ci_subset:
@@ -598,12 +706,31 @@ def main() -> int:
     # is a soundness fault: a certified objective that disagrees with the baseline.
     # ------------------------------------------------------------------ #
     cert_reference: dict | None = None
+    budget_scale = 1.0
     if args.ci_subset:
+        # #1204: measure the runner BEFORE any panel, and give every panel the same
+        # budgets. On the reference machine the slowest cert rows certify at ~half
+        # their budget, so a runner ~2x slower tips all of them and "did this
+        # instance certify" becomes a fact about the runner — which then decides arm
+        # verdicts, because a row disarmed in the control cannot fail anything while
+        # the same row armed hard-fails whichever arm tips first.
+        print("\n=== host calibration (flag-OFF, once for every panel) ===", flush=True)
+        host = run_host_calibration()
+        print(f"# {host.reason}", flush=True)
+        # A scale is not free: 8 panels run under it, and a budget a row fails to
+        # certify inside is burned in full. Bound the panel's predicted wall before
+        # committing to the scale, so the gate cannot quietly become a job that
+        # times out and returns no verdict at all.
+        budget_scale, fit_note = fit_scale_to_panel(
+            load_baseline(_CERT_BASELINE), _instance_budgets(60.0), host
+        )
+        if fit_note:
+            print(f"# {fit_note}", flush=True)
         print(
             "\n=== cert-panel control: flag-OFF (shared reference for every arm) ===",
             flush=True,
         )
-        off_cert = run_cert_neutrality("off", {})
+        off_cert = run_cert_neutrality("off", {}, budget_scale=budget_scale)
         cert_reference = off_cert.panel_rows or None
         if cert_reference is None:
             print(
@@ -624,12 +751,22 @@ def main() -> int:
             committed = load_baseline(_CERT_BASELINE)
             _op = Path(_CERT_OPTIMA)
             oracle = json.loads(_op.read_text()) if _op.exists() else {}
+            # The drift report reads the same panel through the same rule as every
+            # arm (#1204): a row the clock decided is named as a wall fact, not as a
+            # lost `status`. This block is where the gate already said drift "is
+            # dominated by whether an instance certified inside its wall-clock budget
+            # on THIS machine, which is a perf fact, not a soundness one" — it now
+            # classifies it that way instead of only saying so in prose.
+            drift_budgets = scale_budgets(_instance_budgets(60.0), budget_scale)
             drift = check_neutrality(
                 cert_reference,
                 committed,
                 known_perf_gated=_KNOWN_PERF_GATED,
                 regime="bound_changing",
                 oracle=oracle,
+                wall_limited=wall_limited_arms(
+                    cert_reference, committed, budgets=drift_budgets
+                ),
             )
             print(
                 f"# drift vs committed cert-baseline ({len(committed)} instances): "
@@ -705,6 +842,7 @@ def main() -> int:
             off_cache,
             args.ci_subset,
             cert_reference=cert_reference,
+            budget_scale=budget_scale,
         )
         verdicts.append(v)
         if not args.ci_subset and not args.no_ledger:
