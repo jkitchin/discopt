@@ -33,6 +33,7 @@ import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Any, Optional
 
 import numpy as np
@@ -58,7 +59,8 @@ SMALL_MATRIX_VALUE = 1e-12
 #: An LP is ``optimal`` iff ``objective - ns_bound <= CERT_ABS + CERT_REL*|objective|``.
 CERT_ABS = 1e-6
 CERT_REL = 1e-9
-#: Relative margin a Farkas contradiction or a ray descent must clear.
+#: Relative margin a ray descent must clear. A Farkas contradiction is checked against an
+#: explicit bound on its own floating-point error instead -- see :func:`farkas_verified`.
 RAY_REL = 1e-9
 #: A ray entry this small (after scaling the ray to unit max-norm) is cleaned to
 #: zero *before* verification, so the vector that is verified is the vector used.
@@ -323,29 +325,115 @@ def ns_bound(y: np.ndarray, sf: StdForm) -> Optional[float]:
     return None if g is None else float(g) + sf.obj_const
 
 
+def _box_prod(t: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """``t * x`` with the convention ``0 * inf = 0``: a coefficient that is exactly zero
+    cannot ride an open bound side, and numpy would make that product ``nan``."""
+    out = np.zeros_like(t)
+    nz = t != 0.0
+    out[nz] = t[nz] * x[nz]
+    return out
+
+
+def _farkas_exact(y: np.ndarray, sf: StdForm) -> bool:
+    """Decide the Farkas contradiction in exact rational arithmetic.
+
+    Every entry of ``A``, ``b``, the box and ``y`` is a float64 and therefore an exact
+    rational, so ``r = Aᵀy``, the box supremum of ``rᵀx`` and ``yᵀb`` are all computed
+    here with no rounding at all: the verdict is the mathematical truth for the declared
+    standard form, with no tolerance and no error bound to get wrong.
+
+    This exists because the float error bound in :func:`farkas_verified` is a *bound*, not
+    the error. On the huge box a column whose true ``r_j`` is exactly ``0`` still carries a
+    positive bound, and ``(nnz_j + 2)·eps·Σ|A_ij y_i|`` against a ``9.999e19`` side is
+    ~1.8e5 -- enough to swamp any real margin and refuse every genuine huge-box ray, which
+    is how the free-column infeasible LPs lose their certificates. Widening the margin to
+    rescue them would put roundoff back inside the certificate; deciding exactly keeps both
+    the guard and the proofs.
+
+    A column with ``r_j = 0`` contributes nothing whatever its box side, which is the
+    ``0 * inf = 0`` convention of :func:`_box_prod` made exact. A nonzero ``r_j`` pointing
+    along an open side makes the supremum ``+inf``, which proves nothing.
+    """
+    indptr, indices, data = sf.A.indptr, sf.A.indices, sf.A.data
+    zero = Fraction(0)
+    for s in (1, -1):
+        ys = [Fraction(float(v)) * s for v in y]
+        yb = sum((Fraction(float(sf.b[i])) * ys[i] for i in range(sf.m)), zero)
+        sup = zero
+        bounded = True
+        for j in range(sf.n):
+            rj = sum(
+                (
+                    Fraction(float(data[k])) * ys[indices[k]]
+                    for k in range(indptr[j], indptr[j + 1])
+                ),
+                zero,
+            )
+            if rj > 0:
+                if sf.xu[j] >= INF:
+                    bounded = False
+                    break
+                sup += rj * Fraction(float(sf.xu[j]))
+            elif rj < 0:
+                if sf.xl[j] <= -INF:
+                    bounded = False
+                    break
+                sup += rj * Fraction(float(sf.xl[j]))
+        if bounded and yb > sup:
+            return True
+    return False
+
+
 def farkas_verified(y: np.ndarray, sf: StdForm) -> bool:
     """True iff ``y`` (in either orientation) proves ``A x = b, xl <= x <= xu`` empty.
 
     For every box point ``yᵀA x <= sup_box (Aᵀy)ᵀx``; if that supremum is finite and
-    below ``yᵀb`` by a relative margin, no box point satisfies the rows. A nonzero
-    ``(Aᵀy)_j`` on an open side makes the supremum infinite and the ray is refused.
+    strictly below ``yᵀb``, no box point satisfies the rows.
+
+    ``r = Aᵀy`` is a floating-point column dot, so it is only known to lie in
+    ``[r - e, r + e]`` with ``e = (nnz_j + 2)·eps·Σ_i |A_ij y_i|``. The supremum is taken
+    over that interval as well as over the box, and ``yᵀb`` is lowered by its own
+    summation error, so the contradiction has to survive the arithmetic that produced it.
+    The module corrects for the same absorption in :func:`fbbt_box` and ``_on_open_side``.
+
+    Comparing against a *relative* margin of the rounded total instead was unsound:
+    roundoff in a column dot enters the supremum at full magnitude while raising the
+    margin by only ``RAY_REL`` times itself. Bounding that error by ``|side|`` is not
+    enough either -- a truly nonzero ``r_j`` that rounds to exactly ``0`` contributes no
+    term *and* no error -- so the whole box is used. A coefficient that may be nonzero on
+    an open side makes the supremum infinite and the ray is refused.
+
+    Clearing this bound proves the contradiction, but failing it proves nothing: the bound
+    is conservative, and on the huge box it refuses genuine rays whose ``r_j`` is exactly
+    ``0`` (see :func:`_farkas_exact`). So a float refusal falls through to the exact
+    rational decision rather than being taken as the answer.
     """
     y = np.asarray(y, dtype=np.float64)
     if y.shape != (sf.m,) or not np.all(np.isfinite(y)) or not np.any(y):
         return False
     y = y / np.max(np.abs(y))
+    absA = abs(sf.A).tocsc()
+    nnz_col = np.diff(absA.indptr)
+    lo_x = np.where(sf.xl <= -INF, -np.inf, sf.xl)
+    hi_x = np.where(sf.xu >= INF, np.inf, sf.xu)
     for s in (1.0, -1.0):
-        r = sf.A.T @ (s * y)
-        yb = float(sf.b @ (s * y))
-        pos, neg = r > 0.0, r < 0.0
-        if np.any(pos & (sf.xu >= INF)) or np.any(neg & (sf.xl <= -INF)):
+        ys = s * y
+        r = np.asarray(sf.A.T @ ys, dtype=np.float64)
+        r_err = (nnz_col + 2) * _EPS * np.asarray(absA.T @ np.abs(ys), dtype=np.float64)
+        lo_t, hi_t = r - r_err, r + r_err
+        sup_j = np.maximum(
+            np.maximum(_box_prod(lo_t, lo_x), _box_prod(lo_t, hi_x)),
+            np.maximum(_box_prod(hi_t, lo_x), _box_prod(hi_t, hi_x)),
+        )
+        if not np.all(np.isfinite(sup_j)):
             continue
-        terms = np.where(pos, r * sf.xu, 0.0) + np.where(neg, r * sf.xl, 0.0)
-        sup = float(np.sum(terms))
-        scale = 1.0 + abs(yb) + float(np.sum(np.abs(terms)))
-        if np.isfinite(sup) and yb - sup > RAY_REL * scale:
+        sup = float(np.sum(sup_j))
+        sup_err = (sup_j.size + 2) * _EPS * float(np.sum(np.abs(sup_j)))
+        yb = float(sf.b @ ys)
+        yb_err = (sf.m + 2) * _EPS * float(np.sum(np.abs(sf.b * ys)))
+        if np.isfinite(sup) and (yb - yb_err) - (sup + sup_err) > 0.0:
             return True
-    return False
+    return _farkas_exact(y, sf)
 
 
 def primal_ray_verified(d: np.ndarray, sf: StdForm) -> bool:

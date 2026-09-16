@@ -61,6 +61,31 @@ def test_farkas_ray_is_verified_in_either_orientation_and_refused_when_unsound()
     assert not H.farkas_verified(np.array([1.0]), open_side)
 
 
+def test_farkas_refuses_a_ray_whose_contradiction_is_only_roundoff():
+    """``r = Aᵀy`` is a floating-point column dot. At ``2**53`` the ``+1`` of column 0 is
+    absorbed, so the computed ``Aᵀy`` is ``[-1, 1, 1]`` where the exact one is ``[0, 1, 1]``.
+    That spurious ``-1`` dropped the box supremum from 4 to 3, and the old relative margin
+    (``RAY_REL`` times the *rounded* total, 1.1e-8 here) was cleared by a gap the arithmetic
+    had manufactured -- on a problem whose ``x* = (1, 2, 2)`` satisfies every row exactly.
+
+    This is the LP ``infeasible`` label's only gate, and the ``farkas-root-lp`` promotion
+    in ``solve_milp_std`` turns it into a certified MILP ``infeasible``, so a wrong accept
+    here is a wrong certificate.
+    """
+    P = 2.0**53
+    sf = H.StdForm.from_arrays(
+        [0.0, 0.0, 0.0],
+        [[P, 1.0, 0.0], [1.0, 0.0, 0.0], [-P, 0.0, 1.0], [-1.0, 0.0, 0.0]],
+        [P + 2.0, 1.0, -P + 2.0, -1.0],
+        [1.0, 2.0, 2.0], [1.0, 2.0, 2.0],
+    )  # fmt: skip
+    xstar = np.array([1.0, 2.0, 2.0])
+    # The premise: x* is feasible exactly, with no tolerance doing any work.
+    assert np.array_equal(sf.A @ xstar, sf.b)
+    assert H.feasibility_problem(xstar, sf, check_integrality=False) is None
+    assert not H.farkas_verified(np.array([1.0, 1.0, 1.0, 1.0]), sf)
+
+
 def test_primal_ray_must_lie_in_the_recession_cone_and_descend():
     sf = H.StdForm.from_arrays([-1.0, -1.0], [[1.0, -1.0]], [0.0], [0, 0], [INF, INF])
     assert H.primal_ray_verified(np.array([1.0, 1.0]), sf)
