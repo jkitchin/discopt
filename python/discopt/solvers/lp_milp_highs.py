@@ -703,20 +703,28 @@ def _set_options(h, highspy, opts: list[tuple[str, Any]]) -> None:
             raise RuntimeError(f"HiGHS rejected option {key}={val!r} (status {st})")
 
 
-def _huge_box(sf: StdForm) -> np.ndarray:
-    """Columns with a finite declared bound at sentinel-adjacent magnitude (the default
-    ±9.999e19 box)."""
+def _huge_box(sf: StdForm) -> tuple[np.ndarray, np.ndarray]:
+    """Per-side masks of the finite declared bounds at sentinel-adjacent magnitude (the
+    default ±9.999e19 box).
+
+    The sides are returned separately because a column can carry one sentinel-magnitude
+    side and one ordinary declared side. Folding them into a single column mask and
+    re-deriving the side from the sign discards the declared side too: ``lb=-5`` with a
+    default ``ub`` opened to ``[-inf, inf]``, and the MILP route answered ``error`` where
+    the declared box has an optimum. ``lb=0`` escaped only because ``0 < 0`` is false.
+    """
     lo = (np.abs(sf.xl) >= READBACK_LIMIT) & (sf.xl > -INF)
     hi = (np.abs(sf.xu) >= READBACK_LIMIT) & (sf.xu < INF)
-    return np.asarray(lo | hi, dtype=bool)
+    return np.asarray(lo, dtype=bool), np.asarray(hi, dtype=bool)
 
 
-def _relax_huge_box(sf: StdForm, huge: np.ndarray) -> StdForm:
-    """``sf`` with the huge finite bounds opened to infinity: a relaxation of ``sf``."""
+def _relax_huge_box(sf: StdForm, huge_lo: np.ndarray, huge_hi: np.ndarray) -> StdForm:
+    """``sf`` with the huge finite bounds opened to infinity, one side at a time: a
+    relaxation of ``sf`` that keeps every ordinary declared bound."""
     return dataclasses.replace(
         sf,
-        xl=np.where(huge & (sf.xl < 0), -INF, sf.xl),
-        xu=np.where(huge & (sf.xu > 0), INF, sf.xu),
+        xl=np.where(huge_lo, -INF, sf.xl),
+        xu=np.where(huge_hi, INF, sf.xu),
     )
 
 
@@ -823,7 +831,7 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
     # bounds relaxed to infinity then looks for a Farkas ray. A ray of the relaxed
     # problem also proves the declared problem empty, and it is verified against the
     # declared bounds regardless. Nothing else from that re-solve is used.
-    huge_box = _huge_box(sf)
+    huge_lo, huge_hi = _huge_box(sf)
     presolve_off = False
     relaxed = False
     last_reason = ""
@@ -842,7 +850,7 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             opts.append(("presolve", "off"))
         h = _new_highs(highspy, opts)
         stats["highs/version"] = _version_number(h)
-        sf_pass = _relax_huge_box(sf, huge_box) if relaxed else sf
+        sf_pass = _relax_huge_box(sf, huge_lo, huge_hi) if relaxed else sf
         pass_st, pass_why = _pass_model(h, highspy, sf_pass, integer=False)
         if pass_st == highspy.HighsStatus.kError:
             return done(HighsOutcome("error", message=pass_why))
@@ -878,7 +886,7 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             why = readback_problem(x, sf, row_dual=y, col_dual=rc) or feasibility_problem(
                 x, sf, check_integrality=False
             )
-            if why and huge_box.any():
+            if why and (huge_lo.any() or huge_hi.any()):
                 relaxed = True
                 last_reason = f"HiGHS LP optimal: {why}"
                 stats["lp/huge_box_relaxed_resolve"] = 1.0
@@ -1074,10 +1082,10 @@ def solve_milp_std(
     # HiGHS is handed the relaxation with those bounds open. That keeps an infeasible
     # label and a dual bound valid for ``sf``, and every incumbent is still verified
     # against the declared box below.
-    huge = _huge_box(sf)
-    if huge.any():
+    huge_lo, huge_hi = _huge_box(sf)
+    if huge_lo.any() or huge_hi.any():
         stats["milp/huge_box_relaxed"] = 1.0
-    pass_st, pass_why = _pass_model(h, highspy, _relax_huge_box(sf, huge), integer=True)
+    pass_st, pass_why = _pass_model(h, highspy, _relax_huge_box(sf, huge_lo, huge_hi), integer=True)
     if pass_why:
         # No MILP certificate is re-derivable from ``sf`` (HiGHS's infeasible label and
         # tree bound are trusted as-is), so a model HiGHS changed on the way in -- or
