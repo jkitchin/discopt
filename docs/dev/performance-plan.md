@@ -8913,3 +8913,64 @@ limit, so that column measured throughput, not work — an arm getting through
 fewer nodes was slower per node, not better. At a fixed node budget, compared on
 the dual bound, the result reverses completely. A time-limited node count is not
 a work measurement, and the tell is `status == "feasible"` in every arm.
+
+## 67. #1276 n-ary registered atoms: the lift is not the mechanism (falsified 2026-09-16)
+
+#1276 proposed extending `dm.register_function` to multi-argument lowerings, with
+the derived curvature becoming a Hessian enclosure and the emitter becoming
+`uniform_relax._try_convex_lift` instead of `_emit_1d`. The reasoning was sound:
+`canonical_expr._sum` flattens nested sums, so a multivariate composite written in
+primitives never exists as a node — its terms become siblings of every other
+objective term, the lift is offered the whole mixed-curvature sum, abstains, and
+descends. Registration is the only way to create the grouping.
+
+That part is real and was confirmed: `exp(x+y) + exp(y+z) + (x-z)²` and a
+three-term entropy sum each score one `composite_convex` lift standing alone, zero
+when flattened behind an indefinite blocker, and one again when grouped behind
+`g == composite`. The grouping is genuinely lost and genuinely recoverable.
+
+It is also worth nothing. `scripts/entry_1276_nary_atoms.py` (296 probes):
+
+**1. On the CALPHAD class C was motivated by, the lift never certifies at any
+width**, so a registration has nothing to hand it. Twelve random sub-boxes at each
+of six widths from 1.0 to 0.005:
+
+| composite | w=1 | w=0.5 | w=0.25 | w=0.1 | w=0.02 | w=0.005 |
+|---|---|---|---|---|---|---|
+| cef cross product | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 |
+| cef excess (RK × z) | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 |
+| cef full objective | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 |
+| **CONTROL convex sum-exp** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** |
+
+Structural, not a budget artefact: a CEF's cross terms are bilinear, whose Hessian
+`[[0,c],[c,0]]` has eigenvalues ±|c| on *every* box, so interval-Gershgorin can
+never be sign-definite. The control fires at every width, which is what makes the
+zeros mean something (CLAUDE.md §6).
+
+**2. Where a composite does certify, its terms already carry tight envelopes.**
+`sum-exp` and `entropy` sit at a 0.00% root gap flattened *and* grouped, against a
+dense-sampled truth. Recovering the lift changes the bound by −0.00%.
+
+**3. Even on the composite best suited to C, the lift is not the answer.**
+`log(exp x + exp y + exp z)` is the worst case for term-wise relaxation — the
+factorable path relaxes the outer `log` as *concave* over a separately relaxed
+exp-sum. The lift fires in both spellings and still:
+
+| arm | root bound | truth | root gap |
+|---|---:|---:|---:|
+| flattened, LSE atom off | −0.10865 | 1.55196 | 107.00% |
+| grouped, LSE atom off | −0.09679 | 1.55196 | 106.24% |
+| flattened, LSE atom **ON** | 1.55195 | 1.55196 | **0.00%** |
+| grouped, LSE atom **ON** | 1.55195 | 1.55196 | **0.00%** |
+
+Grouping is worth 0.76 of a 107-point gap. What closes it is the purpose-built
+log-sum-exp envelope — a hand-written treatment, not something derivable from a
+lowering, and a user-supplied envelope is exactly what component A excluded by
+design. So C is declined: its mechanism (a node for the lift) is confirmed to work
+and confirmed not to matter.
+
+**Left on the table, for #632's ATOM-REDUNDANCY-REVIEW cluster rather than here:**
+those last two rows are `DISCOPT_LOGSUMEXP_ATOM`, **default OFF**, taking a 107%
+root gap to 0.00%. The in-tree note already records it as HELPS (103 → 3 nodes).
+Graduating it is a §5 bound-changing decision needing its own differential panel;
+it is not #1276's to make, but it is the largest single number this round turned up.
