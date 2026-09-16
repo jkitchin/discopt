@@ -98,6 +98,33 @@ def test_parallel_results_carry_their_model_back():
         assert np.asarray(val).shape in ((), (1,))
 
 
+def _pricing(i: int) -> "dm.Model":
+    """The CALPHAD pricing shape: one ``xlogx`` per site fraction, a mu per
+    component, and a different mu per model so a dropped value cannot go
+    unnoticed."""
+    m = dm.Model(f"pricing{i}")
+    y0 = m.continuous("y0", lb=1e-6, ub=1.0)
+    y1 = m.continuous("y1", lb=1e-6, ub=1.0)
+    mu0 = m.parameter("mu0", -1.0 - i)
+    mu1 = m.parameter("mu1", 0.5 * i)
+    m.minimize(dm.xlogx(y0) + dm.xlogx(y1) - mu0 * y0 - mu1 * y1)
+    m.subject_to(y0 + y1 == 1.0)
+    return m
+
+
+def test_parameter_values_cross_the_worker_boundary():
+    """Workers rebuild each model from its serialized text, so a ``Parameter``
+    value that failed to cross would have every worker solving a *different*
+    problem — silently, and with a plausible answer."""
+    seq = dm.solve_batch([_pricing(i) for i in range(4)], workers=1, time_limit=30)
+    par = dm.solve_batch([_pricing(i) for i in range(4)], workers=4, time_limit=30)
+    for i, (a, b) in enumerate(zip(seq, par)):
+        assert _same(a, b), (i, a.status, b.status, a.objective, b.objective)
+    # Distinct mu -> distinct optima; without this the equality above could hold
+    # on four copies of the same wrongly-parameterised model.
+    assert len({round(r.objective, 9) for r in par}) == 4, [r.objective for r in par]
+
+
 def test_callbacks_are_refused_for_worker_processes():
     with pytest.raises(ValueError, match="cannot forward"):
         dm.solve_batch(
