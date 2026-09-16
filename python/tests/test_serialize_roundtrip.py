@@ -59,9 +59,18 @@ def _kinetics_model():
 
 @pytest.mark.smoke
 def test_document_is_stable_under_reload():
+    """Model *content* is byte-stable across a reload.
+
+    Written with ``provenance=False``: the provenance block is metadata about the
+    document, not about the model, and it is timestamped -- so re-dumping a loaded
+    model legitimately produces a different (later, and ``derived_from``-carrying)
+    block. Stripping it keeps this assertion on the invariant it is actually for.
+    ``test_provenance.py`` covers the block itself, including that a re-dump
+    differs *only* there.
+    """
     m = _kinetics_model()
-    once = dumps(m)
-    assert dumps(loads(once)) == once
+    once = dumps(m, provenance=False)
+    assert dumps(loads(once), provenance=False) == once
 
 
 @pytest.mark.smoke
@@ -87,9 +96,11 @@ def test_reloaded_model_keeps_variable_names_unlike_nl():
 def test_corpus_round_trip_is_nl_byte_identical(nl_path):
     """Every in-repo MINLPLib instance survives .nl -> native -> .nl unchanged."""
     m = dm.from_nl(str(nl_path))
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     reloaded = loads(once)
-    assert dumps(reloaded) == once, f"{nl_path.stem}: document not stable under reload"
+    assert dumps(reloaded, provenance=False) == once, (
+        f"{nl_path.stem}: document not stable under reload"
+    )
     assert reloaded.to_nl() == m.to_nl(), f"{nl_path.stem}: .nl differs after round trip"
 
 
@@ -153,7 +164,14 @@ def test_gzip_is_detected_by_magic_bytes_not_filename(tmp_path):
 
     renamed = tmp_path / "no_suffix.bin"
     gz.rename(renamed)
-    assert dumps(load(renamed)) == dumps(load(plain)) == dumps(m)
+    # `provenance=False` for the comparison only: the two files were saved by
+    # separate `save` calls and carry their own timestamps, which is a difference
+    # between the documents, not between the models this test is about.
+    assert (
+        dumps(load(renamed), provenance=False)
+        == dumps(load(plain), provenance=False)
+        == dumps(m, provenance=False)
+    )
 
 
 @pytest.mark.smoke
@@ -185,9 +203,9 @@ def test_relations_survive_that_nl_refuses():
     with pytest.raises(ValueError, match="indicator"):
         m.to_nl()
 
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
     assert [type(c).__name__ for c in back._constraints] == [
         type(c).__name__ for c in m._constraints
     ]
@@ -285,9 +303,9 @@ def test_builder_resident_rows_survive(objective):
     m = _fast_api_model(objective)
     assert len(m._constraints) == 0 and len(m._builder_linear_blocks) == 1
 
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
     assert len(back._builder_linear_blocks) == 1, "blocks must stay builder-resident"
     assert len(back._constraints) == 0, "blocks must not be relocated into _constraints"
     assert back.num_constraints == m.num_constraints
@@ -406,9 +424,9 @@ def test_complementarity_relation_round_trips():
     from discopt.mpec import resolve_source_variables
 
     m, x, y, pair = _mpcc()
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
 
     assert len(back._complementarities) == 1
     rel = back._complementarities[0]
@@ -462,9 +480,9 @@ def test_unlowered_relation_is_not_marked_lowered():
     register_relations(m, [complementarity(x, y, name="never_lowered")])
     assert len(unlowered_relations(m)) == 1
 
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
     assert len(unlowered_relations(back)) == 1
     assert back._lowered_complementarities == {}
 
@@ -557,9 +575,9 @@ def test_source_link_carries_a_parent_outside_the_declared_list():
     register_relations(m, elements)  # only the elements are declared
     assert all(p is not parent for p in m._complementarities)
 
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
 
     assert len(back._complementarities) == 2
     parents = {id(rel.source) for rel in back._complementarities}
@@ -639,9 +657,9 @@ def test_decomposition_annotations_survive():
     m.set_block(y, 0)
     m.mark_coupling(link)
 
-    once = dumps(m)
+    once = dumps(m, provenance=False)
     back = loads(once)
-    assert dumps(back) == once
+    assert dumps(back, provenance=False) == once
     assert back._decomp_stages == m._decomp_stages
     assert back._decomp_blocks == m._decomp_blocks
     # `mark_coupling` records id(constraint) for the object form; a raw id is a
