@@ -172,7 +172,8 @@ def test_reduction_separation_timers_present_and_bounded():
     timer is strictly positive (cert:T0.3).
 
     Plus per-decision cut-pool telemetry (``pool/gate_*``, cut-inheritance gating)
-    and the ``row_filter/`` counters (#1039/#1150).
+    and the ``row_filter/`` counters (#1039/#1150). ``gap_criterion`` is the one
+    string entry (#1243).
 
     NOTE (schema, not a weakening): the ``sum(values) <= wall_time`` invariant is
     only meaningful for the *timer* families — ``cuts/`` values are counts and
@@ -201,7 +202,11 @@ def test_reduction_separation_timers_present_and_bounded():
     # reaches this schema check on every spatial solve.
     _NON_TIMER_FAMILIES = ("cuts/", "pool/", "row_filter/")
     _KNOWN = _TIMER_FAMILIES + _NON_TIMER_FAMILIES
-    # Every entry is a non-negative float in a known instrumentation family.
+    # ``gap_criterion`` (#1243) is the one documented non-numeric entry: which arm
+    # of the convergence test the returned pair meets, present only when one does.
+    crit = stats.pop("gap_criterion", None)
+    assert crit in (None, "absolute", "relative"), f"gap_criterion={crit!r}"
+    # Every other entry is a non-negative float in a known instrumentation family.
     assert all(isinstance(v, float) and v >= 0.0 for v in stats.values())
     assert all(k.startswith(_KNOWN) for k in stats), (
         f"unexpected solver_stats keys: {[k for k in stats if not k.startswith(_KNOWN)]}"

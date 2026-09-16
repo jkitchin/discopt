@@ -1,0 +1,239 @@
+#+TITLE: Eigenvalue Degeneracy Constraints in Global Optimization
+#+FILETAGS: :method:mecp:meci:eigenvalue-degeneracy:formulation:relaxation:mccormick:factorable:discriminant:gdp:global-optimization:
+
+* Eigenvalue Degeneracy Constraints in Global Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: richings2023 galvan2023 levine2008 koppel1984 berkolaiko2021 mitsos2009mccormick schweidtmann2019ann schweidtmann2021gp anderson2020 ravutla2026 braams2009 maranas1994jcp kitchin2026
+:STATUS: draft
+:CREATED: 2026-08-22
+:END:
+
+A minimum-energy crossing point asks for the lowest point of a set defined by an
+*eigenvalue degeneracy* (see [[file:../concepts/potential-energy-surface-crossings.org][Potential Energy Surface Crossings]]). Every algebraic
+way of writing that condition defines the same feasible set, so a local optimizer
+is nearly indifferent between them. A relaxation-based global solver is not:
+measured on one two-mode conical-intersection model with an analytic answer, the
+formulations span roughly four orders of magnitude in solve cost, and the
+formulation the field standardized on is the one that fails outright. This
+article is the formulation map, plus the open items a state-of-the-art
+implementation would have to settle.
+
+** The formulations, in order of relaxation quality
+
+Let \(W(x)\) be the \(2\times 2\) symmetric potential matrix with entries
+\(W_{11}, W_{22}, W_{12}\), and \(E_\pm\) its eigenvalues.
+
+*** Diabatic form — degeneracy as \(W = cI\)
+
+Degeneracy of a \(2\times 2\) real symmetric matrix is exactly
+\(W_{11}=W_{22}\) **and** \(W_{12}=0\), i.e. \(W\) is a multiple of the identity:
+
+\[ \min \tfrac{1}{2}(W_{11}+W_{22}) \quad\text{s.t.}\quad W_{11}-W_{22}=0,\; W_{12}=0 \]
+
+No radical, no squaring, and the constraints inherit whatever structure the
+diabats have. On a linear vibronic coupling model citep:koppel1984 the two
+constraints are *affine* and the objective is a convex quadratic, so the problem
+is a convex QP and a solver disposes of it at the root with zero branching. That
+is a property of the LVC model rather than of diabatic representations in
+general, and any comparison that uses it as the baseline should say so.
+
+The catch is practical: it requires a diabatic representation, which is not
+uniquely defined and not what an electronic-structure code hands you.
+
+*** Difference form — the spin-crossing case
+
+When the interstate coupling vanishes by spin symmetry the adiabats *are* the
+diabats, and the whole problem is
+
+\[ \min W_1 \quad\text{s.t.}\quad W_1 - W_2 = 0. \]
+
+A linear difference of two surfaces relaxes as well as the surfaces themselves.
+This is the cheapest correct formulation whenever it applies, and measurements
+consistently favour it over every reformulation below — including the
+characteristic-polynomial form, which on a spin crossing is a *bad* trade because
+squaring the surfaces widens the relaxation for no structural gain.
+
+*** Characteristic-polynomial (discriminant) form — representation-free
+
+The coefficients of the characteristic polynomial are the symmetric functions of
+the eigenvalues and stay smooth through the intersection even though the
+eigenvalues do not citep:richings2023:
+
+\[ T = E_1+E_2 = W_{11}+W_{22}, \qquad D = E_1E_2 = W_{11}W_{22}-W_{12}^2 \]
+
+Degeneracy is the vanishing of the discriminant \(T^2-4D=(E_1-E_2)^2\), and at
+degeneracy \(E_1=E_2=T/2\):
+
+\[ \min \tfrac{1}{2}T \quad\text{s.t.}\quad T^2 - 4D \le 0. \]
+
+The inequality is exact because \(T^2-4D \ge 0\) identically. This needs no
+diabatization and is exactly the pair of quantities the machine-learned-seam
+literature already fits — the reason it is the natural bridge between a learned
+surrogate and a global solver.
+
+Two properties deserve emphasis, one favourable and one a trap.
+
+**Favourable: LICQ fails, and that is fine here.** Since \(T^2-4D=(E_1-E_2)^2\),
+its gradient \(2(E_1-E_2)\nabla(E_1-E_2)\) vanishes at *every* feasible point.
+Constraint qualification fails on the entire feasible set, so Newton-type local
+methods lose their convergence theory. Measured consequences are
+algorithm-dependent rather than universal — an SQP implementation can fail on
+roughly half of random starts while a trust-region interior method handles the
+degeneracy completely — but a relaxation-based solver does not need LICQ at all.
+It needs valid bounds. This is one of the few places where a global method is
+structurally *better suited* than the local alternative rather than merely more
+expensive.
+
+**The trap: the inequality form is only exact for a genuine symmetric matrix.**
+\(T^2-4D\ge 0\) holds identically when \(T\) and \(D\) are the trace and
+determinant of a real symmetric \(W\). It does *not* hold when \(\hat T\) and
+\(\hat D\) are two independently fitted surrogates — which is precisely what
+citep:richings2023 constructs. Wherever the fit has \(\hat T^2 < 4\hat D\), the
+constraint \(\hat T^2-4\hat D \le 0\) admits an open region of points that are not
+crossings at all, and a solver will certify a global optimum of the wrong problem
+without any warning. A state-of-the-art implementation must either (a) use the
+equality \(\hat T^2-4\hat D=0\), (b) constrain the fit so the discriminant is
+nonnegative by construction (e.g. fit \(T\) and the gap-squared, or fit the
+matrix entries rather than the invariants), or (c) verify \(\hat T^2\ge 4\hat D\)
+over the box before relaxing. This is a soundness issue in the *formulation*, not
+in the solver, and it is not visible from the chemistry framing.
+
+*** Adiabatic form — the radical
+
+\[ \min E_- \quad\text{s.t.}\quad E_+ - E_- = 0 \]
+
+Expressible in any factorable solver with =sqrt=, and it does solve. It is
+strictly worse than the forms above because the radical's argument vanishes
+exactly at the solution: the envelope of \(\sqrt{\cdot}\) on a box touching zero
+is one-sided, since the endpoint tangent there has infinite slope. A
+general-purpose engine that silently drops that facet loses the tightest part of
+the envelope in exactly the region that contains the answer. The same shape
+affects \(\arcsin/\arccos\) at \(\pm 1\), \(\mathrm{arcosh}\) at \(1\), and
+\(\log\) near zero — the fix is to place the tangent at an interior point rather
+than dropping it, which is a *bound-changing* change and needs the corresponding
+verification discipline.
+
+*** Penalty form — do not
+
+\[ \min \tfrac{1}{2}(E_1+E_2) + \sigma\frac{(\Delta E)^2}{|\Delta E| + \alpha} \]
+
+The standard local method citep:levine2008 in unconstrained form. As an object to
+relax it is close to worst case: a squared numerator over a denominator whose
+lower bound is the small smoothing parameter \(\alpha\), so the relaxation of the
+quotient is enormous and the dual bound is useless — measured relative gaps of
+\(10^3\)–\(10^4\) on *two-variable* problems that the constrained form certifies
+in five nodes. The one place it is correct is a derivative-free search
+(e.g. DIRECT), which requires an unconstrained problem and returns no bound
+anyway.
+
+** Coordinates and gauge
+
+Free Cartesian coordinates are the second formulation mistake. Beyond tripling
+the variable count, every translation and rotation of a crossing point is also a
+crossing point, so the problem carries a six-parameter continuum of equivalent
+optima. Measured behaviour on a triatomic: internal coordinates certify in five
+nodes and a second; the same energies in nine free Cartesians reached a 93 %
+gap after three minutes; gauge fixing (atom 0 at the origin, atom 1 on \(+x\),
+atom 2 in the \(xy\) half-plane) restores certifiability at roughly 66× the nodes
+of the internal-coordinate form, because the energies then reach the coordinates
+through \(\sqrt{\sum(\Delta x)^2}\) compositions rather than directly.
+
+The practical rule — *internal coordinates or a gauge-fixed frame, never free
+Cartesians* — is well supported. The *mechanism* is not yet isolated: dimension
+(3 → 9), the extra =sqrt= compositions, and the degenerate optimal manifold are
+confounded in that measurement, and a nine-coordinate internal-coordinate
+instance also fails to certify in the same budget. Separating them needs a
+controlled experiment — fix translation only, then rotation only, then both —
+which has not been run. A degenerate continuum of optima does not by itself break
+convergence of spatial branch-and-bound in *value*; what it reliably does is
+prevent fathoming by strict improvement.
+
+** Beyond two states
+
+The chemically interesting question is one level up: which *pair* of several
+low-lying states crosses lowest. That is a disjunction, and it makes the problem
+a genuine MINLP or GDP (see [[file:../concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]]):
+
+\[ \min_{x,y} E \;\;\text{s.t.}\;\; y_p = 1 \Rightarrow \big(W_i(x)=W_j(x),\; E=W_i(x)\big),\quad \textstyle\sum_p y_p = 1 \]
+
+Measured at three states, enumeration of the three pairs beats the disjunctive
+formulation by about 2.7× — the expected answer at that size, where the
+alternative is three tiny independent problems. The disjunctive form is the
+interesting one as the number of states \(K\) grows, since pairs grow as
+\(O(K^2)\) and a single tree can prune an entire pair on a bound instead of
+solving it; note that pairs which never cross inside the box are exactly the case
+enumeration handles worst (it spends a full solve proving infeasibility) and a
+disjunctive formulation handles best. Where the crossover lies is unmeasured, and
+is the obvious next experiment. Big-M constants for such a formulation should
+come from interval bounds, not from a sampled maximum — a too-tight \(M\) cuts
+off valid crossings silently.
+
+*Two routes to a \(K\)-state degeneracy condition*, with different relaxation
+behaviour:
+
+1. *Discriminant.* Degeneracy of a \(K\times K\) symmetric matrix is the
+   vanishing of the discriminant of its characteristic polynomial — a polynomial
+   of degree \(2K-2\) in the coefficients. It generalizes cleanly on paper and
+   degrades badly in practice: McCormick relaxations of a high-degree polynomial
+   are very weak, so this is likely unusable beyond \(K=3\).
+2. *Eigenvector lifting (proposed, untested).* Introduce the degenerate
+   eigenvalue \(c\) and two eigenvectors explicitly: find \(x, c, u, v\) with
+   \(W(x)u = cu\), \(W(x)v = cv\), \(u^\top v = 0\), \(\|u\|=\|v\|=1\). Every
+   condition is *bilinear* in the lifted variables, which is the class McCormick
+   handles natively — a far lower-degree object than the discriminant, at the
+   cost of \(2K+1\) extra variables. The hazard is immediate and is the same one
+   as free Cartesians: \((u,v)\) is determined only up to a rotation within the
+   degenerate eigenspace, so the lifting *manufactures* a continuum of equivalent
+   optima and must be gauge-fixed (e.g. pin the largest component of \(u\), or
+   impose a normalization plus a sign convention). Worth measuring before
+   believing; the analogy to the Cartesian result suggests the gauge fix is not
+   optional.
+
+** Symmetry
+
+Molecules with equivalent atoms have permutationally equivalent crossing points,
+so each seam basin appears once per equivalent labelling and a branch-and-bound
+tree carries every symmetric copy. This is the classical symmetry problem in
+mathematical programming (orbital branching, isomorphism pruning, symmetry-
+breaking constraints), and it is untouched in this domain. Permutationally
+invariant polynomial surrogates citep:braams2009 are the chemistry-side answer to
+the *fitting* problem and are worth examining as a formulation-side answer to the
+optimization problem: a surrogate written in invariants has the symmetry quotiented
+out before the solver ever sees it.
+
+** The surrogate certification gap
+
+Because real surfaces are black boxes, a certificate on a fitted surrogate
+certifies the global optimum *of the fit*. Closing the remaining gap rigorously
+requires a validated error bound \(|E_\text{true}-E_\text{surrogate}| \le
+\epsilon\), which brackets the true crossing point by optimizing the surrogate
+\(\pm\epsilon\). Rigorous-remainder machinery (Taylor and Chebyshev models)
+exists for *factorable* functions but not for a data-fitted surrogate; the
+data-driven Lipschitz-informed underestimator line citep:ravutla2026 is the
+closest current approach to a bound derived from samples.
+
+The relaxation quality of the surrogate itself is the other half. Reduced-space
+McCormick relaxation of a program citep:mitsos2009mccormick is the foundation;
+its application to trained networks citep:schweidtmann2019ann and to Gaussian
+processes citep:schweidtmann2021gp is the state of the art for embedding a fitted
+model in a deterministic global solve, and the strong MIP formulations for
+piecewise-linear networks citep:anderson2020 are the ReLU-side counterpart (see
+[[file:../concepts/neural-network-embedding.org][Neural Network Embedding]] and [[file:../comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]]). Measured in-repo, a pair of
+small tanh networks over three coordinates gave a dual bound of \(-20.6\) against
+an optimum near \(1.6\) after ten minutes — the modelling is right, the
+certificate is out of reach at that width — so this is the item that would change
+what is *possible* rather than what is convenient.
+
+** Summary of what is settled and what is not
+
+| Question | Status |
+|---|---|
+| Which formulation for a spin crossing | Settled: the plain difference form |
+| Which formulation for a same-spin intersection | Settled: diabatic if available, else characteristic polynomial |
+| Penalty objective in branch-and-bound | Settled: never |
+| Coordinates | Settled in practice: internal or gauge-fixed; mechanism unmeasured |
+| Discriminant inequality on a *fitted* \((T,D)\) | Unsound without an extra guard; not addressed in the source literature |
+| \(K\)-state degeneracy | Open: discriminant degrades, eigenvector lifting untested |
+| Symmetry | Open and unmeasured |
+| Certified answer on a learned surface | Open; the main research item |

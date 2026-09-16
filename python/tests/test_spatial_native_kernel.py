@@ -158,7 +158,10 @@ def test_driver_passes_remaining_time_and_surfaces_partial_result(monkeypatch):
     assert result.objective == pytest.approx(2.0)
     assert result.bound == pytest.approx(1.5)
     assert result.node_count == 7
-    assert result.gap_certified is True
+    # #1262: a budgeted exit with an open gap (2.0 vs 1.5) is not a certificate;
+    # the bound itself is still rigorous, which is what ``bound_valid`` reports.
+    assert result.gap_certified is False
+    assert result.bound_valid is True
 
 
 def test_non_finite_time_limit_requests_an_uncapped_native_search(monkeypatch):

@@ -1,0 +1,122 @@
+#+TITLE: Potential Energy Surface Crossings (MECP / MECI)
+#+FILETAGS: :concept:mecp:meci:conical-intersection:potential-energy-surface:chemistry:global-optimization:eigenvalue-degeneracy:
+
+* Potential Energy Surface Crossings (MECP / MECI)
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: yarkony1993 bearpark1994 harvey1998 levine2008 koppel1984 atchity1991 worth2004 lykhin2016 berkolaiko2021 kitchin2026
+:STATUS: draft
+:CREATED: 2026-08-22
+:END:
+
+Two electronic states of a molecule generally have different energies at a given
+nuclear geometry, but along some geometries they become degenerate. The set of
+degenerate geometries is the *crossing seam*, and its lowest-energy point is the
+*minimum-energy crossing point* (MECP) or, when the two states have the same spin
+multiplicity, the *minimum-energy conical intersection* (MECI). These points play
+the role in spin-forbidden and photochemical reactions that a transition state
+plays in ordinary thermal chemistry: in nonadiabatic transition state theory the
+rate depends on the crossing energy through a Boltzmann factor citep:lykhin2016,
+so the crossing point that matters is the *lowest* one, not merely a nearby one.
+
+For an optimizer the problem is deceptively small. Let \(E_1(x)\) and \(E_2(x)\)
+be two adiabatic electronic energies as functions of nuclear geometry \(x\). Then
+
+\[ \min_x E_1(x) \quad \text{s.t.} \quad E_1(x) - E_2(x) = 0, \quad x \in [x^L, x^U] \]
+
+is a small, dense, continuous, nonconvex NLP with one or two nonlinear equality
+constraints — the shape a spatial branch-and-bound solver handles natively (see
+[[file:../methods/spatial-branch-and-bound.org][Spatial Branch and Bound]]). What makes the class interesting is not its size but
+three structural features, each of which changes what an algorithm can promise.
+
+** Two cases, distinguished by whether the states can couple
+
+If the two states differ in spin multiplicity — a singlet/triplet intersystem
+crossing — the interstate coupling vanishes by spin symmetry in the
+nonrelativistic Hamiltonian. Degeneracy is then a single condition, the seam has
+dimension \(3N-7\), and the adiabatic surfaces *are* the diabatic ones, so
+\(\min E_1\) subject to \(E_1 = E_2\) is the exact problem with no reformulation
+needed. This is the case usually called MECP (or MESX, minimum energy seam of
+crossing). Spin-orbit coupling, which actually drives the hop, is treated
+perturbatively at the located point rather than being part of the geometry
+optimization.
+
+If the two states share a multiplicity, degeneracy requires *two* conditions:
+the energies must match and the interstate coupling \(H_{12}\) must vanish. The
+intersection space then has dimension \(3N-8\) and the two remaining directions
+form the *branching space*, in which the surfaces separate linearly and trace out
+the double cone that gives the conical intersection its name citep:atchity1991.
+This is the MECI case, and it dominates photochemistry citep:worth2004.
+
+That the degeneracy of a real symmetric matrix is a codimension-2 condition is
+the von Neumann–Wigner theorem; the chemistry statement and the linear-algebra
+statement are the same statement. Stripped of chemistry, locating an MECI is the
+problem of finding parameter values at which a parametric real symmetric matrix
+family has a double eigenvalue citep:berkolaiko2021.
+
+** Why the surfaces are hard exactly where the answer is
+
+Near an intersection the two adiabats are the eigenvalues of a \(2\times 2\)
+potential matrix,
+
+\[ E_\pm = \frac{W_{11}+W_{22}}{2} \pm \sqrt{\left(\frac{W_{11}-W_{22}}{2}\right)^2 + W_{12}^2} \]
+
+so the radical vanishes *at the solution* and \(E_\pm\) are non-differentiable to
+any order precisely there. Every established algorithm in the field is built to
+avoid differentiating through the cone; see [[file:../methods/crossing-point-optimization.org][Crossing Point Optimization]]. The
+modern answer is to work with quantities that stay smooth through the
+intersection — a pseudodiabatic surrogate citep:galvan2023, or the coefficients
+of the characteristic polynomial of the potential matrix citep:richings2023 — and
+that turns out to be exactly the reformulation a factorable global solver wants
+(see [[file:../methods/eigenvalue-degeneracy-constraints.org][Eigenvalue Degeneracy Constraints]]).
+
+The linear vibronic coupling model citep:koppel1984 is the canonical analytic
+example: two harmonic diabats coupled linearly through a symmetry-breaking mode,
+whose MECI is available in closed form and therefore serves as an oracle for any
+proposed method.
+
+** Three structural difficulties for a certified method
+
+*Black-box surfaces.* \(E_1\) and \(E_2\) come from an electronic-structure
+program. There is no algebraic expression to relax, so deterministic global
+optimization is impossible on the *true* surfaces; any certified result is
+necessarily a statement about a surrogate, and turning it into a statement about
+the true surface requires a validated error bound. This is the same barrier the
+molecular-conformation global-optimization literature met citep:maranas1994jcp,
+and it is where the surrogate-relaxation methods discussed in
+[[file:neural-network-embedding.org][Neural Network Embedding]] become load-bearing rather than optional.
+
+*Redundant coordinates.* Production codes work in \(3N\) Cartesians and project
+out the six translation and rotation modes. For a local optimizer this redundancy
+is harmless. For branch-and-bound it is not: every translation and rotation of a
+crossing point is also a crossing point, so the problem carries a six-parameter
+continuum of equivalent optima on top of a coordinate count three times larger
+than necessary. Internal coordinates or a gauge-fixed Cartesian frame are a
+practical requirement.
+
+*Permutation symmetry.* Molecules with equivalent atoms have permutationally
+equivalent crossing points, so every seam basin appears once per equivalent
+labelling — the same symmetry that motivates permutationally invariant polynomial
+surrogates citep:braams2009 multiplies the search space for an exhaustive method.
+
+** Why the global question is the interesting one
+
+Multiple crossing points between the same pair of states are the norm rather than
+the exception, which is exactly why automated *exploration* methods exist
+citep:maeda2009addf,lindner2019. None of them certifies that the lowest one has
+been found. Because the crossing energy enters a rate constant exponentially, the
+difference between the lowest crossing point and the second-lowest is not a
+slightly worse answer but a rate wrong by orders of magnitude: a 0.28 eV basin
+error is a factor of \(\exp(0.278/0.02585) \approx 4.6\times 10^4\) at 300 K.
+
+This is the argument for treating MECP location as a global optimization problem
+with a certificate rather than as a local geometry optimization, and it is the
+gap that a relaxation-based solver is positioned to close — subject to the
+dimensional ceiling that spatial branch-and-bound imposes.
+
+** See also
+
+- [[file:../methods/crossing-point-optimization.org][Crossing Point Optimization]] — the established algorithms and what they guarantee
+- [[file:../methods/eigenvalue-degeneracy-constraints.org][Eigenvalue Degeneracy Constraints]] — how to pose the degeneracy for a relaxation-based solver
+- [[file:../summaries/discopt-mecp-readiness-2026.org][discopt MECP Readiness Assessment (2026)]] — the measured in-repo campaign
+- [[file:../methods/spatial-branch-and-bound.org][Spatial Branch and Bound]], [[file:../methods/mccormick-relaxations.org][McCormick Relaxations]]

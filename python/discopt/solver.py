@@ -1668,6 +1668,14 @@ def _try_native_spatial_kernel(
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=_kernel_abs_tol,
+            # #1263: the kernel's absolute test alone is the 1.0-floored relative
+            # test below unit magnitude (st_z: `Optimal` at 2.7e-5 over a true 0).
+            # The kernel CONJOINS this with `_gap_values_converged`'s own
+            # abs-OR-rel criterion, so it can only tighten the test above.
+            rel_gap_tol=float(gap_tolerance),
+            abs_gap_tol=(
+                _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+            ),
             time_limit_s=remaining,
             # Node-LP start basis (default OFF). The kernel's cold two-phase primal
             # grinds to `max_iter` on equality-rich, hence primal-degenerate,
@@ -1895,26 +1903,21 @@ def _try_native_spatial_kernel(
         rust_time=rust_total,
         jax_time=jax_total,
         python_time=wall_time - rust_total - jax_total,
-        gap_certified=math.isfinite(bound_val),
+        # #1262: certified means the gap CLOSED, which on this route only an
+        # ``optimal`` kernel exit proves. A budgeted exit (``time_limit`` /
+        # ``node_limit``) carries a valid bound (``bound_valid`` below) but an open
+        # gap — nvs13 at ``max_nodes=5`` exited ``node_limit`` with a 66% gap and
+        # used to report True here, disagreeing with every Python driver and with
+        # every consumer of the flag (``_route_result_is_certified``, phase gates).
+        gap_certified=(native_status == "optimal" and math.isfinite(bound_val)),
         # #1244: stated explicitly rather than left to the ``gap_certified``
-        # derivation, because on this route that flag is set from bound
-        # FINITENESS rather than from gap closure (the line above). ``bound_val``
-        # here is either the kernel's own rigorous frontier minimum (`TreeStatus`
-        # never reports a bound it did not prove) or, when the kernel exited
-        # bound-less, the root-relaxation fallback composed above -- both valid
-        # on every exit status the kernel is accepted on, so this value is
-        # correct.
-        #
-        # KNOWN LIMITATION (#1262): it is also, today, the SAME EXPRESSION as
-        # ``gap_certified`` on the line above, so ``bound_valid`` carries no
-        # information on this one route -- the two flags cannot disagree, and
-        # the whole point of the field is that they should. The defect is in
-        # ``gap_certified`` (a `node_limit` exit with a 40% open gap reports it
-        # True; measured on nvs13), not here: withdrawing that claim is a
-        # certification change across the corpus and is tracked in #1262 with
-        # the differential panel it needs. Until then, a consumer on this route
-        # learns nothing from ``bound_valid`` it could not get from
-        # ``gap_certified``.
+        # derivation. ``bound_val`` here is either the kernel's own rigorous
+        # frontier minimum (`TreeStatus` never reports a bound it did not prove)
+        # or, when the kernel exited bound-less, the root-relaxation fallback
+        # composed above -- both valid on every exit status the kernel is
+        # accepted on, so this value is correct. Unlike ``gap_certified`` it
+        # holds on budgeted exits too, so the two flags differ exactly where
+        # #1244 intends (#1262).
         bound_valid=math.isfinite(bound_val),
         bound_source=_native_bound_source,
         solver_stats=_native_stats,
@@ -5034,6 +5037,30 @@ def _gap_converged(tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS
     return _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol)
 
 
+def _tree_exhausted_with_proof(tree) -> bool:
+    """``tree.is_finished()`` as an optimality proof, i.e. no unproven removal.
+
+    An empty tree proves optimality only if every removed subtree was proved.
+    The Rust tree records the two ways one was not (#598/#467): an untrusted
+    node fathomed with no branch direction and no finite bound pins
+    ``bound_unresolved``; one with a finite inherited bound seeds
+    ``unresolved_floor``. The floor is a valid dual bound, and it already takes
+    part in ``global_lower_bound``, so :func:`_gap_converged` still certifies
+    when the floor-inclusive gap closes. What an empty tree must not do is
+    certify on its own over an open floor (#1270: seeded ``tls2`` with one
+    stalled convex node reported ``optimal`` at 5.3 against a bound of 2.81).
+    The MILP driver applies the same rule (``milp_driver.rs``,
+    ``decide_status``).
+    """
+    if not tree.is_finished():
+        return False
+    stats = tree.stats()
+    if bool(stats.get("bound_unresolved", False)):
+        return False
+    # ``inf`` is the "no floor" value; -inf or NaN is a removal with no bound.
+    return float(stats.get("unresolved_floor", float("inf"))) == float("inf")
+
+
 def _gap_values_converged(
     ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL
 ) -> bool:
@@ -5054,6 +5081,30 @@ def _gap_values_converged(
     return abs_gap / denom <= gap_tolerance
 
 
+def _recertify_gap_closed(
+    obj_val: float,
+    bound_val: float,
+    is_maximize: bool,
+    gap_tolerance: float,
+    abs_gap_tol: float,
+) -> bool:
+    """Whether a reported (incumbent, bound) pair closes the gap (#1263).
+
+    The predicate the ``feasible -> optimal`` re-certification sites use. It is
+    :func:`_gap_values_converged` with the pair ordered by sense (a MAXIMIZE bound
+    is an upper bound), so granting a certificate uses the same test as stopping
+    the search and as :func:`_gap_criterion`. Those sites previously compared
+    ``gap_tolerance`` against ``|obj - bound| / max(1, |obj|)``, whose 1.0 floor
+    turns the relative tolerance into an absolute one below magnitude 1 and
+    certified ``st_qpc-m3b`` at obj 9.1e-5 over a true optimum of 0.
+
+    The caller still owns the on-correct-side guard: ``_gap_values_converged``
+    clamps a crossed pair to gap 0.
+    """
+    ub, lb = (bound_val, obj_val) if is_maximize else (obj_val, bound_val)
+    return _gap_values_converged(float(ub), float(lb), gap_tolerance, abs_gap_tol)
+
+
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
     """Which of the two convergence criteria the final ``(ub, lb)`` pair meets.
 
@@ -5065,17 +5116,9 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     Both arms use the *identical* arithmetic to :func:`_gap_values_converged`,
     so this agrees with the test at every call site that consults that function.
 
-    It does NOT agree everywhere, and the exception is worth naming rather than
-    discovering: three *re-certification* sites (``solve_model``,
-    ``_solve_nlp_bb``, ``_solve_miqp_bb``) flip a ``feasible`` exit to
-    ``optimal`` by comparing ``gap_tolerance`` against a gap whose denominator
-    is floored at 1.0 -- the third gap formula in this file, and the very
-    degeneration :data:`_DEFAULT_ABS_GAP_TOL` was introduced to correct. On an
-    optimum below magnitude 1 those sites can certify where this function
-    reports ``None``, so such a result carries ``gap_certified=True`` with the
-    ``"gap_criterion"`` key ABSENT. That self-inconsistency is a symptom of the
-    floored formula, not of this one; tightening those three sites is
-    certification-changing corpus-wide and is tracked in #1263.
+    The ``feasible -> optimal`` re-certification sites use the same test via
+    :func:`_recertify_gap_closed` (#1263), so a re-certified result names
+    the criterion that closed it.
 
     Pure reporting: nothing here feeds back into the solver's math.
     """
@@ -16184,8 +16227,7 @@ def solve_model(
                     _taint_rig_bound_internal = _rig_int
 
         search_closed = not _rr_reserve_yield and (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol)
-            or (tree.is_finished() and not _bound_unresolved)
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         )
         if search_closed and _gap_certified:
             status = "optimal"
@@ -16462,8 +16504,8 @@ def solve_model(
         status == "feasible"
         and obj_val is not None
         and _bound_on_correct_side
-        and gap_val is not None
-        and gap_val <= gap_tolerance
+        and bound_val is not None
+        and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol)
         # B2-FIX (task #89): a bound recovered from a TAINTED tree (frontier
         # min floored by the tainted nodes' pop-time bounds) is reported but
         # never re-certifies: #27a's contract is that a non-rigorous fathom
@@ -17782,18 +17824,24 @@ def _solve_nlp_bb(
             # but reset to -inf for others so we don't prune incorrectly.
             if not _model_is_convex:
                 for i in range(n_batch):
-                    if result_lbs[i] < _SENTINEL_THRESHOLD:
-                        sol_is_int_feas = True
-                        for off, sz in zip(int_offsets, int_sizes):
-                            for j in range(off, off + sz):
-                                frac = abs(result_sols[i, j] - round(result_sols[i, j]))
-                                if frac > 1e-5:
-                                    sol_is_int_feas = False
-                                    break
-                            if not sol_is_int_feas:
+                    if result_lbs[i] >= _SENTINEL_THRESHOLD:
+                        # A local verdict on a nonconvex node, not a proof (see
+                        # the serial path). A box proved empty by in-tree presolve
+                        # is rigorous and stays out of the taint.
+                        if not node_infeasible_mask[i]:
+                            _unconverged_fathom = True
+                        continue
+                    sol_is_int_feas = True
+                    for off, sz in zip(int_offsets, int_sizes):
+                        for j in range(off, off + sz):
+                            frac = abs(result_sols[i, j] - round(result_sols[i, j]))
+                            if frac > 1e-5:
+                                sol_is_int_feas = False
                                 break
                         if not sol_is_int_feas:
-                            result_lbs[i] = -np.inf
+                            break
+                    if not sol_is_int_feas:
+                        result_lbs[i] = -np.inf
         else:
             # Serial fallback (batch_size=1 or non-IPM solver)
             result_ids = np.empty(n_batch, dtype=np.int64)
@@ -17884,8 +17932,15 @@ def _solve_nlp_bb(
                                 break
                         if not sol_is_int_feas:
                             nlp_lb = -np.inf
-                    # Guard: NaN lower bounds corrupt the Rust B&B tree.
-                    if not np.isfinite(nlp_lb):
+                    # Guard: NaN lower bounds corrupt the Rust B&B tree. ``-inf`` is
+                    # not one of them: it is the nonconvex "no bound, branch me"
+                    # value set just above, which ``import_results`` floors at the
+                    # parent bound. Sentinelling it marked every fractional
+                    # nonconvex node excluded; its children inherited the 1e30
+                    # floor, the first integer point entered the tree at 1e30 and
+                    # was dropped, and nvs08/nvs16/nvs20 came back ``infeasible``.
+                    # The batch path never had this guard and imports ``-inf``.
+                    if np.isnan(nlp_lb) or nlp_lb == np.inf:
                         nlp_lb = _INFEASIBILITY_SENTINEL
                     if _serial_abstain:
                         # Applied AFTER the NaN guard, which would otherwise
@@ -17899,10 +17954,14 @@ def _solve_nlp_bb(
                 else:
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
                     # A clean SolveStatus.INFEASIBLE is a valid infeasibility
-                    # certificate (for a convex node); ERROR/TIME_LIMIT/UNBOUNDED
+                    # certificate only for a convex node; ERROR/TIME_LIMIT/UNBOUNDED
                     # are not — they are solver failures that must not masquerade
-                    # as a proof of global infeasibility.
-                    if nlp_result.status != SolveStatus.INFEASIBLE:
+                    # as a proof of global infeasibility. On a nonconvex node the
+                    # local solver's INFEASIBLE is not a proof either: heuristic
+                    # mode reported nvs08/nvs16/nvs20 (all feasible) infeasible.
+                    if nlp_result.status != SolveStatus.INFEASIBLE or (
+                        not _model_is_convex and not node_infeasible_mask[i]
+                    ):
                         _unconverged_fathom = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
@@ -18416,8 +18475,11 @@ def _solve_nlp_bb(
     # is an untrusted node the tree had to fathom with no branch direction left;
     # it reports that as ``bound_unresolved`` (#598/#467), which is exactly the
     # gate ``solve_model``'s spatial path already applies. Decertify on that and
-    # on nothing else. The counter makes a no-op arm distinguishable from an arm
-    # that never fired (CLAUDE.md §6).
+    # on nothing else. The same fathom with a finite inherited bound instead
+    # seeds ``unresolved_floor``: that keeps a valid bound, so it does not
+    # decertify, but the status gate below then needs the floor-inclusive gap to
+    # close (``_tree_exhausted_with_proof``, #1270). The counter makes a no-op
+    # arm distinguishable from an arm that never fired (CLAUDE.md §6).
     if _stall_abstain and _stall_abstained:
         logger.info(
             "Convex stall abstention: %d node(s) fell back to their inherited "
@@ -18642,6 +18704,69 @@ def _solve_nlp_bb(
                     sol_flat = refined
                     x_dict = _unpack_solution(model, sol_flat)
                     obj_val = _ref_obj
+            # --- unscaled refine retry ---
+            # POUNCE ends on its SCALED residual. Gradient scaling shrinks a row
+            # with large coefficients by ``nlp_scaling_max_gradient / max|J_i|``,
+            # so the solve can leave an unscaled violation there that the exit
+            # gate below refuses, on a row whose term scale forgives nothing.
+            # Measured on portfol_roundlot (``nlp_bb=True``): at the incumbent's
+            # lot sizes the linking rows ``c_i x_i = n_i`` (c_i up to 1e5) and the
+            # budget row ``sum x_i = 1`` disagree by 3.35e-7. The scaled refine
+            # moved that onto the linking rows, where ``-78000 x2 + x11`` with
+            # ``x11 = 0`` read 2.6e-6, and POUNCE ended at "Solved To Acceptable
+            # Level". The exit raised and the solve returned nothing. The same
+            # refine with scaling off holds every linking row within 1.9e-10 and
+            # leaves the 3.35e-7 on the budget row, which the gate accepts.
+            #
+            # So when the point about to leave fails the gate, re-solve once
+            # unscaled, which is the norm the gate measures. Its output is adopted
+            # only when it clears the gate. The gate itself does not move, and a
+            # point that already clears it never reaches this branch.
+            _cur_exc, _, _ = _nonlinear_point_excess(
+                evaluator,
+                sol_flat,
+                cl_list,
+                cu_list,
+                n_rows=_declared_rows,
+                box=_declared_box,
+            )
+            if _cur_exc > _NLPBB_EXIT_ABS_TOL:
+                unscaled_opts = dict(refine_opts)
+                unscaled_opts["nlp_scaling_method"] = "none"
+                nlp_unscaled = _solve_node_nlp_kkt(
+                    evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, unscaled_opts
+                )
+                if (
+                    nlp_unscaled.status == SolveStatus.OPTIMAL
+                    and nlp_unscaled.x is not None
+                    and np.all(np.isfinite(nlp_unscaled.x))
+                    and nlp_unscaled.objective is not None
+                ):
+                    unscaled = np.asarray(nlp_unscaled.x, dtype=float).copy()
+                    for off, sz in zip(int_offsets, int_sizes):
+                        for k in range(int(sz)):
+                            unscaled[off + k] = round(float(sol_flat[off + k]))
+                    _uns_exc, _, _ = _nonlinear_point_excess(
+                        evaluator,
+                        unscaled,
+                        cl_list,
+                        cu_list,
+                        n_rows=_declared_rows,
+                        box=_declared_box,
+                    )
+                    if _uns_exc <= _NLPBB_EXIT_ABS_TOL:
+                        logger.info(
+                            "NLP-BB: adopting the unscaled refine (excess %.3e -> %.3e, "
+                            "objective %.6g -> %.6g); the scaled refine left the point "
+                            "outside the exit gate.",
+                            _cur_exc,
+                            _uns_exc,
+                            obj_val,
+                            float(nlp_unscaled.objective),
+                        )
+                        sol_flat = unscaled
+                        x_dict = _unpack_solution(model, sol_flat)
+                        obj_val = float(nlp_unscaled.objective)
             nlp_recovered = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
             )
@@ -18749,7 +18874,7 @@ def _solve_nlp_bb(
         # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
         # bound uncertified, so the search closing does not prove optimality.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:
@@ -18850,11 +18975,13 @@ def _solve_nlp_bb(
         and obj_val is not None
         and bound_val is not None
         and np.isfinite(bound_val)
-        and gap_val is not None
-        and gap_val <= gap_tolerance
     ):
         _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
-        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+        # #1263: the certificate is granted by the same gap test that stops the
+        # search, not by the 1.0-floored ``gap_val`` (which stays the reported gap).
+        if (
+            (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9)
+        ) and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol):
             _gap_certified = True
             status = "optimal"
 
@@ -24452,7 +24579,7 @@ def _solve_milp_bb(
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:
@@ -25194,7 +25321,7 @@ def _solve_miqp_bb(
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:
@@ -25285,11 +25412,13 @@ def _solve_miqp_bb(
         and obj_val is not None
         and bound_val is not None
         and np.isfinite(bound_val)
-        and gap_val is not None
-        and gap_val <= gap_tolerance
     ):
         _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
-        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+        # #1263: the certificate is granted by the same gap test that stops the
+        # search, not by the 1.0-floored ``gap_val`` (which stays the reported gap).
+        if (
+            (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9)
+        ) and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol):
             _gap_certified = True
             status = "optimal"
 

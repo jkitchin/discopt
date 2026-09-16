@@ -369,6 +369,80 @@ The release procedure that produces these entries is documented in
   versions, so persisting it reopens the #742 false-bound class), and a solve
   with a parameter change was not measurably slower than one without.
 
+- **Native spatial kernel no longer certifies an open gap** (#1262).
+  `_try_native_spatial_kernel` set `gap_certified` from bound *finiteness*, so a
+  budgeted `time_limit` / `node_limit` exit reported a certificate (nvs13 at
+  `max_nodes=5`: 66% gap, `gap_certified=True`). It is now True only on an
+  `optimal` kernel exit; `bound_valid` still reports the bound as usable, so the
+  two flags now carry different information as #1244 intended. Withdraws claims
+  only. On the 66-instance in-repo corpus at `time_limit=10`, one instance flips:
+  `tanksize` (`time_limit`, gap 0.75%).
+- **Optimality certificates below unit objective scale use the real gap test**
+  (#1263). Several certifiers tested `|obj - bound| / max(1, |obj|)`, which for
+  `|obj| < 1` is an *absolute* 1e-4 tolerance, not the documented abs-1e-6-or-rel-1e-4
+  criterion: the three `feasible -> optimal` re-certification sites in `solver.py`,
+  the native spatial kernel (absolute `gap_tol` only) and the convex-MINLP OA route
+  (`_compute_gap` with `denom_floor=1.0`). All now apply `_gap_values_converged`'s
+  test; the kernel conjoins it with its absolute test via new `rel_gap_tol` /
+  `abs_gap_tol` config fields, so it can only tighten. On 169 small MINLPLib
+  instances (`|opt| < 1`, `time_limit=20`), certified-optimal results with no
+  `gap_criterion` went from 7 to 0: `st_z` (was 2.7e-5, optimum 0), `st_qpc-m3b`,
+  `mathopt5_8` and `portfol_roundlot` (was 0.028383, 0.33% above the best known
+  0.0282906) now certify at the oracle value, and `ex6_1_2` is reported `feasible`
+  (relative gap 3.2e-4) instead of `optimal`. No other instance changed status.
+- **An empty B&B tree no longer certifies over an unproven removal** (#1270). The
+  NLP-BB, MIQP-BB and spatial exits granted `optimal` whenever the tree had no
+  open nodes. An untrusted node fathomed with no branch direction and a finite
+  inherited bound seeds the tree's `unresolved_floor` (#598), and only the
+  `bound_unresolved` (-inf) variant was checked. With one stalled convex node
+  injected into `tls2` on the default `DISCOPT_CONVEX_STALL_ABSTAIN` arm, the
+  solve reported `optimal` at 5.3 against a bound of 2.81. All four exits now use
+  `_tree_exhausted_with_proof`, the rule the MILP driver already applied; a
+  floored tree still certifies when its floor-inclusive gap closes. The #1082
+  canary tests no longer wait for tls2 to stall on its own, which it has stopped
+  doing: they inject the stall and assert that it fired.
+- **Benchmark results keep discopt's `unbounded` and `error` statuses** (#1214).
+  The shared `DISCOPT_STATUS_MAP` omitted both, so the in-process runner and the
+  subprocess worker recorded them as `unknown`. This intentionally moves rows
+  between report buckets without any change in solver behaviour: an `error` row
+  now scores as `error` instead of `unknown`, and an `unbounded` row is now
+  settled for `cert_neutrality`. `score_result` has no unbounded bucket, so that
+  row still scores `unknown`. Unrecognised statuses still map to `unknown`, and
+  the `local_*` statuses stay `local`. The category and GDPLib runners no
+  longer re-spell the two entries.
+- **NLP-BB no longer raises at its exit gate on large-coefficient rows**.
+  `portfol_roundlot` with `nlp_bb=True` raised `RuntimeError: NLP-BB returned
+  an infeasible point`. The #1059 auto-route hits the same error when it falls
+  back to NLP-BB. At the incumbent's lot counts, the rows `c_i x_i = n_i`
+  (`c_i` up to 1e5) and `sum x_i = 1` disagree by 3.35e-7. POUNCE's
+  gradient-scaled refine moved that residual onto a linking row, where it read
+  2.6e-6 unscaled. When the refined point fails the gate, NLP-BB now re-solves
+  the refine once with `nlp_scaling_method="none"`. It adopts that point only
+  if it clears the gate, and here it does: the worst row is 3.35e-7 and the
+  objective is within 1e-7 of `minlplib.solu`. The gate is unchanged. A solve
+  whose point already cleared it never takes the new branch.
+
+- **NLP-BB no longer reports feasible nonconvex models as infeasible**.
+  `solve(nlp_bb=True)` returned `infeasible` on `nvs08`, `nvs16` and `nvs20`.
+  - **Cause:** the serial node loop gives a fractional nonconvex node the bound
+    `-inf` so that it gets branched. Its NaN guard then replaced that `-inf`
+    with the 1e30 exclusion sentinel. Children take their parent's bound as a
+    floor, so the first integer point entered the tree at 1e30 and was dropped.
+  - **Fix:** the guard now catches only NaN and `+inf`, and all three instances
+    return their `minlplib.solu` optimum.
+  - **Also fixed:** a local NLP's `INFEASIBLE` on a nonconvex node no longer
+    counts as a proof. A tree emptied that way now reports `unknown`.
+
+- **The #844 fallback gets the budget the primary left unspent**. On
+  `nvs17`/`nvs23`, `solve(nlp_bb=True, time_limit=20)` reported `time_limit`
+  after 7.4 s with `wall_time` 0.3 s.
+  - **Cause:** the primary returned in 0.3 s with no incumbent. The fallback
+    still got only its 35% reserve, and its own limit became the solve's
+    status.
+  - **Fix:** the fallback now gets whichever is larger, the reserve or the
+    time left. A primary that spent its share leaves the reserve unchanged.
+  - `wall_time` and `python_time` now include the fallback's time.
+
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
   solver asked only whether the residual was small — 1e-6 in the incumbent

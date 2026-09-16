@@ -57,18 +57,20 @@ class SolveStatus(Enum):
 #: Runners that see extra spellings (GDPLib's Pyomo/GAMS terminations) extend it
 #: rather than re-spelling the shared entries.
 #:
-#: Deliberately the exact set the panel runners already mapped, PLUS the #1148
-#: local statuses. Widening it further (``"unbounded"``, ``"error"``) would move
-#: rows between report outcome buckets on every existing panel -- a real
-#: improvement, but not this change's, and not one to fold into a baseline diff
-#: silently. Anything absent maps to ``UNKNOWN`` at the call site, which fails
-#: closed.
+#: #1148 added the local statuses; #1214 added ``"unbounded"`` and ``"error"``,
+#: which had fallen to ``UNKNOWN``. That moved rows between report buckets: an
+#: ``error`` row now scores as ``error`` instead of ``unknown``, and an
+#: ``unbounded`` row is now settled for ``cert_neutrality`` (``score_result``
+#: still buckets it as ``unknown``). Anything absent maps to ``UNKNOWN`` at the
+#: call site, which fails closed.
 DISCOPT_STATUS_MAP = {
     "optimal": SolveStatus.OPTIMAL,
     "feasible": SolveStatus.FEASIBLE,
     "infeasible": SolveStatus.INFEASIBLE,
     "time_limit": SolveStatus.TIME_LIMIT,
     "node_limit": SolveStatus.TIME_LIMIT,
+    "unbounded": SolveStatus.UNBOUNDED,
+    "error": SolveStatus.ERROR,
     # #1148: a local result is not a certificate and must never be scored as one.
     # Both counters of the release gate skip a LOCAL row.
     "local_optimal": SolveStatus.LOCAL,

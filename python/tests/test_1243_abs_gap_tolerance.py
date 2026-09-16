@@ -241,15 +241,20 @@ def test_the_native_kernel_mapping_never_widens_the_fathom():
 
     The mapping is now ``min``, asserted here against the source so the arithmetic
     cannot regress unnoticed.
+
+    #1263 later added ``rel_gap_tol`` / ``abs_gap_tol``, but as a CONJUNCT of this
+    absolute test (the kernel's ``gap_closed``), never a disjunct: it can only
+    close fewer regions. The Rust test
+    ``conjoined_clause_never_closes_what_the_absolute_test_leaves_open`` pins that;
+    here the absolute clause must still receive this mapping.
     """
     import inspect
 
     import discopt.solver as _solver
 
     src = inspect.getsource(_solver._try_native_spatial_kernel)
-    assert "rel_gap_tol" not in src, (
-        "the native kernel mapping grew a relative arm again; on this route that "
-        "can only loosen the fathom"
+    assert "gap_tol=_kernel_abs_tol" in src, (
+        "the native kernel no longer receives the min-mapped absolute tolerance"
     )
 
     # The mapping itself, replicated from the source under test.
@@ -270,15 +275,19 @@ def test_the_native_kernel_mapping_never_widens_the_fathom():
 
 
 @pytest.mark.unit
-def test_the_native_kernel_binding_has_no_relative_arm():
-    """The Rust side must not carry a flag no caller sets (CLAUDE.md §3)."""
-    from discopt._rust import solve_spatial_tree_py
+def test_the_native_kernel_relative_clause_is_set_by_its_caller():
+    """The Rust side must not carry a flag no caller sets (CLAUDE.md §3).
 
-    with pytest.raises(TypeError) as exc:
-        solve_spatial_tree_py(rel_gap_tol=0.0)
-    assert "rel_gap_tol" in str(exc.value), (
-        "the binding still accepts rel_gap_tol, but nothing sets it"
-    )
+    Since #1263 the binding accepts ``rel_gap_tol`` / ``abs_gap_tol`` (a conjunct
+    of the absolute test, disabled by default); the solver must pass both.
+    """
+    import inspect
+
+    import discopt.solver as _solver
+
+    src = inspect.getsource(_solver._try_native_spatial_kernel)
+    assert "rel_gap_tol=float(gap_tolerance)" in src
+    assert "abs_gap_tol=(" in src
 
 
 @pytest.mark.unit

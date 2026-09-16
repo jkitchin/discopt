@@ -1,0 +1,119 @@
+#+TITLE: Crossing Point Optimization
+#+FILETAGS: :method:mecp:meci:conical-intersection:local-optimization:penalty-methods:global-optimization:chemistry:
+
+* Crossing Point Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: yarkony1993 bearpark1994 harvey1998 levine2008 maeda2010 maeda2009addf maeda2018grrm17 lindner2019 somaki2025 galvan2023 richings2023 berkolaiko2021 wang2025dftmrci2
+:STATUS: draft
+:CREATED: 2026-08-22
+:END:
+
+The algorithms quantum chemistry uses to locate minimum-energy crossing points
+(see [[file:../concepts/potential-energy-surface-crossings.org][Potential Energy Surface Crossings]]) divide into three families: local methods
+that converge to *a* crossing point, exploration methods that generate many
+candidates stochastically or heuristically, and a small mathematical literature
+on the underlying double-eigenvalue problem. **No member of any of the three
+returns a bound.** That absence is the opening for a relaxation-based global
+solver, and it is worth being precise about, because it is the claim on which the
+whole case rests.
+
+** Local methods
+
+*Lagrange–Newton* citep:yarkony1993 writes the KKT system of
+\(\min E_1\) subject to \(E_1 - E_2 = 0\) (plus \(H_{12}=0\) for a same-spin
+intersection) and applies Newton's method to it. It needs the interstate coupling
+vector, which not every electronic-structure method can supply, and it inherits
+Newton's local convergence basin.
+
+*Gradient projection* citep:bearpark1994 — the Bearpark–Robb–Schlegel method, the
+field's workhorse — forms a composite step from two orthogonal pieces: a
+gap-reducing component inside the branching space, and the energy gradient
+projected onto the intersection space. It also requires the coupling vector.
+
+*The effective-gradient method* citep:harvey1998 specializes this to spin
+crossings, where the coupling vanishes by symmetry and the branching space
+collapses to the single direction \(\nabla(E_1-E_2)\). This is the standard
+MECP method for intersystem crossing and needs no coupling vector.
+
+*Branching-plane updating* citep:maeda2010 removes the coupling-vector
+requirement for same-spin intersections by replacing the second branching
+direction with one updated iteratively from the optimization history.
+
+*The smooth penalty method* citep:levine2008 removes both the coupling vector and
+the constraints, minimizing
+
+\[ F_\sigma(x) = \tfrac{1}{2}(E_1 + E_2) + \sigma\,\frac{(\Delta E)^2}{|\Delta E| + \alpha} \]
+
+with \(\sigma\) escalated across a sequence of unconstrained minimizations. Its
+practical popularity is deserved — it needs only energies and gradients — but it
+is the single worst formulation to hand a relaxation-based solver, for reasons
+developed in [[file:eigenvalue-degeneracy-constraints.org][Eigenvalue Degeneracy Constraints]]. The rule of thumb that follows is
+worth stating in one line: *the penalty form is right for a local or
+derivative-free search and wrong for branch-and-bound.*
+
+Method development continues on the electronic-structure side rather than the
+optimization side — e.g. MECI optimization at the DFT/MRCI(2) level
+citep:wang2025dftmrci2 — but the optimizer underneath remains one of the above.
+
+** Exploration methods
+
+Because a molecule typically has many crossing points, automated exploration
+matters more in practice than the local step does.
+
+*ADDF seam mapping* citep:maeda2009addf follows anharmonic downward distortions
+to map minimal energy points on seams of crossing systematically, and the
+approach is folded into the *SC-AFIR / GRRM* global reaction route mapping
+machinery citep:maeda2018grrm17, which explores MESX and MECI structures as part
+of building a whole reaction network. This is arguably the closest thing the field
+has to a systematic global search — but it is a heuristic exploration strategy,
+not an exhaustive one, and it certifies nothing.
+
+*Multistate metadynamics* citep:lindner2019 (metaFALCON) biases dynamics along a
+gap collective variable to sample the seam. Stochastic; converges in distribution,
+not to a proof.
+
+*Bayesian optimization* citep:somaki2025 has been applied to searching for the
+global minimum and the most stable conical intersection together. This is the
+closest the chemistry literature comes to a *global* claim, and it is worth
+reading carefully: a GP posterior supplies a probabilistic statement about an
+unexplored region under modelling assumptions, not a valid lower bound on the
+objective. It does not certify.
+
+** The mathematical problem underneath
+
+Locating an MECI is the problem of finding parameters at which a parametric real
+symmetric matrix family acquires a double eigenvalue. citep:berkolaiko2021 give a
+simple iterative scheme for two-parameter families with proven *quadratic*
+convergence, extended to Hermitian families (three parameters) and to triple
+eigenvalues (five parameters). It is a local root-finder — fast, elegant, and
+still silent on whether the located degeneracy is the lowest one. Its value here
+is diagnostic: it shows that the difficulty of the global question is not the
+degeneracy condition, which is well understood, but the *search*.
+
+** Surrogate constructions built to be smooth through the cone
+
+Two recent constructions exist because the adiabats are non-differentiable at the
+answer, and both are directly useful to a global solver:
+
+- A *pseudodiabatic three-surface model* citep:galvan2023 fits smooth surrogate
+  quantities whose eigenvalues reproduce the adiabats.
+- The *characteristic-polynomial* approach citep:richings2023 machine-learns the
+  trace and determinant of the potential matrix instead of its eigenvalues, since
+  the symmetric functions of the eigenvalues stay smooth through the intersection.
+
+The second is the more consequential for optimization: it produces exactly the
+polynomial quantities a factorable relaxation wants. It also carries a soundness
+caveat that the chemistry framing does not surface, discussed in
+[[file:eigenvalue-degeneracy-constraints.org][Eigenvalue Degeneracy Constraints]].
+
+** What none of them provides
+
+Every method above answers "here is a crossing point". None answers "no crossing
+point in this region is lower than \(L\)". The distinction is the entire content
+of a dual bound, and it is what a spatial branch-and-bound method
+([[file:spatial-branch-and-bound.org][Spatial Branch and Bound]]) supplies on a factorable surrogate. The precedent for
+certified answers on a potential energy surface is the molecular-conformation
+work of the αBB school citep:maranas1994jcp — the crossing-point problem is the
+same bargain (certificate in exchange for a dimensional ceiling and a surrogate),
+applied to a different critical point.

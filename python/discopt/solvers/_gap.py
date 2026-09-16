@@ -20,9 +20,9 @@ one ``amp.py`` has always used.
 with optimum 0 an honest incumbent of ``2.46e-9`` against a dual bound of ``0``
 produced ``2.46e-9 / 2.46e-9 = 1.0`` — a 100% relative gap on a numerically exact
 solve, which downgraded ``optimal`` to ``feasible``. The absolute criterion in
-(1) now fires first and reports the gap closed. The floors themselves are left as
-each solver had them (see ``denom_floor``): they set the *reporting* scale for an
-unconverged run, and changing OA's is a separate, panel-worthy change.
+(1) now fires first and reports the gap closed. Both solvers now use the
+``1e-10`` floor: OA converges on this value, and its former ``1.0`` floor made the
+relative tolerance an absolute one below unit scale (#1263).
 
 **3. A dual bound ABOVE the incumbent is no longer clamped to "gap 0".**
 Both copies computed ``abs_gap = max(0.0, ub - lb)``. When the incumbent sits
@@ -77,11 +77,12 @@ def optimality_gap(
         ub: Incumbent (upper) bound, in minimization sense.
         abs_tol: Absolute gap at or below which the gap counts as closed.
         denom_floor: Floor on the relative denominator, i.e. the objective scale
-            below which the *reported* gap becomes the absolute gap. ``oa`` uses
-            ``1.0`` (report the absolute gap for sub-unit objectives); the
-            stricter ``gdpopt_loa`` uses ``1e-10`` (report the gap relative to the
-            objective however small it is). Both are only reached once the
-            absolute criterion above has declined to close the gap.
+            below which the *reported* gap becomes the absolute gap. ``oa`` and
+            ``gdpopt_loa`` both use ``1e-10`` (the gap relative to the objective
+            however small it is, #1263); the default ``1.0`` reports the absolute
+            gap for sub-unit objectives and must not be used for convergence.
+            Only reached once the absolute criterion above has declined to close
+            the gap.
     """
     if ub >= BOUND_INF or lb <= -BOUND_INF:
         return 1.0

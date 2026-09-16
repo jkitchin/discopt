@@ -120,9 +120,27 @@ pub enum TreeStatus {
 /// widened the effective tolerance by orders of magnitude on a large objective.
 /// `solver.py` now maps a caller's absolute tolerance through `min`, so this
 /// route honours a tightening and declines a loosening.
+///
+/// #1263: the absolute `gap_tol` is additionally CONJOINED with the documented
+/// `solver.py` criterion (absolute `abs_gap_tol` OR relative `rel_gap_tol` against
+/// `max(|inc|, |bound|)`). `solver.py` passes `gap_tol = gap_tolerance`, so below
+/// unit objective magnitude the absolute arm alone was exactly the 1.0-floored
+/// relative test `_DEFAULT_ABS_GAP_TOL` exists to correct (`st_z`: `Optimal` at
+/// incumbent 2.7e-5 over a true optimum of 0). A conjunction can only TIGHTEN, and
+/// at `|inc| >= 1` with `rel_gap_tol >= gap_tol` the second clause is implied by
+/// the first, so those solves are unchanged. The defaults (`rel_gap_tol = inf`)
+/// reproduce the purely absolute test.
 #[inline]
 fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
-    bound >= inc - config.gap_tol
+    let absolute_closed = bound >= inc - config.gap_tol; // false on NaN
+    if !absolute_closed {
+        return false;
+    }
+    let gap = inc - bound;
+    if gap <= config.abs_gap_tol {
+        return true;
+    }
+    gap <= config.rel_gap_tol * inc.abs().max(bound.abs()).max(1e-10)
 }
 
 /// Tunables for [`solve_spatial_tree`].
@@ -136,6 +154,12 @@ pub struct SpatialTreeConfig {
     pub deadline: Option<Instant>,
     /// Absolute gap `incumbent − global_bound` at/below which the solve stops.
     pub gap_tol: f64,
+    /// Relative gap (against `max(|incumbent|, |bound|)`) that must ALSO hold
+    /// unless the absolute gap is within [`Self::abs_gap_tol`] (#1263). `inf`
+    /// (the default) disables the extra clause.
+    pub rel_gap_tol: f64,
+    /// Absolute gap that satisfies the #1263 clause on its own.
+    pub abs_gap_tol: f64,
     /// Integrality tolerance for incumbent acceptance / integer branching.
     pub int_tol: f64,
     /// McCormick-exactness tolerance for incumbent acceptance (`|x_aux − f|`).
@@ -203,6 +227,8 @@ impl Default for SpatialTreeConfig {
             max_nodes: 100_000,
             deadline: None,
             gap_tol: 1e-6,
+            rel_gap_tol: f64::INFINITY,
+            abs_gap_tol: 0.0,
             int_tol: 1e-5,
             mccormick_tol: 1e-6,
             min_box_width: 1e-9,
@@ -1202,6 +1228,7 @@ mod gap_criterion_tests {
         // stay EXACTLY the `bound >= inc - gap_tol` each of them spelled out
         // inline before, across the whole range of magnitudes -- a helper that
         // quietly differs from the four sites it replaced is worse than none.
+        // (#1263's extra clause is disabled by the defaults used here.)
         let config = SpatialTreeConfig {
             gap_tol: 1e-4,
             ..Default::default()
@@ -1219,6 +1246,90 @@ mod gap_criterion_tests {
             }
         }
         assert_eq!(checked, 42, "probe ran {checked} comparisons");
+    }
+
+    #[test]
+    fn relative_clause_rejects_small_magnitude_open_gaps() {
+        // #1263: with `gap_tol = 1e-4` alone, st_z closed at incumbent 2.727e-5
+        // over a bound of -5.6e-10 (true optimum 0). The conjoined clause is the
+        // Python `_gap_values_converged` test: absolute 1e-6 OR relative 1e-4.
+        let config = SpatialTreeConfig {
+            gap_tol: 1e-4,
+            rel_gap_tol: 1e-4,
+            abs_gap_tol: 1e-6,
+            ..Default::default()
+        };
+        let cases: [(f64, f64, bool); 8] = [
+            (2.727e-5, -5.6e-10, false),       // st_z
+            (0.1, 0.09995, false),             // relative 5e-4
+            (-0.68607228, -0.68616931, false), // mathopt5_8 shape
+            (4e-12, 0.0, true),                // absolute arm
+            (0.1, 0.1 - 5e-7, true),           // absolute arm
+            (100.0, 100.0 - 5e-5, true),       // |inc| > 1: unchanged
+            (-1e6, -1e6 - 50.0, false),        // old absolute test already open
+            (5.0, 5.0 - 5e-5, true),           // |inc| > 1: unchanged
+        ];
+        let mut checked = 0usize;
+        for (inc, bound, want) in cases {
+            assert_eq!(
+                gap_closed(bound, inc, &config),
+                want,
+                "inc={inc} bound={bound}"
+            );
+            // The clause only ever tightens the absolute test.
+            if want {
+                assert!(bound >= inc - config.gap_tol);
+            }
+            checked += 1;
+        }
+        // At |inc| >= 1 with rel_gap_tol >= gap_tol the result is unchanged.
+        for &inc in &[-1e6, -1.0, 1.0, 1e6] {
+            for &gap in &[0.0, 1e-9, 1e-5, 1e-4, 1.1e-4, 1.0] {
+                let bound = inc - gap;
+                assert_eq!(
+                    gap_closed(bound, inc, &config),
+                    bound >= inc - config.gap_tol,
+                    "inc={inc} gap={gap}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 32, "probe ran {checked} comparisons");
+    }
+
+    #[test]
+    fn conjoined_clause_never_closes_what_the_absolute_test_leaves_open() {
+        // The #1260 hazard was a relative DISJUNCT loosening the fathom. #1263's
+        // clause is a conjunct: for any `rel_gap_tol` / `abs_gap_tol` it may only
+        // close a subset of what the absolute test alone closes.
+        let mut checked = 0usize;
+        for &inc in &[-1e5, -1.0, -1e-3, 0.0, 1e-3, 1.0, 1e5] {
+            for &gap in &[0.0, 1e-9, 1e-7, 1e-5, 1e-4, 1e-2, 1.0, 11.0] {
+                for &rel in &[0.0, 1e-9, 1e-4, 1.0, f64::INFINITY] {
+                    for &abs in &[0.0, 1e-6, 1e-4, 10.0] {
+                        let bound = inc - gap;
+                        let base = SpatialTreeConfig {
+                            gap_tol: 1e-4,
+                            ..Default::default()
+                        };
+                        let conj = SpatialTreeConfig {
+                            gap_tol: 1e-4,
+                            rel_gap_tol: rel,
+                            abs_gap_tol: abs,
+                            ..Default::default()
+                        };
+                        if gap_closed(bound, inc, &conj) {
+                            assert!(
+                                gap_closed(bound, inc, &base),
+                                "inc={inc} gap={gap} rel={rel} abs={abs}"
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 7 * 8 * 5 * 4, "probe ran {checked} comparisons");
     }
 
     #[test]

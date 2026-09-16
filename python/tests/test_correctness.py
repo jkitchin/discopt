@@ -936,10 +936,30 @@ class TestMINLP:
         assert abs(float(r.x["y"])) < 1e-4, f"y should be 0, got {float(r.x['y']):.6f}"
 
     def test_bnb_uses_nodes(self) -> None:
-        """MINLP problems should use at least 1 B&B node."""
-        m = _build_simple_minlp()
-        r = m.solve()
+        """A MINLP solved by branch-and-bound reports at least 1 B&B node.
+
+        #1269: the default path no longer reaches B&B for this model. It is a
+        convex MIQCQP, which ``DISCOPT_CONVEX_MINLP_ROUTE`` sends to OA, so the
+        test pins ``solver="bb"`` to keep covering the B&B node count.
+        """
+        r = _build_simple_minlp().solve(solver="bb")
+        assert r.status == "optimal"
+        assert r.algorithm_route is None, f"did not take B&B: {r.algorithm_route}"
         assert r.node_count >= 1, "MINLP should use branch-and-bound"
+
+    def test_default_convex_route_reports_its_work(self) -> None:
+        """#1269: the default solve is OA; ``node_count=0`` is correct there.
+
+        ``node_count`` counts B&B nodes, and OA runs no tree. Its work is
+        reported as master MILP solves and NLP subproblems, which must be
+        nonzero. Otherwise a 0 would be the reporting defect #1059 fixed.
+        """
+        r = _build_simple_minlp().solve()
+        assert r.status == "optimal"
+        assert r.algorithm_route is not None and "mip-nlp/oa" in r.algorithm_route
+        assert r.node_count == 0
+        assert r.mip_count >= 1
+        assert r.subnlp_calls >= 1
 
 
 # ──────────────────────────────────────────────────────────
