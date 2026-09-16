@@ -140,6 +140,14 @@ class NLPResult:
     bound_multipliers_upper: Optional[np.ndarray] = None
     iterations: int = 0
     wall_time: float = 0.0
+    #: Terminal KKT residuals reported by the backend, or ``None`` when it
+    #: reports none (#1247). Keys: ``primal_infeasibility``,
+    #: ``dual_infeasibility``, ``complementarity``, ``kkt_error`` — on the
+    #: solver's internally scaled problem, which is what its own convergence
+    #: test runs on — the same four suffixed ``_unscaled`` in the model's units,
+    #: and ``barrier_parameter`` (the terminal ``mu``, which seeds a subsequent
+    #: warm start's ``mu_init``). Absent entries are omitted rather than filled.
+    kkt: Optional[dict[str, float]] = None
     #: The subsolver's own terminal code, unmapped (Ipopt/POUNCE ``info["status"]``),
     #: or ``None`` for backends that do not report one.
     #:

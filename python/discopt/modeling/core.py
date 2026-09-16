@@ -3557,6 +3557,19 @@ class SolveResult:
         ABSENT when neither does — a solve that stopped on ``time_limit`` /
         ``node_limit`` or on an exhausted tree — so a consumer reading it with
         ``.get()`` gets ``None`` rather than a criterion the solve never met.
+    kkt : dict of str to float, or None
+        Terminal KKT residuals at the returned point, on the single-NLP routes
+        whose backend reports them (#1247); ``None`` elsewhere, including every
+        branch-and-bound route — there is no single NLP there whose residuals
+        these would be.
+
+        ``primal_infeasibility``, ``dual_infeasibility``, ``complementarity`` and
+        ``kkt_error`` are POUNCE's ``final_*``, measured on its internally
+        **scaled** problem (what its own convergence test runs on). The same four
+        suffixed ``_unscaled`` are the residuals in the model's units — the ones
+        a certificate stated in problem units must be built from.
+        ``barrier_parameter`` is the terminal interior-point ``mu``, forwarded by
+        :meth:`solve`'s ``warm_start`` to seed the next solve.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -3694,6 +3707,27 @@ class SolveResult:
     bound_duals_lower: Optional[dict[str, np.ndarray]] = None
     bound_duals_upper: Optional[dict[str, np.ndarray]] = None
 
+    # Terminal KKT residuals at the returned point, on NLP routes whose backend
+    # reports them (#1247). ``None`` everywhere else — a branch-and-bound solve
+    # has no single NLP whose residuals these would be, and a route that cannot
+    # point at a measured residual reports nothing rather than a zero.
+    #
+    # Keys (see ``solvers.nlp_pounce._kkt_from_info``):
+    #   * ``primal_infeasibility`` / ``dual_infeasibility`` / ``complementarity``
+    #     / ``kkt_error`` — POUNCE's ``final_*``, measured on the solver's
+    #     internally SCALED problem, which is what its own convergence test runs
+    #     on;
+    #   * the same four suffixed ``_unscaled`` — the residuals in the model's own
+    #     units. A certificate stated in problem units (e.g. a CALPHAD
+    #     tangent-plane bound) must be built from these, not from the scaled
+    #     ones;
+    #   * ``barrier_parameter`` — the terminal interior-point ``mu``, forwarded
+    #     by ``solve(warm_start=...)`` to seed the next solve's ``mu_init``.
+    #
+    # Diagnostic, never load-bearing: nothing in the solver reads this field back,
+    # so a backend that omits a key cannot change a verdict.
+    kkt: Optional[dict[str, float]] = None
+
     # Witness for an infeasible result, when the backend computed one. An
     # ``InfeasibilityCertificate`` (per-row minimal constraint violations, in
     # LP-row order) for LPs solved via the POUNCE engine; None otherwise.
@@ -3724,6 +3758,13 @@ class SolveResult:
     # Structured MIP-NLP decomposition trace. Populated by solver="mip-nlp"
     # paths when iteration/provenance data is available.
     mip_nlp_trace: Optional[dict[str, object]] = None
+
+    # Why this solve failed, when the caller would otherwise be left with a bare
+    # ``status="error"`` and no reason (#1246). Set by :func:`discopt.solve_batch`
+    # for a model whose solve raised — the batch captures the exception here
+    # instead of aborting the remaining models — and ``None`` on every other
+    # route, which today reports failures by status alone.
+    error: Optional[str] = None
 
     # Why an algorithm other than the default branch-and-bound ran (#1059).
     # ``None`` means no automatic routing took place — either the caller named a
@@ -6247,6 +6288,7 @@ class Model:
         deterministic: bool = False,
         partitions: int = 0,
         initial_solution: Optional[dict] = None,
+        warm_start: Optional["SolveResult"] = None,
         skip_convex_check: bool = False,
         nlp_bb: Optional[bool] = None,
         lazy_constraints: Optional[Callable] = None,
@@ -6337,6 +6379,29 @@ class Model:
             Values are validated against variable bounds and integrality
             requirements; violations produce warnings and are corrected
             automatically (clamped / rounded).
+        warm_start : SolveResult, optional
+            A previous :class:`SolveResult` for this model, used as a PRIMAL-DUAL
+            start (#1247). On the single-NLP routes it forwards the point, the
+            constraint multipliers, the variable-bound multipliers and the
+            terminal barrier parameter to POUNCE, which derives its warm-start
+            options from them; successive solves that differ only slightly — a
+            phase-diagram trace stepping ``T``, a fitting loop nudging a
+            ``Parameter`` — then start from the previous solution's dual
+            information instead of from a cold central point.
+
+            On every other route only the primal point is usable, and it is used:
+            it becomes the initial point, exactly as ``initial_solution`` would.
+
+            Convergence-affecting only. Where a solve starts cannot change what it
+            certifies at termination; on a nonconvex NLP it can change *which*
+            local stationary point is reached, and on a global route it only seeds
+            the incumbent search. Passing both ``warm_start`` and
+            ``initial_solution`` raises — two different starting points, silently
+            resolved, is the kind of thing that makes a warm start look broken.
+
+            The result must come from a model with the same variables and
+            constraints; a mismatch raises ``ValueError`` rather than starting
+            from a partially filled point.
         skip_convex_check : bool, default False
             If True, skip automatic convexity detection for continuous
             problems. When False (default), convex NLPs are solved with
@@ -6579,6 +6644,36 @@ class Model:
 
             _x0_flat = validate_initial_solution(self, initial_solution)
 
+        # Primal-dual warm start (#1247). The primal half is turned into the
+        # ordinary initial point here, so every route benefits from it; the dual
+        # half rides along to the single-NLP routes on ``_warm_start_state``.
+        _warm_start_state = None
+        if warm_start is not None:
+            if initial_solution is not None:
+                raise ValueError(
+                    "solve() got both initial_solution and warm_start, which name two "
+                    "different starting points. Pass one: warm_start carries the previous "
+                    "solve's point AND its duals; initial_solution carries a point only."
+                )
+            if not isinstance(warm_start, SolveResult):
+                raise TypeError(
+                    "warm_start must be a SolveResult from a previous solve of this model, "
+                    f"got {type(warm_start).__name__}"
+                )
+            from discopt.warm_start import (
+                bound_duals_from_result,
+                primal_point_from_result,
+            )
+
+            _x0_flat = primal_point_from_result(self, warm_start)
+            _warm_start_state = {
+                "x": _x0_flat,
+                "constraint_duals": warm_start.constraint_duals,
+                "bound_duals_lower": bound_duals_from_result(self, warm_start.bound_duals_lower),
+                "bound_duals_upper": bound_duals_from_result(self, warm_start.bound_duals_upper),
+                "barrier_parameter": (warm_start.kkt or {}).get("barrier_parameter"),
+            }
+
         # Pre-solve LLM analysis (advisory only, never blocks solving)
         if llm:
             try:
@@ -6597,6 +6692,15 @@ class Model:
                 )
 
         if stream:
+            if warm_start is not None:
+                # The streaming driver takes neither a start point nor duals, so a
+                # warm start handed to it would be silently inert — the exact
+                # failure #1247 exists to remove. (``initial_solution`` has the
+                # same limitation on this path; it predates this guard.)
+                raise ValueError(
+                    "solve(stream=True) cannot take a warm_start: the streaming driver has no "
+                    "seam for a starting point or its duals. Solve without stream=True to use it."
+                )
             return self._solve_streaming(
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
@@ -6819,6 +6923,7 @@ class Model:
                     deterministic=deterministic,
                     partitions=partitions,
                     initial_point=_x0_flat,
+                    warm_start=_warm_start_state,
                     skip_convex_check=skip_convex_check,
                     nlp_bb=nlp_bb,
                     lazy_constraints=lazy_constraints,

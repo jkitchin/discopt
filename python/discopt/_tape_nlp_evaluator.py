@@ -235,6 +235,7 @@ class TapeNLPEvaluator:
         # move -- a tape build is milliseconds, unlike a JAX trace.
         self._parameters = list(model._parameters)
         self._param_snapshot = self._snapshot_params()
+        self._rebuild_param_watch()
 
         self._build()
 
@@ -243,14 +244,52 @@ class TapeNLPEvaluator:
     def _snapshot_params(self) -> tuple:
         return tuple(np.asarray(p.value, dtype=float).copy() for p in self._parameters)
 
+    def _rebuild_param_watch(self) -> None:
+        """Split the snapshot into the two comparison paths ``_params_changed`` uses.
+
+        Scalar (0-d) parameters — every parameter the relaxation layer accepts, and
+        the overwhelming majority in practice — are watched as plain Python floats,
+        which is what makes the staleness check cheap enough to sit in front of every
+        evaluation (issue #1245). Array parameters keep the ndarray comparison.
+        """
+        scalar: list[tuple[Any, float]] = []
+        array: list[tuple[Any, np.ndarray]] = []
+        for p, snap in zip(self._parameters, self._param_snapshot):
+            if snap.ndim == 0:
+                scalar.append((p, float(snap)))
+            else:
+                array.append((p, snap))
+        self._scalar_watch = scalar
+        self._array_watch = array
+
     def _params_changed(self) -> bool:
-        current = self._snapshot_params()
-        if len(current) != len(self._param_snapshot):
-            return True
-        return any(
-            a.shape != b.shape or not np.array_equal(a, b)
-            for a, b in zip(current, self._param_snapshot)
-        )
+        """Has any watched ``Parameter.value`` moved since the tape was built?
+
+        Called once per objective/gradient/constraint/Jacobian/Hessian evaluation,
+        so its cost is on the solve's hot path: measured at 11.5 us/call (5 scalar
+        parameters) for the previous form, which copied every parameter array into a
+        fresh snapshot tuple on every call — 4.5% of the wall of a parameterised
+        CALPHAD-shaped solve (issue #1245). Comparing against the retained snapshot
+        in place, with a float compare for the 0-d parameters, is 0.30 us/call.
+
+        The verdict is unchanged, element for element: this is exact equality, the
+        same predicate ``np.array_equal`` applied (so a NaN-valued parameter still
+        reads as *changed* on every call, as it did before — it never compares equal
+        to itself).
+        """
+        for p, ref in self._scalar_watch:
+            v = p.value
+            # ``Parameter.value`` normalises to a float64 ndarray and its setter
+            # refuses a shape change, so a 0-d snapshot stays 0-d across a re-bind.
+            # The ndim guard keeps the fast path exact if a value ever arrives by
+            # some other route.
+            if v.ndim != 0 or v[()] != ref:
+                return True
+        for p, ref_arr in self._array_watch:
+            v = np.asarray(p.value, dtype=np.float64)
+            if v.shape != ref_arr.shape or not np.array_equal(v, ref_arr):
+                return True
+        return False
 
     def _build(self) -> None:
         """(Re)build the tape for this model.
@@ -456,6 +495,7 @@ class TapeNLPEvaluator:
         """Rebuild if a ``Parameter.value`` moved since the tape was built."""
         if self._parameters and self._params_changed():
             self._param_snapshot = self._snapshot_params()
+            self._rebuild_param_watch()
             self._build()
 
     # -- shape / structure --------------------------------------------------

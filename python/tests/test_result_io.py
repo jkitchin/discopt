@@ -397,3 +397,99 @@ def test_a_pre_1266_document_still_reads():
     assert r.validation_report is None
     assert getattr(r, "_provenance", None) is None
     assert getattr(r, "_solve_options", None) is None
+
+
+@pytest.mark.smoke
+def test_kkt_and_error_round_trip():
+    """#1247's residuals and #1246's failure reason survive a store/reload.
+
+    Both are exactly the fields a consumer reads the stored result *for* — a
+    certificate built from the KKT residual, and the reason a batch entry
+    failed — so dropping them on the way through is the same class of loss the
+    #1244 comment in ``result_io`` describes for ``bound_valid``.
+    """
+    r = SolveResult(
+        status="optimal",
+        objective=-2.13,
+        bound=-2.13,
+        kkt={
+            "primal_infeasibility": 0.0,
+            "dual_infeasibility": 1.5e-11,
+            "complementarity": 2.5e-09,
+            "kkt_error": 2.5e-09,
+            "kkt_error_unscaled": 2.5e-09,
+            "barrier_parameter": 2.5e-09,
+        },
+    )
+    back = deserialize_result(serialize_result(r))
+    assert back.kkt == r.kkt
+    assert back.error is None
+
+    # Tagged like every other float: a diverged solve reports a non-finite
+    # residual, and a bare NaN/Infinity token is not valid JSON (#1266).
+    diverged = SolveResult(status="error", kkt={"kkt_error": float("inf")})
+    back_diverged = deserialize_result(serialize_result(diverged))
+    assert back_diverged.kkt == {"kkt_error": float("inf")}
+
+    failed = SolveResult(status="error", error="ValueError: No objective set.")
+    back_failed = deserialize_result(serialize_result(failed))
+    assert back_failed.status == "error"
+    assert back_failed.error == "ValueError: No objective set."
+    assert back_failed.kkt is None
+
+    # ``error`` is TEXT, so it is excluded from float-tag decoding: a message
+    # that happens to read exactly "inf" must come back as that string.
+    odd = deserialize_result(serialize_result(SolveResult(status="error", error="inf")))
+    assert odd.error == "inf"
+
+
+@pytest.mark.smoke
+def test_every_string_scalar_field_is_excluded_from_float_decoding():
+    """A text-valued scalar field must never be float-tag decoded on the way in.
+
+    ``bound_source`` was missing from ``_STRING_SCALAR_FIELDS`` when the float
+    tagging landed, so `deserialize_result` raised ``SerializationError: unknown
+    float token 'convex_proof'`` on every result carrying a bound source — every
+    certified result that crossed the daemon socket or was stored and read back.
+    Deriving the expectation from the dataclass annotations rather than listing
+    the fields again means the next string field added to ``_SCALAR_FIELDS``
+    cannot repeat it.
+    """
+    import dataclasses
+    import typing
+
+    from discopt.result_io import _SCALAR_FIELDS, _STRING_SCALAR_FIELDS
+
+    annotations = {f.name: f.type for f in dataclasses.fields(SolveResult)}
+    string_fields = set()
+    for name in _SCALAR_FIELDS:
+        ann = annotations[name]
+        text = ann if isinstance(ann, str) else str(ann)
+        if "str" in text and "Model" not in text:
+            string_fields.add(name)
+    assert string_fields, "the probe found no string-valued scalar fields"
+    missing = sorted(string_fields - set(_STRING_SCALAR_FIELDS))
+    assert not missing, (
+        f"these text fields would be float-decoded on deserialize: {missing}. "
+        "Add them to _STRING_SCALAR_FIELDS."
+    )
+    assert typing  # (imported for readers; the annotations above are strings)
+
+
+@pytest.mark.smoke
+def test_a_certified_result_round_trips_with_its_bound_source():
+    """The end-to-end shape of the same defect: a result whose bound is certified
+    carries ``bound_source``, and reading it back must not raise."""
+    r = SolveResult(
+        status="optimal",
+        objective=1.25,
+        bound=1.25,
+        gap=0.0,
+        gap_certified=True,
+        bound_valid=True,
+        bound_source="convex_proof",
+    )
+    back = deserialize_result(serialize_result(r))
+    assert back.bound_source == "convex_proof"
+    assert back.bound_valid is True
+    assert back.bound == pytest.approx(1.25)

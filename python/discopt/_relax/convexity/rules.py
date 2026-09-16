@@ -61,7 +61,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, TypeVar, cast
+from typing import Any, Optional, TypeVar, cast
 
 import numpy as np
 
@@ -604,6 +604,13 @@ def _classify_impl(expr: Expression, model: Optional[Model], cache: dict) -> Exp
         # the base expression.
         if isinstance(expr.base, Variable):
             return ExprInfo(Curvature.AFFINE, _indexed_variable_sign(expr))
+        # A static index into a constant leaf carries the sign of the ELEMENT,
+        # which is strictly more information than the whole array's: ``mu[2]``
+        # can be provably positive where ``mu`` as a whole is mixed-sign and
+        # therefore Sign.UNKNOWN (which is what recursing into the base returns).
+        indexed = _const_leaf_value(expr)
+        if indexed is not None:
+            return ExprInfo(Curvature.AFFINE, sign_from_value(indexed))
         base = classify_expr_info(expr.base, model, cache)
         return base  # indexing preserves curvature and sign info.
 
@@ -655,16 +662,86 @@ def _classify_impl(expr: Expression, model: Optional[Model], cache: dict) -> Exp
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _is_scalar_const(expr: Expression) -> bool:
-    """True if ``expr`` is a concrete numeric scalar."""
+def _is_static_index(index: Any) -> bool:
+    """Is ``index`` plain numpy indexing data, with nothing symbolic in it?
+
+    An :class:`~discopt.modeling.core.IndexExpression`'s index is whatever was
+    written between the brackets; the constructor is deliberately non-raising and
+    keeps forms it cannot resolve as lazy nodes. Only an index made of integers,
+    slices, ``Ellipsis``, ``None`` and integer/bool arrays resolves to a fixed
+    element of a constant's value here and now — anything holding an
+    ``Expression`` is refused, because its value is not known at classification
+    time and a curvature *proof* may not rest on a guess.
+    """
+    if isinstance(index, Expression):
+        return False
+    if isinstance(index, (tuple, list)):
+        return all(_is_static_index(i) for i in index)
+    if isinstance(index, slice):
+        return all(_is_static_index(p) for p in (index.start, index.stop, index.step))
+    if isinstance(index, np.ndarray):
+        return bool(index.dtype.kind in "iub")
+    return isinstance(index, (int, np.integer, bool, np.bool_, type(Ellipsis), type(None)))
+
+
+def _const_leaf_value(expr: Expression) -> Optional[np.ndarray]:
+    """The float64 value of a constant leaf, ``None`` if ``expr`` is not one.
+
+    A constant leaf is a :class:`Constant`, a :class:`Parameter` (fixed for the
+    duration of a solve; the classification cache is reset per solve, so a
+    re-bound value is re-classified), or a **static index into one** —
+    ``mu[3]``, ``L[:, 0]``, ``c[idx]``.
+
+    The indexed case is why this function exists. Writing a coefficient vector as
+    one array ``Parameter`` and using ``mu[k] * x[k]`` is the natural spelling,
+    and without it the product rule saw two non-constants and fell through to
+    UNKNOWN — so a convex model built that way lost its convexity certificate
+    and, with it, the single-NLP route (measured on a restricted-equilibrium NLP:
+    ``convex=False``/``feasible`` for the array spelling against
+    ``convex=True``/``optimal`` for the identical model with scalar parameters).
+
+    The resolution uses numpy's own indexing on the leaf's value, so it agrees
+    with what the evaluator will compute by construction, and refuses — returns
+    ``None`` — on anything numpy will not resolve, on a symbolic index, and on a
+    non-numeric value. Refusing costs a proof; guessing would *make* one.
+    """
     if isinstance(expr, (Constant, Parameter)):
-        val = np.asarray(expr.value)
-        return bool(val.ndim == 0)
-    return False
+        try:
+            return np.asarray(expr.value, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(expr, IndexExpression):
+        base = _const_leaf_value(expr.base)
+        if base is None or not _is_static_index(expr.index):
+            return None
+        try:
+            return np.asarray(base[expr.index], dtype=np.float64)
+        except (TypeError, ValueError, IndexError):
+            return None
+    return None
+
+
+def _is_scalar_const(expr: Expression) -> bool:
+    """True if ``expr`` is a concrete numeric scalar (or a static index into one).
+
+    The ``Constant``/``Parameter`` arm is the pre-existing test, unchanged: this
+    predicate is only ever *widened* to the indexed case, never narrowed, so no
+    expression that used to pass can start failing (a constant whose value is not
+    float64-coercible still answers exactly as it did).
+    """
+    if isinstance(expr, (Constant, Parameter)):
+        return bool(np.asarray(expr.value).ndim == 0)
+    val = _const_leaf_value(expr)
+    return bool(val is not None and val.ndim == 0)
 
 
 def _scalar_value(expr: Expression) -> float:
-    return float(np.asarray(expr.value))  # type: ignore[attr-defined]
+    if isinstance(expr, (Constant, Parameter)):
+        return float(np.asarray(expr.value))  # type: ignore[attr-defined]
+    val = _const_leaf_value(expr)
+    if val is None:  # pragma: no cover - callers gate on _is_scalar_const
+        raise TypeError(f"{expr!r} is not a constant leaf")
+    return float(val)
 
 
 def _finite_const_value(expr: Expression) -> Optional[np.ndarray]:
@@ -679,11 +756,8 @@ def _finite_const_value(expr: Expression) -> Optional[np.ndarray]:
     a proof). Conflating them made the product rule disagree with
     :func:`_classify_division`, which has always refused non-finite divisors.
     """
-    if not isinstance(expr, (Constant, Parameter)):
-        return None
-    try:
-        arr = np.asarray(expr.value, dtype=np.float64)
-    except (TypeError, ValueError):
+    arr = _const_leaf_value(expr)
+    if arr is None:
         return None
     if not np.all(np.isfinite(arr)):
         return None
@@ -732,11 +806,8 @@ def _const_divisor_info(expr: Expression) -> Optional[int]:
     concrete constant, holds a non-finite entry, or holds an entry at or within
     ``1e-30`` of zero, matching the scalar guard this generalises.
     """
-    if not isinstance(expr, (Constant, Parameter)):
-        return None
-    try:
-        arr = np.asarray(expr.value, dtype=np.float64)
-    except (TypeError, ValueError):
+    arr = _const_leaf_value(expr)
+    if arr is None:
         return None
     if not np.all(np.isfinite(arr)) or np.any(np.abs(arr) <= 1e-30):
         return None
@@ -847,7 +918,7 @@ def _classify_division(
     # finite-element widths); ``1/c`` then has the same uniform sign as ``c``, so
     # the same scaling applies. Every entry must be bounded away from zero —
     # a single zero entry makes the quotient undefined there (#944).
-    if isinstance(expr.right, (Constant, Parameter)):
+    if isinstance(expr.right, (Constant, Parameter)) or _const_leaf_value(expr.right) is not None:
         s = _const_divisor_info(expr.right)
         if s is None:
             # Non-finite, or an entry at/near zero: the quotient is undefined or
@@ -1183,9 +1254,9 @@ def _sign_join(a: Sign, b: Sign) -> Sign:
 def _classify_matmul(expr: MatMulExpression, model: Optional[Model], cache: dict) -> ExprInfo:
     left = classify_expr_info(expr.left, model, cache)
     right = classify_expr_info(expr.right, model, cache)
-    if isinstance(expr.left, (Constant, Parameter)):
+    if isinstance(expr.left, (Constant, Parameter)) or _const_leaf_value(expr.left) is not None:
         return ExprInfo(right.curvature, Sign.UNKNOWN)
-    if isinstance(expr.right, (Constant, Parameter)):
+    if isinstance(expr.right, (Constant, Parameter)) or _const_leaf_value(expr.right) is not None:
         return ExprInfo(left.curvature, Sign.UNKNOWN)
     return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 

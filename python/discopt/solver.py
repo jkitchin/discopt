@@ -7620,6 +7620,7 @@ def solve_model(
     lagrangian_frequency: int = 1,
     lagrangian_method: str = "subgradient",
     initial_point: Optional[np.ndarray] = None,
+    warm_start: Optional[dict] = None,
     skip_convex_check: bool = False,
     nlp_bb: Optional[bool] = None,
     lazy_constraints=None,
@@ -10271,6 +10272,7 @@ def solve_model(
                 t_start,
                 nlp_solver,
                 initial_point=initial_point,
+                warm_start=warm_start,
             )
             # C-33/SC-1 (#998) applies here a fortiori: an opaque dm.custom body
             # cannot be inspected at all, so convexity can never be established
@@ -10726,6 +10728,7 @@ def solve_model(
             t_start,
             nlp_solver,
             initial_point=initial_point,
+            warm_start=warm_start,
             gap_tolerance=gap_tolerance,
             certify_convex=True,
         )
@@ -10797,6 +10800,7 @@ def solve_model(
             t_start,
             nlp_solver,
             initial_point=initial_point,
+            warm_start=warm_start,
         )
         # A local NLP on a model we could NOT certify convex (classification
         # failed/timed out, leaving convexity unknown) is best-effort only. If it
@@ -16852,6 +16856,82 @@ def _convex_nlp_certificate_gap(
     return stationarity_rel, complementarity_rel
 
 
+def _build_pounce_warm_start(evaluator, state: dict):
+    """Turn ``Model.solve``'s warm-start state into a ``pounce.WarmStart``.
+
+    ``state`` holds the previous result's flat point, its constraint multipliers
+    keyed by constraint name, and its bound multipliers already flattened in
+    variable order (``warm_start.primal_point_from_result`` /
+    ``bound_duals_from_result``). The constraint multipliers are flattened here,
+    against *this* evaluator's row layout, because that layout is what POUNCE
+    will see — the inverse of ``_unpack_constraint_duals``.
+
+    Returns ``None`` when pounce is too old to expose ``WarmStart``, or when a
+    piece does not fit this problem's shape; in both cases the solve proceeds
+    from the point alone, which is what the caller would have done anyway. A
+    shape mismatch is reported at WARNING, never swallowed: a warm start that
+    silently does nothing is the failure mode #1247 exists to remove.
+    """
+    try:
+        import pounce
+    except ImportError:  # pragma: no cover - POUNCE absence is handled upstream
+        return None
+    if not hasattr(pounce, "WarmStart"):
+        logger.warning(
+            "warm_start requested but this pounce build has no WarmStart; starting from the "
+            "point only [pounce-warm-start-unsupported]."
+        )
+        return None
+
+    from discopt.warm_start import constraint_duals_from_result
+
+    x = np.asarray(state.get("x"), dtype=np.float64)
+    try:
+        lagrange = constraint_duals_from_result(evaluator, state.get("constraint_duals"))
+    except ValueError as exc:
+        logger.warning("warm_start: constraint multipliers unusable (%s); starting without", exc)
+        lagrange = None
+
+    zl = state.get("bound_duals_lower")
+    zu = state.get("bound_duals_upper")
+    n = int(evaluator.n_variables)
+    m_rows = int(evaluator.n_constraints)
+
+    def _sized(name, arr, want):
+        if arr is None:
+            return None
+        arr = np.asarray(arr, dtype=np.float64).ravel()
+        if arr.size != want:
+            logger.warning(
+                "warm_start: %s has %d entries but this problem has %d; starting without it "
+                "[warm-start-shape-mismatch].",
+                name,
+                arr.size,
+                want,
+            )
+            return None
+        return arr
+
+    x = _sized("the starting point", x, n)
+    if x is None:
+        return None
+    lagrange = _sized("the constraint multipliers", lagrange, m_rows)
+    zl = _sized("the lower-bound multipliers", zl, n)
+    zu = _sized("the upper-bound multipliers", zu, n)
+
+    mu = state.get("barrier_parameter")
+    try:
+        mu = float(mu) if mu is not None else None
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        mu = None
+    if mu is not None and not (math.isfinite(mu) and mu > 0.0):
+        # pounce falls back to ``mu_init_fallback`` for a non-positive / unknown
+        # mu; passing a garbage value instead would pin the barrier there.
+        mu = None
+
+    return pounce.WarmStart(x=x, lagrange=lagrange, zl=zl, zu=zu, mu=mu)
+
+
 def _solve_continuous(
     model: Model,
     time_limit: float,
@@ -16859,10 +16939,18 @@ def _solve_continuous(
     t_start: float,
     nlp_solver: str = "ipopt",
     initial_point: Optional[np.ndarray] = None,
+    warm_start: Optional[dict] = None,
     gap_tolerance: float = 1e-6,
     certify_convex: bool = False,
 ) -> SolveResult:
-    """Solve a purely continuous model directly with NLP solver (no B&B)."""
+    """Solve a purely continuous model directly with NLP solver (no B&B).
+
+    ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
+    ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
+    "barrier_parameter"}``, with the primal half already delivered as
+    ``initial_point``. It is honoured on the POUNCE backend and ignored (with a
+    log line) elsewhere, since only POUNCE exposes a primal-dual start.
+    """
     # Single-NLP solves need reliable KKT convergence. The pure-JAX IPM's
     # acceptable-tolerance check only covers bound complementarity, so on
     # problems with unbounded variables and inequality constraints it can
@@ -16934,12 +17022,32 @@ def _solve_continuous(
     constraint_bounds = None
     backend_evaluator = cast("NLPEvaluator", _BoundOverrideEvaluator(evaluator, lb, ub))
 
+    # Primal-dual warm start (#1247): POUNCE takes the previous solve's
+    # multipliers and barrier parameter alongside the point, and derives its own
+    # warm-start options (``warm_start_init_point``, ``mu_init``, the bound
+    # pushes) from them. Built here, where the evaluator that defines the
+    # constraint-row layout exists.
+    pounce_warm_start = None
+    if warm_start is not None:
+        if nlp_solver == "pounce":
+            pounce_warm_start = _build_pounce_warm_start(evaluator, warm_start)
+        else:
+            logger.info(
+                "warm_start ignored on the %r NLP backend (only POUNCE takes a primal-dual "
+                "start); the point is still used as the initial point.",
+                nlp_solver,
+            )
+
     t_jax_start = time.perf_counter()
     if nlp_solver == "pounce":
         from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
         nlp_result = solve_nlp_pounce(
-            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+            backend_evaluator,
+            x0,
+            constraint_bounds=constraint_bounds,
+            options=opts,
+            warm_start=pounce_warm_start,
         )
     else:
         # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
@@ -17105,6 +17213,7 @@ def _solve_continuous(
         root_gap=_c_gap,
         root_time=wall_time,
         gap_certified=_gap_certified,
+        kkt=nlp_result.kkt,
     )
 
 

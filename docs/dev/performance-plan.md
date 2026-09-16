@@ -8732,3 +8732,96 @@ non-zero on a zero count (§6). Pinned in-repo by
 `test_1238_balanced_fold_is_bound_neutral_against_the_left_deep_fold`, which
 compares all three spellings — the unshipped n-ary form included — through the
 same engine.
+
+## 65. #1245 reuse compiled relaxations across `Parameter` changes: the compile is not the cost (falsified 2026-09-16)
+
+#1245 (P1 of the discopt-calphad plugin tracker #1249) asked for compiled
+relaxations to be reused across `Parameter` value changes, with the acceptance
+criterion "100 global re-solves of one model with different `Parameter` values
+show relaxation compile time only on the first solve". Its stated evidence was
+`_relax/relaxation_compiler.py:426-431`, which bakes `Parameter.value` into the
+relaxation closure as a constant.
+
+The workload is a CALPHAD phase-pricing solve — `min G(y) - mu^T y` over a
+site-fraction simplex, with `x ln x` entropy and Redlich-Kister excess terms —
+re-solved once per phase, per (T, x) point of a trace, and per data condition of
+a fitting round. The committed probe is
+`scripts/entry_1245_parameter_resolve_cost.py` (five arms, each printing an
+executed count, exiting non-zero on a zero count per §6).
+
+### The measurements
+
+**A. The cited compiler is not on the default solve path.** Three default solves
+of the pricing model: `compile_relaxation` 0 calls, `_compile_relax_node` 0
+calls. `relaxation_compiler` is reached only from `_relax/batch_evaluator.py`.
+The per-node engine is `uniform_relax.build_uniform_relaxation` (#632), whose
+box-independent analysis (canonical DAG, reconstructed exprs, DCP verdicts,
+compiled value/grad fns, interval enclosures, curvature certs) is pinned on the
+model and dropped at the start of every solve by `clear_analysis_cache` —
+because a stale one embeds the OLD parameter values and yields an unsound bound
+(#742). *That* drop, not the cited compiler, is the per-solve rebuild.
+
+**B. What the per-solve rebuild costs**, as first-build minus median-build in
+`build_uniform_relaxation`, 2 reps per size, `max_nodes=40`:
+
+| n (components) | terms | wall/solve | cold excess | share of solve |
+|---:|---:|---:|---:|---:|
+| 2 | 5 | 1.130 s | 7.9 ms | 0.70% |
+| 4 | 22 | 1.855 s | 34.9 ms | 1.88% |
+| 6 | 51 | 2.030 s | 76.4 ms | 3.76% |
+| 8 | 92 | 5.079 s | 145.5 ms | 2.86% |
+
+It grows with model size but stays **0.4-3.8% of a solve**. Its composition at
+n = 8: `classify_expr` 74.4 ms, `interval_hessian` 51.1 ms, `canonicalize`
+18.9 ms.
+
+**C. The ceiling on content-addressed reuse.** `CNode` already carries a
+content key, so the question "how much could a cross-solve, content-keyed memo
+recover?" is answerable without building one: 85.2% (n=3), 91.3% (n=6), 93.3%
+(n=8) of canonical nodes keep their key across a `mu` change; 73.8-84.3% across
+a `T` change. High — but of the work behind those nodes, `classify_expr` and
+`interval_hessian` (125 of the 145 ms at n=8) depend on the model's **declared
+variable bounds** through `convexity/patterns._box_bounds`, which nothing in the
+object model tracks: `Variable.lb`/`ub` are plain attributes with no setter, no
+version counter, and in-place mutation is possible. Persisting those verdicts
+across solves reopens exactly the #742 unsoundness in a form no token catches
+(narrow the box mid-solve, restore it, reuse a verdict proven on the narrow
+box). The soundly persistable remainder — reconstructed exprs, compiled fns,
+support columns, box-keyed interval enclosures — is ~35% of the cold fill, i.e.
+**~1% of a solve.**
+
+**D. A parameter change costs nothing measurable.** The control the issue's
+premise implies — the same model, same node budget, solved with `mu` changed vs
+`mu` left alone, 6 interleaved reps each: **changed 1.727 s ± 0.088, unchanged
+1.863 s ± 0.067.** The arm that rebuilds everything is the *faster* one (the
+instances differ; the point is that the rebuild is not visible above that).
+
+**E. What a parameter did cost on every solve.** `TapeNLPEvaluator._ensure_fresh`
+runs in front of every objective/gradient/constraint/Jacobian/Hessian
+evaluation, and its staleness check rebuilt the whole snapshot tuple — one
+`np.asarray(...).copy()` per parameter — on **every call**: 12.15 µs/call at 5
+scalar parameters, 48 341 calls in 8 solves, **4.5% of the wall of a
+parameterised solve**, paid whether or not any value moved.
+
+### Binding consequence
+
+The kill criterion fires. **No relaxation-cache rework ships.** The ceiling on
+the ask is ~1% of a solve for the soundly reusable part, against a change that
+would reopen the #742 false-bound class — §5's "sound ≠ helpful" bar, refused on
+the safer side of §1. The acceptance criterion as written ("compile time only on
+the first solve") is not reachable in any design: `canonicalize` folds a scalar
+`Parameter` into a `const` leaf, so a new value *is* a new relaxation, and the
+verdicts above depend on bounds the model does not version.
+
+What ships is arm E: the staleness check now compares against the retained
+snapshot in place, with a plain float compare for 0-d parameters — **12.15 →
+0.82 µs/call, 14.7×**, same verdict element for element (exact equality, NaN
+still reading as changed). That single fix is worth more than the entire
+relaxation-reuse ceiling it replaces.
+
+Pinned by `python/tests/test_1245_parameter_resolve_reuse.py`: the check still
+sees every re-bind route (scalar, array, in-place on either), the tape rebuilds
+exactly once per change and never per evaluation, the check performs no
+snapshot, a re-solved model matches a freshly built one to 1e-12, and a
+parameter whose sign flips the objective's curvature still gets a sound
+relaxation on the same model object (the #742 class, alternated 1 → -1 → 1 → -1).

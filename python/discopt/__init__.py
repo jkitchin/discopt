@@ -261,6 +261,9 @@ from discopt.modeling import (
     softplus as softplus,
 )
 from discopt.modeling import (
+    solve_batch as solve_batch,
+)
+from discopt.modeling import (
     sqrt as sqrt,
 )
 from discopt.modeling import (
