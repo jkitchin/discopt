@@ -260,3 +260,62 @@ def test_the_validator_is_callable_on_its_own():
     # gate was vacuous; it must not silently read as a pass.
     n0, _ = validate_cut_against_witnesses(bad, m, [])
     assert n0 == 0
+
+
+def test_the_retroactive_recheck_convicts_a_cut_accepted_with_no_evidence():
+    """Raised in review on #1275: the FIRST cuts can arrive before any witness
+    exists, so they are accepted unchecked, and the region a bad cut excludes can
+    never afterwards produce a witness to convict it.
+
+    Nothing recovers the excluded region, but such a cut can still be convicted by
+    a witness found elsewhere, so every new witness is re-checked against every cut
+    already accepted. This exercises that path directly — a solve-level version of
+    this test passed both with and WITHOUT the re-check, because on every model
+    tried the incumbent is recorded before the first cut is validated (measured:
+    zero validations with an empty witness set over two models and 23
+    validations). A test that cannot fail is not a test (CLAUDE.md §6).
+    """
+    from discopt.solver import _recheck_accepted_cuts
+
+    m, v = _spatial_model()
+    bad = CutResult(terms=[(v[0], 1.0), (v[1], 1.0), (v[2], 1.0)], sense="<=", rhs=1.0)
+    good = CutResult(terms=[(v[0], 1.0), (v[1], 1.0), (v[2], 1.0)], sense="<=", rhs=10.0)
+    witness = np.array([1.0, 1.5, 1.5])  # feasible: sums to 4
+
+    tally: dict = {}
+    _recheck_accepted_cuts([good], m, witness, tally)
+    assert tally["retro_checks"] == 1, tally
+
+    with pytest.raises(CutValidationError, match="verified FEASIBLE"):
+        _recheck_accepted_cuts([good, bad], m, witness, tally)
+
+
+def test_the_gate_is_not_vacuous_on_a_normal_solve():
+    """The counterpart measurement: on an ordinary solve every cut IS judged
+    against at least one witness, so the hole above is narrow rather than the
+    common case. Pinned because a change that stopped recording the incumbent as a
+    witness would widen it silently."""
+    m, v = _spatial_model()
+    r = m.solve(
+        time_limit=90,
+        cut_callback=lambda ctx, model: [
+            CutResult(terms=[(x, 1.0) for x in v], sense="<=", rhs=100.0)
+        ],
+    )
+    stats = r.solver_stats or {}
+    assert stats.get("cut_validation/cuts", 0) > 0, stats
+    assert stats.get("cut_validation/unvalidated", 0) == 0, stats
+    assert stats.get("cut_validation/witness_checks", 0) >= stats["cut_validation/cuts"], stats
+
+
+def test_the_retroactive_recheck_does_not_fire_on_a_valid_cut():
+    """The re-check must not cost a correct callback its solve."""
+    m, x, y = _hyperbola_model()
+    r = m.solve(
+        time_limit=60,
+        cut_callback=lambda ctx, model: [
+            CutResult(terms=[(x, 1.0), (y, 1.0)], sense="<=", rhs=10.0 / 3.0)
+        ],
+    )
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(TRUE_OPT, abs=1e-4)

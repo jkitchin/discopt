@@ -12787,6 +12787,7 @@ def solve_model(
     # tally. Both live for the whole solve so a cut generated late is still judged
     # against every witness collected earlier.
     _cut_witnesses: list = []
+    _cut_accepted_cuts: list = []
     _cut_gate_tally: dict = {}
 
     # Objective-gating priority branching (issue #184). Opt-in via
@@ -15457,6 +15458,7 @@ def solve_model(
                 cut_callback=cut_callback,
                 _cut_pool=_cut_pool,
                 witnesses=_cut_witnesses,
+                accepted_cuts=_cut_accepted_cuts,
                 tally=_cut_gate_tally,
                 tree_bound_valid=_gap_certified,
             )
@@ -25542,6 +25544,7 @@ def _invoke_node_cut_callback(
     cut_callback,
     _cut_pool,
     witnesses: list,
+    accepted_cuts: list,
     tally: dict,
     tree_bound_valid: bool = True,
 ) -> int:
@@ -25573,6 +25576,16 @@ def _invoke_node_cut_callback(
     is valid everywhere. ``tally`` records how many witnesses were actually
     tested so a gate that checked nothing cannot read as a pass (CLAUDE.md §6) —
     it surfaces on ``solver_stats`` as ``cut_validation/*``.
+
+    One hole the tally alone does not close (raised in review on #1275): the FIRST
+    cuts arrive before any witness exists, so they are accepted unchecked, and a
+    region a bad cut excludes can never afterwards produce a witness to convict it.
+    Nothing recovers the excluded region, but the cut can still be convicted by a
+    witness found elsewhere, so every new witness is re-checked against every cut
+    already accepted (``accepted_cuts``) and a contradiction raises with the same
+    force as a contradiction at insertion time. This narrows the hole rather than
+    closing it: a cut that excludes the optimum and nothing else may still go
+    unconvicted, which is why ``cut_validation/unvalidated`` is reported.
     """
     from discopt._relax.cutting_planes import LinearCut
     from discopt.callbacks import (
@@ -25593,14 +25606,15 @@ def _invoke_node_cut_callback(
     inc_obj = None
     if inc is not None and inc[1] < _SENTINEL_THRESHOLD:
         inc_obj = -float(inc[1]) if is_max else float(inc[1])
-        _add_cut_witness(witnesses, inc[0])
+        if _add_cut_witness(witnesses, inc[0]):
+            _recheck_accepted_cuts(accepted_cuts, model, witnesses[-1], tally)
 
     for i in range(n_batch):
         if result_lbs[i] >= _SENTINEL_THRESHOLD or bool(node_infeasible_mask[i]):
             continue  # nothing to cut at an infeasible or failed node
         sol = np.asarray(result_sols[i], dtype=np.float64)
-        if bool(result_feas[i]):
-            _add_cut_witness(witnesses, sol)
+        if bool(result_feas[i]) and _add_cut_witness(witnesses, sol):
+            _recheck_accepted_cuts(accepted_cuts, model, witnesses[-1], tally)
         ctx = NodeCutContext(
             node_id=int(batch_ids[i]),
             node_lb=np.asarray(batch_lb[i], dtype=np.float64).copy(),
@@ -25630,6 +25644,7 @@ def _invoke_node_cut_callback(
                 tally["unvalidated"] = tally.get("unvalidated", 0) + 1
             coeffs, rhs, sense = cut_result_to_dense(cut, model)
             _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+            accepted_cuts.append(cut)
             accepted += 1
     return accepted
 
@@ -25640,14 +25655,34 @@ def _invoke_node_cut_callback(
 _CUT_WITNESS_CAP = 64
 
 
-def _add_cut_witness(witnesses: list, x) -> None:
-    """Record a point already verified feasible, for the cut-validation gate."""
+def _add_cut_witness(witnesses: list, x) -> bool:
+    """Record a point already verified feasible, for the cut-validation gate.
+
+    Returns True iff this point was new, so the caller can re-check it against the
+    cuts already accepted (see :func:`_recheck_accepted_cuts`).
+    """
     arr = np.asarray(x, dtype=np.float64).ravel()
     if arr.size == 0 or not np.all(np.isfinite(arr)):
-        return
+        return False
     for held in witnesses:
         if held.shape == arr.shape and np.allclose(held, arr, rtol=0.0, atol=1e-12):
-            return
+            return False
     witnesses.append(arr.copy())
     if len(witnesses) > _CUT_WITNESS_CAP:
         del witnesses[0]
+    return True
+
+
+def _recheck_accepted_cuts(accepted_cuts: list, model: Model, witness, tally: dict) -> None:
+    """Re-judge every already-accepted cut against a newly found feasible point.
+
+    A cut accepted when the witness set was empty carried no evidence at all. This
+    is the cheapest way to convict it later: a feasible point that violates a
+    pooled cut proves the cut was never valid, and raising here is the same verdict
+    the insertion-time gate would have returned had the point been known then.
+    """
+    from discopt.callbacks import validate_cut_against_witnesses
+
+    for cut in accepted_cuts:
+        n_checked, _worst = validate_cut_against_witnesses(cut, model, [witness])
+        tally["retro_checks"] = tally.get("retro_checks", 0) + n_checked
