@@ -7669,6 +7669,7 @@ def solve_model(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
+    cut_callback=None,
     solver: Optional[str] = None,
     presolve: bool = True,
     presolve_polynomial: bool = False,
@@ -11327,6 +11328,12 @@ def solve_model(
         _constraint_senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
 
     # --- Lazy constraint callback requires a cut pool ---
+    if cut_callback is not None and _cut_pool is None:
+        # #1278 D: the callback's cuts need somewhere to live, exactly as the
+        # lazy-constraint path below requires.
+        from discopt._relax.cutting_planes import CutPool as _CutPoolD
+
+        _cut_pool = _CutPoolD(max_cuts=500)
     if lazy_constraints is not None and _cut_pool is None:
         from discopt._relax.cutting_planes import CutPool
 
@@ -12759,6 +12766,28 @@ def solve_model(
     # Per-node reduction timers (cert:T0.3). Accumulated across the spatial B&B
     # loop and surfaced on SolveResult.solver_stats. Pure instrumentation.
     _reduce_timers = {"fbbt": 0.0, "obbt": 0.0}
+
+    # #1278 F: which argument certified each node's bound. `mccormick_lp._certify`
+    # tags every certified node with `ns_safe_bound` (a Neumaier-Shcherbina safe
+    # bound from the in-house simplex's own duals -- rigorous for ANY dual vector),
+    # `milp_dual`, `trusted_backend` / `trusted_vertex` (an LP optimum taken on
+    # trust, where no safe bound is computable), or `declined`. #1278 asked for a
+    # `verified_bound=True` mode using NS + outward rounding "throughout"; both are
+    # already default-ON and `_certify` already prefers the safe bound, so what was
+    # missing was only the ability to SEE it from outside. The tally is
+    # process-global, so the delta across this solve is taken here; that is exact
+    # for one solve at a time in a process (which is how `dm.solve_batch` runs
+    # them -- separate processes) and approximate only if a caller runs two solves
+    # concurrently in one interpreter.
+    from discopt._relax.mccormick_lp import BOUND_PROVENANCE as _bound_prov
+
+    _bound_prov_at_entry = dict(_bound_prov)
+
+    # #1278 D: points this solve has verified feasible, and the cut gate's own
+    # tally. Both live for the whole solve so a cut generated late is still judged
+    # against every witness collected earlier.
+    _cut_witnesses: list = []
+    _cut_gate_tally: dict = {}
 
     # Objective-gating priority branching (issue #184). Opt-in via
     # ``DISCOPT_OBJ_BRANCH_PRIORITY=1``: branch the binaries that gate the
@@ -15411,6 +15440,27 @@ def solve_model(
                     _record_improver(_HEUR_COST["lbranch"], _lb_improved)
                     _heuristic_governor.record("lbranch", _lb_improved)
 
+        # --- User cut callback at EVERY node (#1278 D) ---
+        if cut_callback is not None and _cut_pool is not None:
+            _invoke_node_cut_callback(
+                model=model,
+                tree=tree,
+                t_start=t_start,
+                batch_ids=batch_ids,
+                batch_lb=batch_lb,
+                batch_ub=batch_ub,
+                result_lbs=result_lbs,
+                result_sols=result_sols,
+                result_feas=result_feas,
+                node_infeasible_mask=node_infeasible_mask,
+                n_batch=n_batch,
+                cut_callback=cut_callback,
+                _cut_pool=_cut_pool,
+                witnesses=_cut_witnesses,
+                tally=_cut_gate_tally,
+                tree_bound_valid=_gap_certified,
+            )
+
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
             _n_cb_rejected = _invoke_pre_import_callbacks(
@@ -16630,6 +16680,13 @@ def solve_model(
     # than inferred from a wall-clock reading.
     if _incumbent_extension_taken > 0.0:
         _solver_stats["budget/incumbent_extension_s"] = float(_incumbent_extension_taken)
+    for _gate_key, _gate_val in _cut_gate_tally.items():
+        if _gate_val:
+            _solver_stats[f"cut_validation/{_gate_key}"] = float(_gate_val)
+    for _prov_tag, _prov_now in _bound_prov.items():
+        _prov_delta = _prov_now - _bound_prov_at_entry.get(_prov_tag, 0)
+        if _prov_delta > 0:
+            _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
     return SolveResult(
         status=status,
@@ -25467,3 +25524,130 @@ def _solve_miqp_bb(
         bound_source=_bound_source,
         solver_stats=_ext_stats,
     )
+
+
+def _invoke_node_cut_callback(
+    *,
+    model: Model,
+    tree,
+    t_start: float,
+    batch_ids,
+    batch_lb,
+    batch_ub,
+    result_lbs,
+    result_sols,
+    result_feas,
+    node_infeasible_mask,
+    n_batch: int,
+    cut_callback,
+    _cut_pool,
+    witnesses: list,
+    tally: dict,
+    tree_bound_valid: bool = True,
+) -> int:
+    """Run the user's :class:`~discopt.callbacks.CutCallback` on every node of a
+    batch and pool the cuts it returns. Returns how many cuts were accepted.
+
+    Component **D** of #1248, via #1278. ``lazy_constraints`` fires only at
+    integer-feasible nodes, so a plugin with tangent-plane cuts of a nonconvex
+    surface — the CALPHAD case — had nowhere to put them. This fires at every
+    node the batch evaluated, spatial ones included, and hands the callback the
+    node's BOX, which is what a spatial cut needs to pick a linearization point.
+
+    Soundness, which is the whole design problem here and is the opposite of
+    #1248 A's. A cut the solver derives is a theorem; a cut the caller hands it is
+    an assertion. ``_cut_pool`` is applied at EVERY node through
+    ``_AugmentedEvaluator``, so every accepted cut is global and an invalid one
+    removes the optimum from the whole tree — a false ``optimal``. Two guards,
+    neither optional:
+
+    * ``CutResult(scope="local")`` is refused at construction. There is no
+      subtree-scoped pool to put such a cut in, and silently promoting it to
+      global is exactly the false-certificate case above.
+    * Every cut is checked against ``witnesses`` — points this solve has already
+      verified feasible (its incumbents, and node relaxation solutions that came
+      back feasible). A violator raises ``CutValidationError`` rather than being
+      dropped: a caller whose cut was silently discarded believes it applied.
+
+    The gate is a filter, not a proof; no finite witness set can establish a cut
+    is valid everywhere. ``tally`` records how many witnesses were actually
+    tested so a gate that checked nothing cannot read as a pass (CLAUDE.md §6) —
+    it surfaces on ``solver_stats`` as ``cut_validation/*``.
+    """
+    from discopt._relax.cutting_planes import LinearCut
+    from discopt.callbacks import (
+        NodeCutContext,
+        cut_result_to_dense,
+        validate_cut_against_witnesses,
+    )
+    from discopt.modeling.core import ObjectiveSense as _Sense
+
+    accepted = 0
+    stats = tree.stats()
+    is_max = model._objective is not None and model._objective.sense == _Sense.MAXIMIZE
+    best_bound = _certified_callback_bound(
+        stats.get("global_lower_bound"), tree_bound_valid, is_max
+    )
+
+    inc = tree.incumbent()
+    inc_obj = None
+    if inc is not None and inc[1] < _SENTINEL_THRESHOLD:
+        inc_obj = -float(inc[1]) if is_max else float(inc[1])
+        _add_cut_witness(witnesses, inc[0])
+
+    for i in range(n_batch):
+        if result_lbs[i] >= _SENTINEL_THRESHOLD or bool(node_infeasible_mask[i]):
+            continue  # nothing to cut at an infeasible or failed node
+        sol = np.asarray(result_sols[i], dtype=np.float64)
+        if bool(result_feas[i]):
+            _add_cut_witness(witnesses, sol)
+        ctx = NodeCutContext(
+            node_id=int(batch_ids[i]),
+            node_lb=np.asarray(batch_lb[i], dtype=np.float64).copy(),
+            node_ub=np.asarray(batch_ub[i], dtype=np.float64).copy(),
+            x_relaxation=sol.copy(),
+            node_bound=float(result_lbs[i]),
+            incumbent_obj=inc_obj,
+            best_bound=best_bound,
+            node_count=stats["total_nodes"],
+            elapsed_time=time.perf_counter() - t_start,
+        )
+        # Only the USER's call may fail softly (INT-1, #413). Everything after it
+        # — validating and pooling — is our code, so a CutValidationError
+        # propagates and stops the solve instead of being logged away.
+        try:
+            cuts = cut_callback(ctx, model)
+        except Exception as exc:  # noqa: BLE001 - user code; logged, never silent
+            logger.warning("Cut callback raised %s: %s", type(exc).__name__, exc)
+            continue
+        if not cuts:
+            continue
+        for cut in cuts:
+            n_checked, _worst = validate_cut_against_witnesses(cut, model, witnesses)
+            tally["cuts"] = tally.get("cuts", 0) + 1
+            tally["witness_checks"] = tally.get("witness_checks", 0) + n_checked
+            if n_checked == 0:
+                tally["unvalidated"] = tally.get("unvalidated", 0) + 1
+            coeffs, rhs, sense = cut_result_to_dense(cut, model)
+            _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+            accepted += 1
+    return accepted
+
+
+#: How many verified-feasible points the cut gate keeps. Bounded so a long solve
+#: cannot grow the witness list without limit; the newest are kept because they
+#: are the ones near the incumbent, where a bad cut does the most damage.
+_CUT_WITNESS_CAP = 64
+
+
+def _add_cut_witness(witnesses: list, x) -> None:
+    """Record a point already verified feasible, for the cut-validation gate."""
+    arr = np.asarray(x, dtype=np.float64).ravel()
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return
+    for held in witnesses:
+        if held.shape == arr.shape and np.allclose(held, arr, rtol=0.0, atol=1e-12):
+            return
+    witnesses.append(arr.copy())
+    if len(witnesses) > _CUT_WITNESS_CAP:
+        del witnesses[0]

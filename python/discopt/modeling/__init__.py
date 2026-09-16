@@ -115,6 +115,7 @@ from discopt.modeling.indexed import (
     Skip,
 )
 from discopt.modeling.sets import ProductSet, RangeSet, Set
+from discopt.operators import register_function, registered_names
 from discopt.serialize import dumps, load, loads
 
 __all__ = [
@@ -175,6 +176,8 @@ __all__ = [
     "tanh",
     "SolveResult",
     "solve_batch",
+    "register_function",
+    "registered_names",
     "SolveUpdate",
     "from_pyomo",
     "from_nl",

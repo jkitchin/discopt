@@ -6295,6 +6295,7 @@ class Model:
         lazy_constraints: Optional[Callable] = None,
         incumbent_callback: Optional[Callable] = None,
         node_callback: Optional[Callable] = None,
+        cut_callback: Optional[Callable] = None,
         solver: Optional[str] = None,
         validate: bool = False,
         verify_incumbent: bool = True,
@@ -6425,6 +6426,25 @@ class Model:
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
+        cut_callback : callable, optional
+            Cut callback, invoked at **every** node — spatial ones included,
+            unlike ``lazy_constraints``, which fires only at integer-feasible
+            nodes. Accepts ``(ctx, model)`` where ``ctx`` is a
+            :class:`~discopt.callbacks.NodeCutContext` carrying the node's BOX,
+            its relaxation solution and the incumbent, and returns a list of
+            :class:`~discopt.callbacks.CutResult` (possibly empty).
+
+            **Every returned cut is validated before it is accepted.** A cut the
+            solver derives is a theorem; one you hand it is an assertion, and
+            discopt applies its cut pool at every node — so an invalid cut
+            removes the optimum from the whole tree and the solve can report a
+            false ``optimal``. Each cut is therefore checked against the points
+            this solve has already verified feasible, and a violator raises
+            :class:`~discopt.callbacks.CutValidationError` rather than being
+            quietly dropped. ``CutResult(scope="local")`` is refused outright:
+            there is no subtree-scoped pool to hold such a cut. The gate is a
+            filter, not a proof — ``SolveResult.solver_stats["cut_validation/*"]``
+            reports how many points it actually tested.
         solver : str, optional
             Optional backend selector.
 
@@ -6931,6 +6951,7 @@ class Model:
                     lazy_constraints=lazy_constraints,
                     incumbent_callback=incumbent_callback,
                     node_callback=node_callback,
+                    cut_callback=cut_callback,
                     solver=solver,
                     tuning=tuning,
                     **kwargs,

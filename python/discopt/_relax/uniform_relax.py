@@ -394,6 +394,91 @@ def _dacosh(t: float) -> float:
     return math.inf if r == 0.0 else math.nan
 
 
+# --------------------------------------------------------------------------- #
+# Intrinsics discopt models natively but never enveloped (issue #1277).
+#
+# ``entropy`` (``dm.xlogx``), ``softplus``, ``sigmoid`` and ``tan`` are first-class
+# operators of the modeling layer -- ``canonical_expr`` emits a ``call`` node for
+# each -- yet none had an entry below, so ``_build_univariate_call`` fell through
+# to ``Envelope(rows=[], tight=False)``: the aux interval floor, a box with no
+# secant and no tangent. The floor DECOUPLES ``w`` from ``t``, so the LP may take
+# every such term's independent minimum at once.
+#
+# That is invisible on a bare univariate objective (the aux IS the objective, so
+# its enclosure is exact -- measured 0.00% root gap, which is why this went
+# unnoticed) and expensive as soon as the atom sits beside a term the
+# composite-convex lift cannot certify. Measured root gap, floor -> envelope
+# (``scripts/entry_1277_univariate_floor.py``):
+#
+#     CALPHAD compound-energy (entropy + bilinear)   28.84% -> 5.45%
+#     coupled f(x)+f(y)+c*x*y, entropy               73.57% -> 69.31%
+#     coupled f(x)+f(y)+c*x*y, softplus               5.75% ->  2.41%
+#     coupled f(x)+f(y)+c*x*y, sigmoid               14.71% ->  0.00%
+#     coupled f(x)+f(y)+c*x*y, tan                   84.75% -> 22.37%
+#
+# No new mechanism: each entry is the same exact secant/tangent envelope
+# ``_emit_1d`` already emits for ``exp``/``log``/``tanh``, and each curvature
+# verdict is a closed-form sign argument on ``f''`` stated at its definition.
+# --------------------------------------------------------------------------- #
+def _xlogx(t: float) -> float:
+    """``dm.xlogx`` / the ``entropy`` intrinsic: ``t ln t``, domain ``t > 0``."""
+    return t * math.log(t)
+
+
+def _xlogx_prime(t: float) -> float:
+    return math.log(t) + 1.0
+
+
+def _sigmoid(t: float) -> float:
+    """``1/(1+e^-t)``, evaluated on the overflow-free branch for each sign."""
+    t = float(t)
+    if t >= 0.0:
+        return 1.0 / (1.0 + math.exp(-t))
+    e = math.exp(t)
+    return e / (1.0 + e)
+
+
+def _sigmoid_prime(t: float) -> float:
+    s = _sigmoid(t)
+    return s * (1.0 - s)
+
+
+def _softplus(t: float) -> float:
+    """``log(1+e^t)`` via ``logaddexp``: the naive form overflows for ``t`` large."""
+    return float(np.logaddexp(0.0, float(t)))
+
+
+def _dtan(t: float) -> float:
+    """``d/dt tan(t) = sec^2(t)``; ``+inf`` only at a pole, which the curvature
+    guard excludes from every admitted box."""
+    c = math.cos(float(t))
+    return math.inf if c == 0.0 else 1.0 / (c * c)
+
+
+def _curv_tan(lo: float, hi: float) -> Optional[str]:
+    """``tan'' = 2 sec^2(t) tan(t)``, so the sign of ``tan''`` is the sign of
+    ``tan`` -- but ONLY within a single branch, where ``tan`` is finite and
+    increasing. A box touching or crossing a pole has no finite enclosure and no
+    sound chord, so it abstains; inside branch ``k`` the inflection is at
+    ``k*pi`` and the verdict is the sign of ``t - k*pi``.
+
+    This is why ``tan`` was absent from the table rather than merely overlooked:
+    the guard is two-sided and ``domain_ok`` only sees ``lo``.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi < lo:
+        return None
+    k = math.floor(lo / math.pi + 0.5)  # index of the branch containing lo
+    if math.floor(hi / math.pi + 0.5) != k:
+        return None  # crosses a pole
+    if not ((k - 0.5) * math.pi < lo and hi < (k + 0.5) * math.pi):
+        return None  # touches a pole (or the float-rounded branch test is unsafe)
+    if lo - k * math.pi >= 0.0:
+        return "convex"
+    if hi - k * math.pi <= 0.0:
+        return "concave"
+    return None  # straddles the inflection at k*pi
+
+
 # name -> (f, f', curvature, domain_ok(lo) )
 _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
     "exp": (np.exp, np.exp, _curv_const("convex"), lambda lo: True),
@@ -449,6 +534,17 @@ _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
         _curv_by_sign(False),
         lambda lo: True,
     ),
+    # --- #1277: the four native intrinsics that used to reach the floor ------- #
+    # t*ln(t): f'' = 1/t > 0 on the domain, so convex wherever it is defined.
+    "entropy": (_xlogx, _xlogx_prime, _curv_const("convex"), lambda lo: lo > 0.0),
+    # log(1+e^t): f'' = sigmoid(t)*(1-sigmoid(t)) > 0 everywhere -> convex on R.
+    "softplus": (_softplus, _sigmoid, _curv_const("convex"), lambda lo: True),
+    # 1/(1+e^-t): f'' = s(1-s)(1-2s), and s >= 1/2 iff t >= 0, so f'' has the sign
+    # of -t -- the same sigmoid shape as tanh/atan.
+    "sigmoid": (_sigmoid, _sigmoid_prime, _curv_by_sign(False), lambda lo: True),
+    # tan: the branch containment is in `_curv_tan`, not in `domain_ok` (which
+    # only sees `lo`); a pole-touching box abstains and keeps the interval floor.
+    "tan": (math.tan, _dtan, _curv_tan, lambda lo: True),
 }
 
 
@@ -1773,6 +1869,20 @@ def _emit_1d(
 # If that check comes back clean, DELETE the three REDUNDANT atoms (their detectors,
 # emitters, ``_build_product``/``_build_univariate_call`` interceptions, flags, and
 # tests) — each redundant site is tagged ``ATOM-REDUNDANCY-REVIEW: redundant`` below.
+#
+# PARTIAL FALSIFICATION (#1277, measured). The entropy row's "REDUNDANT (the lift
+# certifies it)" holds only while the entropy sum is the WHOLE node. ``_try_convex_lift``
+# certifies a node, so an entropy sum that shares its parent with a term of
+# indefinite curvature is not certified and every term falls back to whatever
+# envelope it has of its own. On the #1249 CALPHAD compound-energy model — four
+# ``dm.xlogx`` terms plus the cross-sublattice bilinears in the same objective —
+# the lift abstains and the root bound sat 28.84% from the optimum. The reading to
+# keep is narrower than the one recorded above: the lift covers the PURE convex
+# sum, not the convex part of a mixed one, so a per-atom envelope is NOT redundant
+# with it in general. (The gap is now 5.45%, from the ``entropy`` entry in
+# ``_UNIVARIATE_FN`` — a different spelling from this gated atom, which matches
+# ``x*log(x)`` written as a ``prod``. The DELETE recommendation above is left as
+# it stands: it rests on the measured node counts, which this does not touch.)
 # --------------------------------------------------------------------------- #
 # Log-sum-exp atom (issue #632 adjacent-atom family). ``log(sum_i exp(t_i))`` is
 # CONVEX in the exp arguments ``t_i``, but the factorable path relaxes the outer
@@ -1983,12 +2093,44 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
         return _build_abs(ctx, w, lt, lo, hi)
     entry = _UNIVARIATE_FN.get(fname)
     if entry is None:
+        entry = _registered_envelope_entry(fname)
+    if entry is None:
         return Envelope(rows=[], tight=False)  # unknown intrinsic -> interval floor
     f, fp, curv_fn, dom_ok = entry
     if not dom_ok(lo):
         return Envelope(rows=[], tight=False)  # arg box violates domain -> floor
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv_fn(lo, hi))
     return Envelope(rows=[], tight=tight)
+
+
+def _registered_envelope_entry(fname: str):
+    """``_UNIVARIATE_FN``-shaped entry for a registered domain operator (#1248 A).
+
+    Returns ``None`` for any name that is not registered, which leaves the caller
+    on its existing interval-floor path. The entry's curvature verdict is an
+    interval enclosure of the atom's second derivative over the node box, so it
+    is a proof on that box rather than a user assertion — see
+    :mod:`discopt.operators`.
+    """
+    from discopt.operators import get_registered
+
+    fn = get_registered(fname)
+    if fn is None:
+        return None
+    try:
+        entry = fn.envelope_entry()
+        fn.note_use()
+        return entry
+    except Exception as exc:  # noqa: BLE001 - a registration that cannot be derived
+        # must not break the solve; it degrades to the interval floor, loudly.
+        logger.warning(
+            "registered operator %r could not derive its envelope (%s: %s); relaxing it "
+            "term by term instead [registered-atom-underivable].",
+            fname,
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 def _build_abs(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Envelope:
@@ -2463,14 +2605,6 @@ def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) ->
 # byte-identical. Recognizes ``t*log(t)`` for any shared affine form ``t`` (so
 # ``x log x``, ``(a x) log(a x)`` and ``(a x + b) log(a x + b)`` all fire); the
 # relative-entropy generalization ``x log(x/y)`` has its own gated atom below.
-def _xlogx(t: float) -> float:
-    return t * math.log(t)
-
-
-def _xlogx_prime(t: float) -> float:
-    return math.log(t) + 1.0
-
-
 def _linform_eq(a: LinForm, b: LinForm) -> bool:
     """Do two LinForms represent the same affine expression (same nonzero coeffs
     and constant)? Used to recognize ``t*log(t)`` for a shared affine ``t``."""
@@ -3413,9 +3547,17 @@ def _add_piecewise_bilinear(
 # curvature(arg_lo, arg_hi))``. Reuses the static-envelope table and adds ``tan``
 # (absent there because it has no single-curvature envelope over a box straddling
 # its inflection — the exact case piecewise splitting fixes).
+# Every ``_UNIVARIATE_FN`` entry, minus its ``domain_ok`` (the partition path
+# guards the domain by the PIECE's box, not the whole box's ``lo``).
+#
+# ``tan`` used to be listed separately here with ``_curv_by_sign(True)``, which is
+# its curvature only WITHIN one branch: on a piece straddling a pole that verdict
+# claims a definite curvature, and the resulting endpoint chord is not a chord of
+# the graph at all (``tan`` runs to +inf and returns from -inf in between). Now
+# that ``tan`` is in ``_UNIVARIATE_FN``, the splat below carries the branch-aware
+# ``_curv_tan``, which abstains on exactly those pieces (issue #1277).
 _PIECEWISE_UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable]] = {
-    "tan": (np.tan, lambda t: 1.0 / (np.cos(t) ** 2), _curv_by_sign(True)),
-    **{name: (f, fp, cv) for name, (f, fp, cv, _dom) in _UNIVARIATE_FN.items()},
+    name: (f, fp, cv) for name, (f, fp, cv, _dom) in _UNIVARIATE_FN.items()
 }
 
 

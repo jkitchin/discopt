@@ -12,6 +12,30 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`dm.register_function` — a named composite the relaxer treats as one atom**
+  (#1248 component A, for the plugin needs in #1249). A plugin knows structure
+  that generic factorable relaxation throws away: written in primitives, the
+  Redlich-Kister binary a CALPHAD phase is priced with —
+  `x(1-x)(L0 + L1(2x-1)) + RT[x ln x + (1-x) ln(1-x)]` — is relaxed term by term,
+  which loses every cancellation between the terms. Measured over `x in [0, 1]`
+  (`scripts/entry_1248_envelope_gain.py`): the root bound misses the true optimum
+  by 4% to 324%, and the ONE-VARIABLE global solve takes 131 to 7559 nodes.
+
+  `register_function(name, lower)` names that composite. The model still carries
+  the **lowering** — an ordinary primitive expression — so evaluation, `.nl`
+  export, the Rust core and presolve need no new opcode and are untouched; what
+  changes is that the relaxation layer envelopes the whole atom. Measured on the
+  same family: 7559 → 35, 2655 → 47, 1741 → 15, 1729 → 25 and 2019 → 19 nodes
+  (56x–216x), with the same optimum in every row.
+
+  Nothing is taken on trust. `f` and `f'` are evaluated on the lowering through
+  the solver's own tape, and the per-box curvature verdict is an **interval
+  enclosure of `f''`** — a proof on that box, not a sample, that abstains when it
+  straddles zero. There is no user-supplied envelope, so there is none to be
+  unsound: a stronger answer than #1248's "reject an unsound `relax` at
+  registration". A registered name may not shadow a built-in operator, and
+  re-registering needs `replace=True`.
+
 - **`dm.solve_batch` -- many small independent global solves, optionally in
   parallel** (#1246). `dm.solve_batch(models, workers=8, **solve_kwargs)` returns
   one `SolveResult` per model, in input order. `workers=1` is a plain `m.solve()`
