@@ -3636,6 +3636,14 @@ class SolveResult:
     # Sensitivity cache (populated lazily by .gradient())
     _sensitivity: Optional[np.ndarray] = None
 
+    # Provenance of the process that SOLVED this result, and the options it
+    # solved with (#1266). Set by ``result_io.deserialize_result`` when a result
+    # arrives from the solve daemon, so the archived file records the daemon's
+    # identity rather than the writing client's. ``None`` on an in-process solve:
+    # there the writer IS the solving process and captures its own.
+    _provenance: Optional[dict] = None
+    _solve_options: Optional[dict] = None
+
     def __post_init__(self) -> None:
         # A2 (correctness/API): the failure/no-relaxation sentinel must never
         # escape through the public bound/gap surface. Internally the solver

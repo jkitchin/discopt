@@ -81,7 +81,7 @@ def test_solve_format_json_to_stdout(tmp_path, capsys):
     import json
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 1 and payload["status"] == "optimal"
+    assert payload["schema_version"] == 2 and payload["status"] == "optimal"
 
 
 def test_solve_unknown_profile_errors(tmp_path):

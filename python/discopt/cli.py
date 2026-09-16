@@ -444,7 +444,7 @@ def _cmd_solve(args):
     wrote = []
     if args.json:
         p = base_dir / f"{stub}.result.json"
-        write_json(result, p)
+        write_json(result, p, options=payload)
         wrote.append(str(p))
     if args.sol:
         from discopt.modeling.core import from_nl
@@ -455,7 +455,8 @@ def _cmd_solve(args):
         wrote.append(str(p))
 
     if args.format == "json":
-        print(json.dumps(serialize_result(result), indent=2))
+        # Scripts redirect this into a file, so it is an archival path too (#1266).
+        print(json.dumps(serialize_result(result, provenance=True, options=payload), indent=2))
     elif not args.quiet:
         print(summary_text(result))
     for w in wrote:

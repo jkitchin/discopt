@@ -88,7 +88,14 @@ def _solve_request(req: dict) -> dict:
     options = options_from_payload(req.get("options") or {})
     # The daemon never passes stream=True, so solve() returns a SolveResult.
     result = cast(SolveResult, from_nl(nl_file).solve(**options))
-    return {"ok": True, "result": serialize_result(result)}
+    # The daemon is the process that actually solved, so it is the one that can
+    # honestly stamp provenance and record the options used (#1266). The CLI
+    # carries both through to the archived file rather than recomputing them --
+    # its own version is not the one that produced these numbers.
+    return {
+        "ok": True,
+        "result": serialize_result(result, provenance=True, options=req.get("options") or {}),
+    }
 
 
 def make_server(socket_path: Path | None = None) -> DaemonServer:

@@ -12,6 +12,42 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **FAIR provenance and the validation report on result files** (#1266, the
+  result-side half of #1264). `result_io.serialize_result` emitted
+  `schema_version: 1` plus solver metrics and nothing else, so an archived
+  `wall_time` had no record of which discopt produced it, with what options, or
+  when — a number that cannot be interpreted, let alone reproduced. The
+  Examiner `validation_report` was dropped outright as "non-JSON-safe".
+
+  Result documents are now `schema_version: 2` and carry `provenance`,
+  `solve_options` and `validation_report`. The bump is additive: a v1 document
+  reads unchanged, and `deserialize_result` restores each section when present.
+
+  The load-bearing rule is **a carried value always wins over a freshly
+  captured one**, because the provenance of a result is the identity of the
+  process that *solved* it — which on the daemon path is not the process that
+  writes the file. A warm daemon solves in its own interpreter, so the daemon
+  stamps the block and the CLI carries it to disk untouched; recomputing at the
+  writer would record the client's version for numbers the daemon produced.
+  That is why the wire format carries the block, which #1266 had left open:
+  it is one small dict per reply, and the only place that identity exists.
+
+  The validation report round-trips as a real `ExaminerReport`, not a dict —
+  the CLI deserializes a daemon reply and then re-serializes it to disk, so a
+  report left as a plain dict would be refused by the encoder at exactly that
+  step and vanish. A `validation_report` that is not an `ExaminerReport` raises
+  rather than being dropped. `infeasibility_certificate` is still dropped: it
+  is a backend object rather than a report and needs its own encoding.
+
+  The two new nested sections route through `discopt.serialize`'s float
+  tagging, so a NaN or infinity inside them is written as a tagged string
+  instead of the bare `NaN`/`Infinity` tokens Python's `json` emits and other
+  languages reject — the same encoding these already get when embedded in a
+  `.dopt`. The legacy scalar fields (`objective`, `bound`, `gap`) are
+  deliberately left untagged: they have always been written bare and retagging
+  them would break every reader that parses them as numbers, so that
+  pre-existing defect is documented rather than half-fixed.
+
 - **FAIR provenance on saved models**. A `.dopt` document recorded the schema id
   and `discopt.__version__` and nothing else -- and the version was *written but
   never read*: `serialize.loads` validated only the schema major, so a model
