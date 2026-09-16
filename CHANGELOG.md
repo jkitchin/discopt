@@ -12,6 +12,39 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **FAIR provenance on saved models**. A `.dopt` document recorded the schema id
+  and `discopt.__version__` and nothing else -- and the version was *written but
+  never read*: `serialize.loads` validated only the schema major, so a model
+  written by one discopt and reloaded by another produced no signal at all, and
+  the rebuilt `Model` could not say what wrote it. There was no timestamp, so a
+  saved model could not be ordered against the solve log that produced it.
+
+  `Model.save` / `dumps` now write a `provenance` block: UTC timestamp, the
+  software identity (`version`, plus `rust_core` from the `_rust` extension --
+  the Expression IR, `.nl` parser and LP layer version independently of the
+  Python package, and it is the half `pip show` does not report), the
+  `source_fingerprint` and git HEAD of the writing checkout, the interpreter and
+  platform, and an optional `author`. It comes back on `Model.provenance`, and a
+  version difference between writer and reader now raises `ProvenanceSkewWarning`
+  -- its own category, so an exact-version pipeline can escalate it to an error.
+
+  `author` is never inferred: it is recorded only from the `author=` argument or
+  `DISCOPT_PROVENANCE_AUTHOR`, and deliberately *not* from the repository's
+  `CITATION.cff`, which names the author of discopt rather than of the user's
+  model. The block is descriptive metadata only -- no content of it reaches the
+  model's mathematics, which is asserted directly by feeding `loads` a corrupt
+  block carrying keys like `objective` and `variables` and requiring the rebuilt
+  document to be byte-identical.
+
+  Re-saving a loaded model stamps the new document's own `created` and keeps the
+  previous block under `derived_from`, capped at one level (the deeper chain
+  lives in the files themselves). The schema minor is `discopt.model/1.1`:
+  additive, so 1.0 readers still read these documents and this reader still reads
+  1.0 documents (recording no provenance, silently -- a document written before
+  the block is legitimately provenance-free). Because the block is timestamped
+  the default is no longer byte-reproducible; `provenance=False` restores that
+  and is what the format's byte-identity fidelity tests now use.
+
 - **Vector `min` / `max`** (#1238). "The smallest element of this vector" had no
   spelling: `dm.minimum`/`dm.maximum` took exactly two operands, a shaped
   `Variable` had no `.min()`/`.max()`, and `np.min(xs)` is refused by the
