@@ -1017,12 +1017,28 @@ def solve_milp_std(
     *,
     time_limit: Optional[float],
     gap_tolerance: float,
+    abs_gap_tolerance: Optional[float] = None,
     max_nodes: int,
     initial_point: Optional[np.ndarray] = None,
     n_struct: Optional[int] = None,
     root_check: bool = True,
 ) -> HighsOutcome:
-    """Solve the MILP ``sf`` under the §3.2 contract."""
+    """Solve the MILP ``sf`` under the §3.2 contract.
+
+    ``abs_gap_tolerance`` is ``Model.solve``'s absolute convergence tolerance
+    (#1243), mapped onto HiGHS's ``mip_abs_gap``. The mapping is faithful:
+    HiGHS stops when EITHER ``mip_rel_gap`` or ``mip_abs_gap`` is met, which is
+    the same disjunction ``solver.py::_gap_values_converged`` applies on the
+    Python tree, so a model certified here and a model certified there mean the
+    same thing by the same numbers.
+
+    ``None`` keeps the 1e-6 this route was written with -- which is also
+    ``solver.py::_DEFAULT_ABS_GAP_TOL``, so an omitted argument changes nothing.
+    It has to be reachable, though: this route is the DEFAULT for pure MILP, and
+    a hardcoded absolute tolerance is exactly what #1243 exists to remove. A
+    CALPHAD-style certificate is an absolute test on an optimum near zero, where
+    the relative arm carries no information at all.
+    """
     highspy = require_highspy()
     t0 = time.perf_counter()
     stats: dict[str, float] = {"route/lp_milp_backend": 1.0, "milp/bound_provenance_highs_fp": 1.0}
@@ -1042,7 +1058,7 @@ def solve_milp_std(
         return done(HighsOutcome("time_limit", message="MILP time budget exhausted"))
     opts: list[tuple[str, Any]] = [
         ("mip_rel_gap", float(gap_tolerance)),
-        ("mip_abs_gap", 1e-6),
+        ("mip_abs_gap", 1e-6 if abs_gap_tolerance is None else float(abs_gap_tolerance)),
         ("mip_max_nodes", int(min(max(int(max_nodes), 0), _MAX_NODES_CAP))),
         ("mip_feasibility_tolerance", 1e-6),
         ("primal_feasibility_tolerance", 1e-7),

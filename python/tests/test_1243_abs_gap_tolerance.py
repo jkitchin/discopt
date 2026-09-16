@@ -276,6 +276,64 @@ def test_amp_receives_the_tolerance_as_its_own_abs_tol():
     assert captured.get("rel_gap") == 1e-4
 
 
+def _knapsack(seed: int = 3, n: int = 60) -> Model:
+    """A MILP big enough that the absolute tolerance actually binds."""
+    rng = np.random.default_rng(seed)
+    w = rng.integers(20, 90, n).astype(float)
+    v = w + rng.integers(0, 12, n)
+    m = Model()
+    x = m.binary("x", shape=n)
+    m.subject_to(dm.sum(w * x) <= float(w.sum() * 0.37))
+    m.maximize(dm.sum(v * x))
+    return m
+
+
+@pytest.mark.slow
+def test_the_highs_milp_route_honors_the_absolute_tolerance():
+    """#1258 made the verified HiGHS route the DEFAULT for pure MILP.
+
+    That route hardcoded ``("mip_abs_gap", 1e-6)`` with no caller parameter, so
+    ``abs_gap_tolerance`` was silently ignored on the most common linear path --
+    reintroducing exactly the constant #1243 exists to remove, on a new route.
+
+    Proven by a LOOSE tolerance rather than a tight one: if the value never
+    reached HiGHS's termination test, both arms would close the gap identically.
+    A loose arm that stops early can only happen if the number arrived.
+    """
+    tight = _knapsack().solve(time_limit=60, gap_tolerance=1e-9)
+    loose = _knapsack().solve(time_limit=60, gap_tolerance=1e-9, abs_gap_tolerance=50.0)
+
+    for r in (tight, loose):
+        assert r.algorithm_route and "highs-milp" in r.algorithm_route, r.algorithm_route
+        assert r.bound is not None
+
+    tight_gap = abs(tight.objective - tight.bound)
+    loose_gap = abs(loose.objective - loose.bound)
+    assert loose_gap > tight_gap + 1e-9, (
+        f"the loose absolute tolerance did not reach HiGHS: tight gap {tight_gap}, "
+        f"loose gap {loose_gap}"
+    )
+    assert loose_gap <= 50.0 + 1e-6
+    # Soundness is not traded for the early stop: for a MAXIMIZE the reported
+    # bound is an UPPER bound and must still sit above the incumbent.
+    assert loose.bound >= loose.objective - 1e-9
+    assert tight.bound >= tight.objective - 1e-9
+
+
+@pytest.mark.smoke
+def test_the_highs_milp_route_accepts_the_option_at_all():
+    """The plumbing, checked without a long solve."""
+    import inspect
+
+    from discopt.solvers.lp_milp_highs import solve_milp_std
+
+    assert "abs_gap_tolerance" in inspect.signature(solve_milp_std).parameters
+    src = inspect.getsource(solve_milp_std)
+    assert '("mip_abs_gap", 1e-6)' not in src, (
+        "mip_abs_gap is a bare literal again; the caller cannot reach it"
+    )
+
+
 @pytest.mark.unit
 def test_an_explicit_amp_abs_tol_still_wins():
     import discopt.solver as _solver

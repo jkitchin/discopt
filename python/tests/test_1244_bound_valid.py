@@ -161,6 +161,53 @@ def test_convex_fast_path_reports_a_valid_bound_named_by_its_proof():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 2b. The verified HiGHS LP/MILP route (#1258)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_the_highs_lp_route_names_its_safe_bound():
+    """That route's LP bound is a Neumaier-Shcherbina SAFE bound.
+
+    Strictly stronger than the floating-point LP duals the other routes' bounds
+    rest on, so it is worth telling apart -- which is what ``bound_source``
+    is for.
+    """
+    m = Model()
+    x = m.continuous("x", shape=3, lb=0.0, ub=10.0)
+    m.subject_to(dm.sum(x) <= 4.0)
+    m.subject_to(x[0] + 2 * x[1] <= 5.0)
+    m.maximize(3 * x[0] + 2 * x[1] + x[2])
+    res = m.solve(time_limit=30)
+    assert res.algorithm_route and "highs-lp" in res.algorithm_route
+    assert res.bound_valid is True
+    assert res.bound_source == "lp_dual"
+    # Maximize: the bound is an UPPER bound and may not sit below the incumbent.
+    assert res.bound >= res.objective - 1e-9
+
+
+@pytest.mark.smoke
+def test_the_highs_milp_route_names_its_tree_bound():
+    """HiGHS's MIP dual bound is trusted as-is (``milp/bound_provenance=highs-fp``).
+
+    That is the same floating-point standard every other branch-and-bound route
+    in this repo reports, so ``bnb_tree`` is the honest label -- deliberately
+    NOT ``lp_dual``, which would claim the LP route's stronger guarantee.
+    """
+    m = Model()
+    x = m.integer("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    m.subject_to(x + y <= 7.5)
+    m.subject_to(y <= 3.2)
+    m.maximize(1.0 * x + 2.0 * y)
+    res = m.solve(time_limit=30)
+    assert res.algorithm_route and "highs-milp" in res.algorithm_route
+    assert res.bound_valid is True
+    assert res.bound_source == "bnb_tree"
+    assert res.bound >= res.objective - 1e-9
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 3. The acceptance table: status x route, against recorded optima
 # ──────────────────────────────────────────────────────────────────────
 

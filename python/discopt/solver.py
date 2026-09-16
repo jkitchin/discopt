@@ -10399,6 +10399,7 @@ def solve_model(
                         max_nodes,
                         t_start,
                         initial_point=initial_point,
+                        abs_gap_tolerance=abs_gap_tolerance,
                     )
                     if _highs_res is not None:
                         return _highs_res
@@ -22719,6 +22720,16 @@ def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = Non
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
             gap_certified=out.gap_certified,
+            # #1244 x #1258: this route's LP bound is a Neumaier-Shcherbina SAFE
+            # bound over the dual (optionally over an FBBT box, optionally with
+            # exact dual correction) -- see `lp_milp_highs.solve_lp_std`. That is
+            # strictly stronger than the floating-point LP duals every other
+            # route's bound rests on, so it is named `lp_dual` and claimed valid
+            # on the `feasible` exit too: the gap did not close there, but the
+            # safe bound below the incumbent is exactly the case `bound_valid`
+            # exists to express.
+            bound_valid=bound is not None,
+            bound_source="lp_dual" if bound is not None else None,
             solver_stats=stats,
             algorithm_route=route,
         )
@@ -22748,6 +22759,9 @@ def _solve_milp_highs(
     max_nodes: int,
     t_start: float,
     initial_point: Optional[np.ndarray] = None,
+    # #1243: the caller's absolute gap tolerance, or None for this route's
+    # established 1e-6. Passed straight through to HiGHS's ``mip_abs_gap``.
+    abs_gap_tolerance: Optional[float] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with HiGHS under the verified contract of plan §3.2.
 
@@ -22768,6 +22782,10 @@ def _solve_milp_highs(
         sf,
         time_limit=float(time_limit) - (time.perf_counter() - t_start),
         gap_tolerance=float(gap_tolerance),
+        # #1243 x #1258: this route is the DEFAULT for pure MILP, so the
+        # absolute arm of the convergence criterion has to reach it or the
+        # option is silently ignored on the most common linear path.
+        abs_gap_tolerance=abs_gap_tolerance,
         max_nodes=int(max_nodes),
         initial_point=seed,
         n_struct=n_orig,
@@ -22821,6 +22839,16 @@ def _solve_milp_highs(
             root_gap=root_gap,
             root_time=out.root_time,
             gap_certified=out.gap_certified,
+            # #1244 x #1258: HiGHS's own MIP dual bound (`milp/bound_provenance
+            # = highs-fp`). `solve_milp_std` trusts it as-is rather than
+            # re-deriving it, so this is a FLOATING-POINT tree bound -- which is
+            # the same standard every other branch-and-bound route in this repo
+            # reports (`_finalize_reported_bound` returns fp LP duals too), NOT
+            # the stronger safe bound the LP route above earns. Naming it
+            # `bnb_tree` says exactly that, so a consumer that wants the
+            # stronger guarantee can tell the two apart.
+            bound_valid=bound is not None,
+            bound_source="bnb_tree" if bound is not None else None,
             constraint_duals=cd,
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
@@ -22829,14 +22857,20 @@ def _solve_milp_highs(
         )
     if out.status == "error":
         logger.warning("HiGHS MILP route: %s", out.message)
+    _budget_bound = bound if out.status in ("time_limit", "node_limit") else None
     return SolveResult(
         status=out.status,
-        bound=bound if out.status in ("time_limit", "node_limit") else None,
+        bound=_budget_bound,
         wall_time=wall,
         node_count=out.node_count,
         root_bound=root_bound,
         root_time=out.root_time,
         gap_certified=out.status == "infeasible",
+        # #1244: the budgeted exit is precisely the case this field exists for --
+        # the gap is open, so `gap_certified` is False, but HiGHS's tree bound
+        # over the unexplored tree is still a bound. Same fp standard as above.
+        bound_valid=_budget_bound is not None,
+        bound_source="bnb_tree" if _budget_bound is not None else None,
         solver_stats=stats,
         algorithm_route=route,
     )
