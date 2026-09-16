@@ -243,6 +243,9 @@ from discopt.modeling import (
     minimum as minimum,
 )
 from discopt.modeling import (
+    register_function as register_function,
+)
+from discopt.modeling import (
     round_ as round_,
 )
 from discopt.modeling import (

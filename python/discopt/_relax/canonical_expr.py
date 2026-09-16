@@ -405,6 +405,17 @@ class _Canonicalizer:
 
     def _canon_dispatch(self, expr: Expression) -> CNode:
         from discopt._relax.term_classifier import _get_flat_index
+        from discopt.operators import atom_of
+
+        # A registered domain operator (#1248 A): the model carries the LOWERING —
+        # so evaluation, export and the Rust core see an ordinary expression — and
+        # the lowering carries a tag naming the atom. Emitting the named ``call``
+        # node here is what lets the relaxer envelope the composite whole instead
+        # of term by term, which is the entire point of registering it.
+        atom = atom_of(expr)
+        if atom is not None:
+            name, arg = atom
+            return self._call(name, self.canon(arg))
 
         if isinstance(expr, Constant):
             if expr.value.ndim == 0:

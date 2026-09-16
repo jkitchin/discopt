@@ -1983,12 +1983,44 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
         return _build_abs(ctx, w, lt, lo, hi)
     entry = _UNIVARIATE_FN.get(fname)
     if entry is None:
+        entry = _registered_envelope_entry(fname)
+    if entry is None:
         return Envelope(rows=[], tight=False)  # unknown intrinsic -> interval floor
     f, fp, curv_fn, dom_ok = entry
     if not dom_ok(lo):
         return Envelope(rows=[], tight=False)  # arg box violates domain -> floor
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv_fn(lo, hi))
     return Envelope(rows=[], tight=tight)
+
+
+def _registered_envelope_entry(fname: str):
+    """``_UNIVARIATE_FN``-shaped entry for a registered domain operator (#1248 A).
+
+    Returns ``None`` for any name that is not registered, which leaves the caller
+    on its existing interval-floor path. The entry's curvature verdict is an
+    interval enclosure of the atom's second derivative over the node box, so it
+    is a proof on that box rather than a user assertion — see
+    :mod:`discopt.operators`.
+    """
+    from discopt.operators import get_registered
+
+    fn = get_registered(fname)
+    if fn is None:
+        return None
+    try:
+        entry = fn.envelope_entry()
+        fn.note_use()
+        return entry
+    except Exception as exc:  # noqa: BLE001 - a registration that cannot be derived
+        # must not break the solve; it degrades to the interval floor, loudly.
+        logger.warning(
+            "registered operator %r could not derive its envelope (%s: %s); relaxing it "
+            "term by term instead [registered-atom-underivable].",
+            fname,
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 def _build_abs(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Envelope:

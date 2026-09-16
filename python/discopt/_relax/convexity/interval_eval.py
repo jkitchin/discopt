@@ -470,10 +470,35 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
         return iv.softplus(arg)
     if name == "entropy":
         return iv.entropy(arg)
+    # A registered domain operator (#1248 A). Its enclosure is, by definition,
+    # the enclosure of its lowering — the expression the model actually carries —
+    # so this is sound by construction and never looser than the term-by-term
+    # bound the same box would give.
+    reg = _registered_interval(name, expr, model, box, cache)
+    if reg is not None:
+        return reg
     # Unsupported atoms return an unbounded enclosure; the certificate
     # will refuse to prove convexity for expressions that hit this
     # path, preserving soundness.
     return _unbounded(arg.lo.shape)
+
+
+def _registered_interval(name, expr, model, box, cache):
+    """Enclosure of a registered atom, via its lowering, or ``None``.
+
+    Reached for a ``FunctionCall`` that ``canonical_expr`` reconstructed from a
+    named atom node: the reconstruction carries the name but not the tag, so the
+    lowering is rebuilt from the registry on the reconstructed argument.
+    """
+    from discopt.operators import get_registered
+
+    fn = get_registered(name)
+    if fn is None or len(expr.args) != 1:
+        return None
+    try:
+        return evaluate_interval(fn.interval_expr(expr.args[0]), model, box, cache)
+    except Exception:  # noqa: BLE001 - abstaining leaves the unbounded enclosure
+        return None
 
 
 def _eval_matmul(expr: MatMulExpression, model: Model, box: dict, cache: dict) -> Interval:
