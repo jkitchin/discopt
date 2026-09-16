@@ -19,6 +19,21 @@
 //! `ConstraintRepr` at each split site here, rather than assuming a 1:1 mapping.
 //! Tracked as correctness-issue C-12 (P3, hygiene — no current mis-certification).
 //!
+//! # Why this coexists with `pounce-nl` (issue #1213)
+//!
+//! discopt's `pounce-solver` dependency also ships a `.nl` reader. It is **not**
+//! redundant with this one and neither can replace the other: `pounce.read_nl`
+//! yields an evaluable TNLP (`NlProblem` — objective/gradient/Jacobian/Hessian)
+//! with no expression accessor, while this parser yields the [`ModelRepr`] arena
+//! that McCormick envelopes, FBBT, term classification and convexity detection
+//! all require. The 2026-09-16 audit measured the genuinely shared decoding
+//! surface at 213 lines (14 % of this file's non-test code), found coverage
+//! diverging in both directions by design — discopt refuses o35/o48 as
+//! unrelaxable while pounce accepts them; pounce cannot read binary `.nl` or
+//! o76/o77/o78 — and decided to keep both readers. Before proposing a merge
+//! again, read `docs/dev/nl-decoder-duplication-audit-2026-09-16.md`, which
+//! also names the two measurements that would reverse the decision.
+//!
 //! # Example
 //! ```
 //! use discopt_core::nl_parser::parse_nl;
