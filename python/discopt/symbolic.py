@@ -108,7 +108,7 @@ def _build_discopt_functions() -> dict:
     """
     sp = _require_sympy()
 
-    class entropy(sp.Function):  # noqa: N801 - the canonical node name
+    class entropy(sp.Function):  # type: ignore[name-defined]  # noqa: N801
         """``t*log(t)`` — discopt's ``entropy`` intrinsic (``dm.xlogx``)."""
 
         @classmethod
@@ -127,7 +127,7 @@ def _build_discopt_functions() -> dict:
             t = self.args[0]._eval_evalf(prec)
             return None if t is None else (t * sp.log(t))._eval_evalf(prec)
 
-    class sigmoid(sp.Function):  # noqa: N801
+    class sigmoid(sp.Function):  # type: ignore[name-defined]  # noqa: N801
         """``1/(1+exp(-t))``."""
 
         def fdiff(self, argindex=1):
@@ -140,7 +140,7 @@ def _build_discopt_functions() -> dict:
             t = self.args[0]._eval_evalf(prec)
             return None if t is None else (1 / (1 + sp.exp(-t)))._eval_evalf(prec)
 
-    class softplus(sp.Function):  # noqa: N801
+    class softplus(sp.Function):  # type: ignore[name-defined]  # noqa: N801
         """``log(1+exp(t))``."""
 
         def fdiff(self, argindex=1):
@@ -153,7 +153,7 @@ def _build_discopt_functions() -> dict:
             return None if t is None else sp.log(1 + sp.exp(t))._eval_evalf(prec)
 
     def _log_base(cls_name, base_expr, doc):
-        class _LogBase(sp.Function):
+        class _LogBase(sp.Function):  # type: ignore[name-defined]
             def fdiff(self, argindex=1):
                 if argindex != 1:
                     raise sp.ArgumentIndexError(self, argindex)
@@ -173,7 +173,7 @@ def _build_discopt_functions() -> dict:
     log2 = _log_base("log2", lambda: sp.log(2), "``log(t)/log(2)``.")
     log10 = _log_base("log10", lambda: sp.log(10), "``log(t)/log(10)``.")
 
-    class log1p(sp.Function):  # noqa: N801
+    class log1p(sp.Function):  # type: ignore[name-defined]  # noqa: N801
         """``log(1+t)``, kept as its own node so it round-trips."""
 
         def fdiff(self, argindex=1):
