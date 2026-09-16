@@ -41,6 +41,65 @@ except ImportError:
 
 _logger = logging.getLogger(__name__)
 
+#: Option keys this process has already warned about (see the ``add_option``
+#: loop in :func:`solve_nlp`). Module-level so the warning is once per key per
+#: process rather than once per solve.
+_WARNED_REJECTED_OPTIONS: set[str] = set()
+
+
+def _run_solve(problem, x0: np.ndarray, warm_start: Optional[object]):
+    """Call ``pounce.Problem.solve``, with or without a warm start.
+
+    ``x0`` still wins over ``warm_start.x`` inside pounce, and the caller has
+    already clipped it into the box this NLP is solved on, so both are passed:
+    the point from the box in force now, the multipliers and barrier parameter
+    from the previous solve.
+    """
+    with _timing.charge("pounce"):
+        if warm_start is not None:
+            return problem.solve(x0.astype(np.float64), warm_start=warm_start)
+        return problem.solve(x0.astype(np.float64))
+
+
+def _kkt_from_info(info: dict) -> Optional[dict[str, float]]:
+    """Terminal KKT residuals from POUNCE's ``info``, or ``None`` if absent.
+
+    The four names #1247 specifies map to POUNCE's ``final_*`` entries, which are
+    measured on the solver's internally **scaled** problem — that is what its own
+    convergence test runs on, and what ``kkt_error`` means there. The
+    ``*_unscaled`` entries beside them are the same residuals in the model's own
+    units, which is what a certificate stated in problem units (a CALPHAD
+    tangent-plane bound, say) must be built from. Both are reported rather than
+    one silently standing in for the other; ``barrier_parameter`` is POUNCE's
+    terminal ``mu``, which is what a subsequent warm start seeds ``mu_init``
+    with.
+
+    Missing entries are omitted rather than filled with a sentinel, so a consumer
+    reading a key it did not get sees ``KeyError``/``None`` instead of a number
+    the solver never reported.
+    """
+    mapping = {
+        "primal_infeasibility": "final_constr_viol",
+        "dual_infeasibility": "final_dual_inf",
+        "complementarity": "final_compl",
+        "kkt_error": "final_kkt_error",
+        "primal_infeasibility_unscaled": "final_unscaled_constr_viol",
+        "dual_infeasibility_unscaled": "final_unscaled_dual_inf",
+        "complementarity_unscaled": "final_unscaled_compl",
+        "kkt_error_unscaled": "final_unscaled_kkt_error",
+        "barrier_parameter": "mu",
+    }
+    out: dict[str, float] = {}
+    for name, key in mapping.items():
+        val = info.get(key)
+        if val is None:
+            continue
+        try:
+            out[name] = float(val)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+    return out or None
+
 
 def solve_nlp(
     evaluator: NLPEvaluator,
@@ -49,6 +108,7 @@ def solve_nlp(
     options: Optional[dict] = None,
     kkt_schur_block: Optional[Sequence[int]] = None,
     ordering: Optional[Sequence[int]] = None,
+    warm_start: Optional[object] = None,
 ) -> NLPResult:
     """Solve an NLP using pounce with the NLPEvaluator callbacks.
 
@@ -68,6 +128,14 @@ def solve_nlp(
         ordering: Optional sequence of KKT-space indices giving a custom
             factorization ordering, handed to ``pounce.Problem.set_ordering``.
             Correctness-safe for the same reason as ``kkt_schur_block``.
+        warm_start: Optional ``pounce.WarmStart`` carrying a previous solve's
+            primal point, constraint and bound multipliers, and barrier
+            parameter (#1247). Handed to ``pounce.Problem.solve``, which derives
+            the warm-start options (``warm_start_init_point``, ``mu_init``, the
+            bound pushes) from it. Convergence-affecting only: where the solver
+            starts cannot change what it certifies at termination — though on a
+            *nonconvex* NLP it can change which local stationary point is
+            reached.
     """
     if not POUNCE_AVAILABLE:
         raise ImportError(
@@ -152,8 +220,22 @@ def solve_nlp(
                 problem.add_option(key, int(value))
             else:
                 problem.add_option(key, value)
-        except (TypeError, ValueError, RuntimeError):
-            _logger.debug("pounce option '%s' not accepted, skipping", key)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            # #1247: a rejected option used to vanish at DEBUG, so a misspelled
+            # or unsupported key silently did nothing — the caller believed it
+            # was solving under an option the solver never saw. Warn, once per
+            # key per process so a backend-wide default that this pounce build
+            # does not know cannot turn into per-solve spam.
+            if key not in _WARNED_REJECTED_OPTIONS:
+                _WARNED_REJECTED_OPTIONS.add(key)
+                _logger.warning(
+                    "pounce rejected the option %r (value %r): %s: %s. It is NOT in effect "
+                    "for this solve [pounce-option-rejected].",
+                    key,
+                    value,
+                    type(exc).__name__,
+                    exc,
+                )
 
     # Structure-aware KKT passthroughs (pounce#180). Both are correctness-safe:
     # pounce transparently falls back to the full-space path when the partition
@@ -180,8 +262,23 @@ def solve_nlp(
             _logger.debug("pounce has no set_ordering; ignoring passthrough")
 
     t0 = time.perf_counter()
-    with _timing.charge("pounce"):
-        x, info = problem.solve(x0.astype(np.float64))
+    try:
+        x, info = _run_solve(problem, x0, warm_start)
+    except RuntimeError as exc:
+        # #1247: pounce validates option NAMES at solve time, not at
+        # ``add_option`` time, so a misspelled key reaches here as a raw Rust
+        # ``OPTION_INVALID`` out of the middle of the solver. Name the option and
+        # where it came from instead. The solve still fails — an option the
+        # caller asked for that the solver will not honour is a refusal, not
+        # something to drop and carry on with (CLAUDE.md §3).
+        msg = str(exc)
+        if "OPTION_INVALID" in msg or "Unknown option" in msg:
+            raise ValueError(
+                f"POUNCE rejected a solver option: {msg.splitlines()[0]}. Options reaching the "
+                f"NLP backend on this solve: {sorted(opts)}. Fix or drop the offending key "
+                "(Model.solve(ipopt_options={...}))."
+            ) from exc
+        raise
     wall_time = time.perf_counter() - t0
 
     status_code = info.get("status", -100)
@@ -210,6 +307,7 @@ def solve_nlp(
         status=status,
         x=np.asarray(x),
         objective=float(info.get("obj_val", np.nan)),
+        kkt=_kkt_from_info(info),
         multipliers=np.asarray(multipliers) if multipliers is not None else None,
         bound_multipliers_lower=np.asarray(mult_x_L) if mult_x_L is not None else None,
         bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,

@@ -464,3 +464,109 @@ def _repair_discrete(model: Model, x: np.ndarray, cols: list[int], evaluator):
         if cur_viol < best_viol:
             best_x, best_viol = cur.copy(), cur_viol
     return best_x
+
+
+# --------------------------------------------------------------------------- #
+# Primal-dual warm start (#1247)
+# --------------------------------------------------------------------------- #
+def primal_point_from_result(model: Model, result) -> np.ndarray:
+    """Flatten a :class:`~discopt.modeling.core.SolveResult`'s ``x`` for ``model``.
+
+    Uses the same ordering contract as :func:`validate_initial_solution` and
+    :func:`unflatten_solution` — variables in ``model._variables`` declaration
+    order, each occupying ``v.size`` contiguous entries — but keys off
+    ``result.x``, which is a dict of *variable names*.
+
+    Raises ``ValueError`` when the result does not describe this model (a missing
+    name or a wrong shape). It refuses rather than filling a default: a warm
+    start silently completed from a different model is a warm start that quietly
+    does nothing, which is the failure this function exists to make impossible.
+    """
+    if getattr(result, "x", None) is None:
+        raise ValueError(
+            "warm start: the previous result carries no solution vector "
+            f"(status={getattr(result, 'status', '?')!r}), so there is no point to start from"
+        )
+    x_by_name = result.x
+    chunks: list[np.ndarray] = []
+    for v in model._variables:
+        if v.name not in x_by_name:
+            raise ValueError(
+                f"warm start: the previous result has no value for variable {v.name!r}. "
+                "It must come from a solve of a model with the same variables."
+            )
+        arr = np.asarray(x_by_name[v.name], dtype=np.float64).ravel()
+        if arr.size != v.size:
+            raise ValueError(
+                f"warm start: variable {v.name!r} has {v.size} scalar entries in this model "
+                f"but {arr.size} in the previous result."
+            )
+        chunks.append(arr)
+    if not chunks:
+        return np.zeros(0, dtype=np.float64)
+    return np.concatenate(chunks)
+
+
+def bound_duals_from_result(model: Model, duals: "dict[str, np.ndarray] | None"):
+    """Flatten ``SolveResult.bound_duals_lower`` / ``_upper`` in variable order.
+
+    Returns ``None`` when ``duals`` is ``None`` (the previous solve reported no
+    bound multipliers) so the caller can start without them — POUNCE fills the
+    unseeded multipliers from the supplied point. A dict that is present but does
+    not cover the model raises, for the reason in
+    :func:`primal_point_from_result`.
+    """
+    if duals is None:
+        return None
+    chunks: list[np.ndarray] = []
+    for v in model._variables:
+        if v.name not in duals:
+            raise ValueError(
+                f"warm start: the previous result's bound multipliers have no entry for "
+                f"variable {v.name!r}."
+            )
+        arr = np.asarray(duals[v.name], dtype=np.float64).ravel()
+        if arr.size != v.size:
+            raise ValueError(
+                f"warm start: variable {v.name!r} has {v.size} scalar entries in this model "
+                f"but {arr.size} bound multipliers in the previous result."
+            )
+        chunks.append(arr)
+    if not chunks:
+        return None
+    return np.concatenate(chunks)
+
+
+def constraint_duals_from_result(evaluator, duals: "dict[str, np.ndarray] | None"):
+    """Flatten ``SolveResult.constraint_duals`` into the evaluator's row order.
+
+    The exact inverse of ``solver._unpack_constraint_duals``: it walks the
+    evaluator's ``_source_constraints`` / ``_constraint_flat_sizes`` — the layout
+    source of truth — and keys by ``Constraint.name`` (or ``c{idx}`` when
+    anonymous), so a vector body's multipliers land back on their own rows.
+
+    Returns ``None`` when ``duals`` is ``None``.
+    """
+    if duals is None:
+        return None
+    chunks: list[np.ndarray] = []
+    for idx, (c, size) in enumerate(
+        zip(evaluator._source_constraints, evaluator._constraint_flat_sizes)
+    ):
+        size = int(size)
+        key = c.name if c.name else f"c{idx}"
+        if key not in duals:
+            raise ValueError(
+                f"warm start: the previous result's constraint multipliers have no entry for "
+                f"constraint {key!r}."
+            )
+        arr = np.asarray(duals[key], dtype=np.float64).ravel()
+        if arr.size != size:
+            raise ValueError(
+                f"warm start: constraint {key!r} has {size} rows in this model but "
+                f"{arr.size} multipliers in the previous result."
+            )
+        chunks.append(arr)
+    if not chunks:
+        return None
+    return np.concatenate(chunks)
