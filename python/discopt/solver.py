@@ -12760,6 +12760,22 @@ def solve_model(
     # loop and surfaced on SolveResult.solver_stats. Pure instrumentation.
     _reduce_timers = {"fbbt": 0.0, "obbt": 0.0}
 
+    # #1278 F: which argument certified each node's bound. `mccormick_lp._certify`
+    # tags every certified node with `ns_safe_bound` (a Neumaier-Shcherbina safe
+    # bound from the in-house simplex's own duals -- rigorous for ANY dual vector),
+    # `milp_dual`, `trusted_backend` / `trusted_vertex` (an LP optimum taken on
+    # trust, where no safe bound is computable), or `declined`. #1278 asked for a
+    # `verified_bound=True` mode using NS + outward rounding "throughout"; both are
+    # already default-ON and `_certify` already prefers the safe bound, so what was
+    # missing was only the ability to SEE it from outside. The tally is
+    # process-global, so the delta across this solve is taken here; that is exact
+    # for one solve at a time in a process (which is how `dm.solve_batch` runs
+    # them -- separate processes) and approximate only if a caller runs two solves
+    # concurrently in one interpreter.
+    from discopt._relax.mccormick_lp import BOUND_PROVENANCE as _bound_prov
+
+    _bound_prov_at_entry = dict(_bound_prov)
+
     # Objective-gating priority branching (issue #184). Opt-in via
     # ``DISCOPT_OBJ_BRANCH_PRIORITY=1``: branch the binaries that gate the
     # objective's nonlinear terms first so the global bound can climb off a
@@ -16630,6 +16646,10 @@ def solve_model(
     # than inferred from a wall-clock reading.
     if _incumbent_extension_taken > 0.0:
         _solver_stats["budget/incumbent_extension_s"] = float(_incumbent_extension_taken)
+    for _prov_tag, _prov_now in _bound_prov.items():
+        _prov_delta = _prov_now - _bound_prov_at_entry.get(_prov_tag, 0)
+        if _prov_delta > 0:
+            _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
     return SolveResult(
         status=status,

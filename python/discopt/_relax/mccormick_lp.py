@@ -335,6 +335,32 @@ def _lp_lift_too_large(n_cols: int, n_rows: int, nnz: int) -> bool:
 _LAZY_RESEP_STRIDE = 64
 
 
+#: Provenance tally for the node-bound certificate (#1278 F). ``_certify`` bumps
+#: exactly one key per certified node, naming WHICH argument certified the bound:
+#:
+#:   ``ns_safe_bound``   a Neumaier-Shcherbina safe bound from the in-house
+#:                       simplex's own duals -- rigorous for ANY dual vector, so
+#:                       a drifted basis only loosens it;
+#:   ``milp_dual``       the engine's own B&B dual bound (``node_bound_mode="milp"``);
+#:   ``trusted_backend`` the ``auto`` backend's optimum (HiGHS / POUNCE), taken on
+#:                       trust -- no certificate is produced on that path;
+#:   ``trusted_vertex``  the in-house simplex's vertex objective with no computable
+#:                       safe bound (a free nonlinear column), accepted only when
+#:                       the relaxation is well-conditioned;
+#:   ``declined``        no bound this node could certify -- the driver branches.
+#:
+#: Diagnostic only: nothing reads it back and no bound depends on it, so the
+#: relaxation is byte-identical whether or not it is consulted. It exists because
+#: "is this bound rigorous?" was not answerable from outside the solver, which is
+#: what #1278 F asked for.
+BOUND_PROVENANCE: "collections.Counter[str]" = collections.Counter()
+
+
+def reset_bound_provenance() -> None:
+    """Zero the tally (per-solve scoping is the caller's business)."""
+    BOUND_PROVENANCE.clear()
+
+
 @dataclass
 class MccormickLPResult:
     """Outcome of one LP-form McCormick relaxation solve.
@@ -1968,17 +1994,21 @@ class MccormickLPRelaxer:
             """The valid lower bound this optimal solve certifies (or None)."""
             if r is None or r.status != "optimal" or r.x is None:
                 return None
+            tag = "declined"
             if self._backend == "auto":
                 # HiGHS/POUNCE already returns a trustworthy optimum; keep the
                 # legacy behaviour (no certificate is produced on that path).
                 b: Optional[float] = r.objective
+                tag = "trusted_backend"
             elif r.safe_bound is not None:
                 # The common pure-LP warm-simplex path: rigorous safe bound.
                 b = r.safe_bound
+                tag = "ns_safe_bound"
             elif milp._integrality is not None:
                 # Integer-aware node bound (non-default ``node_bound_mode="milp"``):
                 # the engine's own B&B dual bound is the valid lower bound here.
                 b = r.bound
+                tag = "milp_dual"
             elif self._nonlinear_cols and self._has_unbounded_nonlinear_col(milp):
                 # A nonlinear-participating variable is still unbounded at this node,
                 # so the McCormick/RLT envelope may be genuinely UNBOUNDED — and the
@@ -1989,19 +2019,24 @@ class MccormickLPRelaxer:
                 # would fathom the optimal region. (Pure-Rust replacement of the old
                 # HiGHS unbounded-relaxation cross-check.)
                 b = None
+                tag = "declined"
             elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
                 # Pure-LP with a free variable but a bounded relaxation: trust the
                 # internally-equilibrated, dual-feasibility-verified vertex objective
                 # only when well-conditioned (mirrors the old guard's conditioning
                 # gate — below it the vertex carries no meaningful drift).
                 b = r.objective
+                tag = "trusted_vertex"
             else:
                 # Free variable AND ill-conditioned beyond where the fast simplex is
                 # reliable, with no computable safe bound: decline (branch) rather
                 # than risk a too-high vertex value (pure-Rust replacement of the old
                 # too-high-optimal HiGHS cross-check).
                 b = None
-            return b if (b is not None and np.isfinite(b)) else None
+                tag = "declined"
+            ok = b is not None and np.isfinite(b)
+            BOUND_PROVENANCE[tag if ok else "declined"] += 1
+            return b if ok else None
 
         bound = _certify(res)
         x_source = res
