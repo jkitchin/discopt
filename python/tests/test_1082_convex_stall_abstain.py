@@ -18,17 +18,20 @@ and marks the node ``bound_trusted=False``, so it is *branched*, never fathomed
 and never promoted to the incumbent. The one case that proves nothing is an
 untrusted node the tree had to fathom with no branch direction left, reported as
 ``bound_unresolved`` (#598/#467). ``DISCOPT_CONVEX_STALL_ABSTAIN=1`` adopts that
-rule on the convex path; it is bound-changing, so it is default-OFF pending the
-CLAUDE.md §5 differential panel.
+rule on the convex path. It graduated default-ON through the CLAUDE.md §5
+panel; ``=0`` keeps the legacy arm.
 """
 
 from pathlib import Path
 
 import numpy as np
 import pytest
-from discopt.mo.utils import _flatten_solution
 from discopt.modeling.core import from_nl
-from discopt.solver import _convex_stall_abstain_enabled, solve_model
+from discopt.solver import (
+    _convex_stall_abstain_enabled,
+    _gap_values_converged,
+    solve_model,
+)
 
 NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 ABSTAIN_ENV = "DISCOPT_CONVEX_STALL_ABSTAIN"
@@ -71,67 +74,133 @@ class TestFlagDefault:
         assert _convex_stall_abstain_enabled() is True
 
 
-def _solve_tls2(seed=None, time_limit=180.0):
+def _solve_tls2(time_limit=180.0):
     path = NL_DIR / "tls2.nl"
     assert path.exists(), f"missing corpus instance {path}"
     model = from_nl(str(path))
-    kwargs = {"time_limit": time_limit}
-    if seed is not None:
-        kwargs["initial_point"] = seed
-    return model, solve_model(model, **kwargs)
+    return model, solve_model(model, time_limit=time_limit)
 
 
-def _optimal_seed():
-    """A genuinely optimal point for tls2, obtained by solving it."""
-    model, result = _solve_tls2()
-    assert result.status == "optimal", f"unseeded tls2 did not prove optimal: {result.status}"
-    seed = np.asarray(_flatten_solution(model, result.x), dtype=np.float64).reshape(-1)
-    assert seed.size and np.all(np.isfinite(seed)), "seed is not a usable point"
-    return seed
+class _InjectedStall:
+    """Make exactly one convex node NLP return a violating ``ITERATION_LIMIT``.
+
+    #1270: tls2 no longer stalls on its own (0 iteration limits seeded or not,
+    and 0 across a 66-instance sweep of the in-repo corpus), so a canary that
+    waits for a natural stall measures nothing. This replays the #1082 shape
+    deterministically: the ``k``-th convex node solve that would have returned
+    ``OPTIMAL`` instead reports ``ITERATION_LIMIT`` at a point of its box that
+    violates the constraints -- the input both arms branch on.
+    ``injected`` is the proof that it fired (CLAUDE.md §6).
+    """
+
+    def __init__(self, monkeypatch, k, corners):
+        import discopt.solver as solver_mod
+        from discopt.solvers import NLPResult, SolveStatus
+
+        self.calls = 0
+        self.injected = 0
+        real = solver_mod._solve_node_nlp
+
+        def stalled(evaluator, x0, node_lb, node_ub, constraint_bounds, options, **kw):
+            r = real(evaluator, x0, node_lb, node_ub, constraint_bounds, options, **kw)
+            self.calls += 1
+            if (
+                kw.get("convex")
+                and not self.injected
+                and self.calls >= k
+                and r.status == SolveStatus.OPTIMAL
+            ):
+                cl = [c[0] for c in constraint_bounds]
+                cu = [c[1] for c in constraint_bounds]
+                lo = np.clip(node_lb, -1e3, 1e3)
+                hi = np.clip(node_ub, -1e3, 1e3)
+                points = {"lo": lo, "hi": hi, "mid": 0.5 * (lo + hi)}
+                for name in corners:
+                    x = points[name]
+                    if not solver_mod._check_constraint_feasibility(evaluator, x, cl, cu):
+                        self.injected += 1
+                        return NLPResult(
+                            status=SolveStatus.ITERATION_LIMIT, x=x, objective=r.objective
+                        )
+            return r
+
+        monkeypatch.setattr(solver_mod, "_solve_node_nlp", stalled)
+
+
+def _assert_sound(result):
+    """CLAUDE.md §1: the bound never crosses the oracle or the incumbent."""
+    assert result.bound <= TLS2_OPT + 1e-6, (
+        f"dual bound {result.bound} exceeds the reference optimum {TLS2_OPT}"
+    )
+    assert result.bound <= result.objective + 1e-6
+    assert abs(result.objective - TLS2_OPT) <= 1e-4 * max(1.0, abs(TLS2_OPT))
+
+
+def _solve_with_stall(monkeypatch, arm, k, corners):
+    monkeypatch.setenv(ABSTAIN_ENV, arm)
+    stall = _InjectedStall(monkeypatch, k=k, corners=corners)
+    _, result = _solve_tls2()
+    assert stall.injected == 1, f"the stall never fired ({stall.calls} node solves)"
+    return result
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
-class TestSeededSolveKeepsCertificate:
-    """Seeding an optimal point must not cost the certificate."""
+class TestStalledNodeKeepsCertificate:
+    """A stalled convex node must not cost the certificate (#1082).
 
-    def test_seeded_solve_certifies_with_abstention(self, monkeypatch):
-        monkeypatch.setenv(ABSTAIN_ENV, "1")
-        seed = _optimal_seed()
-        _, result = _solve_tls2(seed=seed)
+    Until #1270 this was driven by seeding tls2 with its own optimum, which
+    used to make a node stall. It no longer does, so the legacy-arm canary
+    passed for a reason unrelated to the flag. The stall is now injected; the
+    midpoint of the node box is the violating point, so the node stays
+    branchable (its integer coordinates are fractional).
+    """
 
-        # The point of the fix: the seeded solve still proves optimality.
+    @pytest.mark.parametrize("k", [1, 20])
+    def test_abstention_certifies(self, monkeypatch, k):
+        result = _solve_with_stall(monkeypatch, "1", k, ("mid",))
         assert result.gap_certified is True, (
-            f"seeded solve lost the certificate: bound={result.bound} "
+            f"stalled node cost the certificate: bound={result.bound} "
             f"obj={result.objective} status={result.status}"
         )
         assert result.status == "optimal"
+        _assert_sound(result)
+        assert _gap_values_converged(result.objective, result.bound, 1e-4, 1e-6)
 
-        # Soundness (CLAUDE.md §1): the dual bound never crosses the oracle,
-        # and never exceeds the incumbent it is certifying.
-        assert result.bound <= TLS2_OPT + 1e-6, (
-            f"dual bound {result.bound} exceeds the reference optimum {TLS2_OPT}"
-        )
-        assert result.bound <= result.objective + 1e-6
-        assert abs(result.objective - TLS2_OPT) <= 1e-4 * max(1.0, abs(TLS2_OPT))
+    @pytest.mark.parametrize("k", [1, 20])
+    def test_legacy_arm_still_loses_it(self, monkeypatch, k):
+        """Pins the defect the flag fixes: the legacy arm excludes the node.
 
-    def test_legacy_arm_still_loses_it(self, monkeypatch):
-        """Pins the defect: with the flag off, the same seed strands the bound.
-
-        This is the "fails before, passes after" half. It asserts the *old*
-        behaviour, so if a later change fixes the default path this test fails
-        loudly and the flag can be retired rather than silently kept.
+        This is the "fails before, passes after" half. If a later change makes
+        the ``=0`` arm certify through a stall, this fails and the flag can be
+        retired rather than silently kept.
         """
-        monkeypatch.setenv(ABSTAIN_ENV, "0")
-        seed = _optimal_seed()
-        _, result = _solve_tls2(seed=seed)
-
+        result = _solve_with_stall(monkeypatch, "0", k, ("mid",))
         assert result.gap_certified is False, (
-            "the legacy arm now certifies -- #1082 may be fixed on the default "
-            "path; retire DISCOPT_CONVEX_STALL_ABSTAIN instead of keeping it"
+            "the legacy arm now certifies through a stalled node -- #1082 may be "
+            "fixed on the default path; retire DISCOPT_CONVEX_STALL_ABSTAIN"
         )
-        # Even uncertified, the reported bound must remain a valid dual bound.
-        assert result.bound <= TLS2_OPT + 1e-6
+        assert result.status == "feasible"
+        _assert_sound(result)
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_unbranchable_stall_does_not_certify_an_open_gap(monkeypatch):
+    """#1270: an abstaining node with no branch direction floors the tree.
+
+    A violating box *corner* is integral, so the tree fathoms the untrusted
+    node and seeds ``unresolved_floor`` at its inherited bound (~2.81). The tree
+    then finishes, and ``is_finished()`` alone used to certify ``optimal`` at
+    5.3 over that floor.
+    """
+    result = _solve_with_stall(monkeypatch, "1", 20, ("lo", "hi", "mid"))
+    _assert_sound(result)
+    if result.status == "optimal" or result.gap_certified:
+        assert _gap_values_converged(result.objective, result.bound, 1e-4, 1e-6), (
+            f"certified {result.status} with an open gap: obj={result.objective} "
+            f"bound={result.bound}"
+        )
 
 
 @pytest.mark.slow

@@ -5037,6 +5037,30 @@ def _gap_converged(tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS
     return _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol)
 
 
+def _tree_exhausted_with_proof(tree) -> bool:
+    """``tree.is_finished()`` as an optimality proof, i.e. no unproven removal.
+
+    An empty tree proves optimality only if every removed subtree was proved.
+    The Rust tree records the two ways one was not (#598/#467): an untrusted
+    node fathomed with no branch direction and no finite bound pins
+    ``bound_unresolved``; one with a finite inherited bound seeds
+    ``unresolved_floor``. The floor is a valid dual bound, and it already takes
+    part in ``global_lower_bound``, so :func:`_gap_converged` still certifies
+    when the floor-inclusive gap closes. What an empty tree must not do is
+    certify on its own over an open floor (#1270: seeded ``tls2`` with one
+    stalled convex node reported ``optimal`` at 5.3 against a bound of 2.81).
+    The MILP driver applies the same rule (``milp_driver.rs``,
+    ``decide_status``).
+    """
+    if not tree.is_finished():
+        return False
+    stats = tree.stats()
+    if bool(stats.get("bound_unresolved", False)):
+        return False
+    # ``inf`` is the "no floor" value; -inf or NaN is a removal with no bound.
+    return float(stats.get("unresolved_floor", float("inf"))) == float("inf")
+
+
 def _gap_values_converged(
     ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL
 ) -> bool:
@@ -16203,8 +16227,7 @@ def solve_model(
                     _taint_rig_bound_internal = _rig_int
 
         search_closed = not _rr_reserve_yield and (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol)
-            or (tree.is_finished() and not _bound_unresolved)
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         )
         if search_closed and _gap_certified:
             status = "optimal"
@@ -18435,8 +18458,11 @@ def _solve_nlp_bb(
     # is an untrusted node the tree had to fathom with no branch direction left;
     # it reports that as ``bound_unresolved`` (#598/#467), which is exactly the
     # gate ``solve_model``'s spatial path already applies. Decertify on that and
-    # on nothing else. The counter makes a no-op arm distinguishable from an arm
-    # that never fired (CLAUDE.md §6).
+    # on nothing else. The same fathom with a finite inherited bound instead
+    # seeds ``unresolved_floor``: that keeps a valid bound, so it does not
+    # decertify, but the status gate below then needs the floor-inclusive gap to
+    # close (``_tree_exhausted_with_proof``, #1270). The counter makes a no-op
+    # arm distinguishable from an arm that never fired (CLAUDE.md §6).
     if _stall_abstain and _stall_abstained:
         logger.info(
             "Convex stall abstention: %d node(s) fell back to their inherited "
@@ -18768,7 +18794,7 @@ def _solve_nlp_bb(
         # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
         # bound uncertified, so the search closing does not prove optimality.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:
@@ -24473,7 +24499,7 @@ def _solve_milp_bb(
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:
@@ -25215,7 +25241,7 @@ def _solve_miqp_bb(
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
         if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or tree.is_finished()
+            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         ) and _gap_certified:
             status = "optimal"
         else:

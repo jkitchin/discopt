@@ -390,6 +390,17 @@ The release procedure that produces these entries is documented in
   `mathopt5_8` and `portfol_roundlot` (was 0.028383, 0.33% above the best known
   0.0282906) now certify at the oracle value, and `ex6_1_2` is reported `feasible`
   (relative gap 3.2e-4) instead of `optimal`. No other instance changed status.
+- **An empty B&B tree no longer certifies over an unproven removal** (#1270). The
+  NLP-BB, MIQP-BB and spatial exits granted `optimal` whenever the tree had no
+  open nodes. An untrusted node fathomed with no branch direction and a finite
+  inherited bound seeds the tree's `unresolved_floor` (#598), and only the
+  `bound_unresolved` (-inf) variant was checked. With one stalled convex node
+  injected into `tls2` on the default `DISCOPT_CONVEX_STALL_ABSTAIN` arm, the
+  solve reported `optimal` at 5.3 against a bound of 2.81. All four exits now use
+  `_tree_exhausted_with_proof`, the rule the MILP driver already applied; a
+  floored tree still certifies when its floor-inclusive gap closes. The #1082
+  canary tests no longer wait for tls2 to stall on its own, which it has stopped
+  doing: they inject the stall and assert that it fired.
 
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
