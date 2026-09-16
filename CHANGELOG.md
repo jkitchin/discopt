@@ -241,6 +241,92 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **An absolute feasibility tolerance certified an infeasible point as optimal
+  on a small-magnitude constraint** (#1254). Every feasibility gate in the
+  solver asked only whether the residual was small — 1e-6 in the incumbent
+  verifier, 1e-4 in the heuristic gates. On `10**y1 + 10**y2 <= 10**z` with
+  `y in [-9,-6]`, `z in [-20,0]`, the point `y1 = y2 = -7, z = -20` violates the
+  row by 2.0e-07 against a right-hand side of 1e-20; every gate accepted it, it
+  became the incumbent, it met the root relaxation bound, and `solve` returned
+  `status="optimal"`, `gap_certified=True` at `z = -20` where the true optimum
+  is `-6.69897`. Silent, and 13 orders out.
+
+  A residual is not on its own a statement about the point. What makes a small
+  residual tolerable is that the point sits within tolerance of one that
+  satisfies the row, and the first-order distance to the row's surface is
+  `violation / ||grad g||_inf`. Every gate now also requires that distance to
+  stay inside the declared `rel = 1e-4`
+  (`validation.feasibility.feasible_distance_cap`, applied as a `min` against
+  the tolerance each gate already computed, so it can only ever reject). At the
+  bad point above every partial derivative is ~2.3e-07, so restoring
+  feasibility needs `Δy ~ 0.87` — a third of that variable's whole box — and
+  the point is now rejected by nine orders. The cap is inert unless a row is
+  nearly flat in *every* variable: a converged Scholtes-regularized MPEC point
+  (`x*y <= t` violated by 40 % of the row's own magnitude, but with `dg/dx = 1`)
+  is still accepted, which is why the cap is keyed on the gradient and not on
+  the row's term magnitude — the latter cannot tell those two points apart, and
+  ranks the acceptable one as worse. The reproducer now returns the true
+  optimum, certified.
+
+- **A warm start raised `ValueError` when a solve-time reformulation added
+  variables** (#1255). `initial_solution` is flattened against the variables the
+  user declared; the GDP pass then lowers each disjunction into selector
+  binaries at solve time, so the warm-start site fed a 3-entry point to a
+  5-column evaluator and raised `objective: x: expected length 5, got 3` out of
+  a model that solves fine without any warm start. The point is now completed to
+  the working model's columns (`warm_start.complete_initial_point`) and, when it
+  cannot be, dropped with a warning — a hint must never be able to fail a solve.
+  The completion is not just padding: the appended discrete columns are repaired
+  by a bounded best-neighbour search on total constraint violation, which
+  recovers the indicator the given point implies. That needs to accept an uphill
+  move — the selectors carry `sum(y) == 1`, so moving off the wrong disjunct is
+  a swap, and plain descent stops on the wrong one.
+
+- **`log10` of a sum of exponentials got no dual bound at all** (#1256).
+  `minimize log10(sum_i 10**y_i)` returned `status="feasible"`, `bound=None`
+  after one node. Three causes, all of them classes rather than instances:
+
+  - `b**e` with a constant base and a variable exponent canonicalized to an
+    **opaque** node, and an opaque node has no envelope, so the relaxation had
+    no valid objective bound. For `b > 0` it is `exp(ln(b)*e)` identically, and
+    `exp` is in the univariate envelope table with a certified-convex verdict on
+    every box.
+  - `sum(<array expression>)` was opaque unless its operand was a bare
+    `Variable`; it is now the sum of the scalar elements
+    `_relax.scalarize` already derives for the constraint path.
+  - `IncrementalMcCormickLP` built its root box with one entry per `Variable`
+    **object** while the lifted layout has one column per flat **element**, so
+    on any model with a shaped variable it died with `cannot reshape array of
+    size 1 into shape (3,)` and declined — and a correctly-sized flat box handed
+    in by the caller was rejected for having the "wrong" length. Vectorized
+    models therefore never got the incremental fast path, its cuts, or its
+    feasibility pump; they do now.
+
+  A solve that ends with no dual bound also now says so at WARNING rather than
+  leaving `bound=None` as the only trace.
+
+  Measured trade, recorded rather than hidden: giving `b**e` an envelope changes
+  the relaxation of a row that carries one. On hda's three
+  `x == -log(c*4**(a+b*x0) - c)` rows the exp spans 13 decades over the DECLARED
+  box, and the envelope coefficients degrade the Neumaier-Shcherbina bound read
+  off a raw-box root LP (-5.71e6 -> -9.99e11 with the #671 filter off; the filter
+  recovers it to -1.38e9, a 725x tightening where it used to manage 88x). Sound
+  throughout, and a raw-box artefact: every real solve runs FBBT/OBBT first, and
+  hda end to end is unchanged at a 10 s limit and *better* at 60 s (-64510.17,
+  twice, against -122962 / -141697 on the parent). The same lowering moves
+  `contvar` the other way — its root LP goes from *uncertified* (no bound at all)
+  to a certified 174362.80. Those two are the only rows of
+  `docs/dev/data/claim-baseline.jsonl` this change moves, established by
+  regenerating the baseline from the parent commit on the same host and diffing
+  three ways: 12 further rows differ between the committed file and the parent
+  commit *here*, i.e. they are the cross-build float noise that file's gate
+  already documents, and they are left as committed rather than rebaselined onto
+  one host's arithmetic. The 66-instance in-repo
+  differential panel is cert-clean: 0 status changes, 0 certification changes, 0
+  objective drift, 0 new exceptions; the three bound differences are time-limit
+  variance reproduced within a single arm (nvs05 and tls2 each produce both
+  outcomes across 10 interleaved runs per arm).
+
 - **`.nl` header under-declared `nlvo`, so an ASL solver silently answered a
   different problem** (#1222). Header line 4 is `nlvc nlvo nlvb`, and the
   writer put the *raw* count of variables appearing nonlinearly in objectives

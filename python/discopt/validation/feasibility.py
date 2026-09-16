@@ -51,6 +51,17 @@ Two properties of that form are load-bearing and easy to get wrong:
 * The Jacobian term is a *row-scale estimate*, not a slack. Dropping it makes the
   test **stricter**, never looser — which is why the fallback below is sound.
 
+That form still asks only "is the residual small". #1254 is what the missing
+half costs: on a row whose every partial derivative is ~2e-7, a residual of 2e-7
+is inside every absolute tolerance in the solver while the nearest point that
+actually satisfies the row is a third of a variable's box away — and the point
+was accepted, and certified optimal, at the wrong optimum.
+:func:`feasible_distance_cap` adds the missing half — the first-order distance
+from the point to the row's surface must also stay inside 1e-4 — applied as a
+``min`` against the form above. Inert unless the row is nearly flat in every
+variable. See that function for the measurement, and for why the row's term
+magnitude cannot serve here.
+
 ``test_vector_constraint_corpus.py`` carries a control for each naive widening of
 this form, showing that each one accepts a bad point this form rejects.
 
@@ -124,6 +135,88 @@ INT_TOL = 1e-5
 #: Legacy relative coefficient, used ONLY for the variable-bound test, where it
 #: is keyed on the bound (a genuine scale) rather than on the residual.
 BOUND_REL_TOL = 1e-4
+#: The first-order DISTANCE, in variable space, a point may sit from satisfying a
+#: row — the repo's declared ``rel=1e-4``. See :func:`feasible_distance_cap`.
+FEASIBLE_DISTANCE_TOL = 1e-4
+#: Absolute floor under that cap, so a row that is exactly flat at the point is
+#: not held to exact arithmetic. Four orders above double-precision evaluation
+#: noise on a unit-scale row.
+SMALL_ROW_ABS_FLOOR = 1e-12
+#: Per-term coefficient of the cancellation-noise floor under the cap — the
+#: ``rtol`` ``_relax/primal_heuristics`` has always used for the same purpose.
+CANCELLATION_RTOL = 1e-9
+
+
+def jacobian_row_gradient_norms(J) -> np.ndarray:
+    """``max_j |J_ij|`` per row — the row gradient's sup-norm at the point.
+
+    Distinct from :func:`jacobian_row_scales` (``max_j |J_ij| * |x_j|``, the row's
+    term MAGNITUDE) and used for a different question: not "how big is this row"
+    but "how far must the point move to satisfy it". Non-finite rows return
+    ``inf``, which :func:`feasible_distance_cap` turns into "no cap" — an
+    unestimatable gradient must not manufacture a strict test.
+    """
+    J = np.asarray(J, dtype=np.float64)
+    if J.ndim != 2:
+        raise ValueError(f"expected a 2-D Jacobian, got shape {J.shape}")
+    if J.shape[0] == 0:
+        return np.zeros(0, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        mag = np.abs(J)
+    finite = np.isfinite(mag)
+    out = np.asarray(np.where(finite, mag, 0.0).max(axis=1), dtype=np.float64)
+    out[~finite.all(axis=1)] = np.inf
+    return out
+
+
+def feasible_distance_cap(grad_norms, term_scale=None) -> np.ndarray:
+    """Cap on a row's absolute violation: ``FEASIBLE_DISTANCE_TOL * ||grad g_i||_inf``.
+
+    Every feasibility gate in the solver compares a row's violation against a
+    tolerance that is ultimately *absolute* — ``ABS_TOL * max(1, ...)`` here,
+    ``tol + rtol*scale`` in ``_relax/primal_heuristics``, a bare ``tol`` in
+    ``solver._check_constraint_feasibility``. A residual is not, on its own, a
+    statement about the point: what makes an absolute residual tolerable is that
+    a point carrying it sits within tolerance of a point that satisfies the row.
+    The first-order distance to the row's surface is ``violation /
+    ||grad g||_inf``, so requiring that distance to stay inside the repo's
+    declared ``rel=1e-4`` is the same statement expressed where the user's bounds
+    and tolerances live — in variable space.
+
+    Measured (#1254). ``10**y1 + 10**y2 <= 10**z`` with ``y in [-9,-6]``,
+    ``z in [-20,0]``: at ``y1=y2=-7, z=-20`` the row is violated by 2.0e-07 and
+    every partial derivative is ~2.3e-07 or smaller, so restoring feasibility
+    needs ``Δy ~ 0.87`` — a THIRD of that variable's whole box. Every gate
+    accepted the point (2e-7 < 1e-6 < 1e-4), it became the incumbent, it met the
+    root relaxation bound, and ``solve`` returned ``status="optimal"``,
+    ``gap_certified=True`` at ``z = -20`` where the true optimum is ``-6.69897``.
+    A false certificate, silent, from an absolute residual alone.
+
+    Why the distance and not the row's term magnitude, which is the other obvious
+    way to read "relative to the row". On the Scholtes-regularized MPEC row
+    ``x*y <= t`` at ``x = 1, y = 1.67e-08, t = 1e-08``, the residual 6.7e-09 is
+    40 % of the row's magnitude — relatively WORSE than #1254's point — yet
+    ``dg/dx = 1``, so the point is 6.7e-09 in ``y`` away from feasible and is
+    exactly the kind of converged local point the absolute tolerance exists to
+    accept (``test_mpec_source_residuals.py`` asserts it must verify). Term
+    magnitude cannot separate the two; distance separates them by nine orders.
+
+    Applied as a ``min`` against whatever tolerance the calling gate already
+    computes, so it can only ever REJECT a point a gate would have accepted. It
+    is inert unless ``||grad g||_inf < 1e-2``, i.e. on a row that is nearly flat
+    in EVERY variable — where no small move fixes the residual and calling the
+    point near-feasible is not a statement about anything.
+    """
+    g = np.abs(np.asarray(grad_norms, dtype=np.float64))
+    cap = np.maximum(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL * g)
+    if term_scale is not None:
+        # Cancellation noise is not a distance: a row built from terms of
+        # magnitude 1e5 carries ~1e-9*1e5 of pure floating-point residual no
+        # matter where the point is, and a cap that cut into that would reject
+        # points for the arithmetic's rounding rather than for their position.
+        # ``test_polish_feasibility_gate_1199`` holds the boundary this protects.
+        cap = np.maximum(cap, CANCELLATION_RTOL * np.abs(np.asarray(term_scale, np.float64)))
+    return np.where(np.isfinite(g), cap, np.inf)
 
 
 @dataclass(frozen=True)
@@ -211,12 +304,14 @@ def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
 
     **Non-finite rows return 0.0**, i.e. the caller's floor, i.e. the plain
     absolute tolerance — the STRICTEST answer, and the same direction
-    :func:`_row_scales` already takes when the Jacobian is unavailable. This is
+    :func:`_row_scales_and_gradients` already takes when the Jacobian is
+    unavailable. This is
     not hypothetical: an unbounded derivative at a variable pinned to zero
     (``d/dx log(x)`` at ``x = 0``) makes ``inf * 0`` a NaN, and a NaN scale
     propagates into ``violation / row_scale`` as a NaN that compares False
     against every tolerance. Reported by the second review pass on #1157: the
-    guard lived in ``_row_scales`` and did not survive being factored out here,
+    guard lived in ``_row_scales_and_gradients`` and did not survive being
+    factored out here,
     so the two consumers that call this directly emitted a numpy RuntimeWarning
     and a spurious ``[FAIL] primal_con_feas (scaled)`` with ``scale=nan``. Note
     the pre-#1151 floored form gave that row ``inf`` and so an INFINITE
@@ -230,7 +325,8 @@ def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
 def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.ndarray, bool]:
     """:func:`jacobian_row_scales` plus "was every row finite?".
 
-    Split out so :func:`_row_scales` can keep its **whole-batch** fallback: one
+    Split out so :func:`_row_scales_and_gradients` can keep its **whole-batch**
+    fallback: one
     non-finite row there sends *every* suspect row to the Jacobian-free bound.
     Zeroing per row instead would leave the co-occurring rows on their own
     (larger) scales, which is looser than what that function did before this
@@ -262,17 +358,22 @@ def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.
     return np.asarray(terms.max(axis=1), dtype=np.float64), True
 
 
-def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.ndarray]:
-    """``max_j |J_ij| * |x_j|`` for the given row indices, or ``None``.
+def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray):
+    """``(max_j |J_ij| * |x_j|, max_j |J_ij|)`` for the given rows, or ``(None, None)``.
 
-    That product is the first-order magnitude of the row's *j*-th term; see the
-    module docstring (#1151) for why flooring ``|x_j|`` at 1 turns this from a
+    Both halves of the tolerance from ONE Jacobian evaluation: the term magnitude
+    says how big the row is, the gradient sup-norm says how far the point is from
+    satisfying it, and the two must be read off the same matrix.
+
+    The first product is the first-order magnitude of the row's *j*-th term; see
+    the module docstring (#1151) for why flooring ``|x_j|`` at 1 turns this from a
     row-scale estimate into a ``1/|x_j|`` amplification of the tolerance, and how
-    that produced a reported objective below the global minimum.
-
-    The result is floored at 1 by the caller (``max(anchor, scale)`` with
-    ``anchor >= 1``), so a row all of whose terms vanish at the point is held to
-    the plain absolute tolerance rather than to zero.
+    that produced a reported objective below the global minimum. It is floored at
+    1 by the caller (``max(anchor, scale)`` with ``anchor >= 1``), so a row all of
+    whose terms vanish at the point is held to the plain absolute tolerance rather
+    than to zero — and then capped from above by :func:`feasible_distance_cap`,
+    which is what keeps that floor from vouching for a point no small move can
+    make feasible (#1254).
 
     ``None`` means the Jacobian was unavailable, and the caller must then fall
     back to the Jacobian-free bound — which is STRICTER, so the fallback can only
@@ -283,15 +384,15 @@ def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.
         J = np.asarray(evaluator.evaluate_jacobian(x_flat), dtype=np.float64)
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         logger.debug("feasibility: Jacobian unavailable, using the stricter bound: %s", exc)
-        return None
+        return None, None
     if J.ndim != 2 or J.shape[0] <= int(rows.max()):
         logger.debug("feasibility: Jacobian shape %s cannot cover rows; stricter bound", J.shape)
-        return None
+        return None, None
     sub, all_finite = _jacobian_row_scales_checked(J[rows, :], x_flat)
     if not all_finite:
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")
-        return None
-    return sub
+        return None, None
+    return sub, jacobian_row_gradient_norms(J[rows, :])
 
 
 def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult:
@@ -337,16 +438,32 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
             viol[i] = _row_violation(val, sense)
             anchor[i] = max(1.0, abs(rhs))
 
-    suspect = np.nonzero(viol > ABS_TOL * anchor)[0]
+    # Pass 1 selects the rows that could fail EITHER bound. The absolute bound is
+    # ``ABS_TOL * anchor``; the small-row cap (#1254) can be as low as
+    # ``SMALL_ROW_ABS_FLOOR``, so a row violated by more than that floor is a
+    # candidate too — without this term a row the cap rejects would short-circuit
+    # to "feasible" here and the cap would be a no-op on the very rows it exists
+    # for. The Jacobian is still computed only when some row is actually near or
+    # over a line, and an exactly-satisfied row (violation 0) never is.
+    suspect = np.nonzero((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR))[0]
     if suspect.size == 0:
         return VerifyResult(True)
 
     # Pass 2 — only the suspect rows get the full scale-keyed bound.
-    scales = _row_scales(evaluator, x_flat, suspect)
+    scales, grad_norms = _row_scales_and_gradients(evaluator, x_flat, suspect)
     if scales is None:
-        worst = int(suspect[int(np.argmax(viol[suspect]))])
+        # No Jacobian: no scale estimate, so no cap either (it would be a cap
+        # built on nothing). The rows that fail the plain absolute bound are the
+        # rejection, exactly as before the cap existed.
+        hard = suspect[viol[suspect] > ABS_TOL * anchor[suspect]]
+        if hard.size == 0:
+            return VerifyResult(True)
+        worst = int(hard[int(np.argmax(viol[hard]))])
         return VerifyResult(False, None, f"row {worst} violated by {viol[worst]:.3e}")
-    allowed = ABS_TOL * np.maximum(anchor[suspect], scales)
+    allowed = np.minimum(
+        ABS_TOL * np.maximum(anchor[suspect], scales),
+        feasible_distance_cap(grad_norms, scales),
+    )
     over = viol[suspect] > allowed
     if np.any(over):
         k = int(np.argmax(np.where(over, viol[suspect] - allowed, -np.inf)))

@@ -447,7 +447,9 @@ class MccormickLPRelaxer:
         #     root pool (and how many rows in total), across the cold AND fast
         #     paths;
         #   * skipped_separations: node solves where the square/PSD point
-        #     separators were skipped in favour of the inherited pool;
+        #     separators were skipped in favour of the inherited pool, on the
+        #     cold path AND on the incremental fast path (which returns before
+        #     the separation chain runs at all);
         #   * dropped_nodes: cold node solves where the pool-augmented system
         #     produced no certified verdict and the pool rows were stripped for
         #     a no-pool retry (C-42 — the pool is an accelerator, never a
@@ -1405,6 +1407,17 @@ class MccormickLPRelaxer:
                 deadline=_fast_deadline,
             )
             if _fast is not None and not (_skip_fast_for_lift and _fast.status == "optimal"):
+                if separate and skip_pool_separators:
+                    # The fast path applies the inherited pool and returns before the
+                    # separation chain below ever runs, so this node's square/PSD
+                    # separators were skipped in favour of the pool just as surely as
+                    # on the cold path — count it under the same stat rather than
+                    # leaving the skip invisible on whichever path served the node.
+                    # Pure instrumentation; the returned result is unchanged. Before
+                    # #1256 the incremental structure never built for a model with a
+                    # shaped variable, so every such node took the cold path and this
+                    # branch could not be reached.
+                    self._pool_stats["skipped_separations"] += 1
                 return _fast
 
         try:

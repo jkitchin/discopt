@@ -42,6 +42,7 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._relax.model_utils import flat_variable_bounds
 from discopt._relax.outward_rounding import (
     envelope_1d_slack,
     envelope_product_slack,
@@ -349,10 +350,18 @@ class IncrementalMcCormickLP:
         self.model = model
         self.terms = terms
         self._box = None
+        # Column count is the FLAT element count, not the number of ``Variable``
+        # objects: a ``shape=(3,)`` variable is one object and three lifted columns
+        # (#1256). Reading it as the object count silently built every box at the
+        # wrong length — the caller's correctly-sized box was rejected here, and
+        # ``_root_box`` then produced a 1-element box for a 3-column model, which
+        # surfaced as ``cannot reshape array of size 1 into shape (3,)`` from the
+        # relaxation builder and declined the whole structure.
+        self._ncols_orig = int(sum(int(getattr(v, "size", 1)) for v in model._variables))
         if box is not None:
             _blb = np.asarray(box[0], dtype=np.float64).ravel()
             _bub = np.asarray(box[1], dtype=np.float64).ravel()
-            if _blb.size == _bub.size == len(model._variables):
+            if _blb.size == _bub.size == self._ncols_orig:
                 self._box = (_blb.copy(), _bub.copy())
         # Why this structure declined, or ``None`` when it was admitted (#861). The
         # reason used to exist ONLY as the ``logger.debug`` line below, so a caller
@@ -428,10 +437,11 @@ class IncrementalMcCormickLP:
         (presolved) ``box`` when given, else the model's declared bounds."""
         if self._box is not None:
             return self._box[0].copy(), self._box[1].copy()
-        return (
-            np.array([float(np.min(v.lb)) for v in self.model._variables]),
-            np.array([float(np.max(v.ub)) for v in self.model._variables]),
-        )
+        # Flat, one entry per lifted column — ``min(v.lb)`` per ``Variable`` object
+        # collapses a shaped variable's elements into a single entry and desynchronises
+        # every box built from it (#1256).
+        lb, ub = flat_variable_bounds(self.model)
+        return lb.astype(np.float64, copy=True), ub.astype(np.float64, copy=True)
 
     @staticmethod
     def _finite_root_interval(rl, ru, i):
@@ -505,7 +515,7 @@ class IncrementalMcCormickLP:
         return lb_p, ub_p
 
     def _build_structure(self):
-        n = len(self.model._variables)
+        n = self._ncols_orig
         # Per-variable ROOT sign regime (cert:T1.2). ``+1`` = ``lb>=0``, ``-1`` =
         # ``ub<=0``, ``0`` = spans zero. Branching only shrinks boxes, so a
         # sign-definite root sign holds at every node of the subtree; a spanning root
