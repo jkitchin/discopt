@@ -161,6 +161,78 @@ def test_convex_fast_path_reports_a_valid_bound_named_by_its_proof():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 1b. The triple survives MUTATION, not just construction (#1260 review)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_withholding_a_local_certificate_also_withholds_the_validity_claim():
+    """``__post_init__`` runs once; mutation has to maintain the triple by hand.
+
+    ``_withhold_local_optimality_certificate`` cleared ``bound`` and left
+    ``bound_valid=True`` standing, so a result reported ``bound=None`` with
+    ``bound_valid=True`` — violating this field's own rule, and in the one
+    function whose entire job is removing claims it cannot stand behind.
+
+    Reachable on any nonconvex continuous model solved with
+    ``skip_convex_check=True``, and behind an opaque ``dm.custom`` body.
+    """
+    from discopt.solver import _withhold_local_optimality_certificate
+
+    res = SolveResult(status="optimal", objective=15.06, bound=15.06, gap_certified=True)
+    assert res.bound_valid is True  # the state the withholder receives
+    out = _withhold_local_optimality_certificate(res)
+    assert out.bound is None
+    assert out.bound_valid is False, "bound cleared but the claim about it left standing"
+    assert out.bound_source is None
+
+
+@pytest.mark.unit
+def test_the_844_fallback_merge_does_not_read_fields_its_result_lacks():
+    """``solve_lp_spatial_bb`` returns ``LpSpatialResult``, a 6-field NamedTuple.
+
+    The merge read ``_fb.bound_valid`` off it, which raised ``AttributeError``
+    *after* ``result.bound`` had already been mutated; the enclosing
+    ``except Exception`` downgraded that to a ``RuntimeWarning``, so the solve
+    returned the fallback's bound beside the primary's stale flag, a stale gap,
+    a wrong node count and no primal adoption — worse than either branch alone.
+    """
+    from discopt._relax.lp_spatial_bb import LpSpatialResult
+
+    fb = LpSpatialResult(status="optimal", objective=1.0, bound=0.5, gap=0.5, x=None, node_count=3)
+    for missing in ("bound_valid", "bound_source"):
+        assert not hasattr(fb, missing), (
+            f"LpSpatialResult grew {missing}; the merge should carry its claim "
+            "directly instead of deriving one"
+        )
+
+
+@pytest.mark.unit
+def test_set_bound_keeps_the_triple_consistent():
+    """The helper both mutation sites now go through."""
+    res = SolveResult(status="time_limit", objective=1.0, bound=None, gap_certified=False)
+
+    res._set_bound(0.5, valid=True, source="bnb_tree")
+    assert (res.bound, res.bound_valid, res.bound_source) == (0.5, True, "bnb_tree")
+
+    # No bound means no claim, whatever the caller passes.
+    res._set_bound(None, valid=True, source="bnb_tree")
+    assert (res.bound, res.bound_valid, res.bound_source) == (None, False, None)
+
+    # A non-finite bound is no bound either.
+    res._set_bound(float("inf"), valid=True, source="lp_dual")
+    assert res.bound_valid is False and res.bound_source is None
+
+    # The vocabulary stays closed under mutation too.
+    with pytest.raises(ValueError, match="bound_source"):
+        res._set_bound(0.5, valid=True, source="bnb")
+
+    # An invalid bound carries no provenance.
+    res._set_bound(0.5, valid=False, source="bnb_tree")
+    assert res.bound == 0.5 and res.bound_valid is False and res.bound_source is None
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 2b. The verified HiGHS LP/MILP route (#1258)
 # ──────────────────────────────────────────────────────────────────────
 

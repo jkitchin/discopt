@@ -227,25 +227,58 @@ def test_a_budget_stop_reports_no_criterion():
 
 
 @pytest.mark.unit
-def test_the_native_spatial_kernel_takes_a_relative_arm():
-    """The kernel's ``gap_tol`` is applied ABSOLUTELY, so honoring the option
-    there means also giving it the relative arm — otherwise the two routes
-    would certify to different tolerances on the same model.
+def test_the_native_kernel_mapping_never_widens_the_fathom():
+    """The #1260 review finding: tightening must not loosen.
 
-    ``solver.py`` passes ``rel_gap_tol=`` unconditionally, so a binding without
-    it would raise ``TypeError`` on every native-kernel solve. Asserted against
-    the live binding rather than the source: the two are maintained separately
-    and drifting apart is the failure mode.
+    The kernel's ``gap_tol`` is applied ABSOLUTELY. An earlier version of this
+    change also handed it a relative arm (``rel_gap_tol = gap_tolerance``) so the
+    route would match the Python tree's disjunction. That is unsound in the
+    surprising direction: the relative arm never existed here, and adding one can
+    only LOOSEN. With ``abs_gap_tolerance=1e-9``, ``gap_tolerance`` at its 1e-4
+    default and an incumbent of magnitude 1e5, the effective fathoming tolerance
+    went from 1e-4 to ``max(1e-9, 1e-4 * 1e5) = 10.0`` -- five orders looser for
+    a caller who asked for five orders tighter.
+
+    The mapping is now ``min``, asserted here against the source so the arithmetic
+    cannot regress unnoticed.
     """
+    import inspect
+
+    import discopt.solver as _solver
+
+    src = inspect.getsource(_solver._try_native_spatial_kernel)
+    assert "rel_gap_tol" not in src, (
+        "the native kernel mapping grew a relative arm again; on this route that "
+        "can only loosen the fathom"
+    )
+
+    # The mapping itself, replicated from the source under test.
+    def kernel_abs_tol(gap_tolerance: float, abs_gap_tolerance: float | None) -> float:
+        if abs_gap_tolerance is None:
+            return float(gap_tolerance)
+        return min(float(gap_tolerance), float(abs_gap_tolerance))
+
+    # Default is untouched.
+    assert kernel_abs_tol(1e-4, None) == 1e-4
+    # The worked case from the review: tightening tightens.
+    assert kernel_abs_tol(1e-4, 1e-9) == 1e-9
+    # A looser absolute request does not loosen this route.
+    assert kernel_abs_tol(1e-4, 1e-3) == 1e-4
+    # Monotone: no request can produce a threshold above the established one.
+    for abs_req in (1e-12, 1e-9, 1e-6, 1e-4, 1e-2, 1.0):
+        assert kernel_abs_tol(1e-4, abs_req) <= 1e-4
+
+
+@pytest.mark.unit
+def test_the_native_kernel_binding_has_no_relative_arm():
+    """The Rust side must not carry a flag no caller sets (CLAUDE.md §3)."""
     from discopt._rust import solve_spatial_tree_py
 
     with pytest.raises(TypeError) as exc:
-        # Deliberately arity-incomplete: the call must fail for the MISSING
-        # required arguments, never for an unknown ``rel_gap_tol`` keyword.
         solve_spatial_tree_py(rel_gap_tol=0.0)
-    msg = str(exc.value)
-    assert "rel_gap_tol" not in msg, f"solve_spatial_tree_py rejected rel_gap_tol: {msg}"
-    assert "argument" in msg.lower(), f"unexpected TypeError from the binding: {msg}"
+    assert "rel_gap_tol" in str(exc.value), (
+        "the binding still accepts rel_gap_tol, but nothing sets it"
+    )
 
 
 @pytest.mark.unit

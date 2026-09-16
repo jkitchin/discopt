@@ -3910,6 +3910,38 @@ class SolveResult:
                 f"{sorted(BOUND_SOURCES)}."
             )
 
+    def _set_bound(
+        self,
+        bound: Optional[float],
+        *,
+        valid: bool,
+        source: Optional[str] = None,
+    ) -> None:
+        """Set ``bound`` together with its validity claim (#1244).
+
+        ``bound_valid`` / ``bound_source`` are DERIVED in ``__post_init__``, but
+        that runs once. Every post-construction mutation of ``bound`` has to
+        maintain the triple by hand, and two sites got it wrong within one PR --
+        ``Model.solve``'s #844 fallback merge installed the fallback's bound
+        beside the primary's stale flag, and
+        ``solver._withhold_local_optimality_certificate`` cleared the bound and
+        left ``bound_valid=True`` standing. Both were the same shape of mistake,
+        so the triple moves together through here instead.
+
+        The same two normalizations ``__post_init__`` applies are re-applied, so
+        a caller cannot install an inconsistent pair: no bound means no claim,
+        and the provenance vocabulary is closed.
+        """
+        self.bound = bound
+        if bound is None or not np.isfinite(bound):
+            self.bound_valid = False
+            self.bound_source = None
+            return
+        if source is not None and source not in BOUND_SOURCES:
+            raise ValueError(f"bound_source={source!r} is not one of {sorted(BOUND_SOURCES)}.")
+        self.bound_valid = bool(valid)
+        self.bound_source = source if valid else None
+
     def value(self, var: Variable) -> np.ndarray:
         """
         Get the optimal value of a variable.
@@ -6912,24 +6944,41 @@ class Model:
                         # ``bound_valid=False`` beside it would be discarded by
                         # every consumer that checks the flag, which is the whole
                         # point of the fallback's work.
-                        _fb_wins = result.bound is None
-                        if result.bound is None:
-                            result.bound = _fb.bound
-                        elif (
+                        _maximize = (
                             self._objective is not None
                             and self._objective.sense == ObjectiveSense.MAXIMIZE
-                        ):
+                        )
+                        if result.bound is None:
+                            _fb_wins, _merged_bound = True, _fb.bound
+                        elif _maximize:
                             _fb_wins = _fb.bound < result.bound
-                            result.bound = min(result.bound, _fb.bound)
+                            _merged_bound = min(result.bound, _fb.bound)
                         else:
                             _fb_wins = _fb.bound > result.bound
-                            result.bound = max(result.bound, _fb.bound)
+                            _merged_bound = max(result.bound, _fb.bound)
                         if _fb_wins:
-                            # ``solve_lp_spatial_bb`` returns a rigorous spatial
-                            # B&B bound; carry its own claim rather than assuming
-                            # one.
-                            result.bound_valid = _fb.bound_valid
-                            result.bound_source = _fb.bound_source
+                            # #1244. ``_fb`` is an ``LpSpatialResult`` -- a
+                            # 6-field NamedTuple with NO ``bound_valid`` /
+                            # ``bound_source``, so reading them off it raised
+                            # ``AttributeError``, which the ``except`` below
+                            # turned into a warning after ``result.bound`` had
+                            # already been mutated. The claim is derived here
+                            # instead, from what that engine documents: it is a
+                            # spatial branch-and-bound whose module invariant is
+                            # "every LP bound is a valid LOWER bound on sgn*f",
+                            # gated on ``_objective_bound_valid`` -- the same
+                            # frontier-bound standard the other B&B routes
+                            # report, hence ``bnb_tree``.
+                            result._set_bound(_merged_bound, valid=True, source="bnb_tree")
+                        else:
+                            # The primary's bound survives; its existing claim
+                            # still describes it, so re-assert it unchanged
+                            # rather than leaving the triple to drift.
+                            result._set_bound(
+                                _merged_bound,
+                                valid=result.bound_valid,
+                                source=result.bound_source,
+                            )
                     result.node_count = (result.node_count or 0) + _fb.node_count
                 # #1038: ``solve_lp_spatial_bb`` neither receives nor consults
                 # ``lazy_constraints``/``incumbent_callback``, so its primal is

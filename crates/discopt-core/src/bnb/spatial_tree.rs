@@ -111,17 +111,18 @@ pub enum TreeStatus {
 /// The single place the gap criterion is spelled out, so the fathoming tests,
 /// the node-limit exit and the terminal `Optimal` verdict can never drift apart
 /// — which is exactly how a fathom looser than the certificate becomes a false
-/// `Optimal`. Mirrors `solver.py::_gap_values_converged`, including its
-/// `max(|ub|, |lb|, 1e-10)` denominator: flooring that at 1.0 instead is what
-/// makes a relative tolerance meaningless for an optimum near zero.
+/// `Optimal`.
+///
+/// Purely ABSOLUTE, as this kernel has always been. #1243 briefly gave it a
+/// relative second arm so it would match the Python tree's disjunction; that was
+/// reverted, because the relative arm never existed here and adding one can only
+/// LOOSEN the fathom — a caller tightening `abs_gap_tolerance` would have
+/// widened the effective tolerance by orders of magnitude on a large objective.
+/// `solver.py` now maps a caller's absolute tolerance through `min`, so this
+/// route honours a tightening and declines a loosening.
 #[inline]
 fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
-    let mut tol = config.gap_tol;
-    if config.rel_gap_tol > 0.0 {
-        let denom = inc.abs().max(bound.abs()).max(1e-10);
-        tol = tol.max(config.rel_gap_tol * denom);
-    }
-    bound >= inc - tol
+    bound >= inc - config.gap_tol
 }
 
 /// Tunables for [`solve_spatial_tree`].
@@ -135,20 +136,6 @@ pub struct SpatialTreeConfig {
     pub deadline: Option<Instant>,
     /// Absolute gap `incumbent − global_bound` at/below which the solve stops.
     pub gap_tol: f64,
-    /// RELATIVE gap at/below which the solve also stops, as the second arm of a
-    /// disjunction with [`Self::gap_tol`]: a region closes when
-    /// `incumbent − bound <= max(gap_tol, rel_gap_tol · max(|incumbent|, |bound|, 1e-10))`.
-    ///
-    /// `0.0` — the default — makes the relative arm unreachable, so the test
-    /// reduces to the absolute one this kernel has always used and every
-    /// existing caller is bit-for-bit unchanged (#1243).
-    ///
-    /// Python sets it only when `Model.solve` was given an explicit
-    /// `abs_gap_tolerance`; the pair is then `(gap_tol = abs_gap_tolerance,
-    /// rel_gap_tol = gap_tolerance)`, which is the same disjunction
-    /// `solver.py::_gap_values_converged` applies on the Python tree, so the two
-    /// routes certify to the same tolerance.
-    pub rel_gap_tol: f64,
     /// Integrality tolerance for incumbent acceptance / integer branching.
     pub int_tol: f64,
     /// McCormick-exactness tolerance for incumbent acceptance (`|x_aux − f|`).
@@ -216,7 +203,6 @@ impl Default for SpatialTreeConfig {
             max_nodes: 100_000,
             deadline: None,
             gap_tol: 1e-6,
-            rel_gap_tol: 0.0,
             int_tol: 1e-5,
             mccormick_tol: 1e-6,
             min_box_width: 1e-9,
@@ -1209,27 +1195,24 @@ mod tests {
 mod gap_criterion_tests {
     use super::*;
 
-    fn cfg(abs_tol: f64, rel_tol: f64) -> SpatialTreeConfig {
-        SpatialTreeConfig {
-            gap_tol: abs_tol,
-            rel_gap_tol: rel_tol,
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn a_zero_relative_arm_reproduces_the_absolute_test_exactly() {
-        // The default. Every pre-#1243 caller must be bit-for-bit unchanged, so
-        // `gap_closed` has to agree with the literal `bound >= inc - gap_tol`
-        // it replaced across the whole range of magnitudes.
-        let c = cfg(1e-4, 0.0);
+    fn gap_closed_is_the_absolute_test_it_consolidates() {
+        // `gap_closed` exists so the fathoming tests, the node-limit exit and
+        // the terminal `Optimal` verdict cannot drift apart. It must therefore
+        // stay EXACTLY the `bound >= inc - gap_tol` each of them spelled out
+        // inline before, across the whole range of magnitudes -- a helper that
+        // quietly differs from the four sites it replaced is worse than none.
+        let config = SpatialTreeConfig {
+            gap_tol: 1e-4,
+            ..Default::default()
+        };
         let mut checked = 0usize;
         for &inc in &[-1e6, -1.0, -1e-8, 0.0, 1e-8, 1.0, 1e6] {
             for &gap in &[0.0, 1e-9, 1e-5, 1e-4, 1.1e-4, 1.0] {
                 let bound = inc - gap;
                 assert_eq!(
-                    gap_closed(bound, inc, &c),
-                    bound >= inc - c.gap_tol,
+                    gap_closed(bound, inc, &config),
+                    bound >= inc - config.gap_tol,
                     "inc={inc} gap={gap}"
                 );
                 checked += 1;
@@ -1239,40 +1222,35 @@ mod gap_criterion_tests {
     }
 
     #[test]
-    fn the_relative_arm_only_ever_loosens_never_tightens() {
-        // A disjunction can only close a region EARLIER, never later — so a
-        // region the absolute arm already closes must stay closed whatever the
-        // relative tolerance is. The opposite would be a fathom that a prior
-        // release made and this one does not: a silent search regression.
+    fn a_tighter_gap_tol_never_widens_the_fathom() {
+        // The #1260 review finding, pinned at the level it happened. A relative
+        // second arm was briefly added here so this route would match the Python
+        // tree's disjunction; on a large objective it turned a caller's TIGHTER
+        // absolute tolerance into a fathom orders of magnitude LOOSER
+        // (1e-9 requested, 10.0 effective at |inc| ~ 1e5). The criterion must be
+        // monotone in `gap_tol`: shrinking it can only ever close fewer regions.
         let mut checked = 0usize;
-        for &rel in &[0.0, 1e-9, 1e-4, 1e-2] {
-            let c = cfg(1e-6, rel);
-            let base = cfg(1e-6, 0.0);
-            for &inc in &[-1e5, -1.0, 0.0, 1.0, 1e5] {
-                for &gap in &[0.0, 1e-7, 1e-6, 1e-3, 1.0] {
-                    let bound = inc - gap;
-                    if gap_closed(bound, inc, &base) {
-                        assert!(gap_closed(bound, inc, &c), "rel={rel} inc={inc} gap={gap}");
-                    }
-                    checked += 1;
+        for &inc in &[-1e5, -1.0, 0.0, 1.0, 1e5] {
+            for &gap in &[0.0, 1e-9, 1e-7, 1e-4, 1e-2, 1.0, 11.0] {
+                let bound = inc - gap;
+                let loose = SpatialTreeConfig {
+                    gap_tol: 1e-4,
+                    ..Default::default()
+                };
+                let tight = SpatialTreeConfig {
+                    gap_tol: 1e-9,
+                    ..Default::default()
+                };
+                if gap_closed(bound, inc, &tight) {
+                    assert!(
+                        gap_closed(bound, inc, &loose),
+                        "tightening closed a region the looser tolerance does not: \
+                         inc={inc} gap={gap}"
+                    );
                 }
+                checked += 1;
             }
         }
-        assert_eq!(checked, 100, "probe ran {checked} comparisons");
-    }
-
-    #[test]
-    fn the_denominator_is_not_floored_at_one() {
-        // The whole point: near zero, a relative tolerance must NOT degenerate
-        // into an absolute one. With inc ~ 1e-8 and a 1e-7 gap the relative gap
-        // is ~0.9, so a 1e-4 relative tolerance may not close the region — a
-        // denominator floored at 1.0 would read it as 1e-7 and close it.
-        let c = cfg(1e-10, 1e-4);
-        let inc = 1e-8;
-        let bound = inc - 1e-7;
-        assert!(!gap_closed(bound, inc, &c));
-        // The same absolute gap on a unit-magnitude objective DOES close.
-        let inc2 = 1.0;
-        assert!(gap_closed(inc2 - 1e-7, inc2, &c));
+        assert_eq!(checked, 35, "probe ran {checked} comparisons");
     }
 }

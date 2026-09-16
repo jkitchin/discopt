@@ -1633,22 +1633,34 @@ def _try_native_spatial_kernel(
             remaining = remaining - _bound_reserve
         # #1243. The kernel's ``gap_tol`` has always been applied ABSOLUTELY
         # (``bound >= inc - gap_tol``), so this route's established absolute
-        # tolerance *is* the caller's ``gap_tolerance`` -- which is why the
-        # default below is ``gap_tolerance`` and not ``_DEFAULT_ABS_GAP_TOL``:
-        # anything else would silently change every solve that routes here.
-        # When the caller names ``abs_gap_tolerance`` they get it as the absolute
-        # arm, and ``rel_gap_tol`` switches the kernel's test to the same
-        # disjunction the Python tree uses, so the two routes agree. Left at 0.0
-        # the relative arm can never fire and the kernel behaves exactly as
-        # before.
+        # tolerance *is* the caller's ``gap_tolerance``: the default below is
+        # ``gap_tolerance``, not ``_DEFAULT_ABS_GAP_TOL``, because anything else
+        # would silently change every solve that routes here.
+        #
+        # ``min``, NOT the disjunction the Python tree applies. An earlier
+        # version handed the kernel a relative arm as well, so that the two
+        # routes would agree; that is unsound in the surprising direction,
+        # because the relative arm never existed HERE and adding one can only
+        # LOOSEN. Measured: ``abs_gap_tolerance=1e-9`` with ``gap_tolerance`` at
+        # its 1e-4 default and |incumbent| ~ 1e5 moved the effective fathoming
+        # tolerance from 1e-4 to ``max(1e-9, 1e-4 * 1e5) = 10.0`` -- a caller who
+        # asked to tighten by five orders of magnitude got a certificate five
+        # orders looser, and `TreeStatus::Optimal` at an absolute gap of 10.
+        #
+        # So this route honours a TIGHTENING and declines a LOOSENING. Naming an
+        # absolute tolerance is not consent to a relative one, and refusing to
+        # loosen is the safe direction for a certificate. The cost is stated in
+        # ``abs_gap_tolerance``'s docstring: an absolute tolerance LOOSER than
+        # ``gap_tolerance`` does not take effect on this route, which only ever
+        # means the kernel does more work than asked.
         _kernel_abs_tol = (
-            float(gap_tolerance) if abs_gap_tolerance is None else float(abs_gap_tolerance)
+            float(gap_tolerance)
+            if abs_gap_tolerance is None
+            else min(float(gap_tolerance), float(abs_gap_tolerance))
         )
-        _kernel_rel_tol = 0.0 if abs_gap_tolerance is None else float(gap_tolerance)
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=_kernel_abs_tol,
-            rel_gap_tol=_kernel_rel_tol,
             time_limit_s=remaining,
             # Node-LP start basis (default OFF). The kernel's cold two-phase primal
             # grinds to `max_iter` on equality-rich, hence primal-degenerate,
@@ -5009,10 +5021,22 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     ``"absolute"`` when the absolute gap closed, ``"relative"`` when only the
     relative one did, ``None`` when neither holds -- a solve that stopped on
     ``time_limit`` / ``node_limit`` / an exhausted tree rather than on the gap.
+    ``"absolute"`` wins a tie because it is the tighter statement (#1243).
+
     Both arms use the *identical* arithmetic to :func:`_gap_values_converged`,
-    so the reported criterion can never disagree with the test that stopped the
-    search; ``"absolute"`` wins a tie because it is the tighter statement
-    (#1243).
+    so this agrees with the test at every call site that consults that function.
+
+    It does NOT agree everywhere, and the exception is worth naming rather than
+    discovering: three *re-certification* sites (``solve_model``,
+    ``_solve_nlp_bb``, ``_solve_miqp_bb``) flip a ``feasible`` exit to
+    ``optimal`` by comparing ``gap_tolerance`` against a gap whose denominator
+    is floored at 1.0 -- the third gap formula in this file, and the very
+    degeneration :data:`_DEFAULT_ABS_GAP_TOL` was introduced to correct. On an
+    optimum below magnitude 1 those sites can certify where this function
+    reports ``None``, so such a result carries ``gap_certified=True`` with the
+    ``"gap_criterion"`` key ABSENT. That self-inconsistency is a symptom of the
+    floored formula, not of this one; tightening those three sites is
+    certification-changing corpus-wide and is tracked in #1263.
 
     Pure reporting: nothing here feeds back into the solver's math.
     """
@@ -7251,7 +7275,13 @@ def _withhold_local_optimality_certificate(result: SolveResult) -> SolveResult:
     if result.status == "infeasible":
         return result
     result.gap_certified = False
-    result.bound = None
+    # #1244: clear the VALIDITY CLAIM with the bound, not just the number. This
+    # function exists to remove claims it cannot stand behind, and a
+    # ``bound_valid=True`` left standing beside ``bound=None`` is exactly such a
+    # claim -- it also violates the field's own rule ("no bound, no claim"),
+    # which ``__post_init__`` enforces at construction and cannot re-enforce
+    # here because this mutates an already-built result.
+    result._set_bound(None, valid=False)
     result.root_bound = None
     result.gap = None
     result.root_gap = None
