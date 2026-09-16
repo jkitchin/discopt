@@ -142,7 +142,15 @@ _DICT_ARRAY_FIELDS = (
 #: Scalar fields whose value is text, not a number. They are excluded from float
 #: tag *decoding*: without this, a status or route that happened to read exactly
 #: ``"inf"`` would be turned into a float on the way back in.
-_STRING_SCALAR_FIELDS = frozenset({"status", "algorithm_route", "error"})
+#:
+#: ``bound_source`` was missing from this set when the tagging landed (#1266),
+#: which made ``deserialize_result`` raise ``SerializationError: unknown float
+#: token 'convex_proof'`` on **every** result carrying a bound source — i.e. every
+#: certified result that crossed the daemon socket or was stored and read back.
+#: ``test_every_string_scalar_field_is_excluded_from_float_decoding`` now derives
+#: the set from the dataclass annotations, so the next string field added to
+#: ``_SCALAR_FIELDS`` cannot repeat it.
+_STRING_SCALAR_FIELDS = frozenset({"status", "algorithm_route", "bound_source", "error"})
 
 
 def _jsonify_arrays(d: Optional[dict]) -> Optional[dict]:
