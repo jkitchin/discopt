@@ -1895,26 +1895,21 @@ def _try_native_spatial_kernel(
         rust_time=rust_total,
         jax_time=jax_total,
         python_time=wall_time - rust_total - jax_total,
-        gap_certified=math.isfinite(bound_val),
+        # #1262: certified means the gap CLOSED, which on this route only an
+        # ``optimal`` kernel exit proves. A budgeted exit (``time_limit`` /
+        # ``node_limit``) carries a valid bound (``bound_valid`` below) but an open
+        # gap — nvs13 at ``max_nodes=5`` exited ``node_limit`` with a 66% gap and
+        # used to report True here, disagreeing with every Python driver and with
+        # every consumer of the flag (``_route_result_is_certified``, phase gates).
+        gap_certified=(native_status == "optimal" and math.isfinite(bound_val)),
         # #1244: stated explicitly rather than left to the ``gap_certified``
-        # derivation, because on this route that flag is set from bound
-        # FINITENESS rather than from gap closure (the line above). ``bound_val``
-        # here is either the kernel's own rigorous frontier minimum (`TreeStatus`
-        # never reports a bound it did not prove) or, when the kernel exited
-        # bound-less, the root-relaxation fallback composed above -- both valid
-        # on every exit status the kernel is accepted on, so this value is
-        # correct.
-        #
-        # KNOWN LIMITATION (#1262): it is also, today, the SAME EXPRESSION as
-        # ``gap_certified`` on the line above, so ``bound_valid`` carries no
-        # information on this one route -- the two flags cannot disagree, and
-        # the whole point of the field is that they should. The defect is in
-        # ``gap_certified`` (a `node_limit` exit with a 40% open gap reports it
-        # True; measured on nvs13), not here: withdrawing that claim is a
-        # certification change across the corpus and is tracked in #1262 with
-        # the differential panel it needs. Until then, a consumer on this route
-        # learns nothing from ``bound_valid`` it could not get from
-        # ``gap_certified``.
+        # derivation. ``bound_val`` here is either the kernel's own rigorous
+        # frontier minimum (`TreeStatus` never reports a bound it did not prove)
+        # or, when the kernel exited bound-less, the root-relaxation fallback
+        # composed above -- both valid on every exit status the kernel is
+        # accepted on, so this value is correct. Unlike ``gap_certified`` it
+        # holds on budgeted exits too, so the two flags differ exactly where
+        # #1244 intends (#1262).
         bound_valid=math.isfinite(bound_val),
         bound_source=_native_bound_source,
         solver_stats=_native_stats,

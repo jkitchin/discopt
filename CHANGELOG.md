@@ -369,6 +369,15 @@ The release procedure that produces these entries is documented in
   versions, so persisting it reopens the #742 false-bound class), and a solve
   with a parameter change was not measurably slower than one without.
 
+- **Native spatial kernel no longer certifies an open gap** (#1262).
+  `_try_native_spatial_kernel` set `gap_certified` from bound *finiteness*, so a
+  budgeted `time_limit` / `node_limit` exit reported a certificate (nvs13 at
+  `max_nodes=5`: 66% gap, `gap_certified=True`). It is now True only on an
+  `optimal` kernel exit; `bound_valid` still reports the bound as usable, so the
+  two flags now carry different information as #1244 intended. Withdraws claims
+  only. On the 66-instance in-repo corpus at `time_limit=10`, one instance flips:
+  `tanksize` (`time_limit`, gap 0.75%).
+
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
   solver asked only whether the residual was small — 1e-6 in the incumbent
