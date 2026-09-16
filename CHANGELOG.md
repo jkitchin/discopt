@@ -272,6 +272,20 @@ The release procedure that produces these entries is documented in
   A solve that ends with no dual bound also now says so at WARNING rather than
   leaving `bound=None` as the only trace.
 
+  Measured trade, recorded rather than hidden: giving `b**e` an envelope changes
+  the relaxation of a row that carries one. On hda's three
+  `x == -log(c*4**(a+b*x0) - c)` rows the exp spans 13 decades over the DECLARED
+  box, and the envelope coefficients degrade the Neumaier-Shcherbina bound read
+  off a raw-box root LP (-5.71e6 -> -9.99e11 with the #671 filter off; the filter
+  recovers it to -1.38e9, a 725x tightening where it used to manage 88x). Sound
+  throughout, and a raw-box artefact: every real solve runs FBBT/OBBT first, and
+  hda end to end is unchanged at a 10 s limit and *better* at 60 s (-64510.17,
+  twice, against -122962 / -141697 on the parent). The 66-instance in-repo
+  differential panel is cert-clean: 0 status changes, 0 certification changes, 0
+  objective drift, 0 new exceptions; the three bound differences are time-limit
+  variance reproduced within a single arm (nvs05 and tls2 each produce both
+  outcomes across 10 interleaved runs per arm).
+
 - **`.nl` header under-declared `nlvo`, so an ASL solver silently answered a
   different problem** (#1222). Header line 4 is `nlvc nlvo nlvb`, and the
   writer put the *raw* count of variables appearing nonlinearly in objectives
