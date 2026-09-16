@@ -84,8 +84,8 @@ def _mindtpy_duran_grossmann_minlp():
     return m
 
 
-def test_compute_gap_uses_absolute_scale_near_zero():
-    """A near-zero objective must not inflate a small gap into a large relative one.
+def test_compute_gap_bounded_near_zero_incumbent():
+    """A near-zero incumbent must not inflate the relative gap without bound.
 
     Re-baselined by #945: the magnitude was 1.99e-8, which now sits *below* the
     shared absolute criterion (1e-6, discopt's absolute tolerance) and so reads as
@@ -93,13 +93,22 @@ def test_compute_gap_uses_absolute_scale_near_zero():
     magnitude, so it is re-pinned above the absolute floor where the floor is what
     decides the answer.
     """
+    from discopt.solver import _gap_values_converged
     from discopt.solvers.oa import _compute_gap
 
-    # denom = max(9e-18, 1.99e-3, 1.0) = 1.0 -> the ABSOLUTE gap is reported,
-    # rather than 1.99e-3/9e-18 ~ 2e14.
-    assert _compute_gap(-1.99e-3, 9e-18) == pytest.approx(1.99e-3)
+    # Re-pinned by #1263: the denominator floor is 1e-10, not 1.0. OA converges on
+    # this value, and a 1.0 floor turned the relative tolerance into an absolute
+    # 1e-4 below unit scale (portfol_roundlot certified 0.33% off). The
+    # denominator still includes |lb|, so the gap is 1.99e-3 / 1.99e-3 = 1.0,
+    # not 1.99e-3 / 9e-18 ~ 2e14.
+    assert _compute_gap(-1.99e-3, 9e-18) == pytest.approx(1.0)
+    # A 5e-5 absolute gap at scale 0.1 is a 5e-4 relative gap: open.
+    assert _compute_gap(0.09995, 0.1) == pytest.approx(5e-4)
     # Below the absolute criterion the gap is closed outright.
     assert _compute_gap(-1.99e-8, 9e-18) == 0.0
+    # Converging on this value agrees with the solver's own test.
+    for lb, ub in [(-1.99e-3, 9e-18), (0.09995, 0.1), (-1.99e-8, 9e-18), (99.995, 100.0)]:
+        assert (_compute_gap(lb, ub) <= 1e-4) == _gap_values_converged(ub, lb, 1e-4, 1e-6)
 
 
 def test_compute_gap_refuses_to_certify_an_inverted_bound():

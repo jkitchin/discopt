@@ -1668,6 +1668,14 @@ def _try_native_spatial_kernel(
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=_kernel_abs_tol,
+            # #1263: the kernel's absolute test alone is the 1.0-floored relative
+            # test below unit magnitude (st_z: `Optimal` at 2.7e-5 over a true 0).
+            # The kernel CONJOINS this with `_gap_values_converged`'s own
+            # abs-OR-rel criterion, so it can only tighten the test above.
+            rel_gap_tol=float(gap_tolerance),
+            abs_gap_tol=(
+                _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+            ),
             time_limit_s=remaining,
             # Node-LP start basis (default OFF). The kernel's cold two-phase primal
             # grinds to `max_iter` on equality-rich, hence primal-degenerate,
@@ -5049,6 +5057,30 @@ def _gap_values_converged(
     return abs_gap / denom <= gap_tolerance
 
 
+def _recertify_gap_closed(
+    obj_val: float,
+    bound_val: float,
+    is_maximize: bool,
+    gap_tolerance: float,
+    abs_gap_tol: float,
+) -> bool:
+    """Whether a reported (incumbent, bound) pair closes the gap (#1263).
+
+    The predicate the ``feasible -> optimal`` re-certification sites use. It is
+    :func:`_gap_values_converged` with the pair ordered by sense (a MAXIMIZE bound
+    is an upper bound), so granting a certificate uses the same test as stopping
+    the search and as :func:`_gap_criterion`. Those sites previously compared
+    ``gap_tolerance`` against ``|obj - bound| / max(1, |obj|)``, whose 1.0 floor
+    turns the relative tolerance into an absolute one below magnitude 1 and
+    certified ``st_qpc-m3b`` at obj 9.1e-5 over a true optimum of 0.
+
+    The caller still owns the on-correct-side guard: ``_gap_values_converged``
+    clamps a crossed pair to gap 0.
+    """
+    ub, lb = (bound_val, obj_val) if is_maximize else (obj_val, bound_val)
+    return _gap_values_converged(float(ub), float(lb), gap_tolerance, abs_gap_tol)
+
+
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
     """Which of the two convergence criteria the final ``(ub, lb)`` pair meets.
 
@@ -5060,17 +5092,9 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     Both arms use the *identical* arithmetic to :func:`_gap_values_converged`,
     so this agrees with the test at every call site that consults that function.
 
-    It does NOT agree everywhere, and the exception is worth naming rather than
-    discovering: three *re-certification* sites (``solve_model``,
-    ``_solve_nlp_bb``, ``_solve_miqp_bb``) flip a ``feasible`` exit to
-    ``optimal`` by comparing ``gap_tolerance`` against a gap whose denominator
-    is floored at 1.0 -- the third gap formula in this file, and the very
-    degeneration :data:`_DEFAULT_ABS_GAP_TOL` was introduced to correct. On an
-    optimum below magnitude 1 those sites can certify where this function
-    reports ``None``, so such a result carries ``gap_certified=True`` with the
-    ``"gap_criterion"`` key ABSENT. That self-inconsistency is a symptom of the
-    floored formula, not of this one; tightening those three sites is
-    certification-changing corpus-wide and is tracked in #1263.
+    The ``feasible -> optimal`` re-certification sites use the same test via
+    :func:`_recertify_gap_closed` (#1263), so a re-certified result names
+    the criterion that closed it.
 
     Pure reporting: nothing here feeds back into the solver's math.
     """
@@ -16457,8 +16481,8 @@ def solve_model(
         status == "feasible"
         and obj_val is not None
         and _bound_on_correct_side
-        and gap_val is not None
-        and gap_val <= gap_tolerance
+        and bound_val is not None
+        and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol)
         # B2-FIX (task #89): a bound recovered from a TAINTED tree (frontier
         # min floored by the tainted nodes' pop-time bounds) is reported but
         # never re-certifies: #27a's contract is that a non-rigorous fathom
@@ -18845,11 +18869,13 @@ def _solve_nlp_bb(
         and obj_val is not None
         and bound_val is not None
         and np.isfinite(bound_val)
-        and gap_val is not None
-        and gap_val <= gap_tolerance
     ):
         _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
-        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+        # #1263: the certificate is granted by the same gap test that stops the
+        # search, not by the 1.0-floored ``gap_val`` (which stays the reported gap).
+        if (
+            (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9)
+        ) and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol):
             _gap_certified = True
             status = "optimal"
 
@@ -25280,11 +25306,13 @@ def _solve_miqp_bb(
         and obj_val is not None
         and bound_val is not None
         and np.isfinite(bound_val)
-        and gap_val is not None
-        and gap_val <= gap_tolerance
     ):
         _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
-        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+        # #1263: the certificate is granted by the same gap test that stops the
+        # search, not by the 1.0-floored ``gap_val`` (which stays the reported gap).
+        if (
+            (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9)
+        ) and _recertify_gap_closed(obj_val, bound_val, _is_max, gap_tolerance, abs_gap_tol):
             _gap_certified = True
             status = "optimal"
 

@@ -4586,10 +4586,15 @@ def _bounds_moved(
 def _compute_gap(lb: float, ub: float) -> float:
     """OA's optimality gap — see :mod:`discopt.solvers._gap` for the semantics.
 
-    ``denom_floor=1.0``: below unit objective scale OA reports the absolute gap
-    rather than dividing by a vanishing denominator.
+    ``denom_floor=1e-10``, the floor :func:`discopt.solver._gap_values_converged`
+    uses. OA compares this value to ``gap_tolerance`` to *converge*, and a
+    ``1.0`` floor turned that relative tolerance into an absolute ``1e-4`` below
+    unit objective scale: ``portfol_roundlot`` was certified ``optimal`` at
+    0.02838 against a bound of 0.02829 (true optimum 0.02829, a 0.33% miss).
+    The absolute ``1e-6`` criterion still closes a genuinely zero optimum
+    (#1263).
     """
-    return optimality_gap(lb, ub, denom_floor=1.0)
+    return optimality_gap(lb, ub, denom_floor=1e-10)
 
 
 def _lp_nlp_bb_exit_status(

@@ -377,6 +377,19 @@ The release procedure that produces these entries is documented in
   two flags now carry different information as #1244 intended. Withdraws claims
   only. On the 66-instance in-repo corpus at `time_limit=10`, one instance flips:
   `tanksize` (`time_limit`, gap 0.75%).
+- **Optimality certificates below unit objective scale use the real gap test**
+  (#1263). Several certifiers tested `|obj - bound| / max(1, |obj|)`, which for
+  `|obj| < 1` is an *absolute* 1e-4 tolerance, not the documented abs-1e-6-or-rel-1e-4
+  criterion: the three `feasible -> optimal` re-certification sites in `solver.py`,
+  the native spatial kernel (absolute `gap_tol` only) and the convex-MINLP OA route
+  (`_compute_gap` with `denom_floor=1.0`). All now apply `_gap_values_converged`'s
+  test; the kernel conjoins it with its absolute test via new `rel_gap_tol` /
+  `abs_gap_tol` config fields, so it can only tighten. On 169 small MINLPLib
+  instances (`|opt| < 1`, `time_limit=20`), certified-optimal results with no
+  `gap_criterion` went from 7 to 0: `st_z` (was 2.7e-5, optimum 0), `st_qpc-m3b`,
+  `mathopt5_8` and `portfol_roundlot` (was 0.028383, 0.33% above the best known
+  0.0282906) now certify at the oracle value, and `ex6_1_2` is reported `feasible`
+  (relative gap 3.2e-4) instead of `optimal`. No other instance changed status.
 
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
