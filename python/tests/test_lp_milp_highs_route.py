@@ -106,6 +106,30 @@ def test_rows_at_the_huge_box_are_checked_exactly():
     assert H.feasibility_problem(xc, costed, check_integrality=False) is not None
 
 
+def test_huge_box_masks_each_side_separately_and_keeps_declared_bounds():
+    """``_relax_huge_box`` re-derived the side to open from the *sign* of the bound rather
+    than from a per-side mask, so a column with one sentinel-magnitude side had its other,
+    ordinary declared side opened too: ``lb=-5`` beside a default ``ub`` became ``-inf``,
+    HiGHS saw a free column and the MILP route answered ``error``. ``lb=0`` survived only
+    because ``0 < 0`` is false. Opening a side is still a relaxation, so the fully free
+    column (the F2 case) must keep opening both.
+    """
+    B = 9.999e19
+    #                                free   lb=-5/default ub   default lb/ub=5   finite
+    sf = H.StdForm.from_arrays(
+        [0.0, 0.0, 0.0, 0.0], np.zeros((0, 4)), [],
+        [-B, -5.0, -B, 0.0], [B, B, 5.0, 10.0],
+    )  # fmt: skip
+    lo, hi = H._huge_box(sf)
+    assert lo.tolist() == [True, False, True, False]
+    assert hi.tolist() == [True, True, False, False]
+    r = H._relax_huge_box(sf, lo, hi)
+    assert r.xl.tolist() == [-INF, -5.0, -INF, 0.0]  # the declared -5 and 0 are kept
+    assert r.xu.tolist() == [INF, INF, 5.0, 10.0]  # the declared 5 and 10 are kept
+    # Every side that moved, moved outward -- the result is a relaxation of ``sf``.
+    assert np.all(r.xl <= sf.xl) and np.all(r.xu >= sf.xu)
+
+
 def test_ns_bound_is_valid_from_an_arbitrary_dual():
     # min x0 + 2 x1, x0 + x1 = 3, 0 <= x <= 10: optimum 3. Any y gives a lower bound.
     sf = H.StdForm.from_arrays([1.0, 2.0], [[1.0, 1.0]], [3.0], [0, 0], [10, 10])
@@ -513,6 +537,40 @@ def test_milp_on_the_default_box_is_not_falsely_infeasible(highs):
     assert res.status == "optimal" and res.gap_certified
     assert res.objective == pytest.approx(4.0, abs=1e-6)
     assert res.solver_stats.get("milp/huge_box_relaxed") == 1.0
+
+
+def test_milp_declared_lower_bound_beside_a_default_side_survives(highs):
+    """A column with one sentinel-magnitude side and one *ordinary declared* side had the
+    declared side opened too: ``_huge_box`` flagged the column for its default ``ub`` and
+    ``_relax_huge_box`` re-derived the side from the sign, so ``x >= -5`` was discarded.
+    HiGHS then saw a free column, returned ``kUnboundedOrInfeasible``, and the route
+    answered ``error`` where the declared box has an optimum (the Rust route says -5.0).
+
+    The F2 test above cannot catch this: its column ``y`` is fully free, which is exactly
+    the case where opening both sides is harmless. ``lb=0`` escaped on ``0 < 0``.
+    """
+    m = dm.Model("milp_one_sided_lb")
+    x = m.continuous("x", lb=-5.0)
+    z = m.binary("z")
+    m.subject_to(x + 3 * z <= 10, name="cap")
+    m.minimize(x)
+    res = m.solve(time_limit=20)
+    assert _on_highs_route(res)
+    assert res.status == "optimal" and res.gap_certified
+    assert res.objective == pytest.approx(-5.0, abs=1e-6)
+
+
+def test_milp_declared_upper_bound_beside_a_default_side_survives(highs):
+    """Mirror of the lower-bound case: a finite declared ``ub`` beside a default ``lb``."""
+    m = dm.Model("milp_one_sided_ub")
+    x = m.continuous("x", ub=5.0)
+    z = m.binary("z")
+    m.subject_to(x + 3 * z >= -10, name="cap")
+    m.maximize(x)
+    res = m.solve(time_limit=20)
+    assert _on_highs_route(res)
+    assert res.status == "optimal" and res.gap_certified
+    assert res.objective == pytest.approx(5.0, abs=1e-6)
 
 
 def test_lp_coefficient_at_highs_drop_threshold_is_kept(highs):
