@@ -77,14 +77,19 @@ def test_serialize_infeasible_and_no_solution():
 
 
 def test_non_serializable_fields_are_dropped():
+    """``_model`` is a live object graph, not data, so it never travels.
+
+    This used to assert the same of ``infeasibility_certificate``. #1266 carries
+    the certificate instead, and a non-certificate value in that field now RAISES
+    rather than being dropped -- strictly stricter, and covered by
+    ``test_a_non_certificate_in_that_field_is_refused_not_dropped`` below.
+    """
     r = _optimal_result()
     r._model = object()  # not JSON-safe
-    r.infeasibility_certificate = object()
     d = serialize_result(r)
-    import json
 
     json.dumps(d)  # must not raise
-    assert "_model" not in d and "infeasibility_certificate" not in d
+    assert "_model" not in d
 
 
 def test_options_to_payload_flattens_tuning_and_drops_callables():
@@ -274,6 +279,82 @@ def test_a_non_examiner_validation_report_is_refused_not_dropped():
     """A report that silently vanishes is the bug this change fixes."""
     r = _optimal_result()
     r.validation_report = {"passed": True}
+    with pytest.raises(TypeError, match="no faithful encoding"):
+        serialize_result(r)
+
+
+@pytest.mark.smoke
+def test_an_unbounded_objective_no_longer_writes_a_bare_infinity(tmp_path):
+    """The reachable case: `objective=-inf` survives `SolveResult.__post_init__`.
+
+    (`bound` and `gap` do not -- the soundness guard there nulls a non-finite
+    value -- so `objective` and the timing fields are where this actually bites.)
+    Before this, the file held a bare `Infinity`, which is not JSON: every parser
+    outside Python rejects it. `write_json` now dumps with `allow_nan=False`, so
+    a float that slipped past the encoders raises rather than writing one.
+    """
+    r = SolveResult(
+        status="unbounded",
+        objective=float("-inf"),
+        bound=None,
+        gap=None,
+        x={"x": np.array([1.0, float("inf")])},
+        wall_time=float("nan"),
+    )
+    p = tmp_path / "r.json"
+    write_json(r, p)
+
+    raw = p.read_text()
+    assert "Infinity" not in raw and "NaN" not in raw, "a bare non-JSON token reached the file"
+    d = json.loads(raw)
+    assert d["objective"] == "-inf" and d["wall_time"] == "nan"
+    assert d["x"]["x"] == [1.0, "inf"]
+
+    back = deserialize_result(d)
+    assert back.objective == float("-inf")
+    assert back.wall_time != back.wall_time  # NaN
+    assert np.isinf(back.x["x"][1])
+    assert back.x["x"].dtype == float, "a tagged entry left as a string gives an object array"
+
+
+@pytest.mark.smoke
+def test_a_string_scalar_that_reads_like_a_float_tag_is_left_alone():
+    """`status`/`algorithm_route` are text; decoding them as floats would corrupt them."""
+    d = serialize_result(_optimal_result())
+    d["status"] = "inf"
+    d["algorithm_route"] = "nan"
+    back = deserialize_result(d)
+    assert back.status == "inf" and back.algorithm_route == "nan"
+
+
+@pytest.mark.smoke
+def test_infeasibility_certificate_round_trips():
+    """An infeasible result is a claim; the witness for it is worth archiving."""
+    from discopt.solvers import InfeasibilityCertificate
+
+    r = SolveResult(status="infeasible", objective=None, bound=None, gap=None, x=None)
+    r.infeasibility_certificate = InfeasibilityCertificate(
+        total_violation=2.5,
+        ineq_violations=np.array([0.0, 2.5]),
+        eq_violations=np.array([0.0]),
+    )
+
+    d = serialize_result(r)
+    assert d["infeasibility_certificate"]["total_violation"] == pytest.approx(2.5)
+    assert d["infeasibility_certificate"]["ineq_violations"] == [0.0, 2.5]
+
+    back = deserialize_result(json.loads(json.dumps(d, allow_nan=False)))
+    cert = back.infeasibility_certificate
+    assert isinstance(cert, InfeasibilityCertificate)
+    np.testing.assert_allclose(cert.ineq_violations, [0.0, 2.5])
+    np.testing.assert_allclose(cert.eq_violations, [0.0])
+    assert cert.total_violation == pytest.approx(2.5)
+
+
+@pytest.mark.smoke
+def test_a_non_certificate_in_that_field_is_refused_not_dropped():
+    r = SolveResult(status="infeasible", objective=None, bound=None, gap=None, x=None)
+    r.infeasibility_certificate = {"total_violation": 1.0}
     with pytest.raises(TypeError, match="no faithful encoding"):
         serialize_result(r)
 

@@ -39,14 +39,29 @@ The release procedure that produces these entries is documented in
   rather than being dropped. `infeasibility_certificate` is still dropped: it
   is a backend object rather than a report and needs its own encoding.
 
-  The two new nested sections route through `discopt.serialize`'s float
-  tagging, so a NaN or infinity inside them is written as a tagged string
-  instead of the bare `NaN`/`Infinity` tokens Python's `json` emits and other
-  languages reject — the same encoding these already get when embedded in a
-  `.dopt`. The legacy scalar fields (`objective`, `bound`, `gap`) are
-  deliberately left untagged: they have always been written bare and retagging
-  them would break every reader that parses them as numbers, so that
-  pre-existing defect is documented rather than half-fixed.
+  `infeasibility_certificate` is carried too, and the earlier "non-JSON-safe"
+  grouping with `_model` was simply wrong about it: it is a three-field
+  dataclass (a total violation and two float arrays). An infeasible result is a
+  *claim*, and the witness for it is the part worth archiving. One caveat
+  travels with it in the docstring: the violation arrays are indexed in backend
+  LP row order, not the user's constraint order, and the file does not carry
+  that mapping. `_model` remains dropped — it is a live object graph, not data.
+
+  **Every float** written by this module — the scalars, the solution and dual
+  arrays, and the nested blocks — now goes through `discopt.serialize`'s
+  tagging, and `write_json` dumps with `allow_nan=False` so a value that slipped
+  past the encoders raises instead of silently writing a non-standard token.
+  Previously an unbounded `objective` wrote a bare `Infinity`, which is not JSON
+  and which every parser outside Python rejects. This is not a compatibility
+  break in any case that previously worked: such a document was *already*
+  invalid, finite values are written exactly as before, and anything going
+  through `deserialize_result` sees real floats either way. (`bound` and `gap`
+  cannot reach a non-finite value — `SolveResult.__post_init__` nulls one as a
+  soundness guard — so `objective` and the timing fields are where this bites.)
+
+  One behavior is now strictly stricter: a `validation_report` or
+  `infeasibility_certificate` holding a value this writer cannot faithfully
+  encode raises instead of being silently dropped.
 
 - **FAIR provenance on saved models**. A `.dopt` document recorded the schema id
   and `discopt.__version__` and nothing else -- and the version was *written but

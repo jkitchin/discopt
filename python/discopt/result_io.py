@@ -38,24 +38,42 @@ the validation it passed is a worse gap than a missing timestamp, so it is now
 carried: :class:`~discopt.validation.examiner.ExaminerReport` is a dataclass of
 primitives and round-trips exactly.
 
-``infeasibility_certificate`` is still dropped. It is a backend object
-(``InfeasibilityCertificate``, LP-row-ordered) rather than a report, and giving
-it a faithful encoding is its own piece of work -- see #1266.
+Infeasibility certificate
+-------------------------
+``infeasibility_certificate`` is carried too. It is a three-field dataclass (a
+total violation and two float arrays), so encoding it needs nothing clever --
+the earlier "non-JSON-safe" grouping with ``_model`` was simply wrong about it.
+An infeasible result is a *claim*, and the witness for that claim is the part
+worth archiving.
+
+ONE CAVEAT travels with it, and it is the reason to read this before using the
+numbers: the violation arrays are indexed in **backend LP row order**
+(inequalities then equalities, as the matrices were passed to the LP solver),
+which is not the order of the constraints in the user's model, and the result
+file does not carry that mapping. ``ineq_violations[3]`` is therefore "the
+fourth inequality row of the LP that was solved", not "the fourth constraint I
+wrote". Reconstructing the correspondence needs the model the solve ran on.
+
+``_model`` remains dropped: it is a live object graph, not data.
 
 Non-finite floats
 -----------------
-The nested blocks added here (``validation_report``, ``solve_options``) are
-routed through :mod:`discopt.serialize`'s float tagging, so a NaN or infinity
-inside them is written as a tagged string rather than the bare ``NaN`` /
+Every float written here -- the scalars, the solution and dual arrays, and the
+nested blocks -- goes through :mod:`discopt.serialize`'s tagging, so a NaN or
+infinity is written as a tagged string rather than the bare ``NaN`` /
 ``Infinity`` tokens that Python's ``json`` emits and other languages' parsers
-reject. That is the same encoding a result already gets when embedded in a
-``.dopt`` document, so the standalone and embedded forms agree.
+reject outright. That is the same encoding a result already gets when embedded
+in a ``.dopt`` document, so the standalone and embedded forms agree, and
+:func:`write_json` dumps with ``allow_nan=False`` so a float that slipped past
+the encoders raises instead of silently writing a non-standard token.
 
-NOTE the legacy scalar fields (``objective``, ``bound``, ``gap``) are *not*
-tagged: they have always been written bare, and changing that would break every
-reader that parses them as numbers. An unbounded ``objective`` therefore still
-writes a non-standard ``Infinity`` token. That is a pre-existing defect, left
-alone deliberately rather than fixed halfway here.
+This does change what a raw reader sees for a non-finite value -- ``"inf"``
+rather than ``Infinity``. It is not a compatibility break in any case that
+previously worked: a document containing a non-finite value was *already*
+invalid JSON, so the only readers affected are the ones that were relying on
+Python's non-standard extension to parse a broken file. Finite values, which is
+almost every value, are written exactly as before, and anything going through
+:func:`deserialize_result` sees real floats either way.
 """
 
 from __future__ import annotations
@@ -72,7 +90,7 @@ from discopt.modeling.core import SolveResult
 # The float tagging that keeps NaN/infinity out of the document as bare
 # `NaN`/`Infinity` tokens. Imported rather than re-implemented so the standalone
 # result file and the same result embedded in a `.dopt` use one encoding.
-from discopt.serialize import _dec_tree, _enc_tree
+from discopt.serialize import _dec_float, _dec_tree, _enc_float, _enc_tree
 
 #: Bumped to 2 by #1266 (``provenance``, ``solve_options``, ``validation_report``).
 #: The change is additive: a version-1 reader ignores the new keys, and
@@ -106,12 +124,58 @@ _DICT_ARRAY_FIELDS = (
     "bound_duals_upper",
 )
 
+#: Scalar fields whose value is text, not a number. They are excluded from float
+#: tag *decoding*: without this, a status or route that happened to read exactly
+#: ``"inf"`` would be turned into a float on the way back in.
+_STRING_SCALAR_FIELDS = frozenset({"status", "algorithm_route"})
+
 
 def _jsonify_arrays(d: Optional[dict]) -> Optional[dict]:
-    """``{name: ndarray|scalar}`` -> ``{name: list|number}`` (or ``None``)."""
+    """``{name: ndarray|scalar}`` -> ``{name: list|number}`` (or ``None``).
+
+    Routed through ``_enc_tree`` so a non-finite entry becomes a tagged string
+    rather than a bare ``NaN``/``Infinity`` token. A diverged incumbent is
+    exactly the case where a solution array holds one, so this is not a
+    hypothetical path.
+    """
     if d is None:
         return None
-    return {k: np.asarray(v).tolist() for k, v in d.items()}
+    return {k: _enc_tree(np.asarray(v).tolist()) for k, v in d.items()}
+
+
+def _enc_certificate(cert: Any) -> dict:
+    """``InfeasibilityCertificate`` -> JSON-safe dict.
+
+    See the module docstring on row ordering: these arrays are indexed in
+    backend LP row order, not the user's constraint order.
+    """
+    from discopt.solvers import InfeasibilityCertificate
+
+    if not isinstance(cert, InfeasibilityCertificate):
+        raise TypeError(
+            f"infeasibility_certificate is a {type(cert).__name__}, not an "
+            "InfeasibilityCertificate; this writer has no faithful encoding for it. "
+            "Refusing rather than dropping it silently."
+        )
+    return {
+        "total_violation": _enc_float(cert.total_violation),
+        "ineq_violations": _enc_tree(np.asarray(cert.ineq_violations).tolist()),
+        "eq_violations": _enc_tree(np.asarray(cert.eq_violations).tolist()),
+    }
+
+
+def _dec_certificate(d: Any) -> Any:
+    from discopt.solvers import InfeasibilityCertificate
+
+    if not isinstance(d, dict):
+        raise TypeError(
+            f"infeasibility_certificate section must be an object, got {type(d).__name__}."
+        )
+    return InfeasibilityCertificate(
+        total_violation=_dec_float(d["total_violation"]),
+        ineq_violations=np.asarray(_dec_tree(d["ineq_violations"]), dtype=float),
+        eq_violations=np.asarray(_dec_tree(d["eq_violations"]), dtype=float),
+    )
 
 
 def _enc_validation_report(report: Any) -> dict:
@@ -192,7 +256,11 @@ def serialize_result(
     """
     out: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
     for name in _SCALAR_FIELDS:
-        out[name] = getattr(r, name, None)
+        val = getattr(r, name, None)
+        # Tag by runtime type rather than a hand-kept field list: `bool` is not a
+        # `float` in Python, and ints are left alone, so this catches exactly the
+        # float-valued fields and stays right if one is added later.
+        out[name] = _enc_float(val) if isinstance(val, float) else val
     for name in _DICT_ARRAY_FIELDS:
         val = _jsonify_arrays(getattr(r, name, None))
         if val is not None:
@@ -206,6 +274,10 @@ def serialize_result(
     report = getattr(r, "validation_report", None)
     if report is not None:
         out["validation_report"] = _enc_validation_report(report)
+
+    cert = getattr(r, "infeasibility_certificate", None)
+    if cert is not None:
+        out["infeasibility_certificate"] = _enc_certificate(cert)
 
     carried_opts = getattr(r, "_solve_options", None)
     if carried_opts is not None:
@@ -235,14 +307,21 @@ def deserialize_result(d: dict) -> SolveResult:
     kwargs: dict[str, Any] = {}
     for name in _SCALAR_FIELDS:
         if name in d:
-            kwargs[name] = d[name]
+            val = d[name]
+            if isinstance(val, str) and name not in _STRING_SCALAR_FIELDS:
+                val = _dec_float(val)
+            kwargs[name] = val
     for name in _DICT_ARRAY_FIELDS:
         if d.get(name) is not None:
-            kwargs[name] = {k: np.asarray(v) for k, v in d[name].items()}
+            # `_dec_tree` BEFORE `np.asarray`: a tagged "inf" left as a string
+            # would make an object-dtype array rather than a float one.
+            kwargs[name] = {k: np.asarray(_dec_tree(v), dtype=float) for k, v in d[name].items()}
     if d.get("mip_nlp_trace") is not None:
         kwargs["mip_nlp_trace"] = d["mip_nlp_trace"]
     if d.get("validation_report") is not None:
         kwargs["validation_report"] = _dec_validation_report(d["validation_report"])
+    if d.get("infeasibility_certificate") is not None:
+        kwargs["infeasibility_certificate"] = _dec_certificate(d["infeasibility_certificate"])
     r = SolveResult(**kwargs)
     if d.get("explanation"):
         r._explanation = d["explanation"]
@@ -317,8 +396,13 @@ def write_json(r: SolveResult, path: Path, *, options: Optional[dict] = None) ->
     that solved it) is preserved rather than replaced -- see the module
     docstring.
     """
+    # `allow_nan=False` asserts that every float went through `_enc_float`: a
+    # value that slipped past raises here instead of silently writing a bare
+    # `NaN`/`Infinity` token that is not valid JSON. Same guard the model format
+    # uses, for the same reason.
     path.write_text(
-        json.dumps(serialize_result(r, provenance=True, options=options), indent=2) + "\n"
+        json.dumps(serialize_result(r, provenance=True, options=options), indent=2, allow_nan=False)
+        + "\n"
     )
 
 
