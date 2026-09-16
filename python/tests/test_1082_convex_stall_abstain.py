@@ -206,16 +206,50 @@ def test_unbranchable_stall_does_not_certify_an_open_gap(monkeypatch):
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_unseeded_solve_is_unchanged_by_the_flag(monkeypatch):
-    """No node stalls without the seed, so the flag must be inert there."""
-    monkeypatch.setenv(ABSTAIN_ENV, "0")
-    _, off = _solve_tls2()
-    monkeypatch.setenv(ABSTAIN_ENV, "1")
-    _, on = _solve_tls2()
+    """Where no node stalls, the flag must not perturb the search.
 
-    assert off.status == on.status == "optimal"
-    assert off.gap_certified is on.gap_certified is True
-    # Bound-neutral where the flag does not fire: node count exactly unchanged.
+    #1271: this compared two ``time_limit=180`` solves and asserted equal node
+    counts, which failed on ``main`` 3 times in 5 (``309 -> 329``,
+    ``453 -> 129``): wall-clock sub-budgets inside a node decide how much
+    tightening happens, so the count measured the machine. ``max_nodes`` alone
+    does not fix that either (arm 0 gave 115, 105, 117 nodes at
+    ``max_nodes=100``); ``deterministic=True`` removes those budgets (#1116),
+    and 6 interleaved solves at load 5-8 were then bit-identical (101 nodes).
+    That makes exact equality a real bound-neutrality check (CLAUDE.md §5).
+    """
+    import discopt.solver as solver_mod
+    from discopt.solvers import SolveStatus
+
+    real = solver_mod._solve_node_nlp
+    seen = {"convex": 0, "stalled": 0}
+
+    def spy(*args, **kw):
+        r = real(*args, **kw)
+        if kw.get("convex"):
+            seen["convex"] += 1
+            seen["stalled"] += r.status == SolveStatus.ITERATION_LIMIT
+        return r
+
+    monkeypatch.setattr(solver_mod, "_solve_node_nlp", spy)
+    path = NL_DIR / "tls2.nl"
+    results = {}
+    for arm in ("0", "1"):
+        monkeypatch.setenv(ABSTAIN_ENV, arm)
+        results[arm] = solve_model(
+            from_nl(str(path)), time_limit=3600.0, max_nodes=100, deterministic=True
+        )
+    off, on = results["0"], results["1"]
+
+    # The flag had nothing to act on: node solves ran and none stalled.
+    assert seen["convex"] > 0, "no convex node NLP ran -- the probe measured nothing"
+    assert seen["stalled"] == 0, f"{seen['stalled']} node(s) stalled; the flag was not inert"
+
+    assert off.status == on.status
+    assert off.gap_certified is on.gap_certified
     assert off.node_count == on.node_count, (
         f"flag perturbed a solve with no stalled node: {off.node_count} -> {on.node_count}"
     )
-    assert on.bound == pytest.approx(off.bound, abs=1e-9)
+    assert on.objective == off.objective
+    assert on.bound == off.bound
+    # The budget binds, so this compares a truncated search, not a finished one.
+    assert off.node_count >= 100
