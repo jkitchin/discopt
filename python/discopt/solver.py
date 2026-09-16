@@ -1879,11 +1879,23 @@ def _try_native_spatial_kernel(
         gap_certified=math.isfinite(bound_val),
         # #1244: stated explicitly rather than left to the ``gap_certified``
         # derivation, because on this route that flag is set from bound
-        # FINITENESS rather than from gap closure. ``bound_val`` here is either
-        # the kernel's own rigorous frontier minimum (`TreeStatus` never reports
-        # a bound it did not prove) or, when the kernel exited bound-less, the
-        # root-relaxation fallback composed above -- both valid on every exit
-        # status the kernel is accepted on.
+        # FINITENESS rather than from gap closure (the line above). ``bound_val``
+        # here is either the kernel's own rigorous frontier minimum (`TreeStatus`
+        # never reports a bound it did not prove) or, when the kernel exited
+        # bound-less, the root-relaxation fallback composed above -- both valid
+        # on every exit status the kernel is accepted on, so this value is
+        # correct.
+        #
+        # KNOWN LIMITATION (#1262): it is also, today, the SAME EXPRESSION as
+        # ``gap_certified`` on the line above, so ``bound_valid`` carries no
+        # information on this one route -- the two flags cannot disagree, and
+        # the whole point of the field is that they should. The defect is in
+        # ``gap_certified`` (a `node_limit` exit with a 40% open gap reports it
+        # True; measured on nvs13), not here: withdrawing that claim is a
+        # certification change across the corpus and is tracked in #1262 with
+        # the differential panel it needs. Until then, a consumer on this route
+        # learns nothing from ``bound_valid`` it could not get from
+        # ``gap_certified``.
         bound_valid=math.isfinite(bound_val),
         bound_source=_native_bound_source,
         solver_stats=_native_stats,
