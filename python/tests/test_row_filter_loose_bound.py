@@ -52,8 +52,21 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
     Relational rather than a constant: what #671 owns is the difference between
     the two certified bounds on the same LP, and pinning the absolute value made
     the test a hostage of how one operator happens to be lowered (see the module
-    docstring). The gap asserted below is two orders of magnitude; the two
-    lowerings measured so far give 88x and 725x.
+    docstring). The recovery must close at least 99 % of the un-recovered bound's
+    distance to zero; the two lowerings measured so far close 99.9 % (88x) and
+    99.86 % (725x).
+
+    The comparison is a DIVISION, and the first draft of this assertion got that
+    wrong in a way worth recording. Both bounds are large and negative here, so
+    ``100 * without`` moves *away* from zero: written that way the condition reads
+    ``|with| < 100*|without|``, permitting the filter to make the bound 99x LOOSER
+    and still pass. Worse, it cannot fail at all — ``mccormick_lp`` keeps the
+    larger of the two certified bounds (``if _filtered_bound > bound``), so
+    ``with >= without`` holds by construction, and with ``without < 0`` that gives
+    ``100*without < without <= with`` for every possible implementation of the
+    filter (10 000 random draws honouring that contract: 0 failures). Dividing
+    instead is the tightening direction: ``without / 100`` moves TOWARD zero, and
+    rejects the 10x/50x/99x-looser cases the multiplication accepted.
     """
     with_filter = _root_bound()
     assert with_filter.status == "optimal"
@@ -64,9 +77,17 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
     without = _root_bound()
     assert without.lower_bound is not None
     assert without.lower_bound <= _HDA_OPT, "the un-recovered bound must be sound too"
-    assert with_filter.lower_bound > 100.0 * without.lower_bound, (
+    # The "close 99 % of the distance to zero" form below is stated for a NEGATIVE
+    # un-recovered bound, which is the regime this LP is in and the reason the
+    # recovery exists. Fail loudly rather than pass vacuously if that ever changes.
+    assert without.lower_bound < 0.0, (
+        f"un-recovered bound {without.lower_bound!r} is not negative; the "
+        "tightening comparison below no longer says what it means"
+    )
+    assert with_filter.lower_bound > without.lower_bound / 100.0, (
         f"the row-filtered re-solve barely moved the bound: "
-        f"{without.lower_bound!r} -> {with_filter.lower_bound!r}"
+        f"{without.lower_bound!r} -> {with_filter.lower_bound!r} "
+        f"(needs > {without.lower_bound / 100.0!r})"
     )
 
 
