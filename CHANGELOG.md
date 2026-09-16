@@ -322,6 +322,34 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **An indexed array `Parameter` was not recognised as a constant, costing the
+  convexity certificate** (#1272). The classifier knew a `Constant` and a
+  `Parameter`, but not a *static index into one*, so in `mu[k] * x[k]` — the
+  natural spelling when a coefficient vector is carried as one array parameter —
+  the product rule saw two non-constants and returned `UNKNOWN`. Measured on one
+  restricted-equilibrium NLP written two ways: `g` as six scalar parameters
+  classified convex and solved to `optimal` on the single-NLP route with KKT
+  residuals reported; the identical model with `g` as one array parameter
+  classified *not* convex and returned `feasible` from spatial B&B with no
+  certificate.
+
+  A static index into a constant leaf now resolves to its value, through numpy's
+  own indexing so it agrees with what the evaluator computes. Strictly additive:
+  every existing `Constant`/`Parameter` path is kept byte-for-byte and only
+  widened. A symbolic index (anything holding an `Expression`, including inside a
+  slice or tuple), an index numpy will not resolve, and a non-numeric value are
+  all refused rather than guessed — refusing costs a proof, guessing would make
+  one.
+
+  The change cannot reach the in-repo corpus (0 `IndexExpression` nodes across
+  30 027 expression nodes in all 66 instances); the 66-instance differential
+  panel run anyway showed its only three differences reproduced by a same-arm
+  control, i.e. budget-driven nondeterminism. The canonicalizer's separate
+  blindness (an indexed constant becomes an `opaque` node) was measured and left
+  alone: on a nonconvex model and on two convex composites scaled by an indexed
+  constant, both spellings' root bounds agree to 1e-13 with identical node
+  counts.
+
 - **The parameter staleness check was 4.5% of a parameterised solve** (#1245).
   The tape evaluator re-derives its tape whenever a `Parameter.value` moves, and
   the check guarding that ran in front of *every* objective / gradient /
