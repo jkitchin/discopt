@@ -30,6 +30,7 @@ import builtins as _builtins
 import contextlib as _contextlib
 import gc
 import math
+import time as _time
 import warnings
 import warnings as _warnings
 import weakref
@@ -6911,6 +6912,7 @@ class Model:
             _fb_reserve if (_fb_reserve > 0.0 and _lp_spatial_reserve_extension_enabled()) else 0.0
         )
 
+        _t_primary0 = _time.perf_counter()
         try:
             with deadline_scope(_primary_tl):
                 result = solve_model(
@@ -6998,12 +7000,20 @@ class Model:
             result.status == "infeasible" and bool(result.gap_certified)
         )
         if _fb_reserve > 1.0 and result.objective is None and not _primary_decided:
+            # The reserve is a floor, not a cap. A primary that gave up early (NLP-BB
+            # returned on nvs17 in 0.3 s of a 20 s budget) leaves more than the
+            # reserve unspent, and holding the fallback to 35% then surfaced ITS
+            # limit as the solve's ``time_limit`` at 7.4 s. A primary that spent its
+            # budget leaves at most the reserve, so the #917 sizing above is
+            # unchanged for it, and the ``> 1.0`` floor still reads the reserve.
+            _fb_budget = max(_fb_reserve, _remaining_tl - (_time.perf_counter() - _t_primary0))
+            _t_fb0 = _time.perf_counter()
             try:
                 from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
 
                 # Fresh process-global deadline: the primary's scope has expired, and
                 # the JAX-compiled LP loops poll it.
-                with deadline_scope(_fb_reserve):
+                with deadline_scope(_fb_budget):
                     # use_obbt=False: the root OBBT pass is the dominant source of
                     # wall-clock overshoot here (measured on tln6: 77.4 s with it
                     # versus 17.4 s without, against the same budget), and this pass
@@ -7038,7 +7048,7 @@ class Model:
                     # half remains #844 work.
                     _fb = solve_lp_spatial_bb(
                         self,
-                        time_limit=_fb_reserve,
+                        time_limit=_fb_budget,
                         gap_tolerance=gap_tolerance,
                         use_obbt=False,
                         require_incremental=True,
@@ -7157,6 +7167,14 @@ class Model:
                     RuntimeWarning,
                     stacklevel=2,
                 )
+            finally:
+                # The fallback's time is part of this solve. ``wall_time`` was the
+                # primary's alone, so a solve that ran 7.4 s reported 0.3 s.
+                # Python-driven engine, so its time goes to ``python_time`` and the
+                # rust/python partition of ``wall_time`` still holds.
+                _fb_elapsed = _time.perf_counter() - _t_fb0
+                result.wall_time += _fb_elapsed
+                result.python_time += _fb_elapsed
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self

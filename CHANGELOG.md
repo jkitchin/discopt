@@ -422,6 +422,27 @@ The release procedure that produces these entries is documented in
   objective is within 1e-7 of `minlplib.solu`. The gate is unchanged. A solve
   whose point already cleared it never takes the new branch.
 
+- **NLP-BB no longer reports feasible nonconvex models as infeasible**.
+  `solve(nlp_bb=True)` returned `infeasible` on `nvs08`, `nvs16` and `nvs20`.
+  - **Cause:** the serial node loop gives a fractional nonconvex node the bound
+    `-inf` so that it gets branched. Its NaN guard then replaced that `-inf`
+    with the 1e30 exclusion sentinel. Children take their parent's bound as a
+    floor, so the first integer point entered the tree at 1e30 and was dropped.
+  - **Fix:** the guard now catches only NaN and `+inf`, and all three instances
+    return their `minlplib.solu` optimum.
+  - **Also fixed:** a local NLP's `INFEASIBLE` on a nonconvex node no longer
+    counts as a proof. A tree emptied that way now reports `unknown`.
+
+- **The #844 fallback gets the budget the primary left unspent**. On
+  `nvs17`/`nvs23`, `solve(nlp_bb=True, time_limit=20)` reported `time_limit`
+  after 7.4 s with `wall_time` 0.3 s.
+  - **Cause:** the primary returned in 0.3 s with no incumbent. The fallback
+    still got only its 35% reserve, and its own limit became the solve's
+    status.
+  - **Fix:** the fallback now gets whichever is larger, the reserve or the
+    time left. A primary that spent its share leaves the reserve unchanged.
+  - `wall_time` and `python_time` now include the fallback's time.
+
 - **An absolute feasibility tolerance certified an infeasible point as optimal
   on a small-magnitude constraint** (#1254). Every feasibility gate in the
   solver asked only whether the residual was small — 1e-6 in the incumbent

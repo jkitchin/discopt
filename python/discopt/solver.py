@@ -17824,18 +17824,24 @@ def _solve_nlp_bb(
             # but reset to -inf for others so we don't prune incorrectly.
             if not _model_is_convex:
                 for i in range(n_batch):
-                    if result_lbs[i] < _SENTINEL_THRESHOLD:
-                        sol_is_int_feas = True
-                        for off, sz in zip(int_offsets, int_sizes):
-                            for j in range(off, off + sz):
-                                frac = abs(result_sols[i, j] - round(result_sols[i, j]))
-                                if frac > 1e-5:
-                                    sol_is_int_feas = False
-                                    break
-                            if not sol_is_int_feas:
+                    if result_lbs[i] >= _SENTINEL_THRESHOLD:
+                        # A local verdict on a nonconvex node, not a proof (see
+                        # the serial path). A box proved empty by in-tree presolve
+                        # is rigorous and stays out of the taint.
+                        if not node_infeasible_mask[i]:
+                            _unconverged_fathom = True
+                        continue
+                    sol_is_int_feas = True
+                    for off, sz in zip(int_offsets, int_sizes):
+                        for j in range(off, off + sz):
+                            frac = abs(result_sols[i, j] - round(result_sols[i, j]))
+                            if frac > 1e-5:
+                                sol_is_int_feas = False
                                 break
                         if not sol_is_int_feas:
-                            result_lbs[i] = -np.inf
+                            break
+                    if not sol_is_int_feas:
+                        result_lbs[i] = -np.inf
         else:
             # Serial fallback (batch_size=1 or non-IPM solver)
             result_ids = np.empty(n_batch, dtype=np.int64)
@@ -17926,8 +17932,15 @@ def _solve_nlp_bb(
                                 break
                         if not sol_is_int_feas:
                             nlp_lb = -np.inf
-                    # Guard: NaN lower bounds corrupt the Rust B&B tree.
-                    if not np.isfinite(nlp_lb):
+                    # Guard: NaN lower bounds corrupt the Rust B&B tree. ``-inf`` is
+                    # not one of them: it is the nonconvex "no bound, branch me"
+                    # value set just above, which ``import_results`` floors at the
+                    # parent bound. Sentinelling it marked every fractional
+                    # nonconvex node excluded; its children inherited the 1e30
+                    # floor, the first integer point entered the tree at 1e30 and
+                    # was dropped, and nvs08/nvs16/nvs20 came back ``infeasible``.
+                    # The batch path never had this guard and imports ``-inf``.
+                    if np.isnan(nlp_lb) or nlp_lb == np.inf:
                         nlp_lb = _INFEASIBILITY_SENTINEL
                     if _serial_abstain:
                         # Applied AFTER the NaN guard, which would otherwise
@@ -17941,10 +17954,14 @@ def _solve_nlp_bb(
                 else:
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
                     # A clean SolveStatus.INFEASIBLE is a valid infeasibility
-                    # certificate (for a convex node); ERROR/TIME_LIMIT/UNBOUNDED
+                    # certificate only for a convex node; ERROR/TIME_LIMIT/UNBOUNDED
                     # are not — they are solver failures that must not masquerade
-                    # as a proof of global infeasibility.
-                    if nlp_result.status != SolveStatus.INFEASIBLE:
+                    # as a proof of global infeasibility. On a nonconvex node the
+                    # local solver's INFEASIBLE is not a proof either: heuristic
+                    # mode reported nvs08/nvs16/nvs20 (all feasible) infeasible.
+                    if nlp_result.status != SolveStatus.INFEASIBLE or (
+                        not _model_is_convex and not node_infeasible_mask[i]
+                    ):
                         _unconverged_fathom = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
