@@ -280,6 +280,21 @@ pub struct SpatialTreeResult {
     /// leaves the reserve to the caller's root-relaxation fallback). Reported
     /// for the same §6 observability reason as `incumbent_extension_s`.
     pub bound_extension_s: f64,
+    /// #1236: the valid lower bound this search established for the ROOT region —
+    /// the contribution node 1 makes to `bound` before any branching. `-inf` when
+    /// the root never produced one (the search exited on its deadline before the
+    /// root node finished, or the root LP could not be certified).
+    ///
+    /// This is what makes the kernel's dual side diagnosable at all. Everything
+    /// the caller could previously see was the FINAL `bound`, so "the relaxation
+    /// is loose at the root and the tree closes it" and "the root is already tight
+    /// and the tree is spending its nodes on the primal side" were the same
+    /// observation — and the Python `SolveResult` reported `root_bound=None` on
+    /// every kernel-routed solve (CLAUDE.md §6).
+    pub root_bound: f64,
+    /// #1236: seconds elapsed when `root_bound` was established (0.0 when it never
+    /// was). The kernel's analogue of the `root_time` every Python driver reports.
+    pub root_time_s: f64,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -403,6 +418,13 @@ pub fn solve_spatial_tree(
     let mut n_lp_solves = 0usize;
     let mut n_uncertified = 0usize;
     let mut n_undecided = 0usize;
+    // #1236: the root region's proven lower bound, and when it was proven. Set at
+    // whichever of the four arms node 1 leaves by (propagation-fathom, certified-
+    // empty, undecided-LP, bounded), and read only when the result is built -- the
+    // search never branches on either, which is what keeps this bound-neutral.
+    let mut root_bound = f64::NEG_INFINITY;
+    let mut root_time_s = 0.0f64;
+    let t_tree_start = Instant::now();
 
     // Global lower bound = min, over every region that leaves the tree WITHOUT being
     // subdivided (pruned / infeasible / feasible-leaf / width-exhausted), of a valid
@@ -477,6 +499,8 @@ pub fn solve_spatial_tree(
                 n_undecided,
                 incumbent_extension_s: extension_s,
                 bound_extension_s,
+                root_bound,
+                root_time_s,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -504,6 +528,8 @@ pub fn solve_spatial_tree(
                 n_undecided,
                 incumbent_extension_s: extension_s,
                 bound_extension_s,
+                root_bound,
+                root_time_s,
             };
         }
         node_count += 1;
@@ -527,6 +553,10 @@ pub fn solve_spatial_tree(
         {
             let contrib = incumbent.unwrap_or(f64::INFINITY).max(parent_bound);
             global_lb_closed = global_lb_closed.min(contrib);
+            if node_count == 1 {
+                root_bound = contrib;
+                root_time_s = t_tree_start.elapsed().as_secs_f64();
+            }
             continue;
         }
 
@@ -545,6 +575,10 @@ pub fn solve_spatial_tree(
         if verdict != NodeVerdict::Bound {
             // Certified-infeasible node: empty region, contributes +inf (nothing).
             if verdict == NodeVerdict::EmptyRegion {
+                if node_count == 1 {
+                    root_bound = f64::INFINITY;
+                    root_time_s = t_tree_start.elapsed().as_secs_f64();
+                }
                 continue;
             }
             // #927: every OTHER non-Optimal status (`Numerical`, `IterLimit`,
@@ -566,6 +600,10 @@ pub fn solve_spatial_tree(
             // no branchable column is left, the region closes with that same honest
             // bound rather than with `+inf`.
             n_undecided += 1;
+            if node_count == 1 {
+                root_bound = parent_bound;
+                root_time_s = t_tree_start.elapsed().as_secs_f64();
+            }
             let split = widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width);
             match split {
                 Some(j) => {
@@ -593,6 +631,15 @@ pub fn solve_spatial_tree(
         // global lower bound. Sound: `max(safe, parent)` is still `<=` the true region
         // optimum since both terms are.
         let bound = node.bound.max(parent_bound);
+        // #1236: node 1 IS the root region, and `bound` is the rigorous lower bound
+        // just proven for it — the same value that reaches `global_lb_closed` or the
+        // children's `pb`. Recorded here (and at the three other arms node 1 can
+        // leave by) so the caller can tell a loose root relaxation from a tight one,
+        // which the final `bound` alone cannot say.
+        if node_count == 1 {
+            root_bound = bound;
+            root_time_s = t_tree_start.elapsed().as_secs_f64();
+        }
         // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
             if gap_closed(bound, inc, config) {
@@ -743,6 +790,8 @@ pub fn solve_spatial_tree(
                 n_undecided,
                 incumbent_extension_s: extension_s,
                 bound_extension_s,
+                root_bound,
+                root_time_s,
             }
         }
         None => SpatialTreeResult {
@@ -756,6 +805,8 @@ pub fn solve_spatial_tree(
             n_undecided,
             incumbent_extension_s: extension_s,
             bound_extension_s,
+            root_bound,
+            root_time_s,
         },
     }
 }
@@ -912,6 +963,131 @@ mod tests {
         let x = &res.incumbent_x;
         assert!((x[0] * x[1] - x[2]).abs() < 1e-4, "w != x*y at incumbent");
         assert!(x[0] + x[1] >= 3.0 - 1e-4, "x+y>=3 violated");
+    }
+
+    /// #1236: the root region's bound is recorded, is a VALID lower bound on the
+    /// true optimum, and is no tighter than the final tree bound.
+    ///
+    /// The kernel used to report only its final `bound`, which left every
+    /// kernel-routed Python `SolveResult` with `root_bound=None` — so "the
+    /// relaxation is loose at the root and the tree closed it" was
+    /// indistinguishable from "the root was already tight". On this spec the
+    /// McCormick root strictly underestimates (that is what
+    /// `branches_to_certify_bilinear_min` pins), so the root bound must be BELOW
+    /// the optimum 2.0 while the final bound reaches it — a single assertion that
+    /// the recorded value is the root's and not a copy of the final bound.
+    #[test]
+    fn records_the_root_region_bound() {
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(res.status, TreeStatus::Optimal, "did not converge: {res:?}");
+        assert!(
+            res.root_bound.is_finite(),
+            "root bound was never recorded: {}",
+            res.root_bound
+        );
+        // Soundness: a root bound is a lower bound on the true optimum (2.0).
+        assert!(
+            res.root_bound <= 2.0 + 1e-6,
+            "root bound {} above the optimum 2.0",
+            res.root_bound
+        );
+        // Monotonicity: branching only ever tightens the global bound.
+        assert!(
+            res.root_bound <= res.bound + 1e-9,
+            "root bound {} tighter than the final bound {}",
+            res.root_bound,
+            res.bound
+        );
+        assert!(res.root_time_s >= 0.0);
+
+        // It is the ROOT's value, not a copy of the final bound. Spec-independent
+        // identity: a search stopped after node 1 reports exactly the bound the
+        // root region proved, so the full search's `root_bound` must equal the
+        // one-node search's `bound`. (On THIS spec McCormick happens to be tight
+        // at the root, so a "strictly looser than the final bound" assertion would
+        // pass only by accident of the instance -- the identity holds either way.)
+        let cfg1 = SpatialTreeConfig {
+            max_nodes: 1,
+            ..cfg
+        };
+        let res1 = solve_spatial_tree(&spec, &cfg1, &SimplexOptions::default());
+        assert_eq!(
+            res1.node_count, 1,
+            "one-node run processed {}",
+            res1.node_count
+        );
+        assert!(
+            (res1.bound - res.root_bound).abs() <= 1e-9,
+            "root bound {} != the one-node search's bound {}",
+            res.root_bound,
+            res1.bound
+        );
+        assert!(
+            (res1.root_bound - res.root_bound).abs() <= 1e-9,
+            "the two runs disagree on the root bound: {} vs {}",
+            res1.root_bound,
+            res.root_bound
+        );
+    }
+
+    /// #1236 companion: a spec whose McCormick root is genuinely LOOSE, so the
+    /// recorded root bound is visibly weaker than the bound the tree ends with.
+    /// Minimize `-x*y` on `x + y = 2`, `x,y in [0,2]`: the optimum is -1 at
+    /// (1,1), while the root McCormick overestimator allows `w <= 2` and so bounds
+    /// the objective only by -2. Without a root bound on the result there is no
+    /// way to see that from Python -- which is the whole point of the field.
+    #[test]
+    fn root_bound_shows_a_loose_root_relaxation() {
+        let spec = SpatialKernelSpec {
+            n_cols: 3,
+            n_orig: 2,
+            c: vec![0.0, 0.0, -1.0], // minimize -w
+            integrality: vec![false, false, false],
+            global_lo: vec![0.0, 0.0, -1e20],
+            global_hi: vec![2.0, 2.0, 1e20],
+            // x + y == 2, as the two inequalities the fixed-row form takes.
+            fixed_rows: vec![
+                FixedRow {
+                    cols: vec![0, 1],
+                    coeffs: vec![1.0, 1.0],
+                    rhs: 2.0,
+                },
+                FixedRow {
+                    cols: vec![0, 1],
+                    coeffs: vec![-1.0, -1.0],
+                    rhs: -2.0,
+                },
+            ],
+            terms: vec![EnvTerm::Bilinear { i: 0, j: 1, w: 2 }],
+            blf_terms: vec![],
+            obbt_candidates: vec![0, 1],
+        };
+        let cfg = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert!(res.root_bound.is_finite(), "root bound never recorded");
+        // Sound: below the true optimum -1.
+        assert!(
+            res.root_bound <= -1.0 + 1e-6,
+            "root bound {} above the optimum -1.0",
+            res.root_bound
+        );
+        // Loose: the root envelope gives about -2, and the tree tightens it.
+        assert!(
+            res.root_bound < res.bound - 1e-3,
+            "root bound {} not looser than the final bound {}",
+            res.root_bound,
+            res.bound
+        );
     }
 
     /// Regression (premature-fathom fix): a feasible leaf whose region bound does

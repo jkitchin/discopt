@@ -8974,3 +8974,201 @@ those last two rows are `DISCOPT_LOGSUMEXP_ATOM`, **default OFF**, taking a 107%
 root gap to 0.00%. The in-tree note already records it as HELPS (103 → 3 nodes).
 Graduating it is a §5 bound-changing decision needing its own differential panel;
 it is not #1276's to make, but it is the largest single number this round turned up.
+## 68. #1236 integer-heavy node-count tail: three different causes, and three falsified fixes (2026-09-16)
+
+Issue #1236 recorded a five-instance tail (nvs02/nvs14/nvs13/tls2/fac2, 24–297×
+SCIP's nodes) and three leads with kill criteria. It framed the leads as
+*possibly* sharing a cause. They do not: the five instances have **three
+different** causes, and the fix that each one implies is different.
+
+Reproduction is the issue's own script against `python/tests/data/minlplib_nl/`
+(all five are in-repo, so no external corpus is needed). Node counts reproduce
+the issue exactly on `main` — nvs02 297, nvs14 273, nvs13 637, fac2 39 —
+**except tls2**, see §68.4.
+
+### 66.1 Lead 1 (nvs02 / nvs14) — the cause is the LIFT, not cuts, bound strength, or termination
+
+The issue's kill criterion was "if the bound improves monotonically across most of
+the 297 nodes, the termination hypothesis is dead and bound strength is back in
+play." Measured directly against the Rust MILP driver (`solve_milp_csc_py` on the
+matrix `solver.py` hands it — **not** through `Model.solve(max_nodes=k)`, which
+measures the *fallback*, because `_solve_milp_simplex` returns `None` on a
+`node_limit` exit):
+
+| max_nodes | nvs02 bound | nvs02 incumbent | nvs14 bound | nvs14 incumbent |
+|---:|---:|---|---:|---|
+| 2 | 5.9404 | **none** | −40595.8 | **none** |
+| 16 | 5.9469 | **none** | −40530.6 | **none** |
+| 64 | 5.9551 | **none** | −40449.2 | **none** |
+| 128 | 5.9551 | 6.0579 | −40449.2 | **none** |
+| 256 | 5.9559 | 6.0579 | −40440.9 | −39420.5 |
+| full | 5.96418 | 5.96418 | −40358.2 | −40358.2 |
+
+Termination hypothesis: **dead** (the bound climbs monotonically throughout).
+Bound strength: **also not the lever** (the root is within 0.4 %/0.6 %). The
+driver runs **119 of 297** and **219 of 273** nodes holding *no incumbent at
+all* — with nothing to fathom against, every node is bound-free work. Seeding
+the driver with the optimum it eventually finds: **297 → 37** and **273 → 29**
+nodes (12.5 % and 10.6 % of the cold tree). The tail is **primal**.
+
+Then the decisive A/B — lift ON (current default) vs OFF, over the population
+`solver.py` actually *adopts* the integer-bilinear reformulation on, across BOTH
+in-repo corpora (`minlplib_nl` 66 + `minlplib` 84 = 122 scanned, **12 adopted**),
+30 s limit:
+
+| instance | ON nodes / status | OFF nodes / status | winner |
+|---|---|---|---|
+| nvs02 | 297 optimal | **3 optimal** | OFF |
+| nvs14 | 273 optimal | **3 optimal** | OFF |
+| ex1263 | 4997 optimal | **2317 optimal** | OFF |
+| ex1266 | 1409 optimal | **268 optimal** | OFF |
+| prob02 | 37 optimal | **5 optimal** | OFF |
+| prob03 | 7 optimal | **5 optimal** | OFF |
+| ex1264 | **3425 optimal** | 3028 time_limit (9.99 vs 8.6) | ON |
+| ex1265 | **1883 optimal** | 1162 time_limit (19.5 vs 10.3) | ON |
+| nvs10/11/12/15 | 0 optimal | 0 optimal | tie |
+
+Same certified objective wherever both certify. So the nvs02/nvs14 tail is the
+**cost of the binary-expansion lift**: an 8-variable, 3-row MINLP becomes a
+672-column MILP with 29 integers whose feasible set is thin, and finding a first
+feasible point in it is what the 297 nodes buy. SCIP's 1 node is a solve of the
+8-variable model.
+
+**The lift must not simply be turned off.** On `ex1264`/`ex1265` it is the only
+arm that certifies at all; declining it there trades two certificates for six
+smaller trees, which §1 forbids outright. The lever is the **adoption gate** —
+today's test asks only whether the lift is *possible* (does it eliminate every
+nonlinear term), never whether it *helps*.
+
+### 66.2 Three falsified Lead-1 fixes (do not retry these)
+
+1. **The #1060 no-incumbent dive schedule (`DISCOPT_MILP_DIVE_STRIDE`) is a
+   measured no-op on this class.** stride 0/1/4 give byte-identical node counts
+   (nvs02 297, nvs14 273). The new funnel counters say why: the dive fires
+   5–6 times off-root and **every run ends `DiveAbandonedInfeasible`**, after
+   ~8–10 of 29 integers. `DiveOffRootHits` = 0.
+2. **Bound-diving instead of hard-fixing also abandons.** The dive fixes the
+   picked integer to a single value (`l[j] = u[j] = v`); the textbook fractional
+   dive (Berthold 2006, SCIP `fracdiving`) tightens one side only (`u[j] =
+   floor`, or `l[j] = ceil`), which is strictly weaker. Replayed in Python on the
+   same lifted matrix: the bound dive gets further (31 vs 5 steps on nvs02) and
+   **still abandons** on both instances. Stated kill criterion met — not
+   implemented.
+3. **Node selection is not the lever.** The driver uses
+   `SelectionStrategy::BestFirst` for the whole search (`milp_driver.rs:1331`),
+   which is the classic "finds feasible solutions late" configuration. Measured:
+   DepthFirst 297→285 / 273→277 (mixed), BestEstimate 297→253 / 273→253 (~15 %).
+   Real but an order of magnitude short of the 8–9× a good incumbent buys.
+
+Also falsified: rounding the lifted LP relaxation's original-variable block and
+repairing it over a ±1 box on the 5 original integers (3⁵ = 243 candidates) finds
+**no feasible point** on either instance — the feasible set really is thin near
+the relaxation.
+
+### 66.3 RETRACTED — "the tighter root bound predicts the winner"
+
+Read off the A/B's `root_gap` column, the arm that won looked like *exactly* the
+arm whose root bound was tighter, on all eight decided instances. A gate on that
+(`DISCOPT_IPX_ROOT_BOUND_GATE`, adopt the lift iff its root relaxation bound is
+tighter) was implemented and then **measured against its own population before
+shipping: 2 agree, 6 disagree**, and it *declines* on `ex1264`/`ex1265` — the two
+where the lift is the only arm that certifies. The gate was removed, not
+default-offed (§3: no dead flags).
+
+The retraction, per §11: the `root_gap` values compared came from **two different
+bound machineries** (the MILP driver's own relaxation LP on the ON arm, the
+spatial kernel's node-1 bound on the OFF arm), so they were never like-for-like.
+Measured like-for-like via `_root_relaxation_lower_bound` on both formulations
+over the declared box (both are lower bounds on the same internally-minimized
+objective, so larger is tighter regardless of sense):
+
+| instance | optimum | root(original) | root(lift) | lift tighter? | A/B winner |
+|---|---:|---:|---:|---|---|
+| nvs02 | 5.9642 | 5.9208 | **5.96418** | yes | OFF |
+| nvs14 | −40358.2 | −40792.1 | **−40358.2** | yes | OFF |
+| ex1263 | 19.6 | 19.1 | **19.6** | yes | OFF |
+| ex1266 | 16.3 | **16.3** | 16.117 | no | OFF |
+| prob02 | 112235 | 8000 | **112235** | yes | OFF |
+| prob03 | 10.0 | 10.0 | 10.0 | tie | OFF |
+| ex1264 | 8.6 | **8.1** | 8.053 | no | ON |
+| ex1265 | 10.3 | **10.1** | 10.067 | no | ON |
+
+Root-bound tightness is **anti-correlated** with the outcome here. nvs02 is the
+clearest statement of the whole finding: the lift's root bound *equals the
+optimum to 12 digits*, and its tree still takes 297 nodes — a perfect dual bound
+buys nothing while the search cannot find a feasible point.
+
+Consequence: a useful adoption gate has to predict **primal** difficulty of the
+lifted feasible set, not dual tightness. Bit width is not a separator either —
+`ex1263`/`ex1266` (lift-harmful) and `ex1264`/`ex1265` (lift-essential) are the
+same trim-loss family with the same expansion widths. No gate is proposed here on
+the strength of a hypothesis (§4).
+
+### 66.4 Lead 2 (nvs13) — answered, once the path could be measured at all
+
+The issue was right that this path was unmeasurable: `_try_native_spatial_kernel`
+built a `SolveResult` with `root_bound=None`, `root_gap=None` and an **empty**
+`solver_stats`, although the Rust kernel computes and returns `n_lp_solves`,
+`n_uncertified` and `n_undecided` on every exit and can record its root region's
+bound for free. Surfacing them (this PR) answers the lead immediately:
+
+```
+nvs13  nodes=637  root_bound=-1234.41  root_gap=1.109  bound=-585.20  obj=-585.20
+       tree/lp_solves=593  tree/uncertified_nodes=0  tree/undecided_nodes=0
+```
+
+A **111 % root gap** with **zero** uncertified and **zero** undecided nodes: the
+637 nodes are the honest price of closing a McCormick relaxation that is more
+than twice as loose as the optimum, not a bound plateau caused by node LPs that
+could not be certified. This is a *bound-strength* instance — the opposite
+diagnosis from nvs02/nvs14 in the same issue, and not something any amount of
+primal work would fix.
+
+### 66.5 Lead 3 (tls2 / fac2) — split by its own kill criterion
+
+Kill criterion: "<10 % of wall → noise". Three interleaved repetitions each,
+load 0.16 before / 1.37 after:
+
+| instance | abandoned-route share | sd | firings/solve | verdict |
+|---|---:|---:|---|---|
+| tls2 | 3.3 % | 0.5 | 3, 2, 1 | **NOISE** — killed |
+| fac2 | 31.2 % | 0.6 | 1, 1, 1 | **MATERIAL** |
+
+tls2's lead is dead: the nodes are the story. fac2 spends a reproducible third of
+its wall in a convex-MINLP auto-route that certifies nothing and hands back.
+
+Two corrections to the issue's own text while reproducing:
+
+* **tls2 is not deterministic on this path.** The issue says "node counts are
+  deterministic and match the earlier panel exactly". Measured over six solves:
+  197, 227, 357, 359 nodes, and status `feasible` (not `optimal`) at 60 s. Any
+  tls2 A/B has to treat its node count as a distribution.
+* **The #1059 "should be impossible" warning does not reproduce** on the current
+  tree. What fires on fac2 is the *upstream* guard, every run:
+  `OA: certified lower bound 331845337.44 is above the incumbent 331845161.42 by
+  more than rounding`. That is the same bound inversion
+  `_merge_route_and_fallback`'s docstring already attributes to `oa.py`
+  (`_certified_bound_inverted`); the fix is in place and working — OA now
+  withdraws its own certification, so `_gap_is_closed(route)` is False and the
+  merge-level warning can no longer fire. The final fac2 answer is `optimal`
+  331837498.18 with a bound below it, correct and certified. **The OA bound
+  inversion itself is still live** (OA computes a "certified" lower bound ~7839
+  above the true optimum) and is a §1 item for its own issue, not a perf one.
+
+### 66.6 What shipped
+
+Instrumentation only, both pure §6 observability with nothing feeding back into
+any search:
+
+* the native spatial kernel's `root_bound` / `root_gap` / `root_time` and its
+  `tree/nodes`, `tree/lp_solves`, `tree/uncertified_nodes`,
+  `tree/undecided_nodes` counters (§68.4 is what it bought);
+* the MILP driver's dive outcome funnel — `DiveRuns`, `DiveSteps`,
+  `DiveHitIntegral`, `DiveAbandonedInfeasible`, `DiveExhaustedSteps` — which is
+  what turned "the dive fired and repaired nothing" into "every run dies on an
+  infeasible LP after ~8 of 29 fixes" (§68.2), two findings that call for
+  opposite fixes.
+
+No performance change is claimed, and none shipped: every candidate fix was
+falsified by measurement before implementation, or (§68.3) after implementation
+and before shipping.

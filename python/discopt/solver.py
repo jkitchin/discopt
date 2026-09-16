@@ -1892,6 +1892,44 @@ def _try_native_spatial_kernel(
     if _bext_s > 0.0:
         _native_stats = dict(_native_stats or {})
         _native_stats["budget/bound_extension_s"] = _bext_s
+    # #1236: the kernel's per-node work counters. Until this, a kernel-routed
+    # ``SolveResult`` carried an EMPTY ``solver_stats`` and ``root_bound=None`` /
+    # ``root_gap=None`` -- measured on nvs13 (637 nodes, 24x SCIP), where that left
+    # the whole path undiagnosable from Python: nothing distinguished "the
+    # relaxation is loose" from "the relaxation is tight and the nodes went
+    # elsewhere", and nothing said whether the node LPs were even deciding
+    # anything. The kernel returns all four either way, so this is pure
+    # instrumentation -- nothing here feeds back into the search (CLAUDE.md §6).
+    #
+    # ``tree/uncertified_nodes`` and ``tree/undecided_nodes`` are the two that
+    # matter for a bound plateau: the first counts nodes whose LP solved but whose
+    # Neumaier-Shcherbina safe bound could not be certified (they carry only the
+    # inherited parent bound, so a subtree of them freezes the frontier), the
+    # second nodes whose LP decided nothing at all and were branched rather than
+    # fathomed. A nonzero count in either is the signature of a bound that stalls
+    # for numerical reasons rather than relaxation looseness.
+    _native_stats = dict(_native_stats or {})
+    _native_stats["tree/nodes"] = float(int(res["node_count"]))
+    _native_stats["tree/lp_solves"] = float(int(res.get("n_lp_solves") or 0))
+    _native_stats["tree/uncertified_nodes"] = float(int(res.get("n_uncertified") or 0))
+    _native_stats["tree/undecided_nodes"] = float(int(res.get("n_undecided") or 0))
+
+    # #1236: root-node certification metrics, mapped out of the kernel's internal
+    # minimize convention with the same ``sign * (value + offset)`` the incumbent
+    # and the final bound use. ``-inf`` is the kernel's "no root bound proven"
+    # sentinel (it exited before node 1 finished), which maps to ``None`` rather
+    # than to a number no search established. ``root_gap`` uses the same
+    # ``|obj - bound| / max(1, |obj|)`` form as every other driver in this file so
+    # the panels compare like with like.
+    _root_internal = res.get("root_bound")
+    root_bound_val: Optional[float] = None
+    root_gap_val: Optional[float] = None
+    root_time_val: Optional[float] = None
+    if _root_internal is not None and math.isfinite(float(_root_internal)):
+        root_bound_val = sign * (float(_root_internal) + off)
+        root_time_val = float(res.get("root_time_s") or 0.0)
+        if obj_val is not None and math.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
     return SolveResult(
         status=native_status,
         objective=obj_val,
@@ -1920,6 +1958,9 @@ def _try_native_spatial_kernel(
         # #1244 intends (#1262).
         bound_valid=math.isfinite(bound_val),
         bound_source=_native_bound_source,
+        root_bound=root_bound_val,
+        root_gap=root_gap_val,
+        root_time=root_time_val,
         solver_stats=_native_stats,
     )
 

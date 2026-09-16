@@ -4621,6 +4621,7 @@ fn try_dive_repair(
     // Python feasibility gate re-checks the point.
     let mut cur_basis = start_basis.clone();
     let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
+    crate::profile::incr(crate::profile::Ctr::DiveRuns);
     for _ in 0..max_steps {
         // Most-fractional unfixed integer column.
         let mut pick: Option<usize> = None;
@@ -4645,6 +4646,7 @@ fn try_dive_repair(
                     }
                 }
                 let obj = (0..ns).map(|k| ctx.c_w[k] * xc[k]).sum::<f64>() + ctx.obj_const;
+                crate::profile::incr(crate::profile::Ctr::DiveHitIntegral);
                 return Some((xc, obj));
             }
             Some(j) => j,
@@ -4712,8 +4714,16 @@ fn try_dive_repair(
             }
         }
         // `None` means both roundings were infeasible -> abandon the dive.
-        x = next_x?;
+        x = match next_x {
+            Some(v) => v,
+            None => {
+                crate::profile::incr(crate::profile::Ctr::DiveAbandonedInfeasible);
+                return None;
+            }
+        };
+        crate::profile::incr(crate::profile::Ctr::DiveSteps);
     }
+    crate::profile::incr(crate::profile::Ctr::DiveExhaustedSteps);
     None
 }
 

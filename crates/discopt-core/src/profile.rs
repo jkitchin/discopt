@@ -192,6 +192,22 @@ counters!(
     // schedule that never fired (CLAUDE.md §6).
     DiveOffRoot,
     DiveOffRootHits,
+    // #1236 dive outcome funnel. `DiveRuns` counts every `try_dive_repair` call
+    // (root and scheduled alike), `DiveSteps` the integer fixes those calls made,
+    // and the three terminal counters say how each run ENDED:
+    // `DiveHitIntegral` (every integer integral -> an incumbent candidate),
+    // `DiveAbandonedInfeasible` (both roundings of the picked integer made the LP
+    // infeasible) and `DiveExhaustedSteps` (the step budget ran out with integers
+    // still fractional). `DiveRuns == hit + abandoned + exhausted` is the audit
+    // identity. Without these, "the dive fired and repaired nothing" (measured on
+    // nvs02/nvs14: 5-6 off-root firings, 0 hits) is indistinguishable from "the
+    // dive never reached the interesting decision", and a fix aimed at the wrong
+    // arm would read as a plausible tuning change (CLAUDE.md §6).
+    DiveRuns,
+    DiveSteps,
+    DiveHitIntegral,
+    DiveAbandonedInfeasible,
+    DiveExhaustedSteps,
     // A solve whose objective lattice was found ONLY by resolving a costed
     // continuous column through its defining equality row -- the base detector
     // refused and the substitution did not. This is the exact population the A13

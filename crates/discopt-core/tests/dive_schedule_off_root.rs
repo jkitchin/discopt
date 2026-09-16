@@ -134,5 +134,34 @@ fn stride_on_fires_the_dive_away_from_the_root_and_stays_capped() {
     );
     checks += 1;
 
-    assert_eq!(checks, 5, "CHECKS_EXECUTED");
+    // 6. #1236: the outcome funnel closes, and attributes every run to an arm.
+    //    `DiveOffRoot`/`DiveOffRootHits` say how often the schedule fired and how
+    //    often it succeeded, but not WHY a run returned nothing -- and "the dive
+    //    fired 6 times and repaired nothing" calls for a different fix depending on
+    //    whether it ran out of steps or hit an infeasible LP. On this
+    //    parity-infeasible model every run must end abandoned.
+    let runs = counter(Ctr::DiveRuns);
+    let hit = counter(Ctr::DiveHitIntegral);
+    let abandoned = counter(Ctr::DiveAbandonedInfeasible);
+    let exhausted = counter(Ctr::DiveExhaustedSteps);
+    assert!(runs > 0, "DiveRuns is 0 although DiveOffRoot is {dives}");
+    assert_eq!(
+        runs,
+        hit + abandoned + exhausted,
+        "dive funnel does not close: {runs} runs vs hit {hit} + abandoned \
+         {abandoned} + exhausted {exhausted} -- an exit arm has no counter"
+    );
+    checks += 1;
+    assert_eq!(
+        hit, 0,
+        "an integral finish on a model with no integer point"
+    );
+    assert!(
+        abandoned > 0,
+        "no run ended on an infeasible LP, yet none succeeded either -- the arm \
+         attribution is wrong"
+    );
+    checks += 1;
+
+    assert_eq!(checks, 7, "CHECKS_EXECUTED");
 }
