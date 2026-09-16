@@ -280,7 +280,15 @@ The release procedure that produces these entries is documented in
   recovers it to -1.38e9, a 725x tightening where it used to manage 88x). Sound
   throughout, and a raw-box artefact: every real solve runs FBBT/OBBT first, and
   hda end to end is unchanged at a 10 s limit and *better* at 60 s (-64510.17,
-  twice, against -122962 / -141697 on the parent). The 66-instance in-repo
+  twice, against -122962 / -141697 on the parent). The same lowering moves
+  `contvar` the other way — its root LP goes from *uncertified* (no bound at all)
+  to a certified 174362.80. Those two are the only rows of
+  `docs/dev/data/claim-baseline.jsonl` this change moves, established by
+  regenerating the baseline from the parent commit on the same host and diffing
+  three ways: 12 further rows differ between the committed file and the parent
+  commit *here*, i.e. they are the cross-build float noise that file's gate
+  already documents, and they are left as committed rather than rebaselined onto
+  one host's arithmetic. The 66-instance in-repo
   differential panel is cert-clean: 0 status changes, 0 certification changes, 0
   objective drift, 0 new exceptions; the three bound differences are time-limit
   variance reproduced within a single arm (nvs05 and tls2 each produce both
