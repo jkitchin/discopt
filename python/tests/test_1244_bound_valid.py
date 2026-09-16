@@ -209,7 +209,7 @@ def test_the_844_fallback_merge_does_not_read_fields_its_result_lacks():
 
 @pytest.mark.unit
 def test_set_bound_keeps_the_triple_consistent():
-    """The helper both mutation sites now go through."""
+    """The helper every post-construction bound mutation now goes through."""
     res = SolveResult(status="time_limit", objective=1.0, bound=None, gap_certified=False)
 
     res._set_bound(0.5, valid=True, source="bnb_tree")
@@ -230,6 +230,184 @@ def test_set_bound_keeps_the_triple_consistent():
     # An invalid bound carries no provenance.
     res._set_bound(0.5, valid=False, source="bnb_tree")
     assert res.bound == 0.5 and res.bound_valid is False and res.bound_source is None
+
+
+@pytest.mark.unit
+def test_no_bound_mutation_bypasses_the_helper():
+    """The guard that makes the helper's existence worth anything.
+
+    Adding a field that every mutation site must maintain, and teaching only
+    SOME of those sites about it, converts a latent inconsistency into a
+    shipped one. Four sites in these three modules assigned ``.bound``
+    directly; review found two of them after the first two were fixed, which is
+    exactly as many as a reviewer happened to look for.
+
+    So the invariant is asserted structurally rather than trusted: in the three
+    modules that own ``SolveResult``, the only functions allowed to assign
+    ``.bound`` are ``__post_init__`` (which derives the triple on construction)
+    and ``_set_bound`` (which maintains it afterwards). A fifth site fails this
+    test the moment it is written, not the moment it is noticed.
+    """
+    import ast
+
+    import discopt.modeling.core as _core
+    import discopt.result_io as _rio
+    import discopt.solver as _solver
+
+    allowed = {"__post_init__", "_set_bound"}
+    offenders: list[str] = []
+    assignments = 0
+
+    for mod in (_core, _solver, _rio):
+        path = Path(mod.__file__)
+        tree = ast.parse(path.read_text())
+
+        # Walk with the enclosing function carried down, so an assignment is
+        # attributed to the function it is written in rather than to the file.
+        def visit(node, fn):
+            nonlocal assignments
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fn = node.name
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            for t in targets:
+                if isinstance(t, ast.Attribute) and t.attr == "bound":
+                    assignments += 1
+                    if fn not in allowed:
+                        offenders.append(
+                            f"{path.name}:{t.lineno} in {fn}(): {ast.unparse(t)} = ..."
+                        )
+            for child in ast.iter_child_nodes(node):
+                visit(child, fn)
+
+        visit(tree, "<module>")
+
+    # CLAUDE.md §6: a probe that traversed nothing reports "0 violations" and
+    # reads as a pass. These three modules DO assign ``.bound``; if the walk
+    # found none, the walk is broken (a renamed module, a changed AST shape).
+    assert assignments >= 3, (
+        f"the AST walk found only {assignments} '.bound' assignments across "
+        "core.py/solver.py/result_io.py; the probe is not traversing"
+    )
+    assert not offenders, (
+        "these assign SolveResult.bound without maintaining bound_valid/"
+        "bound_source; route them through _set_bound:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.unit
+def test_the_merge_carries_the_losers_claim_with_the_losers_bound():
+    """#1244, the third mutation site: ``_merge_route_and_fallback``.
+
+    The merge keeps the tighter dual bound from EITHER side, so the winner can
+    end up publishing a number the loser proved. The claim about that number
+    has to travel with it: leaving the winner's own ``bound_source`` in place
+    attributes the loser's proof to the winner's machinery, and leaving the
+    winner's ``bound_valid`` in place can assert validity for a bound nothing
+    has validated.
+    """
+    from discopt.solver import _merge_route_and_fallback
+
+    # Minimize. The route has the better incumbent and wins; the fallback has
+    # the tighter (larger) lower bound, which is what gets installed.
+    route = SolveResult(status="feasible", objective=10.0, gap_certified=False)
+    route._set_bound(1.0, valid=True, source="lp_dual")
+    fallback = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback._set_bound(5.0, valid=True, source="bnb_tree")
+
+    merged = _merge_route_and_fallback(route, fallback, is_maximize=False)
+    assert merged.bound == 5.0
+    assert merged.bound_source == "bnb_tree", (
+        "the merge published the fallback's bound under the route's provenance"
+    )
+    assert merged.bound_valid is True
+
+    # And the claim travels in the other direction too: an UNVALIDATED bound
+    # that wins on tightness must not inherit the winner's validity.
+    route2 = SolveResult(status="feasible", objective=10.0, gap_certified=False)
+    route2._set_bound(1.0, valid=True, source="lp_dual")
+    fallback2 = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback2._set_bound(5.0, valid=False)
+
+    merged2 = _merge_route_and_fallback(route2, fallback2, is_maximize=False)
+    assert merged2.bound == 5.0
+    assert merged2.bound_valid is False, (
+        "an unvalidated bound inherited the winner's bound_valid=True"
+    )
+    assert merged2.bound_source is None
+
+
+@pytest.mark.unit
+def test_the_crossing_guard_retracts_the_claim_with_the_bound():
+    """#1244, the fourth mutation site: the #1059 crossing guard.
+
+    Its own log line calls the bound it is about to drop "a bound known to be
+    invalid". It cleared ``bound``, ``gap`` and ``gap_certified`` and left
+    ``bound_valid=True`` standing beside them -- the single assertion the guard
+    exists to retract, surviving the retraction.
+    """
+    from discopt.solver import _merge_route_and_fallback
+
+    # Minimize: a lower bound of 12.0 above the incumbent 10.0 is inverted.
+    route = SolveResult(status="feasible", objective=10.0, gap_certified=True)
+    route._set_bound(12.0, valid=True, source="bnb_tree")
+    fallback = SolveResult(status="feasible", objective=20.0, gap_certified=False)
+    fallback._set_bound(None, valid=False)
+
+    merged = _merge_route_and_fallback(route, fallback, is_maximize=False)
+    assert merged.bound is None
+    assert merged.gap is None and merged.gap_certified is False
+    assert merged.bound_valid is False, (
+        "the guard suppressed the invalid bound but kept the claim that it was valid"
+    )
+    assert merged.bound_source is None
+
+
+@pytest.mark.unit
+def test_a_round_trip_never_strengthens_a_stored_certificate():
+    """Persistence is an identity, not a re-derivation (#1244).
+
+    ``deserialize_result`` rebuilds through ``SolveResult(**kwargs)``, which
+    re-runs ``__post_init__`` -- including its rule that ``gap_certified``
+    implies ``bound_valid``. That rule is right for a result being CONSTRUCTED
+    from a solve, and wrong for one being RESTORED: it overwrote the stored
+    value and handed back a certificate stronger than the one written down.
+
+    The triple below is not hypothetical. ``Model.solve``'s #844 fallback merge
+    builds exactly it whenever a ``gap_certified`` result's surviving bound
+    carries ``bound_valid=False``.
+    """
+    from discopt.result_io import deserialize_result, serialize_result
+
+    # The bound has to be present at CONSTRUCTION: ``__post_init__`` revokes
+    # ``gap_certified`` outright for a result that arrives without a finite one,
+    # so the triple under test cannot be built by adding the bound afterwards.
+    r = SolveResult(status="optimal", objective=2.0, bound=1.0, gap=0.0, gap_certified=True)
+    assert r.bound_valid is True  # rule 1 raised it
+    r._set_bound(1.0, valid=False)  # ...and a later mutation lowered it again
+    assert (r.gap_certified, r.bound_valid, r.bound_source) == (True, False, None)
+
+    back = deserialize_result(serialize_result(r))
+    assert back.bound == 1.0
+    assert back.gap_certified is True
+    assert back.bound_valid is False, (
+        "the round trip UPGRADED a stored bound_valid=False to True; a persisted "
+        "certificate must never come back stronger than it went in"
+    )
+    assert back.bound_source is None
+
+    # The ordinary direction still round-trips, provenance included.
+    r2 = SolveResult(status="time_limit", objective=2.0, gap_certified=False)
+    r2._set_bound(1.0, valid=True, source="root_relaxation")
+    back2 = deserialize_result(serialize_result(r2))
+    assert (back2.bound, back2.bound_valid, back2.bound_source) == (
+        1.0,
+        True,
+        "root_relaxation",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

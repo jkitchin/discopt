@@ -6314,7 +6314,12 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         # the caller sees it.
         and not _bound_crosses_objective(float(l_b), winner.objective, is_maximize)
     ):
-        winner.bound = float(l_b)
+        # #1244: the LOSER's bound is being installed on the winner, so the
+        # loser's claim about it travels with it. Leaving the winner's
+        # ``bound_valid`` / ``bound_source`` in place would describe a number
+        # that is no longer there -- the provenance would name the winner's
+        # machinery for a bound the other side proved.
+        winner._set_bound(float(l_b), valid=loser.bound_valid, source=loser.bound_source)
     obj, bnd = winner.objective, winner.bound
     if obj is not None and bnd is not None and np.isfinite(obj) and np.isfinite(bnd):
         # A bound past the incumbent is a broken certificate whichever side it
@@ -6337,7 +6342,12 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
                 float(bnd),
                 float(obj),
             )
-            winner.bound = None
+            # #1244: clear the CLAIM with the number. This branch has just
+            # proved the bound crosses the incumbent -- "a bound known to be
+            # invalid", as the log line says -- so a ``bound_valid=True`` left
+            # standing beside the cleared bound would be the one assertion this
+            # guard exists to retract.
+            winner._set_bound(None, valid=False)
             winner.gap = None
             winner.gap_certified = False
         else:
@@ -20396,6 +20406,13 @@ def _solve_qcp_gurobi(
         return SolveResult(
             status="optimal",
             objective=objective,
+            # Explicit, not defaulted. ``gap_certified`` defaults to True, so
+            # the three other exits of this wrapper used to certify by silence
+            # (#1244 review). Here the claim is real -- Gurobi proved
+            # optimality and the returned point is independently
+            # feasibility-verified just above -- but it is now a decision on
+            # the page rather than a default nobody read.
+            gap_certified=True,
             bound=objective,
             gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
             x=_unpack_solution(model, x_flat),
@@ -20413,6 +20430,13 @@ def _solve_qcp_gurobi(
         return SolveResult(
             status="time_limit",
             objective=objective,
+            # A budget stop closed no gap. ``gap_certified`` DEFAULTS to True,
+            # so omitting it here published a certificate nobody decided to
+            # make -- and #1244's rule 1 then derives ``bound_valid`` from it,
+            # turning one unearned claim into two. Gurobi's own dual bound is
+            # very probably valid, but discopt has not verified it, so "no
+            # claim" is the honest answer rather than an inherited one.
+            gap_certified=False,
             bound=bound,
             gap=_relative_gap_from_objective_bound(objective, bound),
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
@@ -20423,6 +20447,7 @@ def _solve_qcp_gurobi(
         return SolveResult(
             status="iteration_limit",
             objective=objective,
+            gap_certified=False,  # as above: a budget stop closed no gap
             bound=bound,
             gap=_relative_gap_from_objective_bound(objective, bound),
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
@@ -20732,6 +20757,14 @@ def _solve_qp_matrix(
     elif result.status == SolveStatus.UNBOUNDED:
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
     elif result.status == SolveStatus.TIME_LIMIT:
+        # NOTE (#1262): this exit and the ITERATION_LIMIT one below leave
+        # ``gap_certified`` at its default of True, so a budget stop certifies a
+        # gap it did not close -- the same defect #1262 tracks on the native
+        # kernel route, in a different function. It is NOT fixed here, unlike the
+        # Gurobi wrappers' matching exits: those need gurobipy and have no test
+        # exposure, whereas this function is the shared QP matrix path (POUNCE
+        # reaches it too), so tightening it is certification-changing on live
+        # code and wants the CLAUDE.md §5 differential panel, not a drive-by.
         return SolveResult(
             status="time_limit",
             objective=objective,
@@ -20845,6 +20878,8 @@ def _solve_milp_gurobi(
         return SolveResult(
             status="optimal",
             objective=objective,
+            # Explicit, not defaulted -- see ``_solve_qcp_gurobi``'s optimal exit.
+            gap_certified=True,
             bound=bound,
             gap=result.gap if result.gap is not None else 0.0,
             x=_unpack_solution(model, result.x[:n_orig]),
@@ -20866,6 +20901,7 @@ def _solve_milp_gurobi(
         return SolveResult(
             status="time_limit",
             objective=objective,
+            gap_certified=False,  # a budget stop closed no gap (see _solve_qcp_gurobi)
             bound=bound,
             gap=result.gap,
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
@@ -20876,6 +20912,7 @@ def _solve_milp_gurobi(
         return SolveResult(
             status="iteration_limit",
             objective=objective,
+            gap_certified=False,  # as above
             bound=bound,
             gap=result.gap,
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,

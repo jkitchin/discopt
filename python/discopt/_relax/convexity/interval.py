@@ -63,8 +63,20 @@ def _round_down_exact0(x: Number) -> np.ndarray:
     subnormal range and manufactures a coefficient ~300 orders of magnitude
     below everything else in the model. That value is still a sound
     enclosure, but it defeats downstream code that reasons about
-    *magnitudes* — the coefficient-spread test in ``milp_relaxation`` divides
-    by the smallest nonzero entry and overflows to ``inf`` on it.
+    *magnitudes* — the motivating case was the coefficient-spread test in
+    ``milp_relaxation``, which in its pre-#957 naive
+    ``nz.max() / nz.min() > trigger`` form divided by the smallest nonzero
+    entry and overflowed to ``inf`` on such a value.
+
+    That consumer is no longer vulnerable, and this sentence used to read as
+    though it still were: #957 hardened BOTH ends in one pass, so today
+    ``_coefficient_spread_exceeds`` cross-multiplies instead of dividing *and*
+    filters entries below ``_SUBNORMAL_FLOOR`` before measuring. The producer-
+    side rule below is still worth having — a manufactured ``±5e-324`` is a
+    magnitude-reasoning hazard for any consumer, not only that one — but it is
+    a general precaution now, not a live bug being patched around, and reading
+    it as the latter sends the next person hunting an overflow that cannot
+    happen.
 
     Skipping the nudge is sound **only** where a floating-point result of
     exactly ``0`` implies the exact real result is ``0`` — i.e. where the

@@ -3920,13 +3920,27 @@ class SolveResult:
         """Set ``bound`` together with its validity claim (#1244).
 
         ``bound_valid`` / ``bound_source`` are DERIVED in ``__post_init__``, but
-        that runs once. Every post-construction mutation of ``bound`` has to
-        maintain the triple by hand, and two sites got it wrong within one PR --
-        ``Model.solve``'s #844 fallback merge installed the fallback's bound
-        beside the primary's stale flag, and
-        ``solver._withhold_local_optimality_certificate`` cleared the bound and
-        left ``bound_valid=True`` standing. Both were the same shape of mistake,
-        so the triple moves together through here instead.
+        that runs once. Every post-construction mutation of ``bound`` then has to
+        maintain the triple by hand, and the audit that added the field found
+        FOUR such sites in the tree -- all four the same shape of mistake, none
+        of them noticed until searched for:
+
+        * ``Model.solve``'s #844 fallback merge installed the fallback's bound
+          beside the primary's stale flag;
+        * ``solver._withhold_local_optimality_certificate`` cleared the bound and
+          left ``bound_valid=True`` standing;
+        * ``solver._merge_route_and_fallback`` installed the loser's bound on the
+          winner, leaving provenance naming the winner's machinery for a number
+          the other side proved;
+        * the same function's #1059 crossing guard cleared a bound it had just
+          proved invalid while leaving the claim that it was valid.
+
+        An earlier draft of this docstring said "two sites" -- that was a count of
+        the sites the field's own PR happened to touch first, not of the sites
+        that exist. The lesson is the opposite of a small number: a field that
+        every mutation site must maintain, taught to only some of them, converts
+        a latent inconsistency into a shipped one. So the triple moves together
+        through here, and a new ``self.bound = ...`` anywhere is a bug.
 
         The same two normalizations ``__post_init__`` applies are re-applied, so
         a caller cannot install an inconsistent pair: no bound means no claim,

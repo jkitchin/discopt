@@ -93,6 +93,21 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("mip_nlp_trace") is not None:
         kwargs["mip_nlp_trace"] = d["mip_nlp_trace"]
     r = SolveResult(**kwargs)
+    # #1244: restore the DECIDED validity, do not let it be re-derived.
+    #
+    # ``__post_init__`` runs again on this construction, and its rule 1
+    # (``gap_certified`` implies ``bound_valid``) overwrites the value just
+    # restored beside it. A result stored with ``gap_certified=True``, a finite
+    # bound and ``bound_valid=False`` therefore reloaded as ``True`` -- the
+    # persisted certificate came back STRONGER than it went in, which is the one
+    # direction a round trip must never move a claim.
+    #
+    # That triple is not hypothetical: ``Model.solve``'s #844 merge builds it
+    # whenever the primary's bound survives with a claim of False. A round trip
+    # is an identity, not a re-derivation.
+    if "bound_valid" in d:
+        r.bound_valid = bool(d["bound_valid"])
+        r.bound_source = d.get("bound_source") if r.bound_valid else None
     if d.get("explanation"):
         r._explanation = d["explanation"]
     return r

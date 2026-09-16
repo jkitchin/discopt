@@ -1604,9 +1604,23 @@ const ENTROPY_INV_MARGIN: f64 = 1e-9;
 
 /// Forward interval enclosure of `entropy([lo, hi])`.
 ///
-/// Mirrors `_relax/convexity/interval.py::entropy` exactly, including the
+/// Mirrors `_relax/convexity/interval.py::entropy` up to the `XLOG_FLOOR` clamp
+/// and this module's usual absence of outward rounding, including the
 /// continuous extension `f(0) = 0` that makes a site-fraction box starting at 0
 /// enclose finitely (#1242). `lo < 0` is outside the domain and abstains.
+///
+/// "Exactly" would be too strong, in two ways, and a differential test written
+/// against that word would report both as bugs:
+///
+/// 1. This rule computes through [`expr::xlogx`], which floors its argument at
+///    `XLOG_FLOOR = 1e-300`; the Python rule uses the exact continuous
+///    extension with no floor. They agree at 0 and everywhere at or above
+///    1e-300, and differ on `x` in `(0, 1e-300)` -- at `x = 1e-310` this
+///    returns `1e-310*ln(1e-300)`, about 2.4e-309 ABOVE the true image.
+/// 2. The Python rule rounds its endpoints outward; this one does not. That is
+///    the convention throughout this module (`interval_exp`, `interval_log`,
+///    `interval_sqrt`, ... are all bare `Interval::new`), not something new
+///    here, but it does mean the Python enclosure is ~1 ULP wider on each side.
 fn entropy_interval(a: &Interval) -> Interval {
     if a.lo < 0.0 {
         return Interval::new(f64::NEG_INFINITY, f64::INFINITY);
@@ -3408,7 +3422,16 @@ mod entropy_tests {
     #[test]
     fn entropy_preimage_is_sound_on_each_branch() {
         // Decreasing branch [0, 1/e]: require entropy(x) <= -0.2.
-        // f(x) = -0.2 has roots at ~0.0712 and ~0.3070 (both < 1/e? no: 0.307 < 0.3679, yes).
+        //
+        // f(x) = -0.2 has roots at 0.07865836 and 0.77169097 (re-derived with
+        // brentq on each side of the minimizer). An earlier version of this
+        // comment quoted ~0.0712 and ~0.3070, which solve nothing nearby --
+        // f(0.0712) = -0.1881, f(0.3070) = -0.3625 -- and then argued from the
+        // fake second root that "both roots are below 1/e". They are not: the
+        // real one is 0.7717. The branch is still unambiguous here, for the
+        // other reason -- 0.7717 lies OUTSIDE `inp`, so on [0, 1/e] the
+        // constraint f(x) <= -0.2 is exactly x >= 0.07865836, and the expected
+        // preimage is [0.07865836, 1/e].
         let inp = Interval::new(0.0, ENTROPY_ARGMIN);
         let out = Interval::new(f64::NEG_INFINITY, -0.2);
         let pre = entropy_preimage(&inp, &out).expect("decreasing branch inverts");
@@ -3427,6 +3450,19 @@ mod entropy_tests {
             }
         }
         assert!(kept > 0, "probe found no feasible points to check");
+        // ...and it must be a real tightening. Without this, every assertion
+        // above is satisfied by `pre == inp` (or anything wider), so the arm
+        // would pass against an `entropy_preimage` that hands the input box
+        // straight back -- sound, and a complete no-op. Only the increasing
+        // arm below had this check.
+        assert!(
+            pre.lo > inp.lo,
+            "decreasing branch did not tighten: {pre:?}"
+        );
+        assert!(
+            (pre.lo - 0.078_658_360_286_855_77).abs() < 1e-6,
+            "decreasing branch cut at the wrong root: {pre:?}"
+        );
 
         // Increasing branch [1/e, 3].
         let inp = Interval::new(ENTROPY_ARGMIN, 3.0);

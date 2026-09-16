@@ -25,19 +25,32 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from discopt.modeling.core import SolveResult
 from discopt.solver import _merge_route_and_fallback
 
 
-class _R:
-    """Minimal stand-in for the fields the merge touches."""
+def _R(objective, bound, *, gap_certified=False, node_count=0, status="feasible"):
+    """A real ``SolveResult``, not a stand-in.
 
-    def __init__(self, objective, bound, *, gap_certified=False, node_count=0, status="feasible"):
-        self.objective = objective
-        self.bound = bound
-        self.gap_certified = gap_certified
-        self.node_count = node_count
-        self.status = status
-        self.gap = None
+    This was a hand-rolled stub carrying "the fields the merge touches" -- and
+    that is exactly why it stopped catching things. When #1244 added
+    ``bound_valid``/``bound_source``, the merge's two bound mutations had to
+    maintain them; a stub without those attributes cannot tell a merge that
+    maintains the triple from one that does not, so this file's twelve
+    assertions would have gone on passing either way. Worse, the stub had no
+    ``__post_init__``, so it accepted field combinations the real type
+    normalizes away.
+
+    A fixture that omits the fields under test measures nothing (CLAUDE.md §6).
+    The real type is not more expensive here, so use it.
+    """
+    return SolveResult(
+        status=status,
+        objective=objective,
+        bound=bound,
+        gap_certified=gap_certified,
+        node_count=node_count,
+    )
 
 
 @pytest.mark.unit
