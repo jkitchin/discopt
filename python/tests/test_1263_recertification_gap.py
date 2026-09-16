@@ -81,16 +81,22 @@ def test_predicate_is_the_convergence_test():
 # before the fix (``time_limit=20``): st_z certified at 2.727e-5 (opt 0), and
 # portfol_roundlot at 0.028383 (best known 0.0282906, a 0.33% miss); neither
 # named a ``gap_criterion``. The oracle values are from ``minlplib.solu``.
+#
+# portfol_roundlot names its route. On the default path the #1059 auto-route
+# hands over to NLP-BB when OA has not certified within its share of the budget.
+# That happens on a loaded CI runner, and there NLP-BB's exit gate raises, which
+# is a separate defect that also exists on main. Pinning OA keeps this test on
+# the certifier it covers.
 @pytest.mark.parametrize(
-    "name, opt",
+    "name, opt, kwargs",
     [
-        ("st_z", 0.0),  # native spatial kernel
-        ("mathopt5_8", -0.6860722798),  # native spatial kernel
-        ("portfol_roundlot", 0.0282906349),  # convex-MINLP OA route
+        ("st_z", 0.0, {}),  # native spatial kernel
+        ("mathopt5_8", -0.6860722798, {}),  # native spatial kernel
+        ("portfol_roundlot", 0.0282906349, {"solver": "mip-nlp", "mip_nlp_method": "oa"}),
     ],
 )
-def test_certified_result_meets_the_gap_it_names(name, opt):
-    r = from_nl(os.path.join(DATA, f"{name}.nl")).solve(time_limit=60)
+def test_certified_result_meets_the_gap_it_names(name, opt, kwargs):
+    r = from_nl(os.path.join(DATA, f"{name}.nl")).solve(time_limit=60, **kwargs)
     assert r.status == "optimal" and r.gap_certified, (r.status, r.gap_certified)
     crit = (r.solver_stats or {}).get("gap_criterion")
     assert crit in ("absolute", "relative"), (
