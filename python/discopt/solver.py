@@ -18318,14 +18318,22 @@ def _solve_nlp_bb(
                         if not _check_constraint_feasibility(
                             evaluator, result_sols[i], cl_list, cu_list
                         ):
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
                             # Batch IPM returned an objective (not a clean
-                            # infeasibility verdict) but the iterate violates
-                            # constraints: a stall, not a proof. Untrusted nodes
-                            # are unconverged by definition; tainting on any
-                            # constraint-infeasible batch fathom is conservative
-                            # and sound.
-                            _unconverged_fathom = True
+                            # infeasibility verdict) but the gate refused the
+                            # iterate: a stall, not a proof. Excluding the node
+                            # prunes its subtree unproven, and ``_unconverged_fathom``
+                            # only guards the no-incumbent exit, so an incumbent
+                            # found elsewhere was certified over the hole
+                            # (clay0303hfsg: optimal at 28862, optimum 26669).
+                            # Abstain like a stalled node, or decertify.
+                            if _model_is_convex and _stall_abstain:
+                                result_lbs[i] = -np.inf
+                                _stall_abstained += 1
+                                _unconverged_fathom = True
+                            else:
+                                result_lbs[i] = _INFEASIBILITY_SENTINEL
+                                _unconverged_fathom = True
+                                _gap_certified = False
             # For nonconvex: NLP objective is NOT a valid lower bound.
             # Keep it for integer-feasible nodes (incumbent candidates),
             # but reset to -inf for others so we don't prune incorrectly.
@@ -18408,24 +18416,29 @@ def _solve_nlp_bb(
                     if cl_list and not _check_constraint_feasibility(
                         evaluator, nlp_result.x, cl_list, cu_list
                     ):
-                        if _serial_abstain:
-                            # A stalled convex node whose iterate also violates
-                            # constraints proves nothing either way. The legacy
-                            # arm below EXCLUDES it (sentinel), and the tree
+                        if _serial_abstain or (_model_is_convex and _stall_abstain):
+                            # A convex node whose iterate the gate refuses proves
+                            # nothing either way, whether or not it stalled. The
+                            # legacy arm below EXCLUDES it (sentinel), and the tree
                             # prunes an excluded node without a proof — which is
                             # precisely why that arm must decertify. Abstaining
                             # keeps the node instead: it imports at its inherited
                             # parent bound, stays untrusted, and is branched, so
                             # the subtree is still searched and nothing unproven
-                            # is closed.
-                            pass
+                            # is closed. Should the tree still close it with no
+                            # branch direction left, that is no infeasibility
+                            # proof either.
+                            _serial_abstain = True
+                            _unconverged_fathom = True
                         else:
                             nlp_lb = _INFEASIBILITY_SENTINEL
                             # The solver returned OPTIMAL/ITERATION_LIMIT yet the
                             # iterate violates constraints — this is non-convergence
                             # (a stall), not a SolveStatus.INFEASIBLE proof. Fathoming
-                            # it cannot certify global infeasibility.
+                            # it proves neither infeasibility nor that the subtree
+                            # holds nothing better than the incumbent.
                             _unconverged_fathom = True
+                            _gap_certified = False
                     # For nonconvex: reset non-integer-feasible to -inf
                     elif not _model_is_convex:
                         sol_is_int_feas = True
@@ -18996,6 +19009,9 @@ def _solve_nlp_bb(
         )
     if _stall_abstain and bool(stats.get("bound_unresolved", False)):
         _gap_certified = False
+        # An abstained node closed with no branch direction proves nothing, so
+        # an exhausted tree with no incumbent is "unknown", not "infeasible".
+        _unconverged_fathom = True
     # #933: capture the tree-bound taint state NOW, before the exit-status logic
     # below overwrites ``_gap_certified`` on limit exits. "The exit is not
     # certified" (no incumbent at a time/node limit) says nothing about whether

@@ -37,17 +37,19 @@ def test_improving_norm_drops_blocked_and_integer_columns():
     x = np.array([-7.0, -7.0, -20.0, 0.0])
     lb = np.array([-9.0, -9.0, -20.0, 0.0])
     ub = np.array([-6.0, -6.0, 0.0, 1.0])
-    # body must decrease: s would have to go below its lower bound
-    assert improving_gradient_norms(J, x, lb, ub, [1.0])[0] == pytest.approx(2.3e-7)
-    # the other direction: s can move up, so it counts in full
+    # body must decrease: s would have to go below its lower bound; y1 and y2
+    # move together, so their contributions add
+    assert improving_gradient_norms(J, x, lb, ub, [1.0])[0] == pytest.approx(4.6e-7)
+    # the other direction: s can move up, so it counts in full (clipped to the
+    # plain sup-norm)
     assert improving_gradient_norms(J, x, lb, ub, [-1.0])[0] == pytest.approx(1.0)
-    # an integer column never counts
+    # an integer column sitting on an integer cannot move within the distance
     mask = np.array([False, False, False, True])
-    assert improving_gradient_norms(J, x, lb, ub, [-1.0], mask)[0] == pytest.approx(2.3e-7)
+    assert improving_gradient_norms(J, x, lb, ub, [-1.0], mask)[0] == pytest.approx(4.6e-7)
     # partial room scales the column's contribution
     x2 = x.copy()
     x2[3] = 0.5e-4
-    assert improving_gradient_norms(J, x2, lb, ub, [1.0])[0] == pytest.approx(0.5)
+    assert improving_gradient_norms(J, x2, lb, ub, [1.0])[0] == pytest.approx(0.5 + 4.6e-7)
     # a satisfied row keeps the plain sup-norm
     assert improving_gradient_norms(J, x, lb, ub, [0.0])[0] == pytest.approx(1.0)
 
@@ -85,3 +87,46 @@ def test_single_column_exact_repair_is_not_decided_by_roundoff():
         J, x, np.zeros(2), np.full(2, np.inf), [-1.0], np.array([False, True])
     )
     assert viol <= FEASIBLE_DISTANCE_TOL * g[0]
+
+
+def test_integer_column_counts_its_rounding_move():
+    """An integer column off its integer can move to ``round(x)`` and no further."""
+    from discopt.validation.feasibility import improving_gradient_norms
+
+    J = np.array([[0.0, 0.0, -50.0]])
+    lb, ub = np.zeros(3), np.ones(3)
+    mask = np.array([False, False, True])
+    # body must decrease -> y must increase; round(-2e-6) = 0 lies above it
+    g = improving_gradient_norms(J, np.array([0.0, 0.0, -2e-6]), lb, ub, [1.0], mask)
+    assert g[0] == pytest.approx(50.0 * 2e-6 / 1e-4)
+    # rounding goes the wrong way: no room
+    g = improving_gradient_norms(J, np.array([0.0, 0.0, 2e-6]), lb, ub, [1.0], mask)
+    assert g[0] < 1e-9
+
+
+def test_big_m_row_repaired_by_two_columns_together():
+    """clay0303hfsg's node points: ``x - 52.5 y <= 0`` at ``x = 1e-8`` (bound 0)
+    and binary ``y = -1.77e-10``. Rounding ``y`` and moving ``x`` onto its bound
+    together remove the whole violation, so the point is inside the cap. A
+    per-column max rejected it, and the solve certified a bound above the optimum.
+    """
+    from discopt.validation.feasibility import (
+        FEASIBLE_DISTANCE_TOL,
+        improving_gradient_norms,
+    )
+
+    x = np.array([9.99763018e-09, -1.76515511e-10])
+    J = np.array([[1.0, -52.5]])
+    viol = x[0] - 52.5 * x[1]
+    g = improving_gradient_norms(
+        J, x, np.zeros(2), np.array([100.0, 1.0]), [1.0], np.array([False, True])
+    )
+    assert viol <= FEASIBLE_DISTANCE_TOL * g[0]
+    # With ``y`` already integral and the row asking for ``<= -1e-8``, the only
+    # move left (``x`` down to 0) removes 1e-8 of a 2e-8 violation: still refused.
+    x_int = np.array([1.0e-8, 0.0])
+    viol = x_int[0] - (-1.0e-8)
+    g = improving_gradient_norms(
+        J, x_int, np.zeros(2), np.array([100.0, 1.0]), [1.0], np.array([False, True])
+    )
+    assert viol > 1.5 * FEASIBLE_DISTANCE_TOL * g[0]

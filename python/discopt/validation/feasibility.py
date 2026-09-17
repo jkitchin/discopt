@@ -183,18 +183,28 @@ def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.n
     ``y`` was certified again at ``z = -20`` (true optimum -6.699).
 
     Column ``j`` of row ``i`` counts for what a move of at most
-    ``FEASIBLE_DISTANCE_TOL`` in ``x_j`` alone, inside ``[lb_j, ub_j]``, can
-    remove from the violation: ``|J_ij| * min(1, room_ij / FEASIBLE_DISTANCE_TOL)``,
-    where ``room_ij`` is the distance from ``x_j`` to the bound in the direction
-    that reduces the violation. Integer columns count 0 (they cannot move by a
-    small amount). So ``FEASIBLE_DISTANCE_TOL * result`` is exactly the largest
-    first-order reduction a single small in-box move achieves — the statement
+    ``FEASIBLE_DISTANCE_TOL`` in ``x_j``, inside ``[lb_j, ub_j]``, can remove from
+    the violation: ``|J_ij| * min(1, room_ij / FEASIBLE_DISTANCE_TOL)``, where
+    ``room_ij`` is the distance from ``x_j`` to the bound in the direction that
+    reduces the violation. An integer column can move only to an integer, and the
+    one integer within that distance is ``round(x_j)``: its room is
+    ``|round(x_j) - x_j|`` when that lies in the improving direction, else 0.
+    The columns move together (a box of half-width ``FEASIBLE_DISTANCE_TOL``), so
+    their contributions add, and ``FEASIBLE_DISTANCE_TOL * result`` is the
+    first-order reduction the best such move achieves: the statement
     :func:`feasible_distance_cap` makes, now true of the point's box.
+
+    Summed, not maxed (measured on clay0303hfsg): a big-M row
+    ``x - 52.5 y <= 0`` at ``x = 1.0e-8`` (bound 0) and ``y = -1.8e-10`` (binary)
+    is violated by 1.9e-8, exactly what rounding ``y`` and moving ``x`` onto its
+    bound together remove. A per-column max (or zero weight for ``y``) put the cap
+    at 1e-8, rejected that point and every node solution like it, and the solve
+    certified 28862 against the recorded optimum 26669.
 
     ``direction[i]`` is ``+1`` when row ``i``'s body must DECREASE, ``-1`` when it
     must increase, ``0`` when the row is not violated (plain sup-norm; the cap is
-    irrelevant there). Never larger than :func:`jacobian_row_gradient_norms`, so it
-    can only tighten a gate. Non-finite rows return ``inf`` as there.
+    irrelevant there). Clipped to :func:`jacobian_row_gradient_norms`, so it can
+    only tighten a gate. Non-finite rows return ``inf`` as there.
     """
     J = np.asarray(J, dtype=np.float64)
     if J.ndim != 2:
@@ -229,15 +239,20 @@ def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.n
         up = up[None, :]
         down = down[None, :]
         room = np.where(step > 0, up, np.where(step < 0, down, 0.0))
+        if integer_mask is not None:
+            mask = np.asarray(integer_mask, dtype=bool).ravel()
+            if mask.size != n:
+                raise ValueError(f"integer_mask has {mask.size} entries for {n} columns")
+            r = np.clip(np.round(x), np.ceil(lb), np.floor(ub))
+            gap = r - x
+            to_int = np.abs(gap) + slack * (np.abs(r) + np.abs(x))
+            int_room = np.where(step * np.sign(gap)[None, :] > 0, to_int[None, :], 0.0)
+            int_room = np.where((gap == 0.0)[None, :] & (step != 0), to_int[None, :], int_room)
+            room = np.where(mask[None, :], int_room, room)
         frac = np.minimum(1.0, room / FEASIBLE_DISTANCE_TOL)
         contrib = np.abs(J) * frac
-    if integer_mask is not None:
-        mask = np.asarray(integer_mask, dtype=bool).ravel()
-        if mask.size != n:
-            raise ValueError(f"integer_mask has {mask.size} entries for {n} columns")
-        contrib[:, mask] = 0.0
     finite = np.isfinite(contrib)
-    out = np.where(finite, contrib, 0.0).max(axis=1)
+    out = np.minimum(np.where(finite, contrib, 0.0).sum(axis=1), plain)
     out = np.where(d == 0.0, plain, out)
     out[~np.isfinite(plain)] = np.inf
     return np.asarray(out, dtype=np.float64)
