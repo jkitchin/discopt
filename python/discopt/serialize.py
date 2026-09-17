@@ -1076,12 +1076,65 @@ _FLOAT_TOKENS = {"nan", "inf", "-inf"}
 
 
 def _dec_tree(obj: Any) -> Any:
+    """Inverse of :func:`_enc_tree` -- ONLY for trees whose leaves are numbers.
+
+    The bare ``"nan"``/``"inf"`` token is indistinguishable from a string of the
+    same text, so every such string is read as a float. Use it where the position
+    is known to be numeric (solution arrays), and :func:`_dec_json_tree` for a
+    tree that can hold arbitrary strings (#1292).
+    """
     if isinstance(obj, str) and obj in _FLOAT_TOKENS:
         return _dec_float(obj)
     if isinstance(obj, dict):
         return {k: _dec_tree(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_dec_tree(v) for v in obj]
+    return obj
+
+
+#: Unambiguous tagging for free-form trees (#1292): a non-finite float is written
+#: as ``{"__float__": "nan"}``, which no string can be mistaken for. A genuine dict
+#: whose only key is one of the two tags is wrapped as ``{"__dict__": {...}}`` so
+#: it cannot be mistaken for a tag either.
+_FLOAT_TAG = "__float__"
+_DICT_TAG = "__dict__"
+
+
+def _enc_json_tree(obj: Any) -> Any:
+    """Encode a free-form JSON tree (strings, numbers, bools, None, lists, dicts)."""
+    if isinstance(obj, float):
+        v = _enc_float(obj)
+        return {_FLOAT_TAG: v} if isinstance(v, str) else v
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return _enc_json_tree(obj.item())
+    if isinstance(obj, np.ndarray):
+        return _enc_json_tree(obj.tolist())
+    if isinstance(obj, dict):
+        enc = {k: _enc_json_tree(v) for k, v in obj.items()}
+        if len(obj) == 1 and next(iter(obj)) in (_FLOAT_TAG, _DICT_TAG):
+            return {_DICT_TAG: enc}
+        return enc
+    if isinstance(obj, (list, tuple)):
+        return [_enc_json_tree(v) for v in obj]
+    return obj
+
+
+def _dec_json_tree(obj: Any) -> Any:
+    """Inverse of :func:`_enc_json_tree`. Strings are never reinterpreted."""
+    if isinstance(obj, dict):
+        if len(obj) == 1 and _FLOAT_TAG in obj:
+            token = obj[_FLOAT_TAG]
+            if not isinstance(token, str) or token not in _FLOAT_TOKENS:
+                raise SerializationError(f"invalid float tag {obj!r}")
+            return _dec_float(token)
+        if len(obj) == 1 and _DICT_TAG in obj:
+            inner = obj[_DICT_TAG]
+            if not isinstance(inner, dict):
+                raise SerializationError(f"invalid dict tag {obj!r}")
+            return {k: _dec_json_tree(v) for k, v in inner.items()}
+        return {k: _dec_json_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_dec_json_tree(v) for v in obj]
     return obj
 
 
@@ -1197,7 +1250,10 @@ def dumps(
     if result is not None:
         from discopt.result_io import serialize_result
 
-        doc["solution"] = _enc_tree(serialize_result(result))
+        # Already JSON-safe, and each field is tagged by its own rule. A blanket
+        # re-encode/decode here is what turned a string field reading "nan" into
+        # a float on reload (#1292).
+        doc["solution"] = serialize_result(result)
 
     # `allow_nan=False`: bare NaN/Infinity is not valid JSON, and every float has
     # already been routed through `_enc_float`, so this asserts that nothing
@@ -1286,7 +1342,7 @@ def loads(text: Union[str, bytes]) -> Model:
     if doc.get("solution") is not None:
         from discopt.result_io import deserialize_result
 
-        model.saved_result = deserialize_result(_dec_tree(doc["solution"]))
+        model.saved_result = deserialize_result(doc["solution"])
     else:
         model.saved_result = None
 

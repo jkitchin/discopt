@@ -74,6 +74,13 @@ invalid JSON, so the only readers affected are the ones that were relying on
 Python's non-standard extension to parse a broken file. Finite values, which is
 almost every value, are written exactly as before, and anything going through
 :func:`deserialize_result` sees real floats either way.
+
+A bare ``"nan"`` token is only unambiguous where the reader knows the position
+holds a number, so it is used only there: the float scalars, the arrays, the
+KKT residuals, the certificate, and the float fields of the validation report
+(decoded by field type). The free-form trees -- ``solve_options`` and
+``mip_nlp_trace`` -- can hold strings of any text, so they use
+``{"__float__": "nan"}`` instead (#1292; schema version 3).
 """
 
 from __future__ import annotations
@@ -81,7 +88,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, get_type_hints
 
 import numpy as np
 
@@ -90,12 +97,26 @@ from discopt.modeling.core import SolveResult
 # The float tagging that keeps NaN/infinity out of the document as bare
 # `NaN`/`Infinity` tokens. Imported rather than re-implemented so the standalone
 # result file and the same result embedded in a `.dopt` use one encoding.
-from discopt.serialize import _dec_float, _dec_tree, _enc_float, _enc_tree
+from discopt.serialize import (
+    _dec_float,
+    _dec_json_tree,
+    _dec_tree,
+    _enc_float,
+    _enc_json_tree,
+    _enc_tree,
+)
 
 #: Bumped to 2 by #1266 (``provenance``, ``solve_options``, ``validation_report``).
 #: The change is additive: a version-1 reader ignores the new keys, and
 #: :func:`deserialize_result` reads a version-1 document unchanged.
-SCHEMA_VERSION = 2
+#:
+#: Bumped to 3 by #1292: the free-form trees (``solve_options``,
+#: ``mip_nlp_trace``) tag a non-finite float as ``{"__float__": "nan"}`` rather
+#: than the bare string ``"nan"``, which a string option of that text could not
+#: be told apart from. Documents of version 1 and 2 are still read, with their
+#: ``solve_options`` decoded the old way (their bare tokens are ambiguous in the
+#: file itself, so there is nothing better to recover).
+SCHEMA_VERSION = 3
 
 # Scalar SolveResult fields that round-trip as-is.
 _SCALAR_FIELDS = (
@@ -238,21 +259,36 @@ def _dec_validation_report(d: Any) -> Any:
     """
     from discopt.validation.examiner import CheckResult, ExaminerReport
 
-    d = _dec_tree(d)
     if not isinstance(d, dict):
         raise TypeError(f"validation_report section must be an object, got {type(d).__name__}.")
+    # Decoded BY FIELD TYPE, not by scanning for "nan"/"inf" strings: a label or
+    # detail that reads "nan" (a variable named `nan`) is a string (#1292).
+    report_floats = _float_fields(ExaminerReport)
+    check_floats = _float_fields(CheckResult)
     report_fields = {f.name for f in fields(ExaminerReport)}
     check_fields = {f.name for f in fields(CheckResult)}
     # `passed` is a property, so it is not in `fields(ExaminerReport)` and is
     # filtered out here -- passing it to the constructor would raise.
-    kwargs = {k: v for k, v in d.items() if k in report_fields and k != "checks"}
+    kwargs: dict[str, Any] = {
+        k: _dec_float(v) if k in report_floats else v
+        for k, v in d.items()
+        if k in report_fields and k != "checks"
+    }
     checks = []
     for c in d.get("checks", []):
-        cd = {k: v for k, v in c.items() if k in check_fields}
+        cd: dict[str, Any] = {
+            k: _dec_float(v) if k in check_floats else v for k, v in c.items() if k in check_fields
+        }
         # `violators` is a list of (label, value) pairs; JSON gives back lists.
-        cd["violators"] = [tuple(v) for v in cd.get("violators", [])]
+        cd["violators"] = [(label, _dec_float(val)) for label, val in cd.get("violators", [])]
         checks.append(CheckResult(**cd))
     return ExaminerReport(checks=checks, **kwargs)
+
+
+def _float_fields(cls: type) -> frozenset[str]:
+    """Names of *cls*'s dataclass fields annotated ``float``."""
+    hints = get_type_hints(cls)
+    return frozenset(f.name for f in fields(cls) if hints[f.name] is float)
 
 
 def serialize_result(
@@ -283,6 +319,8 @@ def serialize_result(
         # Tag by runtime type rather than a hand-kept field list: `bool` is not a
         # `float` in Python, and ints are left alone, so this catches exactly the
         # float-valued fields and stays right if one is added later.
+        if isinstance(val, (np.integer, np.bool_)):
+            val = val.item()
         out[name] = _enc_float(val) if isinstance(val, float) else val
     for name in _DICT_ARRAY_FIELDS:
         val = _jsonify_arrays(getattr(r, name, None))
@@ -295,7 +333,7 @@ def serialize_result(
             # kind of number that comes back non-finite from a diverged solve.
             out[name] = {k: _enc_float(float(v)) for k, v in fval.items()}
     if r.mip_nlp_trace is not None:
-        out["mip_nlp_trace"] = r.mip_nlp_trace
+        out["mip_nlp_trace"] = _enc_json_tree(r.mip_nlp_trace)
     expl = getattr(r, "_explanation", None)
     if expl:
         out["explanation"] = str(expl)
@@ -310,9 +348,9 @@ def serialize_result(
 
     carried_opts = getattr(r, "_solve_options", None)
     if carried_opts is not None:
-        out["solve_options"] = _enc_tree(carried_opts)
+        out["solve_options"] = _enc_json_tree(carried_opts)
     elif options is not None:
-        out["solve_options"] = _enc_tree(options)
+        out["solve_options"] = _enc_json_tree(options)
 
     carried_prov = getattr(r, "_provenance", None)
     if carried_prov is not None:
@@ -334,6 +372,9 @@ def deserialize_result(d: dict) -> SolveResult:
     daemon socket arrives at the writer with them intact.
     """
     kwargs: dict[str, Any] = {}
+    version = d.get("schema_version", 1)
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise TypeError(f"schema_version must be an integer, got {version!r}.")
     for name in _SCALAR_FIELDS:
         if name in d:
             val = d[name]
@@ -349,7 +390,9 @@ def deserialize_result(d: dict) -> SolveResult:
         if d.get(name) is not None:
             kwargs[name] = {k: _dec_float(v) for k, v in d[name].items()}
     if d.get("mip_nlp_trace") is not None:
-        kwargs["mip_nlp_trace"] = d["mip_nlp_trace"]
+        trace = d["mip_nlp_trace"]
+        # Before version 3 the trace was written untagged.
+        kwargs["mip_nlp_trace"] = _dec_json_tree(trace) if version >= 3 else trace
     if d.get("validation_report") is not None:
         kwargs["validation_report"] = _dec_validation_report(d["validation_report"])
     if d.get("infeasibility_certificate") is not None:
@@ -375,7 +418,8 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("provenance") is not None:
         r._provenance = d["provenance"]
     if d.get("solve_options") is not None:
-        r._solve_options = _dec_tree(d["solve_options"])
+        opts = d["solve_options"]
+        r._solve_options = _dec_json_tree(opts) if version >= 3 else _dec_tree(opts)
     return r
 
 
