@@ -357,8 +357,18 @@ class NLPEvaluatorFromCUTEst:
                 np.array([], dtype=np.int32),
             )
         x = np.asarray(x, dtype=np.float64)
-        # slagjac returns (sparse_jac, grad_lagrangian) — we only need the Jacobian
-        J_sparse, _ = self._p.slagjac(x)
+        # pycutest's slagjac returns (g, J): the (sparse, 1 x n) objective
+        # gradient FIRST, then the m x n constraint Jacobian. Unpacking it the
+        # other way round made the Jacobian structure the gradient's pattern --
+        # every entry in row 0 -- so each constrained problem was solved with
+        # constraints 1..m-1 carrying no derivative (HS71: POUNCE stopped at an
+        # infeasible 16.32, Ipopt hit its iteration limit at 45.8; opt 17.014).
+        _, J_sparse = self._p.slagjac(x)
+        if J_sparse.shape != (self._n_constraints, self._n_variables):
+            raise ValueError(
+                f"slagjac Jacobian has shape {J_sparse.shape}, expected "
+                f"({self._n_constraints}, {self._n_variables})"
+            )
         coo = J_sparse.tocoo()
         return (
             np.asarray(coo.data, dtype=np.float64),

@@ -2,18 +2,20 @@
 # Classes: lp, qp, convex_nlp, nonconvex_nlp, milp, miqp, convex_minlp, nonconvex_minlp
 
 [instances]
-# NLP instances (continuous, nonlinear)
-ex1221 = "nonconvex_nlp"
-ex1225 = "nonconvex_nlp"
-ex1226 = "nonconvex_nlp"
-st_e13 = "nonconvex_nlp"
-st_e15 = "nonconvex_nlp"
-st_e27 = "nonconvex_nlp"
-st_e38 = "nonconvex_nlp"
-st_e40 = "nonconvex_nlp"
-prob03 = "nonconvex_nlp"
-prob06 = "nonconvex_nlp"
-prob10 = "nonconvex_nlp"
+# Hand-labelled instances in the vendored corpus. The MINLPLib probtype is
+# noted for each; pure-NLP suites select by that metadata instead (see
+# [suites.nlp*] in benchmarks.toml), not by this table.
+ex1221 = "nonconvex_minlp"  # MBNLP
+ex1225 = "nonconvex_minlp"  # MBNLP
+ex1226 = "nonconvex_minlp"  # MBNLP
+st_e13 = "nonconvex_minlp"  # MBQCP
+st_e15 = "nonconvex_minlp"  # MBNLP
+st_e27 = "miqp"             # MBQP
+st_e38 = "nonconvex_minlp"  # MINLP
+st_e40 = "nonconvex_minlp"  # MINLP
+prob03 = "nonconvex_minlp"  # IQCP
+prob06 = "nonconvex_nlp"    # QCP: continuous, nonconvex quadratic constraints
+prob10 = "nonconvex_minlp"  # MINLP
 
 # MINLP instances (mixed-integer, nonlinear)
 nvs01 = "nonconvex_minlp"

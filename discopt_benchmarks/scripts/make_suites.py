@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate stratified instance lists for the small/medium/full benchmark tiers.
+"""Generate stratified instance lists for the small/medium/full and NLP benchmark tiers.
 
 Reads ``instancedata.csv`` from the MINLPLib cache and writes three text files
 under ``discopt_benchmarks/config/suites/`` (one instance name per line). The
@@ -11,6 +11,9 @@ Tiers (target wall time on 8 workers):
   small   ~60 instances, per-instance limit 60s   →  ~10-30 min wall
   medium  ~250 instances, per-instance limit 300s →  ~1.5-3 h wall
   full    every cached instance                    →  ~12-30 h wall on 8 workers
+
+  nlp_smoke  20 pure-NLP instances (probtype NLP, <=100 vars), 60s limit
+  nlp        every proven-optimal pure-NLP instance <=500 vars, 300s limit
 
 Determinism: stratified sampling is seeded; the same CSV produces the same
 lists. Pre-existing lists are overwritten only with ``--force`` when the cache
@@ -83,15 +86,42 @@ MEDIUM_PLAN: dict[tuple[str, str], int] = {
     ("NLP",   "<=500"):  10,
 }  # sum ≈ 251
 
+# NLP tiers: pure continuous NLP (MINLPLib probtype == "NLP" exactly -- not
+# QCP/QCQP/MBNLP, which the old hand-labelled ``nonconvex_nlp`` suite mixed
+# in). Proven-optimal only, so every instance carries a ``.solu`` oracle and
+# can be counted incorrect.
+NLP_SMOKE_PLAN: dict[tuple[str, str], int] = {
+    ("NLP", "<=10"):   8,
+    ("NLP", "<=30"):   6,
+    ("NLP", "<=100"):  6,
+}  # sum = 20
+
+# The full NLP tier takes every proven-optimal NLP up to 500 variables; the
+# targets exceed the bucket sizes on purpose so the draw is "all of them".
+NLP_PLAN: dict[tuple[str, str], int] = {
+    ("NLP", "<=10"):   10**6,
+    ("NLP", "<=30"):   10**6,
+    ("NLP", "<=100"):  10**6,
+    ("NLP", "<=500"):  10**6,
+}
+
 
 def _bucketize(
     index: dict[str, InstanceMeta],
     proven_only: bool,
+    require_nl: bool = False,
 ) -> dict[tuple[str, str], list[str]]:
-    """Group instance names by (category, size_bucket)."""
+    """Group instance names by (category, size_bucket).
+
+    ``require_nl`` drops instances MINLPLib publishes no ``.nl`` for; an
+    unknown ``formats`` column drops everything, which the empty-bucket
+    warning in ``_draw_stratified`` then reports.
+    """
     buckets: dict[tuple[str, str], list[str]] = defaultdict(list)
     for name, meta in index.items():
         if proven_only and not meta.proven_optimal:
+            continue
+        if require_nl and meta.has_nl is not True:
             continue
         buckets[(meta.category_bucket, meta.size_bucket)].append(name)
     # Stable order per bucket so the seed produces deterministic output.
@@ -104,6 +134,7 @@ def _draw_stratified(
     buckets: dict[tuple[str, str], list[str]],
     plan: dict[tuple[str, str], int],
     seed: int,
+    warn_underfill: bool = True,
 ) -> list[str]:
     """Take min(plan[k], len(bucket[k])) from each cell; report under-fills."""
     rng = random.Random(seed)
@@ -114,7 +145,7 @@ def _draw_stratified(
             print(f"  WARN: empty bucket {cell}, wanted {target}", file=sys.stderr)
             continue
         n = min(target, len(pool))
-        if n < target:
+        if n < target and warn_underfill:
             print(f"  WARN: bucket {cell} only has {len(pool)}, "
                   f"taking all {n} (wanted {target})", file=sys.stderr)
         picked.extend(rng.sample(pool, n))
@@ -142,6 +173,16 @@ def make_medium(index: dict[str, InstanceMeta], seed: int = 17) -> list[str]:
     return _draw_stratified(buckets, MEDIUM_PLAN, seed)
 
 
+def make_nlp_smoke(index: dict[str, InstanceMeta], seed: int = 17) -> list[str]:
+    buckets = _bucketize(index, proven_only=True, require_nl=True)
+    return _draw_stratified(buckets, NLP_SMOKE_PLAN, seed)
+
+
+def make_nlp(index: dict[str, InstanceMeta], seed: int = 17) -> list[str]:
+    buckets = _bucketize(index, proven_only=True, require_nl=True)
+    return _draw_stratified(buckets, NLP_PLAN, seed, warn_underfill=False)
+
+
 def make_full(index: dict[str, InstanceMeta]) -> list[str]:
     # Full = every instance in the cache (proven or not). We still report
     # outcome buckets, just without an `incorrect` check for the unproven ones.
@@ -165,7 +206,8 @@ def main() -> None:
                    help="MINLPLib cache dir (default: ~/.cache/discopt/minlplib)")
     p.add_argument("--version", type=str, default="current",
                    help="MINLPLib version tag (default: current)")
-    p.add_argument("--tier", choices=["small", "medium", "full", "all"], default="all")
+    p.add_argument("--tier", default="all",
+                   choices=["small", "medium", "full", "nlp_smoke", "nlp", "all"])
     p.add_argument("--seed", type=int, default=17,
                    help="RNG seed for stratified sampling (default: 17)")
     p.add_argument("--force", action="store_true",
@@ -202,6 +244,17 @@ def main() -> None:
                         ["discopt full tier — every MINLPLib instance",
                          "Target wall time 12-30 h on 8 workers at 600s per-instance limit",
                          "Source: instancedata.csv (proven + unproven)"]))
+
+    if args.tier in {"nlp_smoke", "all"}:
+        targets.append(("nlp_smoke", make_nlp_smoke(index, seed=args.seed),
+                        [f"discopt NLP smoke tier -- stratified pure-NLP sample (seed={args.seed})",
+                         "probtype == NLP, <=100 vars; 60s per-instance limit",
+                         "Source: instancedata.csv (proven-optimal only)"]))
+    if args.tier in {"nlp", "all"}:
+        targets.append(("nlp", make_nlp(index, seed=args.seed),
+                        ["discopt NLP tier -- every proven-optimal pure-NLP instance <=500 vars",
+                         "probtype == NLP; 300s per-instance limit",
+                         "Source: instancedata.csv (proven-optimal only)"]))
 
     for name, picks, hdr in targets:
         out = SUITES_DIR / f"{name}.txt"

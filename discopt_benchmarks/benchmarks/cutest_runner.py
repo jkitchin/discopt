@@ -10,6 +10,7 @@ PyCUTEst is required: pip install discopt[cutest]
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -48,6 +49,24 @@ class CUTEstSuiteConfig:
     problem_names: list[str] | None = None
 
 
+def _degrees_of_freedom_deficit(prob) -> str | None:
+    """Why ``prob`` is not a well-posed NLP, or None.
+
+    CUTEst ships nonlinear-equation and data-fitting problems (``*NE``, NIST
+    sets such as BOXBOD) as over-determined equality systems. An interior-point
+    solver rejects those before its first iteration (Ipopt:
+    ``Not_Enough_Degrees_Of_Freedom``), so every arm records ``error`` in about a
+    millisecond and the row says nothing about solver quality.
+    """
+    if prob.m == 0:
+        return None
+    n_eq = int(np.count_nonzero(prob.is_eq_cons))
+    n_free = int(prob.n - np.count_nonzero(prob.bl == prob.bu))
+    if n_eq > n_free:
+        return f"{n_eq} equality constraints > {n_free} free variables"
+    return None
+
+
 class CUTEstBenchmarkRunner:
     """
     Benchmark runner for CUTEst NLP problems.
@@ -67,6 +86,10 @@ class CUTEstBenchmarkRunner:
             timestamp=datetime.now().isoformat(),
         )
         self._problems: list[str] = []
+        # (solver, problem) -> "ExcType: message" for arms that raised.
+        self.errors: dict[tuple[str, str], str] = {}
+        # problem -> reason, for problems dropped as not being a well-posed NLP.
+        self.excluded: dict[str, str] = {}
 
     def discover_problems(self) -> list[str]:
         """Find CUTEst problems matching suite filters."""
@@ -102,7 +125,12 @@ class CUTEstBenchmarkRunner:
         """Load metadata for all discovered problems into results."""
         from discopt.interfaces.cutest import load_cutest_problem
 
-        for name in self._problems:
+        # First use compiles each problem's Fortran (seconds apiece), so report
+        # progress: a silent multi-minute load reads as a hang.
+        total = len(self._problems)
+        for i, name in enumerate(self._problems, 1):
+            if i == 1 or i % 25 == 0 or i == total:
+                print(f"  [load {i}/{total}] {name}", flush=True)
             try:
                 prob = load_cutest_problem(name, sif_params=self.config.sif_params)
                 info = InstanceInfo(
@@ -117,9 +145,21 @@ class CUTEstBenchmarkRunner:
                     source="cutest",
                 )
                 self.results.instance_info[name] = info
+                reason = _degrees_of_freedom_deficit(prob)
+                if reason is not None:
+                    self.excluded[name] = reason
                 prob.close()
             except Exception as e:
-                print(f"  Warning: Could not load {name}: {e}")
+                print(f"  Warning: Could not load {name}: {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+
+        if self.excluded:
+            self._problems = [p for p in self._problems if p not in self.excluded]
+            for name in self.excluded:
+                self.results.instance_info.pop(name, None)
+            print(f"  excluded {len(self.excluded)} problem(s) with more equality "
+                  f"constraints than free variables; {len(self._problems)} remain",
+                  flush=True)
 
     def run_all(
         self,
@@ -185,7 +225,7 @@ class CUTEstBenchmarkRunner:
                 if verbose:
                     status_char = "+" if best_result.is_solved else "-"
                     time_str = (
-                        f"{best_result.wall_time:.2f}s"
+                        f"{best_result.wall_time:.3f}s"
                         if best_result.wall_time < float("inf")
                         else "TL"
                     )
@@ -196,7 +236,8 @@ class CUTEstBenchmarkRunner:
                     )
                     print(
                         f"  {status_char} {problem_name:20s} {time_str:>10s} "
-                        f"{obj_str:>20s}  [{completed}/{total}]"
+                        f"{obj_str:>20s}  {best_result.status.value:12s} [{completed}/{total}]",
+                        flush=True,
                     )
 
         return self.results
@@ -220,157 +261,92 @@ class CUTEstBenchmarkRunner:
             )
         return runner(problem_name)
 
-    def _run_discopt_ipopt(self, problem_name: str) -> SolveResult:
-        """Solve via discopt's Ipopt backend using NLPEvaluatorFromCUTEst."""
+    # Ipopt/POUNCE status -> benchmark status. ITERATION_LIMIT is a stop, not a
+    # verdict, so it is scored with the time-limit bucket.
+    @staticmethod
+    def _nlp_status_map() -> dict:
+        from discopt.solvers import SolveStatus as DiscoptStatus
+
+        return {
+            DiscoptStatus.OPTIMAL: SolveStatus.OPTIMAL,
+            DiscoptStatus.INFEASIBLE: SolveStatus.INFEASIBLE,
+            DiscoptStatus.UNBOUNDED: SolveStatus.UNBOUNDED,
+            DiscoptStatus.ITERATION_LIMIT: SolveStatus.TIME_LIMIT,
+            DiscoptStatus.TIME_LIMIT: SolveStatus.TIME_LIMIT,
+            DiscoptStatus.ERROR: SolveStatus.ERROR,
+        }
+
+    def _error_result(self, solver: str, problem_name: str, exc: BaseException) -> SolveResult:
+        """Record a crashed arm loudly instead of as a bare ERROR row.
+
+        The arms used to ``except Exception: return ERROR`` with the message
+        dropped, so a broken evaluator and a hard problem read the same.
+        """
+        first_line = (str(exc).strip().splitlines() or [""])[0]
+        msg = f"{type(exc).__name__}: {first_line}"
+        self.errors[(solver, problem_name)] = msg
+        print(f"  ! {solver} {problem_name}: {msg}", file=sys.stderr, flush=True)
+        return SolveResult(
+            instance=problem_name,
+            solver=solver,
+            status=SolveStatus.ERROR,
+            wall_time=float("inf"),
+        )
+
+    def _run_discopt_nlp(
+        self, problem_name: str, solver: str, backend: str, options: dict
+    ) -> SolveResult:
+        """Solve through discopt's NLP backend using NLPEvaluatorFromCUTEst."""
         try:
+            import importlib
+
             from discopt.interfaces.cutest import load_cutest_problem
-            from discopt.solvers.nlp_ipopt import solve_nlp
 
+            solve_nlp = importlib.import_module(f"discopt.solvers.{backend}").solve_nlp
             prob = load_cutest_problem(problem_name, sif_params=self.config.sif_params)
-            evaluator = prob.to_evaluator()
-
-            # Build constraint bounds for Ipopt
-            constraint_bounds = None
-            if prob.m > 0:
-                cl = prob.cl
-                cu = prob.cu
-                constraint_bounds = list(zip(cl.tolist(), cu.tolist(), strict=False))
-
-            opts = {"print_level": 0, "max_iter": 3000, "tol": 1e-7}
-
-            t0 = time.perf_counter()
-            nlp_result = solve_nlp(
-                evaluator, prob.x0, constraint_bounds=constraint_bounds, options=opts
-            )
-            wall_time = time.perf_counter() - t0
-
-            from discopt.solvers import SolveStatus as DiscoptStatus
-
-            status_map = {
-                DiscoptStatus.OPTIMAL: SolveStatus.OPTIMAL,
-                DiscoptStatus.INFEASIBLE: SolveStatus.INFEASIBLE,
-                DiscoptStatus.UNBOUNDED: SolveStatus.UNBOUNDED,
-                DiscoptStatus.ITERATION_LIMIT: SolveStatus.TIME_LIMIT,
-                DiscoptStatus.TIME_LIMIT: SolveStatus.TIME_LIMIT,
-                DiscoptStatus.ERROR: SolveStatus.ERROR,
-            }
-
-            prob.close()
+            try:
+                evaluator = prob.to_evaluator()
+                constraint_bounds = None
+                if prob.m > 0:
+                    constraint_bounds = list(zip(prob.cl.tolist(), prob.cu.tolist(), strict=True))
+                opts = {
+                    "print_level": 0,
+                    "max_wall_time": float(self.config.time_limit_seconds),
+                    **options,
+                }
+                t0 = time.perf_counter()
+                nlp_result = solve_nlp(
+                    evaluator, prob.x0, constraint_bounds=constraint_bounds, options=opts
+                )
+                wall_time = time.perf_counter() - t0
+            finally:
+                prob.close()
             return SolveResult(
                 instance=problem_name,
-                solver="discopt_ipopt",
-                status=status_map.get(nlp_result.status, SolveStatus.ERROR),
+                solver=solver,
+                status=self._nlp_status_map().get(nlp_result.status, SolveStatus.ERROR),
                 objective=nlp_result.objective,
                 wall_time=wall_time,
+                iterations=int(getattr(nlp_result, "iterations", 0) or 0),
             )
-        except Exception:
-            return SolveResult(
-                instance=problem_name,
-                solver="discopt_ipopt",
-                status=SolveStatus.ERROR,
-                wall_time=float("inf"),
-            )
+        except Exception as exc:
+            return self._error_result(solver, problem_name, exc)
+
+    def _run_discopt_ipopt(self, problem_name: str) -> SolveResult:
+        """discopt's cyipopt backend."""
+        return self._run_discopt_nlp(
+            problem_name, "discopt_ipopt", "nlp_ipopt", {"max_iter": 3000, "tol": 1e-7}
+        )
 
     def _run_discopt_pounce(self, problem_name: str) -> SolveResult:
-        """Solve via discopt's POUNCE (pure-Rust Ipopt port) backend using NLPEvaluatorFromCUTEst."""
-        try:
-            from discopt.interfaces.cutest import load_cutest_problem
-            from discopt.solvers.nlp_pounce import solve_nlp
-
-            prob = load_cutest_problem(problem_name, sif_params=self.config.sif_params)
-            evaluator = prob.to_evaluator()
-
-            constraint_bounds = None
-            if prob.m > 0:
-                cl = prob.cl
-                cu = prob.cu
-                constraint_bounds = list(zip(cl.tolist(), cu.tolist(), strict=False))
-
-            opts = {"print_level": 0, "max_iter": 3000, "tol": 1e-7}
-
-            t0 = time.perf_counter()
-            nlp_result = solve_nlp(
-                evaluator, prob.x0, constraint_bounds=constraint_bounds, options=opts
-            )
-            wall_time = time.perf_counter() - t0
-
-            from discopt.solvers import SolveStatus as DiscoptStatus
-
-            status_map = {
-                DiscoptStatus.OPTIMAL: SolveStatus.OPTIMAL,
-                DiscoptStatus.INFEASIBLE: SolveStatus.INFEASIBLE,
-                DiscoptStatus.UNBOUNDED: SolveStatus.UNBOUNDED,
-                DiscoptStatus.ITERATION_LIMIT: SolveStatus.TIME_LIMIT,
-                DiscoptStatus.TIME_LIMIT: SolveStatus.TIME_LIMIT,
-                DiscoptStatus.ERROR: SolveStatus.ERROR,
-            }
-
-            prob.close()
-            return SolveResult(
-                instance=problem_name,
-                solver="discopt_pounce",
-                status=status_map.get(nlp_result.status, SolveStatus.ERROR),
-                objective=nlp_result.objective,
-                wall_time=wall_time,
-            )
-        except Exception:
-            return SolveResult(
-                instance=problem_name,
-                solver="discopt_pounce",
-                status=SolveStatus.ERROR,
-                wall_time=float("inf"),
-            )
+        """discopt's POUNCE (pure-Rust Ipopt port) backend -- the default NLP path."""
+        return self._run_discopt_nlp(
+            problem_name, "discopt_pounce", "nlp_pounce", {"max_iter": 3000, "tol": 1e-7}
+        )
 
     def _run_discopt_ipm(self, problem_name: str) -> SolveResult:
-        """Solve via discopt's pure-JAX IPM backend."""
-        try:
-            from discopt.interfaces.cutest import load_cutest_problem
-
-            prob = load_cutest_problem(problem_name, sif_params=self.config.sif_params)
-            evaluator = prob.to_evaluator()
-
-            x0 = prob.x0
-
-            constraint_bounds = None
-            if prob.m > 0:
-                constraint_bounds = list(zip(prob.cl.tolist(), prob.cu.tolist(), strict=False))
-
-            opts = {"print_level": 0, "max_iter": 200}
-
-            t0 = time.perf_counter()
-
-            # The JAX IPM was retired; this backend now runs on POUNCE (the
-            # pure-Rust interior-point solver, signature-compatible).
-            from discopt.solvers.nlp_pounce import solve_nlp
-
-            nlp_result = solve_nlp(
-                evaluator, x0, constraint_bounds=constraint_bounds, options=opts
-            )
-            wall_time = time.perf_counter() - t0
-
-            from discopt.solvers import SolveStatus as DiscoptStatus
-
-            status_map = {
-                DiscoptStatus.OPTIMAL: SolveStatus.OPTIMAL,
-                DiscoptStatus.INFEASIBLE: SolveStatus.INFEASIBLE,
-                DiscoptStatus.ERROR: SolveStatus.ERROR,
-            }
-
-            prob.close()
-            return SolveResult(
-                instance=problem_name,
-                solver="discopt_ipm",
-                status=status_map.get(nlp_result.status, SolveStatus.ERROR),
-                objective=nlp_result.objective,
-                wall_time=wall_time,
-            )
-        except Exception:
-            return SolveResult(
-                instance=problem_name,
-                solver="discopt_ipm",
-                status=SolveStatus.ERROR,
-                wall_time=float("inf"),
-            )
+        """Legacy label: the JAX IPM was retired; this is POUNCE capped at 200 iterations."""
+        return self._run_discopt_nlp(problem_name, "discopt_ipm", "nlp_pounce", {"max_iter": 200})
 
     def _run_scipy(self, problem_name: str) -> SolveResult:
         """Solve via SciPy minimize for comparison baseline."""
@@ -450,13 +426,8 @@ class CUTEstBenchmarkRunner:
                 objective=float(result.fun) if result.success else None,
                 wall_time=wall_time,
             )
-        except Exception:
-            return SolveResult(
-                instance=problem_name,
-                solver="scipy",
-                status=SolveStatus.ERROR,
-                wall_time=float("inf"),
-            )
+        except Exception as exc:
+            return self._error_result("scipy", problem_name, exc)
 
     def _run_ipopt_standalone(self, problem_name: str) -> SolveResult:
         """Solve via standalone cyipopt (direct CUTEst callbacks, no discopt)."""
@@ -484,7 +455,10 @@ class CUTEstBenchmarkRunner:
                     return self._p.cons(x)
 
                 def jacobian(self, x):
-                    return self._p.jac(x).flatten()
+                    # pycutest has no ``jac``; ``cons(x, gradient=True)`` -> (c, J).
+                    # The old ``self._p.jac`` raised on every constrained problem.
+                    _, jac = self._p.cons(x, gradient=True)
+                    return np.asarray(jac).flatten()
 
                 def jacobianstructure(self):
                     m, n = prob.m, prob.n
@@ -523,6 +497,7 @@ class CUTEstBenchmarkRunner:
             problem.add_option("print_level", 0)
             problem.add_option("max_iter", 3000)
             problem.add_option("tol", 1e-7)
+            problem.add_option("max_wall_time", float(self.config.time_limit_seconds))
 
             from discopt.solvers.nlp_ipopt import _IPOPT_STATUS_MAP
 
@@ -550,13 +525,8 @@ class CUTEstBenchmarkRunner:
                 objective=float(info["obj_val"]),
                 wall_time=wall_time,
             )
-        except Exception:
-            return SolveResult(
-                instance=problem_name,
-                solver="ipopt_standalone",
-                status=SolveStatus.ERROR,
-                wall_time=float("inf"),
-            )
+        except Exception as exc:
+            return self._error_result("ipopt_standalone", problem_name, exc)
 
     def save_results(self, path: Path | None = None) -> None:
         """Save results to JSON."""
