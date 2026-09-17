@@ -200,7 +200,9 @@ def test_reduction_separation_timers_present_and_bounded():
     # invariant below. It is emitted unconditionally, zeros included, precisely so a
     # dormant filter is distinguishable from an unwired counter, which is why it now
     # reaches this schema check on every spatial solve.
-    _NON_TIMER_FAMILIES = ("cuts/", "pool/", "row_filter/")
+    # ``bound_provenance/`` (#1278 F) is also COUNTS -- certified nodes per bound
+    # source -- emitted only when non-zero.
+    _NON_TIMER_FAMILIES = ("cuts/", "pool/", "row_filter/", "bound_provenance/")
     _KNOWN = _TIMER_FAMILIES + _NON_TIMER_FAMILIES
     # ``gap_criterion`` (#1243) is the one documented non-numeric entry: which arm
     # of the convergence test the returned pair meets, present only when one does.
