@@ -7,7 +7,9 @@
 #   make bench-notebook      # Just the notebook benchmark (after build)
 #   make bench-smoke         # Quick smoke benchmark
 #   make bench-phase3-gate   # Phase 3 gate validation
-#   make bench-cutest         # Full CUTEst suite (n<=100)
+#   make bench-nlp-smoke      # NLP smoke: CUTEst smoke + 20 MINLPLib pure-NLP instances
+#   make bench-nlp-full       # NLP full: CUTEst n,m<=100 + every proven MINLPLib NLP <=500 vars
+#   make bench-cutest         # CUTEst NLP suite (n,m<=100, 653 problems)
 #   make bench-cutest-smoke   # Quick CUTEst smoke (10 problems)
 #   make setup-cutest         # Install CUTEst/SIFDecode/SIF libraries
 #   make build               # Rebuild Rust .so if sources changed
@@ -103,6 +105,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         lint hooks clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
+        bench-nlp-smoke bench-nlp-full bench-minlplib-nlp-smoke bench-minlplib-nlp \
         docs docs-open notebooks \
         gams-build gams-register gams-install gams-test gams-verify \
         graduation-gate graduation-gate-ci \
@@ -144,8 +147,12 @@ help:
 	@echo "  make bench-smoke        Quick smoke benchmark via run_benchmarks.py"
 	@echo "  make bench-phase3-gate  Phase 3 gate validation script"
 	@echo "  make bench-tests        Run benchmark test suite"
-	@echo "  make bench-cutest       Full CUTEst suite (n<=$(CUTEST_MAX_N), override with CUTEST_MAX_N=N)"
+	@echo "  make bench-nlp-smoke    NLP smoke: CUTEst smoke + MINLPLib nlp_smoke (needs CUTEst)"
+	@echo "  make bench-nlp-full     NLP full: CUTEst cutest_nlp + MINLPLib nlp panel"
+	@echo "  make bench-cutest       CUTEst NLP suite (n,m<=$(CUTEST_MAX_N), override with CUTEST_MAX_N=N)"
 	@echo "  make bench-cutest-smoke Quick CUTEst smoke test (10 problems)"
+	@echo "  make bench-minlplib-nlp-smoke / bench-minlplib-nlp  MINLPLib pure-NLP tier only"
+	@echo "                          (solvers: NLP_SOLVERS=$(NLP_SOLVERS))"
 	@echo "  make setup-cutest       Install CUTEst/SIFDecode/SIF (one-time setup)"
 	@echo "  make notebooks          Execute all notebooks in place (docs/notebooks/ + manuscript/)"
 	@echo "  make docs               Build Jupyter Book documentation"
@@ -536,35 +543,51 @@ check-cutest:
 	}
 	@echo "==> CUTEst environment OK"
 
-# --- Benchmark: CUTEst (full) -------------------------------------------------
+# --- Benchmark: NLP (two tiers) ----------------------------------------------
+#
+# Tier 1 -- CUTEst: local-NLP quality. discopt's POUNCE and Ipopt backends vs
+#   standalone cyipopt on the same PyCUTEst callbacks; a converged objective
+#   that disagrees with a [known_optima] entry fails the target.
+# Tier 2 -- MINLPLib pure NLP (probtype == NLP, proven-optimal, selected from
+#   instancedata.csv by make_suites): global certification vs the .solu
+#   oracle, discopt + SCIP in-harness.
+# `set -o pipefail` keeps a failing benchmark from being masked by `tee`.
 
-bench-cutest: build check-cutest | $(RESULTS_DIR)
-	@echo "==> Running full CUTEst benchmark (n <= $(CUTEST_MAX_N))..."
-	$(PYTHON) scripts/run_cutest_comprehensive.py \
-		--max-n $(CUTEST_MAX_N) \
-		--output $(RESULTS_DIR)/cutest_$(TS).json 2>&1 \
-		| tee $(RESULTS_DIR)/cutest_$(TS).log
-	@echo "==> Generating CUTEst report notebook..."
-	$(PYTHON) scripts/generate_cutest_report.py \
-		$(RESULTS_DIR)/cutest_$(TS).json \
-		$(RESULTS_DIR)/cutest_$(TS).ipynb
-	@echo "==> CUTEst report: $(RESULTS_DIR)/cutest_$(TS).ipynb"
-	@echo "==> CUTEst results: $(RESULTS_DIR)/cutest_$(TS).{json,log,ipynb}"
-
-# --- Benchmark: CUTEst (smoke) -----------------------------------------------
+NLP_SOLVERS ?= discopt,scip
 
 bench-cutest-smoke: build check-cutest | $(RESULTS_DIR)
-	@echo "==> Running CUTEst smoke test..."
-	$(PYTHON) scripts/run_cutest_comprehensive.py \
-		--smoke \
+	@echo "==> Running CUTEst smoke (10 problems)..."
+	set -o pipefail; $(PYTHON) -u discopt_benchmarks/scripts/run_cutest_benchmarks.py \
+		--suite cutest_smoke \
 		--output $(RESULTS_DIR)/cutest_smoke_$(TS).json 2>&1 \
 		| tee $(RESULTS_DIR)/cutest_smoke_$(TS).log
-	@echo "==> Generating CUTEst report notebook..."
-	$(PYTHON) scripts/generate_cutest_report.py \
-		$(RESULTS_DIR)/cutest_smoke_$(TS).json \
-		$(RESULTS_DIR)/cutest_smoke_$(TS).ipynb
-	@echo "==> CUTEst smoke report: $(RESULTS_DIR)/cutest_smoke_$(TS).ipynb"
-	@echo "==> CUTEst smoke results: $(RESULTS_DIR)/cutest_smoke_$(TS).{json,log,ipynb}"
+	@echo "==> CUTEst smoke results: $(RESULTS_DIR)/cutest_smoke_$(TS).{json,md,log}"
+
+bench-cutest: build check-cutest | $(RESULTS_DIR)
+	@echo "==> Running CUTEst NLP suite (n, m <= $(CUTEST_MAX_N))..."
+	set -o pipefail; $(PYTHON) -u discopt_benchmarks/scripts/run_cutest_benchmarks.py \
+		--suite cutest_nlp --max-n $(CUTEST_MAX_N) \
+		--output $(RESULTS_DIR)/cutest_nlp_$(TS).json 2>&1 \
+		| tee $(RESULTS_DIR)/cutest_nlp_$(TS).log
+	@echo "==> CUTEst results: $(RESULTS_DIR)/cutest_nlp_$(TS).{json,md,log}"
+
+bench-minlplib-nlp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running MINLPLib pure-NLP smoke (20 instances, $(NLP_SOLVERS))..."
+	set -o pipefail; $(PYTHON) -u discopt_benchmarks/run_benchmarks.py \
+		--suite nlp_smoke --use-cache --solvers $(NLP_SOLVERS) --report \
+		--output $(RESULTS_DIR)/nlp_smoke_$(TS).json 2>&1 \
+		| tee $(RESULTS_DIR)/nlp_smoke_$(TS).log
+
+bench-minlplib-nlp: build | $(RESULTS_DIR)
+	@echo "==> Running MINLPLib pure-NLP panel ($(NLP_SOLVERS))..."
+	set -o pipefail; $(PYTHON) -u discopt_benchmarks/run_benchmarks.py \
+		--suite nlp --use-cache --solvers $(NLP_SOLVERS) --report \
+		--output $(RESULTS_DIR)/nlp_$(TS).json 2>&1 \
+		| tee $(RESULTS_DIR)/nlp_$(TS).log
+
+bench-nlp-smoke: bench-cutest-smoke bench-minlplib-nlp-smoke
+
+bench-nlp-full: bench-cutest bench-minlplib-nlp
 
 # --- Full pipeline ------------------------------------------------------------
 

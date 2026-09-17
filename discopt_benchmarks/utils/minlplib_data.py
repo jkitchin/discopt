@@ -110,6 +110,22 @@ class InstanceMeta:
         return "MINLP" if pt else "unknown"
 
     @property
+    def has_nl(self) -> bool | None:
+        """Whether MINLPLib publishes an ``.nl`` file for this instance.
+
+        Read from the ``formats`` column (a set literal such as
+        ``{'gms', 'nl', 'osil'}``). ``None`` when the column is absent, so a
+        caller can tell "not published" from "not known". 24 instances of the
+        2026 snapshot (e.g. ``gastransnlp``) ship only GAMS/OSiL and can never
+        be fetched for the ``.nl`` harness.
+        """
+        formats = self.raw.get("formats")
+        if formats is None:
+            return None
+        names = {tok.strip().strip("'\"") for tok in formats.strip("{} ").split(",")}
+        return "nl" in names
+
+    @property
     def size_bucket(self) -> str:
         n = self.n_vars
         if n <= 10:

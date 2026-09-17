@@ -101,6 +101,35 @@ def _make_mock_cutest_problem(n=2, m=0, name="MOCK"):
 # ─────────────────────────────────────────────────────────────
 
 
+def test_sparse_jacobian_unpacks_slagjac_as_gradient_then_jacobian():
+    """pycutest's ``slagjac`` returns ``(g, J)``; the evaluator must keep ``J``.
+
+    Before the fix the tuple was unpacked backwards, so the Jacobian structure
+    was the objective gradient's (one row). Mocked, so it runs without CUTEst.
+    """
+    import scipy.sparse as sp
+
+    mock_prob = _make_mock_cutest_problem(n=3, m=2)
+    g = sp.coo_matrix(np.array([[1.0, 2.0, 3.0]]))
+    J = sp.coo_matrix(np.array([[4.0, 0.0, 5.0], [0.0, 6.0, 7.0]]))
+    mock_prob.slagjac = MagicMock(return_value=(g, J))
+    mock_pycutest = MagicMock()
+    mock_pycutest.import_problem = MagicMock(return_value=mock_prob)
+
+    with patch.dict(sys.modules, {"pycutest": mock_pycutest}):
+        import importlib
+
+        import discopt.interfaces.cutest as cutest_mod
+
+        importlib.reload(cutest_mod)
+        ev = cutest_mod.CUTEstProblem("MOCK").to_evaluator()
+        vals, rows, cols = ev.evaluate_sparse_jacobian(np.zeros(3))
+
+    got = sp.coo_matrix((vals, (rows, cols)), shape=(2, 3)).toarray()
+    np.testing.assert_array_equal(got, J.toarray())
+    assert set(rows.tolist()) == {0, 1}
+
+
 class TestNLPEvaluatorFromCUTEst:
     """Test the evaluator interface with mocked CUTEst problem."""
 
@@ -401,6 +430,44 @@ class TestCUTEstIntegration:
         assert J.shape == (prob.m, prob.n)
 
         prob.close()
+
+    def test_constrained_sparse_structure_matches_dense_jacobian(self):
+        """The sparse Jacobian must cover every nonzero of the dense one (HS71)."""
+        from discopt.interfaces.cutest import load_cutest_problem
+
+        prob = load_cutest_problem("HS71")
+        ev = prob.to_evaluator()
+        x0 = prob.x0
+        J = ev.evaluate_jacobian(x0)
+        rows, cols = ev.jacobian_structure()
+        covered = np.zeros_like(J, dtype=bool)
+        covered[rows, cols] = True
+        assert covered[J != 0].all(), "Jacobian structure misses nonzeros"
+        np.testing.assert_array_equal(ev.evaluate_jacobian_values(x0), J[rows, cols])
+        prob.close()
+
+    @pytest.mark.parametrize("backend", ["nlp_ipopt", "nlp_pounce"])
+    def test_constrained_solve_reaches_known_optimum(self, backend):
+        """HS71 (opt 17.0140173) must solve through the CUTEst evaluator."""
+        import importlib
+
+        from discopt.interfaces.cutest import load_cutest_problem
+        from discopt.solvers import SolveStatus
+
+        if backend == "nlp_ipopt":
+            pytest.importorskip("cyipopt")
+        else:
+            pytest.importorskip("pounce")
+        solve_nlp = importlib.import_module(f"discopt.solvers.{backend}").solve_nlp
+
+        prob = load_cutest_problem("HS71")
+        ev = prob.to_evaluator()
+        bounds = list(zip(prob.cl.tolist(), prob.cu.tolist(), strict=True))
+        result = solve_nlp(ev, prob.x0, constraint_bounds=bounds, options={"print_level": 0})
+        prob.close()
+
+        assert result.status == SolveStatus.OPTIMAL
+        assert result.objective == pytest.approx(17.0140173, rel=1e-6)
 
     def test_problem_info(self):
         from discopt.interfaces.cutest import load_cutest_problem

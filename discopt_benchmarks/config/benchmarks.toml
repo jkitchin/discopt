@@ -165,17 +165,23 @@ sources = ["minlplib"]
 problem_class = "qp"
 time_limit_seconds = 120
 
-[suites.convex_nlp]
-description = "Convex NLP instances"
+# Pure continuous NLP (MINLPLib probtype == "NLP"), selected from
+# instancedata.csv by scripts/make_suites.py (--tier nlp_smoke / nlp):
+# proven-optimal (so .solu is an oracle) and published as .nl. These replace
+# the old convex_nlp / nonconvex_nlp problem_class suites: convex_nlp matched
+# no instance, and nonconvex_nlp was 11 hand-labelled names of which 10 carry
+# integer variables (MBNLP/MINLP/IQCP/...). Run with --use-cache.
+[suites.nlp_smoke]
+description = "Pure-NLP smoke: 20 proven-optimal MINLPLib NLP instances (<=100 vars), stratified by size"
 sources = ["minlplib"]
-problem_class = "convex_nlp"
-time_limit_seconds = 300
+instance_list = "config/suites/nlp_smoke.txt"
+time_limit_seconds = 60
 
-[suites.nonconvex_nlp]
-description = "Non-convex NLP instances"
+[suites.nlp]
+description = "Pure-NLP panel: every proven-optimal MINLPLib NLP instance with an .nl file and <=500 vars"
 sources = ["minlplib"]
-problem_class = "nonconvex_nlp"
-time_limit_seconds = 600
+instance_list = "config/suites/nlp.txt"
+time_limit_seconds = 300
 
 # ─────────────────────────────────────────────────────────────
 # PHASE GATE CRITERIA

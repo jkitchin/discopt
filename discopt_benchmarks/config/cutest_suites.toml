@@ -9,7 +9,9 @@
 
 [general]
 source = "cutest"
-default_solvers = ["discopt_ipopt", "ipopt_standalone"]
+# discopt_pounce is discopt's default NLP backend; ipopt_standalone is the
+# reference (cyipopt straight from PyCUTEst callbacks, no discopt layer).
+default_solvers = ["discopt_pounce", "discopt_ipopt", "ipopt_standalone"]
 num_runs = 1
 
 # ─────────────────────────────────────────────────────────────
@@ -74,6 +76,18 @@ max_variables = 200
 time_limit_seconds = 120
 
 # ─────────────────────────────────────────────────────────────
+# NLP benchmark full tier (make bench-nlp-full): every CUTEst problem
+# with <=100 variables and <=100 constraints, of every constraint type
+# (653 problems at the default SIF dimensions, measured 2026-09-17).
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_nlp]
+description = "All CUTEst U/B/L/Q/O problems with <=100 vars and <=100 constraints"
+classification_constraints = ["U", "B", "L", "Q", "O"]
+max_variables = 100
+max_constraints = 100
+time_limit_seconds = 60
+
+# ─────────────────────────────────────────────────────────────
 # Smoke test: small curated subset for CI
 # ─────────────────────────────────────────────────────────────
 [suites.cutest_smoke]
@@ -100,3 +114,7 @@ ROSENBR = 0.0
 BEALE = 0.0
 HS35 = 0.1111111
 HS71 = 17.0140173
+HS100 = 680.6300573       # Hock & Schittkowski (1981)
+HS106 = 7049.2480205      # the corrected HS106 value; the 1981 table's 7049.3309 is inexact
+DENSCHNA = 0.0            # sum of squares with a zero at the origin
+HILBERTA = 0.0            # positive-definite quadratic form

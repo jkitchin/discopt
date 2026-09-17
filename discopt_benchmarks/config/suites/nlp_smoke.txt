@@ -1,0 +1,25 @@
+# discopt NLP smoke tier -- stratified pure-NLP sample (seed=17)
+# probtype == NLP, <=100 vars; 60s per-instance limit
+# Source: instancedata.csv (proven-optimal only)
+# Total instances: 20
+#
+alkyl
+ann_compressor_exp
+chem
+chenery
+ex14_2_5
+ex4_1_4
+ex5_4_3
+ex7_2_4
+ex7_3_2
+ex7_3_4
+ex8_1_1
+ex8_2_1b
+ex8_2_4b
+ex8_4_4
+gsg_0001
+launch
+least
+mathopt5_3
+prob07
+st_e11
