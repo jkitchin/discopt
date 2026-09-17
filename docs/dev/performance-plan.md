@@ -9039,12 +9039,25 @@ random sub-boxes of the real CU2MG phase, using the engine's own verdict
 | CU2MG Ψ | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 |
 | **CONTROL convex** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** |
 
-Ψ is never certifiably convex on any sub-box down to a **1000× subdivision** of the
-root box — structural, from the bilinear cross terms, whose Hessian `[[0,c],[c,0]]`
-has eigenvalues ±|c| on every box. So a tangent-plane cut is unsound at every node
-at every depth, and **subtree scoping would not let the plugin write it**. The
-sound alternative, an αBB-corrected tangent, is machinery discopt already runs in
-its own relaxation.
+Re-run across **every mixing phase in both shipped assessments** (6 phases, 588
+probes) rather than the one named instance, the verdict is 0 everywhere — with the
+control at 12/12 throughout, so the zeros mean "abstained", not "the probe is
+broken".
+
+Two distinct reasons sit behind them, and they should not be lumped:
+
+* the five `n_y = 1` phases are not eligible for the composite lift at all (it
+  needs ≥2 variables); for them the relevant fact is the reverse — the engine
+  already emits the **exact** 1-D secant/tangent envelope per node box, which is
+  what §66 added, so a user tangent line has nothing to add;
+* `CU2MG`, the one genuine multivariate phase, is eligible and never certifies at
+  any depth — structural, from the bilinear cross terms whose Hessian
+  `[[0,c],[c,0]]` has eigenvalues ±|c| on every box.
+
+Either way no user tangent-plane cut contributes: where it would be sound the
+engine already emits the exact envelope, and where the engine abstains the cut is
+not sound. **Subtree scoping changes neither half.** The sound alternative, an
+αBB-corrected tangent, is machinery discopt already runs in its own relaxation.
 
 **Conclusion: no follow-up work is implied.** D's machinery is sound and complete
 for what it is; its acceptance criterion was written against a cut family that is
