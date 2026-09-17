@@ -8974,3 +8974,81 @@ those last two rows are `DISCOPT_LOGSUMEXP_ATOM`, **default OFF**, taking a 107%
 root gap to 0.00%. The in-tree note already records it as HELPS (103 → 3 nodes).
 Graduating it is a §5 bound-changing decision needing its own differential panel;
 it is not #1276's to make, but it is the largest single number this round turned up.
+
+## 68. #1248 D on a real CALPHAD pricing instance: sound cuts exist and buy nothing, because the useful ones are node-local (2026-09-17)
+
+#1248's end-to-end acceptance for the node cut callback is "tangent-plane cuts
+supplied through `CutCallback` reduce node count on a pricing instance". Measured
+against the actual plugin (`github.com/jkitchin/discopt-calphad` @ `4fc85fe`), on
+CU2MG — the Cu–Mg Laves phase (CU,MG)₂(CU,MG)₁ from the NIMS assessment, priced by
+`equilibrium.pricing.price_phase`. Script: `scripts/entry_1278_calphad_cuts.py`.
+
+**The criterion is not met, and the reason is structural.**
+
+### 1. In the plugin's own formulation no sound nontrivial cut exists
+
+`price_phase` builds a **box-only** model — two site fractions, no constraints
+(the plugin's only `subject_to` is in the restricted-equilibrium NLP). Every point
+of the box is therefore feasible, so any cut excluding part of the box excludes a
+feasible point:
+
+| cut | outcome |
+|---|---|
+| halves the box (`y0 ≤ 0.5`) | **refused** by the validation gate |
+| contains the box (`y0 ≤ 2.0`) | accepted, and **provably inert** — 85 nodes in 12/12 interleaved runs, identical objective |
+
+### 2. In the epigraph formulation sound cuts exist and change nothing
+
+Rewriting as `min t s.t. t ≥ Ψ(y)` makes supporting hyperplanes of a convex
+underestimator of Ψ into valid `t ≥ affine(y)` cuts — what "tangent-plane cuts of
+Gibbs energy" means operationally. 119 such cuts were generated, validated and
+pooled:
+
+| arm | nodes | objective | bound |
+|---|---:|---|---|
+| no cuts | 239 | −17.46104641 | −17.461054074076234 |
+| 119 tangent cuts | **239** | −17.46104641 | −17.461054074076234 |
+
+Identical to the last digit of the bound.
+
+### Why, and what it implies for the roadmap
+
+A cut accepted through this seam is **global** — the pool is applied at every node
+through `_AugmentedEvaluator`, and `CutResult(scope="local")` is refused because
+there is no subtree-scoped pool to hold one. So a cut must be valid over the whole
+root box, and a globally-valid affine underestimator of Ψ is *weaker than the
+McCormick/entropy envelopes discopt already builds on each node box*. The
+tangent-plane cut that would help a pricing solve is the node-local one, and
+node-local cuts are exactly what the mechanism cannot hold.
+
+**So the next useful thing for this class is subtree-scoped cuts, not more cut
+generation.** D's machinery is sound and complete for what it is; its acceptance
+criterion was written against a capability (local cuts) that the design then
+deliberately refused, for the false-certificate reason.
+
+### Two things measured along the way
+
+**The gate earned its keep on a real cut.** The first underestimator took its
+intercept from the worst residual on a 701×701 grid; the true worst residual is
+off-grid, and the gate refused the cut at a **1.308e-06** relative violation. A
+well-meant, nearly-right cut, caught before it could poison the tree.
+
+**#1277's entropy envelope, on the plugin's own phase.** The earlier 28.84% →
+5.45% was on a CEF model I constructed; this is the real one:
+
+| arm | nodes | status |
+|---|---:|---|
+| interval floor (pre-#1277) | 53,811 | **never certified** — hit the 180 s limit |
+| entropy envelope | **85** | `optimal`, gap certified |
+
+Same optimum in both. Note the *root* gap barely moves (13.17% → 12.43%): the gain
+is not at the root but in the tree, where a tight per-box envelope lets
+branch-and-bound close what the floor never does. That is the largest single
+result of this round, and it was found only because #1277's stated premise was
+wrong.
+
+**A confound caught in the same run, worth recording**: an early pass appeared to
+show a vacuous cut cutting 85 nodes to 5. The two arms had different
+`gap_tolerance` (1e-6 vs the 1e-4 default) — my own confound, not an effect. The
+interleaved control (12 runs, identical `gap_tolerance`) shows the vacuous cut is
+exactly inert.
