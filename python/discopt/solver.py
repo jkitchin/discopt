@@ -23751,6 +23751,8 @@ def _solve_milp_highs(
         return None if v is None else (-v if maximize else v)
 
     route = _highs_route_label("milp", out)
+    if out.stats.get("milp/decertified_unscalable") and out.status != "error":
+        logger.warning("HiGHS MILP route: %s", out.message)
     stats = dict(out.stats)
     bound = _flip(out.bound)
     root_bound = _flip(out.root_bound)
@@ -23802,7 +23804,14 @@ def _solve_milp_highs(
             # `bnb_tree` says exactly that, so a consumer that wants the
             # stronger guarantee can tell the two apart.
             bound_valid=bound is not None,
-            bound_source="bnb_tree" if bound is not None else None,
+            # #1295: a decertified solve reports the NS-safe root LP bound instead.
+            bound_source=(
+                None
+                if bound is None
+                else "root_relaxation"
+                if out.labels.get("milp/bound_provenance") == "root-ns"
+                else "bnb_tree"
+            ),
             constraint_duals=cd,
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
@@ -23824,7 +23833,13 @@ def _solve_milp_highs(
         # the gap is open, so `gap_certified` is False, but HiGHS's tree bound
         # over the unexplored tree is still a bound. Same fp standard as above.
         bound_valid=_budget_bound is not None,
-        bound_source="bnb_tree" if _budget_bound is not None else None,
+        bound_source=(
+            None
+            if _budget_bound is None
+            else "root_relaxation"
+            if out.labels.get("milp/bound_provenance") == "root-ns"
+            else "bnb_tree"
+        ),
         solver_stats=stats,
         algorithm_route=route,
     )
