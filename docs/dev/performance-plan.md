@@ -9249,7 +9249,7 @@ the O(1) hole, not that.
 
 | | OFF (pristine) | ON (fixed) |
 |---|---|---|
-| bound-above-incumbent violations | 1 (`syn05hfsg`) | 1 (`syn05hfsg`) |
+| certificate violations (sense-aware; see §69.6) | **0** | **0** |
 | **introduced by the fix** | — | **0** |
 | certification lost / gained | — | **0 / 0** |
 | objective drift > 1e-6 | — | **0** |
@@ -9281,12 +9281,75 @@ This is why "route the OA master to HiGHS" (`lp-milp-highs-routing-plan.md`
 Stage 2) was not an acceptable substitute for the fix: it reaches neither the
 convex kernel nor the pinned Lagrangian/Benders callers.
 
-### 69.6 Two defects this surfaced and did NOT fix
+### 69.6 RETRACTED — `syn05hfsg` is not a second defect; the panel check was sense-blind
 
-* **`syn05hfsg` reports a dual bound 2.757 ABOVE its own incumbent** on a
-  time-limited `feasible` exit. Present in **both** panel arms, so pre-existing
-  and unrelated to the separator. `gap_certified` is False, so nothing is
-  certified — but `bound <= incumbent` is violated, which is a §1 invariant.
-* **`cover.rs:134` and `mir.rs:242` skip small weights in the same shape** as the
-  GMI drop this section fixes, before the sign check. Not measured; an audit is
-  warranted on the same reasoning.
+§69.4 originally reported one bound-above-incumbent violation in each arm
+(`syn05hfsg`, by 2.757) and called it pre-existing. **Both readings were wrong,
+and the error was in the instrument, not the solver.**
+
+`syn05hfsg` is a **MAXIMIZE** model (`O0 1` in its `.nl`; 4 of the 66 in-repo
+instances are). For a maximize the dual bound is an *upper* bound, so
+`bound = 840.489 >= obj = 837.732` is the **correct** orientation. The panel's
+violation test applied the minimize rule (`bound > obj`) to every instance, so it
+flagged every maximize instance that had not closed its gap.
+
+Re-checked sense-aware over both recorded arms:
+
+| | OFF (pristine) | ON (fixed) |
+|---|---|---|
+| bound-above-incumbent violations, sense-aware | **0** | **0** |
+
+So the panel was fully cert-clean in both arms and §69.4's cert-clean row is
+*stronger* than first reported, not weaker. `panel_1236.py` now records each
+instance's sense and `panel_compare.py` tests the invariant against it.
+
+This is the fourth instrument error in this investigation, all the same shape: a
+check whose tolerance or orientation was wrong reported a clean pass (or a false
+alarm) and was believed. The others were a cut evaluation that dropped the
+epigraph column, a violation gate scaled by `|z*|max = 3.3e8` (threshold -0.86
+against a real -0.017), and the inference from a bisect that the cuts were
+invalid — later confirmed correct for the wrong reason. CLAUDE.md §6 is about
+exactly this, and it cost more here than any of the solver defects did.
+
+### 69.7 `cover.rs`: the same term-drop defect, found and fixed
+
+The GMI audit pointed at two siblings. One is real.
+
+**`cover.rs` — real, fixed.** `cover_cut_for_row`'s item loop skipped
+`|w| <= tol` **before** the `w < -tol || !is_int[j] || bounds` validation, so a
+column with a tiny coefficient was neither an item nor checked. The cover
+argument ("every cover item at 1 pushes the row over `cap`") holds only if the
+remaining columns cannot push it back down. Measured on
+`x0 + x1 - 1e-10 y + s = 1.5` with `x0,x1` binary and `y in [0, 1e20]`: the point
+`(1, 1, 5e9)` satisfies the row (2 - 0.5 = 1.5) and the emitted cover cut
+`x0 + x1 <= 1` excludes it. Pinned by
+`tiny_negative_weight_on_a_wide_column_is_not_skipped`, which fails on the
+pre-fix separator with `cover cut excludes the feasible point [1, 1, 5e9]`.
+
+Fixed the same way as the GMI drop: each non-item column's **minimum**
+contribution over its box is charged to the capacity (raising it, which can only
+make a cover harder to find), and a column whose minimum is unbounded refuses the
+cut. The test is on the BOUND against the `1e20` sentinel, never on a product.
+
+Differential panel for the cover fix alone (same 66 instances, 20 s, against the
+GMI-fixed arm as baseline so the two changes are separated):
+
+| | GMI fix only | + cover fix |
+|---|---|---|
+| certificate violations (sense-aware) | 0 | **0** |
+| certification lost / gained | — | **0 / 0** |
+| objective drift > 1e-6 | — | **0** |
+| node counts | — | 62 unchanged, 2 fewer, 2 more |
+| total nodes | 4072 | 4208 (+3.3 %) |
+
+`tanksize` 1812 -> 1932 and `clay0303hfsg` 95 -> 127 pay for the refusals;
+`syn05hfsg` 227 -> 215 and `hda` 7 -> 3 gain. Cert-clean, and the +3.3 % is the
+price of not emitting invalid cover cuts — it ships on §1, not on this column.
+
+**`mir.rs:242` — false positive, no defect.** The skip there sets only
+`comp_near[j]`, i.e. whether to *complement* column `j` at its upper bound;
+`mir_under_substitution` then iterates every column with no skip and substitutes
+`y_j = x_j - l_j`. No term is deleted from any cut, so the drop pattern does not
+occur. `mir.rs` has exactly two tolerance guards — this one and
+`if viol <= tol { return None }`, which refuses an under-violated cut and is
+sound by construction. Recorded so the audit is not repeated.
