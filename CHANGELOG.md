@@ -346,6 +346,61 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **An incumbent better than the true optimum, and a dual bound past it, are now
+  caught on every row — certified or not** (#1204 follow-up). #1195 correctly
+  stopped bracketing *uncertified* incumbents against the oracle: an incumbent
+  above the optimum is the expected shape of an open gap, and the old check
+  hard-failed two graduation-gate arms on `nvs05` sitting 27 % above it. Stopping
+  there also stopped catching an incumbent *below* the optimum — a point better
+  than the optimum cannot be feasible, which is a wrong answer at any certification
+  status — and left the dual bound of an uncertified row unchecked entirely, though
+  a bound past the optimum would prune the optimum away.
+
+  One sense-free rule catches both: `min(bound, incumbent) <= opt <= max(bound,
+  incumbent)` to correctness tolerance, which holds for a minimization and a
+  maximization alike, so it needs no access to the model and lives in the
+  solver-free `cert_neutrality` module. It is the one **absolute** check there —
+  every other compares two runs and can be invalidated by a budget — so no
+  exclusion reaches it: a row the wall rules decline to *compare* is still checked
+  against the model's own optimum. Both gate scripts print an executed-assertion
+  count, because "no violations" over zero rows read is not a pass.
+
+  Falsified before shipping on 96 real solves (48 vendored instances at 2 s and 8 s
+  budgets, small on purpose to force open gaps): 87 rows bracketable, 10 of them
+  uncertified, zero violations; the 9 skips are rows with no oracle, no incumbent
+  or no dual bound, each reported. Verified to fire end-to-end through the real
+  script with one oracle value poisoned.
+
+- **A certification lost at the wall clock no longer hard-fails a graduation-gate
+  arm as a soundness fault** (#1204). The cert panel's budgets are wall-clock
+  seconds chosen on the machine that generated `cert-baseline.jsonl`, where the
+  slowest rows certify at ~half of them (`tanksize` 31.0/60 s, `nvs05` 28.3/60,
+  `tls2` 30.4/60). On a runner ~2x slower they tip, and the comparison then read
+  that as a lost `optimal` *status* plus a lost certificate — two soundness-class
+  violations — so whether an arm failed depended on whether the flag-OFF **control**
+  happened to certify the edge rows: two gate runs of identical PR code failed on
+  different four-arm subsets, and a `main` run that drifted *more* passed because
+  its control lost `tanksize` and disarmed the tripwire.
+
+  Two changes, neither of which weakens a check. **Classification**:
+  `wall_limited_arms` reports which side of a comparison ran out of clock, and
+  `check_neutrality` applies it *per check* — both arms out of clock is still no
+  verdict (#1187); this arm out of clock is a perf-class `wall_regression`, because
+  `optimal` is a settled status so a wall-limited row is never certified and can
+  hide no false certificate; the reference out of clock stops its nodes and
+  incumbent being yardsticks **but leaves this arm's own certificate bracketed
+  against the oracle** — the one soundness question still answerable there, which a
+  row-wholesale exclusion would have deleted. Perf-class stays fatal in the
+  bound-neutral regime exactly as `node_regression` does. **Calibration**: the panel
+  now measures the box against the reference machine first (a bounded probe of
+  cheap settled rows, equal-node and unrouted) and scales every budget by the
+  result, clamped to `[1, 4]` and shrunk further if the panel's predicted wall
+  exceeds a ceiling; an unmeasurable calibration leaves the budgets nominal and says
+  so. Measured on a box 3.17x the reference: `tanksize` `time_limit` -> `optimal`
+  71.4 s, `tls2` `feasible` -> `optimal` 76.5 s, `nvs05` `feasible` (incumbent 27 %
+  above the optimum) -> `optimal` at the true optimum — all three at the reference's
+  answer (`docs/dev/data/README-1204-calibration.md`).
+
 - **An indexed array `Parameter` was not recognised as a constant, costing the
   convexity certificate** (#1272). The classifier knew a `Constant` and a
   `Parameter`, but not a *static index into one*, so in `mu[k] * x[k]` — the
