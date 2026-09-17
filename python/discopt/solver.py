@@ -20967,6 +20967,15 @@ def _solve_lp_matrix(
             wall_time=wall_time,
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
+    if result.status == SolveStatus.UNBOUNDED and result.ray_verified is False:
+        # #1286: the engine's ray did not survive the exact check, so its verdict is
+        # not a certificate. Let the next engine decide, or report ``error``.
+        logger.warning(
+            "%s reported UNBOUNDED but its recession ray does not verify exactly; "
+            "not certifying 'unbounded' (#1286).",
+            engine,
+        )
+        return None
     if result.status == SolveStatus.UNBOUNDED:
         # #850 Obs 1: an interior-point engine (POUNCE) treats a declared finite
         # bound whose magnitude is in [1e15, 1e20) as ±infinity — its barrier

@@ -249,6 +249,16 @@ def solve_lp(
         "numerical": SolveStatus.ERROR,
     }
     st = status_map.get(status, SolveStatus.ERROR)
+    if st == SolveStatus.UNBOUNDED:
+        # The simplex's ray is a candidate (see ``LpSolution::ray``); decide it
+        # exactly over the same standard form the simplex solved (#1286).
+        from discopt.solvers.lp_milp_highs import StdForm, primal_ray_verified
+
+        ray = np.asarray(_ray, dtype=np.float64)
+        verified = ray.shape == (n + m,) and primal_ray_verified(
+            ray, StdForm.from_arrays(c_std, a_std, b_vec, lb_std, ub_std)
+        )
+        return LPResult(status=st, ray_verified=bool(verified))
     if st != SolveStatus.OPTIMAL:
         return LPResult(status=st)
 

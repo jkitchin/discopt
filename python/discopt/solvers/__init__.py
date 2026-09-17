@@ -60,6 +60,10 @@ class LPResult:
     iterations: int = 0
     wall_time: float = 0.0
     infeasibility_certificate: Optional[InfeasibilityCertificate] = None
+    # On an ``UNBOUNDED`` result: whether the engine's recession ray was verified
+    # exactly (``lp_milp_highs.primal_ray_verified``). ``None`` when the engine
+    # did not check; ``False`` means the verdict is not a certificate (#1286).
+    ray_verified: Optional[bool] = None
 
 
 @dataclass
