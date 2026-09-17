@@ -154,7 +154,16 @@ def sum_result_shape(expr: SumExpression) -> Optional[tuple[int, ...]]:
             # numpy would raise here; this module does not guess what the
             # evaluator would have done with an out-of-range axis.
             return None
+        if a % nd in reduced:
+            # Likewise for a repeated axis (``axis=(0, 0)``): numpy refuses it,
+            # so there is no shape to report. Folding the duplicate away and
+            # returning the single-reduction shape would hand every caller a
+            # shape the evaluator never produces.
+            return None
         reduced.add(a % nd)
+    # ``axis=()`` reduces nothing, so ``reduced`` is empty and the comprehension
+    # below returns the operand's shape unchanged -- which is exactly what
+    # ``np.sum(a, axis=())`` evaluates to. `_nl_expr_compiler._sum_along` agrees.
     return tuple(d for i, d in enumerate(operand_shape) if i not in reduced)
 
 

@@ -346,6 +346,30 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Five defects found reviewing the #1288-#1292 batch itself.** The one that
+  mattered: `_sum_along` compiled `sum(x, axis=())` — a reduction over no axes,
+  which numpy defines as the identity — into a single full-reduction tape node,
+  because `shape[:-0]` is empty and `shape[-0:]` is the whole shape. The tape
+  then reported a scalar while `scalarize.sum_result_shape` reported the
+  operand's shape, which is the #1160 shape: the tape and the layer that decides
+  `sum_is_full_reduction` disagreeing about how many rows a node stands for. A
+  repeated axis (`axis=(0, 0)`) was the same disagreement from the other side —
+  numpy refuses it, `sum_result_shape` folded the duplicate through its set and
+  returned a shape the evaluator never produces. Both are refused or answered
+  consistently now, in both layers.
+
+  Also: a 1.1 `.dopt` reloaded a `nan` in `mip_nlp_trace` as the **string**
+  `"nan"` (through 1.1 the solution subtree carried a blanket `_enc_tree`, which
+  #1292 rightly dropped without a legacy path for that field), permanent after a
+  re-save — the model schema goes to `discopt.model/1.2` and the minor now
+  selects the decoder, since it is also the first non-additive minor (the
+  `{"k": "bool"}` index kind and the list sum axis); `_gams_round` raised
+  `OverflowError`/`ValueError` on `INF`/`NA` where the `round` it replaced
+  returned them, crashing `from_gams`; and the #1289 unknown-shape refusal —
+  correct, an opaque `dm.custom` callable has no static shape — advised shaped
+  variables, which is not a workaround for one, so it now names the elementwise
+  spelling that is.
+
 - **An incumbent better than the true optimum, and a dual bound past it, are now
   caught on every row — certified or not** (#1204 follow-up). #1195 correctly
   stopped bracketing *uncertified* incumbents against the oracle: an incumbent

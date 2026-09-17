@@ -2182,7 +2182,11 @@ def _object_array_binop(op: str, left, right) -> np.ndarray:
             f"say so. Index it to scalars and put them in an object array of the "
             f"same shape for elementwise pairing, or use shaped variables directly "
             f"(`m.continuous(..., shape=...)`), which support `{op}` without an "
-            f"object array."
+            f"object array. If the operand is scalar and its shape simply cannot "
+            f"be read statically — a `dm.custom(...)` call is opaque by "
+            f"construction — spell the combination out elementwise instead: "
+            f"`np.array([e {op} s for e in arr], dtype=object)`, which pairs them "
+            f"explicitly and needs no shape."
         )
     if scalar_shape != ():
         raise TypeError(

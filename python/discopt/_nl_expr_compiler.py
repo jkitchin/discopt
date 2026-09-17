@@ -698,6 +698,35 @@ def _sum_along(arr: np.ndarray, axis: int | tuple[int, ...] | None, E: Any) -> n
     # A tuple axis (``X.mean(axis=(0, 1))``, #1289) reduces several axes at once:
     # move them all to the end and flatten them into one.
     axes = tuple(axis) if isinstance(axis, (tuple, list)) else (axis,)
+    # ``axis=()`` reduces NOTHING -- ``np.sum(a, axis=())`` is ``a`` -- and the
+    # ``k``-based slicing below cannot express that: for ``k = 0``,
+    # ``shape[:-0]`` is ``shape[:0]`` (empty, so a 0-d output) and ``shape[-0:]``
+    # is the whole shape (so every element is folded into it). The no-op would
+    # compile to ONE full-reduction node while
+    # :func:`discopt._relax.scalarize.sum_result_shape` still reports the
+    # operand's shape -- the tape and the layer that decides
+    # ``sum_is_full_reduction`` disagreeing about how many rows a node stands
+    # for, which is the #1160 failure mode. Return the operand instead.
+    if not axes:
+        return arr.copy()
+    # numpy refuses a repeated or out-of-range axis, and so does ``np.moveaxis``
+    # below -- with a ``ValueError``/``AxisError`` that :func:`try_compile` does
+    # not catch, so it would escape the fallback and crash the caller rather than
+    # degrade. Refuse in the tape's own currency instead, and let the fallback
+    # path raise numpy's own error on an expression numpy would reject anyway.
+    nd = arr.ndim
+    seen: set[int] = set()
+    for a in axes:
+        if not -nd <= a < nd:
+            raise UnsupportedForTape(
+                f"sum axis {a} is out of range for an operand of shape {arr.shape}"
+            )
+        if a % nd in seen:
+            raise UnsupportedForTape(
+                f"sum axis {a} appears more than once in {axis!r}; a reduction "
+                f"folds each axis exactly once"
+            )
+        seen.add(a % nd)
     k = len(axes)
     moved = np.moveaxis(arr, axes, tuple(range(-k, 0)))
     if moved.ndim == k:
@@ -705,8 +734,8 @@ def _sum_along(arr: np.ndarray, axis: int | tuple[int, ...] | None, E: Any) -> n
     out = np.empty(moved.shape[:-k], dtype=object)
     flat_out = out.reshape(-1)
     flat_in = moved.reshape(flat_out.size, int(np.prod(moved.shape[-k:])))
-    for k in range(flat_out.size):
-        flat_out[k] = E.sum(flat_in[k].tolist())
+    for i in range(flat_out.size):
+        flat_out[i] = E.sum(flat_in[i].tolist())
     return out
 
 
