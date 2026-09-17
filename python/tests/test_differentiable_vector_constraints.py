@@ -28,7 +28,9 @@ from discopt._relax.differentiable import differentiable_solve  # noqa: E402
 def _mixed_shape_model(pv: float):
     """MAX sum(x)+sum(y) s.t. x<=0.5p (shape 3), y<=0.3p (shape 2), x,y>=0.
     Both constraints bind at the optimum, so multipliers are nonzero and the
-    sensitivity is meaningful: obj* = 3*0.5p + 2*0.3p = 2.1p (min-convention -2.1p).
+    sensitivity is meaningful: obj* = 3*0.5p + 2*0.3p = 2.1p, so d(obj*)/dp = 2.1.
+    (These assertions read -2.1 until #1299: the reported objective and gradient
+    were the internal minimization form of a model written as a MAXIMIZE.)
     """
     m = dm.Model("mixed")
     x = m.continuous("x", shape=(3,), lb=0, ub=10)
@@ -91,9 +93,9 @@ def test_mixed_shape_gradient_matches_finite_difference():
     eps = 1e-4
     fd = (obj_star(2.0 + eps) - obj_star(2.0 - eps)) / (2 * eps)
 
-    # Closed form: obj (min-convention) = -2.1p -> d/dp = -2.1.
+    # Closed form: obj* = 2.1p -> d/dp = 2.1 (#1299: was reported as -2.1).
     assert np.isclose(g, fd, atol=1e-2), f"gradient {g} != finite-diff {fd}"
-    assert np.isclose(g, -2.1, atol=1e-2), f"gradient {g} != analytic -2.1"
+    assert np.isclose(g, 2.1, atol=1e-2), f"gradient {g} != analytic 2.1"
 
 
 def test_l3_mixed_shape_gradient_matches_finite_difference():
@@ -114,7 +116,7 @@ def test_l3_mixed_shape_gradient_matches_finite_difference():
     eps = 1e-4
     fd = (obj_star(2.0 + eps) - obj_star(2.0 - eps)) / (2 * eps)
     assert np.isclose(g, fd, atol=1e-2), f"L3 gradient {g} != finite-diff {fd}"
-    assert np.isclose(g, -2.1, atol=1e-2)
+    assert np.isclose(g, 2.1, atol=1e-2)
 
 
 def test_scalar_constraint_gradient_unregressed():
@@ -129,6 +131,6 @@ def test_scalar_constraint_gradient_unregressed():
     g = float(np.ravel(np.asarray(r.gradient(p)))[0])
     eps = 1e-4
     fd = (obj_star(1.5 + eps) - obj_star(1.5 - eps)) / (2 * eps)
-    # obj (min-convention) = -2p -> d/dp = -2.
+    # obj* = 2p -> d/dp = 2 (#1299: was reported as -2).
     assert np.isclose(g, fd, atol=1e-2)
-    assert np.isclose(g, -2.0, atol=1e-2)
+    assert np.isclose(g, 2.0, atol=1e-2)
