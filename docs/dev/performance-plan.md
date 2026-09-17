@@ -8974,3 +8974,682 @@ those last two rows are `DISCOPT_LOGSUMEXP_ATOM`, **default OFF**, taking a 107%
 root gap to 0.00%. The in-tree note already records it as HELPS (103 → 3 nodes).
 Graduating it is a §5 bound-changing decision needing its own differential panel;
 it is not #1276's to make, but it is the largest single number this round turned up.
+## 68. #1236 integer-heavy node-count tail: three different causes, and three falsified fixes (2026-09-16)
+
+Issue #1236 recorded a five-instance tail (nvs02/nvs14/nvs13/tls2/fac2, 24–297×
+SCIP's nodes) and three leads with kill criteria. It framed the leads as
+*possibly* sharing a cause. They do not: the five instances have **three
+different** causes, and the fix that each one implies is different.
+
+Reproduction is the issue's own script against `python/tests/data/minlplib_nl/`
+(all five are in-repo, so no external corpus is needed). Node counts reproduce
+the issue exactly on `main` — nvs02 297, nvs14 273, nvs13 637, fac2 39 —
+**except tls2**, see §68.4.
+
+### 66.1 Lead 1 (nvs02 / nvs14) — the cause is the LIFT, not cuts, bound strength, or termination
+
+The issue's kill criterion was "if the bound improves monotonically across most of
+the 297 nodes, the termination hypothesis is dead and bound strength is back in
+play." Measured directly against the Rust MILP driver (`solve_milp_csc_py` on the
+matrix `solver.py` hands it — **not** through `Model.solve(max_nodes=k)`, which
+measures the *fallback*, because `_solve_milp_simplex` returns `None` on a
+`node_limit` exit):
+
+| max_nodes | nvs02 bound | nvs02 incumbent | nvs14 bound | nvs14 incumbent |
+|---:|---:|---|---:|---|
+| 2 | 5.9404 | **none** | −40595.8 | **none** |
+| 16 | 5.9469 | **none** | −40530.6 | **none** |
+| 64 | 5.9551 | **none** | −40449.2 | **none** |
+| 128 | 5.9551 | 6.0579 | −40449.2 | **none** |
+| 256 | 5.9559 | 6.0579 | −40440.9 | −39420.5 |
+| full | 5.96418 | 5.96418 | −40358.2 | −40358.2 |
+
+Termination hypothesis: **dead** (the bound climbs monotonically throughout).
+Bound strength: **also not the lever** (the root is within 0.4 %/0.6 %). The
+driver runs **119 of 297** and **219 of 273** nodes holding *no incumbent at
+all* — with nothing to fathom against, every node is bound-free work. Seeding
+the driver with the optimum it eventually finds: **297 → 37** and **273 → 29**
+nodes (12.5 % and 10.6 % of the cold tree). The tail is **primal**.
+
+Then the decisive A/B — lift ON (current default) vs OFF, over the population
+`solver.py` actually *adopts* the integer-bilinear reformulation on, across BOTH
+in-repo corpora (`minlplib_nl` 66 + `minlplib` 84 = 122 scanned, **12 adopted**),
+30 s limit:
+
+| instance | ON nodes / status | OFF nodes / status | winner |
+|---|---|---|---|
+| nvs02 | 297 optimal | **3 optimal** | OFF |
+| nvs14 | 273 optimal | **3 optimal** | OFF |
+| ex1263 | 4997 optimal | **2317 optimal** | OFF |
+| ex1266 | 1409 optimal | **268 optimal** | OFF |
+| prob02 | 37 optimal | **5 optimal** | OFF |
+| prob03 | 7 optimal | **5 optimal** | OFF |
+| ex1264 | **3425 optimal** | 3028 time_limit (9.99 vs 8.6) | ON |
+| ex1265 | **1883 optimal** | 1162 time_limit (19.5 vs 10.3) | ON |
+| nvs10/11/12/15 | 0 optimal | 0 optimal | tie |
+
+Same certified objective wherever both certify. So the nvs02/nvs14 tail is the
+**cost of the binary-expansion lift**: an 8-variable, 3-row MINLP becomes a
+672-column MILP with 29 integers whose feasible set is thin, and finding a first
+feasible point in it is what the 297 nodes buy. SCIP's 1 node is a solve of the
+8-variable model.
+
+**The lift must not simply be turned off.** On `ex1264`/`ex1265` it is the only
+arm that certifies at all; declining it there trades two certificates for six
+smaller trees, which §1 forbids outright. The lever is the **adoption gate** —
+today's test asks only whether the lift is *possible* (does it eliminate every
+nonlinear term), never whether it *helps*.
+
+### 66.2 Three falsified Lead-1 fixes (do not retry these)
+
+1. **The #1060 no-incumbent dive schedule (`DISCOPT_MILP_DIVE_STRIDE`) is a
+   measured no-op on this class.** stride 0/1/4 give byte-identical node counts
+   (nvs02 297, nvs14 273). The new funnel counters say why: the dive fires
+   5–6 times off-root and **every run ends `DiveAbandonedInfeasible`**, after
+   ~8–10 of 29 integers. `DiveOffRootHits` = 0.
+2. **Bound-diving instead of hard-fixing also abandons.** The dive fixes the
+   picked integer to a single value (`l[j] = u[j] = v`); the textbook fractional
+   dive (Berthold 2006, SCIP `fracdiving`) tightens one side only (`u[j] =
+   floor`, or `l[j] = ceil`), which is strictly weaker. Replayed in Python on the
+   same lifted matrix: the bound dive gets further (31 vs 5 steps on nvs02) and
+   **still abandons** on both instances. Stated kill criterion met — not
+   implemented.
+3. **Node selection is not the lever.** The driver uses
+   `SelectionStrategy::BestFirst` for the whole search (`milp_driver.rs:1331`),
+   which is the classic "finds feasible solutions late" configuration. Measured:
+   DepthFirst 297→285 / 273→277 (mixed), BestEstimate 297→253 / 273→253 (~15 %).
+   Real but an order of magnitude short of the 8–9× a good incumbent buys.
+
+Also falsified: rounding the lifted LP relaxation's original-variable block and
+repairing it over a ±1 box on the 5 original integers (3⁵ = 243 candidates) finds
+**no feasible point** on either instance — the feasible set really is thin near
+the relaxation.
+
+### 66.3 RETRACTED — "the tighter root bound predicts the winner"
+
+Read off the A/B's `root_gap` column, the arm that won looked like *exactly* the
+arm whose root bound was tighter, on all eight decided instances. A gate on that
+(`DISCOPT_IPX_ROOT_BOUND_GATE`, adopt the lift iff its root relaxation bound is
+tighter) was implemented and then **measured against its own population before
+shipping: 2 agree, 6 disagree**, and it *declines* on `ex1264`/`ex1265` — the two
+where the lift is the only arm that certifies. The gate was removed, not
+default-offed (§3: no dead flags).
+
+The retraction, per §11: the `root_gap` values compared came from **two different
+bound machineries** (the MILP driver's own relaxation LP on the ON arm, the
+spatial kernel's node-1 bound on the OFF arm), so they were never like-for-like.
+Measured like-for-like via `_root_relaxation_lower_bound` on both formulations
+over the declared box (both are lower bounds on the same internally-minimized
+objective, so larger is tighter regardless of sense):
+
+| instance | optimum | root(original) | root(lift) | lift tighter? | A/B winner |
+|---|---:|---:|---:|---|---|
+| nvs02 | 5.9642 | 5.9208 | **5.96418** | yes | OFF |
+| nvs14 | −40358.2 | −40792.1 | **−40358.2** | yes | OFF |
+| ex1263 | 19.6 | 19.1 | **19.6** | yes | OFF |
+| ex1266 | 16.3 | **16.3** | 16.117 | no | OFF |
+| prob02 | 112235 | 8000 | **112235** | yes | OFF |
+| prob03 | 10.0 | 10.0 | 10.0 | tie | OFF |
+| ex1264 | 8.6 | **8.1** | 8.053 | no | ON |
+| ex1265 | 10.3 | **10.1** | 10.067 | no | ON |
+
+Root-bound tightness is **anti-correlated** with the outcome here. nvs02 is the
+clearest statement of the whole finding: the lift's root bound *equals the
+optimum to 12 digits*, and its tree still takes 297 nodes — a perfect dual bound
+buys nothing while the search cannot find a feasible point.
+
+Consequence: a useful adoption gate has to predict **primal** difficulty of the
+lifted feasible set, not dual tightness. Bit width is not a separator either —
+`ex1263`/`ex1266` (lift-harmful) and `ex1264`/`ex1265` (lift-essential) are the
+same trim-loss family with the same expansion widths. No gate is proposed here on
+the strength of a hypothesis (§4).
+
+### 66.4 Lead 2 (nvs13) — answered, once the path could be measured at all
+
+The issue was right that this path was unmeasurable: `_try_native_spatial_kernel`
+built a `SolveResult` with `root_bound=None`, `root_gap=None` and an **empty**
+`solver_stats`, although the Rust kernel computes and returns `n_lp_solves`,
+`n_uncertified` and `n_undecided` on every exit and can record its root region's
+bound for free. Surfacing them (this PR) answers the lead immediately:
+
+```
+nvs13  nodes=637  root_bound=-1234.41  root_gap=1.109  bound=-585.20  obj=-585.20
+       tree/lp_solves=593  tree/uncertified_nodes=0  tree/undecided_nodes=0
+```
+
+A **111 % root gap** with **zero** uncertified and **zero** undecided nodes: the
+637 nodes are the honest price of closing a McCormick relaxation that is more
+than twice as loose as the optimum, not a bound plateau caused by node LPs that
+could not be certified. This is a *bound-strength* instance — the opposite
+diagnosis from nvs02/nvs14 in the same issue, and not something any amount of
+primal work would fix.
+
+### 66.5 Lead 3 (tls2 / fac2) — split by its own kill criterion
+
+Kill criterion: "<10 % of wall → noise". Three interleaved repetitions each,
+load 0.16 before / 1.37 after:
+
+| instance | abandoned-route share | sd | firings/solve | verdict |
+|---|---:|---:|---|---|
+| tls2 | 3.3 % | 0.5 | 3, 2, 1 | **NOISE** — killed |
+| fac2 | 31.2 % | 0.6 | 1, 1, 1 | **MATERIAL** |
+
+tls2's lead is dead: the nodes are the story. fac2 spends a reproducible third of
+its wall in a convex-MINLP auto-route that certifies nothing and hands back.
+
+Two corrections to the issue's own text while reproducing:
+
+* **tls2 is not deterministic on this path.** The issue says "node counts are
+  deterministic and match the earlier panel exactly". Measured over six solves:
+  197, 227, 357, 359 nodes, and status `feasible` (not `optimal`) at 60 s. Any
+  tls2 A/B has to treat its node count as a distribution.
+* **The #1059 "should be impossible" warning does not reproduce** on the current
+  tree. What fires on fac2 is the *upstream* guard, every run:
+  `OA: certified lower bound 331845337.44 is above the incumbent 331845161.42 by
+  more than rounding`. That is the same bound inversion
+  `_merge_route_and_fallback`'s docstring already attributes to `oa.py`
+  (`_certified_bound_inverted`); the fix is in place and working — OA now
+  withdraws its own certification, so `_gap_is_closed(route)` is False and the
+  merge-level warning can no longer fire. The final fac2 answer is `optimal`
+  331837498.18 with a bound below it, correct and certified. **The OA bound
+  inversion itself is still live** (OA computes a "certified" lower bound ~7839
+  above the true optimum) and is a §1 item for its own issue, not a perf one.
+
+### 66.6 What shipped
+
+Instrumentation only, both pure §6 observability with nothing feeding back into
+any search:
+
+* the native spatial kernel's `root_bound` / `root_gap` / `root_time` and its
+  `tree/nodes`, `tree/lp_solves`, `tree/uncertified_nodes`,
+  `tree/undecided_nodes` counters (§68.4 is what it bought);
+* the MILP driver's dive outcome funnel — `DiveRuns`, `DiveSteps`,
+  `DiveHitIntegral`, `DiveAbandonedInfeasible`, `DiveExhaustedSteps` — which is
+  what turned "the dive fired and repaired nothing" into "every run dies on an
+  infeasible LP after ~8 of 29 fixes" (§68.2), two findings that call for
+  opposite fixes.
+
+No performance change is claimed, and none shipped: every candidate fix was
+falsified by measurement before implementation, or (§68.3) after implementation
+and before shipping.
+
+## 69. #1236 the GMI separator deleted terms from a cut's LHS — a certified false `optimal` (2026-09-16)
+
+§68 diagnosed the node-count tail. Reproducing its fac2 row found something
+worse underneath: the in-house Rust MILP driver returns a **certified false
+`optimal`**, 7839 above a point feasible for the very problem it was handed.
+`incorrect_count` class, §1, zero slack.
+
+### 69.1 Reproduction, reduced to no MINLP and no OA
+
+The OA master captured from `fac2` is now
+`python/tests/data/oa_masters/fac2_master0.npz` (418 x 67, 12 integers) with a
+witness `z_star` verified feasible at **331837498.17693394**. Replayed through
+`milp_simplex.solve_milp`, three engines on the identical problem:
+
+| backend | status | objective | nodes |
+|---|---|---:|---:|
+| **in-house simplex** (`auto`) | optimal | **331845337.44** | 27 |
+| POUNCE | optimal | 331837498.50 | 99 |
+| HiGHS | optimal | 331837498.18 | 1 |
+
+### 69.2 Root cause
+
+`lp/gomory.rs::separate_gomory_cols` builds `Σ ψ_j x̃_j ≥ 1` with `ψ_j ≥ 0`,
+`x̃_j ≥ 0`, and removed terms from the LHS two ways — snapping `ā_j` to the
+nearest integer within `SNAP_TOL` (which zeroes a *continuous* column's `ψ`),
+and `if psi.abs() <= tol { continue }` — charging **nothing** to the rhs.
+Removing a nonnegative term from the LHS of a `≥` is a **strengthening**, so the
+cut can exclude feasible integer points.
+
+Harmless while `x̃` is O(1), which is every binary — which is presumably all it
+was exercised on. On this master the two dropped terms sat on continuous slacks
+with `u = 1e20` and `x̃ ≈ 7e7` / `2.3e8`, so coefficients of ~1e-10 were worth
+**0.4735 and 0.025 against a rhs of 1**. Root cut #1 is violated at the witness
+by **-1.739e-2**; the driver then fathomed the subtree holding the optimum
+*correctly for the problem it was searching*, and certified.
+
+The module header's justification for snapping — that it "collapses the flip
+error" — is false. The flip is in `f_j`; `ψ(f)` is continuous with `ψ → 0` at
+both `f → 0` and `f → 1`, so a coefficient straddling an integer gives a
+near-zero `ψ` either way. Header corrected.
+
+Same family as the `INF`-sentinel note in CLAUDE.md: reasoning about a
+coefficient's magnitude instead of the bound it multiplies. `1e20` is not
+infinity, and `1e-10 x 2.3e8` is not negligible.
+
+### 69.3 The fix, and the three arms rejected
+
+A tiny term may leave the LHS only as a **relaxation**: its maximum over the box
+`ψ_j·(u_j − l_j)` is charged to the rhs, and only when that product is itself
+`<= tol`. An unbounded range means the term cannot move, so it is kept exactly.
+Bounds are tested against the `1e20` sentinel directly, never through a product.
+`substitute_slacks_to_structural` in the driver already applied this rule
+correctly; the separator was the inconsistent one.
+
+Rejected, each on measurement:
+
+* **charge `ψ·range` whenever the range is finite** — over-weakens at the tests'
+  `tol=1e-7`; breaks `gmi_cut_valid_when_integer_var_has_fractional_bound`
+  ("cut must separate vertex").
+* **keep tiny exact coefficients but count them in the dynamism gate** — sound,
+  all tests pass, but the separator then refuses nearly every cut on a big-M
+  master: the rsyn0830m master goes **6408 -> 17804 nodes**. Sound-but-harmful,
+  the `DISCOPT_CUT_INHERIT` rule. Tiny coefficients kept exactly are therefore
+  excluded from the dynamism gate; the cut is exact either way, and where a
+  bound-based cleanup exists it weakens them soundly or refuses the cut.
+* **keep snapping/dropping and add an rhs margin** — the margin needed here is
+  ~0.5 against a rhs of 1, i.e. the cut's entire strength. §3 band-aid.
+
+Numerically-safe GMI (Cook–Dash–Fukasawa–Goycoolea directed rounding) remains
+the answer to the residual floating-point exposure on big-M models; this removes
+the O(1) hole, not that.
+
+### 69.4 Differential panel (66 in-repo instances, 20 s, both arms marker-verified)
+
+| | OFF (pristine) | ON (fixed) |
+|---|---|---|
+| certificate violations (sense-aware; see §69.6) | **0** | **0** |
+| **introduced by the fix** | — | **0** |
+| certification lost / gained | — | **0 / 0** |
+| objective drift > 1e-6 | — | **0** |
+| node counts | — | 60 unchanged, 1 fewer, 5 more |
+| total nodes | 4055 | 4072 (+0.4 %) |
+
+`fac2` goes **39 -> 0 nodes** end to end and certifies in 1.4 s instead of 20.2 s,
+matching the MINLPLib reference to 7e-11. The five instances that cost nodes are
++2 to +24 (`tls2` 75 -> 99 is the largest). Cert-clean and node-neutral; the
+change ships as a correctness fix, not on this column.
+
+Each arm asserts its own identity before measuring: the captured master is a
+false `optimal` on the pristine separator and correct on the fixed one, so an arm
+that loaded the wrong `.so` fails instead of quietly measuring the other arm
+(CLAUDE.md §8).
+
+### 69.5 Blast radius
+
+Every caller of the separator: the driver's root cut loop (so every in-house MILP
+solve with `gmi_cuts` on, including `_LEGACY_CUT_PROFILE`) — OA masters,
+GDP-LOA, `_relax/milp_relaxation.py`, `partition_selection.py`, AMP via
+`MilpRelaxationModel`, RINS/RENS sub-MIPs — plus **`bnb/convex_kernel.rs`'s
+per-node separation** and the Python B&B route through `gomory_cuts_py`.
+Lagrangian and Benders pin `backend="simplex"`. Top-level pure LP/MILP is routed
+to HiGHS (`DISCOPT_LP_MILP_BACKEND`), so a user's own MILP was not exposed; the
+MINLP paths were.
+
+This is why "route the OA master to HiGHS" (`lp-milp-highs-routing-plan.md`
+Stage 2) was not an acceptable substitute for the fix: it reaches neither the
+convex kernel nor the pinned Lagrangian/Benders callers.
+
+### 69.6 RETRACTED — `syn05hfsg` is not a second defect; the panel check was sense-blind
+
+§69.4 originally reported one bound-above-incumbent violation in each arm
+(`syn05hfsg`, by 2.757) and called it pre-existing. **Both readings were wrong,
+and the error was in the instrument, not the solver.**
+
+`syn05hfsg` is a **MAXIMIZE** model (`O0 1` in its `.nl`; 4 of the 66 in-repo
+instances are). For a maximize the dual bound is an *upper* bound, so
+`bound = 840.489 >= obj = 837.732` is the **correct** orientation. The panel's
+violation test applied the minimize rule (`bound > obj`) to every instance, so it
+flagged every maximize instance that had not closed its gap.
+
+Re-checked sense-aware over both recorded arms:
+
+| | OFF (pristine) | ON (fixed) |
+|---|---|---|
+| bound-above-incumbent violations, sense-aware | **0** | **0** |
+
+So the panel was fully cert-clean in both arms and §69.4's cert-clean row is
+*stronger* than first reported, not weaker. `panel_1236.py` now records each
+instance's sense and `panel_compare.py` tests the invariant against it.
+
+This is the fourth instrument error in this investigation, all the same shape: a
+check whose tolerance or orientation was wrong reported a clean pass (or a false
+alarm) and was believed. The others were a cut evaluation that dropped the
+epigraph column, a violation gate scaled by `|z*|max = 3.3e8` (threshold -0.86
+against a real -0.017), and the inference from a bisect that the cuts were
+invalid — later confirmed correct for the wrong reason. CLAUDE.md §6 is about
+exactly this, and it cost more here than any of the solver defects did.
+
+### 69.7 `cover.rs`: the same term-drop defect, found and fixed
+
+The GMI audit pointed at two siblings. One is real.
+
+**`cover.rs` — real, fixed.** `cover_cut_for_row`'s item loop skipped
+`|w| <= tol` **before** the `w < -tol || !is_int[j] || bounds` validation, so a
+column with a tiny coefficient was neither an item nor checked. The cover
+argument ("every cover item at 1 pushes the row over `cap`") holds only if the
+remaining columns cannot push it back down. Measured on
+`x0 + x1 - 1e-10 y + s = 1.5` with `x0,x1` binary and `y in [0, 1e20]`: the point
+`(1, 1, 5e9)` satisfies the row (2 - 0.5 = 1.5) and the emitted cover cut
+`x0 + x1 <= 1` excludes it. Pinned by
+`tiny_negative_weight_on_a_wide_column_is_not_skipped`, which fails on the
+pre-fix separator with `cover cut excludes the feasible point [1, 1, 5e9]`.
+
+Fixed the same way as the GMI drop: each non-item column's **minimum**
+contribution over its box is charged to the capacity (raising it, which can only
+make a cover harder to find), and a column whose minimum is unbounded refuses the
+cut. The test is on the BOUND against the `1e20` sentinel, never on a product.
+
+Differential panel for the cover fix alone (same 66 instances, 20 s, against the
+GMI-fixed arm as baseline so the two changes are separated):
+
+| | GMI fix only | + cover fix |
+|---|---|---|
+| certificate violations (sense-aware) | 0 | **0** |
+| certification lost / gained | — | **0 / 0** |
+| objective drift > 1e-6 | — | **0** |
+| node counts | — | 62 unchanged, 2 fewer, 2 more |
+| total nodes | 4072 | 4208 (+3.3 %) |
+
+`tanksize` 1812 -> 1932 and `clay0303hfsg` 95 -> 127 pay for the refusals;
+`syn05hfsg` 227 -> 215 and `hda` 7 -> 3 gain. Cert-clean, and the +3.3 % is the
+price of not emitting invalid cover cuts — it ships on §1, not on this column.
+
+**`mir.rs:242` — false positive, no defect.** The skip there sets only
+`comp_near[j]`, i.e. whether to *complement* column `j` at its upper bound;
+`mir_under_substitution` then iterates every column with no skip and substitutes
+`y_j = x_j - l_j`. No term is deleted from any cut, so the drop pattern does not
+occur. `mir.rs` has exactly two tolerance guards — this one and
+`if viol <= tol { return None }`, which refuses an under-violated cut and is
+sound by construction. Recorded so the audit is not repeated.
+
+## 70. #1236 the integer-bilinear lift now has to earn its adoption (2026-09-17)
+
+§68.1 measured that the lift is harmful more often than it helps, and §68.3
+retracted the obvious gate (root-bound tightness, **anti**-correlated). This is
+the gate that works, and the two items §68 left open.
+
+### 70.1 Item B — cheap-first: measure whether the lift is needed, don't predict it
+
+Neither candidate separator survives: root-bound tightness is anti-correlated
+(§68.3) and bit width cannot split `ex1263`/`ex1266` (harmful) from
+`ex1264`/`ex1265` (essential) because they are the same trim-loss family at the
+same widths. What *does* separate them is simply **whether the un-lifted model
+closes**, so the gate measures that.
+
+`DISCOPT_IPX_CHEAP_FIRST` gives the un-lifted model a bounded probe before the
+lift is adopted. A certified probe IS the answer and is returned; an uncertified
+one is discarded whole and the lift is adopted with the remaining budget.
+
+Entry experiment — un-lifted time-to-certify over the adopted population, 60 s:
+
+| group | instances | un-lifted result |
+|---|---|---|
+| lift harmful | nvs02, nvs14, ex1263, ex1266, prob02, prob03 | certifies in 1.28, 1.00, **20.41**, 4.26, 1.98, 0.36 s |
+| lift neutral | nvs10, nvs11, nvs12, nvs15 | certifies in ≤ 0.13 s |
+| **lift essential** | ex1264, ex1265 | **never certifies** (full 60 s, uncertified) |
+
+Slowest must-keep 20.41 s = 34 % of budget; next-slowest 4.26 s. `0.40` clears
+the first with the rest an order of magnitude below it.
+
+The cap is affordable because of the other half of the measurement, which
+**falsified a prediction made before running it**: the expectation was that
+spending 40 % of the budget would cost `ex1264`/`ex1265` their certificates.
+Lifted, they certify in **1.2 s** (3425 nodes) and **2.3 s** (1883 nodes) — about
+25x headroom, and unchanged at a 50 % remainder.
+
+Result on the adopted population (the only models this gate can change): it picks
+the better arm **12 of 12**, declining the lift on all six it harms and keeping it
+on both that need it.
+
+**Graduation panel (§5 regime 2, both bars on one run)** — 66 in-repo instances,
+20 s, ON vs OFF:
+
+| bar | result |
+|---|---|
+| certificate violations (sense-aware) | **0 / 0** |
+| certification lost / gained | **0 / 0** |
+| objective drift > 1e-6 | **0** |
+| node counts | 62 unchanged, **4 fewer, 0 more** |
+| total nodes | 4208 -> **3636 (-13.6 %)** |
+
+`nvs02` 297 -> 3, `nvs14` 273 -> 3, `tanksize` 1932 -> 1926, `nvs07` 3 -> 1. No
+instance regresses, so the flag ships **default-ON** with the `=0` opt-out and the
+legacy path intact.
+
+**One implementation trap, recorded because it produced a plausible-looking
+pass.** The probe re-enters `solve_model`, and the first version guarded only
+against probing recursively — not against the probe *adopting the lift itself*.
+The nested solve therefore re-adopted it and the probe "certified" in 23.94 s with
+the lift's own 297 nodes on `nvs02`, i.e. the gate fired, reported success, and
+changed nothing. The guard now suppresses adoption inside the probe, and that
+measurement is in the code comment so a regression cannot look like a pass.
+
+### 70.2 Item C — nvs13: the candidate lever is argued dead by §68's own evidence
+
+`nvs13`'s lift is not discarded, it is **never built**: alongside its ten integer
+bilinears it carries `monomial` terms (x² on all five variables) and
+`reformulate_integer_bilinear` declines the model whole. The candidate fix was
+therefore extending the reform to integer *squares* — `x² = x·x` expands through
+the same binary machinery.
+
+Not implemented, and the reason is §68.3's measurement rather than an estimate.
+The lift's value is an exact relaxation, and nvs13's problem is a 111 % root gap
+(§68.4), so the lift looks like the obvious answer. But on `nvs02` the lift
+already produces a root bound **equal to the optimum to 12 digits** and its tree
+still takes 297 nodes, because the lifted feasible set is combinatorially hard,
+not loosely bounded — which is precisely why item B's gate *declines* the lift
+there. Extending the same mechanism to nvs13 buys the same exact-root /
+hard-tree trade, and would then be declined by the gate built in §70.1.
+
+So nvs13 needs root-bound strength **without** a lift — OBBT on the aux columns,
+RLT, or the pinned-bound work of #196/#208 — which is a different subsystem and
+outside what #1236 set out to diagnose. Recorded here with its instrumentation
+shipped (§68.4: root gap 111 %, 0 uncertified, 0 undecided nodes) so the next
+attempt starts from measurement rather than from the lift.
+
+## 71. #1236 review round: two more term-deletions of the same shape, and a probe that solved a different problem (2026-09-17)
+
+The #1280 review found ten items. Four were defects of consequence, and two of
+those are the *same* class §69 was opened for — a guard that stopped seeing
+something — reproduced inside the fix for it. Recorded here because the pattern
+is now three-for-three: every time this separator was made safer, the safety was
+taken out of a gate somewhere else without anyone noticing.
+
+### 71.1 The all-tiny cut: fixing the deletion removed the refusal that covered it
+
+`separate_gomory_cols` refuses a cut when `max_c == 0.0`. Before §69 that arm did
+double duty: every tiny coefficient was *skipped*, so a cut whose coefficients
+were all ~1e-12 left `max_c` at 0.0 and was refused. §69 made those terms be kept
+(soundness requires it — dropping them is a strengthening) and excluded them from
+`min_c` so the dynamism gate would not refuse most cuts on a big-M master. That
+left `min_c = INFINITY`, and `max_c / INFINITY == 0` passes the dynamism gate
+while `max_c = 1e-12 != 0` passes the emptiness gate. **The refusal became
+unreachable.**
+
+It is not a weak-cut problem, it is a false-prune problem:
+`sum 1e-12 xtilde >= 1` reads as `0 >= 1` at a 1e-9 LP feasibility tolerance, so
+the node is fathomed as infeasible although it contains feasible points — and
+that feeds a certified bound. The driver path is shielded by
+`substitute_slacks_to_structural`; the convex kernel's `substitute_slacks`
+(`convex_kernel.rs:777`) drops only exact zeros, applies no dynamism check, and
+would have handed it straight to the node LP.
+
+Fixed by refusing when `!min_c.is_finite()` — exactly "no kept coefficient was
+above tolerance", which is what the `max_c == 0.0` arm used to mean. Pinned by
+`a_cut_whose_every_coefficient_is_tiny_is_refused`, which asserts the *spec*
+(whatever is emitted must be enforceable at LP tolerance) rather than a count.
+
+### 71.2 `snap_eligible` was read on the branch it does not describe
+
+`tiny = psi.abs() <= tol || (integrality[j] && snap_eligible)`. The second clause
+is meant to name "this integer column's `abar` sits on an integer, so under the
+integer formula its psi is ulp noise". But when an integer column is pinned at a
+**fractional** bound the code deliberately falls back to the *continuous* formula
+(the premise for the integer strengthening fails), and there an integral `abar`
+gives `psi = |alpha| / f0 >= 1` — which can be in the thousands. Calling that
+"tiny" excluded it from `min_c`, so the dynamism gate stopped seeing the smallest
+coefficient in the cut.
+
+Measured on the three-column LP in
+`an_integer_column_pinned_at_a_fractional_bound_is_not_tiny`: the true spread is
+`2e6 / 2 = 1e6`, the gate saw `1.0`, and a `max_dynamism = 1e3` waved the cut
+through. Gating on `use_integer` instead of `integrality[j]` is the one-token fix.
+
+Note the interaction with §71.1: once the all-tiny refusal exists, this bug would
+*also* have started refusing perfectly good cuts whose only coefficient came from
+such a column. Two gates, one mislabel, opposite failures.
+
+### 71.3 The cheap-first probe forwarded 2 of 47 caller options
+
+§70.1's probe solves the un-lifted model through `solve_model` and, when it
+certifies, **its result is returned as the final answer**. It shipped forwarding
+only `gap_tolerance` and `max_nodes`. Everything else — `lazy_constraints`,
+`abs_gap_tolerance`, both callbacks, `deterministic`, `presolve`, `cuts`, `rlt`,
+`nlp_solver`, `solver` — silently vanished into `**solve_kwargs`.
+
+With `lazy_constraints` set the probe solves a **relaxation of the user's
+problem**, and on certifying returns that as a certified optimum. This is the
+same failure as a false bound and arrives by a different door.
+
+Fixed two ways, because a list of forwarded names is only as good as its last
+edit:
+
+1. Options the probe cannot honour faithfully — both callbacks, `cut_callback`,
+   `lazy_constraints`, `initial_point`, `warm_start`, `decomposition_structure` —
+   **decline the probe outright**, which is the pre-#1236 behaviour (adopt the
+   lift) and never a wrong answer. This mirrors `_sub_blocked`.
+2. Everything else is forwarded explicitly, and
+   `test_the_probe_forwards_every_option_that_changes_the_answer` enumerates
+   `solve_model`'s **live signature**, failing on any parameter that is not
+   forwarded, blocked, or exempt *with a stated reason*. Verified non-vacuous by
+   deleting one forwarded option and watching it name it.
+
+### 71.4 `max_nodes` was spent twice, and the probe's nodes were invisible
+
+The caller's full `max_nodes` went to the probe and then, unreduced, to the lifted
+solve — so a caller using it as a work budget could get up to 2x the nodes it
+asked for. The probe's nodes are now charged against it (floored at 1).
+
+Separately `SolveResult.node_count` covers only the winning arm, so on the two
+instances where the lift is *kept* the probe's search was reported as never having
+happened. That is how a node-count panel credits a gate with a saving it did not
+make. The losing probe's node count is now surfaced as
+`solver_stats["cheap_first/probe_nodes"]`, stamped in `_stamp_layer_timing` — the
+one funnel every one of `solve_model`'s 334 return sites passes through.
+
+### 71.5 Conflations and self-inflicted breaks in the instrumentation itself
+
+- **`root_bound=None` meant three different things** (§68's own instrument): root
+  region certified empty (`+inf`), root LP decided nothing (the parent's `-inf`),
+  and the search never finishing node 1 (`-inf`) all map to `None` in Python. The
+  kernel now reports `root_status` naming the arm, surfaced as
+  `solver_stats["root/status"]`.
+- **A test that breaks when the solver gets faster.**
+  `test_the_suite_does_not_claim_determinism_for_a_budgeted_exit` asserted
+  `status != "optimal"` for `tls2` at 5 s. It now asserts the contract for
+  whichever regime the solve lands in, and counts which arm ran — a skip would be
+  the §6 no-op that reads as a pass.
+- **A scale-relative tolerance on the 3.3e8 fixture**, which the fixture's own
+  README forbids for exactly this reason. `1e-6 * |attained|` is **331.8**: it
+  catches the original 7839 defect with a 24x margin and misses anything an order
+  of magnitude smaller. Replaced with measured absolute slacks — 1.0 for the
+  in-house driver (observed margin 1.7e-4) and 10.0 for the cross-backend
+  comparison (POUNCE's +0.32 is the worst legitimate excess). Detection margin
+  goes from 24x to ~800x.
+
+### 71.6 The cut-density concern, measured and falsified
+
+The review's remaining substantive claim (finding 4) was that keeping a tiny
+coefficient whose range is unbounded — which §69's soundness fix requires, since
+such a term cannot be charged to the rhs — makes GMI cuts **"fully dense" on
+exactly the models this PR targets**, with the convex kernel's `substitute_slacks`
+then expanding each tiny slack coefficient into its row's full support. The
+differential panel measured node counts, not cut nnz, so it could not have seen it.
+
+That is a plausible mechanism and it is wrong on the instance in question. Two
+counters were added (`SepGomoryCutsEmitted`, `SepGomoryCutNnz` — both, because the
+ratio is meaningless without its denominator) and both arms measured on the `fac2`
+master, 485 standard-form columns. **Arm identity was asserted behaviourally**
+rather than by a version string: the pre-§69 separator returns the known false
+optimal 331845337.44 and the fixed one returns 331837498.18, so an arm that loaded
+the wrong `.so` fails before it measures anything.
+
+| arm | objective (identity) | cuts | mean nnz/cut | % of 485 cols |
+|---|---|---|---|---|
+| pre-§69 (unsound skip) | 331845337.44 | 3 | **35.3** | 7.3 % |
+| fixed | 331837498.18 | 2 | **34.5** | 7.1 % |
+
+Cuts got marginally *sparser*, not denser, and neither arm is within two orders of
+magnitude of dense. The mechanism does not fire here for two reasons the claim
+missed: on a big-M master most tiny-psi columns are **bounded binaries**, which are
+still charged to the rhs and dropped; and the driver's
+`substitute_slacks_to_structural` refuses a cut whose pin is unbounded
+(`SubstDropUnbounded = 1` on this run), so the density-inducing cut never reaches
+an LP at all.
+
+Scope of the claim, stated rather than implied: this measures the **driver** path
+on the instance the PR targets, not the convex-kernel path, where
+`substitute_slacks` really does apply no cleanup. That path's exposure is now
+bounded at the separator instead — §71.1 refuses an all-tiny cut before either
+substitution runs, which is the case that could actually have hurt the kernel.
+
+## 72. #1236 item B falsified by its own review: node count was the wrong metric (2026-09-17)
+
+`DISCOPT_IPX_CHEAP_FIRST` shipped **default-ON** in §70 on a graduation panel
+reporting "total 4208 -> 3636 nodes (-13.6 %), 4 fewer, 0 more, no instance
+regresses". The #1280 review's finding 6 pointed out that `SolveResult.node_count`
+covers only the WINNING arm, so a probe that loses is invisible. Chasing that
+produced two corrections, the second of which kills the flag.
+
+### 72.1 Retraction 1 — the −13.6 % omitted the probe's own nodes
+
+Measured with the new `solver_stats["cheap_first/probe_nodes"]`: on the two
+instances where the gate KEEPS the lift, the losing probe spent **2627 nodes
+(`ex1264`)** and **938 (`ex1265`)**. The saving it was credited with was 572
+nodes. So the published figure inverts: **4208 -> 7219, +71.6 %**, not −13.6 %.
+
+This is CLAUDE.md §6 exactly, and it is the fourth instrument in this issue to
+measure nothing and be believed. The tell was available and ignored: a panel
+whose denominator is "nodes of the arm that won" cannot score a mechanism whose
+cost is "the arm that lost".
+
+### 72.2 Retraction 2 — the whole premise, measured in wall clock
+
+Item B exists because the lift "is harmful more often than not over the adopted
+population". Every number behind that sentence (§68.1, §70.1) is a **node count**.
+Re-measured in wall clock on the same 12 instances — the complete population the
+gate can change — interleaved ON/OFF, 2 reps, 60 s, pooled sd ≤ 0.26 s:
+
+| | gate ON | gate OFF (lift adopted) |
+|---|---|---|
+| total wall | **81.6 s** | **7.4 s** |
+| total nodes | 11474 | 12328 |
+| certifications lost / gained | 0 / 0 | 0 / 0 |
+| instances where this arm is faster | 1 | **11** |
+
+An **11.1x slowdown for a 6.9 % node saving**. Per instance the lift wins by
+30.3x (`ex1264`), 33.0x (`prob03`), 24.2x (`prob02`), 16.5x (`ex1263`), 10.9x
+(`ex1265`); the only rows it loses are `nvs02` (3.4x) and `nvs14` (3.7x) — the
+very rows in #1236's table that motivated the whole item.
+
+**Why the metric inverted the answer.** The lifted model is a pure MILP on the
+in-house Rust simplex; the un-lifted model goes through spatial B&B with an NLP
+relaxation per node. The lift trades many cheap nodes for few expensive ones.
+`nvs02` is the lesson in one row:
+
+    lifted     297 nodes   0.31 s
+    un-lifted    3 nodes   1.06 s
+
+A node-count panel reads that as a **99 % improvement**. It is a 3.4x regression.
+
+### 72.3 Disposition
+
+Flag **defaulted OFF**, `=1` opts in. Kept rather than deleted, per the
+`DISCOPT_CUT_INHERIT` precedent CLAUDE.md §5 cites for this exact situation: the
+mechanism is sound (an ordinary complete solve of the original model, cert-clean
+on every panel run), it is tested, and the measurement is recorded. A wider corpus
+may hold a lift pathological enough to be worth a bounded premium — the MINLPLib
+snapshot was not reachable from this environment. **Re-graduating it requires a
+wall-clock panel**, not a node panel.
+
+The standing lesson, which is not specific to this flag: on this solver a node
+count is not a cost. Two formulations of the same model can differ by 100x in
+cost per node, so any comparison BETWEEN formulations (lift vs no lift, MILP route
+vs spatial route) must be made in wall clock. Node counts remain the right
+instrument WITHIN one formulation, which is what CLAUDE.md §5's bound-neutral
+regime uses them for.
+
+Note this does not touch #1236's correctness content. The two separator fixes
+(§69, §71.1–71.2) are independent of the flag and ship regardless.

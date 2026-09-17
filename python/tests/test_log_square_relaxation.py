@@ -164,8 +164,9 @@ def test_distributed_log_square_product_form_is_collected():
     # log squares were actually bounded, not silently dropped.
     bound = _root_lp_bound(milp)
     true_min = _brute_min(
-        lambda pt: sum(math.log(v - 2) ** 2 + math.log(10 - v) ** 2 for v in pt)
-        - (math.prod(pt)) ** 0.2,
+        lambda pt: (
+            sum(math.log(v - 2) ** 2 + math.log(10 - v) ** 2 for v in pt) - (math.prod(pt)) ** 0.2
+        ),
         3,
         9,
         n,

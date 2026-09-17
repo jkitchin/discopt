@@ -144,7 +144,7 @@ class TestAugmecon2Bypass:
         m, objs = _knapsack_step_model()
         calls = {"n": 0}
         orig = m.solve
-        m.solve = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1) or orig(*a, **k))
+        m.solve = lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or orig(*a, **k)
         epsilon_constraint(m, objs, senses=["max", "max"], n_points=11, bypass=False, filter=False)
         # k=2 => n_points grid solves + k lexicographic-payoff solves (>= n_points).
         assert calls["n"] >= 11

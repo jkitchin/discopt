@@ -98,6 +98,14 @@ pub fn separate_cover_csc(
     cuts
 }
 
+/// The `1e20` unbounded sentinel this LP layer uses in place of `f64::INFINITY`.
+///
+/// Named here so the #1236 accounting below tests a BOUND against it rather than
+/// a product: `1e-10 * 1e20` is an ordinary finite number, and reasoning about the
+/// product instead of the bound is exactly how this layer has produced an invalid
+/// cut and a certified false `optimal` before (CLAUDE.md, INF note).
+const COVER_INF: f64 = 1e20;
+
 /// Shared cover-cut construction for a single `≤` row, given its nonzeros
 /// `(col, coeff)` in ascending-column order. Returns a violated lifted-minimal-cover
 /// cut or `None`. Representation-independent: the dense and CSC entries differ ONLY
@@ -129,17 +137,57 @@ fn cover_cut_for_row(
         return None;
     }
     // Structural items must be binary with nonnegative weights.
+    //
+    // #1236: a column that is NOT an item still has to be accounted for. The cover
+    // argument is "every cover item at 1 pushes the row over `cap`", which holds
+    // only if the remaining columns cannot push it back down -- i.e. only against
+    // `cap - min(remaining contribution)`. This loop used to `continue` on
+    // `|w| <= tol` BEFORE the binary/sign/bounds validation below, so a tiny
+    // coefficient on a wide continuous column was neither an item nor checked.
+    // Measured: `x0 + x1 - 1e-10 y + s = 1.5` with `y in [0, 1e20]` admits
+    // `(1, 1, 5e9)`, which the cover cut `x0 + x1 <= 1` excludes -- an invalid cut,
+    // the same defect shape as the GMI term-drop fixed in `gomory.rs` for #1236.
+    //
+    // So each skipped column's MINIMUM contribution over its box is charged to the
+    // capacity (raising it, which can only make a cover harder to find), and a
+    // column whose minimum is unbounded refuses the cut outright. As everywhere in
+    // this layer, the test is on the BOUND against the `1e20` sentinel, never on a
+    // product: for a small `w` the product of an unbounded bound is an ordinary
+    // finite number.
     let mut items: Vec<(usize, f64, f64)> = Vec::new();
+    let mut cap = cap;
     for &(j, w) in row_nz {
-        if j >= ns || w.abs() <= tol {
+        if j == s {
+            // The designated slack is already what makes this a `<=` row: the
+            // derivation `sum w x + s = cap, s >= 0` gives `sum w x <= cap`.
             continue;
         }
-        if w < -tol || !is_int[j] || l[j] < -tol || u[j] > 1.0 + tol {
+        if j < ns && w.abs() > tol {
+            if w < -tol || !is_int[j] || l[j] < -tol || u[j] > 1.0 + tol {
+                return None;
+            }
+            items.push((j, w, x[j]));
+            continue;
+        }
+        if w == 0.0 {
+            continue;
+        }
+        // Not an item: charge its minimum over the box to the capacity.
+        let (pin, unbounded) = if w > 0.0 {
+            (l[j], l[j] <= -COVER_INF)
+        } else {
+            (u[j], u[j] >= COVER_INF)
+        };
+        if unbounded || !pin.is_finite() {
             return None;
         }
-        items.push((j, w, x[j]));
+        let contribution = w * pin;
+        if !contribution.is_finite() {
+            return None;
+        }
+        cap -= contribution;
     }
-    if items.is_empty() {
+    if items.is_empty() || !cap.is_finite() {
         return None;
     }
 
@@ -245,6 +293,57 @@ fn cover_cut_for_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1236 sibling: a tiny NEGATIVE weight on a wide continuous column must not
+    /// be skipped past the item validation.
+    ///
+    /// The cover argument is "all cover items at 1 forces the row over its
+    /// capacity", which needs every column OUTSIDE the cover to contribute
+    /// nonnegatively. The item loop skipped `|w| <= tol` BEFORE the
+    /// `w < -tol || !is_int[j] || bounds` validation, so such a column was neither
+    /// an item nor checked: a continuous column with `w = -1e-10` and `u = 1e20`
+    /// contributes down to -1e10, and the row is satisfiable with every cover item
+    /// at 1.
+    ///
+    /// Row `x0 + x1 - 1e-10 y + s = 1.5`, `x0,x1` binary, `y in [0, 1e20]`.
+    /// `(1, 1, 5e9)` is feasible (2 - 0.5 = 1.5) yet the naive cover cut
+    /// `x0 + x1 <= 1` excludes it. Same defect shape as the GMI drop in
+    /// `gomory.rs` (#1236): a term removed from a cut derivation without charging
+    /// its extreme over the box.
+    #[test]
+    fn tiny_negative_weight_on_a_wide_column_is_not_skipped() {
+        let a = [1.0, 1.0, -1e-10, 1.0];
+        let c = [0.0; 4];
+        let l = [0.0; 4];
+        let u = [1.0, 1.0, 1e20, 1e20];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 4,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        // An LP point that makes the pair look like a violated cover.
+        let x = [0.8, 0.8, 0.0, 0.0];
+        let is_int = [true, true, false, false];
+        let cuts = separate_cover(&lp, &[1.5], &x, 3, &is_int, 1, 1e-9);
+
+        // The feasible point the naive cover cut would exclude.
+        let pt = [1.0, 1.0, 5e9, 0.0];
+        assert!(
+            (a[0] * pt[0] + a[1] * pt[1] + a[2] * pt[2] + a[3] * pt[3] - 1.5).abs() < 1e-6,
+            "the witness must satisfy the row, or this test proves nothing"
+        );
+        for cut in &cuts {
+            let lhs: f64 = cut.coeffs.iter().zip(pt.iter()).map(|(c, p)| c * p).sum();
+            assert!(
+                lhs >= cut.rhs - 1e-6,
+                "cover cut excludes the feasible point {pt:?}: lhs={lhs} rhs={}",
+                cut.rhs
+            );
+        }
+    }
 
     #[test]
     fn separates_violated_cover() {

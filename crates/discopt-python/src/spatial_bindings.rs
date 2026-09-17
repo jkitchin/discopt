@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 ///
 /// Returns a dict: `status` ("optimal"|"node_limit"|"time_limit"|"infeasible"), `incumbent`
 /// (float or None), `incumbent_x` (length-`n_cols` array or empty), `bound`
-/// (global lower bound), `node_count`, `n_lp_solves`.
+/// (global lower bound), `node_count`, `n_lp_solves`, `n_uncertified`,
+/// `n_undecided`, `incumbent_extension_s`, `bound_extension_s`, and (#1236)
+/// `root_bound` / `root_time_s` for the root region.
 #[pyfunction]
 #[pyo3(signature = (
     n_cols, n_orig, c, integrality, global_lo, global_hi,
@@ -355,5 +357,14 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("incumbent_extension_s", res.incumbent_extension_s)?;
     // #933: seconds of the bound-fallback reserve reclaimed (bound already finite).
     out.set_item("bound_extension_s", res.bound_extension_s)?;
+    // #1236: the root region's proven lower bound and when it was proven, so a
+    // kernel-routed `SolveResult` can report `root_bound` / `root_gap` / `root_time`
+    // like every other driver instead of three `None`s.
+    out.set_item("root_bound", res.root_bound)?;
+    out.set_item("root_time_s", res.root_time_s)?;
+    // #1236 review finding 8: which arm node 1 left by. Three outcomes carry a
+    // non-finite bound -- root region certified empty, root LP undecided, and the
+    // search never reaching node 1 -- and all three map to `root_bound=None`.
+    out.set_item("root_status", res.root_status)?;
     Ok(out)
 }
