@@ -66,3 +66,22 @@ def test_solve_does_not_certify_below_the_optimum(kind):
         assert r.objective == pytest.approx(TRUE_OPTIMUM, abs=1e-4)
     if r.objective is not None:
         assert r.objective >= TRUE_OPTIMUM - 1e-4
+
+
+def test_single_column_exact_repair_is_not_decided_by_roundoff():
+    """portfol_roundlot's OA incumbent: ``x11 - 78000 x2 >= 0`` at ``x2 = 7.22e-11``
+    (lower bound 0), ``x11 = 0`` integer. Moving ``x2`` onto its bound repairs the
+    row exactly, so the point is 7e-11 from feasible and must stay inside the cap."""
+    from discopt.validation.feasibility import (
+        FEASIBLE_DISTANCE_TOL,
+        improving_gradient_norms,
+    )
+
+    x2 = 7.220330978261474e-11
+    J = np.array([[-78000.0, 1.0]])
+    x = np.array([x2, 0.0])
+    viol = 0.0 - (0.0 - 78000.0 * x2)
+    g = improving_gradient_norms(
+        J, x, np.zeros(2), np.full(2, np.inf), [-1.0], np.array([False, True])
+    )
+    assert viol <= FEASIBLE_DISTANCE_TOL * g[0]

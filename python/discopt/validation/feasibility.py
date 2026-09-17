@@ -169,6 +169,9 @@ def jacobian_row_gradient_norms(J) -> np.ndarray:
     return out
 
 
+_EPS = float(np.finfo(np.float64).eps)
+
+
 def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.ndarray:
     """Per-row gradient norm restricted to moves that can REDUCE the violation (#1284).
 
@@ -213,8 +216,18 @@ def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.n
         raise ValueError(f"direction has {d.size} entries for {J.shape[0]} rows")
     with np.errstate(invalid="ignore"):
         step = -d[:, None] * np.sign(J)  # sign of the improving move in x_j
-        up = np.maximum(ub - x, 0.0)[None, :]
-        down = np.maximum(x - lb, 0.0)[None, :]
+        # Each room carries its own round-off allowance. A violation caused only
+        # by ``x_j`` sitting ``room`` inside its bound is repaired by that one move
+        # exactly, so ``viol == |J_ij| * room`` up to the round-off of two
+        # different products; without the allowance the gate decides that tie by
+        # one ulp (portfol_roundlot: ``x11 - 78000 x2 >= 0`` at ``x2 = 7.2e-11``,
+        # ``x11 = 0`` integer, rejected 5.63185816304395e-06 against a cap of
+        # 5.631858163043949e-06).
+        slack = 16.0 * _EPS
+        up = np.maximum(ub - x, 0.0) + slack * (np.abs(ub) + np.abs(x))
+        down = np.maximum(x - lb, 0.0) + slack * (np.abs(lb) + np.abs(x))
+        up = up[None, :]
+        down = down[None, :]
         room = np.where(step > 0, up, np.where(step < 0, down, 0.0))
         frac = np.minimum(1.0, room / FEASIBLE_DISTANCE_TOL)
         contrib = np.abs(J) * frac
